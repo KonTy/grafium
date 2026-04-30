@@ -1,0 +1,91 @@
+:root {
+  /* Dark theme (default) */
+  --bg-primary: #1e1e2e;
+  --bg-secondary: #252536;
+  --bg-sidebar: #181825;
+  --bg-hover: #2a2a3c;
+  --bg-active: #313145;
+  --bg-input: #252536;
+  --bg-code: #2a2a3c;
+
+  --text-primary: #cdd6f4;
+  --text-secondary: #a6adc8;
+  --text-muted: #6c7086;
+
+  --border: #313145;
+
+  --accent: #89b4fa;
+  --accent-secondary: #a6e3a1;
+
+  --danger: #f38ba8;
+  --danger-bg: #f38ba822;
+
+  /* Buttons & surfaces */
+  --btn-bg: #2a2a3c;
+  --btn-bg-hover: #313145;
+  --btn-primary-bg: #89b4fa;
+  --btn-primary-fg: #1e1e2e;
+  --btn-primary-hover: #74a8f7;
+  --surface-raised: #2a2a3c;
+  --surface-overlay: #252536;
+
+  --task-todo-bg: #fab38722;
+  --task-todo-fg: #fab387;
+  --task-doing-bg: #89b4fa22;
+  --task-doing-fg: #89b4fa;
+  --task-done-bg: #a6e3a122;
+  --task-done-fg: #a6e3a1;
+  --task-later-bg: #cba6f722;
+  --task-later-fg: #cba6f7;
+
+  /* Layout & spacing */
+  --content-max-width: 800px;
+  --content-padding-x: 24px;
+  --content-padding-y: 40px;
+  --narrow-padding-x: 10%;
+  --zen-padding-top: 16px;
+  --zen-max-width: 700px;
+  --zen-wide-padding-x: 24px;
+  --zen-font-size: 16px;
+  --zen-line-height: 1.8;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Selection */
+::selection {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
