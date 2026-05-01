@@ -326,20 +326,6 @@ export function registerDefaultShortcuts(actions: {
       category: "toggle",
       description: "Toggle keyboard shortcuts help",
     },
-    {
-      binding: "mod+z",
-      action: actions.undo,
-      navOnly: true,
-      category: "basics",
-      description: "Undo",
-    },
-    {
-      binding: "mod+shift+z",
-      action: actions.redo,
-      navOnly: true,
-      category: "basics",
-      description: "Redo",
-    },
 
     // ─── History navigation ────────────────────────
     {

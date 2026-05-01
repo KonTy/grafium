@@ -8,15 +8,33 @@
   let loadingMore = $state(false);
   let hasMore = $state(true);
 
+  function getLocalDate(): string {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+
+  let lastDate = getLocalDate();
+
   $effect(() => {
     loadJournals();
+
+    // Check every 30s if the date has changed (midnight rollover)
+    const interval = setInterval(async () => {
+      const now = getLocalDate();
+      if (now !== lastDate) {
+        lastDate = now;
+        await loadJournals();
+      }
+    }, 30_000);
+
+    return () => clearInterval(interval);
   });
 
   async function loadJournals() {
     loading = true;
     try {
       // Ensure today's journal exists
-      const today = new Date().toISOString().split("T")[0];
+      const today = getLocalDate();
       try {
         await getPage({ title: today });
       } catch {

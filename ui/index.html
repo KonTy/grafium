@@ -4,6 +4,68 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Logseq Clone</title>
+    <script>
+      // === DEBUG CONSOLE (toggle with Ctrl+`) ===
+      var __log = [];
+      var __dbgVisible = false;
+      var __dbgHeight = 250; // default, grows on repeated toggle
+      function __addLog(msg) {
+        __log.push(Date.now() % 100000 + " " + msg);
+        if (__log.length > 200) __log.shift();
+        var el = document.getElementById("__dbg");
+        if (el && __dbgVisible) el.innerHTML = __log.join("<br>");
+      }
+      // OVERRIDE console.log/error to capture in debug panel
+      var _origLog = console.log;
+      var _origErr = console.error;
+      console.log = function() {
+        _origLog.apply(console, arguments);
+        __addLog(Array.from(arguments).join(" "));
+      };
+      console.error = function() {
+        _origErr.apply(console, arguments);
+        __addLog("ERR: " + Array.from(arguments).join(" "));
+      };
+
+      document.addEventListener("DOMContentLoaded", function() {
+        var el = document.createElement("div");
+        el.id = "__dbg";
+        el.style.cssText = "position:fixed;bottom:0;left:0;right:0;background:rgba(0,0,0,0.92);color:#0f0;padding:8px 12px;z-index:99999;font-family:'Courier New',monospace;font-size:12px;max-height:0;overflow-y:auto;transition:max-height 0.15s ease-out;border-top:2px solid #333;display:none;";
+        document.body.appendChild(el);
+      });
+
+      // Toggle with Ctrl+` (like Doom/Quake console)
+      document.addEventListener("keydown", function(e) {
+        if (e.ctrlKey && e.key === "`") {
+          e.preventDefault();
+          e.stopPropagation();
+          var el = document.getElementById("__dbg");
+          if (!el) return;
+          __dbgVisible = !__dbgVisible;
+          if (__dbgVisible) {
+            el.style.display = "block";
+            requestAnimationFrame(function() {
+              el.style.maxHeight = __dbgHeight + "px";
+              el.innerHTML = __log.join("<br>");
+              el.scrollTop = el.scrollHeight;
+            });
+          } else {
+            el.style.maxHeight = "0";
+            setTimeout(function() { el.style.display = "none"; }, 150);
+          }
+        }
+      }, true);
+
+      // Native undo/redo handlers (called from Rust via eval)
+      window.__handleNativeUndo = function() {
+        __addLog("*** NATIVE UNDO CALLED ***");
+        window.dispatchEvent(new CustomEvent("app-undo"));
+      };
+      window.__handleNativeRedo = function() {
+        __addLog("*** NATIVE REDO CALLED ***");
+        window.dispatchEvent(new CustomEvent("app-redo"));
+      };
+    </script>
   </head>
   <body>
     <div id="app"></div>

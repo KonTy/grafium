@@ -52,6 +52,94 @@ pub fn run() {
             config.save(&config_path);
 
             app.manage(AppState { graph: Mutex::new(graph) });
+
+            // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
+            // WebKitGTK intercepts these keys internally before JS sees them,
+            // and the WebView widget signal doesn't fire. By connecting to the
+            // toplevel GtkWindow, we intercept BEFORE WebKitGTK processes them.
+            #[cfg(target_os = "linux")]
+            {
+                let window = app.get_webview_window("main").unwrap();
+                let win_for_eval = window.clone();
+                window.with_webview(move |webview| {
+                    use gtk::prelude::*;
+
+                    let wk_webview = webview.inner();
+                    // Get the toplevel GtkWindow - key events go here first
+                    let toplevel = wk_webview.toplevel().unwrap();
+                    let gtk_window = toplevel.downcast::<gtk::Window>().unwrap();
+
+                    // Log ALL key events at GTK level to see what arrives
+                    let eval_window = win_for_eval.clone();
+                    gtk_window.connect_key_press_event(move |_, event| {
+                        let state = event.state();
+                        let keyval = event.keyval();
+                        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+
+                        eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+
+                        if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                            eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                            // Call undo AND capture console output via a self-reporting mechanism
+                            let result = eval_window.eval(r#"
+                                (function() {
+                                    var msg = 'EVAL_OK: __handleNativeUndo exists=' + (typeof window.__handleNativeUndo) + ' activeView=' + !!(window.__activeEditorView);
+                                    var el = document.getElementById('__dbg');
+                                    if (el) { el.innerHTML += '<br>' + msg; }
+                                    if (window.__handleNativeUndo) {
+                                        window.__handleNativeUndo();
+                                    } else {
+                                        document.title = 'ERROR: __handleNativeUndo not found!';
+                                    }
+                                })();
+                            "#);
+                            eprintln!("[GTK-WINDOW] => eval result: {:?}", result);
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                            eprintln!("[GTK-WINDOW] => Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
+                            let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
+                            eprintln!("[GTK-WINDOW] => Ctrl+Y detected, calling eval(__handleNativeRedo)");
+                            let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        gtk::glib::Propagation::Proceed
+                    });
+
+                    // ALSO connect directly on the WebView widget itself
+                    let eval_window2 = win_for_eval.clone();
+                    wk_webview.connect_key_press_event(move |_, event| {
+                        let state = event.state();
+                        let keyval = event.keyval();
+                        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+
+                        eprintln!("[GTK-WEBVIEW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+
+                        if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                            eprintln!("[GTK-WEBVIEW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                            let _ = eval_window2.eval("window.__handleNativeUndo && window.__handleNativeUndo()");
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                            eprintln!("[GTK-WEBVIEW] => Ctrl+Shift+Z detected");
+                            let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
+                            eprintln!("[GTK-WEBVIEW] => Ctrl+Y detected");
+                            let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                            return gtk::glib::Propagation::Stop;
+                        }
+                        gtk::glib::Propagation::Proceed
+                    });
+                }).expect("Failed to access webview");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

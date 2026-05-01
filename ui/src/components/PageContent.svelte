@@ -2,6 +2,8 @@
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks } from "../lib/api";
   import type { Block, Page } from "../lib/api";
+  import { pushUndo, setUndoCallback, removeUndoCallback, performUndo, performRedo, canUndo, getUndoStackSize } from "../lib/undoStack";
+  import type { UndoAction } from "../lib/undoStack";
 
   interface Props {
     page: Page;
@@ -15,6 +17,45 @@
   let navigatingBlock = false;
   let backlinks: { link: unknown; block: Block }[] = $state([]);
   let loadError: string | null = $state(null);
+  let selectedBlockIds: Set<string> = $state(new Set());
+  let undoCount = $state(0);
+
+  function updateUndoCount() {
+    undoCount = getUndoStackSize();
+  }
+
+  // Listen for app-undo/app-redo custom DOM events (dispatched by main.ts)
+  $effect(() => {
+    const handleUndo = async () => {
+      console.log("[PageContent] performing app-level undo");
+      await performUndo();
+      updateUndoCount();
+    };
+    const handleRedo = async () => {
+      console.log("[PageContent] performing app-level redo");
+      await performRedo();
+      updateUndoCount();
+    };
+    window.addEventListener("app-undo", handleUndo);
+    window.addEventListener("app-redo", handleRedo);
+    return () => {
+      window.removeEventListener("app-undo", handleUndo);
+      window.removeEventListener("app-redo", handleRedo);
+    };
+  });
+
+  // Register undo callback for THIS page (supports multiple instances in journal view)
+  $effect(() => {
+    if (page?.id) {
+      setUndoCallback(page.id, (_action: UndoAction) => {
+        loadBlocks();
+        updateUndoCount();
+      });
+      return () => {
+        removeUndoCallback(page.id);
+      };
+    }
+  });
 
   // Load blocks when page changes
   $effect(() => {
@@ -47,8 +88,17 @@
     }
   }
 
+  // Track block content before editing starts, so undo can restore it
+  let preEditSnapshots: Map<string, Block> = new Map();
+
   function handleFocus(blockId: string) {
     focusedBlockId = blockId;
+    selectedBlockIds = new Set();
+    // Snapshot the block content before the user edits it
+    const block = blocks.find((b) => b.id === blockId);
+    if (block) {
+      preEditSnapshots.set(blockId, { ...block });
+    }
   }
 
   function handleBlur(blockId: string) {
@@ -56,14 +106,10 @@
     // Don't auto-delete if we're navigating to another block
     if (navigatingBlock) {
       navigatingBlock = false;
+      preEditSnapshots.delete(blockId);
       return;
     }
-    // Auto-delete empty blocks on blur (keep at least one)
-    const block = blocks.find((b) => b.id === blockId);
-    if (block && block.content.trim() === "" && blocks.length > 1) {
-      deleteBlock(blockId);
-      blocks = blocks.filter((b) => b.id !== blockId);
-    }
+    preEditSnapshots.delete(blockId);
   }
 
   function getBlockDepth(block: Block): number {
@@ -115,6 +161,56 @@
     }
   }
 
+  async function handlePasteBlocks(blockId: string, pasteBlocks: import("../lib/htmlToMd").PasteBlock[]) {
+    try {
+      const idx = blocks.findIndex((b) => b.id === blockId);
+      const block = blocks[idx];
+      if (!block) return;
+
+      const baseParentId = block.parent_id;
+      const newBlocks: Block[] = [];
+      // Track parent at each depth level. depth 0 siblings share baseParentId,
+      // depth 1+ items are children of the last block at depth-1.
+      const parentAtDepth: (string | null)[] = [baseParentId];
+      const orderAtDepth: number[] = [0];
+
+      for (const pb of pasteBlocks) {
+        const depth = pb.depth;
+        // Determine parent: if depth > 0, parent is the last block at depth-1
+        const parentId = depth > 0 ? (parentAtDepth[depth] ?? parentAtDepth[parentAtDepth.length - 1] ?? baseParentId) : baseParentId;
+
+        // Get order index for this depth
+        if (!orderAtDepth[depth]) orderAtDepth[depth] = 0;
+        const order = orderAtDepth[depth]!;
+        orderAtDepth[depth] = order + 1;
+
+        const newBlock = await createBlock(page.id, parentId, order, pb.content);
+        newBlocks.push(newBlock);
+
+        // This block can be a parent for deeper items
+        parentAtDepth[depth + 1] = newBlock.id;
+        // Reset child order counters for deeper levels
+        for (let d = depth + 1; d < orderAtDepth.length; d++) {
+          orderAtDepth[d] = 0;
+        }
+      }
+      // Insert all new blocks after the current block
+      blocks = [...blocks.slice(0, idx + 1), ...newBlocks, ...blocks.slice(idx + 1)];
+      // Focus the last new block
+      const lastNew = newBlocks[newBlocks.length - 1];
+      requestAnimationFrame(() => {
+        focusedBlockId = lastNew.id;
+        const el = document.querySelector(`[data-block-id="${lastNew.id}"] .block-content`);
+        if (el) {
+          el.scrollIntoView({ block: "nearest" });
+          (el as HTMLElement).click();
+        }
+      });
+    } catch (e) {
+      console.error("Failed to paste blocks:", e);
+    }
+  }
+
   async function handleClickBelow() {
     try {
       const lastOrder = blocks.length > 0 ? blocks[blocks.length - 1].order_index + 1 : 0;
@@ -131,7 +227,19 @@
   }
 
   async function handleDelete(blockId: string) {
-    if (blocks.length <= 1) return; // Keep at least one block
+    console.log("[DELETE] handleDelete called, blockId:", blockId, "total blocks:", blocks.length);
+    if (blocks.length <= 1) { console.log("[DELETE] skipping - only 1 block left"); return; }
+    const block = blocks.find((b) => b.id === blockId);
+    if (block) {
+      // Use pre-edit snapshot if available (has original content before clearing)
+      const snapshot = preEditSnapshots.get(blockId) || block;
+      console.log("[DELETE] pushing to undo stack, content:", snapshot.content.substring(0, 40));
+      pushUndo({ type: "delete_blocks", blocks: [snapshot], pageId: page.id });
+      updateUndoCount();
+      preEditSnapshots.delete(blockId);
+    } else {
+      console.log("[DELETE] block not found!");
+    }
     await deleteBlock(blockId);
     const idx = blocks.findIndex((b) => b.id === blockId);
     blocks = blocks.filter((b) => b.id !== blockId);
@@ -206,7 +314,71 @@
       console.error("Failed to indent/outdent:", e);
     }
   }
+
+  function handleBulletClick(blockId: string, event: MouseEvent) {
+    if (event.shiftKey && selectedBlockIds.size > 0) {
+      // Range select from last selected to this block
+      const lastSelected = [...selectedBlockIds].pop()!;
+      const startIdx = blocks.findIndex((b) => b.id === lastSelected);
+      const endIdx = blocks.findIndex((b) => b.id === blockId);
+      const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+      const newSelection = new Set(selectedBlockIds);
+      for (let i = from; i <= to; i++) {
+        newSelection.add(blocks[i].id);
+      }
+      selectedBlockIds = newSelection;
+    } else {
+      // Toggle single block selection
+      const newSelection = new Set(selectedBlockIds);
+      if (newSelection.has(blockId)) {
+        newSelection.delete(blockId);
+      } else {
+        newSelection.add(blockId);
+      }
+      selectedBlockIds = newSelection;
+    }
+    // Clear any active editor focus
+    if (focusedBlockId) {
+      focusedBlockId = null;
+    }
+  }
+
+  async function handleDeleteSelected() {
+    if (selectedBlockIds.size === 0) return;
+    const toDelete = [...selectedBlockIds];
+
+    // Save deleted blocks for undo
+    const deletedBlocks = blocks.filter((b) => selectedBlockIds.has(b.id));
+    pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
+    updateUndoCount();
+
+    for (const id of toDelete) {
+      await deleteBlock(id);
+    }
+
+    const remaining = blocks.filter((b) => !selectedBlockIds.has(b.id));
+    if (remaining.length === 0) {
+      // All blocks deleted — create a fresh empty block
+      const newBlock = await createBlock(page.id, null, 0, "");
+      blocks = [newBlock];
+    } else {
+      blocks = remaining;
+    }
+    selectedBlockIds = new Set();
+  }
+
+  function handleKeydownForSelection(e: KeyboardEvent) {
+    if (selectedBlockIds.size === 0) return;
+    if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
+      handleDeleteSelected();
+    } else if (e.key === "Escape") {
+      selectedBlockIds = new Set();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydownForSelection} />
 
 <div class="page-content" class:compact>
   <h1 class="page-title">{page.title}</h1>
@@ -225,12 +397,15 @@
           pageId={page.id}
           depth={getBlockDepth(block)}
           focused={focusedBlockId === block.id}
+          selected={selectedBlockIds.has(block.id)}
           onFocus={handleFocus}
           onBlur={handleBlur}
           onEnter={handleEnter}
           onDelete={handleDelete}
           onNavigate={handleNavigate}
           onIndent={handleIndent}
+          onBulletClick={handleBulletClick}
+          onPasteBlocks={handlePasteBlocks}
         />
       </div>
     {/each}

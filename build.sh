@@ -55,19 +55,19 @@ else
     echo "  Skipping version bump (--no-bump). Version: $NEW_VERSION"
 fi
 
-# ─── 3. Build Rust backend ───────────────────────
-echo ""
-echo "▶ Building Rust backend..."
-cargo build --release 2>&1
-echo "✓ Rust build complete."
-
-# ─── 4. Build frontend ───────────────────────────
+# ─── 3. Build frontend ───────────────────────────
 echo ""
 echo "▶ Building frontend..."
 cd ui
 npm run build 2>&1
 cd ..
 echo "✓ Frontend build complete."
+
+# ─── 4. Build Rust backend (embeds frontend dist) ─
+echo ""
+echo "▶ Building Rust backend..."
+cargo build --release 2>&1
+echo "✓ Rust build complete."
 
 # ─── 5. Done ─────────────────────────────────────
 echo ""

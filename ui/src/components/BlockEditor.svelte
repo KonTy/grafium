@@ -2,11 +2,13 @@
   import { onMount } from "svelte";
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
   import { EditorState, EditorSelection } from "@codemirror/state";
-  import { defaultKeymap, indentWithTab, history, historyKeymap } from "@codemirror/commands";
+  import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
   import { updateBlock, createBlock, deleteBlock } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
+  import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
+  import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
 
   interface Props {
@@ -14,12 +16,15 @@
     pageId: string;
     depth?: number;
     focused?: boolean;
+    selected?: boolean;
     onFocus?: (blockId: string) => void;
     onBlur?: (blockId: string) => void;
     onEnter?: (blockId: string, content: string, orderIndex: number) => void;
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out") => void;
     onNavigate?: (blockId: string, direction: "up" | "down") => void;
+    onBulletClick?: (blockId: string, event: MouseEvent) => void;
+    onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void;
   }
 
   let {
@@ -27,16 +32,21 @@
     pageId,
     depth = 0,
     focused = false,
+    selected = false,
     onFocus,
     onBlur,
     onEnter,
     onDelete,
     onIndent,
     onNavigate,
+    onBulletClick,
+    onPasteBlocks,
   }: Props = $props();
 
   let editorContainer: HTMLDivElement;
   let editorView: EditorView | undefined;
+  let savedState: EditorState | undefined;
+  let shiftHeld = false;
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content));
@@ -98,12 +108,29 @@
     requestAnimationFrame(() => {
       if (!editorContainer) return;
 
-      const state = EditorState.create({
+      // Reuse saved state if content hasn't changed externally
+      let state: EditorState;
+      if (savedState && savedState.doc.toString() === block.content) {
+        state = savedState;
+      } else {
+        state = EditorState.create({
         doc: block.content,
         extensions: [
           markdown(),
           history(),
           keymap.of([
+            {
+              key: "Mod-z",
+              run: (view) => undo(view),
+            },
+            {
+              key: "Mod-Shift-z",
+              run: (view) => redo(view),
+            },
+            {
+              key: "Mod-y",
+              run: (view) => redo(view),
+            },
             {
               key: "Enter",
               run: (view) => {
@@ -224,9 +251,52 @@
             },
           }),
           EditorView.domEventHandlers({
+            keydown: (event) => {
+              if (event.key === "Shift") shiftHeld = true;
+            },
+            keyup: (event) => {
+              if (event.key === "Shift") shiftHeld = false;
+            },
+            paste: (event, view) => {
+              const html = event.clipboardData?.getData("text/html");
+              if (!html) return false;
+              event.preventDefault();
+              const md = htmlToMarkdown(html);
+
+              if (shiftHeld || !onPasteBlocks) {
+                // Ctrl+Shift+V: paste everything into this one block
+                const { from, to } = view.state.selection.main;
+                view.dispatch({
+                  changes: { from, to, insert: md },
+                  selection: EditorSelection.cursor(from + md.length),
+                });
+              } else {
+                // Ctrl+V: split into separate blocks with hierarchy
+                const chunks = splitMarkdownIntoBlocks(md);
+                // First chunk goes into the current block at cursor
+                const { from, to } = view.state.selection.main;
+                view.dispatch({
+                  changes: { from, to, insert: chunks[0].content },
+                  selection: EditorSelection.cursor(from + chunks[0].content.length),
+                });
+                // Remaining chunks become new blocks (with depth info)
+                if (chunks.length > 1) {
+                  const content = view.state.doc.toString();
+                  saveContent(content);
+                  block.content = content;
+                  onPasteBlocks(block.id, chunks.slice(1));
+                }
+              }
+              return true;
+            },
             blur: (_, view) => {
               const content = view.state.doc.toString();
+              // Update block.content synchronously BEFORE onBlur fires,
+              // so handleBlur sees the current text (not stale empty content)
+              block.content = content;
               saveContent(content);
+              savedState = view.state;
+              (window as any).__activeEditorView = undefined;
               editorView?.destroy();
               editorView = undefined;
               isEditing = false;
@@ -253,8 +323,10 @@
           }),
         ],
       });
+      }
 
       editorView = new EditorView({ state, parent: editorContainer });
+      (window as any).__activeEditorView = editorView;
       editorView.focus();
     });
   }
@@ -315,11 +387,12 @@
 <div
   class="block-item"
   class:editing={isEditing}
+  class:selected
   class:code-block={isCodeBlock !== null}
   style="padding-left: {depth * 24}px"
 >
-  {#if !block.content.trim().startsWith("```")}
-    <div class="bullet-container">
+  {#if !block.content.trim().startsWith("```") && block.content.trim() !== ""}
+    <div class="bullet-container" onclick={(e) => { e.stopPropagation(); onBulletClick?.(block.id, e); }}>
       <span class="bullet">•</span>
     </div>
   {/if}
@@ -331,7 +404,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="rendered-content" onclick={handleRenderedClick}>
         {#if block.content.trim() === ""}
-          <span class="placeholder">Click to edit...</span>
+          <span class="placeholder">&nbsp;</span>
         {:else}
           {@html renderedHtml}
         {/if}
@@ -358,6 +431,11 @@
     background: var(--bg-active);
   }
 
+  .block-item.selected {
+    background: var(--accent, #7c3aed);
+    background: color-mix(in srgb, var(--accent, #7c3aed) 20%, transparent);
+  }
+
   .bullet-container {
     width: 20px;
     min-height: 28px;
@@ -365,6 +443,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    cursor: pointer;
   }
 
   .block-item:has(.rendered-content > :first-child:is(h1)) .bullet-container {
