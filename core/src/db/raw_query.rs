@@ -12,9 +12,10 @@ impl Database {
         if !upper.starts_with("SELECT") {
             return Err(CoreError::Parse("Only SELECT queries are allowed".to_string()));
         }
-        // Reject dangerous keywords
+        // Reject dangerous keywords (whole-word match only)
         for forbidden in &["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH", "PRAGMA"] {
-            if upper.contains(forbidden) && *forbidden != "SELECT" {
+            let pat = format!(r"\b{}\b", forbidden);
+            if regex::Regex::new(&pat).unwrap().is_match(&upper) && *forbidden != "SELECT" {
                 return Err(CoreError::Parse(format!("Query contains forbidden keyword: {}", forbidden)));
             }
         }
