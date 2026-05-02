@@ -656,7 +656,7 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="query-block" onclick={(e) => e.stopPropagation()}>
-        <div class="query-header" ondblclick={startEditing}>
+        <div class="query-header" onclick={startEditing}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <span class="query-expr">{queryExpression}</span>
           <button class="query-refresh" onclick={(e) => { e.stopPropagation(); runQueryBlock(queryExpression!); }} title="Re-run query">↻</button>
