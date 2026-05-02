@@ -1117,8 +1117,6 @@
 
   .query-table-wrap {
     overflow-x: auto;
-    max-height: 400px;
-    overflow-y: auto;
   }
 
   .query-table {
