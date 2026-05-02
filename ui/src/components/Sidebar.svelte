@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, listPages, listJournalPages, searchFts, getPage } from "../lib/api";
+  import { listFavorites, listRecentPages, listPages, listJournalPages, searchFts, getPage, addFavorite, removeFavorite } from "../lib/api";
   import type { Page, Block } from "../lib/api";
 
   interface Props {
@@ -24,8 +24,35 @@
   let allSearchPages: Page[] = $state([]);
   let pagesLoaded = $state(false);
 
+  // Context menu state
+  interface ContextMenu {
+    x: number;
+    y: number;
+    page: Page;
+    isFav: boolean;
+  }
+  let contextMenu: ContextMenu | null = $state(null);
+
   $effect(() => {
     loadSidebar();
+  });
+
+  // Refresh recent pages whenever currentPage changes
+  $effect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    currentPage;
+    listRecentPages(10).then((p) => { recentPages = p; }).catch(() => {});
+  });
+
+  // Close context menu on any click outside
+  $effect(() => {
+    function closeMenu() { contextMenu = null; }
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+    };
   });
 
   async function loadSidebar() {
@@ -35,6 +62,28 @@
     try {
       recentPages = await listRecentPages(10);
     } catch { recentPages = []; }
+  }
+
+  function favSet(): Set<string> {
+    return new Set(favorites.map((f) => f.id));
+  }
+
+  function handlePageRightClick(e: MouseEvent, page: Page) {
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = { x: e.clientX, y: e.clientY, page, isFav: favSet().has(page.id) };
+  }
+
+  async function handleToggleFavorite() {
+    if (!contextMenu) return;
+    const { page, isFav } = contextMenu;
+    contextMenu = null;
+    if (isFav) {
+      await removeFavorite(page.id).catch(() => {});
+    } else {
+      await addFavorite(page.id).catch(() => {});
+    }
+    favorites = await listFavorites().catch(() => []);
   }
 
   function normalizeForFuzzy(value: string): string {
@@ -292,7 +341,15 @@
     <div class="sidebar-section">
       <h3 class="section-title">Favorites</h3>
       {#each favorites as fav}
-        <button class="nav-item page-item" class:active={currentPage?.id === fav.id} onclick={() => onNavigate(fav.title)}>
+        <button
+          class="nav-item page-item"
+          class:active={currentPage?.id === fav.id}
+          onclick={() => onNavigate(fav.title)}
+          oncontextmenu={(e) => handlePageRightClick(e, fav)}
+        >
+          <svg class="fav-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
           {fav.title}
         </button>
       {/each}
@@ -303,7 +360,12 @@
     <div class="sidebar-section">
       <h3 class="section-title">Recent</h3>
       {#each recentPages as recent}
-        <button class="nav-item page-item" class:active={currentPage?.id === recent.id} onclick={() => onNavigate(recent.title)}>
+        <button
+          class="nav-item page-item"
+          class:active={currentPage?.id === recent.id}
+          onclick={() => onNavigate(recent.title)}
+          oncontextmenu={(e) => handlePageRightClick(e, recent)}
+        >
           {recent.title}
         </button>
       {/each}
@@ -321,6 +383,29 @@
       <span>Create</span>
     </button>
   </div>
+
+  {#if contextMenu}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div
+      class="context-menu"
+      style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <button class="context-menu-item" onclick={handleToggleFavorite}>
+        {#if contextMenu.isFav}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+          Remove from Favorites
+        {:else}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+          Add to Favorites
+        {/if}
+      </button>
+    </div>
+  {/if}
 </aside>
 
 <style>
@@ -512,5 +597,42 @@
     background: var(--btn-bg-hover);
     color: var(--text-primary);
     border-color: var(--accent);
+  }
+
+  .fav-icon {
+    color: var(--accent);
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 9999;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    padding: 4px;
+    min-width: 170px;
+  }
+
+  .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .context-menu-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 </style>
