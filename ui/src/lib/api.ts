@@ -149,8 +149,9 @@ export function listRecentPages(limit = 10): Promise<Page[]> {
   return invoke("list_recent_pages", { limit });
 }
 
-// Query
-export function runQuery(query: string): Promise<Block[]> {
+// Query — returns rows as arrays of [column_name, value] pairs
+export type QueryRow = [string, unknown][];
+export function runQuery(query: string): Promise<QueryRow[]> {
   return invoke("run_query", { queryString: query });
 }
 

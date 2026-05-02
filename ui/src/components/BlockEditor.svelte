@@ -6,7 +6,8 @@
   import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery, getPage } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery } from "../lib/api";
+  import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
@@ -67,8 +68,8 @@
     const m = block.content.trim().match(QUERY_RE);
     return m ? m[1].trim() : null;
   })());
-  let queryResults: Block[] | null = $state(null);
-  let queryResultPages = $state<Record<string, string>>({});
+  let queryRows: QueryRow[] | null = $state(null);
+  let queryColumns: string[] = $state([]);
   let queryError: string | null = $state(null);
   let queryLoading = $state(false);
 
@@ -76,24 +77,13 @@
     queryLoading = true;
     queryError = null;
     try {
-      const results = await runQuery(expr);
-      queryResults = results;
-      // Resolve page titles
-      const pageIds = [...new Set(results.map((b) => b.page_id))];
-      const entries = await Promise.all(
-        pageIds.map(async (id) => {
-          try {
-            const p = await getPage({ id });
-            return [id, p.title] as [string, string];
-          } catch {
-            return [id, id] as [string, string];
-          }
-        })
-      );
-      queryResultPages = Object.fromEntries(entries);
+      const rows = await runQuery(expr);
+      queryRows = rows;
+      queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
     } catch (e: unknown) {
       queryError = e instanceof Error ? e.message : String(e);
-      queryResults = [];
+      queryRows = [];
+      queryColumns = [];
     } finally {
       queryLoading = false;
     }
@@ -110,9 +100,9 @@
   const SLASH_COMMANDS = [
     {
       label: "/query",
-      detail: "Run a query and display results",
-      apply: "{{query }}",
-      cursorOffset: 9, // position cursor before `}}`
+      detail: "Run a SQL SELECT and display results",
+      apply: "{{query SELECT }}",
+      cursorOffset: 15, // position cursor after "SELECT "
     },
     {
       label: "/TODO",
@@ -583,22 +573,28 @@
           <div class="query-loading">Running…</div>
         {:else if queryError}
           <div class="query-error">Error: {queryError}</div>
-        {:else if queryResults !== null && queryResults.length === 0}
+        {:else if queryRows !== null && queryRows.length === 0}
           <div class="query-empty">No results.</div>
-        {:else if queryResults !== null}
-          <div class="query-results">
-            {#each queryResults as result}
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div class="query-result-item" onclick={(e) => {
-                e.stopPropagation();
-                const title = queryResultPages[result.page_id] || result.page_id;
-                window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: title, targetBlockId: result.id } }));
-              }}>
-                <span class="query-result-page">{queryResultPages[result.page_id] || "…"}</span>
-                <span class="query-result-content">{@html renderBlock(result.content)}</span>
-              </div>
-            {/each}
+        {:else if queryRows !== null}
+          <div class="query-table-wrap">
+            <table class="query-table">
+              <thead>
+                <tr>
+                  {#each queryColumns as col}
+                    <th>{col}</th>
+                  {/each}
+                </tr>
+              </thead>
+              <tbody>
+                {#each queryRows as row}
+                  <tr>
+                    {#each row as [_col, val]}
+                      <td>{val === null ? "" : String(val)}</td>
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {/if}
       </div>
@@ -1005,48 +1001,44 @@
     color: #e57373;
   }
 
-  .query-results {
-    display: flex;
-    flex-direction: column;
+  .query-table-wrap {
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
   }
 
-  .query-result-item {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 7px 12px;
-    border-top: 1px solid var(--border);
-    cursor: pointer;
-    transition: background 0.1s;
+  .query-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
   }
 
-  .query-result-item:first-child {
-    border-top: none;
-  }
-
-  .query-result-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .query-result-page {
+  .query-table th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-input, rgba(0,0,0,0.15));
+    font-weight: 600;
+    text-align: left;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
     font-size: 11px;
-    color: var(--accent);
-    white-space: nowrap;
-    flex-shrink: 0;
-    min-width: 60px;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
   }
 
-  .query-result-content {
-    font-size: 13px;
+  .query-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
+    max-width: 300px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 1;
-    min-width: 0;
+  }
+
+  .query-table tbody tr:hover {
+    background: var(--bg-hover);
   }
 
   /* CodeMirror autocomplete dropdown theme override */

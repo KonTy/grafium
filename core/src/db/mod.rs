@@ -7,6 +7,7 @@ mod flashcards;
 mod audio;
 mod favorites;
 mod graph_support;
+mod raw_query;
 
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
