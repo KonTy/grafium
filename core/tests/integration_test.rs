@@ -1,5 +1,5 @@
-use pkm_core::Database;
-use pkm_core::models::*;
+use grafium_core::Database;
+use grafium_core::models::*;
 
 #[test]
 fn test_full_workflow() {

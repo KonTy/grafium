@@ -1,5 +1,5 @@
-use pkm_core::models::BlockType;
-use pkm_core::Graph;
+use grafium_core::models::BlockType;
+use grafium_core::Graph;
 
 #[test]
 fn create_block_indexes_links_immediately() {

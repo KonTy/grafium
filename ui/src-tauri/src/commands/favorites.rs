@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::Page;
+use grafium_core::models::Page;
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_favorite(state: State<AppState>, page_id: String) -> Result<(), String> {

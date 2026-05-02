@@ -2,7 +2,7 @@ mod commands;
 
 use commands::graph::GraphConfig;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use pkm_core::Graph;
+use grafium_core::Graph;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;

@@ -1,5 +1,5 @@
 [package]
-name = "pkm-core"
+name = "grafium-core"
 version.workspace = true
 edition.workspace = true
 

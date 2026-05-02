@@ -5,7 +5,7 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use pkm_core::Graph;
+use grafium_core::Graph;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphInfo {

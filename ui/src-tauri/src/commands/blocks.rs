@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::{Block, BlockType};
+use grafium_core::models::{Block, BlockType};
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_blocks(state: State<AppState>, page_id: String) -> Result<Vec<Block>, String> {

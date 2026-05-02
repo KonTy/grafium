@@ -1,4 +1,4 @@
-use pkm_core::Graph;
+use grafium_core::Graph;
 use tempfile::TempDir;
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ fn test_hierarchy_parent_child_creation() {
 
     let root = graph.create_page("root", false).unwrap();
     graph.create_block(&root.id, None, 0, "Check [[test/page]]",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     let all = graph.db.list_pages(100, 0).unwrap();
     let titles: Vec<&str> = all.iter().map(|p| p.title.as_str()).collect();
@@ -76,7 +76,7 @@ fn test_hierarchy_backslash_normalization() {
     let page = graph.create_page("notes", false).unwrap();
     graph.create_block(&page.id, None, 0,
         "Check out [[test\\page]] for more info",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     // Link must be indexed against the forward-slash normalised page
     let links = graph.db.get_links_from_page(&page.id).unwrap();
@@ -92,7 +92,7 @@ fn test_hierarchy_mixed_slash_normalisation() {
     let page = graph.create_page("notes", false).unwrap();
     graph.create_block(&page.id, None, 0,
         "[[a\\b/c\\d]]",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     // All ancestor pages must exist with forward slashes
     graph.db.get_page_by_title_ci("a").expect("ancestor 'a' must exist");
@@ -109,7 +109,7 @@ fn test_hierarchy_auto_create_chain() {
 
     let page = graph.create_page("root", false).unwrap();
     graph.create_block(&page.id, None, 0, "See [[a/b/c/d]] for details",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     for title in &["a", "a/b", "a/b/c", "a/b/c/d"] {
         let p = graph.db.get_page_by_title_ci(title);
@@ -124,9 +124,9 @@ fn test_hierarchy_duplicate_link_does_not_create_duplicate_pages() {
 
     let page = graph.create_page("root", false).unwrap();
     graph.create_block(&page.id, None, 0, "[[x/y]]",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
     graph.create_block(&page.id, None, 1, "again [[x/y]]",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     let all = graph.db.list_pages(100, 0).unwrap();
     let xy_count = all.iter().filter(|p| p.title.to_lowercase() == "x/y").count();
@@ -145,7 +145,7 @@ fn test_hierarchy_create_page_via_api_creates_parents() {
     let page = graph.create_page("root", false).unwrap();
     // Referencing multi-level path via block triggers ensure_parent_hierarchy
     graph.create_block(&page.id, None, 0, "[[parent/child/grandchild]]",
-        pkm_core::models::BlockType::Text, serde_json::json!({})).unwrap();
+        grafium_core::models::BlockType::Text, serde_json::json!({})).unwrap();
 
     let parent = graph.db.get_parent_page("parent/child/grandchild").unwrap();
     assert!(parent.is_some());

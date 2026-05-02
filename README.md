@@ -1,14 +1,14 @@
-# PKM - Personal Knowledge Management
+# Grafium
 
-A blazing-fast, cross-platform Logseq-style personal knowledge management app built with Rust + Tauri 2 + React.
+A blazing-fast, cross-platform personal knowledge management app built with Rust + Tauri 2 + Svelte 5.
 
 ## Architecture
 
 ```
-/core            → Rust engine (library crate: pkm-core)
-/core/src        → Rust modules: db, models, parser, query, error
-/ui              → Tauri 2 + React frontend
-/ui/src          → React components, hooks, state, pages
+/core            → Rust engine (library crate: grafium-core)
+/core/src        → Rust modules: db, models, parser, error
+/ui              → Tauri 2 + Svelte 5 frontend
+/ui/src          → Svelte components, state, pages
 /ui/src-tauri    → Tauri Rust backend (bridges core → UI)
 ```
 
@@ -67,7 +67,7 @@ cd ui && npm run tauri dev
 cd ui && npm run tauri build
 
 # Run Rust tests
-cargo test -p pkm-core
+cargo test -p grafium-core
 ```
 
 ## Module Structure

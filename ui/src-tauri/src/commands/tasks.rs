@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::{Task, TaskState};
+use grafium_core::models::{Task, TaskState};
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_tasks(state: State<AppState>, task_state: Option<String>, scheduled: Option<String>, deadline_before: Option<String>) -> Result<Vec<Task>, String> {

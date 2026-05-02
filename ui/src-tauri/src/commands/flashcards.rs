@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::Flashcard;
+use grafium_core::models::Flashcard;
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_flashcards_due(state: State<AppState>, limit: Option<i64>) -> Result<Vec<Flashcard>, String> {

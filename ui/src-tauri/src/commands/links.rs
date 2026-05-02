@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::{Link, Block};
+use grafium_core::models::{Link, Block};
 use serde::Serialize;
 
 #[derive(Serialize)]

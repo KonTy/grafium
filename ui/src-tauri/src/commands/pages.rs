@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::AppState;
-use pkm_core::models::Page;
+use grafium_core::models::Page;
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_pages(state: State<AppState>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Page>, String> {

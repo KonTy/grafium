@@ -13,7 +13,7 @@ if [ "$1" = "--no-bump" ]; then
 fi
 
 echo "══════════════════════════════════════════════"
-echo "  Logseq Clone - Build Pipeline"
+echo "  Grafium - Build Pipeline"
 echo "══════════════════════════════════════════════"
 
 # ─── 1. Run Rust tests ────────────────────────────
@@ -73,5 +73,5 @@ echo "✓ Rust build complete."
 echo ""
 echo "══════════════════════════════════════════════"
 echo "  ✓ Build successful - v$NEW_VERSION"
-echo "  Binary: target/release/logseq-clone"
+echo "  Binary: target/release/grafium"
 echo "══════════════════════════════════════════════"

@@ -1,7 +1,7 @@
 {
-  "productName": "Logseq Clone",
+  "productName": "Grafium",
   "version": "0.0.37",
-  "identifier": "com.logseq-clone.app",
+  "identifier": "com.grafium.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Logseq Clone",
+        "title": "Grafium",
         "width": 1200,
         "height": 800,
         "resizable": true,

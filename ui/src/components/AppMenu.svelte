@@ -129,7 +129,7 @@
           <line x1="6" y1="18" x2="10" y2="14"></line>
           <line x1="18" y1="18" x2="14" y2="14"></line>
         </svg>
-        <h2 class="about-title">Logseq Clone</h2>
+        <h2 class="about-title">Grafium</h2>
       </div>
       <div class="about-version">v{appVersion}</div>
       <p class="about-desc">
