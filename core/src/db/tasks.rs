@@ -77,7 +77,17 @@ impl Database {
         };
 
         let next_state = TaskState::from_str(next).unwrap_or(TaskState::Todo);
-        self.update_task_state(block_id, &next_state)?;
+        // Upsert the task (insert if doesn't exist yet)
+        self.upsert_task(block_id, &next_state, None, None)?;
+
+        // Log event
+        let now = Utc::now().timestamp_millis();
+        let event_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO task_events (id, block_id, from_state, to_state, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![event_id, block_id, current, next, now],
+        )?;
+
         Ok(next.to_string())
     }
 
