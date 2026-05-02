@@ -8,22 +8,32 @@ pub enum ExtractedLink {
     BlockRef(String),
 }
 
+impl ExtractedLink {
+    /// Normalize page/tag titles by replacing backslashes with forward slashes
+    /// so [[test/page]] and [[test\page]] are treated as the same hierarchy.
+    fn normalize_title(title: &str) -> String {
+        title.replace('\\', "/")
+    }
+}
+
 static PAGE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9_/\-]+)").unwrap());
+static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9_/\\\-]+)").unwrap());
 static BLOCK_REF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(\(([a-f0-9\-]+)\)\)").unwrap());
 
 pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
 
     for cap in PAGE_LINK_RE.captures_iter(content) {
-        links.push(ExtractedLink::Page(cap[1].to_string()));
+        let title = ExtractedLink::normalize_title(&cap[1]);
+        links.push(ExtractedLink::Page(title));
     }
 
     for cap in TAG_RE.captures_iter(content) {
         let tag = &cap[1];
         // Don't capture #flashcard as a tag link — it's a special marker
         if tag != "flashcard" {
-            links.push(ExtractedLink::Tag(tag.to_string()));
+            let normalized = ExtractedLink::normalize_title(tag);
+            links.push(ExtractedLink::Tag(normalized));
         }
     }
 
@@ -48,11 +58,29 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_hierarchical_page_links() {
+        let links = extract_links("See [[test/page]] and [[test\\child]]");
+        assert_eq!(links, vec![
+            ExtractedLink::Page("test/page".to_string()),
+            ExtractedLink::Page("test/child".to_string()),
+        ]);
+    }
+
+    #[test]
     fn test_extract_tags() {
         let links = extract_links("Hello #rust and #programming");
         assert_eq!(links, vec![
             ExtractedLink::Tag("rust".to_string()),
             ExtractedLink::Tag("programming".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn test_extract_hierarchical_tags() {
+        let links = extract_links("Tags: #test/sys and #test\\other");
+        assert_eq!(links, vec![
+            ExtractedLink::Tag("test/sys".to_string()),
+            ExtractedLink::Tag("test/other".to_string()),
         ]);
     }
 

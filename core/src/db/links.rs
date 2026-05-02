@@ -26,7 +26,8 @@ impl Database {
                     b.id, b.page_id, b.parent_id, b.order_index, b.content, b.block_type, b.properties, b.created_at, b.updated_at
              FROM links l
              JOIN blocks b ON b.id = l.from_block_id
-             WHERE l.to_page_id = ?1
+             JOIN pages target ON target.id = l.to_page_id
+             WHERE lower(target.title) = (SELECT lower(title) FROM pages WHERE id = ?1)
              ORDER BY b.updated_at DESC"
         )?;
         let results = stmt.query_map(params![page_id], |row| {

@@ -81,9 +81,85 @@ pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
     ParsedPage {
         title: page_title,
         properties: serde_json::Value::Object(page_properties),
-        blocks,
+        blocks: normalize_fenced_code_sequences(blocks),
         is_journal,
     }
+}
+
+fn normalize_fenced_code_sequences(blocks: Vec<ParsedBlock>) -> Vec<ParsedBlock> {
+    let mut out: Vec<ParsedBlock> = Vec::new();
+    let mut i = 0usize;
+
+    while i < blocks.len() {
+        if is_fence_open_marker(&blocks[i].content) {
+            let mut close_idx: Option<usize> = None;
+            let mut j = i + 1;
+            while j < blocks.len() {
+                if is_fence_close_marker(&blocks[j].content) {
+                    close_idx = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+
+            if let Some(end) = close_idx {
+                if end > i + 1 {
+                    let mut merged = blocks[i].clone();
+                    let mut content = String::new();
+                    content.push_str(first_line_trimmed(&blocks[i].content));
+
+                    for mid in (i + 1)..end {
+                        content.push('\n');
+                        content.push_str(&blocks[mid].content);
+                    }
+
+                    content.push('\n');
+                    content.push_str(first_line_trimmed(&blocks[end].content));
+
+                    merged.content = content;
+                    merged.children = Vec::new();
+                    out.push(merged);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+
+        let mut block = blocks[i].clone();
+        if !block.children.is_empty() {
+            block.children = normalize_fenced_code_sequences(block.children);
+        }
+        out.push(block);
+        i += 1;
+    }
+
+    out
+}
+
+fn is_fence_open_marker(content: &str) -> bool {
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if !first.starts_with("```") {
+        return false;
+    }
+    lines.all(is_property_line)
+}
+
+fn is_fence_close_marker(content: &str) -> bool {
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if first != "```" {
+        return false;
+    }
+    lines.all(is_property_line)
+}
+
+fn is_property_line(line: &str) -> bool {
+    PROPERTY_RE.is_match(line.trim())
+}
+
+fn first_line_trimmed(content: &str) -> &str {
+    content.lines().next().unwrap_or("").trim()
 }
 
 fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
@@ -94,6 +170,7 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let mut properties = serde_json::Map::new();
     let mut block_id: Option<String> = None;
     let mut consumed = 1;
+    let mut inside_code_fence = raw_content.trim_start().starts_with("```");
 
     // If the bullet content itself is just "id:: <uuid>" (roundtrip corruption fix),
     // treat it as the block's id with empty content
@@ -107,6 +184,48 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
         let next_line = lines[start + consumed];
         let next_indent = count_indent(next_line);
         let next_trimmed = next_line.trim_start();
+
+        // While inside fenced code, keep consuming lines regardless of indentation.
+        if inside_code_fence {
+            let continuation_raw = if next_indent > indent_level {
+                strip_continuation(next_line, indent_level + 1)
+            } else {
+                next_line
+            };
+
+            // Legacy corrupted fence shape sometimes stores each code line as a sibling bullet
+            // at the same indentation level. In that case, drop the synthetic bullet marker.
+            let continuation = if next_indent <= indent_level {
+                let t = continuation_raw.trim_start();
+                if t.starts_with("- ") {
+                    &t[2..]
+                } else {
+                    continuation_raw
+                }
+            } else {
+                continuation_raw
+            };
+
+            // Ignore synthetic metadata/property lines that came from split sibling blocks.
+            if next_indent > indent_level && is_property_line(continuation.trim()) {
+                consumed += 1;
+                continue;
+            }
+
+            // Ignore synthetic empty bullets from prior corruption.
+            if continuation.trim().is_empty() || continuation.trim() == "-" {
+                consumed += 1;
+                continue;
+            }
+
+            full_content.push('\n');
+            full_content.push_str(continuation);
+            if continuation.trim_start().starts_with("```") {
+                inside_code_fence = false;
+            }
+            consumed += 1;
+            continue;
+        }
 
         // Property lines for this block (indented, key:: value)
         if next_indent > indent_level && !next_trimmed.starts_with("- ") {
@@ -124,6 +243,9 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
             // Continuation of content
             full_content.push('\n');
             full_content.push_str(next_trimmed);
+            if next_trimmed.starts_with("```") {
+                inside_code_fence = !inside_code_fence;
+            }
             consumed += 1;
         } else {
             break;
@@ -213,6 +335,24 @@ fn strip_bullet(line: &str) -> &str {
     }
 }
 
+fn strip_continuation(line: &str, min_depth: u32) -> &str {
+    let mut idx = 0usize;
+    let bytes = line.as_bytes();
+    let mut spaces = 0usize;
+    let min_spaces = (min_depth as usize) * 2;
+
+    while idx < bytes.len() && spaces < min_spaces {
+        if bytes[idx] == b' ' {
+            idx += 1;
+            spaces += 1;
+        } else {
+            break;
+        }
+    }
+
+    &line[idx..]
+}
+
 fn is_journal_filename(filename: &str) -> bool {
     let name = filename.trim_end_matches(".md");
     // Match patterns like 2024_01_01 or 2024-01-01
@@ -261,5 +401,57 @@ mod tests {
         let parsed = parse_page(content, "test.md");
         assert!(parsed.blocks[0].is_flashcard);
         assert_eq!(parsed.blocks[0].flashcard_front, Some("Capital of France".to_string()));
+    }
+
+    #[test]
+    fn test_code_fence_keeps_bullet_like_lines_in_same_block() {
+        let content = "- ```\n  - this should stay in code\n  - and this too\n  ```";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].children.len(), 0);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "```\n- this should stay in code\n- and this too\n```"
+        );
+    }
+
+    #[test]
+    fn test_normalize_split_fence_sibling_blocks() {
+        let content = "- ```\n- this is some code block test\n- 2nd line more of it\n- 3rd line\n- ```";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "```\nthis is some code block test\n2nd line more of it\n3rd line\n```"
+        );
+    }
+
+    #[test]
+    fn test_normalize_split_fence_with_ids_and_empty_children() {
+        let content = "- ```\n  id:: open\n- this is some code block test\n  id:: mid\n  - \n    id:: c1\n  - \n    id:: c2\n- 2nd line more of it\n  id:: line2\n- 3rd line\n  id:: line3\n- ```\n  id:: close";
+
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].children.len(), 0);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "```\nthis is some code block test\n2nd line more of it\n3rd line\n```"
+        );
+    }
+
+    #[test]
+    fn test_code_fence_with_unindented_lines_stays_single_block() {
+        let content = "- ```mermaid\nsequenceDiagram\nparticipant U as User\nparticipant S as Server\n```\n- next";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "```mermaid\nsequenceDiagram\nparticipant U as User\nparticipant S as Server\n```"
+        );
+        assert_eq!(parsed.blocks[1].content, "next");
     }
 }

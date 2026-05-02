@@ -37,8 +37,17 @@ fn serialize_blocks(out: &mut String, blocks: &[Block], parent_id: Option<&str>,
 
     for block in children {
         let indent = "  ".repeat(depth);
-        // Write the block as a bullet
-        out.push_str(&format!("{}- {}\n", indent, block.content));
+        // Write block content with proper continuation indentation for multiline content.
+        let lines: Vec<&str> = block.content.split('\n').collect();
+        if let Some((first, rest)) = lines.split_first() {
+            out.push_str(&format!("{}- {}\n", indent, first));
+            let continuation_indent = format!("{}  ", indent);
+            for line in rest {
+                out.push_str(&format!("{}{}\n", continuation_indent, line));
+            }
+        } else {
+            out.push_str(&format!("{}- \n", indent));
+        }
 
         // Write block-level properties (id, custom properties)
         let prop_indent = "  ".repeat(depth + 1);
@@ -133,5 +142,27 @@ mod tests {
         assert!(result.contains("  id:: parent\n"));
         assert!(result.contains("  - Child\n"));
         assert!(result.contains("    id:: child\n"));
+    }
+
+    #[test]
+    fn test_serialize_multiline_code_fence_continuations() {
+        let blocks = vec![Block {
+            id: "code-1".to_string(),
+            page_id: "page-1".to_string(),
+            parent_id: None,
+            order_index: 0,
+            content: "```rust\nlet x = 1;\nlet y = x + 1;\n```".to_string(),
+            block_type: BlockType::Text,
+            properties: serde_json::json!({}),
+            created_at: 0,
+            updated_at: 0,
+        }];
+
+        let result = serialize_page(&serde_json::json!({}), &blocks);
+
+        assert!(result.contains("- ```rust\n"));
+        assert!(result.contains("  let x = 1;\n"));
+        assert!(result.contains("  let y = x + 1;\n"));
+        assert!(result.contains("  ```\n"));
     }
 }

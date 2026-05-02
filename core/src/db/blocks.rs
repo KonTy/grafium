@@ -3,7 +3,29 @@ use crate::error::Result;
 use super::Database;
 use chrono::Utc;
 use rusqlite::params;
+use std::collections::HashMap;
 use uuid::Uuid;
+
+fn flatten_blocks_in_tree_order(
+    grouped: &mut HashMap<Option<String>, Vec<Block>>,
+    parent_id: Option<String>,
+    out: &mut Vec<Block>,
+) {
+    if let Some(mut children) = grouped.remove(&parent_id) {
+        children.sort_by(|a, b| {
+            a.order_index
+                .cmp(&b.order_index)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        for block in children {
+            let child_parent_id = Some(block.id.clone());
+            out.push(block);
+            flatten_blocks_in_tree_order(grouped, child_parent_id, out);
+        }
+    }
+}
 
 impl Database {
     pub fn create_block(
@@ -109,7 +131,7 @@ impl Database {
     pub fn list_blocks_for_page(&self, page_id: &str) -> Result<Vec<Block>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, page_id, parent_id, order_index, content, block_type, properties, created_at, updated_at FROM blocks WHERE page_id = ?1 ORDER BY order_index"
+            "SELECT id, page_id, parent_id, order_index, content, block_type, properties, created_at, updated_at FROM blocks WHERE page_id = ?1"
         )?;
         let blocks = stmt.query_map(params![page_id], |row| {
             Ok(Block {
@@ -124,7 +146,15 @@ impl Database {
                 updated_at: row.get(8)?,
             })
         })?.collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(blocks)
+
+        let mut grouped: HashMap<Option<String>, Vec<Block>> = HashMap::new();
+        for block in blocks {
+            grouped.entry(block.parent_id.clone()).or_default().push(block);
+        }
+
+        let mut ordered = Vec::new();
+        flatten_blocks_in_tree_order(&mut grouped, None, &mut ordered);
+        Ok(ordered)
     }
 
     pub fn list_child_blocks(&self, parent_id: &str) -> Result<Vec<Block>> {

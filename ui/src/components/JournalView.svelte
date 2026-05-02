@@ -3,10 +3,18 @@
   import { listJournalPages, createPage, getPage } from "../lib/api";
   import type { Page } from "../lib/api";
 
+  interface Props {
+    restorePageTitle?: string;
+    restoreRequestId?: number;
+  }
+
+  let { restorePageTitle = "", restoreRequestId = 0 }: Props = $props();
+
   let journalPages: Page[] = $state([]);
   let loading = $state(true);
   let loadingMore = $state(false);
   let hasMore = $state(true);
+  let bottomSentinel: HTMLDivElement | null = $state(null);
 
   function getLocalDate(): string {
     const now = new Date();
@@ -16,18 +24,45 @@
   let lastDate = getLocalDate();
 
   $effect(() => {
+    restorePageTitle;
+    restoreRequestId;
     loadJournals();
 
-    // Check every 30s if the date has changed (midnight rollover)
+    // Check every few seconds for midnight rollover and external journal updates.
     const interval = setInterval(async () => {
       const now = getLocalDate();
       if (now !== lastDate) {
         lastDate = now;
         await loadJournals();
+        return;
       }
-    }, 30_000);
+
+      // Passive refresh so externally indexed journals appear without manual reindex or navigation.
+      await refreshVisibleJournals();
+    }, 3_000);
 
     return () => clearInterval(interval);
+  });
+
+  $effect(() => {
+    if (!bottomSentinel) return;
+
+    const root = bottomSentinel.closest(".main-content");
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMore();
+        }
+      },
+      {
+        root,
+        rootMargin: "250px 0px",
+        threshold: 0,
+      }
+    );
+
+    observer.observe(bottomSentinel);
+    return () => observer.disconnect();
   });
 
   async function loadJournals() {
@@ -41,8 +76,20 @@
         await createPage(today, true);
       }
 
-      journalPages = await listJournalPages(10, 0);
-      hasMore = journalPages.length >= 10;
+      const pageSize = 10;
+      let loadedPages = await listJournalPages(pageSize, 0);
+      let offset = loadedPages.length;
+      let moreAvailable = loadedPages.length >= pageSize;
+
+      while (restorePageTitle && !loadedPages.some((page) => page.title === restorePageTitle) && moreAvailable) {
+        const more = await listJournalPages(pageSize, offset);
+        loadedPages = [...loadedPages, ...more];
+        offset += more.length;
+        moreAvailable = more.length >= pageSize;
+      }
+
+      journalPages = loadedPages;
+      hasMore = moreAvailable;
     } catch (e) {
       console.error("Failed to load journals:", e);
     }
@@ -61,6 +108,24 @@
     }
     loadingMore = false;
   }
+
+  async function refreshVisibleJournals() {
+    if (loading || loadingMore || journalPages.length === 0) return;
+
+    try {
+      // Refresh currently visible slice; preserves scroll and picks up external edits/newer pages.
+      const fresh = await listJournalPages(journalPages.length, 0);
+      if (fresh.length > 0) {
+        journalPages = fresh;
+      }
+
+      // Recompute whether more journals exist beyond the loaded slice.
+      const next = await listJournalPages(1, fresh.length);
+      hasMore = next.length > 0;
+    } catch (e) {
+      console.error("Failed to refresh journals:", e);
+    }
+  }
 </script>
 
 <div class="journal-view">
@@ -68,7 +133,7 @@
     <div class="loading">Loading journals...</div>
   {:else}
     {#each journalPages as page (page.id)}
-      <div class="journal-entry">
+      <div class="journal-entry" id={`journal-page-${page.title}`} data-page-title={page.title}>
         <PageContent {page} compact />
       </div>
       <hr class="journal-divider" />
@@ -81,6 +146,8 @@
     {#if hasMore && !loadingMore}
       <button class="load-more-btn" onclick={loadMore}>Load older journals</button>
     {/if}
+
+    <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
   {/if}
 </div>
 
@@ -120,5 +187,9 @@
   .load-more-btn:hover {
     background: var(--bg-active);
     color: var(--text-primary);
+  }
+
+  .journal-bottom-sentinel {
+    height: 1px;
   }
 </style>

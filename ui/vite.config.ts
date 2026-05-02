@@ -19,4 +19,8 @@ export default defineConfig({
     minify: "esbuild",
     sourcemap: true,
   },
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+  },
 });

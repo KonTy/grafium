@@ -22,6 +22,38 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Auto-create all parent pages in a hierarchy.
+    /// For "a/b/c", creates "a" and "a/b" if they don't exist.
+    fn ensure_parent_hierarchy(&self, title: &str) -> Result<()> {
+        let parts: Vec<&str> = title.split('/').collect();
+        
+        // Build up each parent level
+        for i in 1..parts.len() {
+            let parent_path = parts[0..i].join("/");
+            // Try to get or create the parent
+            let _ = self.db.get_or_create_page(&parent_path, false);
+        }
+        Ok(())
+    }
+
+    fn resolve_link_target(&self, link: ExtractedLink) -> Result<(String, LinkType)> {
+        match link {
+            ExtractedLink::Page(title) => {
+                // Auto-create parent hierarchy if title contains "/"
+                self.ensure_parent_hierarchy(&title)?;
+                let page = self.db.get_or_create_page(&title, false)?;
+                Ok((page.id, LinkType::Page))
+            }
+            ExtractedLink::Tag(tag) => {
+                // Auto-create parent hierarchy for tags too
+                self.ensure_parent_hierarchy(&tag)?;
+                let page = self.db.get_or_create_page(&tag, false)?;
+                Ok((page.id, LinkType::Tag))
+            }
+            ExtractedLink::BlockRef(block_id) => Ok((block_id, LinkType::BlockRef)),
+        }
+    }
+
     /// Open or create a graph rooted at `root_dir`.
     /// Creates pages/ and journals/ subdirectories if needed.
     /// SQLite index is stored at root_dir/.logseq/index.db
@@ -142,11 +174,7 @@ impl Graph {
             // Extract and insert links
             let links = parser::extract_links(&pb.content);
             for link in links {
-                let (target, link_type) = match link {
-                    ExtractedLink::Page(p) => (p, LinkType::Page),
-                    ExtractedLink::Tag(t) => (t, LinkType::Tag),
-                    ExtractedLink::BlockRef(b) => (b, LinkType::BlockRef),
-                };
+                let (target, link_type) = self.resolve_link_target(link)?;
                 self.db.insert_link(&block_id, &target, link_type)?;
             }
 
@@ -208,6 +236,15 @@ impl Graph {
             &properties,
         )?;
 
+        // Index links for newly created block content immediately.
+        // Without this, links inserted via create_block (e.g. paste-split chunks)
+        // do not appear in backlinks until a later update_block call.
+        let links = parser::extract_links(content);
+        for link in links {
+            let (target, link_type) = self.resolve_link_target(link)?;
+            self.db.insert_link(&block_id, &target, link_type)?;
+        }
+
         // Re-serialize the page to disk
         self.write_page_to_disk(&page)?;
 
@@ -245,11 +282,7 @@ impl Graph {
         self.db.delete_links_from_block(block_id)?;
         let links = parser::extract_links(content);
         for link in links {
-            let (target, link_type) = match link {
-                ExtractedLink::Page(p) => (p, LinkType::Page),
-                ExtractedLink::Tag(t) => (t, LinkType::Tag),
-                ExtractedLink::BlockRef(b) => (b, LinkType::BlockRef),
-            };
+            let (target, link_type) = self.resolve_link_target(link)?;
             self.db.insert_link(block_id, &target, link_type)?;
         }
 

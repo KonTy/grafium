@@ -1,4 +1,5 @@
 import { marked } from "marked";
+import katex from "katex";
 
 // Custom renderer for code blocks with line numbers
 const renderer = new marked.Renderer();
@@ -52,6 +53,40 @@ function setCache(key: string, val: string): void {
   cache.set(key, val);
 }
 
+function renderMathSegment(text: string): string {
+  // Render display math first so $$...$$ is not consumed by inline matching.
+  const withDisplay = text.replace(/(?<!\\)\$\$([\s\S]+?)(?<!\\)\$\$/g, (_, expr: string) => {
+    return katex.renderToString(expr.trim(), {
+      throwOnError: false,
+      displayMode: true,
+    });
+  });
+
+  return withDisplay.replace(/(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, expr: string) => {
+    return katex.renderToString(expr.trim(), {
+      throwOnError: false,
+      displayMode: false,
+    });
+  });
+}
+
+function renderMathOutsideCodeFences(markdown: string): string {
+  const fenceRe = /```[\s\S]*?```/g;
+  let out = "";
+  let last = 0;
+
+  for (const match of markdown.matchAll(fenceRe)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    out += renderMathSegment(markdown.slice(last, start));
+    out += match[0];
+    last = end;
+  }
+
+  out += renderMathSegment(markdown.slice(last));
+  return out;
+}
+
 /**
  * Render a block's markdown content to HTML.
  * Handles [[page links]], #tags, ((block refs)), checkboxes, etc.
@@ -60,8 +95,10 @@ export function renderBlock(content: string): string {
   const cached = getCached(content);
   if (cached !== undefined) return cached;
 
+  let processed = renderMathOutsideCodeFences(content);
+
   // Transform [[page links]] to clickable links
-  let processed = content.replace(
+  processed = processed.replace(
     /\[\[([^\]]+)\]\]/g,
     '<a class="page-link" data-page="$1">[[$1]]</a>'
   );

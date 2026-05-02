@@ -4,9 +4,19 @@
 
   interface Props {
     sidebarVisible?: boolean;
+    canGoBack?: boolean;
+    canGoForward?: boolean;
+    onGoBack?: () => void;
+    onGoForward?: () => void;
   }
 
-  let { sidebarVisible = true }: Props = $props();
+  let {
+    sidebarVisible = true,
+    canGoBack = false,
+    canGoForward = false,
+    onGoBack = () => {},
+    onGoForward = () => {},
+  }: Props = $props();
 
   const appWindow = getCurrentWindow();
 
@@ -37,13 +47,25 @@
   {/if}
 
   <div class="titlebar-right" data-tauri-drag-region>
+    <div class="nav-controls" data-tauri-drag-region="false">
+      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title="Back" disabled={!canGoBack}>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M7.5 2.5L4 6l3.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoForward} title="Forward" disabled={!canGoForward}>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M4.5 2.5L8 6 4.5 9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+    </div>
     <AppMenu />
-    <button class="titlebar-btn" onclick={minimize} title="Minimize">
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={minimize} title="Minimize">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
       </svg>
     </button>
-    <button class="titlebar-btn" onclick={toggleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={toggleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
       {#if isMaximized}
         <svg width="12" height="12" viewBox="0 0 12 12">
           <rect x="3" y="1" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1" />
@@ -55,7 +77,7 @@
         </svg>
       {/if}
     </button>
-    <button class="titlebar-btn titlebar-close" onclick={close} title="Close">
+    <button class="titlebar-btn titlebar-close" data-tauri-drag-region="false" onclick={close} title="Close">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
       </svg>
@@ -92,6 +114,14 @@
     background: var(--bg-primary);
   }
 
+  .nav-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-right: auto;
+    padding-left: 8px;
+  }
+
   .titlebar-btn {
     width: 36px;
     height: 36px;
@@ -106,9 +136,19 @@
     transition: background 0.1s;
   }
 
+  .titlebar-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
   .titlebar-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .titlebar-btn:disabled:hover {
+    background: none;
+    color: var(--text-secondary);
   }
 
   .titlebar-close:hover {

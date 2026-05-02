@@ -67,10 +67,26 @@ impl Database {
     pub fn list_recent_pages(&self, limit: i64) -> Result<Vec<Page>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT p.id, p.title, p.file_path, p.created_at, p.updated_at, p.is_journal, p.properties
-             FROM recent_pages r
-             JOIN pages p ON p.id = r.page_id
-             ORDER BY r.last_opened_at DESC
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM (
+                 SELECT
+                     p.id,
+                     p.title,
+                     p.file_path,
+                     p.created_at,
+                     p.updated_at,
+                     p.is_journal,
+                     p.properties,
+                     r.last_opened_at,
+                     ROW_NUMBER() OVER (
+                         PARTITION BY lower(p.title)
+                         ORDER BY r.last_opened_at DESC, p.updated_at DESC, p.id ASC
+                     ) AS rn
+                 FROM recent_pages r
+                 JOIN pages p ON p.id = r.page_id
+             ) deduped
+             WHERE rn = 1
+             ORDER BY last_opened_at DESC
              LIMIT ?1"
         )?;
         let pages = stmt.query_map(params![limit], |row| {

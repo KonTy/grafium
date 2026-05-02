@@ -27,6 +27,11 @@ export interface SearchResult {
   content: string;
 }
 
+export interface BacklinkResult {
+  link: unknown;
+  block: Block;
+}
+
 // Pages
 export function listPages(limit = 100, offset = 0): Promise<Page[]> {
   return invoke("list_pages", { limit, offset });
@@ -50,6 +55,14 @@ export function updatePageMeta(id: string, title?: string, properties?: Record<s
 
 export function deletePage(id: string): Promise<void> {
   return invoke("delete_page", { id });
+}
+
+export function getParentPage(title: string): Promise<Page | null> {
+  return invoke("get_parent_page", { title });
+}
+
+export function getChildPages(parentTitle: string): Promise<Page[]> {
+  return invoke("get_child_pages", { parentTitle });
 }
 
 // Blocks
@@ -89,7 +102,7 @@ export function searchFts(query: string, limit = 50): Promise<Block[]> {
 }
 
 // Links
-export function getBacklinks(pageId: string): Promise<{ link: unknown; block: Block }[]> {
+export function getBacklinks(pageId: string): Promise<BacklinkResult[]> {
   return invoke("get_backlinks", { pageId });
 }
 

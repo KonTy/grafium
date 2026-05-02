@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, listPages, searchFts } from "../lib/api";
+  import { listFavorites, listRecentPages, listPages, listJournalPages, searchFts, getPage } from "../lib/api";
   import type { Page, Block } from "../lib/api";
 
   interface Props {
@@ -14,8 +15,14 @@
   let favorites: Page[] = $state([]);
   let recentPages: Page[] = $state([]);
   let searchQuery = $state("");
-  let searchResults: Block[] = $state([]);
+  let searchResults: Array<
+    { kind: "page"; page: Page }
+    | { kind: "block"; block: Block }
+  > = $state([]);
   let showSearch = $state(false);
+  let searchInputEl: HTMLInputElement | null = $state(null);
+  let allSearchPages: Page[] = $state([]);
+  let pagesLoaded = $state(false);
 
   $effect(() => {
     loadSidebar();
@@ -30,12 +37,114 @@
     } catch { recentPages = []; }
   }
 
+  function normalizeForFuzzy(value: string): string {
+    return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isSubsequence(needle: string, haystack: string): boolean {
+    let i = 0;
+    let j = 0;
+    while (i < needle.length && j < haystack.length) {
+      if (needle[i] === haystack[j]) i += 1;
+      j += 1;
+    }
+    return i === needle.length;
+  }
+
+  function toIsoDate(year: number, month: number, day: number): string | null {
+    const dt = new Date(year, month - 1, day);
+    if (
+      dt.getFullYear() !== year ||
+      dt.getMonth() !== month - 1 ||
+      dt.getDate() !== day
+    ) {
+      return null;
+    }
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  function normalizeDateInput(raw: string): string | null {
+    const value = raw.trim();
+    if (!value) return null;
+
+    let match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) {
+      return toIsoDate(Number(match[1]), Number(match[2]), Number(match[3]));
+    }
+
+    match = value.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2}|\d{4})$/);
+    if (match) {
+      const month = Number(match[1]);
+      const day = Number(match[2]);
+      const yrRaw = Number(match[3]);
+      const year = match[3].length === 2 ? 2000 + yrRaw : yrRaw;
+      return toIsoDate(year, month, day);
+    }
+
+    return null;
+  }
+
+  function scorePageTitle(title: string, query: string, isoDateQuery: string | null): number | null {
+    const q = query.toLowerCase();
+    const t = title.toLowerCase();
+    const qn = normalizeForFuzzy(query);
+    const tn = normalizeForFuzzy(title);
+
+    if (isoDateQuery && title === isoDateQuery) return 1200;
+
+    const exact = t.indexOf(q);
+    if (exact >= 0) return 1000 - exact;
+
+    if (qn.length > 0) {
+      const fuzzyContains = tn.indexOf(qn);
+      if (fuzzyContains >= 0) return 800 - fuzzyContains;
+      if (isSubsequence(qn, tn)) return 500;
+    }
+
+    return null;
+  }
+
+  async function ensureSearchPagesLoaded() {
+    if (pagesLoaded) return;
+
+    const [journalPages, regularPages] = await Promise.all([
+      listJournalPages(5000, 0),
+      listPages(5000, 0),
+    ]);
+
+    const deduped = new Map<string, Page>();
+    for (const p of [...journalPages, ...regularPages]) {
+      const key = p.title.toLowerCase();
+      if (!deduped.has(key)) deduped.set(key, p);
+    }
+
+    allSearchPages = Array.from(deduped.values());
+    pagesLoaded = true;
+  }
+
   async function handleSearch() {
-    if (searchQuery.trim().length < 2) {
+    if (searchQuery.trim().length < 1) {
       searchResults = [];
       return;
     }
-    searchResults = await searchFts(searchQuery, 20);
+
+    await ensureSearchPagesLoaded();
+
+    const query = searchQuery.trim();
+    const isoDateQuery = normalizeDateInput(query);
+
+    const pageMatches = allSearchPages
+      .map((page) => ({ page, score: scorePageTitle(page.title, query, isoDateQuery) }))
+      .filter((x): x is { page: Page; score: number } => x.score !== null)
+      .sort((a, b) => b.score - a.score || a.page.title.localeCompare(b.page.title))
+      .slice(0, 10)
+      .map((x) => ({ kind: "page" as const, page: x.page }));
+
+    const blockMatches = query.length >= 2
+      ? (await searchFts(query, 20)).slice(0, 12).map((block) => ({ kind: "block" as const, block }))
+      : [];
+
+    searchResults = [...pageMatches, ...blockMatches];
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
@@ -46,17 +155,74 @@
     }
   }
 
+  async function openSearch() {
+    showSearch = true;
+    await tick();
+    searchInputEl?.focus();
+    searchInputEl?.select();
+  }
+
+  function toggleSearch() {
+    if (showSearch) {
+      showSearch = false;
+      searchQuery = "";
+      searchResults = [];
+      return;
+    }
+    void openSearch();
+  }
+
+  $effect(() => {
+    const handleToggleSearch = () => {
+      toggleSearch();
+    };
+    window.addEventListener("toggle-search", handleToggleSearch);
+    return () => {
+      window.removeEventListener("toggle-search", handleToggleSearch);
+    };
+  });
+
+  // Cache page titles to avoid repeated lookups
+  const pageTitleCache = new Map<string, string>();
+
+  async function navigateToBlock(result: Block) {
+    showSearch = false;
+    searchQuery = "";
+    searchResults = [];
+    try {
+      let title = pageTitleCache.get(result.page_id);
+      if (!title) {
+        const page = await getPage({ id: result.page_id });
+        title = page.title;
+        pageTitleCache.set(result.page_id, title);
+      }
+      window.dispatchEvent(new CustomEvent("navigate-page", {
+        detail: {
+          pageName: title,
+          targetBlockId: result.id,
+        },
+      }));
+    } catch (e) {
+      console.error("Search navigation failed:", e);
+    }
+  }
+
   function navigateToJournal() {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    onNavigate(today);
+    onNavigate("__journal__");
+  }
+
+  function navigateToPageResult(page: Page) {
+    showSearch = false;
+    searchQuery = "";
+    searchResults = [];
+    onNavigate(page.title);
   }
 </script>
 
 <aside class="sidebar">
   <div class="sidebar-header">
-    <GraphMenu onGraphChanged={() => { loadSidebar(); onGraphChanged(); }} />
-    <button class="search-toggle" onclick={() => (showSearch = !showSearch)} title="Search (Ctrl+K)">
+    <GraphMenu onGraphChanged={() => { loadSidebar(); pagesLoaded = false; allSearchPages = []; onGraphChanged(); }} />
+    <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="11" cy="11" r="8"></circle>
         <path d="m21 21-4.35-4.35"></path>
@@ -69,7 +235,8 @@
       <input
         type="text"
         class="search-input"
-        placeholder="Search blocks..."
+        placeholder="Search pages & blocks..."
+        bind:this={searchInputEl}
         bind:value={searchQuery}
         oninput={handleSearch}
         onkeydown={handleSearchKeydown}
@@ -77,9 +244,17 @@
       {#if searchResults.length > 0}
         <div class="search-results">
           {#each searchResults as result}
-            <button class="search-result-item" onclick={() => { onNavigate(result.page_id); showSearch = false; }}>
-              <span class="result-content">{result.content.slice(0, 80)}</span>
-            </button>
+            {#if result.kind === "page"}
+              <button class="search-result-item" onclick={() => navigateToPageResult(result.page)}>
+                <span class="result-kind">Page</span>
+                <span class="result-content">{result.page.title}</span>
+              </button>
+            {:else}
+              <button class="search-result-item" onclick={() => navigateToBlock(result.block)}>
+                <span class="result-kind">Block</span>
+                <span class="result-content">{result.block.content.replace(/^[-*>\s#]+/, "").slice(0, 100) || "(empty block)"}</span>
+              </button>
+            {/if}
           {/each}
         </div>
       {/if}
@@ -211,7 +386,9 @@
   }
 
   .search-result-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     width: 100%;
     text-align: left;
     padding: 6px 8px;
@@ -229,6 +406,29 @@
   .search-result-item:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .result-kind {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 38px;
+    padding: 1px 6px;
+    font-size: 10px;
+    letter-spacing: 0.2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-input);
+    flex-shrink: 0;
+  }
+
+  .result-content {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .nav-items {

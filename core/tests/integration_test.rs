@@ -78,7 +78,7 @@ fn test_full_workflow() {
     // Delete
     db.delete_block(&block1.id).unwrap();
     let blocks = db.list_blocks_for_page(&page.id).unwrap();
-    assert_eq!(blocks.len(), 2); // block2 + child (child orphaned but still exists)
+    assert_eq!(blocks.len(), 1); // tree-order listing only returns reachable root/subtree blocks
 
     // Page count
     let count = db.count_pages().unwrap();
@@ -157,4 +157,40 @@ fn test_block_reorder() {
     assert_eq!(blocks[0].content, "Third");
     assert_eq!(blocks[1].content, "Second");
     assert_eq!(blocks[2].content, "First");
+}
+
+#[test]
+fn test_recent_pages_case_insensitive_dedup() {
+    let db = Database::in_memory().unwrap();
+
+    let lower = db.create_page("test", false).unwrap();
+    let upper = db.create_page("Test", false).unwrap();
+
+    db.record_page_open(&lower.id).unwrap();
+    db.record_page_open(&upper.id).unwrap();
+
+    let recents = db.list_recent_pages(10).unwrap();
+    assert_eq!(recents.len(), 1);
+    assert_eq!(recents[0].title.to_lowercase(), "test");
+}
+
+#[test]
+fn test_list_pages_case_insensitive_dedup() {
+    let db = Database::in_memory().unwrap();
+
+    db.create_page("test", false).unwrap();
+    db.create_page("Test", false).unwrap();
+    db.create_page("TEST", false).unwrap();
+    // journal pages are excluded from list_pages
+    db.create_page("2026-01-01", true).unwrap();
+
+    let pages = db.list_pages(100, 0).unwrap();
+    let lower_titles: Vec<String> = pages.iter().map(|p| p.title.to_lowercase()).collect();
+
+    // Should contain "test" exactly once
+    assert_eq!(lower_titles.iter().filter(|t| *t == "test").count(), 1,
+        "expected exactly one 'test' entry, got: {:?}", pages.iter().map(|p| &p.title).collect::<Vec<_>>());
+    // Journal pages must not appear
+    assert!(!lower_titles.contains(&"2026-01-01".to_string()),
+        "journal pages must not appear in list_pages");
 }

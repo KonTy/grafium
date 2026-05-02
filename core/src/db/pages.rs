@@ -68,8 +68,32 @@ impl Database {
         Ok(page)
     }
 
+    pub fn get_page_by_title_ci(&self, title: &str) -> Result<Page> {
+        let conn = self.conn()?;
+        let page = conn.query_row(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE lower(title) = lower(?1)
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            params![title],
+            |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            },
+        )?;
+        Ok(page)
+    }
+
     pub fn get_or_create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
-        match self.get_page_by_title(title) {
+        match self.get_page_by_title_ci(title) {
             Ok(page) => Ok(page),
             Err(_) => self.create_page(title, is_journal),
         }
@@ -78,7 +102,15 @@ impl Database {
     pub fn list_pages(&self, limit: i64, offset: i64) -> Result<Vec<Page>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM (
+               SELECT *, ROW_NUMBER() OVER (PARTITION BY lower(title) ORDER BY updated_at DESC) AS rn
+               FROM pages
+               WHERE is_journal = 0
+             )
+             WHERE rn = 1
+             ORDER BY updated_at DESC
+             LIMIT ?1 OFFSET ?2"
         )?;
         let pages = stmt.query_map(params![limit, offset], |row| {
             Ok(Page {
@@ -130,6 +162,50 @@ impl Database {
             )?;
         }
         Ok(())
+    }
+
+    /// Extract the parent path from a hierarchical title.
+    /// "test/page" → Some("test"), "test" → None
+    fn extract_parent_path(title: &str) -> Option<&str> {
+        title.rfind('/').map(|idx| &title[..idx])
+    }
+
+    /// Get parent page for a hierarchical page title.
+    /// Returns the page for "test" if current page is "test/page".
+    pub fn get_parent_page(&self, title: &str) -> Result<Option<Page>> {
+        if let Some(parent_path) = Self::extract_parent_path(title) {
+            match self.get_page_by_title_ci(parent_path) {
+                Ok(page) => Ok(Some(page)),
+                Err(_) => Ok(None), // Parent doesn't exist yet
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get all child pages for a hierarchical parent.
+    /// Returns all pages matching "test/%", "test/%" etc.
+    pub fn get_child_pages(&self, parent_title: &str) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let like_pattern = format!("{}/%", parent_title);
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE lower(title) LIKE lower(?1)
+             ORDER BY title ASC"
+        )?;
+        let pages = stmt.query_map(params![like_pattern], |row| {
+            Ok(Page {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
     }
 
     pub fn delete_page(&self, id: &str) -> Result<()> {

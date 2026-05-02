@@ -8,31 +8,39 @@
   import { updateBlock, createBlock, deleteBlock } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
+  import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
 
   interface Props {
     block: Block;
     pageId: string;
+    pageTitle?: string;
     depth?: number;
     focused?: boolean;
     selected?: boolean;
+    hasChildren?: boolean;
+    collapsed?: boolean;
     onFocus?: (blockId: string) => void;
     onBlur?: (blockId: string) => void;
-    onEnter?: (blockId: string, content: string, orderIndex: number) => void;
+    onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean) => void;
     onDelete?: (blockId: string) => void;
-    onIndent?: (blockId: string, direction: "in" | "out") => void;
+    onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down") => void;
     onBulletClick?: (blockId: string, event: MouseEvent) => void;
     onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void;
+    onToggleCollapse?: (blockId: string) => void;
   }
 
   let {
     block,
     pageId,
+    pageTitle = "",
     depth = 0,
     focused = false,
     selected = false,
+    hasChildren = false,
+    collapsed = false,
     onFocus,
     onBlur,
     onEnter,
@@ -41,6 +49,7 @@
     onNavigate,
     onBulletClick,
     onPasteBlocks,
+    onToggleCollapse,
   }: Props = $props();
 
   let editorContainer: HTMLDivElement;
@@ -69,9 +78,11 @@
 
   // Save content on blur
   async function saveContent(content: string) {
-    if (content !== block.content) {
-      await updateBlock(block.id, content);
-      block.content = content;
+    const context = buildSaveContext(block.id, pageId, block.content, content);
+    console.log("[telemetry] savecontext", JSON.stringify(context));
+    const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
+    if (changed) {
+      console.log("[telemetry] saveContent", JSON.stringify(context));
     }
   }
 
@@ -144,8 +155,9 @@
                   return true;
                 }
                 const content = view.state.doc.toString();
-                saveContent(content);
-                onEnter?.(block.id, content, block.order_index);
+                const sel = view.state.selection.main;
+                const atStart = sel.from === 0 && sel.to === 0;
+                onEnter?.(block.id, content, block.order_index, atStart);
                 return true;
               },
             },
@@ -181,7 +193,8 @@
                   });
                   return true;
                 }
-                onIndent?.(block.id, "in");
+                const content = view.state.doc.toString();
+                onIndent?.(block.id, "in", content);
                 return true;
               },
             },
@@ -191,7 +204,8 @@
                 if (isInsideCodeFence(view)) {
                   return false; // let default handle dedent
                 }
-                onIndent?.(block.id, "out");
+                const content = view.state.doc.toString();
+                onIndent?.(block.id, "out", content);
                 return true;
               },
             },
@@ -237,17 +251,37 @@
           EditorView.theme({
             "&": {
               fontSize: "15px",
+              fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif",
+              lineHeight: "1.6",
+            },
+            "&.cm-editor": {
+              padding: "0",
+            },
+            ".cm-scroller": {
+              padding: "0",
+              overflow: "visible",
               fontFamily: "inherit",
             },
             ".cm-content": {
-              padding: "0",
+              padding: "2px 0",
               caretColor: "var(--text-primary)",
+              color: "var(--text-primary)",
+              minHeight: "auto",
+              fontFamily: "inherit",
             },
             "&.cm-focused": {
               outline: "none",
             },
             ".cm-line": {
               padding: "0",
+              lineHeight: "1.6",
+              fontFamily: "inherit",
+            },
+            ".cm-cursor": {
+              borderLeftColor: "var(--text-primary)",
+            },
+            ".cm-gutters": {
+              display: "none",
             },
           }),
           EditorView.domEventHandlers({
@@ -291,9 +325,6 @@
             },
             blur: (_, view) => {
               const content = view.state.doc.toString();
-              // Update block.content synchronously BEFORE onBlur fires,
-              // so handleBlur sees the current text (not stale empty content)
-              block.content = content;
               saveContent(content);
               savedState = view.state;
               (window as any).__activeEditorView = undefined;
@@ -340,6 +371,15 @@
     }
     isEditing = false;
     keymap_manager.isEditing = false;
+
+    // Ensure focus does not remain on a stale contenteditable node.
+    requestAnimationFrame(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return;
+      if (active.isContentEditable || active.closest(".cm-editor")) {
+        active.blur();
+      }
+    });
   }
 
   // Clean up
@@ -365,7 +405,9 @@
       e.stopPropagation();
       const pageName = target.dataset.page;
       if (pageName) {
-        window.dispatchEvent(new CustomEvent("navigate-page", { detail: pageName }));
+        window.dispatchEvent(new CustomEvent("navigate-page", {
+          detail: { pageName, sourceBlockId: block.id, sourcePageTitle: pageTitle },
+        }));
       }
       return;
     }
@@ -375,7 +417,9 @@
       e.stopPropagation();
       const tag = target.dataset.tag;
       if (tag) {
-        window.dispatchEvent(new CustomEvent("navigate-page", { detail: tag }));
+        window.dispatchEvent(new CustomEvent("navigate-page", {
+          detail: { pageName: tag, sourceBlockId: block.id, sourcePageTitle: pageTitle },
+        }));
       }
       return;
     }
@@ -392,8 +436,23 @@
   style="padding-left: {depth * 24}px"
 >
   {#if !block.content.trim().startsWith("```") && block.content.trim() !== ""}
-    <div class="bullet-container" onclick={(e) => { e.stopPropagation(); onBulletClick?.(block.id, e); }}>
-      <span class="bullet">•</span>
+    <div class="bullet-container" class:has-children={hasChildren} onclick={(e) => {
+      e.stopPropagation();
+      if (hasChildren) {
+        onToggleCollapse?.(block.id);
+      } else {
+        onBulletClick?.(block.id, e);
+      }
+    }}>
+      {#if hasChildren}
+        <span class="collapse-arrow" class:collapsed>
+          {#if collapsed}▶{:else}
+            <span class="arrow-hover">▼</span><span class="bullet-default">•</span>
+          {/if}
+        </span>
+      {:else}
+        <span class="bullet">•</span>
+      {/if}
     </div>
   {/if}
   <div class="block-content" onclick={handleClick}>
@@ -428,7 +487,7 @@
   }
 
   .block-item.editing {
-    background: var(--bg-active);
+    background: transparent;
   }
 
   .block-item.selected {
@@ -469,6 +528,37 @@
     background: var(--text-secondary);
     display: block;
     font-size: 0;
+  }
+
+  .collapse-arrow {
+    font-size: 10px;
+    color: var(--text-muted);
+    user-select: none;
+    line-height: 1;
+  }
+
+  .collapse-arrow .arrow-hover {
+    display: none;
+    font-size: 10px;
+  }
+
+  .collapse-arrow .bullet-default {
+    display: inline;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .block-item:hover .collapse-arrow .arrow-hover {
+    display: inline;
+  }
+
+  .block-item:hover .collapse-arrow .bullet-default {
+    display: none;
+  }
+
+  .collapse-arrow.collapsed {
+    font-size: 10px;
+    color: var(--text-secondary);
   }
 
   .block-content {

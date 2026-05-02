@@ -22,7 +22,7 @@ pub fn get_page(state: State<AppState>, id: Option<String>, title: Option<String
     if let Some(id) = id {
         graph.db.get_page_by_id(&id).map_err(|e| e.to_string())
     } else if let Some(title) = title {
-        graph.db.get_page_by_title(&title).map_err(|e| e.to_string())
+        graph.db.get_page_by_title_ci(&title).map_err(|e| e.to_string())
     } else {
         Err("Must provide id or title".to_string())
     }
@@ -46,4 +46,16 @@ pub fn update_page_meta(state: State<AppState>, id: String, title: Option<String
 pub fn delete_page(state: State<AppState>, id: String) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.delete_page(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_parent_page(state: State<AppState>, title: String) -> Result<Option<Page>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.get_parent_page(&title).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_child_pages(state: State<AppState>, parent_title: String) -> Result<Vec<Page>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.get_child_pages(&parent_title).map_err(|e| e.to_string())
 }

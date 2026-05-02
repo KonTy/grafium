@@ -1,7 +1,9 @@
 <script lang="ts">
   import BlockEditor from "./BlockEditor.svelte";
-  import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks } from "../lib/api";
-  import type { Block, Page } from "../lib/api";
+  import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
+  import { persistBlockContentIfChanged } from "../lib/persistence";
+  import { renderBlock } from "../lib/markdown";
+  import type { BacklinkResult, Block, Page } from "../lib/api";
   import { pushUndo, setUndoCallback, removeUndoCallback, performUndo, performRedo, canUndo, getUndoStackSize } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
 
@@ -15,10 +17,41 @@
   let blocks: Block[] = $state([]);
   let focusedBlockId: string | null = $state(null);
   let navigatingBlock = false;
-  let backlinks: { link: unknown; block: Block }[] = $state([]);
+  type BacklinkTreeNode = { block: Block; depth: number };
+  type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
+
+  let backlinks: BacklinkView[] = $state([]);
+  let parentPage: Page | null = $state(null);
+  let childPages: Page[] = $state([]);
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
   let undoCount = $state(0);
+  let collapsedIds: Set<string> = $state(new Set());
+
+  function hasChildren(blockId: string): boolean {
+    return blocks.some((b) => b.parent_id === blockId);
+  }
+
+  function isBlockVisible(block: Block): boolean {
+    // A block is visible if none of its ancestors are collapsed
+    let parentId = block.parent_id;
+    while (parentId) {
+      if (collapsedIds.has(parentId)) return false;
+      const parent = blocks.find((b) => b.id === parentId);
+      parentId = parent?.parent_id ?? null;
+    }
+    return true;
+  }
+
+  function toggleCollapse(blockId: string) {
+    const newSet = new Set(collapsedIds);
+    if (newSet.has(blockId)) {
+      newSet.delete(blockId);
+    } else {
+      newSet.add(blockId);
+    }
+    collapsedIds = newSet;
+  }
 
   function updateUndoCount() {
     undoCount = getUndoStackSize();
@@ -62,6 +95,7 @@
     if (page?.id) {
       loadBlocks();
       loadBacklinks();
+      loadHierarchy();
     }
   });
 
@@ -80,12 +114,97 @@
     }
   }
 
+  async function loadHierarchy() {
+    try {
+      if (page.title.includes("/")) {
+        parentPage = await getParentPage(page.title);
+      } else {
+        parentPage = null;
+      }
+      childPages = await getChildPages(page.title);
+    } catch (e) {
+      console.warn("[hierarchy] Failed to load hierarchy:", e);
+      parentPage = null;
+      childPages = [];
+    }
+  }
+
   async function loadBacklinks() {
     try {
-      backlinks = await getBacklinks(page.id);
+      const backlinkResults = await getBacklinks(page.id);
+      console.log("[telemetry] backlinks fetched", JSON.stringify({
+        pageId: page.id,
+        pageTitle: page.title,
+        count: backlinkResults.length,
+      }));
+      const pageBlockCache = new Map<string, Block[]>();
+      const pageTitleCache = new Map<string, string>();
+
+      backlinks = await Promise.all(backlinkResults.map(async (result) => {
+        let sourceBlocks = pageBlockCache.get(result.block.page_id);
+        if (!sourceBlocks) {
+          sourceBlocks = await listBlocks(result.block.page_id);
+          pageBlockCache.set(result.block.page_id, sourceBlocks);
+        }
+
+        let sourcePageTitle = pageTitleCache.get(result.block.page_id);
+        if (!sourcePageTitle) {
+          const sourcePage = await getPage({ id: result.block.page_id });
+          sourcePageTitle = sourcePage.title;
+          pageTitleCache.set(result.block.page_id, sourcePageTitle);
+        }
+
+        return {
+          ...result,
+          sourcePageTitle,
+          tree: buildBacklinkTree(result.block.id, sourceBlocks),
+        };
+      }));
+      console.log("[telemetry] backlinks rendered", JSON.stringify({
+        pageId: page.id,
+        pageTitle: page.title,
+        renderedCount: backlinks.length,
+        items: backlinks.map((b) => ({
+          sourcePageTitle: b.sourcePageTitle,
+          rootBlockId: b.block.id,
+          rootContent: b.block.content.slice(0, 80),
+          treeSize: b.tree.length,
+        })),
+      }));
     } catch {
       backlinks = [];
     }
+  }
+
+  function buildBacklinkTree(rootBlockId: string, sourceBlocks: Block[]): BacklinkTreeNode[] {
+    const blockMap = new Map(sourceBlocks.map((block) => [block.id, block]));
+    const childrenByParent = new Map<string | null, Block[]>();
+
+    for (const block of sourceBlocks) {
+      const key = block.parent_id ?? null;
+      const current = childrenByParent.get(key) ?? [];
+      current.push(block);
+      childrenByParent.set(key, current);
+    }
+
+    for (const childList of childrenByParent.values()) {
+      childList.sort((a, b) => a.order_index - b.order_index);
+    }
+
+    const root = blockMap.get(rootBlockId);
+    if (!root) return [];
+
+    const tree: BacklinkTreeNode[] = [];
+    const visit = (block: Block, depth: number) => {
+      tree.push({ block, depth });
+      const children = childrenByParent.get(block.id) ?? [];
+      for (const child of children) {
+        visit(child, depth + 1);
+      }
+    };
+
+    visit(root, 0);
+    return tree;
   }
 
   // Track block content before editing starts, so undo can restore it
@@ -123,10 +242,51 @@
     return depth;
   }
 
-  async function handleEnter(blockId: string, _content: string, orderIndex: number) {
+  async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean) {
     try {
       const block = blocks.find((b) => b.id === blockId);
       if (!block) return;
+
+      // Persist the current block content before any structural operation
+      // (create/move), otherwise write-page operations can serialize stale empty text.
+      if (block.content !== content) {
+        await updateBlock(blockId, content);
+        block.content = content;
+        blocks = [...blocks];
+      }
+
+      // Enter at the very start of a block inserts an empty sibling above it.
+      if (atStart) {
+        const parentId = block.parent_id;
+        const siblings = blocks
+          .filter((b) => b.parent_id === parentId)
+          .sort((a, b) => a.order_index - b.order_index);
+        const currentSiblingIndex = siblings.findIndex((b) => b.id === blockId);
+        const insertOrder = currentSiblingIndex >= 0 ? siblings[currentSiblingIndex].order_index : block.order_index;
+
+        // Shift siblings at/after insert point down by one to keep deterministic ordering.
+        for (const sibling of siblings) {
+          if (sibling.id === blockId) continue;
+          if (sibling.order_index >= insertOrder) {
+            await moveBlock(sibling.id, sibling.parent_id, sibling.order_index + 1);
+            sibling.order_index += 1;
+          }
+        }
+
+        const newBlock = await createBlock(page.id, parentId, insertOrder, "");
+        const idx = blocks.findIndex((b) => b.id === blockId);
+        blocks = [...blocks.slice(0, idx), newBlock, ...blocks.slice(idx)];
+
+        requestAnimationFrame(() => {
+          focusedBlockId = newBlock.id;
+          const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
+          if (el) {
+            el.scrollIntoView({ block: "nearest" });
+            (el as HTMLElement).click();
+          }
+        });
+        return;
+      }
 
       let parentId: string | null;
       let newOrder: number;
@@ -270,10 +430,28 @@
     }
   }
 
-  async function handleIndent(blockId: string, direction: "in" | "out") {
+  async function handleIndent(blockId: string, direction: "in" | "out", currentContent?: string) {
     const idx = blocks.findIndex((b) => b.id === blockId);
     const block = blocks[idx];
     if (!block) return;
+
+    // Persist latest editor text before structural move. This avoids
+    // move/write operations serializing stale empty content from DB.
+    if (typeof currentContent === "string" && currentContent !== block.content) {
+      await persistBlockContentIfChanged(block, currentContent, (id, value) => updateBlock(id, value));
+      blocks = [...blocks];
+    }
+
+    console.log("[telemetry] indent start", JSON.stringify({
+      pageId: page.id,
+      pageTitle: page.title,
+      blockId,
+      direction,
+      content: block.content.slice(0, 80),
+      currentContent: (currentContent ?? "").slice(0, 80),
+      parentId: block.parent_id,
+      orderIndex: block.order_index,
+    }));
 
     try {
       if (direction === "in") {
@@ -290,6 +468,12 @@
         block.parent_id = prevSibling.id;
         block.order_index = childCount;
         blocks = [...blocks];
+        console.log("[telemetry] indent in done", JSON.stringify({
+          blockId: block.id,
+          newParentId: block.parent_id,
+          newOrderIndex: block.order_index,
+          prevSiblingId: prevSibling.id,
+        }));
       } else {
         // Outdent: become a sibling of the current parent
         if (!block.parent_id) return; // Already at top level
@@ -309,6 +493,11 @@
         block.parent_id = newParentId;
         block.order_index = newOrder;
         blocks = [...blocks];
+        console.log("[telemetry] indent out done", JSON.stringify({
+          blockId: block.id,
+          newParentId: block.parent_id,
+          newOrderIndex: block.order_index,
+        }));
       }
     } catch (e) {
       console.error("Failed to indent/outdent:", e);
@@ -376,6 +565,17 @@
       selectedBlockIds = new Set();
     }
   }
+
+  function jumpToSourceBlock(sourcePageTitle: string, sourceBlockId: string) {
+    window.dispatchEvent(new CustomEvent("navigate-page", {
+      detail: {
+        pageName: sourcePageTitle,
+        sourceBlockId,
+        sourcePageTitle,
+        targetBlockId: sourceBlockId,
+      },
+    }));
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydownForSelection} />
@@ -391,13 +591,17 @@
 
   <div class="blocks-container">
     {#each blocks as block (block.id)}
-      <div data-block-id={block.id}>
+      {#if isBlockVisible(block)}
+      <div id={`block-${block.id}`} data-block-id={block.id}>
         <BlockEditor
           {block}
           pageId={page.id}
+          pageTitle={page.title}
           depth={getBlockDepth(block)}
           focused={focusedBlockId === block.id}
           selected={selectedBlockIds.has(block.id)}
+          hasChildren={hasChildren(block.id)}
+          collapsed={collapsedIds.has(block.id)}
           onFocus={handleFocus}
           onBlur={handleBlur}
           onEnter={handleEnter}
@@ -406,8 +610,10 @@
           onIndent={handleIndent}
           onBulletClick={handleBulletClick}
           onPasteBlocks={handlePasteBlocks}
+          onToggleCollapse={toggleCollapse}
         />
       </div>
+      {/if}
     {/each}
   </div>
 
@@ -415,13 +621,59 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="click-below" onclick={handleClickBelow}></div>
 
+  {#if parentPage || childPages.length > 0}
+    <div class="hierarchy-section">
+      <h3 class="hierarchy-title">Hierarchy</h3>
+      {#if parentPage}
+        <div class="hierarchy-parents">
+          <button class="hierarchy-link parent-link" type="button"
+            onclick={() => window.dispatchEvent(new CustomEvent("navigate-page", { detail: parentPage!.title }))}
+          >📁 {parentPage.title}</button>
+        </div>
+      {/if}
+      {#if childPages.length > 0}
+        <div class="hierarchy-children">
+          <div class="children-label">Children:</div>
+          <div class="children-list">
+            {#each childPages as child}
+              <button class="hierarchy-link child-link" type="button"
+                onclick={() => window.dispatchEvent(new CustomEvent("navigate-page", { detail: child.title }))}
+              >📄 {child.title}</button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   {#if backlinks.length > 0}
     <div class="backlinks-section">
       <h3 class="backlinks-title">{backlinks.length} Linked Reference{backlinks.length > 1 ? "s" : ""}</h3>
       <div class="backlinks-list">
         {#each backlinks as bl}
           <div class="backlink-item">
-            <span class="backlink-content">{@html bl.block.content}</span>
+            <button
+              class="backlink-source-page"
+              type="button"
+              onclick={() => jumpToSourceBlock(bl.sourcePageTitle, bl.block.id)}
+              title="Open source block"
+            >
+              {bl.sourcePageTitle}
+            </button>
+            <div class="backlink-tree">
+              {#each bl.tree as node}
+                <button
+                  class="backlink-node"
+                  type="button"
+                  style={`padding-left: ${node.depth * 24}px`}
+                  onclick={() => jumpToSourceBlock(bl.sourcePageTitle, node.block.id)}
+                  title="Jump to this block"
+                >
+                  <span class="backlink-bullet">•</span>
+                  <div class="backlink-content">{@html renderBlock(node.block.content)}</div>
+                </button>
+              {/each}
+            </div>
           </div>
         {/each}
       </div>
@@ -450,7 +702,7 @@
   }
 
   .click-below {
-    min-height: 300px;
+    min-height: 72px;
     cursor: text;
   }
 
@@ -462,9 +714,67 @@
     min-height: 0;
   }
 
+  .hierarchy-section {
+    margin-top: 18px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+  }
+
+  .hierarchy-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 0 0 10px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .hierarchy-parents { margin-bottom: 10px; }
+
+  .hierarchy-children { display: flex; flex-direction: column; gap: 6px; }
+
+  .children-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+
+  .children-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-left: 12px;
+  }
+
+  .hierarchy-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    background: none;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-link);
+    border-radius: 4px;
+    text-align: left;
+  }
+
+  .hierarchy-link:hover {
+    background-color: var(--bg-hover);
+    text-decoration: underline;
+  }
+
+  .parent-link { font-weight: 500; color: var(--text-primary); }
+  .child-link { font-size: 12px; }
+
   .backlinks-section {
-    margin-top: 48px;
-    padding-top: 24px;
+    margin-top: 18px;
+    padding-top: 12px;
     border-top: 1px solid var(--border);
   }
 
@@ -484,9 +794,70 @@
   }
 
   .backlink-item {
-    padding: 8px 12px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
     border-radius: 6px;
     font-size: 14px;
+  }
+
+  .backlink-source-page {
+    display: inline-flex;
+    align-items: center;
+    border: none;
+    background: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .backlink-source-page:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+  }
+
+  .backlink-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .backlink-node {
+    width: 100%;
+    border: none;
+    background: none;
+    padding-top: 2px;
+    padding-right: 0;
+    padding-bottom: 2px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  .backlink-node:hover {
+    background: var(--bg-hover);
+  }
+
+  .backlink-bullet {
+    color: var(--text-muted);
+    line-height: 1.6;
+    flex-shrink: 0;
+  }
+
+  .backlink-content {
+    min-width: 0;
+    color: var(--text-primary);
+  }
+
+  .backlink-content :global(.page-link),
+  .backlink-content :global(.tag) {
+    cursor: pointer;
   }
 </style>

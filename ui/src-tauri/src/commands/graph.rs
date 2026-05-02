@@ -110,6 +110,9 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     // Swap the graph in app state
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
     *graph = new_graph;
+    drop(graph);
+
+    state.restart_graph_watcher()?;
 
     Ok(GraphInfo { name, path })
 }
@@ -134,6 +137,9 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
     // Swap the graph in app state
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
     *graph = new_graph;
+    drop(graph);
+
+    state.restart_graph_watcher()?;
 
     Ok(GraphInfo { name, path })
 }
