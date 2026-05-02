@@ -115,6 +115,10 @@ export function updateTaskState(blockId: string, newState: string): Promise<void
   return invoke("update_task_state", { blockId, newState });
 }
 
+export function cycleTaskState(blockId: string): Promise<string> {
+  return invoke("cycle_task_state", { blockId });
+}
+
 // Flashcards
 export function listFlashcardsDue(): Promise<unknown[]> {
   return invoke("list_flashcards_due", {});

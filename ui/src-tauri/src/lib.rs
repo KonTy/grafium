@@ -334,6 +334,7 @@ pub fn run() {
             commands::links::get_backlinks,
             commands::tasks::list_tasks,
             commands::tasks::update_task_state,
+            commands::tasks::cycle_task_state,
             commands::flashcards::list_flashcards_due,
             commands::flashcards::list_all_flashcards,
             commands::flashcards::update_flashcard_review,

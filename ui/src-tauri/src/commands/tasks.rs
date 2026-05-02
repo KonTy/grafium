@@ -18,3 +18,10 @@ pub fn update_task_state(state: State<AppState>, block_id: String, new_state: St
     graph.db.update_task_state(&block_id, &task_state)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn cycle_task_state(state: State<AppState>, block_id: String) -> Result<String, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.cycle_task_state(&block_id)
+        .map_err(|e| e.to_string())
+}

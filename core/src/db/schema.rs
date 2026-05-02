@@ -119,6 +119,18 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(scheduled_date) WHERE scheduled_date IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline_date) WHERE deadline_date IS NOT NULL;
 
+        CREATE TABLE IF NOT EXISTS task_events (
+            id TEXT PRIMARY KEY,
+            block_id TEXT NOT NULL,
+            from_state TEXT,
+            to_state TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_events_block ON task_events(block_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(timestamp DESC);
+
         CREATE TABLE IF NOT EXISTS favorites (
             id TEXT PRIMARY KEY,
             page_id TEXT NOT NULL UNIQUE,

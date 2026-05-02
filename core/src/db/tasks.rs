@@ -38,11 +38,47 @@ impl Database {
     pub fn update_task_state(&self, block_id: &str, state: &TaskState) -> Result<()> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
+
+        // Get current state for the event log
+        let from_state: Option<String> = conn
+            .query_row("SELECT state FROM tasks WHERE block_id = ?1", params![block_id], |row| row.get(0))
+            .ok();
+
         conn.execute(
             "UPDATE tasks SET state = ?1, updated_at = ?2 WHERE block_id = ?3",
             params![state.as_str(), now, block_id],
         )?;
+
+        // Log event
+        let event_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO task_events (id, block_id, from_state, to_state, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![event_id, block_id, from_state, state.as_str(), now],
+        )?;
+
         Ok(())
+    }
+
+    /// Cycle task state: TODO → DOING → DONE → TODO
+    /// Returns the new state string.
+    pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
+        let conn = self.conn()?;
+        let current: String = conn
+            .query_row("SELECT state FROM tasks WHERE block_id = ?1", params![block_id], |row| row.get(0))
+            .unwrap_or_else(|_| "TODO".to_string());
+
+        let next = match current.as_str() {
+            "TODO" => "DOING",
+            "DOING" => "DONE",
+            "DONE" => "TODO",
+            "NOW" => "DOING",
+            "LATER" => "TODO",
+            _ => "TODO",
+        };
+
+        let next_state = TaskState::from_str(next).unwrap_or(TaskState::Todo);
+        self.update_task_state(block_id, &next_state)?;
+        Ok(next.to_string())
     }
 
     pub fn list_tasks(&self, state: Option<&TaskState>, scheduled_date: Option<&str>, deadline_before: Option<&str>) -> Result<Vec<Task>> {

@@ -6,7 +6,7 @@
   import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
@@ -498,8 +498,31 @@
     }
   }
 
+  async function handleTaskCycle() {
+    try {
+      const newState = await cycleTaskState(block.id);
+      // Update the block content to reflect the new state
+      const taskRe = /^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s/;
+      const newContent = block.content.replace(taskRe, newState + " ");
+      if (newContent !== block.content) {
+        block.content = newContent;
+        await updateBlock(block.id, newContent);
+      }
+    } catch (e) {
+      console.error("Failed to cycle task state:", e);
+    }
+  }
+
   function handleRenderedClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
+
+    // Handle task marker clicks — cycle state
+    if (target.classList.contains("task-marker")) {
+      e.stopPropagation();
+      e.preventDefault();
+      handleTaskCycle();
+      return;
+    }
 
     // Handle page link clicks
     if (target.classList.contains("page-link")) {
@@ -588,8 +611,14 @@
               <tbody>
                 {#each queryRows as row}
                   <tr>
-                    {#each row as [_col, val]}
-                      <td>{val === null ? "" : String(val)}</td>
+                    {#each row as [col, val]}
+                      <td>
+                        {#if col === "content" && val}
+                          <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
+                        {:else}
+                          {val === null ? "" : String(val)}
+                        {/if}
+                      </td>
                     {/each}
                   </tr>
                 {/each}
@@ -753,6 +782,13 @@
     padding: 1px 4px;
     border-radius: 3px;
     margin-right: 4px;
+    cursor: pointer;
+    user-select: none;
+    transition: opacity 0.15s;
+  }
+
+  .rendered-content :global(.task-marker:hover) {
+    opacity: 0.7;
   }
 
   .rendered-content :global(.task-marker.todo) {
@@ -1035,6 +1071,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .query-table td:has(.query-cell-content) {
+    white-space: normal;
+    max-width: 500px;
   }
 
   .query-table tbody tr:hover {
