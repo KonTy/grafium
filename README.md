@@ -1,43 +1,87 @@
+<div align="center">
+
 # Grafium
 
-A blazing-fast, cross-platform personal knowledge management app built with Rust + Tauri 2 + Svelte 5.
+**A fast, local-first personal knowledge base built on Rust and SQLite.**
 
-## Architecture
+Your notes live as plain Markdown files on disk. Grafium indexes them into a SQLite database for instant search, backlinks, queries, and structured knowledge management — without ever locking you into a proprietary format.
 
-```
-/core            → Rust engine (library crate: grafium-core)
-/core/src        → Rust modules: db, models, parser, error
-/ui              → Tauri 2 + Svelte 5 frontend
-/ui/src          → Svelte components, state, pages
-/ui/src-tauri    → Tauri Rust backend (bridges core → UI)
-```
+</div>
 
-## Performance Design
-
-- **SQLite with WAL mode** + aggressive indexing for millions of records
-- **Connection pooling** (r2d2) for concurrent access
-- **FTS5 full-text search** with Porter stemming
-- **Incremental parsing** — only re-indexes changed blocks
-- **Virtual lists** (react-virtuoso) — renders only visible items
-- **Debounced saves** — 300ms delay to batch rapid edits
+---
 
 ## Features
 
-- Block-based outliner editor (Logseq-style)
-- [[Page links]], #tags, ((block references))
-- Tasks: TODO/DOING/DONE/CANCELED with SCHEDULED/DEADLINE dates
-- Flashcards with SM-2 spaced repetition
-- Full-text search across all content
-- Query engine: `{{query (and [[Project]] (task TODO))}}`
-- Favorites & Recent pages
-- Hierarchical topic tree from page titles (tech/rust/async)
-- Journal pages (daily notes)
-- Dark theme with CSS variables
+### Block-Based Outliner
+Every page is a tree of blocks. Indent, reorder, collapse, and reference individual blocks across your entire knowledge base. Each block can hold Markdown, tasks, math (KaTeX), or code.
+
+### Bidirectional Links & Graph
+Connect ideas with `[[page links]]`, `#tags`, and `((block references))`. Backlinks are computed automatically — every mention is tracked and queryable.
+
+### Hierarchical Pages
+Organize pages into topic trees using slash-separated titles: `projects/grafium/roadmap` automatically nests under `projects/grafium`. Navigate the hierarchy from the sidebar or breadcrumbs.
+
+### Journal
+Daily notes are created automatically. Open the app and start writing — today's journal is always ready. Older entries scroll infinitely below.
+
+### Raw SQL Queries
+Embed live SQL queries directly in your pages using fenced code blocks. Grafium exposes read-only access to the underlying SQLite index, so you can write:
+
+~~~markdown
+```query
+SELECT title, updated_at FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT 10
+```
+~~~
+
+Results render inline as tables. Query pages, blocks, links, tasks, flashcards — anything in the index.
+
+### Tasks
+Mark blocks as `TODO`, `DOING`, `DONE`, or `CANCELED`. Attach `SCHEDULED` and `DEADLINE` dates. Query them across your entire graph to build dashboards and agendas.
+
+### Flashcards (Spaced Repetition)
+Turn any block into a flashcard. Grafium uses the SM-2 algorithm to schedule reviews at optimal intervals. Study directly inside the app.
+
+### Full-Text Search
+Powered by SQLite FTS5 with Porter stemming. Search across all content instantly — results are ranked by relevance and returned in milliseconds.
+
+### Audio Notes
+Attach audio recordings to pages with transcript storage for searchable voice notes.
+
+### Live File Watcher
+Edit your `.md` files in any external editor. Grafium detects changes on disk and re-indexes automatically — no manual sync needed.
+
+---
+
+## Performance
+
+Speed is a core design goal, not an afterthought.
+
+| Aspect | Implementation |
+|---|---|
+| **Database** | SQLite in WAL mode with aggressive indexing |
+| **Connection pooling** | r2d2 pool for concurrent read/write access |
+| **Search** | FTS5 full-text search with Porter stemming |
+| **Incremental indexing** | Only changed blocks are re-parsed and updated |
+| **Debounced saves** | 300ms batching to avoid disk thrashing during rapid edits |
+| **Startup** | Near-instant — opens the SQLite index, skips reindex if already populated |
+| **Binary size** | Single native binary via Tauri — no Electron, no bundled Chromium |
+
+---
+
+## Tech Stack
+
+- **Core engine** — Rust (`grafium-core`): parser, database, models
+- **Database** — SQLite with WAL, FTS5, JSON1 extensions
+- **Frontend** — Svelte 5 with CodeMirror 6 editor
+- **Desktop shell** — Tauri 2 (native webview, ~10MB binary)
+- **Markdown** — Marked parser, Turndown for HTML→MD, KaTeX for math
+
+---
 
 ## Prerequisites
 
 ### All platforms
-- Rust (rustup)
+- Rust (via [rustup](https://rustup.rs))
 - Node.js + npm
 
 ### Linux (Arch)
@@ -49,10 +93,6 @@ sudo pacman -S webkit2gtk-4.1 libsoup3 gtk3 librsvg
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev librsvg2-dev
 ```
-
-### Android
-- Android SDK + NDK
-- Tauri 2 Android prerequisites
 
 ## Build & Run
 
@@ -70,29 +110,6 @@ cd ui && npm run tauri build
 cargo test -p grafium-core
 ```
 
-## Module Structure
+## License
 
-### Core Engine (`/core`)
-| Module | Purpose |
-|--------|---------|
-| `db/` | SQLite operations, schema, CRUD for all entities |
-| `models.rs` | Data structs: Page, Block, Task, Flashcard, etc. |
-| `parser/` | Markdown parser (Logseq-style) + link extraction |
-| `query/` | Query AST, parser, and SQL executor |
-| `error.rs` | Error types |
-
-### UI (`/ui/src`)
-| Module | Purpose |
-|--------|---------|
-| `components/` | Layout, Sidebar, BlockEditor, SearchModal |
-| `pages/` | JournalPage, PageView, FlashcardsPage, GraphPage, AllPages |
-| `store/` | Zustand global state |
-| `lib/api.ts` | Tauri command bindings (typed) |
-| `styles/` | CSS variables + component styles |
-
-## Targets
-
-- Linux (native WebKitGTK)
-- Windows (native WebView2)
-- Android (Tauri 2 mobile)
-- macOS / iOS (planned)
+MIT

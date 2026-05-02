@@ -458,7 +458,8 @@
   }
 
   function handleGraphChanged() {
-    // Reload after graph switch
+    // Reload after graph switch — bump request ID so JournalView's $effect re-fires
+    journalRestoreRequestId += 1;
     navigateToJournal();
   }
 
