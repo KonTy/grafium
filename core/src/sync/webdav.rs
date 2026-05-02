@@ -1,0 +1,280 @@
+use crate::error::Result;
+use super::backend::{FileMetadata, SyncBackend, compute_hash};
+
+/// WebDAV-based sync backend for Nextcloud, ownCloud, or any WebDAV server.
+pub struct WebDavBackend {
+    /// Base URL (e.g. "https://cloud.example.com/remote.php/dav/files/user/Notes")
+    base_url: String,
+    username: String,
+    password: String,
+    name: String,
+    client: reqwest::blocking::Client,
+}
+
+impl WebDavBackend {
+    pub fn new(base_url: String, username: String, password: String, name: String) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            username,
+            password,
+            name,
+            client,
+        }
+    }
+
+    fn file_url(&self, rel_path: &str) -> String {
+        format!("{}/{}", self.base_url, rel_path)
+    }
+
+    /// Parse a PROPFIND XML response to extract file metadata.
+    fn parse_propfind_response(&self, xml: &str) -> Result<Vec<FileMetadata>> {
+        let mut files = Vec::new();
+
+        // Simple XML parsing for WebDAV PROPFIND responses.
+        // Looks for <d:href>, <d:getcontentlength>, <d:getlastmodified>
+        for response_block in xml.split("<d:response>").skip(1) {
+            let href = extract_tag(response_block, "d:href")
+                .unwrap_or_default();
+
+            // Skip collection entries (directories)
+            if extract_tag(response_block, "d:collection").is_some() {
+                continue;
+            }
+            if href.ends_with('/') {
+                continue;
+            }
+
+            // Only process .md files
+            if !href.ends_with(".md") {
+                continue;
+            }
+
+            // Extract relative path from the href
+            let rel_path = self.href_to_rel_path(&href);
+            if rel_path.is_empty() {
+                continue;
+            }
+
+            // Only include files under pages/ or journals/
+            if !rel_path.starts_with("pages/") && !rel_path.starts_with("journals/") {
+                continue;
+            }
+
+            let size = extract_tag(response_block, "d:getcontentlength")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+
+            let modified_at = extract_tag(response_block, "d:getlastmodified")
+                .and_then(|s| parse_http_date(&s))
+                .unwrap_or(0);
+
+            files.push(FileMetadata {
+                rel_path,
+                size,
+                modified_at,
+                hash: None,
+            });
+        }
+
+        Ok(files)
+    }
+
+    fn href_to_rel_path(&self, href: &str) -> String {
+        // The href from WebDAV is usually a URL path like:
+        // /remote.php/dav/files/user/Notes/pages/foo.md
+        // We need to extract "pages/foo.md"
+        let decoded = urlencoding::decode(href).unwrap_or_default().to_string();
+
+        // Try to find pages/ or journals/ in the path
+        if let Some(idx) = decoded.find("pages/") {
+            return decoded[idx..].to_string();
+        }
+        if let Some(idx) = decoded.find("journals/") {
+            return decoded[idx..].to_string();
+        }
+        String::new()
+    }
+}
+
+impl SyncBackend for WebDavBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn is_available(&self) -> bool {
+        // Try a simple PROPFIND on the base URL to check connectivity
+        let result = self.client
+            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &self.base_url)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Depth", "0")
+            .send();
+
+        matches!(result, Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 207)
+    }
+
+    fn list_files(&self) -> Result<Vec<FileMetadata>> {
+        // PROPFIND with Depth: infinity to list all files
+        // Most servers limit this, so we do two requests: pages/ and journals/
+        let mut all_files = Vec::new();
+
+        for subdir in &["pages", "journals"] {
+            let url = format!("{}/{}", self.base_url, subdir);
+            let response = self.client
+                .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
+                .basic_auth(&self.username, Some(&self.password))
+                .header("Depth", "infinity")
+                .header("Content-Type", "application/xml")
+                .body(r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getcontentlength/>
+    <d:getlastmodified/>
+    <d:resourcetype/>
+  </d:prop>
+</d:propfind>"#)
+                .send()
+                .map_err(|e| crate::error::CoreError::Io(
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                ))?;
+
+            if response.status().as_u16() == 207 || response.status().is_success() {
+                let xml = response.text().map_err(|e| crate::error::CoreError::Io(
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                ))?;
+                let mut files = self.parse_propfind_response(&xml)?;
+                all_files.append(&mut files);
+            }
+            // If the directory doesn't exist yet (404), that's fine — skip it
+        }
+
+        Ok(all_files)
+    }
+
+    fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
+        let url = self.file_url(rel_path);
+        let response = self.client
+            .get(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| crate::error::CoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))?;
+
+        if !response.status().is_success() {
+            return Err(crate::error::CoreError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("WebDAV GET failed: {} for {}", response.status(), rel_path),
+                )
+            ));
+        }
+
+        response.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| crate::error::CoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))
+    }
+
+    fn write_file(&self, rel_path: &str, content: &[u8]) -> Result<()> {
+        // Ensure parent directories exist via MKCOL
+        let parts: Vec<&str> = rel_path.split('/').collect();
+        let mut current_path = String::new();
+        for part in &parts[..parts.len() - 1] {
+            if !current_path.is_empty() {
+                current_path.push('/');
+            }
+            current_path.push_str(part);
+            let dir_url = format!("{}/{}/", self.base_url, current_path);
+            // MKCOL — ignore errors (dir might already exist)
+            let _ = self.client
+                .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &dir_url)
+                .basic_auth(&self.username, Some(&self.password))
+                .send();
+        }
+
+        // PUT the file
+        let url = self.file_url(rel_path);
+        let response = self.client
+            .put(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Content-Type", "text/markdown")
+            .body(content.to_vec())
+            .send()
+            .map_err(|e| crate::error::CoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))?;
+
+        if !response.status().is_success() && response.status().as_u16() != 201 && response.status().as_u16() != 204 {
+            return Err(crate::error::CoreError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("WebDAV PUT failed: {} for {}", response.status(), rel_path),
+                )
+            ));
+        }
+        Ok(())
+    }
+
+    fn delete_file(&self, rel_path: &str) -> Result<()> {
+        let url = self.file_url(rel_path);
+        let response = self.client
+            .request(reqwest::Method::DELETE, &url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| crate::error::CoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))?;
+
+        // 204 No Content or 404 Not Found are both acceptable
+        if !response.status().is_success() && response.status().as_u16() != 404 {
+            return Err(crate::error::CoreError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("WebDAV DELETE failed: {} for {}", response.status(), rel_path),
+                )
+            ));
+        }
+        Ok(())
+    }
+
+    fn file_hash(&self, rel_path: &str) -> Result<String> {
+        let content = self.read_file(rel_path)?;
+        Ok(compute_hash(&content))
+    }
+}
+
+/// Extract text content between XML tags (simple, non-recursive).
+fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+
+    let start_idx = xml.find(&open)?;
+    // Find the end of the opening tag (handle attributes)
+    let content_start = xml[start_idx..].find('>')? + start_idx + 1;
+    let end_idx = xml[content_start..].find(&close)? + content_start;
+
+    Some(xml[content_start..end_idx].trim().to_string())
+}
+
+/// Parse HTTP date format (e.g. "Mon, 01 Jan 2024 12:00:00 GMT") to Unix timestamp.
+fn parse_http_date(date_str: &str) -> Option<i64> {
+    // Try RFC 2822 style parsing
+    chrono::DateTime::parse_from_rfc2822(date_str)
+        .ok()
+        .map(|dt| dt.timestamp())
+        .or_else(|| {
+            // Try the common WebDAV format: "Fri, 02 May 2025 10:30:00 GMT"
+            chrono::NaiveDateTime::parse_from_str(
+                date_str.trim_end_matches(" GMT"),
+                "%a, %d %b %Y %H:%M:%S"
+            )
+            .ok()
+            .map(|dt| dt.and_utc().timestamp())
+        })
+}

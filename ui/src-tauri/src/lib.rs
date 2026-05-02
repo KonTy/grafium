@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub struct AppState {
     pub graph: Arc<Mutex<Graph>>,
@@ -178,6 +178,104 @@ fn start_graph_watcher(
     Ok(GraphWatcherHandle { stop_tx, join_handle })
 }
 
+/// Background thread that periodically checks if sync targets become available.
+/// When a target that was unavailable becomes available, it emits a Tauri event
+/// and optionally triggers auto-sync.
+fn start_sync_monitor(
+    app_handle: tauri::AppHandle,
+    graph: Arc<Mutex<Graph>>,
+) {
+    use grafium_core::sync::{
+        SyncEngine,
+        filesystem::FilesystemBackend,
+        webdav::WebDavBackend,
+        state::{SyncConfigs, BackendConfig},
+    };
+
+    thread::spawn(move || {
+        let mut was_available: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let check_interval = Duration::from_secs(5);
+
+        loop {
+            thread::sleep(check_interval);
+
+            let root_dir = match graph.lock() {
+                Ok(g) => g.root_dir.clone(),
+                Err(_) => continue,
+            };
+
+            let config_path = root_dir.join(".logseq").join("sync-config.json");
+            let configs = SyncConfigs::load(&config_path);
+
+            for target in &configs.targets {
+                let backend: Box<dyn grafium_core::sync::SyncBackend> = match &target.config {
+                    BackendConfig::Filesystem { path } => {
+                        Box::new(FilesystemBackend::new(path.clone(), target.name.clone()))
+                    }
+                    BackendConfig::WebDav { url, username, password } => {
+                        Box::new(WebDavBackend::new(
+                            url.clone(), username.clone(), password.clone(), target.name.clone(),
+                        ))
+                    }
+                };
+
+                let now_available = backend.is_available();
+                let previously_available = was_available.get(&target.id).copied().unwrap_or(false);
+
+                if now_available && !previously_available {
+                    // Target just became available!
+                    eprintln!("[sync-monitor] Target '{}' is now available", target.name);
+
+                    // Emit event to frontend
+                    let _ = app_handle.emit("sync-target-available", serde_json::json!({
+                        "target_id": target.id,
+                        "target_name": target.name,
+                    }));
+
+                    // Auto-sync if enabled
+                    if target.auto_sync {
+                        let engine = SyncEngine::new(root_dir.clone());
+                        match engine.sync(backend.as_ref()) {
+                            Ok(result) => {
+                                eprintln!("[sync-monitor] Auto-sync '{}': {}", target.name, result.summary());
+
+                                // Reindex if we pulled files
+                                if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty() {
+                                    if let Ok(g) = graph.lock() {
+                                        let _ = g.reindex_all();
+                                    }
+                                    // Notify frontend to refresh
+                                    let _ = app_handle.emit("sync-completed", serde_json::json!({
+                                        "target_name": target.name,
+                                        "pushed": result.pushed.len(),
+                                        "pulled": result.pulled.len(),
+                                        "conflicts": result.conflicts.len(),
+                                    }));
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[sync-monitor] Auto-sync '{}' failed: {}", target.name, e);
+                                let _ = app_handle.emit("sync-error", serde_json::json!({
+                                    "target_name": target.name,
+                                    "error": e.to_string(),
+                                }));
+                            }
+                        }
+                    }
+                } else if !now_available && previously_available {
+                    // Target disconnected
+                    let _ = app_handle.emit("sync-target-disconnected", serde_json::json!({
+                        "target_id": target.id,
+                        "target_name": target.name,
+                    }));
+                }
+
+                was_available.insert(target.id.clone(), now_available);
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -224,6 +322,12 @@ pub fn run() {
                 watcher: Mutex::new(None),
             };
             state.restart_graph_watcher().expect("Failed to start graph watcher");
+
+            // Start sync monitor (checks for USB/mount availability)
+            let sync_graph = state.graph.clone();
+            let sync_app_handle = app.handle().clone();
+            start_sync_monitor(sync_app_handle, sync_graph);
+
             app.manage(state);
 
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
@@ -352,6 +456,13 @@ pub fn run() {
             commands::graph::reindex_current,
             commands::graph::remove_graph,
             commands::graph::get_app_version,
+            commands::sync::sync_list_targets,
+            commands::sync::sync_add_filesystem_target,
+            commands::sync::sync_add_webdav_target,
+            commands::sync::sync_remove_target,
+            commands::sync::sync_check_status,
+            commands::sync::sync_run,
+            commands::sync::sync_run_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

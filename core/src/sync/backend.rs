@@ -1,0 +1,57 @@
+use std::path::Path;
+use crate::error::Result;
+
+/// Metadata about a file on a sync backend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileMetadata {
+    /// Relative path within the graph (e.g. "pages/foo.md")
+    pub rel_path: String,
+    /// Size in bytes
+    pub size: u64,
+    /// Last modified timestamp (Unix epoch seconds)
+    pub modified_at: i64,
+    /// Content hash (SHA-256 hex). None if not yet computed.
+    pub hash: Option<String>,
+}
+
+/// Trait for sync backends. Each backend represents a remote storage location
+/// (USB filesystem, WebDAV server, network share, etc.)
+pub trait SyncBackend: Send + Sync {
+    /// Human-readable name of the backend (e.g. "USB: /media/usb/notes")
+    fn name(&self) -> &str;
+
+    /// Check if the remote is currently reachable/mounted.
+    fn is_available(&self) -> bool;
+
+    /// List all .md files on the remote with their metadata.
+    fn list_files(&self) -> Result<Vec<FileMetadata>>;
+
+    /// Read a file's content by relative path.
+    fn read_file(&self, rel_path: &str) -> Result<Vec<u8>>;
+
+    /// Write a file to the remote. Creates parent directories as needed.
+    fn write_file(&self, rel_path: &str, content: &[u8]) -> Result<()>;
+
+    /// Delete a file on the remote.
+    fn delete_file(&self, rel_path: &str) -> Result<()>;
+
+    /// Compute content hash for a remote file.
+    fn file_hash(&self, rel_path: &str) -> Result<String> {
+        let content = self.read_file(rel_path)?;
+        Ok(compute_hash(&content))
+    }
+}
+
+/// Compute SHA-256 hash of content, returned as hex string.
+pub fn compute_hash(data: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Compute hash for a local file on disk.
+pub fn hash_file(path: &Path) -> Result<String> {
+    let data = std::fs::read(path)?;
+    Ok(compute_hash(&data))
+}
