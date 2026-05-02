@@ -13,6 +13,38 @@ use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use crate::error::Result;
 
+struct FunctionCustomizer;
+
+impl std::fmt::Debug for FunctionCustomizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FunctionCustomizer")
+    }
+}
+
+impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for FunctionCustomizer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
+        use chrono::Utc;
+
+        conn.create_scalar_function("days_ago", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+            let days: i64 = ctx.get(0)?;
+            let ms = Utc::now().timestamp_millis() - (days * 86_400_000);
+            Ok(ms)
+        })?;
+
+        conn.create_scalar_function("hours_ago", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+            let hours: i64 = ctx.get(0)?;
+            let ms = Utc::now().timestamp_millis() - (hours * 3_600_000);
+            Ok(ms)
+        })?;
+
+        conn.create_scalar_function("now_ms", 0, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |_ctx| {
+            Ok(Utc::now().timestamp_millis())
+        })?;
+
+        Ok(())
+    }
+}
+
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -22,6 +54,7 @@ impl Database {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
             .max_size(8)
+            .connection_customizer(Box::new(FunctionCustomizer))
             .build(manager)?;
 
         let db = Self { pool };
@@ -33,6 +66,7 @@ impl Database {
         let manager = SqliteConnectionManager::memory();
         let pool = Pool::builder()
             .max_size(1)
+            .connection_customizer(Box::new(FunctionCustomizer))
             .build(manager)?;
 
         let db = Self { pool };
