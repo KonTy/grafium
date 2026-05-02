@@ -493,7 +493,7 @@
   });
 
   function handleClick() {
-    if (!isEditing) {
+    if (!isEditing && !queryExpression) {
       startEditing();
     }
   }
@@ -510,6 +510,59 @@
       }
     } catch (e) {
       console.error("Failed to cycle task state:", e);
+    }
+  }
+
+  async function handleQueryResultClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+
+    // Handle task-marker clicks inside query results
+    if (target.classList.contains("task-marker")) {
+      e.stopPropagation();
+      e.preventDefault();
+      // Find the row to get the block_id (look for an "id" column)
+      const row = target.closest("tr");
+      if (!row) return;
+      const table = row.closest("table");
+      if (!table) return;
+      const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent?.trim().toLowerCase());
+      const idIdx = headers.indexOf("id");
+      const blockIdIdx = headers.indexOf("block_id");
+      const colIdx = idIdx >= 0 ? idIdx : blockIdIdx;
+      if (colIdx < 0) return;
+      const cells = row.querySelectorAll("td");
+      const blockId = cells[colIdx]?.textContent?.trim();
+      if (!blockId) return;
+      try {
+        const newState = await cycleTaskState(blockId);
+        // Re-run the query to refresh results
+        if (queryExpression) {
+          await runQueryBlock(queryExpression);
+        }
+      } catch (err) {
+        console.error("Failed to cycle task in query result:", err);
+      }
+      return;
+    }
+
+    // Handle page-link clicks inside query results
+    if (target.classList.contains("page-link")) {
+      e.stopPropagation();
+      const pageName = target.dataset.page;
+      if (pageName) {
+        window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName } }));
+      }
+      return;
+    }
+
+    // Handle tag clicks
+    if (target.classList.contains("tag")) {
+      e.stopPropagation();
+      const tag = target.dataset.tag;
+      if (tag) {
+        window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: tag } }));
+      }
+      return;
     }
   }
 
@@ -586,8 +639,8 @@
       <!-- Query block rendered view -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="query-block" ondblclick={startEditing}>
-        <div class="query-header">
+      <div class="query-block" onclick={(e) => e.stopPropagation()}>
+        <div class="query-header" ondblclick={startEditing}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <span class="query-expr">{queryExpression}</span>
           <button class="query-refresh" onclick={(e) => { e.stopPropagation(); runQueryBlock(queryExpression!); }} title="Re-run query">↻</button>
@@ -599,7 +652,9 @@
         {:else if queryRows !== null && queryRows.length === 0}
           <div class="query-empty">No results.</div>
         {:else if queryRows !== null}
-          <div class="query-table-wrap">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="query-table-wrap" onclick={handleQueryResultClick}>
             <table class="query-table">
               <thead>
                 <tr>
@@ -998,6 +1053,7 @@
     border-bottom: 1px solid var(--border);
     color: var(--text-muted);
     font-size: 12px;
+    cursor: text;
   }
 
   .query-expr {
