@@ -67,6 +67,16 @@ fn parse_sexp(input: &str) -> Result<QueryNode> {
         return Ok(QueryNode::Deadline(date_filter));
     }
 
+    if trimmed.starts_with("created-since ") {
+        let days: u32 = trimmed[14..].trim().parse().unwrap_or(7);
+        return Ok(QueryNode::CreatedSince(days));
+    }
+
+    if trimmed.starts_with("updated-since ") {
+        let days: u32 = trimmed[14..].trim().parse().unwrap_or(7);
+        return Ok(QueryNode::UpdatedSince(days));
+    }
+
     Err(CoreError::Parse(format!("Unknown query expression: {}", trimmed)))
 }
 

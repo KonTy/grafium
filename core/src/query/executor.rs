@@ -135,6 +135,18 @@ fn collect_conditions(query: &QueryNode, conditions: &mut Vec<String>, params: &
                 }
             }
         }
+        QueryNode::CreatedSince(days) => {
+            let cutoff = Utc::now().timestamp_millis() - (*days as i64 * 86_400_000);
+            let idx = params.len() + 1;
+            conditions.push(format!("b.created_at >= ?{}", idx));
+            params.push(cutoff.to_string());
+        }
+        QueryNode::UpdatedSince(days) => {
+            let cutoff = Utc::now().timestamp_millis() - (*days as i64 * 86_400_000);
+            let idx = params.len() + 1;
+            conditions.push(format!("b.updated_at >= ?{}", idx));
+            params.push(cutoff.to_string());
+        }
     }
 }
 

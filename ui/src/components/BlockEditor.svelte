@@ -3,9 +3,10 @@
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
   import { EditorState, EditorSelection } from "@codemirror/state";
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
+  import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery, getPage } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
@@ -59,6 +60,111 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content));
+
+  // Query block support
+  const QUERY_RE = /^\{\{query\s+([\s\S]+?)\}\}\s*$/;
+  let queryExpression = $derived((() => {
+    const m = block.content.trim().match(QUERY_RE);
+    return m ? m[1].trim() : null;
+  })());
+  let queryResults: Block[] | null = $state(null);
+  let queryResultPages = $state<Record<string, string>>({});
+  let queryError: string | null = $state(null);
+  let queryLoading = $state(false);
+
+  async function runQueryBlock(expr: string) {
+    queryLoading = true;
+    queryError = null;
+    try {
+      const results = await runQuery(expr);
+      queryResults = results;
+      // Resolve page titles
+      const pageIds = [...new Set(results.map((b) => b.page_id))];
+      const entries = await Promise.all(
+        pageIds.map(async (id) => {
+          try {
+            const p = await getPage({ id });
+            return [id, p.title] as [string, string];
+          } catch {
+            return [id, id] as [string, string];
+          }
+        })
+      );
+      queryResultPages = Object.fromEntries(entries);
+    } catch (e: unknown) {
+      queryError = e instanceof Error ? e.message : String(e);
+      queryResults = [];
+    } finally {
+      queryLoading = false;
+    }
+  }
+
+  // Run query when not editing and it's a query block
+  $effect(() => {
+    if (queryExpression && !isEditing) {
+      runQueryBlock(queryExpression);
+    }
+  });
+
+  // Slash command completion source
+  const SLASH_COMMANDS = [
+    {
+      label: "/query",
+      detail: "Run a query and display results",
+      apply: "{{query }}",
+      cursorOffset: 9, // position cursor before `}}`
+    },
+    {
+      label: "/TODO",
+      detail: "Insert a TODO task marker",
+      apply: "TODO ",
+    },
+    {
+      label: "/DONE",
+      detail: "Insert a DONE task marker",
+      apply: "DONE ",
+    },
+    {
+      label: "/DOING",
+      detail: "Insert a DOING task marker",
+      apply: "DOING ",
+    },
+    {
+      label: "/NOW",
+      detail: "Insert a NOW task marker",
+      apply: "NOW ",
+    },
+    {
+      label: "/LATER",
+      detail: "Insert a LATER task marker",
+      apply: "LATER ",
+    },
+  ];
+
+  function slashCompletionSource(context: CompletionContext): CompletionResult | null {
+    // Match a `/` optionally followed by word chars at the current position
+    const match = context.matchBefore(/\/\w*/);
+    if (!match) return null;
+    // Only trigger if the `/` is at the start of the doc or preceded by whitespace
+    const textBefore = context.state.doc.sliceString(0, match.from);
+    if (match.from > 0 && !/\s$/.test(textBefore) && textBefore !== "") return null;
+
+    return {
+      from: match.from,
+      options: SLASH_COMMANDS.map((cmd) => ({
+        label: cmd.label,
+        detail: cmd.detail,
+        apply: (view, _completion, from, to) => {
+          view.dispatch({
+            changes: { from, to, insert: cmd.apply },
+            selection: EditorSelection.cursor(
+              from + ("cursorOffset" in cmd ? (cmd as { cursorOffset: number }).cursorOffset : cmd.apply.length)
+            ),
+          });
+        },
+      })),
+    };
+  }
 
   // Detect if the block is entirely a code fence
   function detectCodeBlock(content: string): { lang: string; code: string } | null {
@@ -129,6 +235,11 @@
         extensions: [
           markdown(),
           history(),
+          autocompletion({
+            override: [slashCompletionSource],
+            activateOnTyping: true,
+            closeOnBlur: true,
+          }),
           keymap.of([
             {
               key: "Mod-z",
@@ -435,7 +546,7 @@
   class:code-block={isCodeBlock !== null}
   style="padding-left: {depth * 24}px"
 >
-  {#if !block.content.trim().startsWith("```") && block.content.trim() !== ""}
+  {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== ""}
     <div class="bullet-container" class:has-children={hasChildren} onclick={(e) => {
       e.stopPropagation();
       if (hasChildren) {
@@ -458,6 +569,39 @@
   <div class="block-content" onclick={handleClick}>
     {#if isEditing}
       <div class="editor-wrapper" bind:this={editorContainer}></div>
+    {:else if queryExpression !== null}
+      <!-- Query block rendered view -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="query-block" ondblclick={startEditing}>
+        <div class="query-header">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <span class="query-expr">{queryExpression}</span>
+          <button class="query-refresh" onclick={(e) => { e.stopPropagation(); runQueryBlock(queryExpression!); }} title="Re-run query">↻</button>
+        </div>
+        {#if queryLoading}
+          <div class="query-loading">Running…</div>
+        {:else if queryError}
+          <div class="query-error">Error: {queryError}</div>
+        {:else if queryResults !== null && queryResults.length === 0}
+          <div class="query-empty">No results.</div>
+        {:else if queryResults !== null}
+          <div class="query-results">
+            {#each queryResults as result}
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="query-result-item" onclick={(e) => {
+                e.stopPropagation();
+                const title = queryResultPages[result.page_id] || result.page_id;
+                window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: title, targetBlockId: result.id } }));
+              }}>
+                <span class="query-result-page">{queryResultPages[result.page_id] || "…"}</span>
+                <span class="query-result-content">{@html renderBlock(result.content)}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     {:else}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -801,5 +945,131 @@
   .rendered-content :global(img) {
     max-width: 100%;
     border-radius: 6px;
+  }
+
+  /* Query block styles */
+  .query-block {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 13px;
+    background: var(--bg-secondary, var(--bg-sidebar));
+  }
+
+  .query-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: var(--bg-input, rgba(0,0,0,0.1));
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .query-expr {
+    flex: 1;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .query-refresh {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+    border-radius: 3px;
+    line-height: 1;
+  }
+
+  .query-refresh:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .query-loading,
+  .query-empty,
+  .query-error {
+    padding: 10px 12px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .query-error {
+    color: #e57373;
+  }
+
+  .query-results {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .query-result-item {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 12px;
+    border-top: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .query-result-item:first-child {
+    border-top: none;
+  }
+
+  .query-result-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .query-result-page {
+    font-size: 11px;
+    color: var(--accent);
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 60px;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .query-result-content {
+    font-size: 13px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* CodeMirror autocomplete dropdown theme override */
+  :global(.cm-tooltip-autocomplete) {
+    background: var(--bg-sidebar) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25) !important;
+  }
+
+  :global(.cm-tooltip-autocomplete ul li) {
+    color: var(--text-secondary) !important;
+    font-size: 13px !important;
+    padding: 5px 10px !important;
+  }
+
+  :global(.cm-tooltip-autocomplete ul li[aria-selected]) {
+    background: var(--bg-active) !important;
+    color: var(--text-primary) !important;
+  }
+
+  :global(.cm-completionDetail) {
+    color: var(--text-muted) !important;
+    font-size: 11px !important;
   }
 </style>

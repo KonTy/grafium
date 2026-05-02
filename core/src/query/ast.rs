@@ -8,6 +8,8 @@ pub enum QueryNode {
     TaskState(String),
     Scheduled(DateFilter),
     Deadline(DateFilter),
+    CreatedSince(u32),
+    UpdatedSince(u32),
 }
 
 #[derive(Debug, Clone)]
