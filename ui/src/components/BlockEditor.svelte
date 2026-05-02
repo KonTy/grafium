@@ -72,6 +72,7 @@
   let queryColumns: string[] = $state([]);
   let queryError: string | null = $state(null);
   let queryLoading = $state(false);
+  let queryBlockIdCol = $state(-1);
 
   async function runQueryBlock(expr: string) {
     queryLoading = true;
@@ -80,10 +81,16 @@
       const rows = await runQuery(expr);
       queryRows = rows;
       queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
+      // Find the block id column (id, block_id, b.id)
+      const lowerCols = queryColumns.map((c) => c.toLowerCase());
+      queryBlockIdCol = lowerCols.indexOf("id");
+      if (queryBlockIdCol < 0) queryBlockIdCol = lowerCols.indexOf("block_id");
+      if (queryBlockIdCol < 0) queryBlockIdCol = lowerCols.indexOf("b.id");
     } catch (e: unknown) {
       queryError = e instanceof Error ? e.message : String(e);
       queryRows = [];
       queryColumns = [];
+      queryBlockIdCol = -1;
     } finally {
       queryLoading = false;
     }
@@ -520,21 +527,18 @@
     if (target.classList.contains("task-marker")) {
       e.stopPropagation();
       e.preventDefault();
-      // Find the row to get the block_id (look for an "id" column)
+      if (queryBlockIdCol < 0) return;
+      // Find the row index
       const row = target.closest("tr");
       if (!row) return;
-      const table = row.closest("table");
-      if (!table) return;
-      const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent?.trim().toLowerCase());
-      const idIdx = headers.indexOf("id");
-      const blockIdIdx = headers.indexOf("block_id");
-      const colIdx = idIdx >= 0 ? idIdx : blockIdIdx;
-      if (colIdx < 0) return;
-      const cells = row.querySelectorAll("td");
-      const blockId = cells[colIdx]?.textContent?.trim();
+      const tbody = row.closest("tbody");
+      if (!tbody) return;
+      const rowIdx = Array.from(tbody.children).indexOf(row);
+      if (rowIdx < 0 || !queryRows || rowIdx >= queryRows.length) return;
+      const blockId = String(queryRows[rowIdx][queryBlockIdCol][1] ?? "");
       if (!blockId) return;
       try {
-        const newState = await cycleTaskState(blockId);
+        await cycleTaskState(blockId);
         // Re-run the query to refresh results
         if (queryExpression) {
           await runQueryBlock(queryExpression);
@@ -670,6 +674,8 @@
                       <td>
                         {#if col === "content" && val}
                           <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
+                        {:else if col === "state" && val}
+                          <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
                         {:else}
                           {val === null ? "" : String(val)}
                         {/if}
