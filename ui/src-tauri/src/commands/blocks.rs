@@ -51,6 +51,12 @@ pub fn reorder_blocks(state: State<AppState>, page_id: String, block_ids: Vec<St
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn get_block_page_title(state: State<AppState>, block_id: String) -> Result<String, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.get_block_page_title(&block_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn search_fts(state: State<AppState>, query: String, limit: Option<i64>) -> Result<Vec<Block>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.db.search_fts(&query, limit.unwrap_or(50)).map_err(|e| e.to_string())

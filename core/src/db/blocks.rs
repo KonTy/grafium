@@ -128,6 +128,16 @@ impl Database {
         Ok(block)
     }
 
+    pub fn get_block_page_title(&self, block_id: &str) -> Result<String> {
+        let conn = self.conn()?;
+        let title: String = conn.query_row(
+            "SELECT p.title FROM blocks b JOIN pages p ON p.id = b.page_id WHERE b.id = ?1",
+            params![block_id],
+            |row| row.get(0),
+        )?;
+        Ok(title)
+    }
+
     pub fn list_blocks_for_page(&self, page_id: &str) -> Result<Vec<Block>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

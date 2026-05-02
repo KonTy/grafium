@@ -6,7 +6,7 @@
   import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
@@ -579,6 +579,27 @@
         window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: tag } }));
       }
       return;
+    }
+
+    // Handle normal text clicks — navigate to the block's page
+    if (queryBlockIdCol >= 0) {
+      const row = target.closest("tr");
+      if (!row) return;
+      const tbody = row.closest("tbody");
+      if (!tbody) return;
+      const rowIdx = Array.from(tbody.children).indexOf(row);
+      if (rowIdx < 0 || !queryRows || rowIdx >= queryRows.length) return;
+      const blockId = String(queryRows[rowIdx][queryBlockIdCol][1] ?? "");
+      if (!blockId) return;
+      e.stopPropagation();
+      try {
+        const pageTitle = await getBlockPageTitle(blockId);
+        window.dispatchEvent(new CustomEvent("navigate-page", {
+          detail: { pageName: pageTitle, targetBlockId: blockId }
+        }));
+      } catch (err) {
+        console.error("Failed to navigate to block:", err);
+      }
     }
   }
 
@@ -1156,6 +1177,7 @@
 
   .query-table tbody tr:hover {
     background: var(--bg-hover);
+    cursor: pointer;
   }
 
   /* CodeMirror autocomplete dropdown theme override */

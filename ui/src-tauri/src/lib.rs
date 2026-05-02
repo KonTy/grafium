@@ -330,6 +330,7 @@ pub fn run() {
             commands::blocks::delete_block,
             commands::blocks::move_block,
             commands::blocks::reorder_blocks,
+            commands::blocks::get_block_page_title,
             commands::blocks::search_fts,
             commands::links::get_backlinks,
             commands::tasks::list_tasks,

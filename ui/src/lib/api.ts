@@ -119,6 +119,10 @@ export function cycleTaskState(blockId: string): Promise<string> {
   return invoke("cycle_task_state", { blockId });
 }
 
+export function getBlockPageTitle(blockId: string): Promise<string> {
+  return invoke("get_block_page_title", { blockId });
+}
+
 // Flashcards
 export function listFlashcardsDue(): Promise<unknown[]> {
   return invoke("list_flashcards_due", {});
