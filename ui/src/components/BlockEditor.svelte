@@ -74,6 +74,8 @@
   let queryLoading = $state(false);
   let queryBlockIdCol = $state(-1);
 
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
   async function runQueryBlock(expr: string) {
     queryLoading = true;
     queryError = null;
@@ -81,11 +83,21 @@
       const rows = await runQuery(expr);
       queryRows = rows;
       queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
-      // Find the block id column (id, block_id, b.id)
+      // Find the block id column (id, block_id, _block_id)
       const lowerCols = queryColumns.map((c) => c.toLowerCase());
-      queryBlockIdCol = lowerCols.indexOf("id");
+      queryBlockIdCol = lowerCols.indexOf("_block_id");
+      if (queryBlockIdCol < 0) queryBlockIdCol = lowerCols.indexOf("id");
       if (queryBlockIdCol < 0) queryBlockIdCol = lowerCols.indexOf("block_id");
-      if (queryBlockIdCol < 0) queryBlockIdCol = lowerCols.indexOf("b.id");
+      // Fallback: find first column where all values look like UUIDs
+      if (queryBlockIdCol < 0 && rows.length > 0) {
+        for (let i = 0; i < queryColumns.length; i++) {
+          const allUuid = rows.every((row) => {
+            const val = row[i]?.[1];
+            return typeof val === "string" && UUID_RE.test(val);
+          });
+          if (allUuid) { queryBlockIdCol = i; break; }
+        }
+      }
     } catch (e: unknown) {
       queryError = e instanceof Error ? e.message : String(e);
       queryRows = [];
@@ -662,24 +674,28 @@
             <table class="query-table">
               <thead>
                 <tr>
-                  {#each queryColumns as col}
-                    <th>{col}</th>
+                  {#each queryColumns as col, i}
+                    {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
+                      <th>{col}</th>
+                    {/if}
                   {/each}
                 </tr>
               </thead>
               <tbody>
                 {#each queryRows as row}
                   <tr>
-                    {#each row as [col, val]}
-                      <td>
-                        {#if col === "content" && val}
-                          <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
-                        {:else if col === "state" && val}
-                          <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
-                        {:else}
-                          {val === null ? "" : String(val)}
-                        {/if}
-                      </td>
+                    {#each row as [col, val], i}
+                      {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
+                        <td>
+                          {#if col === "content" && val}
+                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
+                          {:else if col === "state" && val}
+                            <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
+                          {:else}
+                            {val === null ? "" : String(val)}
+                          {/if}
+                        </td>
+                      {/if}
                     {/each}
                   </tr>
                 {/each}
