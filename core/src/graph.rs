@@ -289,6 +289,94 @@ impl Graph {
         Ok(())
     }
 
+    /// Cycle a task's state (TODO→DOING→DONE→TODO), updating the block content,
+    /// the tasks table, the .md file on disk, and logging the event.
+    /// Returns the new state string.
+    pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
+        // 1. Cycle in DB (tasks table + task_events log)
+        let new_state = self.db.cycle_task_state(block_id)?;
+
+        // 2. Update block content to reflect the new marker
+        let block = self.db.get_block_by_id(block_id)?;
+        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
+        let new_content = task_re.replace(&block.content, &format!("{} ", new_state)).to_string();
+
+        if new_content != block.content {
+            let page = self.db.get_page_by_id(&block.page_id)?;
+            self.db.update_block(block_id, &new_content, None)?;
+            self.write_page_to_disk(&page)?;
+        }
+
+        Ok(new_state)
+    }
+
+    /// Set a task to a specific state, updating block content and .md file.
+    pub fn update_task_state(&self, block_id: &str, state: &crate::models::TaskState) -> Result<()> {
+        // 1. Update tasks table + log event
+        self.db.update_task_state(block_id, state)?;
+
+        // 2. Update block content
+        let block = self.db.get_block_by_id(block_id)?;
+        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
+        let new_content = task_re.replace(&block.content, &format!("{} ", state.as_str())).to_string();
+
+        if new_content != block.content {
+            let page = self.db.get_page_by_id(&block.page_id)?;
+            self.db.update_block(block_id, &new_content, None)?;
+            self.write_page_to_disk(&page)?;
+        }
+
+        Ok(())
+    }
+
+    /// Set or remove SCHEDULED/DEADLINE on a task block.
+    /// `kind` is "scheduled" or "deadline".
+    /// `date` is Some("2024-01-15") or None to clear.
+    /// Updates block content, tasks table, and writes .md file.
+    pub fn set_task_date(&self, block_id: &str, kind: &str, date: Option<&str>) -> Result<String> {
+        let block = self.db.get_block_by_id(block_id)?;
+        let page = self.db.get_page_by_id(&block.page_id)?;
+
+        // Build the timestamp line (Logseq org-mode format)
+        let keyword = if kind == "deadline" { "DEADLINE" } else { "SCHEDULED" };
+        let re = regex::Regex::new(&format!(r"(?m)^{}: <[^>]+>\n?", keyword)).unwrap();
+
+        // Remove existing line for this keyword
+        let content_without = re.replace(&block.content, "").to_string();
+        let content_without = content_without.trim_end().to_string();
+
+        // Append new line if date is provided
+        let new_content = if let Some(d) = date {
+            // Compute day abbreviation
+            let day_abbr = compute_day_abbr(d);
+            format!("{}\n{}: <{} {}>", content_without, keyword, d, day_abbr)
+        } else {
+            content_without
+        };
+
+        // Update block content in DB
+        self.db.update_block(block_id, &new_content, None)?;
+
+        // Update tasks table with new dates
+        let sched_re = regex::Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap();
+        let dead_re = regex::Regex::new(r"DEADLINE:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap();
+        let scheduled = sched_re.captures(&new_content).map(|c| c[1].to_string());
+        let deadline = dead_re.captures(&new_content).map(|c| c[1].to_string());
+
+        // Get or derive task state from content
+        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
+        let state = task_re.captures(&new_content)
+            .and_then(|c| crate::models::TaskState::from_str(&c[1]))
+            .unwrap_or(crate::models::TaskState::Todo);
+
+        self.db.upsert_task(block_id, &state, scheduled.as_deref(), deadline.as_deref())?;
+
+        // Write to disk
+        self.write_page_to_disk(&page)?;
+
+        Ok(new_content)
+    }
+
     /// Delete a block: removes from DB, then writes .md file.
     pub fn delete_block(&self, block_id: &str) -> Result<()> {
         let block = self.db.get_block_by_id(block_id)?;
@@ -367,5 +455,24 @@ impl Graph {
         fs::write(&file_path, content)?;
 
         Ok(())
+    }
+}
+
+/// Compute the 3-letter day abbreviation from an ISO date string (YYYY-MM-DD).
+fn compute_day_abbr(date: &str) -> &'static str {
+    use chrono::NaiveDate;
+    if let Ok(d) = NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        match d.format("%a").to_string().as_str() {
+            "Mon" => "Mon",
+            "Tue" => "Tue",
+            "Wed" => "Wed",
+            "Thu" => "Thu",
+            "Fri" => "Fri",
+            "Sat" => "Sat",
+            "Sun" => "Sun",
+            _ => "???",
+        }
+    } else {
+        "???"
     }
 }

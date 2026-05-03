@@ -134,4 +134,56 @@ impl Database {
         conn.execute("DELETE FROM tasks WHERE block_id = ?1", params![block_id])?;
         Ok(())
     }
+
+    /// Get daily completion counts for the heatmap.
+    /// Uses task_events if available, falls back to tasks table updated_at.
+    pub fn get_completion_counts(&self, days: i64) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
+        let mut stmt = conn.prepare(
+            "SELECT day, SUM(cnt) as total FROM (
+                SELECT date(timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+                FROM task_events
+                WHERE to_state = 'DONE' AND timestamp >= ?1
+                GROUP BY day
+              UNION ALL
+                SELECT date(t.updated_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+                FROM tasks t
+                WHERE t.state = 'DONE' AND t.updated_at >= ?1
+                  AND NOT EXISTS (SELECT 1 FROM task_events te WHERE te.block_id = t.block_id AND te.to_state = 'DONE')
+                GROUP BY day
+             ) GROUP BY day ORDER BY day ASC"
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get completed tasks with their completion timestamp, block content, and page title.
+    pub fn get_completed_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String)>> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
+        let mut stmt = conn.prepare(
+            "SELECT ts, content, title, block_id FROM (
+                SELECT te.timestamp as ts, COALESCE(b.content, '') as content,
+                       COALESCE(p.title, '') as title, te.block_id as block_id
+                FROM task_events te
+                LEFT JOIN blocks b ON b.id = te.block_id
+                LEFT JOIN pages p ON p.id = b.page_id
+                WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
+              UNION ALL
+                SELECT t.updated_at as ts, b.content, p.title, t.block_id
+                FROM tasks t
+                JOIN blocks b ON b.id = t.block_id
+                JOIN pages p ON p.id = b.page_id
+                WHERE t.state = 'DONE' AND t.updated_at >= ?1
+                  AND NOT EXISTS (SELECT 1 FROM task_events te WHERE te.block_id = t.block_id AND te.to_state = 'DONE')
+             ) ORDER BY ts DESC"
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }

@@ -7,3 +7,4 @@ pub mod favorites;
 pub mod query;
 pub mod graph;
 pub mod sync;
+pub mod theme;

@@ -119,6 +119,25 @@ export function cycleTaskState(blockId: string): Promise<string> {
   return invoke("cycle_task_state", { blockId });
 }
 
+export function setTaskDate(blockId: string, kind: "scheduled" | "deadline", date: string | null): Promise<string> {
+  return invoke("set_task_date", { blockId, kind, date });
+}
+
+export interface CompletedTask {
+  timestamp: number;
+  content: string;
+  page_title: string;
+  block_id: string;
+}
+
+export function getCompletionCounts(days?: number): Promise<[string, number][]> {
+  return invoke("get_completion_counts", { days });
+}
+
+export function getCompletedTasks(days?: number): Promise<CompletedTask[]> {
+  return invoke("get_completed_tasks", { days });
+}
+
 export function getBlockPageTitle(blockId: string): Promise<string> {
   return invoke("get_block_page_title", { blockId });
 }
@@ -195,4 +214,17 @@ export function removeGraph(path: string): Promise<void> {
 
 export function getAppVersion(): Promise<string> {
   return invoke("get_app_version", {});
+}
+
+// Theme
+export function getSmplosTheme(): Promise<string | null> {
+  return invoke("get_smplos_theme", {});
+}
+
+export function getAppTheme(): Promise<string> {
+  return invoke("get_app_theme", {});
+}
+
+export function setAppTheme(themeId: string): Promise<void> {
+  return invoke("set_app_theme", { themeId });
 }

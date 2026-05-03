@@ -4,12 +4,16 @@
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
   import AllPages from "./components/AllPages.svelte";
+  import Statistics from "./components/Statistics.svelte";
+  import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
-  import { getPage, createPage, recordPageOpen } from "./lib/api";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
+  import { applyTheme, getThemeById } from "./lib/themes";
+  import { listen } from "@tauri-apps/api/event";
   import type { Page } from "./lib/api";
 
-  type View = "page" | "journal" | "all-pages" | "flashcards";
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "settings";
 
   let currentView: View = $state("page");
   let currentPage: Page | null = $state(null);
@@ -62,6 +66,12 @@
     }
     if (currentView === "flashcards") {
       return { kind: "flashcards", scrollTop: currentScrollTop() };
+    }
+    if (currentView === "statistics") {
+      return { kind: "statistics", scrollTop: currentScrollTop() };
+    }
+    if (currentView === "settings") {
+      return { kind: "settings", scrollTop: currentScrollTop() };
     }
     return null;
   }
@@ -181,6 +191,26 @@
       return;
     }
 
+    if (entry.kind === "statistics") {
+      currentView = "statistics";
+      currentPage = null;
+      loading = false;
+      error = null;
+      await tick();
+      restoreHistoryState(entry);
+      return;
+    }
+
+    if (entry.kind === "settings") {
+      currentView = "settings";
+      currentPage = null;
+      loading = false;
+      error = null;
+      await tick();
+      restoreHistoryState(entry);
+      return;
+    }
+
     if (entry.title) {
       await navigateToPage(entry.title, false, true, entry);
     }
@@ -249,7 +279,7 @@
       window.dispatchEvent(new CustomEvent("toggle-help"));
     },
     toggleSettings: () => {
-      window.dispatchEvent(new CustomEvent("toggle-settings"));
+      navigateToPage("__settings__");
     },
     toggleWideMode: () => { wideMode = !wideMode; },
     toggleZenMode: () => { zenMode = !zenMode; },
@@ -331,8 +361,37 @@
     if (!hasInitialized) {
       hasInitialized = true;
       navigateToJournal();
+      // Initialize theme
+      initTheme();
     }
   });
+
+  async function initTheme() {
+    // Register listener first — must always succeed regardless of saved theme state
+    listen<{ theme: string }>("smplos-theme-changed", (event) => {
+      const t = getThemeById(event.payload.theme);
+      if (t) {
+        applyTheme(t.colors);
+      }
+    });
+
+    // Apply saved/smplos theme on startup
+    try {
+      const [appTheme, smplosTheme] = await Promise.all([getAppTheme(), getSmplosTheme()]);
+      const themeId = appTheme === "auto" ? (smplosTheme ?? "catppuccin") : appTheme;
+      const theme = getThemeById(themeId);
+      if (theme) {
+        applyTheme(theme.colors);
+      }
+    } catch (e) {
+      // If theme commands fail, fall back to smplos or default
+      try {
+        const smplos = await getSmplosTheme();
+        const t = getThemeById(smplos ?? "catppuccin");
+        if (t) applyTheme(t.colors);
+      } catch (_) {}
+    }
+  }
 
   async function navigateToJournal(skipHistory = false, restoreEntry?: HistoryEntry) {
     if (!skipHistory) {
@@ -382,6 +441,34 @@
       loading = false;
       if (!skipHistory) {
         pushHistoryEntry({ kind: "flashcards", scrollTop: 0 });
+      }
+      await tick();
+      if (restoreEntry) {
+        restoreHistoryState(restoreEntry);
+      }
+      return;
+    }
+    if (title === "__statistics__") {
+      currentView = "statistics";
+      currentPage = null;
+      error = null;
+      loading = false;
+      if (!skipHistory) {
+        pushHistoryEntry({ kind: "statistics", scrollTop: 0 });
+      }
+      await tick();
+      if (restoreEntry) {
+        restoreHistoryState(restoreEntry);
+      }
+      return;
+    }
+    if (title === "__settings__") {
+      currentView = "settings";
+      currentPage = null;
+      error = null;
+      loading = false;
+      if (!skipHistory) {
+        pushHistoryEntry({ kind: "settings", scrollTop: 0 });
       }
       await tick();
       if (restoreEntry) {
@@ -524,6 +611,10 @@
       <div class="loading">Loading...</div>
     {:else if currentView === "all-pages"}
       <AllPages onNavigate={handleNavigate} />
+    {:else if currentView === "statistics"}
+      <Statistics onNavigate={handleNavigate} />
+    {:else if currentView === "settings"}
+      <Settings />
     {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
@@ -535,6 +626,48 @@
       {/key}
     {/if}
     </main>
+
+    <!-- Bottom nav for narrow screens -->
+    <nav class="bottom-nav">
+      <button class="bottom-nav-item" class:active={currentView === "journal"} onclick={() => handleNavigate("__journal__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="16" y1="2" x2="16" y2="6"></line>
+          <line x1="8" y1="2" x2="8" y2="6"></line>
+          <line x1="3" y1="10" x2="21" y2="10"></line>
+        </svg>
+        <span>Journal</span>
+      </button>
+      <button class="bottom-nav-item" class:active={currentView === "statistics"} onclick={() => handleNavigate("__statistics__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 20V10"></path>
+          <path d="M12 20V4"></path>
+          <path d="M6 20v-6"></path>
+        </svg>
+        <span>Stats</span>
+      </button>
+      <button class="bottom-nav-item" class:active={currentView === "all-pages"} onclick={() => handleNavigate("__all_pages__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+        </svg>
+        <span>Pages</span>
+      </button>
+      <button class="bottom-nav-item" onclick={() => handleNavigate("__new_page__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        <span>New</span>
+      </button>
+      <button class="bottom-nav-item" class:active={currentView === "settings"} onclick={() => handleNavigate("__settings__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Settings</span>
+      </button>
+    </nav>
   </div>
 </div>
 
@@ -733,5 +866,59 @@
 
   .dialog-btn-ok:hover {
     background: var(--btn-primary-hover);
+  }
+
+  /* Bottom nav - hidden by default, shown on narrow screens */
+  .bottom-nav {
+    display: none;
+  }
+
+  @media (max-width: 640px) {
+    .bottom-nav {
+      display: flex;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: var(--bg-sidebar);
+      border-top: 1px solid var(--border);
+      padding: 4px 0;
+      padding-bottom: env(safe-area-inset-bottom, 4px);
+      z-index: 100;
+      justify-content: space-around;
+      align-items: center;
+    }
+
+    .bottom-nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.6rem;
+      transition: color 0.15s;
+    }
+
+    .bottom-nav-item.active {
+      color: var(--accent);
+    }
+
+    .bottom-nav-item:hover {
+      color: var(--text-primary);
+    }
+
+    /* Hide sidebar on narrow screens */
+    :global(.sidebar) {
+      display: none !important;
+    }
+
+    .main-content {
+      padding-bottom: 60px;
+    }
   }
 </style>

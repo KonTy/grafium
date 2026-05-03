@@ -178,6 +178,41 @@ fn start_graph_watcher(
     Ok(GraphWatcherHandle { stop_tx, join_handle })
 }
 
+/// Watch ~/.config/smplos/current/theme.name for changes and emit event to frontend
+fn start_smplos_theme_watcher(app_handle: tauri::AppHandle) {
+    let theme_path = match dirs::config_dir() {
+        Some(d) => d.join("smplos/current/theme.name"),
+        None => return,
+    };
+
+    if !theme_path.exists() {
+        return;
+    }
+
+    thread::spawn(move || {
+        use std::fs;
+
+        let mut last_content = fs::read_to_string(&theme_path).unwrap_or_default().trim().to_string();
+
+        loop {
+            thread::sleep(Duration::from_secs(2));
+
+            let current = match fs::read_to_string(&theme_path) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+
+            if current != last_content && !current.is_empty() {
+                eprintln!("[theme-watcher] smplos theme changed: {} -> {}", last_content, current);
+                last_content = current.clone();
+                let _ = app_handle.emit("smplos-theme-changed", serde_json::json!({
+                    "theme": current,
+                }));
+            }
+        }
+    });
+}
+
 /// Background thread that periodically checks if sync targets become available.
 /// When a target that was unavailable becomes available, it emits a Tauri event
 /// and optionally triggers auto-sync.
@@ -328,6 +363,10 @@ pub fn run() {
             let sync_app_handle = app.handle().clone();
             start_sync_monitor(sync_app_handle, sync_graph);
 
+            // Start smplos theme watcher
+            let theme_app_handle = app.handle().clone();
+            start_smplos_theme_watcher(theme_app_handle);
+
             app.manage(state);
 
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
@@ -440,6 +479,9 @@ pub fn run() {
             commands::tasks::list_tasks,
             commands::tasks::update_task_state,
             commands::tasks::cycle_task_state,
+            commands::tasks::get_completion_counts,
+            commands::tasks::get_completed_tasks,
+            commands::tasks::set_task_date,
             commands::flashcards::list_flashcards_due,
             commands::flashcards::list_all_flashcards,
             commands::flashcards::update_flashcard_review,
@@ -463,6 +505,10 @@ pub fn run() {
             commands::sync::sync_check_status,
             commands::sync::sync_run,
             commands::sync::sync_run_all,
+            commands::theme::get_smplos_theme,
+            commands::theme::get_smplos_theme_colors,
+            commands::theme::get_app_theme,
+            commands::theme::set_app_theme,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -124,8 +124,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             block_id TEXT NOT NULL,
             from_state TEXT,
             to_state TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+            timestamp INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_task_events_block ON task_events(block_id, timestamp);

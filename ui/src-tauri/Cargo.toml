@@ -1,6 +1,6 @@
 [package]
 name = "grafium"
-version = "0.0.37"
+version = "0.0.38"
 edition = "2021"
 
 [dependencies]
@@ -13,6 +13,7 @@ grafium_core = { path = "../../core", package = "grafium-core" }
 tokio = { version = "1", features = ["full"] }
 notify = "6"
 uuid = { version = "1", features = ["v4"] }
+dirs = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"

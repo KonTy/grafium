@@ -121,6 +121,23 @@ export function renderBlock(content: string): string {
   processed = processed.replace(/^DONE /, '<span class="task-marker done">DONE</span> ');
   processed = processed.replace(/^LATER /, '<span class="task-marker later">LATER</span> ');
   processed = processed.replace(/^NOW /, '<span class="task-marker now">NOW</span> ');
+  processed = processed.replace(/^CANCELED /, '<span class="task-marker canceled">CANCELED</span> ');
+
+  // Handle priority markers [#A], [#B], [#C]
+  processed = processed.replace(
+    /\[#([ABC])\]/g,
+    '<span class="priority priority-$1">[#$1]</span>'
+  );
+
+  // Handle SCHEDULED and DEADLINE timestamps (display as badges)
+  processed = processed.replace(
+    /SCHEDULED:\s*<([^>]+)>/g,
+    '<span class="task-date scheduled" title="Scheduled">📅 $1</span>'
+  );
+  processed = processed.replace(
+    /DEADLINE:\s*<([^>]+)>/g,
+    '<span class="task-date deadline" title="Deadline">⏰ $1</span>'
+  );
 
   // Use full marked.parse for complete markdown support
   let html = marked.parse(processed) as string;

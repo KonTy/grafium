@@ -4,8 +4,8 @@ use crate::models::{BlockType, TaskState};
 
 static PROPERTY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([a-zA-Z_-]+)::(.*)$").unwrap());
 static TASK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\s+(.*)").unwrap());
-static SCHEDULED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})>").unwrap());
-static DEADLINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"DEADLINE:\s*<(\d{4}-\d{2}-\d{2})>").unwrap());
+static SCHEDULED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
+static DEADLINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"DEADLINE:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
 static FLASHCARD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#flashcard").unwrap());
 static FLASHCARD_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*::\s*").unwrap());
 static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{query\s+(.+?)\}\}").unwrap());

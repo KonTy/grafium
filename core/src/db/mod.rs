@@ -91,6 +91,34 @@ impl Database {
             PRAGMA page_size = 4096;
         ")?;
         schema::create_tables(&conn)?;
+
+        // Migration: recreate task_events without CASCADE to preserve history across reindexes
+        let has_fk: bool = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_events'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|sql| sql.contains("ON DELETE CASCADE"))
+            .unwrap_or(false);
+
+        if has_fk {
+            conn.execute_batch("
+                CREATE TABLE IF NOT EXISTS task_events_new (
+                    id TEXT PRIMARY KEY,
+                    block_id TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO task_events_new SELECT * FROM task_events;
+                DROP TABLE task_events;
+                ALTER TABLE task_events_new RENAME TO task_events;
+                CREATE INDEX IF NOT EXISTS idx_task_events_block ON task_events(block_id, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(timestamp DESC);
+            ")?;
+        }
+
         Ok(())
     }
 }

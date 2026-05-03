@@ -1,6 +1,5 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import AppMenu from "./AppMenu.svelte";
 
   interface Props {
     sidebarVisible?: boolean;
@@ -59,7 +58,6 @@
         </svg>
       </button>
     </div>
-    <AppMenu />
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={minimize} title="Minimize">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />

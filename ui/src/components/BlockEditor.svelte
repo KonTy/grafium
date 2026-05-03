@@ -6,13 +6,14 @@
   import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
+  import DatePicker from "./DatePicker.svelte";
 
   interface Props {
     block: Block;
@@ -61,6 +62,11 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content));
+
+  // Date picker state
+  let showDatePicker = $state(false);
+  let datePickerKind: "scheduled" | "deadline" = $state("scheduled");
+  let datePickerPos = $state({ x: 0, y: 0 });
 
   // Query block support
   const QUERY_RE = /^\{\{query\s+([\s\S]+?)\}\}\s*$/;
@@ -116,12 +122,20 @@
   });
 
   // Slash command completion source
-  const SLASH_COMMANDS = [
+  type SlashCommand = {
+    label: string;
+    detail: string;
+    apply: string;
+    cursorOffset?: number;
+    action?: string; // "scheduled" | "deadline"
+  };
+
+  const SLASH_COMMANDS: SlashCommand[] = [
     {
       label: "/query",
       detail: "Run a SQL SELECT and display results",
       apply: "{{query SELECT }}",
-      cursorOffset: 15, // position cursor after "SELECT "
+      cursorOffset: 15,
     },
     {
       label: "/TODO",
@@ -148,6 +162,38 @@
       detail: "Insert a LATER task marker",
       apply: "LATER ",
     },
+    {
+      label: "/CANCELED",
+      detail: "Mark task as canceled",
+      apply: "CANCELED ",
+    },
+    {
+      label: "/Scheduled",
+      detail: "Set a scheduled date for this task",
+      apply: "",
+      action: "scheduled",
+    },
+    {
+      label: "/Deadline",
+      detail: "Set a deadline date for this task",
+      apply: "",
+      action: "deadline",
+    },
+    {
+      label: "/Priority A",
+      detail: "Set priority A (highest)",
+      apply: "[#A] ",
+    },
+    {
+      label: "/Priority B",
+      detail: "Set priority B (medium)",
+      apply: "[#B] ",
+    },
+    {
+      label: "/Priority C",
+      detail: "Set priority C (low)",
+      apply: "[#C] ",
+    },
   ];
 
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {
@@ -163,13 +209,25 @@
       options: SLASH_COMMANDS.map((cmd) => ({
         label: cmd.label,
         detail: cmd.detail,
-        apply: (view, _completion, from, to) => {
-          view.dispatch({
-            changes: { from, to, insert: cmd.apply },
-            selection: EditorSelection.cursor(
-              from + ("cursorOffset" in cmd ? (cmd as { cursorOffset: number }).cursorOffset : cmd.apply.length)
-            ),
-          });
+        apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
+          if (cmd.action) {
+            // Remove the slash command text
+            view.dispatch({
+              changes: { from, to, insert: "" },
+            });
+            // Show the date picker
+            const coords = view.coordsAtPos(from);
+            datePickerKind = cmd.action as "scheduled" | "deadline";
+            datePickerPos = { x: coords?.left ?? 100, y: (coords?.bottom ?? 100) + 4 };
+            showDatePicker = true;
+          } else {
+            view.dispatch({
+              changes: { from, to, insert: cmd.apply },
+              selection: EditorSelection.cursor(
+                from + (cmd.cursorOffset ?? cmd.apply.length)
+              ),
+            });
+          }
         },
       })),
     };
@@ -520,12 +578,12 @@
   async function handleTaskCycle() {
     try {
       const newState = await cycleTaskState(block.id);
-      // Update the block content to reflect the new state
+      // Backend already updated block content + .md file;
+      // update local state to match
       const taskRe = /^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s/;
       const newContent = block.content.replace(taskRe, newState + " ");
       if (newContent !== block.content) {
         block.content = newContent;
-        await updateBlock(block.id, newContent);
       }
     } catch (e) {
       console.error("Failed to cycle task state:", e);
@@ -640,6 +698,27 @@
 
     startEditing();
   }
+
+  async function handleDateSelect(date: string) {
+    showDatePicker = false;
+    try {
+      const newContent = await setTaskDate(block.id, datePickerKind, date || null);
+      // Update the editor if open
+      if (editorView) {
+        editorView.dispatch({
+          changes: { from: 0, to: editorView.state.doc.length, insert: newContent },
+        });
+      }
+      // Update the block reactive data
+      block.content = newContent;
+    } catch (e) {
+      console.error("Failed to set task date:", e);
+    }
+  }
+
+  function handleDateCancel() {
+    showDatePicker = false;
+  }
 </script>
 
 <div
@@ -738,6 +817,15 @@
     {/if}
   </div>
 </div>
+
+{#if showDatePicker}
+  <DatePicker
+    x={datePickerPos.x}
+    y={datePickerPos.y}
+    onSelect={handleDateSelect}
+    onCancel={handleDateCancel}
+  />
+{/if}
 
 <style>
   .block-item {
@@ -912,6 +1000,54 @@
   .rendered-content :global(.task-marker.now) {
     background: var(--task-doing-bg);
     color: var(--task-doing-fg);
+  }
+
+  .rendered-content :global(.task-marker.canceled) {
+    background: rgba(150, 150, 150, 0.15);
+    color: var(--text-muted);
+    text-decoration: line-through;
+  }
+
+  .rendered-content :global(.priority) {
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-right: 2px;
+  }
+
+  .rendered-content :global(.priority-A) {
+    background: rgba(255, 80, 80, 0.15);
+    color: #ff5050;
+  }
+
+  .rendered-content :global(.priority-B) {
+    background: rgba(255, 170, 0, 0.15);
+    color: #ffaa00;
+  }
+
+  .rendered-content :global(.priority-C) {
+    background: rgba(100, 180, 255, 0.15);
+    color: #64b4ff;
+  }
+
+  .rendered-content :global(.task-date) {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+
+  .rendered-content :global(.task-date.scheduled) {
+    background: rgba(100, 180, 255, 0.1);
+    color: var(--text-secondary);
+  }
+
+  .rendered-content :global(.task-date.deadline) {
+    background: rgba(255, 100, 100, 0.1);
+    color: #ff6464;
   }
 
   .rendered-content :global(code) {
