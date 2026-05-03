@@ -86,7 +86,18 @@
     queryLoading = true;
     queryError = null;
     try {
-      const rows = await runQuery(expr);
+      let rows = await runQuery(expr);
+      // Exclude query blocks from results (blocks starting with {{query)
+      rows = rows.filter((row) => {
+        return !row.some(([col, val]) => {
+          if (typeof val !== "string") return false;
+          // Exclude if this row is the query block itself (by id)
+          if (col.toLowerCase() === "_block_id" && val === block.id) return true;
+          // Exclude if any cell contains a query block
+          if (val.trimStart().startsWith("{{query")) return true;
+          return false;
+        });
+      });
       queryRows = rows;
       queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
       // Find the block id column (id, block_id, _block_id)
@@ -837,10 +848,6 @@
     scroll-margin: 40px;
   }
 
-  .block-item:hover {
-    background: var(--bg-hover);
-  }
-
   .block-item.editing {
     background: transparent;
   }
@@ -1311,8 +1318,7 @@
     max-width: 500px;
   }
 
-  .query-table tbody tr:hover {
-    background: var(--bg-hover);
+  .query-table tbody tr {
     cursor: pointer;
   }
 

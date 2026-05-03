@@ -25,15 +25,41 @@ Organize pages into topic trees using slash-separated titles: `projects/grafium/
 Daily notes are created automatically. Open the app and start writing — today's journal is always ready. Older entries scroll infinitely below.
 
 ### Raw SQL Queries
-Embed live SQL queries directly in your pages using fenced code blocks. Grafium exposes read-only access to the underlying SQLite index, so you can write:
+Embed live SQL queries directly in your pages using `{{query ...}}` blocks. Grafium exposes read-only access to the underlying SQLite index, so you can build dashboards and views right inside your notes.
 
-~~~markdown
-```query
-SELECT title, updated_at FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT 10
+Results render inline as tables. Query pages, blocks, links, tasks, flashcards — anything in the index. Query blocks automatically exclude themselves and other query blocks from results.
+
+#### Query Examples
+
+**All open tasks across the graph:**
 ```
-~~~
+{{query SELECT p.title AS page, b.content AS task FROM blocks b JOIN pages p ON b.page_id = p.id WHERE b.content LIKE 'TODO %' OR b.content LIKE 'DOING %'}}
+```
 
-Results render inline as tables. Query pages, blocks, links, tasks, flashcards — anything in the index.
+**Tasks scheduled this week:**
+```
+{{query SELECT b.content AS task, p.title AS page FROM blocks b JOIN pages p ON b.page_id = p.id JOIN tasks t ON t.block_id = b.id WHERE t.scheduled_date BETWEEN date('now') AND date('now', '+7 days')}}
+```
+
+**All YouTube videos in the graph:**
+```
+{{query SELECT p.title AS page, b.content AS video FROM blocks b JOIN pages p ON b.page_id = p.id WHERE b.content LIKE '%youtube.com%' OR b.content LIKE '%youtu.be%'}}
+```
+
+**Find a specific video (e.g. about drones):**
+```
+{{query SELECT p.title AS page, b.content AS video FROM blocks b JOIN pages p ON b.page_id = p.id WHERE b.content LIKE '%youtube.com%' AND b.content LIKE '%drone%'}}
+```
+
+**Recently modified pages (non-journal):**
+```
+{{query SELECT title, datetime(updated_at, 'unixepoch') AS modified FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT 10}}
+```
+
+**Pages with the most blocks:**
+```
+{{query SELECT p.title, COUNT(*) AS block_count FROM blocks b JOIN pages p ON b.page_id = p.id GROUP BY b.page_id ORDER BY block_count DESC LIMIT 10}}
+```
 
 ### Tasks
 Mark blocks as `TODO`, `DOING`, `DONE`, or `CANCELED`. Attach `SCHEDULED` and `DEADLINE` dates. Query them across your entire graph to build dashboards and agendas.
