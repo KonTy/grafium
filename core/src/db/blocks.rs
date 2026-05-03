@@ -267,4 +267,13 @@ impl Database {
         })?.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(blocks)
     }
+
+    /// Get all block content strings (for asset reference scanning).
+    pub fn get_all_block_content(&self) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT content FROM blocks WHERE content != ''")?;
+        let rows = stmt.query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(rows)
+    }
 }

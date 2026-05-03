@@ -30,6 +30,31 @@ export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
 
+/**
+ * Find all remote image URLs in markdown and download them to assets/.
+ * Rewrites the markdown to use local paths.
+ */
+export async function localizeImages(md: string, downloadFn: (url: string) => Promise<string>): Promise<string> {
+  const imageRe = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+  const matches = [...md.matchAll(imageRe)];
+  if (matches.length === 0) return md;
+
+  let result = md;
+  for (const match of matches) {
+    const fullMatch = match[0];
+    const alt = match[1];
+    const url = match[2];
+    try {
+      const localPath = await downloadFn(url);
+      result = result.replace(fullMatch, `![${alt}](${localPath})`);
+    } catch (e) {
+      // If download fails, keep the original URL
+      console.warn(`[assets] Failed to download ${url}:`, e);
+    }
+  }
+  return result;
+}
+
 export interface PasteBlock {
   content: string;
   depth: number; // 0 = top level, 1 = child, 2 = grandchild, etc.

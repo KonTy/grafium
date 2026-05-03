@@ -228,3 +228,25 @@ export function getAppTheme(): Promise<string> {
 export function setAppTheme(themeId: string): Promise<void> {
   return invoke("set_app_theme", { themeId });
 }
+
+// Asset management
+export function downloadAsset(url: string): Promise<string> {
+  return invoke("download_asset", { url });
+}
+
+export function listAssets(): Promise<string[]> {
+  return invoke("list_assets", {});
+}
+
+export interface OrphanedAsset {
+  filename: string;
+  size: number;
+}
+
+export function findOrphanedAssets(): Promise<OrphanedAsset[]> {
+  return invoke("find_orphaned_assets", {});
+}
+
+export function deleteAssets(filenames: string[]): Promise<number> {
+  return invoke("delete_assets", { filenames });
+}

@@ -6,10 +6,10 @@
   import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate } from "../lib/api";
+  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
-  import { htmlToMarkdown, splitMarkdownIntoBlocks } from "../lib/htmlToMd";
+  import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
@@ -493,6 +493,15 @@
                   changes: { from, to, insert: md },
                   selection: EditorSelection.cursor(from + md.length),
                 });
+                // Download images in background and update content
+                localizeImages(md, downloadAsset).then((localized) => {
+                  if (localized !== md) {
+                    const doc = view.state.doc.toString();
+                    const updated = doc.replace(md, localized);
+                    view.dispatch({ changes: { from: 0, to: doc.length, insert: updated } });
+                    saveContent(updated);
+                  }
+                });
               } else {
                 // Ctrl+V: split into separate blocks with hierarchy
                 const chunks = splitMarkdownIntoBlocks(md);
@@ -509,6 +518,18 @@
                   block.content = content;
                   onPasteBlocks(block.id, chunks.slice(1));
                 }
+                // Download images in all pasted blocks in background
+                localizeImages(md, downloadAsset).then((localized) => {
+                  if (localized !== md) {
+                    // Re-split and update the first block
+                    const localChunks = splitMarkdownIntoBlocks(localized);
+                    if (localChunks[0]?.content !== chunks[0]?.content) {
+                      const newContent = view.state.doc.toString().replace(chunks[0].content, localChunks[0].content);
+                      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: newContent } });
+                      saveContent(newContent);
+                    }
+                  }
+                });
               }
               return true;
             },

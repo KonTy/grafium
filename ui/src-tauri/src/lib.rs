@@ -509,6 +509,10 @@ pub fn run() {
             commands::theme::get_smplos_theme_colors,
             commands::theme::get_app_theme,
             commands::theme::set_app_theme,
+            commands::assets::download_asset,
+            commands::assets::list_assets,
+            commands::assets::find_orphaned_assets,
+            commands::assets::delete_assets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

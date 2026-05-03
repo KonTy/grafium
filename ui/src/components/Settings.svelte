@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets } from "../lib/api";
+  import type { OrphanedAsset } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
 
@@ -16,6 +17,51 @@
   let currentThemeId = $state("auto");
   let smplosThemeName = $state<string | null>(null);
   let appVersion = $state("...");
+
+  // Asset cleanup state
+  let orphanedAssets = $state<OrphanedAsset[]>([]);
+  let assetScanDone = $state(false);
+  let assetDeleting = $state(false);
+
+  async function scanOrphanedAssets() {
+    try {
+      orphanedAssets = await findOrphanedAssets();
+      assetScanDone = true;
+    } catch (e) {
+      console.error("Failed to scan assets:", e);
+    }
+  }
+
+  async function deleteAllOrphans() {
+    if (orphanedAssets.length === 0) return;
+    assetDeleting = true;
+    try {
+      await deleteAssets(orphanedAssets.map((a) => a.filename));
+      orphanedAssets = [];
+    } catch (e) {
+      console.error("Failed to delete assets:", e);
+    } finally {
+      assetDeleting = false;
+    }
+  }
+
+  async function deleteSingleOrphan(filename: string) {
+    assetDeleting = true;
+    try {
+      await deleteAssets([filename]);
+      orphanedAssets = orphanedAssets.filter((a) => a.filename !== filename);
+    } catch (e) {
+      console.error("Failed to delete asset:", e);
+    } finally {
+      assetDeleting = false;
+    }
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
 
   // Sync state
   let syncTargets = $state<SyncTarget[]>([]);
@@ -356,6 +402,42 @@
         </div>
       {/each}
     </div>
+    </div>
+  </details>
+
+  <!-- Asset Cleanup Section -->
+  <details class="settings-section">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="9 18 15 12 9 6"></polyline>
+      </svg>
+      <span class="section-title">Asset Cleanup</span>
+    </summary>
+    <div class="section-content">
+      <p class="setting-desc">Find and remove images in assets/ that are no longer referenced by any block.</p>
+      <button class="sync-btn" onclick={scanOrphanedAssets}>
+        {assetScanDone ? "Re-scan" : "Scan for orphaned assets"}
+      </button>
+
+      {#if assetScanDone}
+        {#if orphanedAssets.length === 0}
+          <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">No orphaned assets found.</p>
+        {:else}
+          <p class="setting-desc" style="margin-top: 8px;">Found {orphanedAssets.length} orphaned file{orphanedAssets.length > 1 ? "s" : ""} ({formatBytes(orphanedAssets.reduce((s, a) => s + a.size, 0))} total)</p>
+          <button class="sync-btn sync-btn-remove" onclick={deleteAllOrphans} disabled={assetDeleting}>
+            {assetDeleting ? "Deleting..." : `Delete all ${orphanedAssets.length} orphans`}
+          </button>
+          <div class="orphan-list">
+            {#each orphanedAssets as asset}
+              <div class="orphan-item">
+                <span class="orphan-name">{asset.filename}</span>
+                <span class="orphan-size">{formatBytes(asset.size)}</span>
+                <button class="orphan-delete" onclick={() => deleteSingleOrphan(asset.filename)} disabled={assetDeleting}>✕</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {/if}
     </div>
   </details>
 
@@ -865,5 +947,56 @@
 
   .detail-value {
     color: var(--text-primary);
+  }
+
+  /* Asset Cleanup */
+  .orphan-list {
+    margin-top: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .orphan-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .orphan-item:last-child {
+    border-bottom: none;
+  }
+
+  .orphan-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+
+  .orphan-size {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .orphan-delete {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 14px;
+  }
+
+  .orphan-delete:hover {
+    background: rgba(255, 80, 80, 0.2);
+    color: #ff5050;
   }
 </style>
