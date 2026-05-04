@@ -7,6 +7,7 @@
     canGoForward?: boolean;
     onGoBack?: () => void;
     onGoForward?: () => void;
+    onToggleReferencePanel?: () => void;
   }
 
   let {
@@ -15,6 +16,7 @@
     canGoForward = false,
     onGoBack = () => {},
     onGoForward = () => {},
+    onToggleReferencePanel = () => {},
   }: Props = $props();
 
   const appWindow = getCurrentWindow();
@@ -58,6 +60,12 @@
         </svg>
       </button>
     </div>
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title="Knowledge Panel">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+      </svg>
+    </button>
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={minimize} title="Minimize">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
@@ -85,7 +93,8 @@
 
 <style>
   .titlebar {
-    height: 36px;
+    height: calc(36px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
     display: flex;
     align-items: center;
     user-select: none;

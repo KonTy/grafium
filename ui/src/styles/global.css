@@ -39,13 +39,13 @@
   --task-later-fg: #cba6f7;
 
   /* Layout & spacing */
-  --content-max-width: 800px;
-  --content-padding-x: 24px;
-  --content-padding-y: 40px;
-  --narrow-padding-x: 10%;
-  --zen-padding-top: 16px;
-  --zen-max-width: 700px;
-  --zen-wide-padding-x: 24px;
+  --content-max-width: 100%;
+  --content-padding-x: 8px;
+  --content-padding-y: 8px;
+  --narrow-padding-x: 0;
+  --zen-padding-top: 0;
+  --zen-max-width: 100%;
+  --zen-wide-padding-x: 0;
   --zen-font-size: 16px;
   --zen-line-height: 1.8;
 
@@ -88,4 +88,20 @@ body {
 ::selection {
   background: var(--accent);
   color: var(--bg-primary);
+}
+
+/* Force full-width content - override any scoped component styles */
+.page-content {
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 8px !important;
+}
+
+.journal-view {
+  padding: 0 8px !important;
+}
+
+.main-content {
+  padding: 0 !important;
+  margin: 0 !important;
 }

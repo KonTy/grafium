@@ -131,7 +131,6 @@ class KeymapManager {
     }
 
     // In edit mode, only process shortcuts marked as not navOnly
-    // (currently we let CodeMirror handle everything in edit mode)
     if (this._editing) {
       return false;
     }
@@ -220,6 +219,8 @@ export function registerDefaultShortcuts(actions: {
 }) {
   const shortcuts: Shortcut[] = [
     // ─── Navigation (g prefix) ─────────────────────
+    // On Linux, these are also handled at the GTK/Rust level via __chordActions
+    // because WebKitGTK JS keydown delivery can be unreliable.
     {
       binding: "g j",
       action: actions.goJournal,

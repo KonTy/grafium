@@ -216,6 +216,25 @@ export function getAppVersion(): Promise<string> {
   return invoke("get_app_version", {});
 }
 
+export interface DirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface DirListing {
+  current_path: string;
+  entries: DirEntry[];
+}
+
+export function listDirectory(path: string): Promise<DirListing> {
+  return invoke("list_directory", { path });
+}
+
+export function getDefaultGraphBase(): Promise<string> {
+  return invoke("get_default_graph_base", {});
+}
+
 // Theme
 export function getSmplosTheme(): Promise<string | null> {
   return invoke("get_smplos_theme", {});

@@ -69,6 +69,11 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 }, true); // capture phase
 
+// === Toggle reference panel (called by Rust via eval() for Ctrl+.) ===
+(window as any).__toggleReferencePanel = () => {
+  window.dispatchEvent(new CustomEvent("toggle-reference-panel"));
+};
+
 const app = mount(App, { target: document.getElementById("app")! });
 
 export default app;

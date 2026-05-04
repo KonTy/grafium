@@ -1,10 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
+  import AISettings from "./AISettings.svelte";
 
   interface SyncTarget {
     id: string;
@@ -17,6 +18,7 @@
   let currentThemeId = $state("auto");
   let smplosThemeName = $state<string | null>(null);
   let appVersion = $state("...");
+  let graphPath = $state("...");
 
   // Asset cleanup state
   let orphanedAssets = $state<OrphanedAsset[]>([]);
@@ -79,6 +81,7 @@
     loadCurrentTheme();
     loadSyncTargets();
     getAppVersion().then((v) => (appVersion = v)).catch(() => {});
+    getGraphInfo().then((info) => (graphPath = info.path)).catch(() => {});
   });
 
   async function loadCurrentTheme() {
@@ -210,52 +213,19 @@
 <div class="settings-page">
   <h1 class="settings-title">Settings</h1>
 
-  <!-- Theme Section -->
+  <!-- General Section -->
   <details class="settings-section" open>
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
       </svg>
-      <span class="section-title">Theme</span>
+      <span class="section-title">General</span>
     </summary>
     <div class="section-content">
-      <p class="section-desc">
-        {#if smplosThemeName}
-          smplos detected — current system theme: <strong>{smplosThemeName}</strong>
-        {:else}
-          Select a color theme for Grafium.
-        {/if}
-      </p>
-
-      <div class="theme-grid">
-      <button
-        class="theme-card"
-        class:active={currentThemeId === "auto"}
-        onclick={() => selectTheme("auto")}
-      >
-        <div class="theme-swatches">
-          <div class="swatch" style="background: {autoSwatches().accent}"></div>
-          <div class="swatch" style="background: {autoSwatches().bg}"></div>
-          <div class="swatch" style="background: {autoSwatches().fg}"></div>
-        </div>
-        <span class="theme-name">Auto{smplosThemeName ? ` (${smplosThemeName})` : ""}</span>
-      </button>
-
-      {#each themes as theme (theme.id)}
-        <button
-          class="theme-card"
-          class:active={currentThemeId === theme.id}
-          onclick={() => selectTheme(theme.id)}
-        >
-          <div class="theme-swatches">
-            <div class="swatch" style="background: {theme.colors.accent}"></div>
-            <div class="swatch" style="background: {theme.colors.bgPrimary}"></div>
-            <div class="swatch" style="background: {theme.colors.textPrimary}"></div>
-          </div>
-          <span class="theme-name">{theme.name}</span>
-        </button>
-      {/each}
-    </div>
+      <div class="setting-row">
+        <span class="setting-label">Graph location</span>
+        <span class="setting-value">{graphPath}</span>
+      </div>
     </div>
   </details>
 
@@ -375,6 +345,68 @@
         </div>
       </div>
     {/if}
+    </div>
+  </details>
+
+  <!-- AI / Knowledge Section -->
+  <details class="settings-section">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 18l6-6-6-6"></path>
+      </svg>
+      <span class="section-title">AI / Knowledge Engine</span>
+    </summary>
+    <div class="section-content">
+      <AISettings />
+    </div>
+  </details>
+
+  <!-- Theme Section -->
+  <details class="settings-section">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 18l6-6-6-6"></path>
+      </svg>
+      <span class="section-title">Theme</span>
+    </summary>
+    <div class="section-content">
+      <p class="section-desc">
+        {#if smplosThemeName}
+          smplos detected — current system theme: <strong>{smplosThemeName}</strong>
+        {:else}
+          Select a color theme for Grafium.
+        {/if}
+      </p>
+
+      <div class="theme-grid">
+      <button
+        class="theme-card"
+        class:active={currentThemeId === "auto"}
+        onclick={() => selectTheme("auto")}
+      >
+        <div class="theme-swatches">
+          <div class="swatch" style="background: {autoSwatches().accent}"></div>
+          <div class="swatch" style="background: {autoSwatches().bg}"></div>
+          <div class="swatch" style="background: {autoSwatches().fg}"></div>
+        </div>
+        <span class="theme-name">Auto{smplosThemeName ? ` (${smplosThemeName})` : ""}</span>
+      </button>
+
+      {#each themes as theme (theme.id)}
+        <button
+          class="theme-card"
+          class:active={currentThemeId === theme.id}
+          onclick={() => selectTheme(theme.id)}
+        >
+          <div class="theme-swatches">
+            <div class="swatch" style="background: {theme.colors.accent}"></div>
+            <div class="swatch" style="background: {theme.colors.bgPrimary}"></div>
+            <div class="swatch" style="background: {theme.colors.textPrimary}"></div>
+          </div>
+          <span class="theme-name">{theme.name}</span>
+        </button>
+      {/each}
+    </div>
     </div>
   </details>
 
@@ -543,6 +575,26 @@
 
   .section-content {
     padding: 16px;
+  }
+
+  .setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .setting-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .setting-value {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: monospace;
+    word-break: break-all;
+    text-align: right;
   }
 
   .section-desc {

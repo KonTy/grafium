@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Grafium</title>
     <script>
       // === DEBUG CONSOLE (toggle with Ctrl+`) ===
@@ -66,6 +66,24 @@
         window.dispatchEvent(new CustomEvent("app-redo"));
       };
     </script>
+    <style>
+      /* LAYOUT FIX: Force content to use all available width */
+      [class*="page-content"] {
+        max-width: none !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+      }
+      [class*="journal-view"] {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+      }
+      [class*="main-content"] {
+        padding: 0 !important;
+        background: var(--bg-primary) !important;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

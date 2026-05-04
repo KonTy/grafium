@@ -683,9 +683,7 @@
 
 <style>
   .page-content {
-    max-width: var(--content-max-width);
-    margin: 0 auto;
-    padding: var(--content-padding-y) var(--content-padding-x);
+    padding: 0;
   }
 
   .page-title {

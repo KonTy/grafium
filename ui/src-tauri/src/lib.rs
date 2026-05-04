@@ -369,6 +369,25 @@ pub fn run() {
 
             app.manage(state);
 
+            // Initialize Knowledge Engine
+            let knowledge_state = {
+                let data_dir = app_dir.join("knowledge");
+                let config_path = data_dir.join("ai_config.json");
+                let ai_config = if config_path.exists() {
+                    std::fs::read_to_string(&config_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default()
+                } else {
+                    grafium_core::ai::config::AiConfig::default()
+                };
+                let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config).ok();
+                commands::knowledge::KnowledgeState {
+                    engine: Arc::new(tokio::sync::RwLock::new(engine)),
+                }
+            };
+            app.manage(knowledge_state);
+
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
             // WebKitGTK intercepts these keys internally before JS sees them,
             // and the WebView widget signal doesn't fire. By connecting to the
@@ -385,7 +404,6 @@ pub fn run() {
                     let toplevel = wk_webview.toplevel().unwrap();
                     let gtk_window = toplevel.downcast::<gtk::Window>().unwrap();
 
-                    // Log ALL key events at GTK level to see what arrives
                     let eval_window = win_for_eval.clone();
                     gtk_window.connect_key_press_event(move |_, event| {
                         let state = event.state();
@@ -394,6 +412,13 @@ pub fn run() {
                         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
                         eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+
+                        // Ctrl+. toggles reference panel
+                        if ctrl && !shift && *keyval == 46 /* period */ {
+                            eprintln!("[GTK-WINDOW] => Ctrl+. detected, toggling reference panel");
+                            let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
+                            return gtk::glib::Propagation::Stop;
+                        }
 
                         if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
                             eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
@@ -498,6 +523,8 @@ pub fn run() {
             commands::graph::reindex_current,
             commands::graph::remove_graph,
             commands::graph::get_app_version,
+            commands::graph::list_directory,
+            commands::graph::get_default_graph_base,
             commands::sync::sync_list_targets,
             commands::sync::sync_add_filesystem_target,
             commands::sync::sync_add_webdav_target,
@@ -513,6 +540,19 @@ pub fn run() {
             commands::assets::list_assets,
             commands::assets::find_orphaned_assets,
             commands::assets::delete_assets,
+            commands::knowledge::ai_get_config,
+            commands::knowledge::ai_set_config,
+            commands::knowledge::ai_health_check,
+            commands::knowledge::ai_index_page,
+            commands::knowledge::ai_index_all_pages,
+            commands::knowledge::ai_search,
+            commands::knowledge::ai_generate_references,
+            commands::knowledge::ai_ask,
+            commands::knowledge::ai_list_registered_graphs,
+            commands::knowledge::ai_register_graph,
+            commands::knowledge::ai_list_schemas,
+            commands::knowledge::ai_save_schema,
+            commands::knowledge::ai_create_default_schemas,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

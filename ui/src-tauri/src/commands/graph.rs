@@ -119,7 +119,14 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: String) -> Result<GraphInfo, String> {
-    let graph_path = PathBuf::from(&path);
+    let graph_path = if PathBuf::from(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        // Relative path → resolve under ~/Documents/grafium/
+        let docs = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+        docs.join("grafium").join(&path)
+    };
+    let path = graph_path.to_string_lossy().to_string();
 
     // Create the directory if it doesn't exist
     fs::create_dir_all(&graph_path).map_err(|e| e.to_string())?;
@@ -165,4 +172,114 @@ pub fn remove_graph(app: AppHandle, path: String) -> Result<(), String> {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirListing {
+    pub current_path: String,
+    pub entries: Vec<DirEntry>,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_directory(app: AppHandle, path: String) -> Result<DirListing, String> {
+    let dir_path = if path.is_empty() {
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = &app;
+            let candidates = [
+                dirs::document_dir(),
+                dirs::home_dir().map(|h| h.join("Documents")),
+                dirs::home_dir(),
+                Some(PathBuf::from("/")),
+            ];
+            candidates.into_iter()
+                .flatten()
+                .find(|p| p.exists() && p.is_dir())
+                .unwrap_or_else(|| PathBuf::from("/"))
+        }
+    } else {
+        PathBuf::from(&path)
+    };
+
+    if !dir_path.exists() {
+        return Err(format!("Directory does not exist: {}", dir_path.display()));
+    }
+    if !dir_path.is_dir() {
+        return Err(format!("Not a directory: {}", dir_path.display()));
+    }
+
+    let mut entries = Vec::new();
+
+    // Add parent directory entry if not at root
+    if let Some(parent) = dir_path.parent() {
+        if parent != dir_path {
+            entries.push(DirEntry {
+                name: "..".to_string(),
+                path: parent.to_string_lossy().to_string(),
+                is_dir: true,
+            });
+        }
+    }
+
+    let read_dir = fs::read_dir(&dir_path).map_err(|e| e.to_string())?;
+    for entry in read_dir.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        entries.push(DirEntry {
+            name,
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir: true,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        if a.name == ".." { return std::cmp::Ordering::Less; }
+        if b.name == ".." { return std::cmp::Ordering::Greater; }
+        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    });
+
+    Ok(DirListing {
+        current_path: dir_path.to_string_lossy().to_string(),
+        entries,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_default_graph_base(app: AppHandle) -> String {
+    // On Android, use the app's files directory; on desktop use ~/Documents/grafium
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let resolver = app.path();
+        if let Ok(app_data) = resolver.app_data_dir() {
+            return app_data.to_string_lossy().to_string();
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = &app; // suppress unused warning
+    }
+    let docs = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+    docs.join("grafium").to_string_lossy().to_string()
 }

@@ -154,7 +154,7 @@
 <style>
   .journal-view {
     height: 100%;
-    padding: var(--content-padding-y, 40px) var(--content-padding-x, 24px);
+    padding: 0;
   }
 
   .journal-entry {

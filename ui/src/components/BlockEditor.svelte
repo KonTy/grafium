@@ -788,9 +788,11 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="query-block" onclick={(e) => e.stopPropagation()}>
-        <div class="query-header" onclick={startEditing}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          <span class="query-expr">{queryExpression}</span>
+        <div class="query-header">
+          <button class="query-edit-btn" onclick={(e) => { e.stopPropagation(); startEditing(); }} title="Edit query">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </button>
+          <span class="query-label">Query</span>
           <button class="query-refresh" onclick={(e) => { e.stopPropagation(); runQueryBlock(queryExpression!); }} title="Re-run query">↻</button>
         </div>
         {#if queryLoading}
@@ -864,6 +866,7 @@
     display: flex;
     align-items: flex-start;
     min-height: 28px;
+    min-width: 0;
     border-radius: 4px;
     transition: background-color 0.1s;
     scroll-margin: 40px;
@@ -959,7 +962,10 @@
 
   .rendered-content {
     width: 100%;
+    min-width: 0;
     padding: 2px 0;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   .placeholder {
@@ -1255,21 +1261,34 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    padding: 4px 10px;
     background: var(--bg-input, rgba(0,0,0,0.1));
     border-bottom: 1px solid var(--border);
     color: var(--text-muted);
     font-size: 12px;
-    cursor: text;
   }
 
-  .query-expr {
+  .query-edit-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+  }
+
+  .query-edit-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .query-label {
     flex: 1;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--text-muted);
+    opacity: 0.7;
   }
 
   .query-refresh {
@@ -1302,12 +1321,14 @@
 
   .query-table-wrap {
     overflow-x: auto;
+    max-width: 100%;
   }
 
   .query-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
+    table-layout: auto;
   }
 
   .query-table th {
@@ -1322,21 +1343,22 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.3px;
+    white-space: nowrap;
   }
 
   .query-table td {
     padding: 5px 10px;
     border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
-    max-width: 300px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+    max-width: 350px;
   }
 
   .query-table td:has(.query-cell-content) {
     white-space: normal;
-    max-width: 500px;
+    max-width: 450px;
   }
 
   .query-table tbody tr {
