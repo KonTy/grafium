@@ -9,9 +9,11 @@
 pub mod backend;
 pub mod engine;
 pub mod filesystem;
+pub mod merge;
 pub mod state;
 pub mod webdav;
 
 pub use backend::{SyncBackend, FileMetadata};
 pub use engine::SyncEngine;
+pub use merge::{three_way_merge, two_way_merge, MergeResult};
 pub use state::{SyncState, SyncConfig};

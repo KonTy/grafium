@@ -70,6 +70,11 @@ impl Database {
     /// Delete all blocks belonging to a page.
     pub fn delete_blocks_for_page(&self, page_id: &str) -> Result<()> {
         let conn = self.conn()?;
+        // Delete normalized block properties
+        conn.execute(
+            "DELETE FROM block_properties WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
+            params![page_id],
+        )?;
         // Delete FTS entries first
         conn.execute(
             "DELETE FROM fts_blocks WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
@@ -137,6 +142,8 @@ impl Database {
             DELETE FROM links;
             DELETE FROM tasks;
             DELETE FROM flashcards;
+            DELETE FROM block_properties;
+            DELETE FROM page_properties;
             DELETE FROM blocks;
             DELETE FROM pages;
         ")?;

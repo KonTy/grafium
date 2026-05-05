@@ -145,6 +145,31 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_recent_opened ON recent_pages(last_opened_at DESC);
+
+        -- Normalized properties for fast indexed queries
+        CREATE TABLE IF NOT EXISTS block_properties (
+            block_id TEXT NOT NULL,
+            key TEXT NOT NULL COLLATE NOCASE,
+            value TEXT NOT NULL DEFAULT '',
+            value_type TEXT NOT NULL DEFAULT 'string',
+            PRIMARY KEY (block_id, key),
+            FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bp_key_value ON block_properties(key, value);
+        CREATE INDEX IF NOT EXISTS idx_bp_block ON block_properties(block_id);
+
+        CREATE TABLE IF NOT EXISTS page_properties (
+            page_id TEXT NOT NULL,
+            key TEXT NOT NULL COLLATE NOCASE,
+            value TEXT NOT NULL DEFAULT '',
+            value_type TEXT NOT NULL DEFAULT 'string',
+            PRIMARY KEY (page_id, key),
+            FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pp_key_value ON page_properties(key, value);
+        CREATE INDEX IF NOT EXISTS idx_pp_page ON page_properties(page_id);
     ")?;
     Ok(())
 }

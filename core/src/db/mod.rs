@@ -8,6 +8,7 @@ mod audio;
 mod favorites;
 mod graph_support;
 mod raw_query;
+mod properties;
 
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -117,6 +118,16 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_task_events_block ON task_events(block_id, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(timestamp DESC);
             ")?;
+        }
+
+        // Backfill normalized properties if tables are empty but JSON blobs have data
+        let prop_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM page_properties", [], |row| row.get(0)
+        ).unwrap_or(0);
+        drop(conn);
+
+        if prop_count == 0 {
+            let _ = self.backfill_properties();
         }
 
         Ok(())

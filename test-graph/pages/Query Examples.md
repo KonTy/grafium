@@ -1,0 +1,80 @@
+title:: Query Examples
+type:: reference
+tags:: queries, help, documentation
+
+- # Database Tables & Fields
+- ## Pages table
+  - `id` - unique page identifier
+  - `title` - page name
+  - `file_path` - relative path to .md file
+  - `created_at` - timestamp (milliseconds)
+  - `updated_at` - timestamp (milliseconds)
+  - `is_journal` - 1 for journal pages, 0 for regular
+  - `properties` - JSON blob of page properties
+- ## Blocks table
+  - `id` - unique block identifier
+  - `page_id` - which page this block belongs to
+  - `parent_id` - parent block (for nesting)
+  - `order_index` - position within siblings
+  - `content` - the text content
+  - `block_type` - text, handwriting, audio, flashcard, query
+  - `properties` - JSON blob of block properties
+  - `created_at` / `updated_at` - timestamps
+- ## Tasks table
+  - `id` - unique task identifier
+  - `block_id` - which block this task belongs to
+  - `state` - TODO, DOING, DONE, CANCELED, LATER, NOW
+  - `scheduled_date` - date string (YYYY-MM-DD)
+  - `deadline_date` - date string (YYYY-MM-DD)
+  - `created_at` / `updated_at` - timestamps
+- ## Links table
+  - `from_block_id` - block containing the link
+  - `to_page_id` - page being linked to
+  - `link_type` - page, tag, topic, block_ref
+- ## Page Properties table (normalized, fast!)
+  - `page_id` - which page
+  - `key` - property name (case-insensitive)
+  - `value` - property value as text
+  - `value_type` - string, number, date, list, boolean
+- ## Block Properties table (normalized, fast!)
+  - `block_id` - which block
+  - `key` - property name (case-insensitive)
+  - `value` - property value as text
+  - `value_type` - string, number, date, list, boolean
+- ---
+- # Query Examples
+- ## All TODOs (incomplete tasks)
+- {{query SELECT b.content, t.state, t.deadline_date, t.scheduled_date, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id WHERE t.state IN ('TODO', 'DOING', 'NOW') ORDER BY t.deadline_date}}
+- ## Urgent TODOs (deadline within 7 days)
+- {{query SELECT b.content, t.deadline_date, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id WHERE t.state = 'TODO' AND t.deadline_date <= date('now', '+7 days') ORDER BY t.deadline_date}}
+- ## TODOs grouped by project
+- {{query SELECT bp.value as project, b.content, t.state, t.deadline_date FROM tasks t JOIN blocks b ON b.id = t.block_id LEFT JOIN block_properties bp ON bp.block_id = t.block_id AND bp.key = 'project' WHERE t.state IN ('TODO', 'DOING') ORDER BY bp.value, t.deadline_date}}
+- ## TODOs grouped by priority
+- {{query SELECT bp.value as priority, b.content, t.state, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id LEFT JOIN block_properties bp ON bp.block_id = t.block_id AND bp.key = 'priority' WHERE t.state IN ('TODO', 'DOING') ORDER BY CASE bp.value WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END}}
+- ## All books (pages with type=book)
+- {{query SELECT pp_title.value as title, pp_author.value as author, pp_year.value as year, pp_rating.value as rating, pp_status.value as status FROM page_properties pp_title JOIN page_properties pp_author ON pp_author.page_id = pp_title.page_id AND pp_author.key = 'author' LEFT JOIN page_properties pp_year ON pp_year.page_id = pp_title.page_id AND pp_year.key = 'year' LEFT JOIN page_properties pp_rating ON pp_rating.page_id = pp_title.page_id AND pp_rating.key = 'rating' LEFT JOIN page_properties pp_status ON pp_status.page_id = pp_title.page_id AND pp_status.key = 'status' WHERE pp_title.key = 'title' AND pp_title.page_id IN (SELECT page_id FROM page_properties WHERE key = 'type' AND value = 'book') ORDER BY pp_author.value}}
+- ## Books by a specific author
+- {{query SELECT pp_title.value as title, pp_year.value as year, pp_rating.value as rating FROM page_properties pp_title LEFT JOIN page_properties pp_year ON pp_year.page_id = pp_title.page_id AND pp_year.key = 'year' LEFT JOIN page_properties pp_rating ON pp_rating.page_id = pp_title.page_id AND pp_rating.key = 'rating' WHERE pp_title.key = 'title' AND pp_title.page_id IN (SELECT page_id FROM page_properties WHERE key = 'author' AND value = 'J.R.R. Tolkien')}}
+- ## All pages with a specific property
+- {{query SELECT p.title, pp.value as genre FROM pages p JOIN page_properties pp ON pp.page_id = p.id WHERE pp.key = 'genre' ORDER BY pp.value}}
+- ## Recently completed tasks (last 7 days)
+- {{query SELECT b.content, bp.value as completed, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id LEFT JOIN block_properties bp ON bp.block_id = t.block_id AND bp.key = 'completed' WHERE t.state = 'DONE' AND t.updated_at >= days_ago(7) ORDER BY t.updated_at DESC}}
+- ## Tasks by assigned person
+- {{query SELECT bp_assigned.value as assigned, b.content, t.state, t.deadline_date FROM tasks t JOIN blocks b ON b.id = t.block_id LEFT JOIN block_properties bp_assigned ON bp_assigned.block_id = t.block_id AND bp_assigned.key = 'assigned' WHERE t.state IN ('TODO', 'DOING') ORDER BY bp_assigned.value, t.deadline_date}}
+- ## Property discovery - see all available keys
+- {{query SELECT key, COUNT(*) as usage_count FROM block_properties GROUP BY key ORDER BY usage_count DESC}}
+- ## Page property discovery
+- {{query SELECT key, COUNT(*) as usage_count FROM page_properties GROUP BY key ORDER BY usage_count DESC}}
+- ## All distinct values for a property (e.g., 'category')
+- {{query SELECT DISTINCT value, COUNT(*) as count FROM block_properties WHERE key = 'category' GROUP BY value ORDER BY count DESC}}
+- ## Tasks scheduled for today
+- {{query SELECT b.content, t.state, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id WHERE t.scheduled_date = date('now') ORDER BY t.state}}
+- ## Overdue tasks
+- {{query SELECT b.content, t.deadline_date, t.state, p.title as page FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id WHERE t.state IN ('TODO', 'DOING') AND t.deadline_date < date('now') ORDER BY t.deadline_date}}
+- ---
+- # Custom SQL functions available
+  - `days_ago(N)` - returns timestamp N days in the past (for updated_at/created_at comparisons)
+  - `hours_ago(N)` - returns timestamp N hours in the past
+  - `now_ms()` - current time in milliseconds
+  - `date('now')` - today's date (SQLite built-in)
+  - `date('now', '+7 days')` - 7 days from now

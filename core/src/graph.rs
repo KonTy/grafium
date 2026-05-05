@@ -79,10 +79,13 @@ impl Graph {
 
     /// Full re-index: scan all .md files and rebuild the SQLite index.
     pub fn reindex_all(&self) -> Result<()> {
+        // Migrate legacy %2F-encoded files to folder hierarchy
+        let _ = self.migrate_percent_encoded_to_folders();
+
         // Clear existing index
         self.db.clear_all()?;
 
-        // Index pages/ directory
+        // Index pages/ directory (recursive)
         self.index_directory(&self.pages_dir)?;
         // Index journals/ directory
         self.index_directory(&self.journals_dir)?;
@@ -91,11 +94,27 @@ impl Graph {
     }
 
     fn index_directory(&self, dir: &Path) -> Result<()> {
-        let entries = fs::read_dir(dir)?;
+        self.index_directory_recursive(dir)
+    }
+
+    fn index_directory_recursive(&self, dir: &Path) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(()),
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if path.is_dir() {
+                // Skip hidden directories (e.g. .logseq)
+                if path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.starts_with('.'))
+                {
+                    continue;
+                }
+                self.index_directory_recursive(&path)?;
+            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 self.index_file(&path)?;
             }
         }
@@ -113,8 +132,18 @@ impl Graph {
         let is_journal = path.starts_with(&self.journals_dir);
         let parsed = parser::parse_page(&content, filename);
 
+        // Derive title from relative path within pages/ or journals/ dir
+        // e.g. pages/Books/MyCoolBook/Chapter1.md → "Books/MyCoolBook/Chapter1"
         let title = parsed.title.unwrap_or_else(|| {
-            filename.trim_end_matches(".md").replace('%', " ").to_string()
+            let base_dir = if is_journal { &self.journals_dir } else { &self.pages_dir };
+            if let Ok(rel) = path.strip_prefix(base_dir) {
+                let rel_str = rel.to_string_lossy();
+                let without_ext = rel_str.trim_end_matches(".md");
+                // Also handle legacy %2F encoding
+                without_ext.replace("%2F", "/").replace('%', " ")
+            } else {
+                filename.trim_end_matches(".md").replace('%', " ").to_string()
+            }
         });
 
         // Compute relative path from root_dir
@@ -125,6 +154,11 @@ impl Graph {
 
         // Upsert the page
         let page = self.db.upsert_page(&title, is_journal, Some(&rel_path), &parsed.properties)?;
+
+        // Sync normalized page properties
+        if parsed.properties.as_object().map_or(false, |o| !o.is_empty()) {
+            self.db.sync_page_properties(&page.id, &parsed.properties)?;
+        }
 
         // Delete old blocks for this page, then insert fresh
         self.db.delete_blocks_for_page(&page.id)?;
@@ -153,6 +187,11 @@ impl Graph {
                 pb.block_type.clone(),
                 &pb.properties,
             )?;
+
+            // Sync normalized properties
+            if pb.properties.as_object().map_or(false, |o| !o.is_empty()) {
+                self.db.sync_block_properties(&block_id, &pb.properties)?;
+            }
 
             // Insert tasks if detected
             if let Some(ref state) = pb.task_state {
@@ -189,14 +228,22 @@ impl Graph {
     // ─── CRUD operations (file-first, then index) ───────────────────────────────
 
     /// Create a new page: creates .md file, then indexes it.
+    /// For hierarchical titles like "Books/MyCoolBook/Chapter1",
+    /// creates pages/Books/MyCoolBook/Chapter1.md (mkdir -p for parents).
     pub fn create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
-        let (dir, filename) = if is_journal {
-            (&self.journals_dir, format!("{}.md", title.replace('/', "_")))
+        let file_path = if is_journal {
+            let filename = format!("{}.md", title.replace('/', "_"));
+            self.journals_dir.join(&filename)
         } else {
-            (&self.pages_dir, format!("{}.md", title.replace('/', "%2F")))
+            // Use folder hierarchy: "Books/MyCoolBook/Chapter1" → pages/Books/MyCoolBook/Chapter1.md
+            let rel_path = format!("{}.md", title);
+            let full_path = self.pages_dir.join(&rel_path);
+            // Create parent directories
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            full_path
         };
-
-        let file_path = dir.join(&filename);
 
         // Create initial .md content (empty page with just a bullet)
         let initial_content = format!("- \n");
@@ -430,15 +477,60 @@ impl Graph {
 
     // ─── Internal helpers ────────────────────────────────────────────────────────
 
+    /// Migrate legacy %2F-encoded flat files to folder hierarchy.
+    /// e.g. pages/Books%2FMyCoolBook%2FChapter1.md → pages/Books/MyCoolBook/Chapter1.md
+    /// Safe to call multiple times (idempotent).
+    pub fn migrate_percent_encoded_to_folders(&self) -> Result<u32> {
+        let mut count = 0u32;
+        let entries: Vec<_> = fs::read_dir(&self.pages_dir)?
+            .flatten()
+            .filter(|e| {
+                e.path().is_file()
+                    && e.file_name().to_string_lossy().contains("%2F")
+            })
+            .collect();
+
+        for entry in entries {
+            let old_path = entry.path();
+            let old_name = old_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Decode: "Books%2FMyCoolBook%2FChapter1.md" → "Books/MyCoolBook/Chapter1.md"
+            let new_rel = old_name.replace("%2F", "/");
+            let new_path = self.pages_dir.join(&new_rel);
+
+            // Create parent directories
+            if let Some(parent) = new_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // Move the file
+            fs::rename(&old_path, &new_path)?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
     /// Serialize all blocks for a page and write the .md file.
     fn write_page_to_disk(&self, page: &Page) -> Result<()> {
         let file_path = match &page.file_path {
             Some(fp) => self.root_dir.join(fp),
             None => {
-                // Generate a path if none exists
-                let dir = if page.is_journal { &self.journals_dir } else { &self.pages_dir };
-                let filename = format!("{}.md", page.title.replace('/', "%2F"));
-                let path = dir.join(&filename);
+                // Generate a path if none exists — use folder hierarchy
+                let path = if page.is_journal {
+                    let filename = format!("{}.md", page.title.replace('/', "_"));
+                    self.journals_dir.join(&filename)
+                } else {
+                    let rel_path = format!("{}.md", page.title);
+                    let full_path = self.pages_dir.join(&rel_path);
+                    if let Some(parent) = full_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    full_path
+                };
                 // Update the page record with the file path
                 let rel = path.strip_prefix(&self.root_dir)
                     .unwrap_or(&path)

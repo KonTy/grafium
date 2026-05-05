@@ -437,6 +437,7 @@
             ...historyKeymap,
             indentWithTab,
           ]),
+          EditorView.lineWrapping,
           EditorView.theme({
             "&": {
               fontSize: "15px",
@@ -950,14 +951,18 @@
   .block-content {
     flex: 1;
     min-height: 28px;
+    min-width: 0;
     display: flex;
     align-items: flex-start;
     cursor: text;
     line-height: 1.6;
+    overflow: hidden;
   }
 
   .editor-wrapper {
     width: 100%;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .rendered-content {

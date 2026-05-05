@@ -60,10 +60,9 @@ pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
         }
     }
 
-    // If no title property, derive from filename
-    if page_title.is_none() {
-        page_title = Some(title_from_filename(filename));
-    }
+    // If no title property found, leave it as None.
+    // The caller (index_file) will derive the title from the file's relative path,
+    // which supports hierarchical folder structures like Books/MyCoolBook/Chapter1.
 
     // Parse blocks (Logseq uses "- " prefix with indentation)
     while i < lines.len() {
@@ -358,12 +357,6 @@ fn is_journal_filename(filename: &str) -> bool {
     // Match patterns like 2024_01_01 or 2024-01-01
     let re = Regex::new(r"^\d{4}[-_]\d{2}[-_]\d{2}$").unwrap();
     re.is_match(name)
-}
-
-fn title_from_filename(filename: &str) -> String {
-    let name = filename.trim_end_matches(".md");
-    // Replace URL-encoded characters
-    name.replace("%2F", "/").replace('_', " ")
 }
 
 #[cfg(test)]

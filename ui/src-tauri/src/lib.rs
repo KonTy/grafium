@@ -516,6 +516,8 @@ pub fn run() {
             commands::favorites::record_page_open,
             commands::favorites::list_recent_pages,
             commands::query::run_query,
+            commands::query::get_property_keys,
+            commands::query::get_property_values,
             commands::graph::get_graph_info,
             commands::graph::list_graphs,
             commands::graph::open_graph,

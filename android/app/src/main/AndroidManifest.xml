@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Read/write the graph files in Documents/ -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Grafium"
+        android:supportsRtl="true">
+
+        <!-- Voice command receiver: SilentPulse discovers this via ASSISTANT_CAPABLE -->
+        <receiver
+            android:name=".VoiceCommandReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.silentpulse.action.ASSISTANT_CAPABLE" />
+                <action android:name="com.silentpulse.action.EXECUTE_COMMAND" />
+                <action android:name="com.silentpulse.action.REQUEST_SCHEMA" />
+            </intent-filter>
+            <!-- Command prefixes: if transcript starts with any of these, route here directly -->
+            <meta-data
+                android:name="com.silentpulse.command_prefixes"
+                android:value="journal,note,log,jot,todo,to do,task,add task,add todo,add note,read journal,read tasks,read my journal,read my tasks,read my to-do,read my todos,remind me to" />
+        </receiver>
+
+        <!-- Minimal activity to configure active graph -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Grafium">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+    <!-- Allow SilentPulse to discover us -->
+    <queries>
+        <package android:name="com.silentpulse.messenger" />
+    </queries>
+
+</manifest>

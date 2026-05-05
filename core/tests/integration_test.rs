@@ -194,3 +194,64 @@ fn test_list_pages_case_insensitive_dedup() {
     assert!(!lower_titles.contains(&"2026-01-01".to_string()),
         "journal pages must not appear in list_pages");
 }
+
+#[test]
+fn test_properties_normalized() {
+    let db = Database::in_memory().unwrap();
+
+    // Create page with properties
+    let page = db.create_page("Dune", false).unwrap();
+    let props = serde_json::json!({
+        "author": "Frank Herbert",
+        "type": "book",
+        "year": "1965",
+        "rating": "5"
+    });
+    db.update_page(&page.id, None, Some(&props)).unwrap();
+    db.sync_page_properties(&page.id, &props).unwrap();
+
+    // Create block with properties
+    let block = db.create_block(
+        &page.id, None, 0, "TODO Read next chapter",
+        BlockType::Text, serde_json::json!({"priority": "high", "deadline": "2026-06-01"})
+    ).unwrap();
+    let block_props = serde_json::json!({"priority": "high", "deadline": "2026-06-01"});
+    db.sync_block_properties(&block.id, &block_props).unwrap();
+
+    // Query page properties
+    let keys = db.get_property_keys().unwrap();
+    assert!(keys.len() >= 4, "expected at least 4 property keys, got {:?}", keys);
+
+    // Query page property values
+    let authors = db.get_property_values("author", "page").unwrap();
+    assert_eq!(authors, vec!["Frank Herbert"]);
+
+    // Query block property values
+    let priorities = db.get_property_values("priority", "block").unwrap();
+    assert_eq!(priorities, vec!["high"]);
+
+    // Test raw query using normalized tables
+    let results = db.run_raw_select(
+        "SELECT pp.value FROM page_properties pp WHERE pp.key = 'author'"
+    ).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0][0].1, serde_json::Value::String("Frank Herbert".to_string()));
+}
+
+#[test]
+fn test_backfill_properties() {
+    let db = Database::in_memory().unwrap();
+
+    // Create page with properties in JSON blob (simulating pre-migration data)
+    let page = db.create_page("Old Page", false).unwrap();
+    let props = serde_json::json!({"genre": "fiction", "status": "read"});
+    db.update_page(&page.id, None, Some(&props)).unwrap();
+
+    // Backfill
+    let count = db.backfill_properties().unwrap();
+    assert_eq!(count, 2);
+
+    // Verify normalized data
+    let genres = db.get_property_values("genre", "page").unwrap();
+    assert_eq!(genres, vec!["fiction"]);
+}

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use crate::error::Result;
 use super::backend::{SyncBackend, compute_hash, hash_file};
+use super::merge;
 use super::state::SyncState;
 
 /// Result of a sync operation.
@@ -15,6 +16,8 @@ pub struct SyncResult {
     pub pulled: Vec<String>,
     /// Files where conflicts were detected (both sides changed)
     pub conflicts: Vec<String>,
+    /// Files that were auto-merged (both sides changed, no overlapping edits)
+    pub merged: Vec<String>,
     /// Files deleted from remote (local deletion propagated)
     pub deleted_remote: Vec<String>,
     /// Files deleted locally (remote deletion propagated)
@@ -29,6 +32,7 @@ impl SyncResult {
             pushed: Vec::new(),
             pulled: Vec::new(),
             conflicts: Vec::new(),
+            merged: Vec::new(),
             deleted_remote: Vec::new(),
             deleted_local: Vec::new(),
             errors: Vec::new(),
@@ -39,6 +43,7 @@ impl SyncResult {
         self.pushed.is_empty()
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
+            && self.merged.is_empty()
             && self.deleted_remote.is_empty()
             && self.deleted_local.is_empty()
             && self.errors.is_empty()
@@ -46,9 +51,10 @@ impl SyncResult {
 
     pub fn summary(&self) -> String {
         format!(
-            "↑{} ↓{} ⚡{} 🗑{}+{} ❌{}",
+            "↑{} ↓{} 🔀{} ⚡{} 🗑{}+{} ❌{}",
             self.pushed.len(),
             self.pulled.len(),
+            self.merged.len(),
             self.conflicts.len(),
             self.deleted_remote.len(),
             self.deleted_local.len(),
@@ -64,12 +70,34 @@ pub struct SyncEngine {
     local_root: PathBuf,
     /// Path to the sync state file
     state_path: PathBuf,
+    /// Directory for storing base content (common ancestor for 3-way merge)
+    bases_dir: PathBuf,
 }
 
 impl SyncEngine {
     pub fn new(local_root: PathBuf) -> Self {
         let state_path = local_root.join(".logseq").join("sync-state.json");
-        Self { local_root, state_path }
+        let bases_dir = local_root.join(".logseq").join("sync-bases");
+        Self { local_root, state_path, bases_dir }
+    }
+
+    /// Path to the cached base content for a given relative path.
+    fn base_path(&self, rel_path: &str) -> PathBuf {
+        self.bases_dir.join(rel_path)
+    }
+
+    /// Save a copy of file content as the merge base for future syncs.
+    fn save_base(&self, rel_path: &str, content: &[u8]) {
+        let path = self.base_path(rel_path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, content);
+    }
+
+    /// Load the cached base content, if available.
+    fn load_base(&self, rel_path: &str) -> Option<Vec<u8>> {
+        fs::read(self.base_path(rel_path)).ok()
     }
 
     /// Run a full bidirectional sync against the given backend.
@@ -199,7 +227,11 @@ impl SyncEngine {
             (true, true) => {
                 // Both changed — conflict!
                 if local_hash == &remote_hash {
-                    // Same content — no real conflict, just update state
+                    // Same content — no real conflict, just update state + base
+                    let local_path = self.local_root.join(rel_path);
+                    if let Ok(content) = fs::read(&local_path) {
+                        self.save_base(rel_path, &content);
+                    }
                     state.record_sync(rel_path, local_hash);
                 } else {
                     self.handle_conflict(backend, rel_path, state, result);
@@ -227,7 +259,11 @@ impl SyncEngine {
         };
 
         if local_hash == &remote_hash {
-            // Identical — just record in state
+            // Identical — record in state + save base for future merges
+            let local_path = self.local_root.join(rel_path);
+            if let Ok(content) = fs::read(&local_path) {
+                self.save_base(rel_path, &content);
+            }
             state.record_sync(rel_path, local_hash);
         } else {
             // Different content — conflict
@@ -256,6 +292,7 @@ impl SyncEngine {
         if let Err(e) = backend.write_file(rel_path, &content) {
             result.errors.push(format!("Push {}: {}", rel_path, e));
         } else {
+            self.save_base(rel_path, &content);
             state.record_sync(rel_path, &hash);
             result.pushed.push(rel_path.to_string());
         }
@@ -286,12 +323,24 @@ impl SyncEngine {
         if let Err(e) = fs::write(&local_path, &content) {
             result.errors.push(format!("Write local {}: {}", rel_path, e));
         } else {
+            self.save_base(rel_path, &content);
             state.record_sync(rel_path, &hash);
             result.pulled.push(rel_path.to_string());
         }
     }
 
-    /// Handle a conflict: keep local version, save remote as .conflict.md
+    /// Handle a conflict using 3-way merge with conflict markers.
+    ///
+    /// If a cached base (common ancestor) is available, performs a true 3-way
+    /// merge: non-overlapping changes are auto-merged, overlapping edits get
+    /// Git-style conflict markers (`<<<<<<< local` / `=======` / `>>>>>>> remote`).
+    ///
+    /// If no base is cached (first sync), falls back to 2-way merge (all
+    /// differing sections get conflict markers).
+    ///
+    /// The merged file (possibly with markers) is written to both local and
+    /// remote so every device sees the same state. A `.conflict_*.md` backup
+    /// of the remote version is still created so no data is ever lost.
     fn handle_conflict(
         &self,
         backend: &dyn SyncBackend,
@@ -299,50 +348,69 @@ impl SyncEngine {
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        // Read the remote version
+        // Read both versions
+        let local_path = self.local_root.join(rel_path);
+        let local_content = match fs::read(&local_path) {
+            Ok(c) => c,
+            Err(e) => {
+                result.errors.push(format!("Read local for conflict {}: {}", rel_path, e));
+                return;
+            }
+        };
         let remote_content = match backend.read_file(rel_path) {
             Ok(c) => c,
             Err(e) => {
-                result.errors.push(format!("Read conflict remote {}: {}", rel_path, e));
+                result.errors.push(format!("Read remote for conflict {}: {}", rel_path, e));
                 return;
             }
         };
 
-        // Save remote as .conflict.md
+        let local_text = String::from_utf8_lossy(&local_content);
+        let remote_text = String::from_utf8_lossy(&remote_content);
+
+        // Attempt 3-way merge if we have a cached base
+        let merge_result = if let Some(base_content) = self.load_base(rel_path) {
+            let base_text = String::from_utf8_lossy(&base_content);
+            merge::three_way_merge(&base_text, &local_text, &remote_text)
+        } else {
+            // No base available — 2-way merge
+            merge::two_way_merge(&local_text, &remote_text)
+        };
+
+        // Always save a .conflict backup of the remote version (no data loss)
         let conflict_path = make_conflict_path(rel_path);
         let local_conflict_path = self.local_root.join(&conflict_path);
         if let Some(parent) = local_conflict_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-
         if let Err(e) = fs::write(&local_conflict_path, &remote_content) {
-            result.errors.push(format!("Write conflict {}: {}", conflict_path, e));
+            result.errors.push(format!("Write conflict backup {}: {}", conflict_path, e));
+        }
+        // Push conflict backup to remote too so both devices see it
+        if let Err(e) = backend.write_file(&conflict_path, &remote_content) {
+            result.errors.push(format!("Push conflict backup {}: {}", conflict_path, e));
+        }
+
+        // Write the merged content to local and remote
+        let merged_bytes = merge_result.content.as_bytes();
+        let merged_hash = compute_hash(merged_bytes);
+
+        if let Err(e) = fs::write(&local_path, merged_bytes) {
+            result.errors.push(format!("Write merged local {}: {}", rel_path, e));
             return;
         }
+        if let Err(e) = backend.write_file(rel_path, merged_bytes) {
+            result.errors.push(format!("Push merged {}: {}", rel_path, e));
+        }
 
-        // Push local version to remote (local wins for the main file)
-        let local_path = self.local_root.join(rel_path);
-        let local_content = match fs::read(&local_path) {
-            Ok(c) => c,
-            Err(e) => {
-                result.errors.push(format!("Read local for conflict push {}: {}", rel_path, e));
-                return;
-            }
-        };
-        let local_hash = compute_hash(&local_content);
+        self.save_base(rel_path, merged_bytes);
+        state.record_sync(rel_path, &merged_hash);
 
-        if let Err(e) = backend.write_file(rel_path, &local_content) {
-            result.errors.push(format!("Push after conflict {}: {}", rel_path, e));
+        if merge_result.has_conflicts {
+            result.conflicts.push(rel_path.to_string());
         } else {
-            state.record_sync(rel_path, &local_hash);
+            result.merged.push(rel_path.to_string());
         }
-
-        // Also push the conflict file to remote so both devices see it
-        if let Err(e) = backend.write_file(&conflict_path, &remote_content) {
-            result.errors.push(format!("Push conflict file {}: {}", conflict_path, e));
-        }
-
-        result.conflicts.push(rel_path.to_string());
     }
 
     /// Collect all local .md files under pages/ and journals/ with their hashes.
@@ -366,8 +434,8 @@ impl SyncEngine {
             if path.is_dir() {
                 self.collect_dir_hashes(&path, base, out)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                // Skip .conflict.md files
-                if path.to_string_lossy().contains(".conflict.") {
+                // Skip .conflict backup files (e.g. foo.conflict_20260504_120000.md)
+                if path.to_string_lossy().contains(".conflict_") {
                     continue;
                 }
                 let rel = path.strip_prefix(base)

@@ -1,0 +1,213 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:2:1-49:12
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:2:1-49:12
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:2:1-49:12
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:2:1-49:12
+MERGED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:17:1-30:12
+MERGED from [androidx.core:core-ktx:1.13.1] /home/blin/.gradle/caches/8.9/transforms/646291824da8c6b4e3aa7da1dc574f41/transformed/core-ktx-1.13.1/AndroidManifest.xml:2:1-7:12
+MERGED from [androidx.annotation:annotation-experimental:1.4.0] /home/blin/.gradle/caches/8.9/transforms/b48bae19ebacd195e0ced0ba8427e9d3/transformed/annotation-experimental-1.4.0/AndroidManifest.xml:2:1-7:12
+MERGED from [androidx.lifecycle:lifecycle-runtime:2.6.2] /home/blin/.gradle/caches/8.9/transforms/2b6cda71f2c63e15028aecb216a7e1e3/transformed/lifecycle-runtime-2.6.2/AndroidManifest.xml:2:1-7:12
+MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /home/blin/.gradle/caches/8.9/transforms/fd3c08c754db485d3bfa1322bd107a61/transformed/versionedparcelable-1.1.1/AndroidManifest.xml:17:1-27:12
+MERGED from [androidx.interpolator:interpolator:1.0.0] /home/blin/.gradle/caches/8.9/transforms/0195a668f2992e0f000aa651e7545f49/transformed/interpolator-1.0.0/AndroidManifest.xml:17:1-22:12
+MERGED from [androidx.arch.core:core-runtime:2.2.0] /home/blin/.gradle/caches/8.9/transforms/7de4202b32b7b584b96361a782a8aa12/transformed/core-runtime-2.2.0/AndroidManifest.xml:17:1-22:12
+MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:17:1-55:12
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:17:1-33:12
+MERGED from [androidx.tracing:tracing:1.0.0] /home/blin/.gradle/caches/8.9/transforms/18363e5a107bdc05eb84c99f0dc0db62/transformed/tracing-1.0.0/AndroidManifest.xml:17:1-24:12
+	package
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+	android:versionName
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+	android:versionCode
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+	xmlns:android
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:2:11-69
+uses-permission#android.permission.READ_EXTERNAL_STORAGE
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:5:5-6:38
+	android:maxSdkVersion
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:6:9-35
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:5:22-77
+uses-permission#android.permission.WRITE_EXTERNAL_STORAGE
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:7:5-8:38
+	android:maxSdkVersion
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:8:9-35
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:7:22-78
+uses-permission#android.permission.MANAGE_EXTERNAL_STORAGE
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:9:5-82
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:9:22-79
+application
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:11:5-42:19
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:11:5-42:19
+MERGED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:28:5-89
+MERGED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:28:5-89
+MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /home/blin/.gradle/caches/8.9/transforms/fd3c08c754db485d3bfa1322bd107a61/transformed/versionedparcelable-1.1.1/AndroidManifest.xml:24:5-25:19
+MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /home/blin/.gradle/caches/8.9/transforms/fd3c08c754db485d3bfa1322bd107a61/transformed/versionedparcelable-1.1.1/AndroidManifest.xml:24:5-25:19
+MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:23:5-53:19
+MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:23:5-53:19
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:25:5-31:19
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:25:5-31:19
+	android:extractNativeLibs
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+	android:appComponentFactory
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:28:18-86
+	android:supportsRtl
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:14:9-35
+	android:label
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:13:9-32
+	android:allowBackup
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:12:9-36
+receiver#com.grafium.companion.VoiceCommandReceiver
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:17:9-29:20
+	android:exported
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:19:13-36
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:18:13-49
+intent-filter#action:name:com.silentpulse.action.ASSISTANT_CAPABLE+action:name:com.silentpulse.action.EXECUTE_COMMAND+action:name:com.silentpulse.action.REQUEST_SCHEMA
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:20:13-24:29
+action#com.silentpulse.action.ASSISTANT_CAPABLE
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:21:17-83
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:21:25-80
+action#com.silentpulse.action.EXECUTE_COMMAND
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:22:17-81
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:22:25-78
+action#com.silentpulse.action.REQUEST_SCHEMA
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:23:17-80
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:23:25-77
+meta-data#com.silentpulse.command_prefixes
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:26:13-28:194
+	android:value
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:28:17-191
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:27:17-64
+activity#com.grafium.companion.MainActivity
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:32:9-40:20
+	android:label
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:35:13-36
+	android:exported
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:34:13-36
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:33:13-41
+intent-filter#action:name:android.intent.action.MAIN+category:name:android.intent.category.LAUNCHER
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:36:13-39:29
+action#android.intent.action.MAIN
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:37:17-69
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:37:25-66
+category#android.intent.category.LAUNCHER
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:38:17-77
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:38:27-74
+queries
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:45:5-47:15
+package#com.silentpulse.messenger
+ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:46:9-61
+	android:name
+		ADDED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml:46:18-58
+uses-sdk
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+MERGED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:20:5-44
+MERGED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:20:5-44
+MERGED from [androidx.core:core-ktx:1.13.1] /home/blin/.gradle/caches/8.9/transforms/646291824da8c6b4e3aa7da1dc574f41/transformed/core-ktx-1.13.1/AndroidManifest.xml:5:5-44
+MERGED from [androidx.core:core-ktx:1.13.1] /home/blin/.gradle/caches/8.9/transforms/646291824da8c6b4e3aa7da1dc574f41/transformed/core-ktx-1.13.1/AndroidManifest.xml:5:5-44
+MERGED from [androidx.annotation:annotation-experimental:1.4.0] /home/blin/.gradle/caches/8.9/transforms/b48bae19ebacd195e0ced0ba8427e9d3/transformed/annotation-experimental-1.4.0/AndroidManifest.xml:5:5-44
+MERGED from [androidx.annotation:annotation-experimental:1.4.0] /home/blin/.gradle/caches/8.9/transforms/b48bae19ebacd195e0ced0ba8427e9d3/transformed/annotation-experimental-1.4.0/AndroidManifest.xml:5:5-44
+MERGED from [androidx.lifecycle:lifecycle-runtime:2.6.2] /home/blin/.gradle/caches/8.9/transforms/2b6cda71f2c63e15028aecb216a7e1e3/transformed/lifecycle-runtime-2.6.2/AndroidManifest.xml:5:5-44
+MERGED from [androidx.lifecycle:lifecycle-runtime:2.6.2] /home/blin/.gradle/caches/8.9/transforms/2b6cda71f2c63e15028aecb216a7e1e3/transformed/lifecycle-runtime-2.6.2/AndroidManifest.xml:5:5-44
+MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /home/blin/.gradle/caches/8.9/transforms/fd3c08c754db485d3bfa1322bd107a61/transformed/versionedparcelable-1.1.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /home/blin/.gradle/caches/8.9/transforms/fd3c08c754db485d3bfa1322bd107a61/transformed/versionedparcelable-1.1.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.interpolator:interpolator:1.0.0] /home/blin/.gradle/caches/8.9/transforms/0195a668f2992e0f000aa651e7545f49/transformed/interpolator-1.0.0/AndroidManifest.xml:20:5-44
+MERGED from [androidx.interpolator:interpolator:1.0.0] /home/blin/.gradle/caches/8.9/transforms/0195a668f2992e0f000aa651e7545f49/transformed/interpolator-1.0.0/AndroidManifest.xml:20:5-44
+MERGED from [androidx.arch.core:core-runtime:2.2.0] /home/blin/.gradle/caches/8.9/transforms/7de4202b32b7b584b96361a782a8aa12/transformed/core-runtime-2.2.0/AndroidManifest.xml:20:5-44
+MERGED from [androidx.arch.core:core-runtime:2.2.0] /home/blin/.gradle/caches/8.9/transforms/7de4202b32b7b584b96361a782a8aa12/transformed/core-runtime-2.2.0/AndroidManifest.xml:20:5-44
+MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:21:5-44
+MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:21:5-44
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:21:5-23:41
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:21:5-23:41
+MERGED from [androidx.tracing:tracing:1.0.0] /home/blin/.gradle/caches/8.9/transforms/18363e5a107bdc05eb84c99f0dc0db62/transformed/tracing-1.0.0/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.tracing:tracing:1.0.0] /home/blin/.gradle/caches/8.9/transforms/18363e5a107bdc05eb84c99f0dc0db62/transformed/tracing-1.0.0/AndroidManifest.xml:20:5-22:41
+	android:targetSdkVersion
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /home/blin/Documents/source/grafium/android/app/src/main/AndroidManifest.xml
+permission#${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
+	android:protectionLevel
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
+	android:name
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
+permission#com.grafium.companion.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
+	android:protectionLevel
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
+	android:name
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
+uses-permission#${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
+	android:name
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
+uses-permission#com.grafium.companion.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
+	android:name
+		ADDED from [androidx.core:core:1.13.1] /home/blin/.gradle/caches/8.9/transforms/c7d9af68416eeecf8a4a6ac0b77be855/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
+provider#androidx.startup.InitializationProvider
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:24:9-32:20
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:26:9-30:34
+MERGED from [androidx.startup:startup-runtime:1.1.1] /home/blin/.gradle/caches/8.9/transforms/310728483b1ffcc4b83ed17145c8c204/transformed/startup-runtime-1.1.1/AndroidManifest.xml:26:9-30:34
+	tools:node
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:28:13-31
+	android:authorities
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:26:13-68
+	android:exported
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:27:13-37
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:25:13-67
+meta-data#androidx.profileinstaller.ProfileInstallerInitializer
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:29:13-31:52
+	android:value
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:31:17-49
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:30:17-85
+receiver#androidx.profileinstaller.ProfileInstallReceiver
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:34:9-52:20
+	android:enabled
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:37:13-35
+	android:exported
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:38:13-36
+	android:permission
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:39:13-57
+	android:directBootAware
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:36:13-44
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:35:13-76
+intent-filter#action:name:androidx.profileinstaller.action.INSTALL_PROFILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:40:13-42:29
+action#androidx.profileinstaller.action.INSTALL_PROFILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:41:17-91
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:41:25-88
+intent-filter#action:name:androidx.profileinstaller.action.SKIP_FILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:43:13-45:29
+action#androidx.profileinstaller.action.SKIP_FILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:44:17-85
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:44:25-82
+intent-filter#action:name:androidx.profileinstaller.action.SAVE_PROFILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:46:13-48:29
+action#androidx.profileinstaller.action.SAVE_PROFILE
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:47:17-88
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:47:25-85
+intent-filter#action:name:androidx.profileinstaller.action.BENCHMARK_OPERATION
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:49:13-51:29
+action#androidx.profileinstaller.action.BENCHMARK_OPERATION
+ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:50:17-95
+	android:name
+		ADDED from [androidx.profileinstaller:profileinstaller:1.3.0] /home/blin/.gradle/caches/8.9/transforms/68502a53e3187b71cbf963e02c0cc854/transformed/profileinstaller-1.3.0/AndroidManifest.xml:50:25-92
