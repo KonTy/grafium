@@ -5,6 +5,7 @@
   import JournalView from "./components/JournalView.svelte";
   import AllPages from "./components/AllPages.svelte";
   import Statistics from "./components/Statistics.svelte";
+  import ChatbotView from "./components/ChatbotView.svelte";
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
@@ -39,7 +40,7 @@
     return null;
   }
 
-  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "settings";
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings";
 
   let currentView: View = $state("page");
   let currentPage: Page | null = $state(null);
@@ -98,6 +99,9 @@
     }
     if (currentView === "settings") {
       return { kind: "settings", scrollTop: currentScrollTop() };
+    }
+    if (currentView === "chat") {
+      return { kind: "chat", scrollTop: currentScrollTop() };
     }
     return null;
   }
@@ -229,6 +233,16 @@
 
     if (entry.kind === "settings") {
       currentView = "settings";
+      currentPage = null;
+      loading = false;
+      error = null;
+      await tick();
+      restoreHistoryState(entry);
+      return;
+    }
+
+    if (entry.kind === "chat") {
+      currentView = "chat";
       currentPage = null;
       loading = false;
       error = null;
@@ -405,16 +419,28 @@
     };
   });
 
-  // Navigate to today's journal on start (only once)
+  // Navigate to tutorial welcome page on start (only once)
   let hasInitialized = false;
   $effect(() => {
     if (!hasInitialized) {
       hasInitialized = true;
-      navigateToJournal();
+      navigateToStartupPage();
       // Initialize theme
       initTheme();
     }
   });
+
+  async function navigateToStartupPage() {
+    try {
+      // Only open Welcome when it already exists (tutorial graph).
+      await getPage({ title: "Welcome To Grafium" });
+      await navigateToPage("Welcome To Grafium");
+      return;
+    } catch {
+      // Fallback for non-tutorial/custom graphs.
+      await navigateToJournal();
+    }
+  }
 
   async function initTheme() {
     // Register listener first — must always succeed regardless of saved theme state
@@ -519,6 +545,20 @@
       loading = false;
       if (!skipHistory) {
         pushHistoryEntry({ kind: "settings", scrollTop: 0 });
+      }
+      await tick();
+      if (restoreEntry) {
+        restoreHistoryState(restoreEntry);
+      }
+      return;
+    }
+    if (title === "__chat__") {
+      currentView = "chat";
+      currentPage = null;
+      error = null;
+      loading = false;
+      if (!skipHistory) {
+        pushHistoryEntry({ kind: "chat", scrollTop: 0 });
       }
       await tick();
       if (restoreEntry) {
@@ -635,8 +675,8 @@
           const missing = [
             !report.has_pages_dir    && "pages/",
             !report.has_journals_dir && "journals/",
-            !report.has_logseq_dir   && ".logseq/",
-            !report.has_valid_db     && ".logseq/index.db (corrupted)",
+            !report.has_metadata_dir && "metadata/",
+            !report.has_valid_db     && "metadata/index.db (corrupted)",
           ].filter(Boolean).join(", ");
           alert(
             `Not a valid Grafium graph.\n\n` +
@@ -753,6 +793,8 @@
       <AllPages onNavigate={handleNavigate} />
     {:else if currentView === "statistics"}
       <Statistics onNavigate={handleNavigate} />
+    {:else if currentView === "chat"}
+      <ChatbotView />
     {:else if currentView === "settings"}
       <Settings />
     {:else if currentView === "journal"}
@@ -811,6 +853,12 @@
         </svg>
         <span>Pages</span>
       </button>
+      <button class="bottom-nav-item" class:active={currentView === "chat"} onclick={() => handleNavigate("__chat__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+        <span>Chat</span>
+      </button>
       <button class="bottom-nav-item" onclick={() => handleNavigate("__new_page__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -847,6 +895,12 @@
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>
           <span>Settings</span>
+        </button>
+        <button class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__chat__"); }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>Chatbot</span>
         </button>
         <button class="more-menu-item" onclick={handleMobileOpenGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

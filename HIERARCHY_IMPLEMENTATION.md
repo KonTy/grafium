@@ -1,7 +1,7 @@
 ## Tag Hierarchy System - Implementation Summary
 
 ### What You Asked For
-Implement tag hierarchy like Logseq with:
+Implement tag hierarchy like Grafium with:
 - `[[test/page]]` and `[[test\page]]` syntax (both render same)
 - Automatic parent page creation when you reference hierarchical pages
 - "Hierarchy" section at bottom of pages showing parent links and children lists

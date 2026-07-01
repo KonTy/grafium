@@ -1,5 +1,5 @@
 /**
- * Dual-mode keyboard shortcut system (like Logseq / Vim).
+ * Dual-mode keyboard shortcut system (like org-style / Vim).
  *
  * - Navigation mode: active when no block is being edited.
  *   Keypresses trigger shortcuts (g j = go journal, etc.)
@@ -189,7 +189,7 @@ class KeymapManager {
 export const keymap_manager = new KeymapManager();
 
 /**
- * Register the default Logseq-style shortcuts.
+ * Register the default outline-style shortcuts.
  * Call this once at app startup, passing action callbacks.
  */
 export function registerDefaultShortcuts(actions: {

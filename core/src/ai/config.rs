@@ -59,6 +59,7 @@ pub struct ProviderConfig {
 pub enum ProviderType {
     Ollama,
     OpenAi,
+    OpenAiCompatible,
     Anthropic,
     HuggingFace,
 }
@@ -66,20 +67,29 @@ pub enum ProviderType {
 /// Local AI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
-    /// Ollama base URL.
-    pub ollama_url: String,
-    /// LLM model name (e.g., "llama3.2", "mistral").
+    /// Local provider endpoint type.
+    pub provider: ProviderType,
+    /// Base URL for endpoint-based local providers (Ollama, vLLM/OpenAI-compatible).
+    pub base_url: String,
+    /// Optional API key for endpoint-based providers.
+    pub api_key: Option<String>,
+    /// LLM model name.
     pub llm_model: String,
-    /// Embedding model name (e.g., "nomic-embed-text").
+    /// Embedding model name.
     pub embedding_model: String,
+    /// Optional local model path for embedded local runtimes.
+    pub model_path: Option<PathBuf>,
 }
 
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            ollama_url: "http://localhost:11434".to_string(),
+            provider: ProviderType::OpenAiCompatible,
+            base_url: "http://localhost:8000/v1".to_string(),
+            api_key: None,
             llm_model: "llama3.2".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
+            model_path: None,
         }
     }
 }
@@ -91,14 +101,18 @@ pub struct CloudConfig {
     pub llm_provider: ProviderType,
     /// LLM model name.
     pub llm_model: String,
-    /// API key for LLM provider.
-    pub llm_api_key: String,
+    /// API key for LLM provider (optional for self-hosted OpenAI-compatible endpoints).
+    pub llm_api_key: Option<String>,
+    /// Optional custom base URL for LLM provider.
+    pub llm_base_url: Option<String>,
     /// Which provider for embeddings (can differ from LLM).
     pub embedding_provider: ProviderType,
     /// Embedding model name.
     pub embedding_model: String,
     /// API key for embedding provider (if different).
     pub embedding_api_key: Option<String>,
+    /// Optional custom base URL for embedding provider.
+    pub embedding_base_url: Option<String>,
 }
 
 /// Embedding pipeline settings.

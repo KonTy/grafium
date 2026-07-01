@@ -12,13 +12,13 @@ fn test_validate_structure_valid_graph() {
     // Create proper graph structure
     fs::create_dir(root.join("pages")).unwrap();
     fs::create_dir(root.join("journals")).unwrap();
-    fs::create_dir(root.join(".logseq")).unwrap();
+    fs::create_dir(root.join(".grafium")).unwrap();
 
     let report = Graph::validate_structure(root);
     assert!(report.is_valid, "Valid graph should pass validation");
     assert!(report.has_pages_dir, "Should have pages dir");
     assert!(report.has_journals_dir, "Should have journals dir");
-    assert!(report.has_logseq_dir, "Should have .logseq dir");
+    assert!(report.has_metadata_dir, "Should have .grafium dir");
     assert!(report.has_valid_db, "DB missing is acceptable");
     assert!(report.not_nested_in_another_graph, "Top-level graph should not be nested");
     assert!(report.has_no_nested_graph_roots, "Graph should not contain nested roots");
@@ -33,13 +33,13 @@ fn test_validate_structure_missing_pages_dir() {
 
     // Create incomplete structure (missing pages/)
     fs::create_dir(root.join("journals")).unwrap();
-    fs::create_dir(root.join(".logseq")).unwrap();
+    fs::create_dir(root.join(".grafium")).unwrap();
 
     let report = Graph::validate_structure(root);
     assert!(!report.is_valid, "Graph without pages/ should fail");
     assert!(!report.has_pages_dir, "Should not have pages dir");
     assert!(report.has_journals_dir, "Should have journals dir");
-    assert!(report.has_logseq_dir, "Should have .logseq dir");
+    assert!(report.has_metadata_dir, "Should have .grafium dir");
     assert!(report.error_message.is_some(), "Should have error message");
     assert!(
         report.error_message.as_ref().unwrap().contains("pages/"),
@@ -55,13 +55,13 @@ fn test_validate_structure_missing_journals_dir() {
 
     // Create incomplete structure (missing journals/)
     fs::create_dir(root.join("pages")).unwrap();
-    fs::create_dir(root.join(".logseq")).unwrap();
+    fs::create_dir(root.join(".grafium")).unwrap();
 
     let report = Graph::validate_structure(root);
     assert!(!report.is_valid, "Graph without journals/ should fail");
     assert!(report.has_pages_dir, "Should have pages dir");
     assert!(!report.has_journals_dir, "Should not have journals dir");
-    assert!(report.has_logseq_dir, "Should have .logseq dir");
+    assert!(report.has_metadata_dir, "Should have .grafium dir");
     assert!(report.error_message.is_some(), "Should have error message");
     assert!(
         report.error_message.as_ref().unwrap().contains("journals/"),
@@ -69,25 +69,25 @@ fn test_validate_structure_missing_journals_dir() {
     );
 }
 
-/// Test that validation rejects a directory missing .logseq/
+/// Test that validation rejects a directory missing .grafium/
 #[test]
-fn test_validate_structure_missing_logseq_dir() {
+fn test_validate_structure_missing_metadata_dir() {
     let tmp = TempDir::new().expect("Failed to create temp dir");
     let root = tmp.path();
 
-    // Create incomplete structure (missing .logseq/)
+    // Create incomplete structure (missing .grafium/)
     fs::create_dir(root.join("pages")).unwrap();
     fs::create_dir(root.join("journals")).unwrap();
 
     let report = Graph::validate_structure(root);
-    assert!(!report.is_valid, "Graph without .logseq/ should fail");
+    assert!(!report.is_valid, "Graph without .grafium/ should fail");
     assert!(report.has_pages_dir, "Should have pages dir");
     assert!(report.has_journals_dir, "Should have journals dir");
-    assert!(!report.has_logseq_dir, "Should not have .logseq dir");
+    assert!(!report.has_metadata_dir, "Should not have .grafium dir");
     assert!(report.error_message.is_some(), "Should have error message");
     assert!(
-        report.error_message.as_ref().unwrap().contains(".logseq/"),
-        "Error should mention missing .logseq/"
+        report.error_message.as_ref().unwrap().contains(".grafium/"),
+        "Error should mention missing .grafium/"
     );
 }
 
@@ -109,8 +109,8 @@ fn test_validate_structure_multiple_missing() {
         "Error should mention missing journals/"
     );
     assert!(
-        error.contains(".logseq/"),
-        "Error should mention missing .logseq/"
+        error.contains(".grafium/"),
+        "Error should mention missing .grafium/"
     );
 }
 
@@ -121,7 +121,7 @@ fn test_validate_structure_nonexistent_path() {
     assert!(!report.is_valid, "Nonexistent path should fail");
     assert!(!report.has_pages_dir, "Nonexistent path has no pages dir");
     assert!(!report.has_journals_dir, "Nonexistent path has no journals dir");
-    assert!(!report.has_logseq_dir, "Nonexistent path has no .logseq dir");
+    assert!(!report.has_metadata_dir, "Nonexistent path has no .grafium dir");
 }
 
 /// Test that open_graph refuses to open invalid structures
@@ -132,7 +132,7 @@ fn test_open_graph_rejects_invalid_structure() {
 
     // Create incomplete structure
     fs::create_dir(root.join("pages")).unwrap();
-    // Missing journals/ and .logseq/
+    // Missing journals/ and .grafium/
 
     // validate_structure should catch this before any open operation
     let validation = Graph::validate_structure(root);
@@ -157,7 +157,7 @@ fn test_validate_structure_newly_created_graph() {
     assert!(report.is_valid, "Newly created graph should pass validation");
     assert!(report.has_pages_dir, "Created graph should have pages dir");
     assert!(report.has_journals_dir, "Created graph should have journals dir");
-    assert!(report.has_logseq_dir, "Created graph should have .logseq dir");
+    assert!(report.has_metadata_dir, "Created graph should have .grafium dir");
     assert!(report.has_valid_db, "Created graph should have valid DB");
     assert!(report.not_nested_in_another_graph, "Created graph should not be nested");
     assert!(report.has_no_nested_graph_roots, "Created graph should not contain nested roots");
@@ -173,12 +173,12 @@ fn test_validate_structure_rejects_nested_graph_root() {
     // Outer graph
     fs::create_dir_all(outer.join("pages")).unwrap();
     fs::create_dir_all(outer.join("journals")).unwrap();
-    fs::create_dir_all(outer.join(".logseq")).unwrap();
+    fs::create_dir_all(outer.join(".grafium")).unwrap();
 
     // Inner graph nested under outer/journals
     fs::create_dir_all(inner.join("pages")).unwrap();
     fs::create_dir_all(inner.join("journals")).unwrap();
-    fs::create_dir_all(inner.join(".logseq")).unwrap();
+    fs::create_dir_all(inner.join(".grafium")).unwrap();
 
     let inner_report = Graph::validate_structure(&inner);
     assert!(!inner_report.is_valid, "Nested graph root should be rejected");
@@ -199,12 +199,12 @@ fn test_validate_structure_rejects_graph_with_nested_graphs_inside() {
     // Root graph
     fs::create_dir_all(root.join("pages")).unwrap();
     fs::create_dir_all(root.join("journals")).unwrap();
-    fs::create_dir_all(root.join(".logseq")).unwrap();
+    fs::create_dir_all(root.join(".grafium")).unwrap();
 
     // Nested graph inside root/journals
     fs::create_dir_all(nested.join("pages")).unwrap();
     fs::create_dir_all(nested.join("journals")).unwrap();
-    fs::create_dir_all(nested.join(".logseq")).unwrap();
+    fs::create_dir_all(nested.join(".grafium")).unwrap();
 
     let root_report = Graph::validate_structure(&root);
     assert!(!root_report.is_valid, "Root containing nested graph should be rejected");

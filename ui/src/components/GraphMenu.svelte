@@ -61,8 +61,8 @@
           const missing = [
             !report.has_pages_dir    && "pages/",
             !report.has_journals_dir && "journals/",
-            !report.has_logseq_dir   && ".logseq/",
-            !report.has_valid_db     && ".logseq/index.db (corrupted)",
+            !report.has_metadata_dir && "metadata/",
+            !report.has_valid_db     && "metadata/index.db (corrupted)",
           ].filter(Boolean).join(", ");
           alert(
             `"${selected}" is not a valid Grafium graph.\n\n` +

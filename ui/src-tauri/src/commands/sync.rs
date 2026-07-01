@@ -1,4 +1,5 @@
 use tauri::State;
+use tauri::AppHandle;
 use crate::AppState;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -17,11 +18,29 @@ pub struct SyncStatus {
     pub target_name: String,
 }
 
+fn metadata_dir_name(app: &AppHandle) -> String {
+    let raw = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| app.package_info().name.clone());
+
+    let slug = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    format!(".{}", normalized)
+}
+
 /// List configured sync targets for the current graph.
 #[tauri::command]
-pub fn sync_list_targets(state: State<'_, AppState>) -> Result<Vec<SyncConfig>, String> {
+pub fn sync_list_targets(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SyncConfig>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
     Ok(configs.targets)
 }
@@ -29,12 +48,13 @@ pub fn sync_list_targets(state: State<'_, AppState>) -> Result<Vec<SyncConfig>, 
 /// Add a filesystem sync target (USB drive, network mount, etc.)
 #[tauri::command]
 pub fn sync_add_filesystem_target(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
     path: String,
 ) -> Result<SyncConfig, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
 
     let config = SyncConfig {
@@ -53,6 +73,7 @@ pub fn sync_add_filesystem_target(
 /// Add a WebDAV sync target (Nextcloud, ownCloud, etc.)
 #[tauri::command]
 pub fn sync_add_webdav_target(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
     url: String,
@@ -60,7 +81,7 @@ pub fn sync_add_webdav_target(
     password: String,
 ) -> Result<SyncConfig, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
 
     let config = SyncConfig {
@@ -79,11 +100,12 @@ pub fn sync_add_webdav_target(
 /// Remove a sync target by ID.
 #[tauri::command]
 pub fn sync_remove_target(
+    app: AppHandle,
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
     configs.targets.retain(|t| t.id != target_id);
     configs.save(&config_path).map_err(|e| e.to_string())?;
@@ -93,11 +115,12 @@ pub fn sync_remove_target(
 /// Check if a sync target is currently available/reachable.
 #[tauri::command]
 pub fn sync_check_status(
+    app: AppHandle,
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<SyncStatus, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
     let target = configs.targets.iter()
@@ -107,7 +130,7 @@ pub fn sync_check_status(
     let backend = create_backend(target)?;
     let available = backend.is_available();
 
-    let state_path = graph.root_dir.join(".logseq").join("sync-state.json");
+    let state_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-state.json");
     let sync_state = grafium_core::sync::state::SyncState::load(&state_path);
 
     Ok(SyncStatus {
@@ -120,11 +143,12 @@ pub fn sync_check_status(
 /// Run sync against a specific target. Returns a summary of what happened.
 #[tauri::command]
 pub fn sync_run(
+    app: AppHandle,
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<SyncResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
     let target = configs.targets.iter()
@@ -132,7 +156,7 @@ pub fn sync_run(
         .ok_or("Sync target not found")?;
 
     let backend = create_backend(target)?;
-    let engine = SyncEngine::new(graph.root_dir.clone());
+    let engine = SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
 
     let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
 
@@ -148,12 +172,12 @@ pub fn sync_run(
 
 /// Sync all configured targets that are available and have auto_sync enabled.
 #[tauri::command]
-pub fn sync_run_all(state: State<'_, AppState>) -> Result<Vec<SyncResult>, String> {
+pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SyncResult>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(".logseq").join("sync-config.json");
+    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
-    let engine = SyncEngine::new(graph.root_dir.clone());
+    let engine = SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
     let mut results = Vec::new();
     let mut needs_reindex = false;
 

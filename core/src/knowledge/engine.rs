@@ -11,6 +11,7 @@ use crate::ai::config::{AiConfig, AiMode, ProviderType};
 use crate::ai::embeddings::EmbeddingPipeline;
 use crate::ai::providers::anthropic::AnthropicLlm;
 use crate::ai::providers::ollama::{OllamaEmbedder, OllamaLlm};
+use crate::ai::providers::openai_compatible::{OpenAiCompatibleEmbedder, OpenAiCompatibleLlm};
 use crate::ai::providers::openai::{OpenAiEmbedder, OpenAiLlm};
 use crate::ai::references::{PageReferencesMeta, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
@@ -64,28 +65,73 @@ impl KnowledgeEngine {
         match &self.config.mode {
             AiMode::Local => {
                 if let Some(local) = &self.config.local {
-                    self.llm = Some(Box::new(OllamaLlm::new(
-                        &local.ollama_url,
-                        &local.llm_model,
-                    )));
-                    self.embedder = Some(Box::new(OllamaEmbedder::new(
-                        &local.ollama_url,
-                        &local.embedding_model,
-                        768, // nomic-embed-text default
-                    )));
+                    match local.provider {
+                        ProviderType::Ollama => {
+                            self.llm = Some(Box::new(OllamaLlm::new(
+                                &local.base_url,
+                                &local.llm_model,
+                            )));
+                            self.embedder = Some(Box::new(OllamaEmbedder::new(
+                                &local.base_url,
+                                &local.embedding_model,
+                                768,
+                            )));
+                        }
+                        ProviderType::OpenAiCompatible => {
+                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                                &local.base_url,
+                                &local.llm_model,
+                                local.api_key.clone(),
+                            )));
+                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                                &local.base_url,
+                                &local.embedding_model,
+                                1024,
+                                local.api_key.clone(),
+                            )));
+                        }
+                        ProviderType::HuggingFace => {
+                            return Err(CoreError::Other(
+                                "Embedded Hugging Face local runtime is not implemented yet. Use OpenAI-compatible local endpoint mode for now.".to_string(),
+                            ));
+                        }
+                        _ => {
+                            return Err(CoreError::Other(
+                                "Unsupported local provider".to_string(),
+                            ));
+                        }
+                    }
                 }
             }
             AiMode::Cloud => {
                 if let Some(cloud) = &self.config.cloud {
                     match cloud.llm_provider {
                         ProviderType::OpenAi => {
-                            self.llm =
-                                Some(Box::new(OpenAiLlm::new(&cloud.llm_api_key, &cloud.llm_model)));
+                            let key = cloud
+                                .llm_api_key
+                                .as_deref()
+                                .ok_or_else(|| CoreError::Other("Missing OpenAI API key".to_string()))?;
+                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
                         }
                         ProviderType::Anthropic => {
+                            let key = cloud
+                                .llm_api_key
+                                .as_deref()
+                                .ok_or_else(|| CoreError::Other("Missing Anthropic API key".to_string()))?;
                             self.llm = Some(Box::new(AnthropicLlm::new(
-                                &cloud.llm_api_key,
+                                key,
                                 &cloud.llm_model,
+                            )));
+                        }
+                        ProviderType::OpenAiCompatible => {
+                            let base_url = cloud
+                                .llm_base_url
+                                .clone()
+                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
+                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                                &base_url,
+                                &cloud.llm_model,
+                                cloud.llm_api_key.clone(),
                             )));
                         }
                         _ => {}
@@ -93,15 +139,31 @@ impl KnowledgeEngine {
 
                     let embed_key = cloud
                         .embedding_api_key
-                        .as_deref()
-                        .unwrap_or(&cloud.llm_api_key);
+                        .clone()
+                        .or_else(|| cloud.llm_api_key.clone());
 
                     match cloud.embedding_provider {
                         ProviderType::OpenAi => {
+                            let key = embed_key
+                                .as_deref()
+                                .ok_or_else(|| CoreError::Other("Missing OpenAI embedding API key".to_string()))?;
                             self.embedder = Some(Box::new(OpenAiEmbedder::new(
-                                embed_key,
+                                key,
                                 &cloud.embedding_model,
                                 1536,
+                            )));
+                        }
+                        ProviderType::OpenAiCompatible => {
+                            let base_url = cloud
+                                .embedding_base_url
+                                .clone()
+                                .or_else(|| cloud.llm_base_url.clone())
+                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
+                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                                &base_url,
+                                &cloud.embedding_model,
+                                1024,
+                                embed_key,
                             )));
                         }
                         _ => {}
@@ -109,24 +171,54 @@ impl KnowledgeEngine {
                 }
             }
             AiMode::Hybrid => {
-                // Embeddings from local, LLM from cloud.
+                // Embeddings from local provider.
                 if let Some(local) = &self.config.local {
-                    self.embedder = Some(Box::new(OllamaEmbedder::new(
-                        &local.ollama_url,
-                        &local.embedding_model,
-                        768,
-                    )));
+                    match local.provider {
+                        ProviderType::Ollama => {
+                            self.embedder = Some(Box::new(OllamaEmbedder::new(
+                                &local.base_url,
+                                &local.embedding_model,
+                                768,
+                            )));
+                        }
+                        ProviderType::OpenAiCompatible => {
+                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                                &local.base_url,
+                                &local.embedding_model,
+                                1024,
+                                local.api_key.clone(),
+                            )));
+                        }
+                        _ => {}
+                    }
                 }
+
+                // LLM from cloud provider.
                 if let Some(cloud) = &self.config.cloud {
                     match cloud.llm_provider {
                         ProviderType::OpenAi => {
-                            self.llm =
-                                Some(Box::new(OpenAiLlm::new(&cloud.llm_api_key, &cloud.llm_model)));
+                            let key = cloud
+                                .llm_api_key
+                                .as_deref()
+                                .ok_or_else(|| CoreError::Other("Missing OpenAI API key".to_string()))?;
+                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
                         }
                         ProviderType::Anthropic => {
-                            self.llm = Some(Box::new(AnthropicLlm::new(
-                                &cloud.llm_api_key,
+                            let key = cloud
+                                .llm_api_key
+                                .as_deref()
+                                .ok_or_else(|| CoreError::Other("Missing Anthropic API key".to_string()))?;
+                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)));
+                        }
+                        ProviderType::OpenAiCompatible => {
+                            let base_url = cloud
+                                .llm_base_url
+                                .clone()
+                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
+                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                                &base_url,
                                 &cloud.llm_model,
+                                cloud.llm_api_key.clone(),
                             )));
                         }
                         _ => {}

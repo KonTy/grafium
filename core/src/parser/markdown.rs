@@ -64,7 +64,7 @@ pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
     // The caller (index_file) will derive the title from the file's relative path,
     // which supports hierarchical folder structures like Books/MyCoolBook/Chapter1.
 
-    // Parse blocks (Logseq uses "- " prefix with indentation)
+    // Parse blocks (org-style uses "- " prefix with indentation)
     while i < lines.len() {
         let line = lines[i];
         if line.trim().is_empty() {
@@ -322,7 +322,7 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
 
 fn count_indent(line: &str) -> u32 {
     let spaces = line.len() - line.trim_start().len();
-    // Logseq uses 2 spaces or tab per indent level
+    // org-style uses 2 spaces or tab per indent level
     (spaces / 2) as u32
 }
 

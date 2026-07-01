@@ -55,6 +55,24 @@ fn config_path(app: &AppHandle) -> PathBuf {
     app_dir.join("graphs.json")
 }
 
+fn metadata_dir_name(app: &AppHandle) -> String {
+    let raw = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| app.package_info().name.clone());
+
+    let slug = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    format!(".{}", normalized)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_graph_info(state: State<AppState>, app: AppHandle) -> Result<GraphInfo, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -91,21 +109,25 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     }
 
     // Validate the graph structure before opening
-    let validation = Graph::validate_structure(&graph_path);
+    let metadata_dir = metadata_dir_name(&app);
+    let validation = Graph::validate_structure_with_metadata_dir(&graph_path, &metadata_dir);
     if !validation.is_valid {
         return Err(validation.error_message.unwrap_or_else(|| 
-            "Invalid graph structure. Please ensure the directory contains pages/, journals/, and .logseq/ subdirectories.".to_string()
+            format!(
+                "Invalid graph structure. Please ensure the directory contains pages/, journals/, and {}/ subdirectories.",
+                metadata_dir
+            )
         ));
     }
 
     let db_path = platform_db_path(&app, &graph_path)?;
 
     // Open the graph. If DB is corrupted, recover by rotating index.db and recreating it.
-    let new_graph = match Graph::open_with_db_path(&graph_path, &db_path) {
+    let new_graph = match Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir) {
         Ok(g) => g,
         Err(first_err) => {
             if try_recover_corrupt_index_db(&db_path).is_ok() {
-                Graph::open_with_db_path(&graph_path, &db_path).map_err(|second_err| {
+                Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir).map_err(|second_err| {
                     format!(
                         "Failed to open graph after DB recovery. First error: {}. Second error: {}",
                         first_err,
@@ -147,7 +169,7 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     state.restart_graph_watcher()?;
 
     if needs_background_reindex {
-        schedule_background_reindex(graph_path.clone(), db_path.clone());
+        schedule_background_reindex(graph_path.clone(), db_path.clone(), metadata_dir.clone());
     }
 
     // Notify Android companion app by writing to shared preference file
@@ -157,9 +179,9 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     Ok(GraphInfo { name, path })
 }
 
-fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf) {
+fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf, metadata_dir_name: String) {
     thread::spawn(move || {
-        let graph = match Graph::open_with_db_path(&graph_root, &db_path) {
+        let graph = match Graph::open_with_db_path_and_metadata_dir(&graph_root, &db_path, &metadata_dir_name) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!(
@@ -182,7 +204,7 @@ fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf) {
 }
 
 fn try_recover_corrupt_index_db(db_path: &Path) -> Result<(), String> {
-    let logseq_dir = db_path
+    let metadata_dir = db_path
         .parent()
         .ok_or_else(|| "Invalid DB path: missing parent directory".to_string())?;
 
@@ -195,11 +217,11 @@ fn try_recover_corrupt_index_db(db_path: &Path) -> Result<(), String> {
     // lingering corruption patterns.
     fs::remove_file(db_path).map_err(|e| e.to_string())?;
 
-    let wal = logseq_dir.join("index.db-wal");
+    let wal = metadata_dir.join("index.db-wal");
     if wal.exists() {
         let _ = fs::remove_file(&wal);
     }
-    let shm = logseq_dir.join("index.db-shm");
+    let shm = metadata_dir.join("index.db-shm");
     if shm.exists() {
         let _ = fs::remove_file(&shm);
     }
@@ -228,19 +250,20 @@ fn platform_db_path(app: &AppHandle, graph_root: &Path) -> Result<PathBuf, Strin
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
-        Ok(graph_root.join(".logseq").join("index.db"))
+        let metadata_dir = metadata_dir_name(app);
+        Ok(graph_root.join(metadata_dir).join("index.db"))
     }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn validate_graph(path: String) -> Result<GraphValidationReport, String> {
+pub fn validate_graph(app: AppHandle, path: String) -> Result<GraphValidationReport, String> {
     let graph_path = PathBuf::from(&path);
     if !graph_path.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
 
-    let report = Graph::validate_structure(&graph_path);
+    let metadata_dir = metadata_dir_name(&app);
+    let report = Graph::validate_structure_with_metadata_dir(&graph_path, &metadata_dir);
     Ok(report)
 }
 
@@ -256,7 +279,8 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
     let path = graph_path.to_string_lossy().to_string();
 
     // Never allow creating a graph inside another graph (e.g. inside journals/).
-    if let Some(parent_graph) = Graph::find_ancestor_graph_root(&graph_path) {
+    let metadata_dir = metadata_dir_name(&app);
+    if let Some(parent_graph) = Graph::find_ancestor_graph_root_with_metadata_dir(&graph_path, &metadata_dir) {
         return Err(format!(
             "Cannot create graph inside another graph. Parent graph root: {}",
             parent_graph.display()
@@ -279,7 +303,8 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
 
     // Open as a new graph (creates pages/, journals/, and platform index DB)
     let db_path = platform_db_path(&app, &graph_path)?;
-    let new_graph = Graph::open_with_db_path(&graph_path, &db_path).map_err(|e| e.to_string())?;
+    let new_graph = Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir)
+        .map_err(|e| e.to_string())?;
 
     // Update config
     let cp = config_path(&app);

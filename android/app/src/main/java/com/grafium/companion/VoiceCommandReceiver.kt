@@ -128,7 +128,7 @@ class VoiceCommandReceiver : BroadcastReceiver() {
         val graphDir = getActiveGraphDir(context)
         if (graphDir == null || !isValidGraphDir(graphDir)) {
             return "Invalid Grafium graph structure. " +
-                   "Make sure the graph directory contains pages/, journals/, and .logseq/ folders. " +
+                   "Make sure the graph directory contains pages/, journals/, and .grafium/ folders. " +
                    "Open Grafium and select or create a proper graph."
         }
 
@@ -150,7 +150,7 @@ class VoiceCommandReceiver : BroadcastReceiver() {
         val graphDir = getActiveGraphDir(context)
         if (graphDir == null || !isValidGraphDir(graphDir)) {
             return "Invalid Grafium graph structure. " +
-                   "Make sure the graph directory contains pages/, journals/, and .logseq/ folders. " +
+                   "Make sure the graph directory contains pages/, journals/, and .grafium/ folders. " +
                    "Open Grafium and select or create a proper graph."
         }
 
@@ -322,17 +322,17 @@ class VoiceCommandReceiver : BroadcastReceiver() {
      * A valid graph must have:
      * - pages/ directory
      * - journals/ directory
-     * - .logseq/ directory
+         * - .grafium/ directory
      */
     private fun isValidGraphDir(dir: File): Boolean {
         if (!dir.isDirectory) return false
         val pagesDir = File(dir, "pages")
         val journalsDir = File(dir, "journals")
-        val logseqDir = File(dir, ".logseq")
+         val metadataDir = File(dir, ".grafium")
         
         return pagesDir.isDirectory && 
                journalsDir.isDirectory && 
-               logseqDir.isDirectory
+             metadataDir.isDirectory
     }
 
     private fun getActiveGraphName(context: Context): String {

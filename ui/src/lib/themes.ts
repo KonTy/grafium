@@ -47,6 +47,15 @@ export interface Theme {
   colors: ThemeColors;
 }
 
+function normalizeThemeId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")
+    .replace(/[\s_]+/g, "-");
+}
+
 function dark(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim: string, muted: string, accent: string, accentAlt: string, danger: string, success: string, warning: string): ThemeColors {
   return {
     bgPrimary: bg,
@@ -169,6 +178,11 @@ export const themes: Theme[] = [
     colors: dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#FF9900", "#FF9900", "#00FF00", "#FFCC33"),
   },
   {
+    id: "amber",
+    name: "Amber",
+    colors: dark("#070604", "#15110A", "#231B10", "#FFD7A1", "#FFE4BD", "#8F7A59", "#FFBF3C", "#FF8F1F", "#FF8F1F", "#FFD166", "#FFCF66"),
+  },
+  {
     id: "matte-black",
     name: "Matte Black",
     colors: dark("#121212", "#1e1e1e", "#333333", "#bebebe", "#ffffff", "#8a8a8d", "#e68e0d", "#D35F5F", "#D35F5F", "#FFC107", "#b91c1c"),
@@ -196,7 +210,8 @@ export const themes: Theme[] = [
 ];
 
 export function getThemeById(id: string): Theme | undefined {
-  return themes.find((t) => t.id === id);
+  const normalized = normalizeThemeId(id);
+  return themes.find((t) => t.id === normalized || normalizeThemeId(t.name) === normalized);
 }
 
 export function applyTheme(theme: ThemeColors): void {

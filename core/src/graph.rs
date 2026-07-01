@@ -1,6 +1,6 @@
 //! Graph: file-first storage with SQLite index.
 //!
-//! The Graph manages a directory of .md files (like Logseq's `pages/` and `journals/` folders)
+//! The Graph manages a directory of .md files (like org-style's `pages/` and `journals/` folders)
 //! and maintains a SQLite index for fast queries. All mutations write to .md files first,
 //! then update the index. External file changes are detected and re-indexed.
 
@@ -22,6 +22,8 @@ pub struct Graph {
     pub journals_dir: PathBuf,
 }
 
+pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
+
 /// Validation report for a graph directory structure.
 /// Indicates whether the directory is a valid Grafium graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,9 +34,9 @@ pub struct GraphValidationReport {
     pub has_pages_dir: bool,
     /// Whether journals/ directory exists
     pub has_journals_dir: bool,
-    /// Whether .logseq/ directory exists
-    pub has_logseq_dir: bool,
-    /// Whether .logseq/index.db exists and is valid
+    /// Whether app metadata directory exists
+    pub has_metadata_dir: bool,
+    /// Whether metadata/index.db exists and is valid
     pub has_valid_db: bool,
     /// Whether this graph root is not inside another graph
     pub not_nested_in_another_graph: bool,
@@ -45,18 +47,30 @@ pub struct GraphValidationReport {
 }
 
 impl Graph {
+    pub fn default_metadata_dir_name() -> &'static str {
+        DEFAULT_METADATA_DIR_NAME
+    }
+
     /// A directory is considered a graph root when it has the canonical trio.
     pub fn is_graph_root_dir(path: &Path) -> bool {
+        Self::is_graph_root_dir_with_metadata_dir(path, Self::default_metadata_dir_name())
+    }
+
+    pub fn is_graph_root_dir_with_metadata_dir(path: &Path, metadata_dir_name: &str) -> bool {
         path.join("pages").is_dir()
             && path.join("journals").is_dir()
-            && path.join(".logseq").is_dir()
+            && path.join(metadata_dir_name).is_dir()
     }
 
     /// Find the nearest ancestor directory that looks like a graph root.
     /// Returns None when `path` is not nested inside another graph.
     pub fn find_ancestor_graph_root(path: &Path) -> Option<PathBuf> {
+        Self::find_ancestor_graph_root_with_metadata_dir(path, Self::default_metadata_dir_name())
+    }
+
+    pub fn find_ancestor_graph_root_with_metadata_dir(path: &Path, metadata_dir_name: &str) -> Option<PathBuf> {
         for ancestor in path.ancestors().skip(1) {
-            if Self::is_graph_root_dir(ancestor) {
+            if Self::is_graph_root_dir_with_metadata_dir(ancestor, metadata_dir_name) {
                 return Some(ancestor.to_path_buf());
             }
         }
@@ -68,6 +82,10 @@ impl Graph {
     /// This is intentionally depth-limited to keep folder validation responsive on
     /// mobile devices with very large graphs.
     pub fn find_nested_graph_root(root_dir: &Path) -> Option<PathBuf> {
+        Self::find_nested_graph_root_with_metadata_dir(root_dir, Self::default_metadata_dir_name())
+    }
+
+    pub fn find_nested_graph_root_with_metadata_dir(root_dir: &Path, metadata_dir_name: &str) -> Option<PathBuf> {
         let mut stack: Vec<(PathBuf, usize)> = vec![(root_dir.to_path_buf(), 0)];
         let max_depth = 2usize;
         let max_dirs_scanned = 512usize;
@@ -101,7 +119,7 @@ impl Graph {
                     continue;
                 }
 
-                if Self::is_graph_root_dir(&child) {
+                if Self::is_graph_root_dir_with_metadata_dir(&child, metadata_dir_name) {
                     return Some(child);
                 }
 
@@ -164,20 +182,24 @@ impl Graph {
     /// A valid graph must have:
     /// - `pages/` directory
     /// - `journals/` directory
-    /// - `.logseq/` directory (with optional index.db)
+    /// - app metadata directory (with optional index.db)
     ///
     /// Note: This validates **structure only**. It does not require `index.db` to exist
-    /// because it will be created by `Graph::open()` if missing. However, if `.logseq/index.db`
+    /// because it will be created by `Graph::open()` if missing. However, if `metadata/index.db`
     /// does exist, it must be a valid SQLite database.
     pub fn validate_structure(root_dir: &Path) -> GraphValidationReport {
+        Self::validate_structure_with_metadata_dir(root_dir, Self::default_metadata_dir_name())
+    }
+
+    pub fn validate_structure_with_metadata_dir(root_dir: &Path, metadata_dir_name: &str) -> GraphValidationReport {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
-        let logseq_dir = root_dir.join(".logseq");
-        let db_path = logseq_dir.join("index.db");
+        let metadata_dir = root_dir.join(metadata_dir_name);
+        let db_path = metadata_dir.join("index.db");
 
         let has_pages_dir = pages_dir.is_dir();
         let has_journals_dir = journals_dir.is_dir();
-        let has_logseq_dir = logseq_dir.is_dir();
+        let has_metadata_dir = metadata_dir.is_dir();
 
         // Cheap sanity check only; avoid opening SQLite during validation because
         // schema initialization can be expensive and block the UI thread.
@@ -188,14 +210,14 @@ impl Graph {
             true
         };
 
-        let not_nested_in_another_graph = Self::find_ancestor_graph_root(root_dir).is_none();
-        let has_no_nested_graph_roots = Self::find_nested_graph_root(root_dir).is_none();
+        let not_nested_in_another_graph = Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
+        let has_no_nested_graph_roots = Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
 
         // A valid graph has all three directories and no nested-graph ambiguity.
         // A corrupted DB is recoverable and should not block opening.
         let is_valid = has_pages_dir
             && has_journals_dir
-            && has_logseq_dir
+            && has_metadata_dir
             && not_nested_in_another_graph
             && has_no_nested_graph_roots;
 
@@ -209,14 +231,14 @@ impl Graph {
             if !has_journals_dir {
                 missing.push("journals/".to_string());
             }
-            if !has_logseq_dir {
-                missing.push(".logseq/".to_string());
+            if !has_metadata_dir {
+                missing.push(format!("{}/", metadata_dir_name));
             }
             if !has_valid_db && db_path.exists() {
-                missing.push(".logseq/index.db (invalid or corrupted database)".to_string());
+                missing.push(format!("{}/index.db (invalid or corrupted database)", metadata_dir_name));
             }
             if !not_nested_in_another_graph {
-                if let Some(parent_root) = Self::find_ancestor_graph_root(root_dir) {
+                if let Some(parent_root) = Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name) {
                     missing.push(format!(
                         "graph is nested inside another graph: {}",
                         parent_root.display()
@@ -226,7 +248,7 @@ impl Graph {
                 }
             }
             if !has_no_nested_graph_roots {
-                if let Some(nested_root) = Self::find_nested_graph_root(root_dir) {
+                if let Some(nested_root) = Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name) {
                     missing.push(format!(
                         "contains nested graph root: {}",
                         nested_root.display()
@@ -248,7 +270,7 @@ impl Graph {
             is_valid,
             has_pages_dir,
             has_journals_dir,
-            has_logseq_dir,
+            has_metadata_dir,
             has_valid_db,
             not_nested_in_another_graph,
             has_no_nested_graph_roots,
@@ -258,21 +280,27 @@ impl Graph {
 
     /// Open or create a graph rooted at `root_dir`.
     /// Creates pages/ and journals/ subdirectories if needed.
-    /// SQLite index is stored at root_dir/.logseq/index.db
+    /// SQLite index is stored at root_dir/<metadata>/index.db
     pub fn open(root_dir: &Path) -> Result<Self> {
-        let db_path = root_dir.join(".logseq").join("index.db");
+        let db_path = root_dir.join(Self::default_metadata_dir_name()).join("index.db");
         Self::open_with_db_path(root_dir, &db_path)
     }
 
     /// Open or create a graph rooted at `root_dir` with an explicit index DB path.
     /// This is used on Android where scoped storage can block writes to hidden
-    /// files under shared storage (e.g. /Documents/.../.logseq/index.db).
+    /// files under shared storage (e.g. /Documents/.../.grafium/index.db).
     pub fn open_with_db_path(root_dir: &Path, db_path: &Path) -> Result<Self> {
+        Self::open_with_db_path_and_metadata_dir(root_dir, db_path, Self::default_metadata_dir_name())
+    }
+
+    pub fn open_with_db_path_and_metadata_dir(root_dir: &Path, db_path: &Path, metadata_dir_name: &str) -> Result<Self> {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
+        let metadata_dir = root_dir.join(metadata_dir_name);
 
         fs::create_dir_all(&pages_dir)?;
         fs::create_dir_all(&journals_dir)?;
+        fs::create_dir_all(&metadata_dir)?;
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -316,7 +344,7 @@ impl Graph {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Skip hidden directories (e.g. .logseq)
+                // Skip hidden directories (e.g. metadata directory)
                 if path.file_name()
                     .and_then(|n| n.to_str())
                     .map_or(false, |n| n.starts_with('.'))
@@ -594,7 +622,7 @@ impl Graph {
         let block = self.db.get_block_by_id(block_id)?;
         let page = self.db.get_page_by_id(&block.page_id)?;
 
-        // Build the timestamp line (Logseq org-mode format)
+        // Build the timestamp line (outline/org-mode format)
         let keyword = if kind == "deadline" { "DEADLINE" } else { "SCHEDULED" };
         let re = regex::Regex::new(&format!(r"(?m)^{}: <[^>]+>\n?", keyword)).unwrap();
 
@@ -664,10 +692,20 @@ impl Graph {
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
 
-        // Delete the file
-        if let Some(ref file_path) = page.file_path {
-            let full_path = self.root_dir.join(file_path);
-            let _ = fs::remove_file(full_path);
+        // Delete the file from disk first.
+        // Prefer the persisted file path, but fall back to canonical location when missing.
+        let full_path = if let Some(ref file_path) = page.file_path {
+            self.root_dir.join(file_path)
+        } else if page.is_journal {
+            self.journals_dir.join(format!("{}.md", page.title.replace('/', "_")))
+        } else {
+            self.pages_dir.join(format!("{}.md", page.title))
+        };
+
+        if let Err(e) = fs::remove_file(&full_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
         }
 
         // Delete from DB

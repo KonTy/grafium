@@ -3,6 +3,8 @@ mod commands;
 use commands::graph::GraphConfig;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use grafium_core::Graph;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -239,7 +241,9 @@ fn start_sync_monitor(
                 Err(_) => continue,
             };
 
-            let config_path = root_dir.join(".logseq").join("sync-config.json");
+            let config_path = root_dir
+                .join(metadata_dir_name(&app_handle))
+                .join("sync-config.json");
             let configs = SyncConfigs::load(&config_path);
 
             for target in &configs.targets {
@@ -269,7 +273,7 @@ fn start_sync_monitor(
 
                     // Auto-sync if enabled
                     if target.auto_sync {
-                        let engine = SyncEngine::new(root_dir.clone());
+                        let engine = SyncEngine::new_with_metadata_dir(root_dir.clone(), &metadata_dir_name(&app_handle));
                         match engine.sync(backend.as_ref()) {
                             Ok(result) => {
                                 eprintln!("[sync-monitor] Auto-sync '{}': {}", target.name, result.summary());
@@ -322,6 +326,199 @@ fn stable_path_id(path: &std::path::Path) -> String {
     format!("{:016x}", hash)
 }
 
+fn metadata_dir_name(app: &tauri::AppHandle) -> String {
+    let raw = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| app.package_info().name.clone());
+
+    let slug = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    format!(".{}", normalized)
+}
+
+fn has_any_markdown(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match fs::read_dir(&current) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn write_text_file(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, String> {
+    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v1");
+    if marker.exists() {
+        return Ok(false);
+    }
+
+    let pages_dir = graph_root.join("pages");
+    let journals_dir = graph_root.join("journals");
+    if has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir) {
+        return Ok(false);
+    }
+
+    let image_welcome = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <defs>
+    <linearGradient id='bg' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='#102a43'/>
+      <stop offset='100%' stop-color='#334e68'/>
+    </linearGradient>
+  </defs>
+  <rect width='1280' height='720' fill='url(#bg)'/>
+  <rect x='70' y='70' width='1140' height='580' rx='18' fill='#0b1f33' stroke='#87bfff' stroke-width='2'/>
+  <rect x='95' y='95' width='260' height='530' rx='12' fill='#132f4c'/>
+  <rect x='380' y='95' width='805' height='70' rx='10' fill='#163857'/>
+  <rect x='380' y='185' width='805' height='440' rx='10' fill='#102a43'/>
+  <text x='405' y='140' fill='#d9e2ec' font-size='30' font-family='sans-serif'>Grafium Tutorial Graph</text>
+  <text x='120' y='145' fill='#9fb3c8' font-size='24' font-family='sans-serif'>Sidebar</text>
+  <text x='430' y='245' fill='#d9e2ec' font-size='42' font-family='sans-serif'>Start Here</text>
+  <text x='430' y='295' fill='#9fb3c8' font-size='28' font-family='sans-serif'>This graph teaches core features.</text>
+</svg>"##;
+
+    let image_create_graph = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <rect width='1280' height='720' fill='#0f172a'/>
+  <rect x='130' y='80' width='1020' height='560' rx='16' fill='#1e293b' stroke='#7dd3fc' stroke-width='2'/>
+  <rect x='160' y='120' width='330' height='500' rx='10' fill='#0f2235'/>
+  <rect x='520' y='120' width='600' height='500' rx='10' fill='#17263a'/>
+  <rect x='550' y='180' width='540' height='180' rx='10' fill='#0d1826' stroke='#60a5fa' stroke-width='2'/>
+  <text x='575' y='235' fill='#dbeafe' font-size='30' font-family='sans-serif'>New Graph</text>
+  <text x='575' y='285' fill='#93c5fd' font-size='24' font-family='sans-serif'>Name: my-notes</text>
+  <text x='575' y='325' fill='#93c5fd' font-size='24' font-family='sans-serif'>Location: ~/Documents/grafium/</text>
+  <text x='205' y='170' fill='#bfdbfe' font-size='24' font-family='sans-serif'>Graph Menu</text>
+  <text x='205' y='220' fill='#93c5fd' font-size='20' font-family='sans-serif'>Open Existing</text>
+  <text x='205' y='260' fill='#93c5fd' font-size='20' font-family='sans-serif'>New Graph</text>
+  <text x='205' y='300' fill='#93c5fd' font-size='20' font-family='sans-serif'>Re-index</text>
+</svg>"##;
+
+    let image_blocks = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <rect width='1280' height='720' fill='#111827'/>
+  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#1f2937' stroke='#86efac' stroke-width='2'/>
+  <text x='170' y='135' fill='#dcfce7' font-size='38' font-family='sans-serif'>Block Editing Basics</text>
+  <text x='170' y='200' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Press Enter to create next block</text>
+  <text x='170' y='245' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Tab / Shift+Tab to indent or outdent</text>
+  <text x='170' y='290' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Type TODO / DOING / DONE for task flow</text>
+  <text x='170' y='335' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Use [[Page Links]], #tags, and ((block refs))</text>
+  <rect x='170' y='390' width='920' height='210' rx='10' fill='#0f172a' stroke='#4ade80' stroke-width='2'/>
+  <text x='205' y='455' fill='#e5e7eb' font-size='24' font-family='monospace'>- TODO Draft project plan</text>
+  <text x='245' y='495' fill='#a7f3d0' font-size='24' font-family='monospace'>- Outline milestones</text>
+  <text x='245' y='535' fill='#a7f3d0' font-size='24' font-family='monospace'>- Link to [[Roadmap]]</text>
+</svg>"##;
+
+    let start_here = r##"# Welcome To Grafium
+
+![Tutorial Welcome](../assets/tutorial/welcome-overview.svg)
+
+This is a built-in tutorial graph so you can learn quickly without risking real notes.
+
+## What You Can Learn Here
+
+- Block editing and hierarchy
+- Journals and daily notes
+- Page links, tags, and backlinks
+- Tasks and scheduling
+- Search, favorites, and graph switching
+
+## First 5 Minutes
+
+1. Open [[Try Block Editing]] and follow the mini-exercises.
+2. Open [[Create Your Own Graph]] to make your real graph in Documents.
+3. Switch to your new graph from the graph menu (top-left).
+
+## Important
+
+This tutorial graph stays active until you create/switch to your own graph.
+Your personal notes should live in your own graph folder.
+"##;
+
+    let create_graph_page = r##"# Create Your Own Graph
+
+![Create Graph Flow](../assets/tutorial/create-graph-flow.svg)
+
+## Recommended Location
+
+Use a folder under:
+
+`~/Documents/grafium/`
+
+Example:
+
+`~/Documents/grafium/my-notes`
+
+## Steps
+
+1. Open the graph menu (top-left graph button).
+2. Click **New Graph**.
+3. Enter a graph name.
+4. Pick a location in `Documents/grafium`.
+5. Grafium creates structure automatically (`pages/`, `journals/`, and metadata).
+
+## Switching Graphs
+
+- Use graph menu to switch back/forth between tutorial and your graph.
+- Once switched, Grafium remembers your choice.
+"##;
+
+    let block_editing_page = r##"# Try Block Editing
+
+![Block Editing](../assets/tutorial/block-editing-basics.svg)
+
+Practice these directly in this page:
+
+- Press **Enter** to create a new block
+- Press **Tab** to indent, **Shift+Tab** to outdent
+- Write `TODO` at line start to create tasks
+- Create a page link like `[[Ideas]]`
+- Add a tag like `#project`
+
+## Journal Tip
+
+Open Journal view and right-click the date title to delete a journal page.
+
+## Search Tip
+
+Use search in sidebar to jump by page name or block content.
+"##;
+
+    write_text_file(&graph_root.join("assets/tutorial/welcome-overview.svg"), image_welcome)?;
+    write_text_file(&graph_root.join("assets/tutorial/create-graph-flow.svg"), image_create_graph)?;
+    write_text_file(&graph_root.join("assets/tutorial/block-editing-basics.svg"), image_blocks)?;
+
+    write_text_file(&graph_root.join("pages/Welcome To Grafium.md"), start_here)?;
+    write_text_file(&graph_root.join("pages/Create Your Own Graph.md"), create_graph_page)?;
+    write_text_file(&graph_root.join("pages/Try Block Editing.md"), block_editing_page)?;
+
+    write_text_file(&marker, "seeded_v1")?;
+    Ok(true)
+}
+
 fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
@@ -335,8 +532,7 @@ fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> Pat
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
-        graph_root.join(".logseq").join("index.db")
+        graph_root.join(metadata_dir_name(app)).join("index.db")
     }
 }
 
@@ -354,10 +550,13 @@ pub fn run() {
             // Validate the saved path before trusting it — if it no longer has a proper
             // graph structure, fall back to the default directory rather than creating
             // subdirectories inside an arbitrary user folder.
-            let default_graph_dir = app_dir.join("graph");
+            let default_graph_dir = app_dir.join("tutorial-graph");
             let graph_dir = if let Some(ref current) = config.current {
                 let candidate = PathBuf::from(current);
-                let validation = Graph::validate_structure(&candidate);
+                let validation = Graph::validate_structure_with_metadata_dir(
+                    &candidate,
+                    &metadata_dir_name(app.handle()),
+                );
                 if validation.is_valid {
                     candidate
                 } else {
@@ -366,15 +565,27 @@ pub fn run() {
                         current,
                         validation.error_message.as_deref().unwrap_or("unknown error")
                     );
-                    default_graph_dir
+                    default_graph_dir.clone()
                 }
             } else {
-                default_graph_dir
+                default_graph_dir.clone()
             };
 
             let db_path = platform_db_path(app.handle(), &graph_dir);
-            let graph = Graph::open_with_db_path(&graph_dir, &db_path)
+            let metadata_dir = metadata_dir_name(app.handle());
+            let graph = Graph::open_with_db_path_and_metadata_dir(
+                &graph_dir,
+                &db_path,
+                &metadata_dir,
+            )
                 .expect("Failed to initialize graph");
+
+            let should_seed_tutorial = graph_dir == default_graph_dir;
+            if should_seed_tutorial {
+                if let Ok(true) = seed_tutorial_graph(&graph_dir, &metadata_dir) {
+                    let _ = graph.reindex_all();
+                }
+            }
 
             // Keep startup responsive. If DB is empty (first run or recovered),
             // rebuild in the background instead of blocking app initialization.
@@ -382,8 +593,13 @@ pub fn run() {
             if page_count == 0 {
                 let graph_dir_clone = graph_dir.clone();
                 let db_path_clone = db_path.clone();
+                let metadata_dir_clone = metadata_dir.clone();
                 thread::spawn(move || {
-                    match Graph::open_with_db_path(&graph_dir_clone, &db_path_clone) {
+                    match Graph::open_with_db_path_and_metadata_dir(
+                        &graph_dir_clone,
+                        &db_path_clone,
+                        &metadata_dir_clone,
+                    ) {
                         Ok(g) => {
                             if let Err(e) = g.reindex_all() {
                                 eprintln!(
@@ -407,11 +623,20 @@ pub fn run() {
             // Register default graph in config if not present
             let mut config = config;
             let path_str = graph_dir.to_string_lossy().to_string();
-            let name = graph_dir.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("graph")
-                .to_string();
-            config.add_graph(&name, &path_str);
+            let name = if should_seed_tutorial {
+                "Tutorial Graph".to_string()
+            } else {
+                graph_dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("graph")
+                    .to_string()
+            };
+
+            if let Some(existing) = config.graphs.iter_mut().find(|g| g.path == path_str) {
+                existing.name = name.clone();
+            } else {
+                config.add_graph(&name, &path_str);
+            }
             if config.current.is_none() {
                 config.current = Some(path_str);
             }
@@ -616,6 +841,7 @@ pub fn run() {
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_ask,
+            commands::knowledge::ai_ask_stream,
             commands::knowledge::ai_list_registered_graphs,
             commands::knowledge::ai_register_graph,
             commands::knowledge::ai_list_schemas,

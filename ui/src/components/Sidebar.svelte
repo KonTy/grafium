@@ -343,6 +343,12 @@
       </svg>
       <span>Flashcards</span>
     </button>
+    <button class="nav-item" onclick={() => onNavigate("__chat__")}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+      </svg>
+      <span>Chatbot</span>
+    </button>
     <button class="nav-item" onclick={() => onNavigate("__settings__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"></circle>

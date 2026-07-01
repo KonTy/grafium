@@ -1,7 +1,7 @@
-# MASTER BUILD SPEC FOR LOGSEQ-STYLE PKM APP
+# MASTER BUILD SPEC FOR GRAPH-STYLE PKM APP
 # STACK: RUST + SQLITE + TAURI + REACT + CSS
 # STORAGE: MARKDOWN FILES + FULL SQLITE INDEXING
-# FEATURES: HANDWRITING, AUDIO, AI, FLASHCARDS, GRAPH VIEW, FAVORITES, RECENT, HIERARCHICAL TOPICS, SCHEDULED/DEADLINE, DAILY QUERIES, LOGSEQ IMPORTER
+# FEATURES: HANDWRITING, AUDIO, AI, FLASHCARDS, GRAPH VIEW, FAVORITES, RECENT, HIERARCHICAL TOPICS, SCHEDULED/DEADLINE, DAILY QUERIES, GRAPH IMPORTER
 # THIS SPEC IS FINAL AND MUST BE FOLLOWED EXACTLY BY AIDER
 
 Aider MUST follow phases in order. No redesigning architecture. No skipping or merging phases.
@@ -185,7 +185,7 @@ Goal: Markdown as primary storage, SQLite as index.
 ================================================================================
 PHASE 3 — RUST CORE: QUERY ENGINE
 ================================================================================
-Goal: Logseq-style queries for tasks, pages, flashcards, etc.
+Goal: outline-style queries for tasks, pages, flashcards, etc.
 
 3.1 Query language:
 - {{query [[Page]]}}
@@ -265,8 +265,8 @@ Tasks:
 - update_task_dates(block_id, scheduled_date, deadline_date)
 
 Import:
-- import_logseq_page(file_path)
-- import_logseq_directory(dir_path)
+- import_page(file_path)
+- import_directory(dir_path)
 
 All commands return JSON-safe types.
 
@@ -422,7 +422,7 @@ PHASE 11 — AI FOR TEXT + HANDWRITING
 ================================================================================
 PHASE 12 — FLASHCARDS MODULE
 ================================================================================
-Goal: Logseq-style flashcards created from blocks, reviewed in a dedicated view.
+Goal: outline-style flashcards created from blocks, reviewed in a dedicated view.
 
 12.1 Flashcard creation:
 - Any block with #flashcard tag becomes a flashcard.
@@ -462,7 +462,7 @@ Goal: Logseq-style flashcards created from blocks, reviewed in a dedicated view.
 ================================================================================
 PHASE 13 — TASKS, SCHEDULED, DEADLINE, TODO QUERIES
 ================================================================================
-Goal: Logseq-style task management with /SCHEDULED, /DEADLINE, and queries.
+Goal: outline-style task management with /SCHEDULED, /DEADLINE, and queries.
 
 13.1 Task detection:
 - Blocks starting with:
@@ -566,9 +566,9 @@ PHASE 17 — PLUGIN SYSTEM
 - Add custom views (e.g., custom flashcard views, analytics).
 
 ================================================================================
-PHASE 18 — LOGSEQ IMPORTER
+PHASE 18 — GRAPH IMPORTER
 ================================================================================
-18.1 Import Logseq directory:
+18.1 Import Grafium directory:
 - For each .md file:
   - Detect if journal or page.
   - Parse blocks, properties, tasks, flashcards, queries.

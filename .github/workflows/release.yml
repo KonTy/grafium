@@ -10,10 +10,51 @@ permissions:
   contents: write
 
 jobs:
+  prepare-version:
+    runs-on: ubuntu-22.04
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_tag_build: ${{ steps.version.outputs.is_tag_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute CI version
+        id: version
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            SEMVER="${TAG#v}"
+            echo "is_tag_build=true" >> "$GITHUB_OUTPUT"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            PATCH=$((PATCH + ${{ github.run_number }}))
+            SEMVER="$MAJOR.$MINOR.$PATCH"
+            TAG="v$SEMVER"
+            echo "is_tag_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build-linux:
+    needs: [prepare-version]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply CI version
+        run: |
+          set -euo pipefail
+          VER="${{ needs.prepare-version.outputs.semver }}"
+          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"/version = "'"$VER"'"/' Cargo.toml
+          sed -i -E '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"/s//version = "'"$VER"'"/' ui/src-tauri/Cargo.toml
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/src-tauri/tauri.conf.json
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/package.json
 
       - name: Install Linux dependencies
         run: |
@@ -62,9 +103,29 @@ jobs:
             target/release/bundle/appimage/*.AppImage
 
   build-windows:
+    needs: [prepare-version]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply CI version
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.prepare-version.outputs.semver }}"
+          (Get-Content Cargo.toml) -replace '^version = "\d+\.\d+\.\d+"', "version = \"$ver\"" | Set-Content Cargo.toml
+
+          $tauriCargo = Get-Content ui/src-tauri/Cargo.toml
+          $updated = $false
+          for ($i = 0; $i -lt $tauriCargo.Count; $i++) {
+            if (-not $updated -and $tauriCargo[$i] -match '^version = "\d+\.\d+\.\d+"') {
+              $tauriCargo[$i] = "version = \"$ver\""
+              $updated = $true
+            }
+          }
+          $tauriCargo | Set-Content ui/src-tauri/Cargo.toml
+
+          (Get-Content ui/src-tauri/tauri.conf.json) -replace '"version": "\d+\.\d+\.\d+"', "\"version\": \"$ver\"" | Set-Content ui/src-tauri/tauri.conf.json
+          (Get-Content ui/package.json) -replace '"version": "\d+\.\d+\.\d+"', "\"version\": \"$ver\"" | Set-Content ui/package.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -102,6 +163,7 @@ jobs:
             target/release/bundle/msi/*.msi
 
   build-android:
+    needs: [prepare-version]
     runs-on: ubuntu-22.04
     env:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -110,6 +172,15 @@ jobs:
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Apply CI version
+        run: |
+          set -euo pipefail
+          VER="${{ needs.prepare-version.outputs.semver }}"
+          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"/version = "'"$VER"'"/' Cargo.toml
+          sed -i -E '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"/s//version = "'"$VER"'"/' ui/src-tauri/Cargo.toml
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/src-tauri/tauri.conf.json
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/package.json
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -181,7 +252,7 @@ jobs:
           if-no-files-found: warn
 
   release:
-    needs: [build-linux, build-windows, build-android]
+    needs: [prepare-version, build-linux, build-windows, build-android]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -191,20 +262,11 @@ jobs:
         with:
           path: artifacts
 
-      - name: Get version
-        id: version
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=v$(grep '"version"' ui/src-tauri/tauri.conf.json | head -1 | grep -oP '\d+\.\d+\.\d+')" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: Grafium ${{ steps.version.outputs.version }}
+          tag_name: ${{ needs.prepare-version.outputs.tag }}
+          name: Grafium ${{ needs.prepare-version.outputs.tag }}
           draft: false
           prerelease: false
           generate_release_notes: true

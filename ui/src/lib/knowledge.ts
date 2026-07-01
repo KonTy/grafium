@@ -1,5 +1,6 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -7,30 +8,49 @@ export interface AiConfig {
   enabled: boolean;
   mode: "local" | "cloud" | "hybrid";
   local?: {
-    ollama_url: string;
+    provider: string;
+    base_url: string;
+    api_key?: string;
+    model_path?: string;
     llm_model: string;
     embedding_model: string;
   };
   cloud?: {
     llm_provider: string;
     llm_model: string;
-    llm_api_key: string;
+    llm_api_key?: string;
+    llm_base_url?: string;
     embedding_provider: string;
     embedding_model: string;
     embedding_api_key?: string;
+    embedding_base_url?: string;
   };
 }
 
 export interface AiConfigPayload {
   enabled: boolean;
   mode: string;
-  ollama_url?: string;
+  local_provider?: string;
+  local_base_url?: string;
+  local_api_key?: string;
+  local_model_path?: string;
   llm_model?: string;
   embedding_model?: string;
   cloud_provider?: string;
+  cloud_base_url?: string;
   cloud_llm_model?: string;
   cloud_api_key?: string;
+  cloud_embedding_provider?: string;
+  cloud_embedding_base_url?: string;
+  cloud_embedding_api_key?: string;
   cloud_embedding_model?: string;
+}
+
+export interface StreamChunk {
+  request_id: string;
+  delta: string;
+  done: boolean;
+  error?: string | null;
 }
 
 export interface HealthStatus {
@@ -159,6 +179,44 @@ export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta
 
 export function aiAsk(question: string, graphId?: string): Promise<string> {
   return invoke("ai_ask", { question, graphId });
+}
+
+export async function aiAskStream(
+  question: string,
+  handlers: {
+    onChunk: (delta: string) => void;
+    onDone: () => void;
+    onError?: (message: string) => void;
+  },
+  graphId?: string
+): Promise<void> {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  const unlisten = await listen<StreamChunk>("ai://chat_stream", (event) => {
+    const payload = event.payload;
+    if (!payload || payload.request_id !== requestId) return;
+
+    if (payload.error) {
+      handlers.onError?.(payload.error);
+      return;
+    }
+
+    if (payload.delta) {
+      handlers.onChunk(payload.delta);
+    }
+
+    if (payload.done) {
+      handlers.onDone();
+    }
+  });
+
+  try {
+    await invoke("ai_ask_stream", { question, graphId, requestId });
+  } catch (e: any) {
+    handlers.onError?.(String(e));
+  } finally {
+    unlisten();
+  }
 }
 
 // ─── Graph Registry ──────────────────────────────────────────────────────────

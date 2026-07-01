@@ -19,8 +19,8 @@ Your issue: **Journal entries created via SilentPulse voice commands appear in t
 **Solution:** Added `Graph::validate_structure()` that checks:
 - ✅ `pages/` directory exists
 - ✅ `journals/` directory exists  
-- ✅ `.logseq/` directory exists
-- ✅ `.logseq/index.db` is valid SQLite (if exists)
+- ✅ `.grafium/` directory exists
+- ✅ `.grafium/index.db` is valid SQLite (if exists)
 
 **Files Changed:**
 - `core/src/graph.rs` - Added validation function and report struct
@@ -107,7 +107,7 @@ Your issue: **Journal entries created via SilentPulse voice commands appear in t
 - Valid graph structure validation ✅
 - Missing pages/ directory detection ✅
 - Missing journals/ directory detection ✅
-- Missing .logseq/ directory detection ✅
+- Missing .grafium/ directory detection ✅
 - Multiple missing directories detection ✅
 - Nonexistent paths handling ✅
 - Graph::open behavior with invalid structure ✅
@@ -149,7 +149,7 @@ App checks discovery priority:
 Before writing, validate graph structure:
   - Check pages/ exists
   - Check journals/ exists
-  - Check .logseq/ exists
+  - Check .grafium/ exists
   ↓
 If invalid → return error: "Invalid graph structure. Please open Grafium and select a proper graph."
 If valid → write to journals/2024-05-17.md
@@ -217,7 +217,7 @@ If journals still don't appear in correct graph:
 
 3. **Verify graph structure:**
    ```bash
-   adb shell "find /sdcard/Documents/grafium -type d -name pages -o -name journals -o -name .logseq"
+   adb shell "find /sdcard/Documents/grafium -type d -name pages -o -name journals -o -name .grafium"
    ```
 
 4. **Test companion app:**
@@ -236,7 +236,7 @@ If journals still don't appear in correct graph:
 ├─────────────────────────────────────────────────────────────┤
 │ open_graph("/path/to/graph")                                │
 │   ↓                                                          │
-│ validate_structure() - checks pages/, journals/, .logseq/   │
+│ validate_structure() - checks pages/, journals/, .grafium/   │
 │   ↓                                                          │
 │ Graph::open() - initializes graph                           │
 │   ↓                                                          │
@@ -264,7 +264,7 @@ If journals still don't appear in correct graph:
 │ isValidGraphDir(dir)                                        │
 │   - Check pages/ exists?                                    │
 │   - Check journals/ exists?                                 │
-│   - Check .logseq/ exists?                                  │
+│   - Check .grafium/ exists?                                  │
 │   ↓                                                          │
 │ If valid: getTodayJournalFile() → append entry             │
 │ If invalid: return error message                            │

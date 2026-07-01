@@ -76,8 +76,12 @@ pub struct SyncEngine {
 
 impl SyncEngine {
     pub fn new(local_root: PathBuf) -> Self {
-        let state_path = local_root.join(".logseq").join("sync-state.json");
-        let bases_dir = local_root.join(".logseq").join("sync-bases");
+        Self::new_with_metadata_dir(local_root, crate::graph::DEFAULT_METADATA_DIR_NAME)
+    }
+
+    pub fn new_with_metadata_dir(local_root: PathBuf, metadata_dir_name: &str) -> Self {
+        let state_path = local_root.join(metadata_dir_name).join("sync-state.json");
+        let bases_dir = local_root.join(metadata_dir_name).join("sync-bases");
         Self { local_root, state_path, bases_dir }
     }
 

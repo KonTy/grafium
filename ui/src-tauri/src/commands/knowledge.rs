@@ -5,12 +5,12 @@ use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::knowledge::engine::HealthStatus;
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
-use grafium_core::knowledge::schemas::{FieldType, Schema, SchemaField};
+use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
@@ -24,12 +24,19 @@ pub struct KnowledgeState {
 pub struct AiConfigPayload {
     pub enabled: bool,
     pub mode: String,
-    pub ollama_url: Option<String>,
+    pub local_provider: Option<String>,
+    pub local_base_url: Option<String>,
+    pub local_api_key: Option<String>,
+    pub local_model_path: Option<String>,
     pub llm_model: Option<String>,
     pub embedding_model: Option<String>,
     pub cloud_provider: Option<String>,
+    pub cloud_base_url: Option<String>,
     pub cloud_llm_model: Option<String>,
     pub cloud_api_key: Option<String>,
+    pub cloud_embedding_provider: Option<String>,
+    pub cloud_embedding_base_url: Option<String>,
+    pub cloud_embedding_api_key: Option<String>,
     pub cloud_embedding_model: Option<String>,
 }
 
@@ -50,16 +57,40 @@ pub async fn ai_set_config(
     state: State<'_, KnowledgeState>,
     payload: AiConfigPayload,
 ) -> Result<(), String> {
+    fn parse_provider(name: &str) -> ProviderType {
+        match name {
+            "anthropic" => ProviderType::Anthropic,
+            "openai_compatible" | "vllm" => ProviderType::OpenAiCompatible,
+            "ollama" => ProviderType::Ollama,
+            "huggingface" | "huggingface_local" => ProviderType::HuggingFace,
+            _ => ProviderType::OpenAi,
+        }
+    }
+
     let mode = match payload.mode.as_str() {
         "cloud" => AiMode::Cloud,
         "hybrid" => AiMode::Hybrid,
         _ => AiMode::Local,
     };
 
+    let local_provider = payload
+        .local_provider
+        .as_deref()
+        .map(parse_provider)
+        .unwrap_or(ProviderType::OpenAiCompatible);
+
+    let local_base_url_default = match local_provider {
+        ProviderType::Ollama => "http://localhost:11434",
+        _ => "http://localhost:8000/v1",
+    };
+
     let local = Some(LocalConfig {
-        ollama_url: payload
-            .ollama_url
-            .unwrap_or_else(|| "http://localhost:11434".to_string()),
+        provider: local_provider,
+        base_url: payload
+            .local_base_url
+            .unwrap_or_else(|| local_base_url_default.to_string()),
+        api_key: payload.local_api_key,
+        model_path: payload.local_model_path.map(PathBuf::from),
         llm_model: payload
             .llm_model
             .unwrap_or_else(|| "llama3.2".to_string()),
@@ -68,22 +99,33 @@ pub async fn ai_set_config(
             .unwrap_or_else(|| "nomic-embed-text".to_string()),
     });
 
-    let cloud = if let (Some(provider), Some(model), Some(key)) =
-        (&payload.cloud_provider, &payload.cloud_llm_model, &payload.cloud_api_key)
+    let cloud = if let (Some(provider), Some(model)) =
+        (&payload.cloud_provider, &payload.cloud_llm_model)
     {
-        let provider_type = match provider.as_str() {
-            "anthropic" => ProviderType::Anthropic,
-            _ => ProviderType::OpenAi,
-        };
+        let provider_type = parse_provider(provider);
+        let embedding_provider = payload
+            .cloud_embedding_provider
+            .as_deref()
+            .map(parse_provider)
+            .unwrap_or_else(|| {
+                if provider_type == ProviderType::OpenAi {
+                    ProviderType::OpenAi
+                } else {
+                    ProviderType::OpenAiCompatible
+                }
+            });
+
         Some(CloudConfig {
             llm_provider: provider_type.clone(),
             llm_model: model.clone(),
-            llm_api_key: key.clone(),
-            embedding_provider: ProviderType::OpenAi,
+            llm_api_key: payload.cloud_api_key.clone(),
+            llm_base_url: payload.cloud_base_url,
+            embedding_provider,
             embedding_model: payload
                 .cloud_embedding_model
                 .unwrap_or_else(|| "text-embedding-3-small".to_string()),
-            embedding_api_key: Some(key.clone()),
+            embedding_api_key: payload.cloud_embedding_api_key.or(payload.cloud_api_key),
+            embedding_base_url: payload.cloud_embedding_base_url,
         })
     } else {
         None
@@ -298,6 +340,97 @@ pub async fn ai_ask(
         .ask(&question, graph_id.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskStreamChunk {
+    pub request_id: String,
+    pub delta: String,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ai_ask_stream(
+    state: State<'_, KnowledgeState>,
+    app: tauri::AppHandle,
+    question: String,
+    graph_id: Option<String>,
+    request_id: String,
+) -> Result<(), String> {
+    let guard = state.engine.read().await;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+
+    if !engine.is_ready() {
+        return Err("AI engine not ready".to_string());
+    }
+
+    let answer = engine
+        .ask(&question, graph_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Stream by small chunks to give responsive UI updates across all providers.
+    const CHUNK_SIZE: usize = 24;
+    if answer.is_empty() {
+        app.emit(
+            "ai://chat_stream",
+            AskStreamChunk {
+                request_id,
+                delta: String::new(),
+                done: true,
+                error: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let mut buf = String::new();
+    for ch in answer.chars() {
+        buf.push(ch);
+        if buf.chars().count() >= CHUNK_SIZE {
+            app.emit(
+                "ai://chat_stream",
+                AskStreamChunk {
+                    request_id: request_id.clone(),
+                    delta: std::mem::take(&mut buf),
+                    done: false,
+                    error: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+        }
+    }
+
+    if !buf.is_empty() {
+        app.emit(
+            "ai://chat_stream",
+            AskStreamChunk {
+                request_id: request_id.clone(),
+                delta: buf,
+                done: false,
+                error: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    app.emit(
+        "ai://chat_stream",
+        AskStreamChunk {
+            request_id,
+            delta: String::new(),
+            done: true,
+            error: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 // ─── Graph Registry ──────────────────────────────────────────────────────────

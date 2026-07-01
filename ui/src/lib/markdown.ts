@@ -97,7 +97,7 @@ export function renderBlock(content: string): string {
 
   let processed = renderMathOutsideCodeFences(content);
 
-  // Unescape Logseq-style backslash escapes before brackets (e.g. \] → ])
+  // Unescape outline-style backslash escapes before brackets (e.g. \] → ])
   // so that standard markdown links like [text](url) render correctly.
   processed = processed.replace(/\\([[\]])/g, "$1");
 

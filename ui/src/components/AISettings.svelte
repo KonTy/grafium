@@ -22,12 +22,19 @@
   // Form state
   let enabled = $state(false);
   let mode = $state("local");
-  let ollamaUrl = $state("http://localhost:11434");
+  let localProvider = $state("openai_compatible");
+  let localBaseUrl = $state("http://localhost:8000/v1");
+  let localApiKey = $state("");
+  let localModelPath = $state("");
   let llmModel = $state("llama3.2");
   let embeddingModel = $state("nomic-embed-text");
   let cloudProvider = $state("openai");
+  let cloudBaseUrl = $state("");
   let cloudLlmModel = $state("gpt-4o");
   let cloudApiKey = $state("");
+  let cloudEmbeddingProvider = $state("openai");
+  let cloudEmbeddingBaseUrl = $state("");
+  let cloudEmbeddingApiKey = $state("");
   let cloudEmbeddingModel = $state("text-embedding-3-small");
 
   // Load config on mount
@@ -43,14 +50,21 @@
         enabled = config.enabled;
         mode = config.mode || "local";
         if (config.local) {
-          ollamaUrl = config.local.ollama_url || "http://localhost:11434";
+          localProvider = config.local.provider || "openai_compatible";
+          localBaseUrl = config.local.base_url || "http://localhost:8000/v1";
+          localApiKey = config.local.api_key || "";
+          localModelPath = config.local.model_path || "";
           llmModel = config.local.llm_model || "llama3.2";
           embeddingModel = config.local.embedding_model || "nomic-embed-text";
         }
         if (config.cloud) {
           cloudProvider = config.cloud.llm_provider || "openai";
+          cloudBaseUrl = config.cloud.llm_base_url || "";
           cloudLlmModel = config.cloud.llm_model || "gpt-4o";
           cloudApiKey = config.cloud.llm_api_key || "";
+          cloudEmbeddingProvider = config.cloud.embedding_provider || "openai";
+          cloudEmbeddingBaseUrl = config.cloud.embedding_base_url || "";
+          cloudEmbeddingApiKey = config.cloud.embedding_api_key || "";
           cloudEmbeddingModel = config.cloud.embedding_model || "text-embedding-3-small";
         }
       }
@@ -68,12 +82,19 @@
       const payload: AiConfigPayload = {
         enabled,
         mode,
-        ollama_url: ollamaUrl,
+        local_provider: localProvider,
+        local_base_url: localBaseUrl,
+        local_api_key: localApiKey || undefined,
+        local_model_path: localModelPath || undefined,
         llm_model: llmModel,
         embedding_model: embeddingModel,
         cloud_provider: cloudProvider,
+        cloud_base_url: cloudBaseUrl || undefined,
         cloud_llm_model: cloudLlmModel,
         cloud_api_key: cloudApiKey || undefined,
+        cloud_embedding_provider: cloudEmbeddingProvider,
+        cloud_embedding_base_url: cloudEmbeddingBaseUrl || undefined,
+        cloud_embedding_api_key: cloudEmbeddingApiKey || undefined,
         cloud_embedding_model: cloudEmbeddingModel,
       };
       await aiSetConfig(payload);
@@ -151,25 +172,41 @@
       <!-- Mode selection -->
       <div class="field-group">
         <label class="field-label">Mode</label>
-        <select bind:value={mode} class="field-select">
-          <option value="local">Local (Ollama)</option>
-          <option value="cloud">Cloud (API keys)</option>
-          <option value="hybrid">Hybrid (local embeddings + cloud LLM)</option>
-        </select>
+        <div class="choice-row">
+          <button class="choice-btn" class:active={mode === "local"} onclick={() => (mode = "local")}>Local</button>
+          <button class="choice-btn" class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
+          <button class="choice-btn" class:active={mode === "hybrid"} onclick={() => (mode = "hybrid")}>Hybrid</button>
+        </div>
       </div>
 
       <!-- Local settings -->
       {#if mode === "local" || mode === "hybrid"}
         <div class="settings-section">
-          <h4>Local (Ollama)</h4>
+          <h4>Local Provider</h4>
           <div class="field-group">
-            <label class="field-label">Ollama URL</label>
-            <input type="text" bind:value={ollamaUrl} class="field-input" />
+            <label class="field-label">Provider</label>
+            <div class="choice-row">
+              <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>OpenAI-compatible</button>
+              <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => (localProvider = "ollama")}>Ollama</button>
+              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded (planned)</button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="field-label">Base URL</label>
+            <input type="text" bind:value={localBaseUrl} class="field-input" placeholder="http://localhost:8000/v1 or http://192.168.1.10:11434" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">API Key (optional)</label>
+            <input type="password" bind:value={localApiKey} class="field-input" placeholder="Bearer key if endpoint requires auth" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Embedded Model Path (future)</label>
+            <input type="text" bind:value={localModelPath} class="field-input" placeholder="/path/to/local/model (for embedded runtime mode)" />
           </div>
           {#if mode === "local"}
             <div class="field-group">
               <label class="field-label">LLM Model</label>
-              <input type="text" bind:value={llmModel} class="field-input" placeholder="llama3.2, mistral, etc." />
+              <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
             </div>
           {/if}
           <div class="field-group">
@@ -185,10 +222,15 @@
           <h4>Cloud Provider</h4>
           <div class="field-group">
             <label class="field-label">Provider</label>
-            <select bind:value={cloudProvider} class="field-select">
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic (Claude)</option>
-            </select>
+            <div class="choice-row">
+              <button class="choice-btn" class:active={cloudProvider === "openai"} onclick={() => (cloudProvider = "openai")}>OpenAI</button>
+              <button class="choice-btn" class:active={cloudProvider === "anthropic"} onclick={() => (cloudProvider = "anthropic")}>Anthropic</button>
+              <button class="choice-btn" class:active={cloudProvider === "openai_compatible"} onclick={() => (cloudProvider = "openai_compatible")}>OpenAI-compatible</button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="field-label">Cloud Base URL (optional)</label>
+            <input type="text" bind:value={cloudBaseUrl} class="field-input" placeholder="Leave empty for official provider endpoint" />
           </div>
           <div class="field-group">
             <label class="field-label">Model</label>
@@ -201,8 +243,23 @@
           </div>
           {#if mode === "cloud"}
             <div class="field-group">
+              <label class="field-label">Embedding Provider</label>
+              <div class="choice-row">
+                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai"} onclick={() => (cloudEmbeddingProvider = "openai")}>OpenAI</button>
+                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>OpenAI-compatible</button>
+              </div>
+            </div>
+            <div class="field-group">
+              <label class="field-label">Embedding Base URL (optional)</label>
+              <input type="text" bind:value={cloudEmbeddingBaseUrl} class="field-input" placeholder="Defaults to cloud base URL" />
+            </div>
+            <div class="field-group">
               <label class="field-label">Embedding Model</label>
               <input type="text" bind:value={cloudEmbeddingModel} class="field-input" />
+            </div>
+            <div class="field-group">
+              <label class="field-label">Embedding API Key (optional)</label>
+              <input type="password" bind:value={cloudEmbeddingApiKey} class="field-input" placeholder="defaults to cloud API key" />
             </div>
           {/if}
         </div>
@@ -337,6 +394,35 @@
     border-radius: 6px;
     font-size: 13px;
     outline: none;
+  }
+
+  .field-select {
+    display: none;
+  }
+
+  .field-select option {
+    display: none;
+  }
+
+  .choice-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .choice-btn {
+    background: var(--bg-input, #252536);
+    border: 1px solid var(--border, #333);
+    color: var(--text-primary, #fff);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .choice-btn.active {
+    background: color-mix(in srgb, var(--accent, #7c3aed) 22%, var(--bg-input, #252536));
+    border-color: var(--accent, #7c3aed);
   }
 
   .field-input:focus,

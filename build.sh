@@ -2,15 +2,10 @@
 set -e
 
 # Build script: runs tests, bumps patch version, then builds.
-# Usage: ./build.sh [--no-bump]
+# Usage: ./build.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
-
-NO_BUMP=false
-if [ "$1" = "--no-bump" ]; then
-    NO_BUMP=true
-fi
 
 echo "══════════════════════════════════════════════"
 echo "  Grafium - Build Pipeline"
@@ -26,34 +21,27 @@ if [ $? -ne 0 ]; then
 fi
 echo "✓ All Rust tests passed."
 
-# ─── 2. Bump version (patch) ─────────────────────
-if [ "$NO_BUMP" = false ]; then
-    echo ""
-    echo "▶ Bumping patch version..."
+# ─── 2. Bump version (patch/build) ───────────────
+echo ""
+echo "▶ Bumping patch/build version..."
 
-    # Read current version from workspace Cargo.toml
-    CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-    
-    # Parse major.minor.patch
-    IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
-    NEW_PATCH=$((PATCH + 1))
-    NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+# Read current version from workspace Cargo.toml
+CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 
-    echo "  $CURRENT_VERSION → $NEW_VERSION"
+# Parse major.minor.patch and increment patch like Windows build number
+IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+NEW_PATCH=$((PATCH + 1))
+NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
 
-    # Update all version references
-    sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
-    sed -i "0,/^version = \"$CURRENT_VERSION\"/s//version = \"$NEW_VERSION\"/" ui/src-tauri/Cargo.toml
-    sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" ui/src-tauri/tauri.conf.json
-    sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" ui/package.json
+echo "  $CURRENT_VERSION → $NEW_VERSION"
 
-    echo "✓ Version bumped to $NEW_VERSION"
-else
-    CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-    NEW_VERSION="$CURRENT_VERSION"
-    echo ""
-    echo "  Skipping version bump (--no-bump). Version: $NEW_VERSION"
-fi
+# Update all version references
+sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+sed -i "0,/^version = \"$CURRENT_VERSION\"/s//version = \"$NEW_VERSION\"/" ui/src-tauri/Cargo.toml
+sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" ui/src-tauri/tauri.conf.json
+sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" ui/package.json
+
+echo "✓ Version bumped to $NEW_VERSION"
 
 # ─── 3. Build frontend ───────────────────────────
 echo ""

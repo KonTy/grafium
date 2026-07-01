@@ -65,7 +65,7 @@ class MainActivity : Activity() {
         if (invalidCount > 0) {
             val warning = TextView(this).apply {
                 text = "⚠ Found $invalidCount folder(s) without proper graph structure. " +
-                       "These folders are missing pages/, journals/, and/or .logseq/ directories. " +
+                       "These folders are missing pages/, journals/, and/or .grafium/ directories. " +
                        "Open Grafium and validate these folders, or delete them if they're not graphs.\n"
                 textSize = 12f
                 setTextColor(0xFFFF6600.toInt())
@@ -175,11 +175,11 @@ class MainActivity : Activity() {
         if (!dir.isDirectory) return false
         val pagesDir = File(dir, "pages")
         val journalsDir = File(dir, "journals")
-        val logseqDir = File(dir, ".logseq")
+         val metadataDir = File(dir, ".grafium")
         
         return pagesDir.isDirectory && 
                journalsDir.isDirectory && 
-               logseqDir.isDirectory
+             metadataDir.isDirectory
     }
 
     private fun hasStorageAccess(): Boolean {

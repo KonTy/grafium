@@ -1,6 +1,6 @@
 <script lang="ts">
   import PageContent from "./PageContent.svelte";
-  import { listJournalPages, createPage, getPage } from "../lib/api";
+  import { listJournalPages, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -15,6 +15,14 @@
   let loadingMore = $state(false);
   let hasMore = $state(true);
   let bottomSentinel: HTMLDivElement | null = $state(null);
+
+  interface ContextMenu {
+    x: number;
+    y: number;
+    page: Page;
+  }
+
+  let contextMenu: ContextMenu | null = $state(null);
 
   function getLocalDate(): string {
     const now = new Date();
@@ -64,6 +72,49 @@
     observer.observe(bottomSentinel);
     return () => observer.disconnect();
   });
+
+  $effect(() => {
+    function closeMenu() {
+      contextMenu = null;
+    }
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+    };
+  });
+
+  function handleDateRightClick(e: MouseEvent, page: Page) {
+    const target = e.target as HTMLElement | null;
+    if (!target?.closest(".page-title")) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    contextMenu = { x: e.clientX, y: e.clientY, page };
+  }
+
+  async function handleDeletePage() {
+    if (!contextMenu) return;
+    const pageToDelete = contextMenu.page;
+    contextMenu = null;
+
+    const confirmed = window.confirm(`Delete journal page '${pageToDelete.title}'? This will delete the .md file from disk.`);
+    if (!confirmed) return;
+
+    try {
+      await deletePage(pageToDelete.id);
+      journalPages = journalPages.filter((page) => page.id !== pageToDelete.id);
+
+      const next = await listJournalPages(1, journalPages.length);
+      hasMore = next.length > 0;
+    } catch (e) {
+      console.error("Failed to delete journal page:", e);
+      alert("Failed to delete journal page.");
+    }
+  }
 
   async function loadJournals() {
     loading = true;
@@ -133,7 +184,12 @@
     <div class="loading">Loading journals...</div>
   {:else}
     {#each journalPages as page (page.id)}
-      <div class="journal-entry" id={`journal-page-${page.title}`} data-page-title={page.title}>
+      <div
+        class="journal-entry"
+        id={`journal-page-${page.title}`}
+        data-page-title={page.title}
+        oncontextmenu={(e) => handleDateRightClick(e, page)}
+      >
         <PageContent {page} compact />
       </div>
       <hr class="journal-divider" />
@@ -148,6 +204,19 @@
     {/if}
 
     <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
+
+    {#if contextMenu}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="context-menu"
+        style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <button class="context-menu-item danger" onclick={handleDeletePage}>
+          Delete page
+        </button>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -191,5 +260,37 @@
 
   .journal-bottom-sentinel {
     height: 1px;
+  }
+
+  .context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 150px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: 6px;
+  }
+
+  .context-menu-item {
+    display: block;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .context-menu-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .context-menu-item.danger {
+    color: #f38ba8;
   }
 </style>
