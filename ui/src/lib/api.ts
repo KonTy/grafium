@@ -188,12 +188,27 @@ export interface GraphInfo {
   path: string;
 }
 
+export interface GraphValidationReport {
+  is_valid: boolean;
+  has_pages_dir: boolean;
+  has_journals_dir: boolean;
+  has_logseq_dir: boolean;
+  has_valid_db: boolean;
+  not_nested_in_another_graph: boolean;
+  has_no_nested_graph_roots: boolean;
+  error_message: string | null;
+}
+
 export function getGraphInfo(): Promise<GraphInfo> {
   return invoke("get_graph_info", {});
 }
 
 export function listGraphs(): Promise<GraphInfo[]> {
   return invoke("list_graphs", {});
+}
+
+export function validateGraph(path: string): Promise<GraphValidationReport> {
+  return invoke("validate_graph", { path });
 }
 
 export function openGraph(path: string): Promise<GraphInfo> {

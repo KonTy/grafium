@@ -39,6 +39,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Full-screen ink capture activity for stylus handwriting -->
+        <activity
+            android:name=".ink.InkActivity"
+            android:exported="false"
+            android:label="Grafium Ink"
+            android:windowSoftInputMode="stateHidden"
+            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize|screenLayout" />
+
     </application>
 
     <!-- Allow SilentPulse to discover us -->

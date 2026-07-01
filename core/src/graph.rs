@@ -13,6 +13,7 @@ use crate::parser::links::ExtractedLink;
 use crate::error::Result;
 use chrono::Utc;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 pub struct Graph {
     pub db: Database,
@@ -21,7 +22,111 @@ pub struct Graph {
     pub journals_dir: PathBuf,
 }
 
+/// Validation report for a graph directory structure.
+/// Indicates whether the directory is a valid Grafium graph.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphValidationReport {
+    /// Whether the directory is a valid graph structure
+    pub is_valid: bool,
+    /// Whether pages/ directory exists
+    pub has_pages_dir: bool,
+    /// Whether journals/ directory exists
+    pub has_journals_dir: bool,
+    /// Whether .logseq/ directory exists
+    pub has_logseq_dir: bool,
+    /// Whether .logseq/index.db exists and is valid
+    pub has_valid_db: bool,
+    /// Whether this graph root is not inside another graph
+    pub not_nested_in_another_graph: bool,
+    /// Whether this graph root does not contain nested graph roots
+    pub has_no_nested_graph_roots: bool,
+    /// Detailed error message if invalid
+    pub error_message: Option<String>,
+}
+
 impl Graph {
+    /// A directory is considered a graph root when it has the canonical trio.
+    pub fn is_graph_root_dir(path: &Path) -> bool {
+        path.join("pages").is_dir()
+            && path.join("journals").is_dir()
+            && path.join(".logseq").is_dir()
+    }
+
+    /// Find the nearest ancestor directory that looks like a graph root.
+    /// Returns None when `path` is not nested inside another graph.
+    pub fn find_ancestor_graph_root(path: &Path) -> Option<PathBuf> {
+        for ancestor in path.ancestors().skip(1) {
+            if Self::is_graph_root_dir(ancestor) {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+        None
+    }
+
+    /// Find any nested graph root inside `root_dir` (excluding `root_dir` itself).
+    ///
+    /// This is intentionally depth-limited to keep folder validation responsive on
+    /// mobile devices with very large graphs.
+    pub fn find_nested_graph_root(root_dir: &Path) -> Option<PathBuf> {
+        let mut stack: Vec<(PathBuf, usize)> = vec![(root_dir.to_path_buf(), 0)];
+        let max_depth = 2usize;
+        let max_dirs_scanned = 512usize;
+        let max_entries_per_dir = 256usize;
+        let mut scanned_dirs = 0usize;
+
+        while let Some((dir, depth)) = stack.pop() {
+            if scanned_dirs >= max_dirs_scanned {
+                break;
+            }
+            scanned_dirs += 1;
+
+            let read_dir = match fs::read_dir(&dir) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            for entry in read_dir.flatten().take(max_entries_per_dir) {
+                let child = entry.path();
+                if !child.is_dir() {
+                    continue;
+                }
+
+                // Hidden dirs are never considered graph roots.
+                let is_hidden = child
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with('.'))
+                    .unwrap_or(false);
+                if is_hidden {
+                    continue;
+                }
+
+                if Self::is_graph_root_dir(&child) {
+                    return Some(child);
+                }
+
+                if depth < max_depth {
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn looks_like_sqlite_file(path: &Path) -> bool {
+        let mut header = [0u8; 16];
+        let mut f = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return false,
+        };
+        use std::io::Read;
+        if f.read_exact(&mut header).is_err() {
+            return false;
+        }
+        header == *b"SQLite format 3\0"
+    }
+
     /// Auto-create all parent pages in a hierarchy.
     /// For "a/b/c", creates "a" and "a/b" if they don't exist.
     fn ensure_parent_hierarchy(&self, title: &str) -> Result<()> {
@@ -54,19 +159,124 @@ impl Graph {
         }
     }
 
+    /// Validate that a directory contains a valid Grafium graph structure.
+    /// 
+    /// A valid graph must have:
+    /// - `pages/` directory
+    /// - `journals/` directory
+    /// - `.logseq/` directory (with optional index.db)
+    ///
+    /// Note: This validates **structure only**. It does not require `index.db` to exist
+    /// because it will be created by `Graph::open()` if missing. However, if `.logseq/index.db`
+    /// does exist, it must be a valid SQLite database.
+    pub fn validate_structure(root_dir: &Path) -> GraphValidationReport {
+        let pages_dir = root_dir.join("pages");
+        let journals_dir = root_dir.join("journals");
+        let logseq_dir = root_dir.join(".logseq");
+        let db_path = logseq_dir.join("index.db");
+
+        let has_pages_dir = pages_dir.is_dir();
+        let has_journals_dir = journals_dir.is_dir();
+        let has_logseq_dir = logseq_dir.is_dir();
+
+        // Cheap sanity check only; avoid opening SQLite during validation because
+        // schema initialization can be expensive and block the UI thread.
+        let has_valid_db = if db_path.exists() {
+            Self::looks_like_sqlite_file(&db_path)
+        } else {
+            // DB doesn't exist yet, which is ok (will be created)
+            true
+        };
+
+        let not_nested_in_another_graph = Self::find_ancestor_graph_root(root_dir).is_none();
+        let has_no_nested_graph_roots = Self::find_nested_graph_root(root_dir).is_none();
+
+        // A valid graph has all three directories and no nested-graph ambiguity.
+        // A corrupted DB is recoverable and should not block opening.
+        let is_valid = has_pages_dir
+            && has_journals_dir
+            && has_logseq_dir
+            && not_nested_in_another_graph
+            && has_no_nested_graph_roots;
+
+        let error_message = if is_valid {
+            None
+        } else {
+            let mut missing: Vec<String> = Vec::new();
+            if !has_pages_dir {
+                missing.push("pages/".to_string());
+            }
+            if !has_journals_dir {
+                missing.push("journals/".to_string());
+            }
+            if !has_logseq_dir {
+                missing.push(".logseq/".to_string());
+            }
+            if !has_valid_db && db_path.exists() {
+                missing.push(".logseq/index.db (invalid or corrupted database)".to_string());
+            }
+            if !not_nested_in_another_graph {
+                if let Some(parent_root) = Self::find_ancestor_graph_root(root_dir) {
+                    missing.push(format!(
+                        "graph is nested inside another graph: {}",
+                        parent_root.display()
+                    ));
+                } else {
+                    missing.push("graph is nested inside another graph".to_string());
+                }
+            }
+            if !has_no_nested_graph_roots {
+                if let Some(nested_root) = Self::find_nested_graph_root(root_dir) {
+                    missing.push(format!(
+                        "contains nested graph root: {}",
+                        nested_root.display()
+                    ));
+                } else {
+                    missing.push("contains nested graph roots".to_string());
+                }
+            }
+
+            let msg = format!(
+                "Invalid graph structure in '{}': missing or invalid {}",
+                root_dir.display(),
+                missing.join(", ")
+            );
+            Some(msg)
+        };
+
+        GraphValidationReport {
+            is_valid,
+            has_pages_dir,
+            has_journals_dir,
+            has_logseq_dir,
+            has_valid_db,
+            not_nested_in_another_graph,
+            has_no_nested_graph_roots,
+            error_message,
+        }
+    }
+
     /// Open or create a graph rooted at `root_dir`.
     /// Creates pages/ and journals/ subdirectories if needed.
     /// SQLite index is stored at root_dir/.logseq/index.db
     pub fn open(root_dir: &Path) -> Result<Self> {
+        let db_path = root_dir.join(".logseq").join("index.db");
+        Self::open_with_db_path(root_dir, &db_path)
+    }
+
+    /// Open or create a graph rooted at `root_dir` with an explicit index DB path.
+    /// This is used on Android where scoped storage can block writes to hidden
+    /// files under shared storage (e.g. /Documents/.../.logseq/index.db).
+    pub fn open_with_db_path(root_dir: &Path, db_path: &Path) -> Result<Self> {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
-        let logseq_dir = root_dir.join(".logseq");
 
         fs::create_dir_all(&pages_dir)?;
         fs::create_dir_all(&journals_dir)?;
-        fs::create_dir_all(&logseq_dir)?;
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
 
-        let db_path = logseq_dir.join("index.db");
         let db = Database::new(db_path.to_str().unwrap())?;
 
         Ok(Self {

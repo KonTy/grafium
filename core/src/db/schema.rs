@@ -62,6 +62,45 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_handwriting_block ON handwriting_strokes(block_id);
 
+        -- Ink pages index: maps ink SVG files on disk to blocks for search/graph integration
+        CREATE TABLE IF NOT EXISTS ink_pages (
+            id TEXT PRIMARY KEY,
+            block_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            recognized_text TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            model_version TEXT,
+            confidence REAL,
+            created_at INTEGER NOT NULL,
+            recognized_at INTEGER,
+            FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ink_pages_block ON ink_pages(block_id);
+        CREATE INDEX IF NOT EXISTS idx_ink_pages_status ON ink_pages(status) WHERE status != 'confirmed';
+
+        -- FTS index for recognized handwriting text
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts_ink USING fts5(
+            ink_id UNINDEXED,
+            recognized_text,
+            tokenize='porter unicode61'
+        );
+
+        -- Correction pairs for on-device model fine-tuning
+        CREATE TABLE IF NOT EXISTS ink_corrections (
+            id TEXT PRIMARY KEY,
+            ink_id TEXT NOT NULL,
+            stroke_ids TEXT NOT NULL DEFAULT '[]',
+            original_text TEXT NOT NULL,
+            corrected_text TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            used_in_training INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (ink_id) REFERENCES ink_pages(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ink_corrections_ink ON ink_corrections(ink_id);
+        CREATE INDEX IF NOT EXISTS idx_ink_corrections_unused ON ink_corrections(used_in_training) WHERE used_in_training = 0;
+
         CREATE TABLE IF NOT EXISTS audio_notes (
             id TEXT PRIMARY KEY,
             block_id TEXT NOT NULL,

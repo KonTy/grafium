@@ -311,6 +311,35 @@ fn start_sync_monitor(
     });
 }
 
+#[cfg(target_os = "android")]
+fn stable_path_id(path: &std::path::Path) -> String {
+    // Deterministic FNV-1a hash for filesystem-safe DB directory names.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in path.to_string_lossy().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
+
+fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("/data/local/tmp"));
+        let id = stable_path_id(graph_root);
+        return app_data.join("graph_indexes").join(id).join("index.db");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        graph_root.join(".logseq").join("index.db")
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -321,22 +350,58 @@ pub fn run() {
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path);
 
-            // Use last-used graph, or fall back to default graph dir
+            // Use last-used graph, or fall back to default graph dir.
+            // Validate the saved path before trusting it — if it no longer has a proper
+            // graph structure, fall back to the default directory rather than creating
+            // subdirectories inside an arbitrary user folder.
+            let default_graph_dir = app_dir.join("graph");
             let graph_dir = if let Some(ref current) = config.current {
-                PathBuf::from(current)
+                let candidate = PathBuf::from(current);
+                let validation = Graph::validate_structure(&candidate);
+                if validation.is_valid {
+                    candidate
+                } else {
+                    eprintln!(
+                        "Warning: saved graph path '{}' is no longer valid ({}), falling back to default",
+                        current,
+                        validation.error_message.as_deref().unwrap_or("unknown error")
+                    );
+                    default_graph_dir
+                }
             } else {
-                app_dir.join("graph")
+                default_graph_dir
             };
 
-            let graph = Graph::open(&graph_dir)
+            let db_path = platform_db_path(app.handle(), &graph_dir);
+            let graph = Graph::open_with_db_path(&graph_dir, &db_path)
                 .expect("Failed to initialize graph");
 
-            // Only reindex if DB is empty (first run or corrupted)
+            // Keep startup responsive. If DB is empty (first run or recovered),
+            // rebuild in the background instead of blocking app initialization.
             let page_count = graph.db.list_pages(100, 0).map(|p| p.len()).unwrap_or(0);
             if page_count == 0 {
-                if let Err(e) = graph.reindex_all() {
-                    eprintln!("Warning: reindex failed: {}", e);
-                }
+                let graph_dir_clone = graph_dir.clone();
+                let db_path_clone = db_path.clone();
+                thread::spawn(move || {
+                    match Graph::open_with_db_path(&graph_dir_clone, &db_path_clone) {
+                        Ok(g) => {
+                            if let Err(e) = g.reindex_all() {
+                                eprintln!(
+                                    "Warning: background startup reindex failed for '{}': {}",
+                                    graph_dir_clone.display(),
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: background startup reindex could not open '{}': {}",
+                                graph_dir_clone.display(),
+                                e
+                            );
+                        }
+                    }
+                });
             }
 
             // Register default graph in config if not present
@@ -522,6 +587,7 @@ pub fn run() {
             commands::graph::list_graphs,
             commands::graph::open_graph,
             commands::graph::create_graph,
+            commands::graph::validate_graph,
             commands::graph::reindex_current,
             commands::graph::remove_graph,
             commands::graph::get_app_version,

@@ -123,6 +123,15 @@ class VoiceCommandReceiver : BroadcastReceiver() {
 
     private fun addJournalEntry(context: Context, text: String): String {
         val file = getTodayJournalFile(context) ?: return noGraphMessage()
+        
+        // Validate graph structure before writing
+        val graphDir = getActiveGraphDir(context)
+        if (graphDir == null || !isValidGraphDir(graphDir)) {
+            return "Invalid Grafium graph structure. " +
+                   "Make sure the graph directory contains pages/, journals/, and .logseq/ folders. " +
+                   "Open Grafium and select or create a proper graph."
+        }
+
         return try {
             file.parentFile?.mkdirs()
             file.appendText("- $text\n")
@@ -136,6 +145,14 @@ class VoiceCommandReceiver : BroadcastReceiver() {
 
     private fun addTodo(context: Context, rawText: String): String {
         val file = getTodayJournalFile(context) ?: return noGraphMessage()
+
+        // Validate graph structure before writing
+        val graphDir = getActiveGraphDir(context)
+        if (graphDir == null || !isValidGraphDir(graphDir)) {
+            return "Invalid Grafium graph structure. " +
+                   "Make sure the graph directory contains pages/, journals/, and .logseq/ folders. " +
+                   "Open Grafium and select or create a proper graph."
+        }
 
         var text = rawText
         var priority: String? = null
@@ -230,15 +247,43 @@ class VoiceCommandReceiver : BroadcastReceiver() {
     }
 
     private fun getActiveGraphDir(context: Context): File? {
-        // Check SharedPreferences for explicit path
+        // ── Priority 1: Check for status file from Tauri app ────────────────
+        // When Tauri opens a graph, it writes current_graph.json to ~/grafium/
+        val statusFile = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            "grafium/current_graph.json"
+        )
+        if (statusFile.exists()) {
+            try {
+                val content = statusFile.readText()
+                val json = org.json.JSONObject(content)
+                val path = json.optString("graph_path", null)
+                if (path != null) {
+                    val dir = File(path)
+                    if (isValidGraphDir(dir)) {
+                        Log.d(TAG, "Using graph from status file: $path")
+                        return dir
+                    } else {
+                        Log.w(TAG, "Status file has invalid path: $path")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to read status file", e)
+            }
+        }
+
+        // ── Priority 2: Check SharedPreferences for explicitly saved path ───
         val prefs = context.getSharedPreferences("grafium_prefs", Context.MODE_PRIVATE)
         val saved = prefs.getString("active_graph_path", null)
         if (saved != null) {
             val dir = File(saved)
-            if (dir.exists() && File(dir, "journals").isDirectory) return dir
+            if (isValidGraphDir(dir)) {
+                Log.d(TAG, "Using graph from SharedPreferences: $saved")
+                return dir
+            }
         }
 
-        // Auto-detect from Documents/grafium/
+        // ── Priority 3: Auto-detect from Documents/grafium/ ─────────────────
         val grafiumRoot = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
             "grafium"
@@ -246,11 +291,15 @@ class VoiceCommandReceiver : BroadcastReceiver() {
         if (!grafiumRoot.exists()) return null
 
         val candidates = grafiumRoot.listFiles()
-            ?.filter { it.isDirectory && File(it, "journals").isDirectory }
+            ?.filter { isValidGraphDir(it) }
             ?: return null
 
         if (candidates.isEmpty()) return null
-        if (candidates.size == 1) return candidates[0]
+        if (candidates.size == 1) {
+            val dir = candidates[0]
+            Log.d(TAG, "Auto-detected single graph: ${dir.absolutePath}")
+            return dir
+        }
 
         // Multiple graphs — use the one with the most recent journal file
         val best = candidates.maxByOrNull { dir ->
@@ -259,12 +308,31 @@ class VoiceCommandReceiver : BroadcastReceiver() {
                 ?.maxOfOrNull { it.lastModified() } ?: 0L
         }
 
-        // Save for next time
         best?.let {
+            Log.d(TAG, "Auto-detected most recent graph: ${it.absolutePath}")
+            // Save for next time
             prefs.edit().putString("active_graph_path", it.absolutePath).apply()
         }
 
         return best
+    }
+
+    /**
+     * Validate that a directory contains a proper graph structure.
+     * A valid graph must have:
+     * - pages/ directory
+     * - journals/ directory
+     * - .logseq/ directory
+     */
+    private fun isValidGraphDir(dir: File): Boolean {
+        if (!dir.isDirectory) return false
+        val pagesDir = File(dir, "pages")
+        val journalsDir = File(dir, "journals")
+        val logseqDir = File(dir, ".logseq")
+        
+        return pagesDir.isDirectory && 
+               journalsDir.isDirectory && 
+               logseqDir.isDirectory
     }
 
     private fun getActiveGraphName(context: Context): String {

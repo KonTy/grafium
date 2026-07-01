@@ -8,7 +8,7 @@
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, createGraph, listGraphs, type GraphInfo } from "./lib/api";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { applyTheme, getThemeById } from "./lib/themes";
   import { listen } from "@tauri-apps/api/event";
@@ -317,7 +317,9 @@
       newPageName = "";
       showNewPageDialog = true;
     },
-    reindex: () => {},
+    reindex: () => {
+      void runReindex(true);
+    },
     undo: () => {},
     redo: () => {},
     commandPalette: () => {},
@@ -603,6 +605,24 @@
     showMoreMenu = false;
   }
 
+  async function runReindex(showSuccessAlert = false) {
+    try {
+      await reindexCurrent();
+      handleGraphChanged();
+      if (showSuccessAlert) {
+        alert("Graph re-index complete.");
+      }
+    } catch (e) {
+      console.error("[graph] reindex error:", e);
+      alert("Re-index failed: " + e);
+    }
+  }
+
+  async function handleMobileReindex() {
+    closeMoreMenu();
+    await runReindex(true);
+  }
+
   async function handleMobileOpenGraph() {
     closeMoreMenu();
     console.log("[graph] opening folder picker for Open Graph");
@@ -610,6 +630,21 @@
     console.log("[graph] pickFolder returned:", selected);
     if (selected) {
       try {
+        const report = await validateGraph(selected);
+        if (!report.is_valid) {
+          const missing = [
+            !report.has_pages_dir    && "pages/",
+            !report.has_journals_dir && "journals/",
+            !report.has_logseq_dir   && ".logseq/",
+            !report.has_valid_db     && ".logseq/index.db (corrupted)",
+          ].filter(Boolean).join(", ");
+          alert(
+            `Not a valid Grafium graph.\n\n` +
+            `Missing: ${missing}\n\n` +
+            `Use New Graph to create a graph here instead.`
+          );
+          return;
+        }
         await openGraph(selected);
         handleGraphChanged();
       } catch (e) {
@@ -825,6 +860,13 @@
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
           <span>New Graph</span>
+        </button>
+        <button class="more-menu-item" onclick={handleMobileReindex}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+          <span>Re-index Graph (Manual)</span>
         </button>
       </div>
     {/if}

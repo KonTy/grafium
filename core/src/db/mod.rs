@@ -7,6 +7,7 @@ mod flashcards;
 mod audio;
 mod favorites;
 mod graph_support;
+mod ink;
 mod raw_query;
 mod properties;
 

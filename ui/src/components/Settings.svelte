@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
@@ -19,6 +19,21 @@
   let smplosThemeName = $state<string | null>(null);
   let appVersion = $state("...");
   let graphPath = $state("...");
+  let reindexing = $state(false);
+  let reindexStatus = $state("");
+
+  async function reindexGraphNow() {
+    reindexing = true;
+    reindexStatus = "";
+    try {
+      await reindexCurrent();
+      reindexStatus = "Re-index complete.";
+    } catch (e) {
+      reindexStatus = `Re-index failed: ${e}`;
+    } finally {
+      reindexing = false;
+    }
+  }
 
   // Asset cleanup state
   let orphanedAssets = $state<OrphanedAsset[]>([]);
@@ -225,6 +240,17 @@
       <div class="setting-row">
         <span class="setting-label">Graph location</span>
         <span class="setting-value">{graphPath}</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Index</span>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <button class="sync-btn" onclick={reindexGraphNow} disabled={reindexing}>
+            {reindexing ? "Re-indexing..." : "Re-index Graph (Manual)"}
+          </button>
+          {#if reindexStatus}
+            <span class="setting-value">{reindexStatus}</span>
+          {/if}
+        </div>
       </div>
     </div>
   </details>

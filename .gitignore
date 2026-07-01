@@ -20,6 +20,14 @@ Thumbs.db
 ui/src-tauri/target/
 ui/src-tauri/gen/
 
+# Android
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/captures/
+*.iml
+
 # Data
 *.db
 *.db-wal

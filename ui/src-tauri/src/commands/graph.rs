@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use grafium_core::Graph;
+use grafium_core::graph::GraphValidationReport;
+use std::thread;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphInfo {
@@ -88,11 +90,41 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
         return Err(format!("Path does not exist: {}", path));
     }
 
-    // Open the graph
-    let new_graph = Graph::open(&graph_path).map_err(|e| e.to_string())?;
+    // Validate the graph structure before opening
+    let validation = Graph::validate_structure(&graph_path);
+    if !validation.is_valid {
+        return Err(validation.error_message.unwrap_or_else(|| 
+            "Invalid graph structure. Please ensure the directory contains pages/, journals/, and .logseq/ subdirectories.".to_string()
+        ));
+    }
 
-    // Reindex to pick up all files
-    new_graph.reindex_all().map_err(|e| e.to_string())?;
+    let db_path = platform_db_path(&app, &graph_path)?;
+
+    // Open the graph. If DB is corrupted, recover by rotating index.db and recreating it.
+    let new_graph = match Graph::open_with_db_path(&graph_path, &db_path) {
+        Ok(g) => g,
+        Err(first_err) => {
+            if try_recover_corrupt_index_db(&db_path).is_ok() {
+                Graph::open_with_db_path(&graph_path, &db_path).map_err(|second_err| {
+                    format!(
+                        "Failed to open graph after DB recovery. First error: {}. Second error: {}",
+                        first_err,
+                        second_err
+                    )
+                })?
+            } else {
+                return Err(first_err.to_string());
+            }
+        }
+    };
+
+    // Keep graph open instantaneous. Only schedule a background rebuild when
+    // the index is empty (fresh/corrupt-recovered DB).
+    let needs_background_reindex = new_graph
+        .db
+        .list_pages(1, 0)
+        .map(|p| p.is_empty())
+        .unwrap_or(true);
 
     // Derive name from folder name
     let name = graph_path.file_name()
@@ -114,7 +146,102 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
 
     state.restart_graph_watcher()?;
 
+    if needs_background_reindex {
+        schedule_background_reindex(graph_path.clone(), db_path.clone());
+    }
+
+    // Notify Android companion app by writing to shared preference file
+    // This allows VoiceCommandReceiver to know which graph is currently active in Tauri
+    notify_android_graph_changed(&path, &name);
+
     Ok(GraphInfo { name, path })
+}
+
+fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf) {
+    thread::spawn(move || {
+        let graph = match Graph::open_with_db_path(&graph_root, &db_path) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!(
+                    "Background reindex skipped: failed to open graph '{}': {}",
+                    graph_root.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = graph.reindex_all() {
+            eprintln!(
+                "Background reindex failed for '{}': {}",
+                graph_root.display(),
+                e
+            );
+        }
+    });
+}
+
+fn try_recover_corrupt_index_db(db_path: &Path) -> Result<(), String> {
+    let logseq_dir = db_path
+        .parent()
+        .ok_or_else(|| "Invalid DB path: missing parent directory".to_string())?;
+
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    // Delete the corrupted DB file entirely to force clean rebuild instead of
+    // just rotating. This ensures we get a completely fresh database with no
+    // lingering corruption patterns.
+    fs::remove_file(db_path).map_err(|e| e.to_string())?;
+
+    let wal = logseq_dir.join("index.db-wal");
+    if wal.exists() {
+        let _ = fs::remove_file(&wal);
+    }
+    let shm = logseq_dir.join("index.db-shm");
+    if shm.exists() {
+        let _ = fs::remove_file(&shm);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn stable_path_id(path: &Path) -> String {
+    // Deterministic FNV-1a hash for filesystem-safe DB directory names.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in path.to_string_lossy().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
+
+fn platform_db_path(app: &AppHandle, graph_root: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let id = stable_path_id(graph_root);
+        return Ok(app_data.join("graph_indexes").join(id).join("index.db"));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(graph_root.join(".logseq").join("index.db"))
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn validate_graph(path: String) -> Result<GraphValidationReport, String> {
+    let graph_path = PathBuf::from(&path);
+    if !graph_path.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    let report = Graph::validate_structure(&graph_path);
+    Ok(report)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -128,11 +255,31 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
     };
     let path = graph_path.to_string_lossy().to_string();
 
+    // Never allow creating a graph inside another graph (e.g. inside journals/).
+    if let Some(parent_graph) = Graph::find_ancestor_graph_root(&graph_path) {
+        return Err(format!(
+            "Cannot create graph inside another graph. Parent graph root: {}",
+            parent_graph.display()
+        ));
+    }
+
+    // If target exists already, require it to be empty to avoid mashing unrelated folders.
+    if graph_path.exists() {
+        let mut iter = fs::read_dir(&graph_path).map_err(|e| e.to_string())?;
+        if iter.next().is_some() {
+            return Err(format!(
+                "Target folder is not empty: {}. Please choose an empty folder or a different graph name.",
+                graph_path.display()
+            ));
+        }
+    }
+
     // Create the directory if it doesn't exist
     fs::create_dir_all(&graph_path).map_err(|e| e.to_string())?;
 
-    // Open as a new graph (creates pages/, journals/, .logseq/)
-    let new_graph = Graph::open(&graph_path).map_err(|e| e.to_string())?;
+    // Open as a new graph (creates pages/, journals/, and platform index DB)
+    let db_path = platform_db_path(&app, &graph_path)?;
+    let new_graph = Graph::open_with_db_path(&graph_path, &db_path).map_err(|e| e.to_string())?;
 
     // Update config
     let cp = config_path(&app);
@@ -147,6 +294,9 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
     drop(graph);
 
     state.restart_graph_watcher()?;
+
+    // Notify Android companion app that a new graph has been created and opened
+    notify_android_graph_changed(&path, &name);
 
     Ok(GraphInfo { name, path })
 }
@@ -282,4 +432,41 @@ pub fn get_default_graph_base(app: AppHandle) -> String {
     }
     let docs = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
     docs.join("grafium").to_string_lossy().to_string()
+}
+
+/// Notify the Android companion app that a graph has been opened.
+/// This writes to a shared status file that VoiceCommandReceiver can read.
+/// The file is stored in a location accessible by both Tauri and the Android companion app.
+fn notify_android_graph_changed(graph_path: &str, graph_name: &str) {
+    #[cfg(target_os = "android")]
+    {
+        use serde_json::json;
+
+        // On Android, write to the app's files directory which is accessible to the companion app
+        let status_dir = dirs::document_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/sdcard/Android/data"))
+            .join("com.grafium.companion");
+        
+        if let Ok(_) = std::fs::create_dir_all(&status_dir) {
+            let status_file = status_dir.join("current_graph.json");
+            let status = json!({
+                "graph_path": graph_path,
+                "graph_name": graph_name,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+            
+            if let Ok(json_str) = serde_json::to_string_pretty(&status) {
+                let _ = std::fs::write(status_file, json_str);
+            }
+        }
+    }
+    
+    // On desktop, we don't need to notify Android, so this is a no-op
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (graph_path, graph_name);
+    }
 }

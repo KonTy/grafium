@@ -4,6 +4,7 @@
     getGraphInfo,
     listGraphs,
     openGraph,
+    validateGraph,
     createGraph,
     reindexCurrent,
     removeGraph,
@@ -55,6 +56,21 @@
     if (selected && typeof selected === "string") {
       isLoading = true;
       try {
+        const report = await validateGraph(selected);
+        if (!report.is_valid) {
+          const missing = [
+            !report.has_pages_dir    && "pages/",
+            !report.has_journals_dir && "journals/",
+            !report.has_logseq_dir   && ".logseq/",
+            !report.has_valid_db     && ".logseq/index.db (corrupted)",
+          ].filter(Boolean).join(", ");
+          alert(
+            `"${selected}" is not a valid Grafium graph.\n\n` +
+            `Missing: ${missing}\n\n` +
+            `To create a new graph here, use New Graph instead.`
+          );
+          return;
+        }
         await openGraph(selected);
         await loadGraphInfo();
         onGraphChanged();
@@ -118,6 +134,15 @@
     if (graph.path === currentGraph?.path) return;
     isLoading = true;
     try {
+      const report = await validateGraph(graph.path);
+      if (!report.is_valid) {
+        alert(
+          `"${graph.name}" can no longer be opened.\n\n` +
+          (report.error_message ?? "The graph directory is missing required structure.") +
+          `\n\nYou can remove it from the graph list below.`
+        );
+        return;
+      }
       await openGraph(graph.path);
       await loadGraphInfo();
       onGraphChanged();
