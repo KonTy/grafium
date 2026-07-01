@@ -99,9 +99,15 @@ jobs:
           name: windows-artifacts
           path: |
             target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
 
   build-android:
     runs-on: ubuntu-22.04
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -148,11 +154,29 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
         run: npx tauri android build --apk
 
+      - name: Sign Android APK
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          set -euo pipefail
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(find ui/src-tauri/gen/android -name '*-release-unsigned.apk' | head -1)
+          SIGNED="ui/src-tauri/gen/android/Grafium-release.apk"
+          "$BUILD_TOOLS/zipalign" -f 4 "$UNSIGNED" "$SIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            "$SIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
           name: android-artifacts
           path: |
+            ui/src-tauri/gen/android/Grafium-release.apk
             ui/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: warn
 
@@ -187,4 +211,5 @@ jobs:
           files: |
             artifacts/linux-artifacts/**/*
             artifacts/windows-artifacts/**/*
-            artifacts/android-artifacts/**/*
+            artifacts/android-artifacts/**/Grafium-release.apk
+            artifacts/android-artifacts/**/*-release-unsigned.apk

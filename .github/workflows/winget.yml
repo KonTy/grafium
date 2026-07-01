@@ -1,0 +1,37 @@
+name: Publish to winget
+
+# Auto-submits a PR to microsoft/winget-pkgs when a GitHub Release is published.
+#
+# Prerequisites (one-time):
+#   1. The package identifier below must already exist in winget-pkgs, OR the
+#      first version must be submitted manually (see repo notes). winget-releaser
+#      can also create new packages when the manifest metadata is complete.
+#   2. Create a classic Personal Access Token with the `public_repo` scope at
+#      https://github.com/settings/tokens and store it as the repo secret
+#      WINGET_TOKEN:
+#         gh secret set WINGET_TOKEN
+#
+# The release must contain the Windows .msi installer asset (produced by
+# release.yml).
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.0.40)"
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: KonTy.Grafium
+          version: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          release-tag: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          installers-regex: '_x64_en-US\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}

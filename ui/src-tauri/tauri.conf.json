@@ -1,6 +1,6 @@
 {
   "productName": "Grafium",
-  "version": "0.0.38",
+  "version": "0.0.40",
   "identifier": "com.grafium.app",
   "build": {
     "frontendDist": "../dist",
@@ -27,12 +27,24 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "KonTy",
+    "homepage": "https://github.com/KonTy/grafium",
+    "license": "MIT",
+    "copyright": "Copyright © 2026 KonTy. MIT Licensed.",
+    "category": "Productivity",
+    "shortDescription": "A local-first knowledge graph and note-taking workspace.",
+    "longDescription": "Grafium is a local-first, privacy-respecting knowledge graph and note-taking workspace with bidirectional links, ink/handwriting support, and offline-first sync.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "upgradeCode": "aa8c6869-c092-4c80-b8b4-f6f654fcc782"
+      }
+    }
   }
 }
