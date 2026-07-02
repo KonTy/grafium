@@ -10,7 +10,7 @@ use grafium_core::knowledge::KnowledgeEngine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
@@ -54,13 +54,14 @@ pub async fn ai_get_config(
 
 #[tauri::command]
 pub async fn ai_set_config(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     payload: AiConfigPayload,
 ) -> Result<(), String> {
     fn parse_provider(name: &str) -> ProviderType {
         match name {
             "anthropic" => ProviderType::Anthropic,
-            "openai_compatible" | "vllm" => ProviderType::OpenAiCompatible,
+            "openai_compatible" | "openaicompatible" | "vllm" => ProviderType::OpenAiCompatible,
             "ollama" => ProviderType::Ollama,
             "huggingface" | "huggingface_local" => ProviderType::HuggingFace,
             _ => ProviderType::OpenAi,
@@ -140,9 +141,11 @@ pub async fn ai_set_config(
     };
 
     // Save config to disk.
-    let config_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("grafium");
+    let config_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("knowledge");
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("ai_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;

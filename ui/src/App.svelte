@@ -365,6 +365,17 @@
     // Don't intercept if a dialog is open
     if (showNewPageDialog) return;
 
+    // Never hijack native editor/navigation keys while typing in editable elements.
+    const target = e.target as HTMLElement | null;
+    const editableContainer = target?.closest?.("[contenteditable='true'], [role='textbox']");
+    const isNativeInput =
+      target?.tagName === "INPUT" ||
+      target?.tagName === "TEXTAREA" ||
+      target?.tagName === "SELECT";
+    if (isNativeInput || target?.isContentEditable || !!editableContainer) {
+      return;
+    }
+
     // Keep paging keys reliable regardless of lingering focus on editor DOM after Escape.
     if (mainContentEl && (e.key === "PageDown" || e.key === "PageUp" || e.key === "Home" || e.key === "End")) {
       e.preventDefault();
@@ -382,9 +393,6 @@
 
     // Don't intercept if editing a block
     if (keymap_manager.isEditing) return;
-    // Don't intercept if target is a native form element
-    const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return;
 
     // Escape exits zen mode
     if (zenMode && e.key === "Escape") {
@@ -794,7 +802,7 @@
     {:else if currentView === "statistics"}
       <Statistics onNavigate={handleNavigate} />
     {:else if currentView === "chat"}
-      <ChatbotView />
+      <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
       <Settings />
     {:else if currentView === "journal"}
@@ -995,7 +1003,7 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    background: darkred;
+    background: var(--bg-primary);
     position: relative;
     min-width: 0;
     overflow-wrap: break-word;

@@ -92,7 +92,7 @@ impl KnowledgeEngine {
                         }
                         ProviderType::HuggingFace => {
                             return Err(CoreError::Other(
-                                "Embedded Hugging Face local runtime is not implemented yet. Use OpenAI-compatible local endpoint mode for now.".to_string(),
+                                "Embedded Hugging Face local runtime is not implemented yet. Use vLLM / OpenAI-compatible local endpoint mode for now.".to_string(),
                             ));
                         }
                         _ => {

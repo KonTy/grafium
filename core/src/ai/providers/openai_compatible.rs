@@ -139,7 +139,33 @@ impl LlmProvider for OpenAiCompatibleLlm {
         Box::pin(async move {
             let req = self.client.get(format!("{}/models", self.base_url));
             let resp = self.with_auth(req).send().await;
-            Ok(resp.map(|r| r.status().is_success()).unwrap_or(false))
+            if let Ok(r) = resp {
+                if r.status().is_success() {
+                    return Ok(true);
+                }
+            }
+
+            // GitHub Models uses /inference/chat/completions and may not expose /models.
+            if self.base_url.contains("models.github.ai/inference") {
+                let request = OpenAiChatRequest {
+                    model: self.model.clone(),
+                    messages: vec![OpenAiMessage {
+                        role: "user".to_string(),
+                        content: "ping".to_string(),
+                    }],
+                    max_tokens: Some(1),
+                    temperature: Some(0.0),
+                    stop: None,
+                };
+                let req = self
+                    .client
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .json(&request);
+                let resp = self.with_auth(req).send().await;
+                return Ok(resp.map(|r| r.status().is_success()).unwrap_or(false));
+            }
+
+            Ok(false)
         })
     }
 }

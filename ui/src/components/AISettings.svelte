@@ -37,6 +37,12 @@
   let cloudEmbeddingApiKey = $state("");
   let cloudEmbeddingModel = $state("text-embedding-3-small");
 
+  function normalizeProvider(p?: string): string {
+    if (!p) return "openai_compatible";
+    if (p === "openaicompatible" || p === "vllm") return "openai_compatible";
+    return p;
+  }
+
   // Load config on mount
   $effect(() => {
     loadConfig();
@@ -50,7 +56,7 @@
         enabled = config.enabled;
         mode = config.mode || "local";
         if (config.local) {
-          localProvider = config.local.provider || "openai_compatible";
+          localProvider = normalizeProvider(config.local.provider);
           localBaseUrl = config.local.base_url || "http://localhost:8000/v1";
           localApiKey = config.local.api_key || "";
           localModelPath = config.local.model_path || "";
@@ -58,11 +64,11 @@
           embeddingModel = config.local.embedding_model || "nomic-embed-text";
         }
         if (config.cloud) {
-          cloudProvider = config.cloud.llm_provider || "openai";
+          cloudProvider = normalizeProvider(config.cloud.llm_provider);
           cloudBaseUrl = config.cloud.llm_base_url || "";
           cloudLlmModel = config.cloud.llm_model || "gpt-4o";
           cloudApiKey = config.cloud.llm_api_key || "";
-          cloudEmbeddingProvider = config.cloud.embedding_provider || "openai";
+          cloudEmbeddingProvider = normalizeProvider(config.cloud.embedding_provider);
           cloudEmbeddingBaseUrl = config.cloud.embedding_base_url || "";
           cloudEmbeddingApiKey = config.cloud.embedding_api_key || "";
           cloudEmbeddingModel = config.cloud.embedding_model || "text-embedding-3-small";
@@ -186,7 +192,7 @@
           <div class="field-group">
             <label class="field-label">Provider</label>
             <div class="choice-row">
-              <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>OpenAI-compatible</button>
+              <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
               <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => (localProvider = "ollama")}>Ollama</button>
               <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded (planned)</button>
             </div>
@@ -225,7 +231,7 @@
             <div class="choice-row">
               <button class="choice-btn" class:active={cloudProvider === "openai"} onclick={() => (cloudProvider = "openai")}>OpenAI</button>
               <button class="choice-btn" class:active={cloudProvider === "anthropic"} onclick={() => (cloudProvider = "anthropic")}>Anthropic</button>
-              <button class="choice-btn" class:active={cloudProvider === "openai_compatible"} onclick={() => (cloudProvider = "openai_compatible")}>OpenAI-compatible</button>
+              <button class="choice-btn" class:active={cloudProvider === "openai_compatible"} onclick={() => (cloudProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
             </div>
           </div>
           <div class="field-group">
@@ -246,7 +252,7 @@
               <label class="field-label">Embedding Provider</label>
               <div class="choice-row">
                 <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai"} onclick={() => (cloudEmbeddingProvider = "openai")}>OpenAI</button>
-                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>OpenAI-compatible</button>
+                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
               </div>
             </div>
             <div class="field-group">

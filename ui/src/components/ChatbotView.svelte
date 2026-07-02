@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { aiAskStream } from "../lib/knowledge";
+  import { onMount } from "svelte";
+  import { aiAskStream, aiHealthCheck } from "../lib/knowledge";
+
+  interface Props {
+    onOpenSettings?: () => void;
+  }
+
+  let { onOpenSettings = () => {} }: Props = $props();
 
   type ChatMessage = {
     role: "user" | "assistant";
@@ -17,10 +24,61 @@
   let isStreaming = $state(false);
   let error = $state<string | null>(null);
   let chatScroll: HTMLDivElement | null = null;
+  let inputEl: HTMLTextAreaElement | null = null;
+  let checkingConnection = $state(true);
+  let chatbotConnected = $state(false);
+
+  onMount(() => {
+    keepInputFocusedSoon(true);
+    void refreshConnectionState();
+  });
+
+  $effect(() => {
+    if (!checkingConnection && chatbotConnected && !isStreaming) {
+      keepInputFocusedSoon(true);
+    }
+  });
+
+  async function refreshConnectionState() {
+    checkingConnection = true;
+    try {
+      const status = await aiHealthCheck();
+      chatbotConnected = status.enabled && status.llm_available;
+    } catch {
+      chatbotConnected = false;
+    } finally {
+      checkingConnection = false;
+    }
+  }
+
+  function focusInput(select = false) {
+    if (!inputEl || inputEl.disabled) return;
+    inputEl.focus();
+    if (select) inputEl.select();
+  }
+
+  function keepInputFocusedSoon(select = false) {
+    requestAnimationFrame(() => focusInput(select));
+  }
+
+  function onInputBlur() {
+    if (isStreaming || (!checkingConnection && !chatbotConnected)) return;
+    keepInputFocusedSoon(false);
+  }
 
   async function send() {
     const trimmed = question.trim();
     if (!trimmed || isStreaming) return;
+
+    if (checkingConnection) {
+      error = "Checking chatbot connection. Please wait a moment.";
+      return;
+    }
+
+    if (!chatbotConnected) {
+      error = "Before you talk to chatbot, first you need to connect to it in Settings.";
+      return;
+    }
 
     error = null;
     messages = [...messages, { role: "user", content: trimmed }, { role: "assistant", content: "" }];
@@ -42,18 +100,21 @@
         },
         onDone: () => {
           isStreaming = false;
+          keepInputFocusedSoon(false);
           void scrollToBottom();
         },
         onError: (msg) => {
           error = msg;
           isStreaming = false;
+          keepInputFocusedSoon(false);
         },
       }
     );
   }
 
   function onInputKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    const hasModifier = e.shiftKey || e.ctrlKey || e.altKey || e.metaKey;
+    if (e.key === "Enter" && !hasModifier) {
       e.preventDefault();
       void send();
     }
@@ -73,6 +134,15 @@
     <p>Streaming local/cloud assistant for graph analysis</p>
   </header>
 
+  {#if checkingConnection}
+    <div class="chat-status">Checking chatbot connection...</div>
+  {:else if !chatbotConnected}
+    <div class="chat-warning">
+      <p>Before you talk to chatbot, first you need to connect to it.</p>
+      <button class="settings-link" onclick={() => onOpenSettings()}>Open Settings</button>
+    </div>
+  {/if}
+
   <div class="chat-log" bind:this={chatScroll}>
     {#each messages as m}
       <div class="msg" class:user={m.role === "user"}>
@@ -89,12 +159,14 @@
   <div class="chat-input-row">
     <textarea
       bind:value={question}
+      bind:this={inputEl}
       placeholder="Ask about relationships, themes, or missing links in your graph..."
       rows="3"
       onkeydown={onInputKeydown}
-      disabled={isStreaming}
+      onblur={onInputBlur}
+      disabled={isStreaming || (!checkingConnection && !chatbotConnected)}
     ></textarea>
-    <button onclick={() => void send()} disabled={isStreaming || !question.trim()}>
+    <button onclick={() => void send()} disabled={isStreaming || !question.trim() || checkingConnection || !chatbotConnected}>
       {isStreaming ? "Streaming..." : "Send"}
     </button>
   </div>
@@ -131,6 +203,40 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .chat-status,
+  .chat-warning {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    padding: 10px 12px;
+  }
+
+  .chat-status {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .chat-warning p {
+    margin: 0 0 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .settings-link {
+    padding: 7px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .settings-link:hover {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
   .msg {

@@ -180,7 +180,7 @@ export const themes: Theme[] = [
   {
     id: "amber",
     name: "Amber",
-    colors: dark("#070604", "#15110A", "#231B10", "#FFD7A1", "#FFE4BD", "#8F7A59", "#FFBF3C", "#FF8F1F", "#FF8F1F", "#FFD166", "#FFCF66"),
+    colors: dark("#070604", "#15110A", "#231B10", "#FFB347", "#E4A147", "#9B6D2A", "#8FC5FF", "#A9D1FF", "#FF8F1F", "#FFD166", "#FFCF66"),
   },
   {
     id: "matte-black",
@@ -228,6 +228,7 @@ export function applyTheme(theme: ThemeColors): void {
   root.style.setProperty("--text-muted", theme.textMuted);
   root.style.setProperty("--border", theme.border);
   root.style.setProperty("--accent", theme.accent);
+  root.style.setProperty("--text-link", theme.accent);
   root.style.setProperty("--accent-secondary", theme.accentSecondary);
   root.style.setProperty("--danger", theme.danger);
   root.style.setProperty("--danger-bg", theme.danger + "22");
