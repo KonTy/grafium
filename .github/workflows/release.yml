@@ -112,20 +112,22 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ needs.prepare-version.outputs.semver }}"
-          (Get-Content Cargo.toml) -replace '^version = "\d+\.\d+\.\d+"', "version = \"$ver\"" | Set-Content Cargo.toml
+          $cargoVersionLine = 'version = "{0}"' -f $ver
+          $jsonVersionLine = '"version": "{0}"' -f $ver
+          (Get-Content Cargo.toml) -replace '^version = "\d+\.\d+\.\d+"', $cargoVersionLine | Set-Content Cargo.toml
 
           $tauriCargo = Get-Content ui/src-tauri/Cargo.toml
           $updated = $false
           for ($i = 0; $i -lt $tauriCargo.Count; $i++) {
             if (-not $updated -and $tauriCargo[$i] -match '^version = "\d+\.\d+\.\d+"') {
-              $tauriCargo[$i] = "version = \"$ver\""
+              $tauriCargo[$i] = $cargoVersionLine
               $updated = $true
             }
           }
           $tauriCargo | Set-Content ui/src-tauri/Cargo.toml
 
-          (Get-Content ui/src-tauri/tauri.conf.json) -replace '"version": "\d+\.\d+\.\d+"', "\"version\": \"$ver\"" | Set-Content ui/src-tauri/tauri.conf.json
-          (Get-Content ui/package.json) -replace '"version": "\d+\.\d+\.\d+"', "\"version\": \"$ver\"" | Set-Content ui/package.json
+          (Get-Content ui/src-tauri/tauri.conf.json) -replace '"version": "\d+\.\d+\.\d+"', $jsonVersionLine | Set-Content ui/src-tauri/tauri.conf.json
+          (Get-Content ui/package.json) -replace '"version": "\d+\.\d+\.\d+"', $jsonVersionLine | Set-Content ui/package.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
