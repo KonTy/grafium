@@ -1204,28 +1204,28 @@
   }
 
   .editor-wrapper.h1 :global(.cm-editor) {
-    font-size: 1.8em;
-    line-height: 1.15;
+    font-size: 1.45em;
+    line-height: 1.2;
     font-weight: 700;
   }
 
   .editor-wrapper.h2 :global(.cm-editor) {
-    font-size: 1.5em;
-    line-height: 1.15;
+    font-size: 1.25em;
+    line-height: 1.2;
     font-weight: 600;
   }
 
   .editor-wrapper.h3 :global(.cm-editor) {
-    font-size: 1.25em;
-    line-height: 1.2;
+    font-size: 1.12em;
+    line-height: 1.25;
     font-weight: 600;
   }
 
   .editor-wrapper.h4 :global(.cm-editor),
   .editor-wrapper.h5 :global(.cm-editor),
   .editor-wrapper.h6 :global(.cm-editor) {
-    font-size: 1.1em;
-    line-height: 1.2;
+    font-size: 1em;
+    line-height: 1.25;
     font-weight: 600;
   }
 
@@ -1379,32 +1379,32 @@
   }
 
   .rendered-content :global(h1) {
-    font-size: 1.8em;
+    font-size: 1.45em;
     font-weight: 700;
-    line-height: 1.15;
+    line-height: 1.2;
     margin: 0;
   }
 
   .rendered-content :global(h2) {
-    font-size: 1.5em;
-    font-weight: 600;
-    line-height: 1.15;
-    margin: 0;
-  }
-
-  .rendered-content :global(h3) {
     font-size: 1.25em;
     font-weight: 600;
     line-height: 1.2;
     margin: 0;
   }
 
+  .rendered-content :global(h3) {
+    font-size: 1.12em;
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 0;
+  }
+
   .rendered-content :global(h4),
   .rendered-content :global(h5),
   .rendered-content :global(h6) {
-    font-size: 1.1em;
+    font-size: 1em;
     font-weight: 600;
-    line-height: 1.2;
+    line-height: 1.25;
     margin: 0;
   }
 

@@ -108,3 +108,115 @@ body {
   padding: 0 !important;
   margin: 0 !important;
 }
+
+/* ============================================================
+   Syphi — experimental futuristic / matrix visual-effects layer.
+   Activated by applyTheme() adding `.theme-fx-syphi` to <html>.
+   Only styling; no layout changes. Everything is scoped so it never
+   affects the other themes.
+   ============================================================ */
+
+.theme-fx-syphi body,
+.theme-fx-syphi {
+  font-family: "Share Tech Mono", "JetBrains Mono", "Fira Code", ui-monospace,
+    SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+}
+
+/* Subtle animated scanline + vignette overlay across the whole app. */
+.theme-fx-syphi body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  background: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 240, 255, 0.035) 0px,
+      rgba(0, 240, 255, 0.035) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(
+      ellipse at center,
+      transparent 55%,
+      rgba(0, 0, 0, 0.55) 100%
+    );
+  mix-blend-mode: screen;
+  animation: syphi-scan 6s linear infinite;
+}
+
+@keyframes syphi-scan {
+  0% {
+    background-position: 0 0, 0 0;
+  }
+  100% {
+    background-position: 0 6px, 0 0;
+  }
+}
+
+/* Neon display headings. */
+.theme-fx-syphi h1,
+.theme-fx-syphi h2,
+.theme-fx-syphi h3 {
+  font-family: "Orbitron", "Share Tech Mono", ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  text-shadow: 0 0 4px var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Body text gets a faint phosphor glow. */
+.theme-fx-syphi .rendered-content,
+.theme-fx-syphi .cm-content {
+  text-shadow: 0 0 3px color-mix(in srgb, var(--text-primary) 30%, transparent);
+}
+
+/* Glowing links. */
+.theme-fx-syphi a,
+.theme-fx-syphi .page-link {
+  color: var(--accent-secondary);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent-secondary) 60%, transparent);
+}
+
+/* Neon-framed surfaces: sidebar, inputs, code, cards. */
+.theme-fx-syphi .sidebar,
+.theme-fx-syphi .app-menu,
+.theme-fx-syphi input,
+.theme-fx-syphi textarea,
+.theme-fx-syphi pre,
+.theme-fx-syphi code,
+.theme-fx-syphi .cm-editor {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 0 12px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* Blinking block-style caret in the editor for a terminal feel. */
+.theme-fx-syphi .cm-cursor,
+.theme-fx-syphi .cm-cursor-primary {
+  border-left-width: 2px !important;
+  border-left-color: var(--accent) !important;
+  box-shadow: 0 0 6px var(--accent);
+  animation: syphi-blink 1s steps(2, start) infinite;
+}
+
+@keyframes syphi-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Neon glow on the active/hovered sidebar items and buttons. */
+.theme-fx-syphi button:hover,
+.theme-fx-syphi .sidebar-item:hover,
+.theme-fx-syphi .sidebar-item.active {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* Neon scrollbar. */
+.theme-fx-syphi ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 6px var(--accent);
+}

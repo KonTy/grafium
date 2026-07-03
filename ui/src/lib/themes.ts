@@ -42,6 +42,13 @@ export interface ThemeColors {
   taskLaterFg: string;
 
   isLight: boolean;
+
+  /**
+   * Optional visual-effects preset. When set, applyTheme adds a
+   * `theme-fx-<fx>` class to <html> so global.css can layer on extra styling
+   * (futuristic fonts, neon glow, scanlines, etc.) beyond plain colors.
+   */
+  fx?: string;
 }
 
 export interface Theme {
@@ -184,7 +191,10 @@ export const themes: Theme[] = [
   {
     id: "matrix",
     name: "Matrix",
-    colors: dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#FF9900", "#FF9900", "#00FF00", "#FFCC33"),
+    colors: {
+      ...dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#FF9900", "#FF9900", "#00FF00", "#FFCC33"),
+      fx: "syphi",
+    },
   },
   {
     id: "amber",
@@ -215,6 +225,17 @@ export const themes: Theme[] = [
     id: "rose-pine",
     name: "Rosé Pine",
     colors: light("#faf4ed", "#f2e9e1", "#e4dcd4", "#575279", "#575279", "#9893a5", "#56949f", "#907aa9", "#b4637a", "#286983", "#ea9d34"),
+  },
+  {
+    // Experimental sci-fi / matrix look: neon cyan + green on near-black,
+    // futuristic display font, glowing text, scanline overlay. The `fx` flag
+    // activates the extra styling defined under `.theme-fx-syphi` in global.css.
+    id: "syphi",
+    name: "Syphi (Futuristic)",
+    colors: {
+      ...dark("#02050a", "#061018", "#0c2130", "#c8fff4", "#7ff0e0", "#3d7a72", "#00f0ff", "#39ff88", "#ff2e6b", "#39ff88", "#ffd23f"),
+      fx: "syphi",
+    },
   },
 ];
 
@@ -261,4 +282,30 @@ export function applyTheme(theme: ThemeColors): void {
 
   // Update meta color-scheme for scrollbar etc.
   root.style.colorScheme = theme.isLight ? "light" : "dark";
+
+  // Toggle optional visual-effects presets. Remove any previous fx-* class,
+  // then add the current one (if any) so extra CSS layers can apply.
+  root.classList.forEach((cls) => {
+    if (cls.startsWith("theme-fx-")) root.classList.remove(cls);
+  });
+  if (theme.fx) {
+    root.classList.add(`theme-fx-${theme.fx}`);
+    ensureFxFontsLoaded();
+  }
+}
+
+// Lazily inject the futuristic display fonts only when an fx theme is first
+// selected. This keeps startup fast: default themes never touch the network,
+// and the <link> is added asynchronously (non render-blocking) so the app
+// never waits on Google Fonts. Falls back to system monospace if offline.
+let fxFontsRequested = false;
+function ensureFxFontsLoaded(): void {
+  if (fxFontsRequested) return;
+  fxFontsRequested = true;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href =
+    "https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap";
+  link.crossOrigin = "anonymous";
+  document.head.appendChild(link);
 }
