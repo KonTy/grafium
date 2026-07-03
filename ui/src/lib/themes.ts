@@ -18,6 +18,9 @@ export interface ThemeColors {
 
   accent: string;
   accentSecondary: string;
+  textLink: string;
+  textLinkHover: string;
+  textLinkVisited: string;
 
   danger: string;
 
@@ -71,6 +74,9 @@ function dark(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim:
     border: bgLighter,
     accent,
     accentSecondary: success,
+    textLink: accentAlt,
+    textLinkHover: warning,
+    textLinkVisited: accent,
     danger,
     btnBg: bgLighter,
     btnBgHover: bgLighter,
@@ -106,6 +112,9 @@ function light(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim
     border: bgLighter,
     accent,
     accentSecondary: success,
+    textLink: accentAlt,
+    textLinkHover: warning,
+    textLinkVisited: accent,
     danger,
     btnBg: bgLighter,
     btnBgHover: bgLighter,
@@ -228,7 +237,9 @@ export function applyTheme(theme: ThemeColors): void {
   root.style.setProperty("--text-muted", theme.textMuted);
   root.style.setProperty("--border", theme.border);
   root.style.setProperty("--accent", theme.accent);
-  root.style.setProperty("--text-link", theme.accent);
+  root.style.setProperty("--text-link", theme.textLink);
+  root.style.setProperty("--text-link-hover", theme.textLinkHover);
+  root.style.setProperty("--text-link-visited", theme.textLinkVisited);
   root.style.setProperty("--accent-secondary", theme.accentSecondary);
   root.style.setProperty("--danger", theme.danger);
   root.style.setProperty("--danger-bg", theme.danger + "22");

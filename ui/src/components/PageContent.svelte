@@ -17,6 +17,9 @@
   let blocks: Block[] = $state([]);
   let focusedBlockId: string | null = $state(null);
   let navigatingBlock = false;
+  // Imperative handles to each BlockEditor, keyed by block id, for deterministic
+  // cross-block Arrow Up/Down caret movement.
+  let blockRefs: Record<string, { focusForNav: (x: number, edge: "top" | "bottom") => void }> = {};
   type BacklinkTreeNode = { block: Block; depth: number };
   type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
 
@@ -416,17 +419,21 @@
     }
   }
 
-  function handleNavigate(blockId: string, direction: "up" | "down") {
+  function handleNavigate(blockId: string, direction: "up" | "down", caretX?: number) {
     navigatingBlock = true;
-    const idx = blocks.findIndex((b) => b.id === blockId);
+    const visibleBlocks = blocks.filter((b) => isBlockVisible(b));
+    const idx = visibleBlocks.findIndex((b) => b.id === blockId);
     const targetIdx = direction === "up" ? idx - 1 : idx + 1;
-    if (targetIdx >= 0 && targetIdx < blocks.length) {
-      const blockEl = document.querySelector(`[data-block-id="${blocks[targetIdx].id}"]`);
-      const contentEl = blockEl?.querySelector(".block-content");
-      if (blockEl && contentEl) {
-        blockEl.scrollIntoView({ block: "nearest" });
-        (contentEl as HTMLElement).click();
-      }
+    if (targetIdx >= 0 && targetIdx < visibleBlocks.length) {
+      const target = visibleBlocks[targetIdx];
+      // Moving up lands on the target's BOTTOM line; down lands on its TOP.
+      const edge: "top" | "bottom" = direction === "up" ? "bottom" : "top";
+      focusedBlockId = target.id;
+      document.querySelector(`[data-block-id="${target.id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+      // Deterministic imperative focus — no synthetic click, no prop-timing
+      // race (both unreliable on WebKitGTK).
+      blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
     }
   }
 
@@ -594,6 +601,7 @@
       {#if isBlockVisible(block)}
       <div id={`block-${block.id}`} data-block-id={block.id}>
         <BlockEditor
+          bind:this={blockRefs[block.id]}
           {block}
           pageId={page.id}
           pageTitle={page.title}

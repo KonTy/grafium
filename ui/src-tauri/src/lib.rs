@@ -374,14 +374,19 @@ fn write_text_file(path: &Path, content: &str) -> Result<(), String> {
 }
 
 fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, String> {
-    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v1");
+    let marker_v1 = graph_root.join(metadata_dir).join("tutorial-seeded-v1");
+    let marker_v2 = graph_root.join(metadata_dir).join("tutorial-seeded-v2");
+    let marker_v3 = graph_root.join(metadata_dir).join("tutorial-seeded-v3");
+    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v4");
     if marker.exists() {
         return Ok(false);
     }
 
     let pages_dir = graph_root.join("pages");
     let journals_dir = graph_root.join("journals");
-    if has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir) {
+    let has_markdown = has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir);
+    // Allow one-time in-place refresh of the built-in tutorial graph from v1/v2/v3 -> v4.
+    if has_markdown && !marker_v1.exists() && !marker_v2.exists() && !marker_v3.exists() {
         return Ok(false);
     }
 
@@ -452,6 +457,14 @@ This is a built-in tutorial graph so you can learn quickly without risking real 
 2. Open [[Create Your Own Graph]] to make your real graph in Documents.
 3. Switch to your new graph from the graph menu (top-left).
 
+## Quick Editor Tips
+
+> **Tip:**
+> Click any block to edit it.
+> Press `Enter` to create a new block.
+> Press `Shift+Enter` to create a new line inside the same block.
+> Type `/` to show commands.
+
 ## Important
 
 This tutorial graph stays active until you create/switch to your own graph.
@@ -515,7 +528,7 @@ Use search in sidebar to jump by page name or block content.
     write_text_file(&graph_root.join("pages/Create Your Own Graph.md"), create_graph_page)?;
     write_text_file(&graph_root.join("pages/Try Block Editing.md"), block_editing_page)?;
 
-    write_text_file(&marker, "seeded_v1")?;
+    write_text_file(&marker, "seeded_v4")?;
     Ok(true)
 }
 

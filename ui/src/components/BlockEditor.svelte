@@ -3,7 +3,7 @@
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
   import { EditorState, EditorSelection } from "@codemirror/state";
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
-  import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+  import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { renderBlock } from "../lib/markdown";
   import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
@@ -29,7 +29,7 @@
     onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean) => void;
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
-    onNavigate?: (blockId: string, direction: "up" | "down") => void;
+    onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
     onBulletClick?: (blockId: string, event: MouseEvent) => void;
     onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void;
     onToggleCollapse?: (blockId: string) => void;
@@ -58,6 +58,7 @@
   let editorContainer: HTMLDivElement;
   let editorView: EditorView | undefined;
   let savedState: EditorState | undefined;
+  let blurTeardownTimer: number | undefined;
   let shiftHeld = false;
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
@@ -81,6 +82,7 @@
   let queryBlockIdCol = $state(-1);
   let bulletMinHeight = $derived(getBulletMinHeight(block.content));
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
+  let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -211,14 +213,12 @@
 
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {
     // Match a `/` optionally followed by word chars at the current position
-    const match = context.matchBefore(/\/\w*/);
+    const match = context.matchBefore(/\/[^\s]*/);
     if (!match) return null;
-    // Only trigger if the `/` is at the start of the doc or preceded by whitespace
-    const textBefore = context.state.doc.sliceString(0, match.from);
-    if (match.from > 0 && !/\s$/.test(textBefore) && textBefore !== "") return null;
 
     return {
       from: match.from,
+      filter: false,
       options: SLASH_COMMANDS.map((cmd) => ({
         label: cmd.label,
         detail: cmd.detail,
@@ -291,6 +291,13 @@
     return content.includes("\n") ? "multiline-block" : "normal-block";
   }
 
+  function normalizeTaskPrefix(content: string): string {
+    return content.replace(
+      /^(todo|doing|done|later|now|canceled)\s+/i,
+      (match, keyword: string) => `${keyword.toUpperCase()} `
+    );
+  }
+
   // Save content on blur
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
@@ -325,15 +332,65 @@
     return insideFence;
   }
 
+  // Imperative caret target for cross-block Arrow Up/Down navigation. Set by
+  // the parent via focusForNav() right before/while the editor opens.
+  let navPending: { x: number; edge: "top" | "bottom" } | null = null;
+
+  /** Called imperatively by the parent (PageContent) when this block is the
+   *  target of an Arrow Up/Down move. Opens the editor and places the caret at
+   *  viewport-x `x` on the top or bottom visual line. Deterministic — does not
+   *  depend on synthetic clicks or prop-propagation timing (both unreliable on
+   *  WebKitGTK). */
+  export function focusForNav(x: number, edge: "top" | "bottom") {
+    navPending = { x, edge };
+    (window as any).__keydbg?.(`FOCUSNAV ${block.id.slice(0, 4)} ${edge} ed=${isEditing}`);
+    if (isEditing && editorView) {
+      placeNavCaret(editorView);
+    } else {
+      startEditing();
+    }
+  }
+
+  function placeNavCaret(view: EditorView) {
+    if (!navPending) return;
+    const { x, edge } = navPending;
+    navPending = null;
+    const anchor = edge === "top"
+      ? view.coordsAtPos(0)
+      : view.coordsAtPos(view.state.doc.length);
+    if (!anchor) return;
+    const y = edge === "top" ? anchor.top + 2 : anchor.bottom - 2;
+    const pos = view.posAtCoords({ x, y });
+    if (pos != null) {
+      view.dispatch({ selection: EditorSelection.cursor(pos) });
+    } else if (edge === "bottom") {
+      view.dispatch({ selection: EditorSelection.cursor(view.state.doc.length) });
+    }
+    view.focus();
+  }
+
   function startEditing() {
+    if (isEditing) return;
     isEditing = true;
     keymap_manager.isEditing = true;
     onFocus?.(block.id);
 
-    // Wait for DOM update then create editor
-    requestAnimationFrame(() => {
-      if (!editorContainer) return;
+    // Wait for DOM update then create editor. The editor container is rendered
+    // conditionally on `isEditing`, so it may not exist on the first frame —
+    // retry a few frames before giving up.
+    const tryInit = (attempts: number) => {
+      requestAnimationFrame(() => {
+        if (!editorContainer) {
+          if (attempts < 8) tryInit(attempts + 1);
+          return;
+        }
+        initEditor();
+      });
+    };
+    tryInit(0);
+  }
 
+  function initEditor() {
       // Reuse saved state if content hasn't changed externally
       let state: EditorState;
       if (savedState && savedState.doc.toString() === block.content) {
@@ -346,10 +403,40 @@
           history(),
           autocompletion({
             override: [slashCompletionSource],
-            activateOnTyping: true,
-            closeOnBlur: true,
+            activateOnTyping: false,
+            closeOnBlur: false,
           }),
           keymap.of([
+            {
+              key: "/",
+              run: (view) => {
+                if (isInsideCodeFence(view)) {
+                  return false;
+                }
+                const { from, to } = view.state.selection.main;
+                view.dispatch({
+                  changes: { from, to, insert: "/" },
+                  selection: EditorSelection.cursor(from + 1),
+                });
+                startCompletion(view);
+                return true;
+              },
+            },
+            {
+              key: "Shift-/",
+              run: (view) => {
+                if (isInsideCodeFence(view)) {
+                  return false;
+                }
+                const { from, to } = view.state.selection.main;
+                view.dispatch({
+                  changes: { from, to, insert: "/" },
+                  selection: EditorSelection.cursor(from + 1),
+                });
+                startCompletion(view);
+                return true;
+              },
+            },
             {
               key: "Mod-z",
               run: (view) => undo(view),
@@ -374,7 +461,12 @@
                   });
                   return true;
                 }
-                const content = view.state.doc.toString();
+                const content = normalizeTaskPrefix(view.state.doc.toString());
+                if (content !== view.state.doc.toString()) {
+                  view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: content },
+                  });
+                }
                 const sel = view.state.selection.main;
                 const atStart = sel.from === 0 && sel.to === 0;
                 onEnter?.(block.id, content, block.order_index, atStart);
@@ -426,32 +518,6 @@
                 }
                 const content = view.state.doc.toString();
                 onIndent?.(block.id, "out", content);
-                return true;
-              },
-            },
-            {
-              key: "ArrowUp",
-              run: (view) => {
-                // Inside code fence with lines above: move within
-                if (isInsideCodeFence(view)) {
-                  const { head } = view.state.selection.main;
-                  const line = view.state.doc.lineAt(head);
-                  if (line.number > 1) return false; // let default handle
-                }
-                onNavigate?.(block.id, "up");
-                return true;
-              },
-            },
-            {
-              key: "ArrowDown",
-              run: (view) => {
-                // Inside code fence with lines below: move within
-                if (isInsideCodeFence(view)) {
-                  const { head } = view.state.selection.main;
-                  const line = view.state.doc.lineAt(head);
-                  if (line.number < view.state.doc.lines) return false;
-                }
-                onNavigate?.(block.id, "down");
                 return true;
               },
             },
@@ -511,7 +577,28 @@
               display: "none",
             },
           }),
+          EditorView.updateListener.of((update) => {
+            if (!update.view.hasFocus) return;
+            const sel = update.state.selection.main;
+            if (!sel.empty) return;
+
+            const line = update.state.doc.lineAt(sel.head);
+            const beforeCursor = line.text.slice(0, sel.head - line.from);
+            const slashToken = beforeCursor.match(/(?:^|\s)\/[^\s]*$/);
+            if (!slashToken) return;
+
+            const status = completionStatus(update.state);
+            if (status === null) {
+              startCompletion(update.view);
+            }
+          }),
           EditorView.domEventHandlers({
+            focus: () => {
+              if (blurTeardownTimer !== undefined) {
+                window.clearTimeout(blurTeardownTimer);
+                blurTeardownTimer = undefined;
+              }
+            },
             keydown: (event) => {
               if (event.key === "Shift") shiftHeld = true;
             },
@@ -571,16 +658,43 @@
               }
               return true;
             },
-            blur: (_, view) => {
-              const content = view.state.doc.toString();
-              saveContent(content);
-              savedState = view.state;
-              (window as any).__activeEditorView = undefined;
-              editorView?.destroy();
-              editorView = undefined;
-              isEditing = false;
-              keymap_manager.isEditing = false;
-              onBlur?.(block.id);
+            blur: (_event, view) => {
+              // WebKitGTK can fire blur before focus settles on autocomplete/editor DOM.
+              // Debounce teardown and cancel if focus returns to editor context.
+              if (blurTeardownTimer !== undefined) {
+                window.clearTimeout(blurTeardownTimer);
+              }
+              blurTeardownTimer = window.setTimeout(() => {
+                if (!editorView || editorView !== view) return;
+
+                const completionState = completionStatus(view.state);
+                if (completionState === "active" || completionState === "pending") {
+                  view.focus();
+                  return;
+                }
+
+                const active = document.activeElement as HTMLElement | null;
+                // Only keep THIS editor alive if focus is still within it (e.g.
+                // its own autocomplete popup). If focus moved to a DIFFERENT
+                // block's editor (cross-block navigation), tear this one down so
+                // it re-renders as markdown.
+                const stillInThisEditor = !!active && view.dom.contains(active);
+                const inAutocomplete = !!active?.closest(".cm-tooltip-autocomplete");
+                if (stillInThisEditor || inAutocomplete) {
+                  return;
+                }
+
+                const content = view.state.doc.toString();
+                saveContent(content);
+                savedState = view.state;
+                (window as any).__activeEditorView = undefined;
+                editorView?.destroy();
+                editorView = undefined;
+                isEditing = false;
+                keymap_manager.isEditing = false;
+                onBlur?.(block.id);
+                blurTeardownTimer = undefined;
+              }, 120);
             },
           }),
           // Auto-close ``` into a code fence
@@ -607,10 +721,64 @@
       editorView = new EditorView({ state, parent: editorContainer });
       (window as any).__activeEditorView = editorView;
       editorView.focus();
-    });
+
+      // WebKitGTK note: arrow keydown events are consumed by native
+      // contentEditable caret movement and do NOT reliably reach CodeMirror's
+      // keymap — AND native vertical movement between wrapped visual rows is
+      // also unreliable. So we own vertical movement entirely: intercept Arrow
+      // Up/Down in the CAPTURE phase and move the caret ourselves, preserving
+      // the visual column (x). Only when already on the first/last visual row
+      // do we cross into the adjacent block.
+      {
+        const view = editorView;
+        const onArrowKey = (e: KeyboardEvent) => {
+          if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+          if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+          if (!editorView || editorView !== view) return;
+          const sel = view.state.selection.main;
+          if (!sel.empty) return; // let native handle shift-selection etc.
+          const caret = view.coordsAtPos(sel.head);
+          if (!caret) return;
+          const x = caret.left;
+          const h = Math.max(4, caret.bottom - caret.top);
+          if (e.key === "ArrowUp") {
+            const top = view.coordsAtPos(0);
+            const onFirstRow = !top || caret.top - top.top <= 1;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (onFirstRow) {
+              onNavigate?.(block.id, "up", x);
+            } else {
+              const pos = view.posAtCoords({ x, y: caret.top - h / 2 });
+              if (pos != null) view.dispatch({ selection: EditorSelection.cursor(pos) });
+            }
+          } else {
+            const end = view.coordsAtPos(view.state.doc.length);
+            const onLastRow = !end || end.bottom - caret.bottom <= 1;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (onLastRow) {
+              onNavigate?.(block.id, "down", x);
+            } else {
+              const pos = view.posAtCoords({ x, y: caret.bottom + h / 2 });
+              if (pos != null) view.dispatch({ selection: EditorSelection.cursor(pos) });
+            }
+          }
+        };
+        view.contentDOM.addEventListener("keydown", onArrowKey, true);
+      }
+
+      // Column-preserving vertical navigation: when this block was reached by
+      // pressing Arrow Up/Down in an adjacent block, drop the caret at the same
+      // viewport x on the appropriate (top/bottom) visual line — like MS Word.
+      placeNavCaret(editorView);
   }
 
   function stopEditing() {
+    if (blurTeardownTimer !== undefined) {
+      window.clearTimeout(blurTeardownTimer);
+      blurTeardownTimer = undefined;
+    }
     if (editorView) {
       const content = editorView.state.doc.toString();
       saveContent(content);
@@ -633,6 +801,10 @@
   // Clean up
   $effect(() => {
     return () => {
+      if (blurTeardownTimer !== undefined) {
+        window.clearTimeout(blurTeardownTimer);
+        blurTeardownTimer = undefined;
+      }
       if (editorView) {
         editorView.destroy();
       }
@@ -798,7 +970,7 @@
   class:code-block={isCodeBlock !== null}
   style="padding-left: {depth * 24}px"
 >
-  {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== ""}
+  {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== "" && !isQuoteBlock}
     <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
       e.stopPropagation();
       if (hasChildren) {
@@ -818,7 +990,7 @@
       {/if}
     </div>
   {/if}
-  <div class="block-content" onclick={handleClick}>
+  <div class="block-content" class:quote-block={isQuoteBlock && !isEditing} onclick={handleClick}>
     {#if isEditing}
       <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
     {:else if queryExpression !== null}
@@ -981,10 +1153,31 @@
     overflow: hidden;
   }
 
+  .block-item.editing .block-content {
+    overflow: visible;
+  }
+
+  .block-content.quote-block {
+    position: relative;
+    padding-left: 12px;
+    overflow: visible;
+  }
+
+  .block-content.quote-block::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: -4px;
+    bottom: -4px;
+    width: 3px;
+    background: var(--accent);
+    pointer-events: none;
+  }
+
   .editor-wrapper {
     width: 100%;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
     font-size: inherit;
     font-weight: inherit;
     line-height: inherit;
@@ -1050,14 +1243,15 @@
   }
 
   .rendered-content :global(.page-link) {
-    color: var(--accent);
+    color: var(--text-link);
     cursor: pointer;
     text-decoration: none;
     border-bottom: 1px solid transparent;
   }
 
   .rendered-content :global(.page-link:hover) {
-    border-bottom-color: var(--accent);
+    color: var(--text-link-hover);
+    border-bottom-color: var(--text-link-hover);
   }
 
   .rendered-content :global(.tag) {
@@ -1172,8 +1366,12 @@
   }
 
   .rendered-content :global(a:not(.page-link):not(.tag)) {
-    color: var(--accent);
+    color: var(--text-link);
     text-decoration: underline;
+  }
+
+  .rendered-content :global(a:not(.page-link):not(.tag):hover) {
+    color: var(--text-link-hover);
   }
 
   .rendered-content :global(h1) {
@@ -1209,8 +1407,20 @@
   .rendered-content :global(blockquote) {
     border-left: 3px solid var(--accent);
     padding-left: 12px;
-    margin: 4px 0;
+    margin: 0;
+    min-height: 24px;
+    display: flex;
+    align-items: center;
     color: var(--text-secondary);
+  }
+
+  .rendered-content :global(blockquote > p) {
+    margin: 0;
+  }
+
+  .block-content.quote-block .rendered-content :global(blockquote) {
+    border-left: none;
+    padding-left: 0;
   }
 
   .rendered-content :global(pre) {

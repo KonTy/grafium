@@ -76,4 +76,45 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 
 const app = mount(App, { target: document.getElementById("app")! });
 
+// === TEMP DIAGNOSTIC: key-event visibility on WebKitGTK ===
+// Shows what the JS layer actually receives when arrow keys are pressed.
+{
+  const dbg = document.createElement("div");
+  dbg.id = "__keydbg";
+  dbg.style.cssText =
+    "position:fixed;bottom:8px;right:8px;z-index:99999;background:#000;color:#0f0;" +
+    "font:11px/1.4 monospace;padding:6px 8px;border:1px solid #0f0;pointer-events:none;" +
+    "max-width:360px;white-space:pre;opacity:0.9;border-radius:4px;display:none;";
+  dbg.textContent = "keydbg: press ↑/↓ in a block";
+  document.body.appendChild(dbg);
+  const lines: string[] = [];
+  (window as any).__keydbg = (msg: string) => {
+    lines.unshift(msg);
+    if (lines.length > 6) lines.pop();
+    dbg.textContent = lines.join("\n");
+  };
+  // Toggle the diagnostic overlay with Ctrl+Shift+D.
+  document.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
+        e.preventDefault();
+        dbg.style.display = dbg.style.display === "none" ? "block" : "none";
+      }
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const t = e.target as HTMLElement | null;
+      (window as any).__keydbg(
+        `DOC ${e.key} tgt=${t?.tagName ?? "?"} CE=${!!t?.isContentEditable}`,
+      );
+    },
+    true,
+  );
+}
+
 export default app;

@@ -610,7 +610,7 @@
   }
 
   .task-content :global(.page-link) {
-    color: var(--accent);
+    color: var(--text-link);
     cursor: pointer;
   }
 
@@ -626,7 +626,7 @@
   }
 
   .task-page {
-    color: var(--accent);
+    color: var(--text-link);
     cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;

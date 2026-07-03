@@ -321,12 +321,8 @@ export function registerDefaultShortcuts(actions: {
       category: "basics",
       description: "Command palette",
     },
-    {
-      binding: "shift+/",
-      action: actions.toggleHelp,
-      category: "toggle",
-      description: "Toggle keyboard shortcuts help",
-    },
+    // Disabled due conflict with slash command entry on some keyboard layouts
+    // where '/' requires Shift and could interfere with editor slash menu.
 
     // ─── History navigation ────────────────────────
     {

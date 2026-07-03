@@ -104,7 +104,7 @@ export function renderBlock(content: string): string {
   // Transform [[page links]] to clickable links
   processed = processed.replace(
     /\[\[([^\]]+)\]\]/g,
-    '<a class="page-link" data-page="$1">[[$1]]</a>'
+    '<a class="page-link" data-page="$1">$1</a>'
   );
 
   // Transform #tags
@@ -120,12 +120,12 @@ export function renderBlock(content: string): string {
   );
 
   // Handle task markers
-  processed = processed.replace(/^TODO /, '<span class="task-marker todo">TODO</span> ');
-  processed = processed.replace(/^DOING /, '<span class="task-marker doing">DOING</span> ');
-  processed = processed.replace(/^DONE /, '<span class="task-marker done">DONE</span> ');
-  processed = processed.replace(/^LATER /, '<span class="task-marker later">LATER</span> ');
-  processed = processed.replace(/^NOW /, '<span class="task-marker now">NOW</span> ');
-  processed = processed.replace(/^CANCELED /, '<span class="task-marker canceled">CANCELED</span> ');
+  processed = processed.replace(/^TODO\s+/i, '<span class="task-marker todo">TODO</span> ');
+  processed = processed.replace(/^DOING\s+/i, '<span class="task-marker doing">DOING</span> ');
+  processed = processed.replace(/^DONE\s+/i, '<span class="task-marker done">DONE</span> ');
+  processed = processed.replace(/^LATER\s+/i, '<span class="task-marker later">LATER</span> ');
+  processed = processed.replace(/^NOW\s+/i, '<span class="task-marker now">NOW</span> ');
+  processed = processed.replace(/^CANCELED\s+/i, '<span class="task-marker canceled">CANCELED</span> ');
 
   // Handle priority markers [#A], [#B], [#C]
   processed = processed.replace(
