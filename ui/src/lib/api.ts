@@ -151,16 +151,32 @@ export function getBlockPageTitle(blockId: string): Promise<string> {
 }
 
 // Flashcards
-export function listFlashcardsDue(): Promise<unknown[]> {
-  return invoke("list_flashcards_due", {});
+export interface Flashcard {
+  id: string;
+  block_id: string;
+  front: string;
+  back: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+  last_reviewed_at: number | null;
+  next_review_at: number | null;
+  ease_factor: number;
+  interval_days: number;
+  review_count: number;
 }
 
-export function listAllFlashcards(): Promise<unknown[]> {
-  return invoke("list_all_flashcards", {});
+export function listFlashcardsDue(limit?: number): Promise<Flashcard[]> {
+  return invoke("list_flashcards_due", { limit });
 }
 
-export function updateFlashcardReview(blockId: string, quality: number): Promise<void> {
-  return invoke("update_flashcard_review", { blockId, quality });
+export function listAllFlashcards(limit?: number, offset?: number): Promise<Flashcard[]> {
+  return invoke("list_all_flashcards", { limit, offset });
+}
+
+// quality: 0..5 (0-2 = fail, 3-5 = pass). Returns the updated card.
+export function gradeFlashcard(id: string, quality: number): Promise<Flashcard> {
+  return invoke("grade_flashcard", { id, quality });
 }
 
 // Favorites & Recent

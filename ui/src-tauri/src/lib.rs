@@ -383,7 +383,9 @@ fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, St
     let marker_v1 = graph_root.join(metadata_dir).join("tutorial-seeded-v1");
     let marker_v2 = graph_root.join(metadata_dir).join("tutorial-seeded-v2");
     let marker_v3 = graph_root.join(metadata_dir).join("tutorial-seeded-v3");
-    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v4");
+    let marker_v4 = graph_root.join(metadata_dir).join("tutorial-seeded-v4");
+    let marker_v5 = graph_root.join(metadata_dir).join("tutorial-seeded-v5");
+    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v6");
     if marker.exists() {
         return Ok(false);
     }
@@ -391,8 +393,14 @@ fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, St
     let pages_dir = graph_root.join("pages");
     let journals_dir = graph_root.join("journals");
     let has_markdown = has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir);
-    // Allow one-time in-place refresh of the built-in tutorial graph from v1/v2/v3 -> v4.
-    if has_markdown && !marker_v1.exists() && !marker_v2.exists() && !marker_v3.exists() {
+    // Allow one-time in-place refresh of the built-in tutorial graph from v1..v5 -> v6.
+    if has_markdown
+        && !marker_v1.exists()
+        && !marker_v2.exists()
+        && !marker_v3.exists()
+        && !marker_v4.exists()
+        && !marker_v5.exists()
+    {
         return Ok(false);
     }
 
@@ -447,21 +455,23 @@ fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, St
 
 ![Tutorial Welcome](../assets/tutorial/welcome-overview.svg)
 
-This is a built-in tutorial graph so you can learn quickly without risking real notes.
+Grafium is a **second brain** — a place to capture what you learn, connect it,
+and remember it for good. This is a safe tutorial graph, so you can practice
+without touching your real notes.
 
-## What You Can Learn Here
+## ⭐ Start Here: Learn Anything, Remember It Forever
 
-- Block editing and hierarchy
-- Journals and daily notes
-- Page links, tags, and backlinks
-- Tasks and scheduling
-- Search, favorites, and graph switching
+Grafium isn't just note storage — it's a system for **studying and remembering**
+any book, video, or lecture. Read these three pages in order:
 
-## First 5 Minutes
+1. [[The Grafium Study Method]] — why it works (CODE + PACER)
+2. [[PACER - Tag What You Read]] — label each note so you know how to use it
+3. [[The Study Loop]] — the exact steps: capture, digest, review
 
-1. Open [[Try Block Editing]] and follow the mini-exercises.
-2. Open [[Create Your Own Graph]] to make your real graph in Documents.
-3. Switch to your new graph from the graph menu (top-left).
+## Learn The App
+
+- [[Try Block Editing]] — blocks, links, tags, and tasks
+- [[Create Your Own Graph]] — make your real graph in Documents
 
 ## Quick Editor Tips
 
@@ -526,15 +536,186 @@ Open Journal view and right-click the date title to delete a journal page.
 Use search in sidebar to jump by page name or block content.
 "##;
 
+    let study_method_page = r##"# The Grafium Study Method
+
+![Study Method](../assets/tutorial/study-method.svg)
+
+Most people try to learn by **consuming more** — reading faster, watching at 2x.
+But we forget up to **90%** of what we read. The fix isn't consuming more; it's
+**digesting** what you consume.
+
+Grafium combines two proven ideas:
+
+- **CODE / Second Brain** (Tiago Forte) — *where* notes live and how they link:
+  Capture, Organize, Distill, Express.
+- **PACER** (Justin Sung) — *how* to process each note so it sticks:
+  Procedural, Analogous, Conceptual, Evidence, Reference.
+
+> **The core rule:** Learning = **consume + digest**, and the two must stay
+> **balanced**. If you can't digest what you're reading, slow down.
+
+## The Two Stages
+
+1. **Consume** — capture ideas fast in your daily [[Journal]], tagging each one.
+2. **Digest** — later, turn the important notes into permanent, linked
+   [[concept page]]s. That is what builds your second brain (and your graph).
+
+## Watch The Source
+
+This method is based on Justin Sung's video on how to remember what you read.
+Search YouTube for **Justin Sung — "How to remember everything you read"** to
+watch his full explanation of the PACER system.
+
+## Next
+
+- [[PACER - Tag What You Read]]
+- [[The Study Loop]]
+"##;
+
+    let pacer_page = r##"# PACER - Tag What You Read
+
+![PACER](../assets/tutorial/pacer.svg)
+
+Not all information is equal. As you read, decide which of the **five PACER
+types** each note is, and tag it. That single decision *is* active learning —
+and it tells you how to digest the note later.
+
+## The Five Types
+
+- **P — Procedural** `#proc` — how to *do* something (a technique, steps, code).
+  - Digest by: **practice it** as soon as you can.
+- **A — Analogous** `#analogy` — it reminds you of something you already know.
+  - Digest by: **critique the analogy** — where does it fit, where does it break?
+- **C — Conceptual** `#concept` — the *what* and *why* (facts, theories, links).
+  - Digest by: **map it** — create/link a concept page. This grows your graph.
+- **E — Evidence** `#evidence` — an example, stat, or case that proves a concept.
+  - Digest by: **store** it under its concept, then **rehearse**.
+- **R — Reference** `#ref` — a nitty-gritty fact you may need later.
+  - Digest by: **store** it as a flashcard — write it as `Question :: Answer`.
+
+## Workflow Tags
+
+Use these to find notes again:
+
+- `#inbox` — captured, not yet digested
+- `#rehearse` — needs active-recall practice
+- `#flashcard` — should become a spaced-repetition card
+- `#digested` — done; it now lives in a concept page
+
+> **Tip:** Click any tag to see every note with it. That is how you build your
+> review list.
+
+## Next
+
+- [[The Study Loop]]
+"##;
+
+    let study_loop_page = r##"# The Study Loop
+
+![Study Loop](../assets/tutorial/study-loop.svg)
+
+Here is the exact step-by-step. Example: you're watching a video on learning.
+
+## 1. Before (10 seconds)
+
+Open today's **Journal** and add the source, then indent notes under it:
+
+- [[Source - Justin Sung: How to Remember]]  #inbox
+  - (your notes go here, indented)
+
+## 2. Consume (while watching)
+
+Capture each idea in your own words and **tag its PACER type**. Do not stop to
+memorize — just capture and tag:
+
+- Learning = consume + [[digest]], keep it balanced  #concept
+- Muscle contraction is like my swimming stroke  #analogy
+- Up to 90% forgotten without digestion  #evidence
+- Kim Peek had FG syndrome  #ref
+- Draw a mind-map while reading conceptual info  #proc
+
+> **Balance rule:** if you can't keep tagging, you're consuming too fast.
+
+## 3. Digest (that evening)
+
+Go back through today's journal and process each tag:
+
+- `#concept` → open/create the [[concept page]] and link it to related ideas.
+- `#analogy` → write *why* it fits and where it breaks.
+- `#proc` → add a `TODO` to practice it.
+- `#evidence` → move it under its concept, then tag `#rehearse`.
+- `#ref` → turn it into a flashcard: write `Question :: Answer` (for example
+  `Capital of France :: Paris`). Review it later in **Flashcards** (sidebar).
+
+Change each note from `#inbox` to `#digested` as you finish.
+
+## 4. Review (ongoing)
+
+- **Flashcards (sidebar):** spaced-repetition review of every `Question :: Answer`
+  card. Grade each recall (Again / Hard / Good / Easy) and Grafium schedules when
+  you should see it next.
+- **Rehearse list:** search the `#rehearse` tag to actively recall evidence notes.
+- **Graph view:** find **orphan** notes (captured but never linked = not learned
+  yet) and connect them; practice recall from your dense **hub** topics.
+
+## That's The Whole System
+
+Capture fast → tag with PACER → digest into linked concept pages → review by tag
+and graph. Do this for any topic and your knowledge compounds forever.
+"##;
+
+    let image_study_method = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <rect width='1280' height='720' fill='#0f172a'/>
+  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#1e293b' stroke='#a78bfa' stroke-width='2'/>
+  <text x='170' y='150' fill='#ede9fe' font-size='40' font-family='sans-serif'>Consume + Digest = Learning</text>
+  <rect x='170' y='210' width='430' height='360' rx='12' fill='#0f2235' stroke='#60a5fa' stroke-width='2'/>
+  <text x='200' y='275' fill='#bfdbfe' font-size='28' font-family='sans-serif'>1. Consume (fast)</text>
+  <text x='200' y='325' fill='#93c5fd' font-size='22' font-family='sans-serif'>Capture ideas in the Journal</text>
+  <text x='200' y='362' fill='#93c5fd' font-size='22' font-family='sans-serif'>Tag each with PACER</text>
+  <rect x='680' y='210' width='430' height='360' rx='12' fill='#0d2818' stroke='#4ade80' stroke-width='2'/>
+  <text x='710' y='275' fill='#bbf7d0' font-size='28' font-family='sans-serif'>2. Digest (later)</text>
+  <text x='710' y='325' fill='#86efac' font-size='22' font-family='sans-serif'>Map into concept pages</text>
+  <text x='710' y='362' fill='#86efac' font-size='22' font-family='sans-serif'>Review by tag + graph</text>
+  <text x='612' y='405' fill='#e5e7eb' font-size='48' font-family='sans-serif'>&#8594;</text>
+</svg>"##;
+
+    let image_pacer = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <rect width='1280' height='720' fill='#111827'/>
+  <rect x='120' y='60' width='1040' height='600' rx='16' fill='#1f2937' stroke='#fbbf24' stroke-width='2'/>
+  <text x='170' y='135' fill='#fef3c7' font-size='38' font-family='sans-serif'>PACER: tag what you read</text>
+  <text x='170' y='215' fill='#fde68a' font-size='26' font-family='monospace'>P  Procedural  #proc      practice it</text>
+  <text x='170' y='270' fill='#fde68a' font-size='26' font-family='monospace'>A  Analogous   #analogy   critique it</text>
+  <text x='170' y='325' fill='#fde68a' font-size='26' font-family='monospace'>C  Conceptual  #concept   map it</text>
+  <text x='170' y='380' fill='#fde68a' font-size='26' font-family='monospace'>E  Evidence    #evidence  store + rehearse</text>
+  <text x='170' y='435' fill='#fde68a' font-size='26' font-family='monospace'>R  Reference   #ref       store + flashcard</text>
+</svg>"##;
+
+    let image_study_loop = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
+  <rect width='1280' height='720' fill='#0b1f33'/>
+  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#132f4c' stroke='#7dd3fc' stroke-width='2'/>
+  <text x='170' y='140' fill='#e0f2fe' font-size='38' font-family='sans-serif'>The Study Loop</text>
+  <text x='170' y='225' fill='#bae6fd' font-size='26' font-family='sans-serif'>1. Journal: add the source  #inbox</text>
+  <text x='170' y='285' fill='#bae6fd' font-size='26' font-family='sans-serif'>2. Consume: capture + tag PACER</text>
+  <text x='170' y='345' fill='#bae6fd' font-size='26' font-family='sans-serif'>3. Digest: map into concept pages</text>
+  <text x='170' y='405' fill='#bae6fd' font-size='26' font-family='sans-serif'>4. Review: #rehearse + graph</text>
+  <text x='170' y='480' fill='#7dd3fc' font-size='22' font-family='sans-serif'>capture -&gt; tag -&gt; digest -&gt; review -&gt; repeat</text>
+</svg>"##;
+
     write_text_file(&graph_root.join("assets/tutorial/welcome-overview.svg"), image_welcome)?;
     write_text_file(&graph_root.join("assets/tutorial/create-graph-flow.svg"), image_create_graph)?;
     write_text_file(&graph_root.join("assets/tutorial/block-editing-basics.svg"), image_blocks)?;
+    write_text_file(&graph_root.join("assets/tutorial/study-method.svg"), image_study_method)?;
+    write_text_file(&graph_root.join("assets/tutorial/pacer.svg"), image_pacer)?;
+    write_text_file(&graph_root.join("assets/tutorial/study-loop.svg"), image_study_loop)?;
 
     write_text_file(&graph_root.join("pages/Welcome To Grafium.md"), start_here)?;
     write_text_file(&graph_root.join("pages/Create Your Own Graph.md"), create_graph_page)?;
     write_text_file(&graph_root.join("pages/Try Block Editing.md"), block_editing_page)?;
+    write_text_file(&graph_root.join("pages/The Grafium Study Method.md"), study_method_page)?;
+    write_text_file(&graph_root.join("pages/PACER - Tag What You Read.md"), pacer_page)?;
+    write_text_file(&graph_root.join("pages/The Study Loop.md"), study_loop_page)?;
 
-    write_text_file(&marker, "seeded_v4")?;
+    write_text_file(&marker, "seeded_v6")?;
     Ok(true)
 }
 
@@ -557,6 +738,21 @@ fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> Pat
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK on Wayland aborts with "Error 71 (Protocol error)" on some
+    // GPU/compositor setups when the DMABUF renderer / accelerated compositing
+    // is active. Disable them before the webview initializes so the app launches
+    // reliably from any entry point (start menu, terminal, packaged binary)
+    // without depending on an external wrapper script to set these.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -844,6 +1040,7 @@ pub fn run() {
             commands::flashcards::list_flashcards_due,
             commands::flashcards::list_all_flashcards,
             commands::flashcards::update_flashcard_review,
+            commands::flashcards::grade_flashcard,
             commands::favorites::add_favorite,
             commands::favorites::remove_favorite,
             commands::favorites::list_favorites,

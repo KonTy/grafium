@@ -27,3 +27,9 @@ pub fn update_flashcard_review(
     graph.db.update_flashcard_review(&id, ease_factor, interval_days, next_review_at)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn grade_flashcard(state: State<AppState>, id: String, quality: i32) -> Result<Flashcard, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.grade_flashcard(&id, quality).map_err(|e| e.to_string())
+}

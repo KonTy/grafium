@@ -85,6 +85,52 @@ impl Database {
         Ok(())
     }
 
+    /// Grade a review using the SM-2 algorithm. `quality` is 0..=5 (0-2 = fail,
+    /// 3-5 = pass). The next interval and ease factor are derived from the
+    /// card's current state, so the frontend only needs to send the grade.
+    pub fn grade_flashcard(&self, id: &str, quality: i32) -> Result<Flashcard> {
+        let conn = self.conn()?;
+        let (mut ease, interval): (f64, i32) = conn.query_row(
+            "SELECT ease_factor, interval_days FROM flashcards WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        let q = quality.clamp(0, 5) as f64;
+        // SM-2 ease update, floored at 1.3.
+        ease += 0.1 - (5.0 - q) * (0.08 + (5.0 - q) * 0.02);
+        if ease < 1.3 {
+            ease = 1.3;
+        }
+
+        // Interval schedule using the existing interval_days as the "streak"
+        // signal (0 = new, <6 = second pass), so no extra column is needed.
+        let new_interval = if quality < 3 {
+            1
+        } else if interval <= 0 {
+            1
+        } else if interval < 6 {
+            6
+        } else {
+            ((interval as f64) * ease).round() as i32
+        };
+
+        let now = Utc::now().timestamp_millis();
+        let next = now + new_interval as i64 * 86_400_000;
+        conn.execute(
+            "UPDATE flashcards SET ease_factor = ?1, interval_days = ?2, next_review_at = ?3, last_reviewed_at = ?4, review_count = review_count + 1, updated_at = ?4 WHERE id = ?5",
+            params![ease, new_interval, next, now, id],
+        )?;
+
+        let card = conn.query_row(
+            "SELECT id, block_id, front, back, tags, created_at, updated_at, last_reviewed_at, next_review_at, ease_factor, interval_days, review_count
+             FROM flashcards WHERE id = ?1",
+            params![id],
+            Self::row_to_flashcard,
+        )?;
+        Ok(card)
+    }
+
     fn row_to_flashcard(row: &rusqlite::Row) -> rusqlite::Result<Flashcard> {
         let tags_str: String = row.get(4)?;
         let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();

@@ -6,6 +6,7 @@
   import AllPages from "./components/AllPages.svelte";
   import GraphView from "./components/GraphView.svelte";
   import Statistics from "./components/Statistics.svelte";
+  import FlashcardReview from "./components/FlashcardReview.svelte";
   import ChatbotView from "./components/ChatbotView.svelte";
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
@@ -994,6 +995,8 @@
       />
     {:else if currentView === "statistics"}
       <Statistics onNavigate={handleNavigate} />
+    {:else if currentView === "flashcards"}
+      <FlashcardReview onNavigate={handleNavigate} />
     {:else if currentView === "chat"}
       <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
