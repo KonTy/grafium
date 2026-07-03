@@ -735,6 +735,10 @@
           if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
           if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
           if (!editorView || editorView !== view) return;
+          // If the slash/autocomplete popup is open, let CodeMirror handle
+          // Up/Down to move the menu selection instead of moving the caret.
+          const cstatus = completionStatus(view.state);
+          if (cstatus === "active" || cstatus === "pending") return;
           const sel = view.state.selection.main;
           if (!sel.empty) return; // let native handle shift-selection etc.
           const caret = view.coordsAtPos(sel.head);
