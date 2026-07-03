@@ -134,27 +134,51 @@
     if (animate) {
       reheat(1);
     } else {
-      prewarm();
-      alpha = 0;
-      draw();
+      settleAsync();
     }
   }
 
-  function prewarm(iterations = 400) {
-    if (nodes.length === 0) return;
-    alpha = 1;
-    for (let i = 0; i < iterations; i++) {
-      simulate();
-      alpha *= 0.99;
+  // Settle the layout WITHOUT blocking the main thread: run the physics in
+  // short, time-boxed slices across animation frames, then paint the final
+  // positions once. Painting only at the end means no on-screen "jumping"
+  // (the reason animation was turned off), while the UI never freezes. The old
+  // synchronous 400-iteration pre-warm locked the thread for ~1-2s on open.
+  let settleToken = 0;
+  function settleAsync(iterations = 300) {
+    cancelAnimationFrame(raf);
+    running = false;
+    if (nodes.length === 0) {
+      alpha = 0;
+      draw();
+      return;
     }
+    const token = ++settleToken;
+    alpha = 1;
+    let done = 0;
+    const step = () => {
+      if (token !== settleToken) return; // superseded by a newer settle/build
+      const start = performance.now();
+      // Cap the work per frame so input stays smooth at any node count.
+      while (done < iterations && performance.now() - start < 8) {
+        simulate();
+        alpha *= 0.99;
+        done++;
+      }
+      if (done < iterations) {
+        raf = requestAnimationFrame(step);
+      } else {
+        alpha = 0;
+        running = false;
+        draw();
+      }
+    };
+    raf = requestAnimationFrame(step);
   }
 
   function reheat(a = 0.6) {
     if (!animate) {
-      // Static mode: re-settle off-screen instead of visibly animating.
-      prewarm(200);
-      alpha = 0;
-      draw();
+      // Static mode: re-settle off the main thread, then repaint.
+      settleAsync(200);
       return;
     }
     alpha = Math.max(alpha, a);
