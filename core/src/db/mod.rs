@@ -133,4 +133,128 @@ impl Database {
 
         Ok(())
     }
+
+    /// Populate `fts_block_rowid` for every existing FTS row that isn't mapped
+    /// yet. Walks `fts_blocks` in small rowid-cursor chunks, each in its own
+    /// short transaction with a brief pause between, so it never holds a long
+    /// read snapshot (which balloons the WAL) or starves the UI. Idempotent and
+    /// cheap to call when already populated.
+    ///
+    /// Intended to run once on a background thread the first time an older graph
+    /// (indexed before the map existed) is opened, so that block edits stop
+    /// full-scanning the FTS index.
+    pub fn backfill_fts_rowid_map(&self) -> Result<usize> {
+        {
+            let conn = self.conn()?;
+            let map_count: i64 =
+                conn.query_row("SELECT count(*) FROM fts_block_rowid", [], |r| r.get(0))?;
+            let fts_count: i64 =
+                conn.query_row("SELECT count(*) FROM fts_blocks", [], |r| r.get(0))?;
+            if map_count >= fts_count {
+                return Ok(0);
+            }
+        }
+
+        let batch: i64 = 20_000;
+        let mut cursor: i64 = 0;
+        let mut total = 0usize;
+
+        loop {
+            let mut conn = self.conn()?;
+
+            // Read one chunk (rowid is FTS5's primary key, so this range scan is
+            // fast even mid-table). Collect and drop the read statement before
+            // opening the write transaction.
+            let rows: Vec<(i64, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT rowid, block_id FROM fts_blocks WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+                )?;
+                let mapped = stmt.query_map(rusqlite::params![cursor, batch], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?;
+                mapped.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            cursor = rows.last().map(|(id, _)| *id).unwrap_or(cursor);
+
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR IGNORE INTO fts_block_rowid (block_id, fts_rowid) VALUES (?1, ?2)",
+                )?;
+                for (rowid, block_id) in &rows {
+                    stmt.execute(rusqlite::params![block_id, rowid])?;
+                }
+            }
+            tx.commit()?;
+            total += rows.len();
+            drop(conn);
+
+            // Yield so block edits and UI queries aren't starved, and so the WAL
+            // can checkpoint between chunks during this one-time backfill.
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+
+        Ok(total)
+    }
+}
+
+/// Insert a block into the FTS index and record its rowid in `fts_block_rowid`.
+pub(crate) fn fts_insert_block(
+    conn: &rusqlite::Connection,
+    block_id: &str,
+    content: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO fts_blocks (block_id, content) VALUES (?1, ?2)",
+        rusqlite::params![block_id, content],
+    )?;
+    let rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR REPLACE INTO fts_block_rowid (block_id, fts_rowid) VALUES (?1, ?2)",
+        rusqlite::params![block_id, rowid],
+    )?;
+    Ok(())
+}
+
+/// Delete a block's FTS row by its mapped rowid (O(1)). Falls back to the slow
+/// UNINDEXED scan only for legacy rows not yet in `fts_block_rowid`.
+pub(crate) fn fts_delete_block(conn: &rusqlite::Connection, block_id: &str) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let rowid: Option<i64> = conn
+        .query_row(
+            "SELECT fts_rowid FROM fts_block_rowid WHERE block_id = ?1",
+            rusqlite::params![block_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if let Some(rowid) = rowid {
+        conn.execute("DELETE FROM fts_blocks WHERE rowid = ?1", rusqlite::params![rowid])?;
+        conn.execute(
+            "DELETE FROM fts_block_rowid WHERE block_id = ?1",
+            rusqlite::params![block_id],
+        )?;
+    } else {
+        // Legacy row not mapped yet: slow path (full FTS scan). Only happens
+        // before the one-time backfill maps this block.
+        conn.execute(
+            "DELETE FROM fts_blocks WHERE block_id = ?1",
+            rusqlite::params![block_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replace a block's FTS content (delete old row by rowid, insert new, remap).
+pub(crate) fn fts_replace_block(
+    conn: &rusqlite::Connection,
+    block_id: &str,
+    content: &str,
+) -> Result<()> {
+    fts_delete_block(conn, block_id)?;
+    fts_insert_block(conn, block_id, content)?;
+    Ok(())
 }

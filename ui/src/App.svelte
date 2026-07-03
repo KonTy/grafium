@@ -4,6 +4,7 @@
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
   import AllPages from "./components/AllPages.svelte";
+  import GraphView from "./components/GraphView.svelte";
   import Statistics from "./components/Statistics.svelte";
   import ChatbotView from "./components/ChatbotView.svelte";
   import Settings from "./components/Settings.svelte";
@@ -40,7 +41,7 @@
     return null;
   }
 
-  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings";
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph";
 
   let currentView: View = $state("page");
   let currentPage: Page | null = $state(null);
@@ -206,6 +207,9 @@
     if (currentView === "all-pages") {
       return { kind: "all-pages", scrollTop: currentScrollTop() };
     }
+    if (currentView === "graph") {
+      return { kind: "graph", scrollTop: 0 };
+    }
     if (currentView === "flashcards") {
       return { kind: "flashcards", scrollTop: currentScrollTop() };
     }
@@ -326,6 +330,14 @@
       return;
     }
 
+    if (entry.kind === "graph") {
+      currentView = "graph";
+      loading = false;
+      error = null;
+      await tick();
+      return;
+    }
+
     if (entry.kind === "flashcards") {
       currentView = "flashcards";
       currentPage = null;
@@ -392,6 +404,7 @@
     goJournal: () => navigateToJournal(),
     goHome: () => navigateToJournal(),
     goAllPages: () => navigateToPage("__all_pages__"),
+    goGraph: () => navigateToPage("__graph__"),
     goFlashcards: () => navigateToPage("__flashcards__"),
     goTomorrow: () => {
       const d = new Date();
@@ -660,6 +673,16 @@
       if (restoreEntry) {
         restoreHistoryState(restoreEntry);
       }
+      return;
+    }
+    if (title === "__graph__") {
+      currentView = "graph";
+      error = null;
+      loading = false;
+      if (!skipHistory) {
+        pushHistoryEntry({ kind: "graph", scrollTop: 0 });
+      }
+      await tick();
       return;
     }
     if (title === "__flashcards__") {
@@ -963,6 +986,12 @@
       <div class="loading">Loading...</div>
     {:else if currentView === "all-pages"}
       <AllPages onNavigate={handleNavigate} />
+    {:else if currentView === "graph"}
+      <GraphView
+        onNavigate={handleNavigate}
+        currentPageId={currentPage?.id ?? ""}
+        currentPageTitle={currentPage?.title ?? ""}
+      />
     {:else if currentView === "statistics"}
       <Statistics onNavigate={handleNavigate} />
     {:else if currentView === "chat"}
@@ -1024,6 +1053,17 @@
           <polyline points="14 2 14 8 20 8"></polyline>
         </svg>
         <span>Pages</span>
+      </button>
+      <button class="bottom-nav-item" class:active={currentView === "graph"} onclick={() => handleNavigate("__graph__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="5" cy="6" r="2"></circle>
+          <circle cx="19" cy="6" r="2"></circle>
+          <circle cx="12" cy="18" r="2"></circle>
+          <line x1="6.7" y1="7" x2="10.5" y2="16.3"></line>
+          <line x1="17.3" y1="7" x2="13.5" y2="16.3"></line>
+          <line x1="7" y1="6" x2="17" y2="6"></line>
+        </svg>
+        <span>Graph</span>
       </button>
       <button class="bottom-nav-item" class:active={currentView === "chat"} onclick={() => handleNavigate("__chat__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -99,20 +99,96 @@ impl Database {
         }
     }
 
+    /// Cheap emptiness probe used on startup. Avoids the full-table dedup scan
+    /// that `list_pages` performs, so opening a large graph stays responsive.
+    pub fn has_any_page(&self) -> Result<bool> {
+        let conn = self.conn()?;
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pages LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     pub fn list_pages(&self, limit: i64, offset: i64) -> Result<Vec<Page>> {
         let conn = self.conn()?;
+        // Stream pages newest-first straight off idx_pages_updated and dedup by
+        // case-insensitive title in Rust, stopping as soon as we have enough
+        // unique titles. This avoids a full-table `ROW_NUMBER() OVER (...)` window
+        // scan + temp b-tree sort, which is catastrophic on very large graphs
+        // (millions of pages) and froze the app on startup.
         let mut stmt = conn.prepare(
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
-             FROM (
-               SELECT *, ROW_NUMBER() OVER (PARTITION BY lower(title) ORDER BY updated_at DESC) AS rn
-               FROM pages
-               WHERE is_journal = 0
-             )
-             WHERE rn = 1
-             ORDER BY updated_at DESC
-             LIMIT ?1 OFFSET ?2"
+             FROM pages
+             WHERE is_journal = 0
+             ORDER BY updated_at DESC"
         )?;
-        let pages = stmt.query_map(params![limit, offset], |row| {
+
+        let offset = offset.max(0) as usize;
+        // When limit is negative, callers want "everything"; otherwise we only
+        // need offset + limit unique titles before we can stop scanning.
+        let want: Option<usize> = if limit < 0 {
+            None
+        } else {
+            Some(offset.saturating_add(limit as usize))
+        };
+
+        let mut rows = stmt.query([])?;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pages: Vec<Page> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let title: String = row.get(1)?;
+            if !seen.insert(title.to_lowercase()) {
+                continue;
+            }
+            pages.push(Page {
+                id: row.get(0)?,
+                title,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            });
+            if let Some(want) = want {
+                if pages.len() >= want {
+                    break;
+                }
+            }
+        }
+
+        let start = offset.min(pages.len());
+        Ok(pages.split_off(start))
+    }
+
+    /// Total number of regular (non-journal) pages. Backs the virtualized
+    /// All Pages list so it can size its scrollbar for the full data set.
+    pub fn count_regular_pages(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM pages WHERE is_journal = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Windowed listing of regular pages for the virtualized All Pages view.
+    /// Sorts server-side and pages with LIMIT/OFFSET straight off a partial
+    /// index (`idx_pages_title_regular` / `idx_pages_updated_regular`), so any
+    /// window stays fast (~20ms) regardless of how many pages or journals exist.
+    pub fn list_pages_window(&self, limit: i64, offset: i64, sort_by_title: bool) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let sql = if sort_by_title {
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages WHERE is_journal = 0 ORDER BY title ASC LIMIT ?1 OFFSET ?2"
+        } else {
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let pages = stmt.query_map(params![limit, offset.max(0)], |row| {
             Ok(Page {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -187,14 +263,22 @@ impl Database {
     /// Returns all pages matching "test/%", "test/%" etc.
     pub fn get_child_pages(&self, parent_title: &str) -> Result<Vec<Page>> {
         let conn = self.conn()?;
-        let like_pattern = format!("{}/%", parent_title);
+        // Seek the `idx_pages_title_lower` index with a half-open range instead
+        // of `LIKE 'parent/%'`. A `LIKE` on `lower(title)` cannot use the index
+        // (SQLite full-scans every page), which froze the app on large graphs
+        // when each rendered journal called this. `'/'` (0x2F) is immediately
+        // followed by `'0'` (0x30), so every "parent/..." title sorts in
+        // `[parent/, parent0)` and the scan touches only the child rows.
+        let lower = parent_title.to_lowercase();
+        let low = format!("{}/", lower);
+        let high = format!("{}0", lower);
         let mut stmt = conn.prepare(
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
              FROM pages
-             WHERE lower(title) LIKE lower(?1)
+             WHERE lower(title) >= ?1 AND lower(title) < ?2
              ORDER BY title ASC"
         )?;
-        let pages = stmt.query_map(params![like_pattern], |row| {
+        let pages = stmt.query_map(params![low, high], |row| {
             Ok(Page {
                 id: row.get(0)?,
                 title: row.get(1)?,

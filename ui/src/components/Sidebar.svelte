@@ -339,6 +339,17 @@
       </svg>
       <span>All Pages</span>
     </button>
+    <button class="nav-item" onclick={() => onNavigate("__graph__")}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="5" cy="6" r="2"></circle>
+        <circle cx="19" cy="6" r="2"></circle>
+        <circle cx="12" cy="18" r="2"></circle>
+        <line x1="6.7" y1="7" x2="10.5" y2="16.3"></line>
+        <line x1="17.3" y1="7" x2="13.5" y2="16.3"></line>
+        <line x1="7" y1="6" x2="17" y2="6"></line>
+      </svg>
+      <span>Graph View</span>
+    </button>
     <button class="nav-item" onclick={() => onNavigate("__flashcards__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"></rect>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
   import { EditorState, EditorSelection } from "@codemirror/state";
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
@@ -375,19 +375,27 @@
     keymap_manager.isEditing = true;
     onFocus?.(block.id);
 
-    // Wait for DOM update then create editor. The editor container is rendered
-    // conditionally on `isEditing`, so it may not exist on the first frame —
-    // retry a few frames before giving up.
-    const tryInit = (attempts: number) => {
-      requestAnimationFrame(() => {
-        if (!editorContainer) {
-          if (attempts < 8) tryInit(attempts + 1);
-          return;
-        }
+    // Open the editor as soon as the container is in the DOM. `tick()` flushes
+    // Svelte's pending DOM update in a microtask, so on the common path the
+    // editor appears well before the next paint frame — much snappier for
+    // cross-block Arrow Up/Down navigation than waiting a full rAF. Fall back
+    // to an rAF retry only if the container somehow isn't ready yet.
+    tick().then(() => {
+      if (editorContainer) {
         initEditor();
-      });
-    };
-    tryInit(0);
+        return;
+      }
+      const tryInit = (attempts: number) => {
+        requestAnimationFrame(() => {
+          if (!editorContainer) {
+            if (attempts < 8) tryInit(attempts + 1);
+            return;
+          }
+          initEditor();
+        });
+      };
+      tryInit(0);
+    });
   }
 
   function initEditor() {
@@ -1458,36 +1466,13 @@
     font-family: inherit;
   }
 
-  .rendered-content :global(.code-block-inner) {
-    display: flex;
-    overflow-x: auto;
-  }
-
-  .rendered-content :global(.line-numbers) {
-    display: flex;
-    flex-direction: column;
-    padding: 10px 0;
-    min-width: 32px;
-    text-align: right;
-    user-select: none;
-    border-right: 1px solid var(--border);
-  }
-
-  .rendered-content :global(.line-number) {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 12px;
-    line-height: 1.5;
-    padding: 0 8px;
-    color: var(--text-muted);
-  }
-
   .rendered-content :global(.code-block-pre) {
     margin: 0;
     padding: 10px 12px;
     background: none;
     border-radius: 0;
-    flex: 1;
     overflow-x: auto;
+    counter-reset: codeline;
   }
 
   .rendered-content :global(.code-block-pre code) {
@@ -1500,6 +1485,17 @@
 
   .rendered-content :global(.code-line) {
     display: block;
+    counter-increment: codeline;
+  }
+
+  .rendered-content :global(.code-line)::before {
+    content: counter(codeline);
+    display: inline-block;
+    width: 2em;
+    margin-right: 1em;
+    text-align: right;
+    color: var(--text-muted);
+    user-select: none;
   }
 
   .rendered-content :global(ul),

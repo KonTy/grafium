@@ -1,11 +1,12 @@
 mod commands;
 
 use commands::graph::GraphConfig;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use grafium_core::Graph;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,12 +37,12 @@ impl AppState {
             }
         }
 
-        let (pages_dir, journals_dir) = {
+        let (pages_dir, journals_dir, self_writes) = {
             let graph = self.graph.lock().map_err(|e| e.to_string())?;
-            (graph.pages_dir.clone(), graph.journals_dir.clone())
+            (graph.pages_dir.clone(), graph.journals_dir.clone(), graph.self_write_tracker())
         };
 
-        let handle = start_graph_watcher(self.graph.clone(), pages_dir, journals_dir)?;
+        let handle = start_graph_watcher(self.graph.clone(), pages_dir, journals_dir, self_writes)?;
         let mut guard = self.watcher.lock().map_err(|e| e.to_string())?;
         *guard = Some(handle);
         Ok(())
@@ -55,17 +56,28 @@ fn should_process_event(event: &Event, pages_dir: &std::path::Path, journals_dir
     })
 }
 
-fn is_full_reindex_event(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Remove(_) | EventKind::Create(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
-    )
+/// Returns true if `path` was written by the app itself within the last few
+/// seconds. Used to ignore self-inflicted filesystem events so a normal block
+/// save doesn't get mistaken for an external edit.
+fn was_recent_self_write(
+    self_writes: &Arc<Mutex<HashMap<PathBuf, Instant>>>,
+    path: &Path,
+) -> bool {
+    if let Ok(mut map) = self_writes.lock() {
+        let now = Instant::now();
+        map.retain(|_, t| now.duration_since(*t).as_secs() < 30);
+        if let Some(t) = map.get(path) {
+            return now.duration_since(*t).as_secs() < 10;
+        }
+    }
+    false
 }
 
 fn start_graph_watcher(
     graph: Arc<Mutex<Graph>>,
     pages_dir: PathBuf,
     journals_dir: PathBuf,
+    self_writes: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 ) -> Result<GraphWatcherHandle, String> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (event_tx, event_rx) = mpsc::channel::<notify::Result<Event>>();
@@ -95,7 +107,6 @@ fn start_graph_watcher(
 
         let debounce = Duration::from_millis(400);
         let mut pending_files = std::collections::HashSet::<PathBuf>::new();
-        let mut pending_full_reindex = false;
         let mut last_event_at: Option<Instant> = None;
 
         loop {
@@ -109,16 +120,22 @@ fn start_graph_watcher(
                         continue;
                     }
 
-                    if is_full_reindex_event(&event.kind) {
-                        pending_full_reindex = true;
-                    } else {
-                        for path in event.paths {
-                            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                                pending_files.insert(path);
-                            }
+                    for path in event.paths {
+                        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                            continue;
                         }
+                        // Ignore writes the app just made itself. Without this,
+                        // every block save (which rewrites the page's .md file)
+                        // would be re-processed as an external change.
+                        if was_recent_self_write(&self_writes, &path) {
+                            continue;
+                        }
+                        pending_files.insert(path);
                     }
-                    last_event_at = Some(Instant::now());
+
+                    if !pending_files.is_empty() {
+                        last_event_at = Some(Instant::now());
+                    }
                 }
                 Ok(Err(e)) => {
                     eprintln!("watch event error: {}", e);
@@ -140,39 +157,28 @@ fn start_graph_watcher(
                 Err(e) => {
                     eprintln!("watch lock error: {}", e);
                     pending_files.clear();
-                    pending_full_reindex = false;
                     last_event_at = None;
                     continue;
                 }
             };
 
-            if pending_full_reindex {
-                if let Err(e) = g.reindex_all() {
-                    eprintln!("watch reindex failed: {}", e);
-                }
-            } else {
-                let mut missing_file_seen = false;
-                for path in pending_files.drain() {
-                    if path.exists() {
-                        if let Err(e) = g.index_file(&path) {
-                            eprintln!("watch index file failed ({}): {}", path.display(), e);
-                        }
-                    } else {
-                        missing_file_seen = true;
-                    }
-                }
-
-                // Some platforms report deletes as generic modify events.
-                // If a watched markdown path disappeared, run a full reconcile.
-                if missing_file_seen {
-                    if let Err(e) = g.reindex_all() {
-                        eprintln!("watch fallback reindex failed: {}", e);
+            // Incremental indexing only. We deliberately NEVER call
+            // `reindex_all()` from the watcher: it runs `clear_all()` (wiping
+            // the entire index) followed by a full disk rescan. On a large
+            // graph that both freezes the app for a long time and — if the
+            // on-disk .md files are not a complete mirror of the index — can
+            // destroy data. Index only the changed files. Deletions are left
+            // alone (a stale entry is harmless; an explicit re-index fixes it).
+            for path in pending_files.drain() {
+                if path.exists() {
+                    if let Err(e) = g.index_file(&path) {
+                        eprintln!("watch index file failed ({}): {}", path.display(), e);
                     }
                 }
             }
 
+            drop(g);
             pending_files.clear();
-            pending_full_reindex = false;
             last_event_at = None;
         }
     });
@@ -602,7 +608,9 @@ pub fn run() {
 
             // Keep startup responsive. If DB is empty (first run or recovered),
             // rebuild in the background instead of blocking app initialization.
-            let page_count = graph.db.list_pages(100, 0).map(|p| p.len()).unwrap_or(0);
+            // Use a cheap existence probe — a full page listing here would scan
+            // the whole table and freeze the UI thread on very large graphs.
+            let page_count = if graph.db.has_any_page().unwrap_or(false) { 1 } else { 0 };
             if page_count == 0 {
                 let graph_dir_clone = graph_dir.clone();
                 let db_path_clone = db_path.clone();
@@ -629,6 +637,27 @@ pub fn run() {
                                 e
                             );
                         }
+                    }
+                });
+            }
+
+            // One-time (per graph): map existing FTS rows to their rowids.
+            // `fts_blocks.block_id` is UNINDEXED, so deleting a block's FTS row
+            // by block_id full-scans the whole index — seconds per edit on a
+            // large graph, which froze the UI. `fts_block_rowid` lets edits
+            // delete by rowid instead. Backfill runs in the background so it
+            // never blocks startup; edits work meanwhile (only not-yet-mapped
+            // legacy blocks use the slow path until the backfill reaches them).
+            {
+                let db_path_str = db_path.to_string_lossy().to_string();
+                thread::spawn(move || match grafium_core::Database::new(&db_path_str) {
+                    Ok(db) => match db.backfill_fts_rowid_map() {
+                        Ok(0) => {}
+                        Ok(n) => eprintln!("fts rowid map backfill: mapped {n} blocks"),
+                        Err(e) => eprintln!("Warning: fts rowid map backfill failed: {}", e),
+                    },
+                    Err(e) => {
+                        eprintln!("Warning: fts rowid map backfill could not open db: {}", e)
                     }
                 });
             }
@@ -788,6 +817,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::pages::list_pages,
+            commands::pages::count_pages,
+            commands::pages::list_pages_window,
             commands::pages::list_journal_pages,
             commands::pages::get_page,
             commands::pages::create_page,
@@ -822,6 +853,7 @@ pub fn run() {
             commands::query::get_property_keys,
             commands::query::get_property_values,
             commands::graph::get_graph_info,
+            commands::graph::get_graph_data,
             commands::graph::list_graphs,
             commands::graph::open_graph,
             commands::graph::create_graph,

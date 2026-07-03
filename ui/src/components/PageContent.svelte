@@ -716,6 +716,11 @@
     padding: 0;
   }
 
+  .compact .page-title {
+    font-size: 16px;
+    margin-bottom: 4px;
+  }
+
   .compact .click-below {
     min-height: 0;
   }

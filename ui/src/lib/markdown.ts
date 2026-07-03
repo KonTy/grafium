@@ -1,18 +1,18 @@
 import { marked } from "marked";
 import katex from "katex";
 
-// Custom renderer for code blocks with line numbers
+// Custom renderer for code blocks with line numbers.
+// Each line number is emitted as a CSS counter (::before) on its own
+// .code-line, so the number always shares the same line box as its code and
+// can never drift out of alignment (regardless of theme borders/fonts).
 const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   const lines = text.split("\n");
-  const lineNumbersHtml = lines
-    .map((_, i) => `<span class="line-number">${i + 1}</span>`)
-    .join("");
   const codeHtml = lines
     .map((line) => `<span class="code-line">${escapeHtml(line)}</span>`)
     .join("");
   const langLabel = lang ? `<span class="code-lang">${escapeHtml(lang)}</span>` : "";
-  return `<div class="code-block-wrapper">${langLabel}<div class="code-block-inner"><div class="line-numbers">${lineNumbersHtml}</div><pre class="code-block-pre"><code>${codeHtml}</code></pre></div></div>`;
+  return `<div class="code-block-wrapper">${langLabel}<pre class="code-block-pre"><code>${codeHtml}</code></pre></div>`;
 };
 
 function escapeHtml(str: string): string {

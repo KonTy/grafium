@@ -15,6 +15,26 @@ pub struct GraphInfo {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub title: String,
+    pub degree: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub weight: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GraphConfig {
     pub graphs: Vec<GraphInfo>,
@@ -92,6 +112,33 @@ pub fn get_graph_info(state: State<AppState>, app: AppHandle) -> Result<GraphInf
     Ok(GraphInfo {
         name: display_name,
         path,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_graph_data(
+    state: State<AppState>,
+    node_limit: Option<i64>,
+    focus_page_id: Option<String>,
+) -> Result<GraphData, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let (nodes, edges) = graph
+        .db
+        .graph_data(focus_page_id.as_deref(), node_limit.unwrap_or(200))
+        .map_err(|e| e.to_string())?;
+    Ok(GraphData {
+        nodes: nodes
+            .into_iter()
+            .map(|(id, title, degree)| GraphNode { id, title, degree })
+            .collect(),
+        edges: edges
+            .into_iter()
+            .map(|(source, target, weight)| GraphEdge {
+                source,
+                target,
+                weight,
+            })
+            .collect(),
     })
 }
 

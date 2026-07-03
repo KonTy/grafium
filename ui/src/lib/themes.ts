@@ -288,24 +288,5 @@ export function applyTheme(theme: ThemeColors): void {
   root.classList.forEach((cls) => {
     if (cls.startsWith("theme-fx-")) root.classList.remove(cls);
   });
-  if (theme.fx) {
-    root.classList.add(`theme-fx-${theme.fx}`);
-    ensureFxFontsLoaded();
-  }
-}
-
-// Lazily inject the futuristic display fonts only when an fx theme is first
-// selected. This keeps startup fast: default themes never touch the network,
-// and the <link> is added asynchronously (non render-blocking) so the app
-// never waits on Google Fonts. Falls back to system monospace if offline.
-let fxFontsRequested = false;
-function ensureFxFontsLoaded(): void {
-  if (fxFontsRequested) return;
-  fxFontsRequested = true;
-  const link = document.createElement("link");
-  link.rel = "stylesheet";
-  link.href =
-    "https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap";
-  link.crossOrigin = "anonymous";
-  document.head.appendChild(link);
+  if (theme.fx) root.classList.add(`theme-fx-${theme.fx}`);
 }

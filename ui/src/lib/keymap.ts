@@ -196,6 +196,7 @@ export function registerDefaultShortcuts(actions: {
   goJournal: () => void;
   goHome: () => void;
   goAllPages: () => void;
+  goGraph: () => void;
   goFlashcards: () => void;
   goTomorrow: () => void;
   goNextJournal: () => void;
@@ -238,6 +239,12 @@ export function registerDefaultShortcuts(actions: {
       action: actions.goAllPages,
       category: "navigation",
       description: "Go to all pages",
+    },
+    {
+      binding: "g g",
+      action: actions.goGraph,
+      category: "navigation",
+      description: "Go to graph view",
     },
     {
       binding: "g f",

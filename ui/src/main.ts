@@ -87,8 +87,10 @@ const app = mount(App, { target: document.getElementById("app")! });
     "max-width:360px;white-space:pre;opacity:0.9;border-radius:4px;display:none;";
   dbg.textContent = "keydbg: press ↑/↓ in a block";
   document.body.appendChild(dbg);
+  let dbgVisible = false;
   const lines: string[] = [];
   (window as any).__keydbg = (msg: string) => {
+    if (!dbgVisible) return;
     lines.unshift(msg);
     if (lines.length > 6) lines.pop();
     dbg.textContent = lines.join("\n");
@@ -99,7 +101,8 @@ const app = mount(App, { target: document.getElementById("app")! });
     (e: KeyboardEvent) => {
       if (e.ctrlKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
         e.preventDefault();
-        dbg.style.display = dbg.style.display === "none" ? "block" : "none";
+        dbgVisible = !dbgVisible;
+        dbg.style.display = dbgVisible ? "block" : "none";
       }
     },
     true,
@@ -107,6 +110,9 @@ const app = mount(App, { target: document.getElementById("app")! });
   document.addEventListener(
     "keydown",
     (e: KeyboardEvent) => {
+      // Cheap early-out when the debug box is hidden (the default), so this
+      // adds zero per-keystroke cost during normal use.
+      if (!dbgVisible) return;
       if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
       const t = e.target as HTMLElement | null;
       (window as any).__keydbg(

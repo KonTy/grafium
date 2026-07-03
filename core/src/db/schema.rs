@@ -14,8 +14,22 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_pages_title ON pages(title);
-        CREATE INDEX IF NOT EXISTS idx_pages_journal ON pages(is_journal) WHERE is_journal = 1;
+        CREATE INDEX IF NOT EXISTS idx_pages_title_lower ON pages(lower(title));
+        -- Partial title index for regular pages, so the A-Z All Pages listing
+        -- can page (ORDER BY title, LIMIT/OFFSET) without walking past journals.
+        CREATE INDEX IF NOT EXISTS idx_pages_title_regular ON pages(title) WHERE is_journal = 0;
+        CREATE INDEX IF NOT EXISTS idx_pages_journal_title ON pages(title DESC) WHERE is_journal = 1;
         CREATE INDEX IF NOT EXISTS idx_pages_updated ON pages(updated_at DESC);
+        -- Partial index for listing regular (non-journal) pages newest-first.
+        -- Without it, `list_pages` scans idx_pages_updated and skips past every
+        -- journal row (journals can outnumber pages), turning a LIMIT 500 into
+        -- an O(journal_count) scan. This index contains only regular pages, so
+        -- the listing is O(limit) regardless of how many journals exist.
+        CREATE INDEX IF NOT EXISTS idx_pages_updated_regular ON pages(updated_at DESC) WHERE is_journal = 0;
+        -- idx_pages_journal_title supersedes the old is_journal-only index: it
+        -- covers the same WHERE is_journal=1 filter AND lets journal listing scan
+        -- in title order without a sort. Drop the redundant one on older DBs.
+        DROP INDEX IF EXISTS idx_pages_journal;
 
         CREATE TABLE IF NOT EXISTS blocks (
             id TEXT PRIMARY KEY,
@@ -50,6 +64,16 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             block_id UNINDEXED,
             content,
             tokenize='porter unicode61'
+        );
+
+        -- Maps a block id to its fts_blocks rowid. `block_id` is an UNINDEXED
+        -- FTS column, so `DELETE FROM fts_blocks WHERE block_id = ?` full-scans
+        -- the entire FTS index (seconds on a large graph, freezing the UI on
+        -- every block edit). Deleting by rowid is O(1), so we keep this side
+        -- table and look the rowid up here instead.
+        CREATE TABLE IF NOT EXISTS fts_block_rowid (
+            block_id TEXT PRIMARY KEY,
+            fts_rowid INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS handwriting_strokes (

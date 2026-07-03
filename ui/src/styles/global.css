@@ -1,3 +1,22 @@
+/* Locally bundled futuristic fonts for the Syphi / Matrix themes. These are
+   embedded in the app bundle so the tool never contacts the network for fonts,
+   preserving the offline / privacy-first guarantee. Orbitron covers both
+   weights (500/700) via a single latin variable file. */
+@font-face {
+  font-family: "Orbitron";
+  font-style: normal;
+  font-weight: 500 700;
+  font-display: swap;
+  src: url("../assets/fonts/orbitron.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Share Tech Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/share-tech-mono.woff2") format("woff2");
+}
+
 :root {
   /* Dark theme (default) */
   --bg-primary: #1e1e2e;
@@ -123,36 +142,30 @@ body {
   letter-spacing: 0.02em;
 }
 
-/* Subtle animated scanline + vignette overlay across the whole app. */
+/* Subtle STATIC scanline + vignette overlay across the whole app.
+   Intentionally NOT animated and NOT using mix-blend-mode: on WebKitGTK a
+   full-viewport animated blended layer forces a constant full-screen
+   recomposite and makes the whole UI feel sluggish. A static low-opacity
+   gradient is effectively free after first paint. */
 .theme-fx-syphi body::after {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 9998;
+  opacity: 0.5;
   background: repeating-linear-gradient(
       to bottom,
-      rgba(0, 240, 255, 0.035) 0px,
-      rgba(0, 240, 255, 0.035) 1px,
+      rgba(0, 240, 255, 0.045) 0px,
+      rgba(0, 240, 255, 0.045) 1px,
       transparent 1px,
       transparent 3px
     ),
     radial-gradient(
       ellipse at center,
       transparent 55%,
-      rgba(0, 0, 0, 0.55) 100%
+      rgba(0, 0, 0, 0.5) 100%
     );
-  mix-blend-mode: screen;
-  animation: syphi-scan 6s linear infinite;
-}
-
-@keyframes syphi-scan {
-  0% {
-    background-position: 0 0, 0 0;
-  }
-  100% {
-    background-position: 0 6px, 0 0;
-  }
 }
 
 /* Neon display headings. */
@@ -164,12 +177,6 @@ body {
   letter-spacing: 0.14em;
   color: var(--accent);
   text-shadow: 0 0 4px var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-/* Body text gets a faint phosphor glow. */
-.theme-fx-syphi .rendered-content,
-.theme-fx-syphi .cm-content {
-  text-shadow: 0 0 3px color-mix(in srgb, var(--text-primary) 30%, transparent);
 }
 
 /* Glowing links. */

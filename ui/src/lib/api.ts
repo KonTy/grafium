@@ -37,6 +37,14 @@ export function listPages(limit = 100, offset = 0): Promise<Page[]> {
   return invoke("list_pages", { limit, offset });
 }
 
+export function countPages(): Promise<number> {
+  return invoke("count_pages");
+}
+
+export function listPagesWindow(limit: number, offset: number, sortByTitle: boolean): Promise<Page[]> {
+  return invoke("list_pages_window", { limit, offset, sortByTitle });
+}
+
 export function listJournalPages(limit = 20, offset = 0): Promise<Page[]> {
   return invoke("list_journal_pages", { limit, offset });
 }
@@ -201,6 +209,27 @@ export interface GraphValidationReport {
 
 export function getGraphInfo(): Promise<GraphInfo> {
   return invoke("get_graph_info", {});
+}
+
+export interface GraphNode {
+  id: string;
+  title: string;
+  degree: number;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  weight: number;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export function getGraphData(nodeLimit: number, focusPageId?: string): Promise<GraphData> {
+  return invoke("get_graph_data", { nodeLimit, focusPageId: focusPageId ?? null });
 }
 
 export function listGraphs(): Promise<GraphInfo[]> {

@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use std::collections::HashMap;
 use crate::db::Database;
 use crate::models::{Block, BlockType, LinkType, Page};
 use crate::parser::{self, ParsedBlock};
@@ -20,6 +23,10 @@ pub struct Graph {
     pub root_dir: PathBuf,
     pub pages_dir: PathBuf,
     pub journals_dir: PathBuf,
+    /// Absolute paths the app itself wrote to disk, with the instant of the
+    /// write. The filesystem watcher consults this to ignore self-inflicted
+    /// events, preventing a write → watch → re-index feedback loop.
+    self_writes: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 }
 
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
@@ -312,7 +319,25 @@ impl Graph {
             root_dir: root_dir.to_path_buf(),
             pages_dir,
             journals_dir,
+            self_writes: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Shared handle to the set of paths the app has recently written itself.
+    /// The Tauri filesystem watcher clones this to skip its own writes.
+    pub fn self_write_tracker(&self) -> Arc<Mutex<HashMap<PathBuf, Instant>>> {
+        self.self_writes.clone()
+    }
+
+    /// Record that the app just wrote `path`, so the watcher ignores the
+    /// resulting create/modify event.
+    fn note_self_write(&self, path: &Path) {
+        if let Ok(mut map) = self.self_writes.lock() {
+            let now = Instant::now();
+            // Opportunistically prune stale entries so the map stays small.
+            map.retain(|_, t| now.duration_since(*t).as_secs() < 30);
+            map.insert(path.to_path_buf(), now);
+        }
     }
 
     /// Full re-index: scan all .md files and rebuild the SQLite index.
@@ -793,6 +818,11 @@ impl Graph {
         let content = parser::serialize_page(&page.properties, &blocks);
 
         fs::write(&file_path, content)?;
+
+        // Remember this write so the filesystem watcher ignores the resulting
+        // create/modify event instead of treating it as an external change
+        // (which previously triggered a full, destructive reindex).
+        self.note_self_write(&file_path);
 
         Ok(())
     }

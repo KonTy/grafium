@@ -47,10 +47,7 @@ impl Database {
         )?;
 
         // Update FTS
-        conn.execute(
-            "INSERT INTO fts_blocks (block_id, content) VALUES (?1, ?2)",
-            params![id, content],
-        )?;
+        super::fts_insert_block(&conn, &id, content)?;
 
         Ok(Block {
             id,
@@ -84,14 +81,7 @@ impl Database {
         )?;
 
         // Update FTS
-        conn.execute(
-            "DELETE FROM fts_blocks WHERE block_id = ?1",
-            params![id],
-        )?;
-        conn.execute(
-            "INSERT INTO fts_blocks (block_id, content) VALUES (?1, ?2)",
-            params![id, content],
-        )?;
+        super::fts_replace_block(&conn, id, content)?;
 
         Ok(Block {
             id: id.to_string(),
@@ -205,18 +195,14 @@ impl Database {
         }
 
         // Update FTS
-        conn.execute("DELETE FROM fts_blocks WHERE block_id = ?1", params![id])?;
-        conn.execute(
-            "INSERT INTO fts_blocks (block_id, content) VALUES (?1, ?2)",
-            params![id, content],
-        )?;
+        super::fts_replace_block(&conn, id, content)?;
 
         Ok(())
     }
 
     pub fn delete_block(&self, id: &str) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute("DELETE FROM fts_blocks WHERE block_id = ?1", params![id])?;
+        super::fts_delete_block(&conn, id)?;
         conn.execute("DELETE FROM blocks WHERE id = ?1", params![id])?;
         Ok(())
     }

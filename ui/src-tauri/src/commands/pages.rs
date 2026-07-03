@@ -10,6 +10,19 @@ pub fn list_pages(state: State<AppState>, limit: Option<i64>, offset: Option<i64
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn count_pages(state: State<AppState>) -> Result<i64, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.count_regular_pages().map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_pages_window(state: State<AppState>, limit: i64, offset: i64, sort_by_title: Option<bool>) -> Result<Vec<Page>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.list_pages_window(limit, offset, sort_by_title.unwrap_or(false))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn list_journal_pages(state: State<AppState>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Page>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.db.list_journal_pages(limit.unwrap_or(20), offset.unwrap_or(0))

@@ -75,9 +75,16 @@ impl Database {
             "DELETE FROM block_properties WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
             params![page_id],
         )?;
-        // Delete FTS entries first
+        // Delete FTS entries (by rowid via the map; fast) and their map rows.
         conn.execute(
-            "DELETE FROM fts_blocks WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
+            "DELETE FROM fts_blocks WHERE rowid IN (
+                SELECT fts_rowid FROM fts_block_rowid
+                WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)
+            )",
+            params![page_id],
+        )?;
+        conn.execute(
+            "DELETE FROM fts_block_rowid WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
             params![page_id],
         )?;
         // Delete links from these blocks
@@ -120,11 +127,7 @@ impl Database {
         )?;
 
         // Update FTS
-        conn.execute("DELETE FROM fts_blocks WHERE block_id = ?1", params![id])?;
-        conn.execute(
-            "INSERT INTO fts_blocks (block_id, content) VALUES (?1, ?2)",
-            params![id, content],
-        )?;
+        super::fts_replace_block(&conn, id, content)?;
 
         Ok(())
     }
@@ -139,6 +142,7 @@ impl Database {
         let conn = self.conn()?;
         conn.execute_batch("
             DELETE FROM fts_blocks;
+            DELETE FROM fts_block_rowid;
             DELETE FROM links;
             DELETE FROM tasks;
             DELETE FROM flashcards;
