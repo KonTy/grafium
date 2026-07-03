@@ -8,9 +8,13 @@
     currentPage?: Page | null;
     onNavigate: (pageTitle: string) => void;
     onGraphChanged?: () => void;
+    sidebarWidth?: number;
   }
 
-  let { currentPage = null, onNavigate, onGraphChanged = () => {} }: Props = $props();
+  let { currentPage = null, onNavigate, onGraphChanged = () => {}, sidebarWidth = 260 }: Props = $props();
+
+  const COMPACT_SIDEBAR_WIDTH = 220;
+  let compactSidebar = $derived(sidebarWidth < COMPACT_SIDEBAR_WIDTH);
 
   let favorites: Page[] = $state([]);
   let recentPages: Page[] = $state([]);
@@ -393,15 +397,15 @@
     </div>
   {/if}
 
-  <div class="sidebar-spacer"></div>
-
-  <div class="sidebar-footer">
-    <button class="create-btn" onclick={() => onNavigate("__new_page__")}>
+  <div class="sidebar-footer" class:compact={compactSidebar}>
+    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__new_page__") } title="Create new page">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19"></line>
         <line x1="5" y1="12" x2="19" y2="12"></line>
       </svg>
-      <span>Create</span>
+      {#if !compactSidebar}
+        <span>Create</span>
+      {/if}
     </button>
   </div>
 
@@ -588,14 +592,17 @@
     padding: 6px 10px;
   }
 
-  .sidebar-spacer {
-    flex: 1;
-  }
-
   .sidebar-footer {
+    margin-top: auto;
     padding-top: 12px;
     border-top: 1px solid var(--border);
-    margin-top: 12px;
+  }
+
+  .sidebar-footer.compact {
+    padding-top: 0;
+    border-top: none;
+    display: flex;
+    justify-content: center;
   }
 
   .create-btn {
@@ -618,6 +625,23 @@
     background: var(--btn-bg-hover);
     color: var(--text-primary);
     border-color: var(--accent);
+  }
+
+  .create-btn.compact {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    justify-content: center;
+    align-self: center;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+  }
+
+  .create-btn.compact:hover {
+    background: transparent;
+    color: var(--text-primary);
+    border: none;
   }
 
   .fav-icon {

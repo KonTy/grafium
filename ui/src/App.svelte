@@ -47,12 +47,16 @@
   let loading = $state(true);
   let error: string | null = $state(null);
   let sidebarVisible = $state(true);
+  let sidebarWidth = $state(260);
+  let isResizingSidebar = $state(false);
+  let appLayoutEl: HTMLDivElement | null = null;
   let zenMode = $state(false);
   let referencePanelVisible = $state(false);
   let mainContentEl: HTMLElement | null = null;
   let restoreTimer: number | null = null;
   let pendingJournalRestore: HistoryEntry | null = $state(null);
   let journalRestoreRequestId = $state(0);
+  let uiZoom = $state(1);
 
   // Navigation history for back/forward
   type HistoryEntry = {
@@ -72,6 +76,117 @@
 
   let navHistory: HistoryEntry[] = $state([]);
   let navIndex = $state(-1);
+
+  const DEFAULT_SIDEBAR_WIDTH = 260;
+  const SIDEBAR_MIN_WIDTH = 180;
+  const SIDEBAR_MAX_WIDTH = 520;
+  const MAIN_CONTENT_MIN_WIDTH = 360;
+  const DEFAULT_UI_ZOOM = 1;
+  const MIN_UI_ZOOM = 0.7;
+  const MAX_UI_ZOOM = 1.8;
+  const UI_ZOOM_STEP = 0.05;
+
+  function applyUiZoom(zoom: number) {
+    uiZoom = zoom;
+    document.documentElement.style.zoom = String(zoom);
+  }
+
+  function saveUiZoomPreference(zoom: number) {
+    try {
+      localStorage.setItem("grafium.ui.zoom", String(Math.round(zoom * 100)));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function loadUiZoomPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.ui.zoom");
+      if (!raw) {
+        applyUiZoom(DEFAULT_UI_ZOOM);
+        return;
+      }
+      const percent = Number(raw);
+      if (!Number.isFinite(percent)) {
+        applyUiZoom(DEFAULT_UI_ZOOM);
+        return;
+      }
+      const zoom = Math.max(MIN_UI_ZOOM, Math.min(MAX_UI_ZOOM, percent / 100));
+      applyUiZoom(zoom);
+    } catch {
+      applyUiZoom(DEFAULT_UI_ZOOM);
+    }
+  }
+
+  function adjustUiZoom(direction: 1 | -1) {
+    const base = Number.isFinite(uiZoom) ? uiZoom : DEFAULT_UI_ZOOM;
+    const next = Math.max(MIN_UI_ZOOM, Math.min(MAX_UI_ZOOM, Math.round((base + direction * UI_ZOOM_STEP) * 100) / 100));
+    applyUiZoom(next);
+    saveUiZoomPreference(next);
+  }
+
+  function resetUiZoom() {
+    applyUiZoom(DEFAULT_UI_ZOOM);
+    saveUiZoomPreference(DEFAULT_UI_ZOOM);
+  }
+
+  function loadSidebarWidthPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.sidebar.width");
+      if (!raw) return;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) return;
+      sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, parsed));
+    } catch {
+      // Ignore localStorage failures and keep defaults.
+    }
+  }
+
+  function resetSidebarWidth() {
+    sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+    saveSidebarWidthPreference(sidebarWidth);
+  }
+
+  function saveSidebarWidthPreference(width: number) {
+    try {
+      localStorage.setItem("grafium.sidebar.width", String(Math.round(width)));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function applySidebarWidthFromPointer(clientX: number) {
+    if (!appLayoutEl) return;
+    const rect = appLayoutEl.getBoundingClientRect();
+    const maxByLayout = Math.max(SIDEBAR_MIN_WIDTH, rect.width - MAIN_CONTENT_MIN_WIDTH);
+    const maxWidth = Math.min(SIDEBAR_MAX_WIDTH, maxByLayout);
+    const next = clientX - rect.left;
+    sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, next));
+  }
+
+  function startSidebarResize(e: PointerEvent) {
+    if (!sidebarVisible || zenMode || window.innerWidth <= 640) return;
+    e.preventDefault();
+    isResizingSidebar = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (moveEvent: PointerEvent) => {
+      applySidebarWidthFromPointer(moveEvent.clientX);
+    };
+
+    const onUp = () => {
+      isResizingSidebar = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      saveSidebarWidthPreference(sidebarWidth);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
 
   function logNav(event: string, data: unknown) {
     console.log(`[nav] ${event} ${JSON.stringify(data)}`);
@@ -341,6 +456,25 @@
 
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey) {
+      const key = e.key.toLowerCase();
+      if (key === "0") {
+        e.preventDefault();
+        resetUiZoom();
+        return;
+      }
+      if (key === "+" || key === "=" || (key === "-" && e.shiftKey)) {
+        e.preventDefault();
+        adjustUiZoom(1);
+        return;
+      }
+      if (key === "-") {
+        e.preventDefault();
+        adjustUiZoom(-1);
+        return;
+      }
+    }
+
     // Keep search shortcut global, including while editing.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
@@ -414,15 +548,25 @@
     }
   }
 
+  function handleWheelZoom(e: WheelEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const direction: 1 | -1 = e.deltaY < 0 ? 1 : -1;
+    adjustUiZoom(direction);
+  }
+
   $effect(() => {
+    loadUiZoomPreference();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("mouseup", handleMouseNavigation);
+    window.addEventListener("wheel", handleWheelZoom, { passive: false });
     window.addEventListener("toggle-reference-panel", () => {
       referencePanelVisible = !referencePanelVisible;
     });
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown, true);
       window.removeEventListener("mouseup", handleMouseNavigation);
+      window.removeEventListener("wheel", handleWheelZoom);
       clearRestoreTimer();
     };
   });
@@ -771,22 +915,42 @@
     window.addEventListener("navigate-page", handlePageNav);
     return () => window.removeEventListener("navigate-page", handlePageNav);
   });
+
+  $effect(() => {
+    loadSidebarWidthPreference();
+  });
 </script>
 
 <div class="app-shell" class:zen={zenMode}>
   {#if !zenMode}
     <TitleBar
       {sidebarVisible}
+      {uiZoom}
       canGoBack={navIndex > 0}
       canGoForward={navIndex < navHistory.length - 1}
       onGoBack={goBack}
       onGoForward={goForward}
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
+      onZoomIn={() => adjustUiZoom(1)}
+      onZoomOut={() => adjustUiZoom(-1)}
+      onZoomReset={resetUiZoom}
     />
   {/if}
-  <div class="app-layout">
+  <div class="app-layout" bind:this={appLayoutEl}>
     {#if sidebarVisible && !zenMode}
-      <Sidebar {currentPage} onNavigate={handleNavigate} onGraphChanged={handleGraphChanged} />
+      <div class="sidebar-container" style={`width: ${sidebarWidth}px;`}>
+        <Sidebar {currentPage} {sidebarWidth} onNavigate={handleNavigate} onGraphChanged={handleGraphChanged} />
+      </div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="sidebar-resizer"
+        class:resizing={isResizingSidebar}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        onpointerdown={startSidebarResize}
+        ondblclick={resetSidebarWidth}
+      ></div>
     {/if}
 
     <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode}>
@@ -999,6 +1163,42 @@
     min-width: 0;
   }
 
+  .sidebar-container {
+    flex: 0 0 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .sidebar-container :global(.sidebar) {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .sidebar-resizer {
+    flex: 0 0 6px;
+    cursor: col-resize;
+    position: relative;
+    background: transparent;
+    border-left: 1px solid var(--border);
+  }
+
+  .sidebar-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 2px;
+    width: 1px;
+    height: 100%;
+    background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .sidebar-resizer:hover::after,
+  .sidebar-resizer.resizing::after {
+    opacity: 1;
+  }
+
   .main-content {
     flex: 1;
     overflow-y: auto;
@@ -1201,6 +1401,10 @@
   }
 
   @media (max-width: 640px) {
+    .sidebar-resizer {
+      display: none;
+    }
+
     .bottom-nav {
       display: flex;
       position: fixed;

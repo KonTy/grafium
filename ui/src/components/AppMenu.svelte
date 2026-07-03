@@ -12,6 +12,20 @@
     config: any;
   }
 
+  interface Props {
+    uiZoom?: number;
+    onZoomIn?: () => void;
+    onZoomOut?: () => void;
+    onZoomReset?: () => void;
+  }
+
+  let {
+    uiZoom = 1,
+    onZoomIn = () => {},
+    onZoomOut = () => {},
+    onZoomReset = () => {},
+  }: Props = $props();
+
   let menuOpen = $state(false);
   let showAbout = $state(false);
   let showSettings = $state(false);
@@ -179,6 +193,15 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu-backdrop" onclick={closeMenu}></div>
     <div class="menu-dropdown">
+      <div class="zoom-section">
+        <div class="zoom-label">Zoom {Math.round(uiZoom * 100)}%</div>
+        <div class="zoom-controls">
+          <button class="zoom-btn" onclick={() => { closeMenu(); onZoomOut(); }} title="Zoom out (Ctrl+-)">−</button>
+          <button class="zoom-reset" onclick={() => { closeMenu(); onZoomReset(); }} title="Reset zoom (Ctrl+0)">100%</button>
+          <button class="zoom-btn" onclick={() => { closeMenu(); onZoomIn(); }} title="Zoom in (Ctrl+Plus)">+</button>
+        </div>
+      </div>
+      <div class="menu-separator"></div>
       <button class="menu-item" onclick={openSettings}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"></circle>
@@ -516,6 +539,50 @@
   .menu-item:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .zoom-section {
+    padding: 10px 12px 8px;
+  }
+
+  .zoom-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+
+  .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .zoom-btn,
+  .zoom-reset {
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  .zoom-btn {
+    width: 30px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .zoom-reset {
+    flex: 1;
+    min-width: 64px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  .zoom-btn:hover,
+  .zoom-reset:hover {
+    background: var(--bg-hover);
   }
 
   .menu-separator {

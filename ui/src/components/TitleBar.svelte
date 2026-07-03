@@ -1,22 +1,31 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import AppMenu from "./AppMenu.svelte";
 
   interface Props {
     sidebarVisible?: boolean;
+    uiZoom?: number;
     canGoBack?: boolean;
     canGoForward?: boolean;
     onGoBack?: () => void;
     onGoForward?: () => void;
     onToggleReferencePanel?: () => void;
+    onZoomIn?: () => void;
+    onZoomOut?: () => void;
+    onZoomReset?: () => void;
   }
 
   let {
     sidebarVisible = true,
+    uiZoom = 1,
     canGoBack = false,
     canGoForward = false,
     onGoBack = () => {},
     onGoForward = () => {},
     onToggleReferencePanel = () => {},
+    onZoomIn = () => {},
+    onZoomOut = () => {},
+    onZoomReset = () => {},
   }: Props = $props();
 
   const appWindow = getCurrentWindow();
@@ -48,6 +57,7 @@
   {/if}
 
   <div class="titlebar-right" data-tauri-drag-region>
+    <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} />
     <div class="nav-controls" data-tauri-drag-region="false">
       <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title="Back" disabled={!canGoBack}>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">

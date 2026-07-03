@@ -79,6 +79,8 @@
   let queryError: string | null = $state(null);
   let queryLoading = $state(false);
   let queryBlockIdCol = $state(-1);
+  let bulletMinHeight = $derived(getBulletMinHeight(block.content));
+  let editorStyleClass = $derived(getEditorStyleClass(block.content));
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -258,6 +260,35 @@
     }
     const code = trimmed.slice(firstNewline + 1, lastNewline);
     return { lang, code };
+  }
+
+  function getHeadingLevel(content: string): number {
+    const trimmed = content.trimStart();
+    const match = trimmed.match(/^(#{1,6})\s+/);
+    return match ? match[1].length : 0;
+  }
+
+  function getBulletMinHeight(content: string): string {
+    switch (getHeadingLevel(content)) {
+      case 1:
+        return "2.7em";
+      case 2:
+        return "2.25em";
+      case 3:
+        return "1.875em";
+      case 4:
+      case 5:
+      case 6:
+        return "1.65em";
+      default:
+        return "24px";
+    }
+  }
+
+  function getEditorStyleClass(content: string): string {
+    const level = getHeadingLevel(content);
+    if (level > 0) return `h${level}`;
+    return content.includes("\n") ? "multiline-block" : "normal-block";
   }
 
   // Save content on blur
@@ -440,9 +471,10 @@
           EditorView.lineWrapping,
           EditorView.theme({
             "&": {
-              fontSize: "15px",
               fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif",
-              lineHeight: "1.6",
+              fontSize: "inherit",
+              lineHeight: "inherit",
+              fontWeight: "inherit",
             },
             "&.cm-editor": {
               padding: "0",
@@ -453,19 +485,24 @@
               fontFamily: "inherit",
             },
             ".cm-content": {
-              padding: "2px 0",
+              padding: "0",
               caretColor: "var(--text-primary)",
               color: "var(--text-primary)",
               minHeight: "auto",
               fontFamily: "inherit",
+              fontSize: "inherit",
+              lineHeight: "inherit",
+              fontWeight: "inherit",
             },
             "&.cm-focused": {
               outline: "none",
             },
             ".cm-line": {
               padding: "0",
-              lineHeight: "1.6",
+              lineHeight: "inherit",
               fontFamily: "inherit",
+              fontSize: "inherit",
+              fontWeight: "inherit",
             },
             ".cm-cursor": {
               borderLeftColor: "var(--text-primary)",
@@ -762,7 +799,7 @@
   style="padding-left: {depth * 24}px"
 >
   {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== ""}
-    <div class="bullet-container" class:has-children={hasChildren} onclick={(e) => {
+    <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
       e.stopPropagation();
       if (hasChildren) {
         onToggleCollapse?.(block.id);
@@ -783,7 +820,7 @@
   {/if}
   <div class="block-content" onclick={handleClick}>
     {#if isEditing}
-      <div class="editor-wrapper" bind:this={editorContainer}></div>
+      <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
     {:else if queryExpression !== null}
       <!-- Query block rendered view -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -865,8 +902,8 @@
 <style>
   .block-item {
     display: flex;
-    align-items: flex-start;
-    min-height: 28px;
+    align-items: center;
+    min-height: 24px;
     min-width: 0;
     border-radius: 4px;
     transition: background-color 0.1s;
@@ -875,6 +912,7 @@
 
   .block-item.editing {
     background: transparent;
+    align-items: center;
   }
 
   .block-item.selected {
@@ -884,28 +922,12 @@
 
   .bullet-container {
     width: 20px;
-    min-height: 28px;
+    min-height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     cursor: pointer;
-  }
-
-  .block-item:has(.rendered-content > :first-child:is(h1)) .bullet-container {
-    min-height: calc(1.8em * 1.6);
-  }
-
-  .block-item:has(.rendered-content > :first-child:is(h2)) .bullet-container {
-    min-height: calc(1.5em * 1.6);
-  }
-
-  .block-item:has(.rendered-content > :first-child:is(h3)) .bullet-container {
-    min-height: calc(1.25em * 1.6);
-  }
-
-  .block-item:has(.rendered-content > :first-child:is(h4, h5, h6)) .bullet-container {
-    min-height: calc(1.1em * 1.6);
   }
 
   .bullet {
@@ -950,12 +972,12 @@
 
   .block-content {
     flex: 1;
-    min-height: 28px;
+    min-height: 24px;
     min-width: 0;
     display: flex;
     align-items: flex-start;
     cursor: text;
-    line-height: 1.6;
+    line-height: 1.45;
     overflow: hidden;
   }
 
@@ -963,14 +985,63 @@
     width: 100%;
     min-width: 0;
     overflow: hidden;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+  }
+
+  .editor-wrapper :global(.cm-editor),
+  .editor-wrapper :global(.cm-content),
+  .editor-wrapper :global(.cm-line) {
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+  }
+
+  .editor-wrapper.normal-block :global(.cm-editor),
+  .editor-wrapper.multiline-block :global(.cm-editor) {
+    font-size: 15px;
+    line-height: 1.45;
+    font-weight: 400;
+  }
+
+  .editor-wrapper.h1 :global(.cm-editor) {
+    font-size: 1.8em;
+    line-height: 1.15;
+    font-weight: 700;
+  }
+
+  .editor-wrapper.h2 :global(.cm-editor) {
+    font-size: 1.5em;
+    line-height: 1.15;
+    font-weight: 600;
+  }
+
+  .editor-wrapper.h3 :global(.cm-editor) {
+    font-size: 1.25em;
+    line-height: 1.2;
+    font-weight: 600;
+  }
+
+  .editor-wrapper.h4 :global(.cm-editor),
+  .editor-wrapper.h5 :global(.cm-editor),
+  .editor-wrapper.h6 :global(.cm-editor) {
+    font-size: 1.1em;
+    line-height: 1.2;
+    font-weight: 600;
   }
 
   .rendered-content {
     width: 100%;
     min-width: 0;
-    padding: 2px 0;
+    padding: 0;
     overflow-wrap: break-word;
     word-break: break-word;
+  }
+
+  .rendered-content :global(p) {
+    margin: 0;
   }
 
   .placeholder {
@@ -1108,18 +1179,21 @@
   .rendered-content :global(h1) {
     font-size: 1.8em;
     font-weight: 700;
+    line-height: 1.15;
     margin: 0;
   }
 
   .rendered-content :global(h2) {
     font-size: 1.5em;
     font-weight: 600;
+    line-height: 1.15;
     margin: 0;
   }
 
   .rendered-content :global(h3) {
     font-size: 1.25em;
     font-weight: 600;
+    line-height: 1.2;
     margin: 0;
   }
 
@@ -1128,6 +1202,7 @@
   .rendered-content :global(h6) {
     font-size: 1.1em;
     font-weight: 600;
+    line-height: 1.2;
     margin: 0;
   }
 
@@ -1215,12 +1290,19 @@
 
   .rendered-content :global(ul),
   .rendered-content :global(ol) {
-    margin: 2px 0;
-    padding-left: 20px;
+    margin: 0;
+    padding-left: 0;
+    list-style-position: inside;
   }
 
   .rendered-content :global(li) {
-    margin: 2px 0;
+    margin: 0;
+    line-height: inherit;
+  }
+
+  .rendered-content :global(li > p) {
+    margin: 0;
+    display: inline;
   }
 
   .rendered-content :global(hr) {
