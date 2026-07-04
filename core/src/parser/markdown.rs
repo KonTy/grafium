@@ -10,6 +10,23 @@ static FLASHCARD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#flashcard"
 static FLASHCARD_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*::\s*").unwrap());
 static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{query\s+(.+?)\}\}").unwrap());
 
+/// Remove inline-code spans (text between backticks) so that separators like
+/// `::` inside code samples are not treated as flashcard/property syntax.
+fn strip_inline_code(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_code = false;
+    for c in s.chars() {
+        if c == '`' {
+            in_code = !in_code;
+            continue;
+        }
+        if !in_code {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedBlock {
     pub id: Option<String>,
@@ -261,9 +278,13 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let deadline_date = DEADLINE_RE.captures(&full_content)
         .map(|cap| cap[1].to_string());
 
-    // Detect flashcard
-    let is_flashcard = FLASHCARD_RE.is_match(&full_content);
-    let (flashcard_front, flashcard_back) = if is_flashcard || full_content.contains(" :: ") {
+    // Detect flashcard. A block is a card if it carries #flashcard, OR it is
+    // written as `Question :: Answer`. The `::` separator only counts when it
+    // appears OUTSIDE inline code, so explanatory prose that mentions
+    // `Question :: Answer` in backticks is not mistaken for a card.
+    let code_stripped = strip_inline_code(&full_content);
+    let is_flashcard = FLASHCARD_RE.is_match(&full_content) || code_stripped.contains(" :: ");
+    let (flashcard_front, flashcard_back) = if is_flashcard {
         let parts: Vec<&str> = FLASHCARD_SPLIT_RE.splitn(&full_content, 2).collect();
         if parts.len() == 2 {
             (Some(parts[0].to_string()), Some(parts[1].to_string()))

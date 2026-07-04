@@ -1,9 +1,11 @@
 use crate::models::Flashcard;
+use crate::models::FlashcardTopic;
 use crate::error::Result;
 use super::Database;
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
+use std::collections::BTreeMap;
 
 impl Database {
     pub fn upsert_flashcard(
@@ -41,19 +43,95 @@ impl Database {
         })
     }
 
-    pub fn list_flashcards_due(&self, limit: i64) -> Result<Vec<Flashcard>> {
+    pub fn list_flashcards_due(&self, topic: Option<&str>, limit: i64) -> Result<Vec<Flashcard>> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
-        let mut stmt = conn.prepare(
-            "SELECT id, block_id, front, back, tags, created_at, updated_at, last_reviewed_at, next_review_at, ease_factor, interval_days, review_count
-             FROM flashcards
-             WHERE next_review_at IS NULL OR next_review_at <= ?1
-             ORDER BY next_review_at ASC NULLS FIRST
-             LIMIT ?2"
-        )?;
-        let cards = stmt.query_map(params![now, limit], Self::row_to_flashcard)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        const COLS: &str = "id, block_id, front, back, tags, created_at, updated_at, last_reviewed_at, next_review_at, ease_factor, interval_days, review_count";
+        let cards = match topic {
+            // Mixed mode: all due cards across every topic.
+            None => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {COLS} FROM flashcards
+                     WHERE next_review_at IS NULL OR next_review_at <= ?1
+                     ORDER BY next_review_at ASC NULLS FIRST
+                     LIMIT ?2"
+                ))?;
+                let v = stmt
+                    .query_map(params![now, limit], Self::row_to_flashcard)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                v
+            }
+            // Untagged cards (topic == "").
+            Some(t) if t.is_empty() => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {COLS} FROM flashcards
+                     WHERE (next_review_at IS NULL OR next_review_at <= ?1) AND tags = '[]'
+                     ORDER BY next_review_at ASC NULLS FIRST
+                     LIMIT ?2"
+                ))?;
+                let v = stmt
+                    .query_map(params![now, limit], Self::row_to_flashcard)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                v
+            }
+            // A specific topic: tags is a JSON array, so match the quoted tag.
+            Some(t) => {
+                let pattern = format!("%\"{}\"%", t);
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {COLS} FROM flashcards
+                     WHERE (next_review_at IS NULL OR next_review_at <= ?1) AND tags LIKE ?2
+                     ORDER BY next_review_at ASC NULLS FIRST
+                     LIMIT ?3"
+                ))?;
+                let v = stmt
+                    .query_map(params![now, pattern, limit], Self::row_to_flashcard)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                v
+            }
+        };
         Ok(cards)
+    }
+
+    /// List all study topics (derived from flashcard tags) with total and due
+    /// counts. A card with multiple tags counts toward each topic; a card with
+    /// no tags is grouped under the empty-string topic ("untagged").
+    pub fn flashcard_topics(&self) -> Result<Vec<FlashcardTopic>> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        let mut stmt = conn.prepare("SELECT tags, next_review_at FROM flashcards")?;
+        let rows = stmt.query_map([], |r| {
+            let tags_str: String = r.get(0)?;
+            let next: Option<i64> = r.get(1)?;
+            Ok((tags_str, next))
+        })?;
+
+        // topic -> (total, due)
+        let mut map: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        for row in rows {
+            let (tags_str, next) = row?;
+            let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+            let is_due = next.map_or(true, |n| n <= now);
+            if tags.is_empty() {
+                let e = map.entry(String::new()).or_insert((0, 0));
+                e.0 += 1;
+                if is_due {
+                    e.1 += 1;
+                }
+            } else {
+                for t in tags {
+                    let e = map.entry(t).or_insert((0, 0));
+                    e.0 += 1;
+                    if is_due {
+                        e.1 += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(map
+            .into_iter()
+            .map(|(topic, (total, due))| FlashcardTopic { topic, total, due })
+            .collect())
     }
 
     pub fn list_flashcards(&self, limit: i64, offset: i64) -> Result<Vec<Flashcard>> {

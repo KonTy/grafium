@@ -5,7 +5,7 @@
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
-  import { renderBlock } from "../lib/markdown";
+  import { renderBlock, hydrateAssetMedia } from "../lib/markdown";
   import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
@@ -63,6 +63,15 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content));
+
+  // Rendered-content container, used to hydrate <audio>/<video> media that
+  // WebKitGTK can't load from the custom asset scheme.
+  let renderedEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    void renderedHtml;
+    const el = renderedEl;
+    queueMicrotask(() => hydrateAssetMedia(el));
+  });
 
   // Date picker state
   let showDatePicker = $state(false);
@@ -1063,7 +1072,7 @@
     {:else}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="rendered-content" onclick={handleRenderedClick}>
+      <div class="rendered-content" onclick={handleRenderedClick} bind:this={renderedEl}>
         {#if block.content.trim() === ""}
           <span class="placeholder">&nbsp;</span>
         {:else}
@@ -1496,6 +1505,31 @@
     text-align: right;
     color: var(--text-muted);
     user-select: none;
+  }
+
+  .rendered-content :global(.fc-img) {
+    max-width: 100%;
+    max-height: 360px;
+    height: auto;
+    border-radius: 6px;
+    margin: 4px 0;
+    display: block;
+  }
+
+  .rendered-content :global(.fc-audio) {
+    width: 100%;
+    max-width: 340px;
+    height: 36px;
+    margin: 4px 0;
+    display: block;
+  }
+
+  .rendered-content :global(.fc-video) {
+    max-width: 100%;
+    max-height: 360px;
+    border-radius: 6px;
+    margin: 4px 0;
+    display: block;
   }
 
   .rendered-content :global(ul),

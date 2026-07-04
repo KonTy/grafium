@@ -166,8 +166,19 @@ export interface Flashcard {
   review_count: number;
 }
 
-export function listFlashcardsDue(limit?: number): Promise<Flashcard[]> {
-  return invoke("list_flashcards_due", { limit });
+export interface FlashcardTopic {
+  topic: string; // "" = untagged
+  total: number;
+  due: number;
+}
+
+// topic: a tag name (e.g. "chinese"); "" = untagged; omit for mixed (all topics).
+export function listFlashcardsDue(limit?: number, topic?: string): Promise<Flashcard[]> {
+  return invoke("list_flashcards_due", { limit, topic });
+}
+
+export function listFlashcardTopics(): Promise<FlashcardTopic[]> {
+  return invoke("list_flashcard_topics", {});
 }
 
 export function listAllFlashcards(limit?: number, offset?: number): Promise<Flashcard[]> {
@@ -177,6 +188,22 @@ export function listAllFlashcards(limit?: number, offset?: number): Promise<Flas
 // quality: 0..5 (0-2 = fail, 3-5 = pass). Returns the updated card.
 export function gradeFlashcard(id: string, quality: number): Promise<Flashcard> {
   return invoke("grade_flashcard", { id, quality });
+}
+
+export interface AnkiImportSummary {
+  deck: string;
+  page_title: string;
+  topic: string;
+  note_count: number;
+  card_count: number;
+  media_count: number;
+}
+
+// Import an Anki .apkg deck into the active graph. Converts it to a markdown
+// page of `Front :: Back` flashcards tagged with the deck's topic and copies
+// referenced media into the graph assets folder.
+export function importAnkiApkg(path: string): Promise<AnkiImportSummary> {
+  return invoke("import_anki_apkg", { path });
 }
 
 // Favorites & Recent

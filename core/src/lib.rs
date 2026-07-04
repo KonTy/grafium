@@ -3,6 +3,7 @@ pub mod db;
 pub mod error;
 pub mod graph;
 pub mod ink;
+pub mod import;
 pub mod knowledge;
 pub mod models;
 pub mod parser;

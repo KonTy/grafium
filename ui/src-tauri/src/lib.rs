@@ -385,7 +385,12 @@ fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, St
     let marker_v3 = graph_root.join(metadata_dir).join("tutorial-seeded-v3");
     let marker_v4 = graph_root.join(metadata_dir).join("tutorial-seeded-v4");
     let marker_v5 = graph_root.join(metadata_dir).join("tutorial-seeded-v5");
-    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v6");
+    let marker_v6 = graph_root.join(metadata_dir).join("tutorial-seeded-v6");
+    let marker_v7 = graph_root.join(metadata_dir).join("tutorial-seeded-v7");
+    let marker_v8 = graph_root.join(metadata_dir).join("tutorial-seeded-v8");
+    let marker_v9 = graph_root.join(metadata_dir).join("tutorial-seeded-v9");
+    let marker_v10 = graph_root.join(metadata_dir).join("tutorial-seeded-v10");
+    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v11");
     if marker.exists() {
         return Ok(false);
     }
@@ -393,84 +398,39 @@ fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, St
     let pages_dir = graph_root.join("pages");
     let journals_dir = graph_root.join("journals");
     let has_markdown = has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir);
-    // Allow one-time in-place refresh of the built-in tutorial graph from v1..v5 -> v6.
+    // Allow one-time in-place refresh of the built-in tutorial graph from v1..v10 -> v11.
     if has_markdown
         && !marker_v1.exists()
         && !marker_v2.exists()
         && !marker_v3.exists()
         && !marker_v4.exists()
         && !marker_v5.exists()
+        && !marker_v6.exists()
+        && !marker_v7.exists()
+        && !marker_v8.exists()
+        && !marker_v9.exists()
+        && !marker_v10.exists()
     {
         return Ok(false);
     }
 
-    let image_welcome = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <defs>
-    <linearGradient id='bg' x1='0' y1='0' x2='1' y2='1'>
-      <stop offset='0%' stop-color='#102a43'/>
-      <stop offset='100%' stop-color='#334e68'/>
-    </linearGradient>
-  </defs>
-  <rect width='1280' height='720' fill='url(#bg)'/>
-  <rect x='70' y='70' width='1140' height='580' rx='18' fill='#0b1f33' stroke='#87bfff' stroke-width='2'/>
-  <rect x='95' y='95' width='260' height='530' rx='12' fill='#132f4c'/>
-  <rect x='380' y='95' width='805' height='70' rx='10' fill='#163857'/>
-  <rect x='380' y='185' width='805' height='440' rx='10' fill='#102a43'/>
-  <text x='405' y='140' fill='#d9e2ec' font-size='30' font-family='sans-serif'>Grafium Tutorial Graph</text>
-  <text x='120' y='145' fill='#9fb3c8' font-size='24' font-family='sans-serif'>Sidebar</text>
-  <text x='430' y='245' fill='#d9e2ec' font-size='42' font-family='sans-serif'>Start Here</text>
-  <text x='430' y='295' fill='#9fb3c8' font-size='28' font-family='sans-serif'>This graph teaches core features.</text>
-</svg>"##;
-
-    let image_create_graph = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <rect width='1280' height='720' fill='#0f172a'/>
-  <rect x='130' y='80' width='1020' height='560' rx='16' fill='#1e293b' stroke='#7dd3fc' stroke-width='2'/>
-  <rect x='160' y='120' width='330' height='500' rx='10' fill='#0f2235'/>
-  <rect x='520' y='120' width='600' height='500' rx='10' fill='#17263a'/>
-  <rect x='550' y='180' width='540' height='180' rx='10' fill='#0d1826' stroke='#60a5fa' stroke-width='2'/>
-  <text x='575' y='235' fill='#dbeafe' font-size='30' font-family='sans-serif'>New Graph</text>
-  <text x='575' y='285' fill='#93c5fd' font-size='24' font-family='sans-serif'>Name: my-notes</text>
-  <text x='575' y='325' fill='#93c5fd' font-size='24' font-family='sans-serif'>Location: ~/Documents/grafium/</text>
-  <text x='205' y='170' fill='#bfdbfe' font-size='24' font-family='sans-serif'>Graph Menu</text>
-  <text x='205' y='220' fill='#93c5fd' font-size='20' font-family='sans-serif'>Open Existing</text>
-  <text x='205' y='260' fill='#93c5fd' font-size='20' font-family='sans-serif'>New Graph</text>
-  <text x='205' y='300' fill='#93c5fd' font-size='20' font-family='sans-serif'>Re-index</text>
-</svg>"##;
-
-    let image_blocks = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <rect width='1280' height='720' fill='#111827'/>
-  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#1f2937' stroke='#86efac' stroke-width='2'/>
-  <text x='170' y='135' fill='#dcfce7' font-size='38' font-family='sans-serif'>Block Editing Basics</text>
-  <text x='170' y='200' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Press Enter to create next block</text>
-  <text x='170' y='245' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Tab / Shift+Tab to indent or outdent</text>
-  <text x='170' y='290' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Type TODO / DOING / DONE for task flow</text>
-  <text x='170' y='335' fill='#bbf7d0' font-size='26' font-family='sans-serif'>- Use [[Page Links]], #tags, and ((block refs))</text>
-  <rect x='170' y='390' width='920' height='210' rx='10' fill='#0f172a' stroke='#4ade80' stroke-width='2'/>
-  <text x='205' y='455' fill='#e5e7eb' font-size='24' font-family='monospace'>- TODO Draft project plan</text>
-  <text x='245' y='495' fill='#a7f3d0' font-size='24' font-family='monospace'>- Outline milestones</text>
-  <text x='245' y='535' fill='#a7f3d0' font-size='24' font-family='monospace'>- Link to [[Roadmap]]</text>
-</svg>"##;
-
     let start_here = r##"# Welcome To Grafium
 
-![Tutorial Welcome](../assets/tutorial/welcome-overview.svg)
-
-Grafium is a **second brain** — a place to capture what you learn, connect it,
-and remember it for good. This is a safe tutorial graph, so you can practice
-without touching your real notes.
+Grafium is a **second brain** — a place to capture what you learn, connect it, and remember it for good. This is a safe tutorial graph, so you can practice without touching your real notes.
 
 ## ⭐ Start Here: Learn Anything, Remember It Forever
 
-Grafium isn't just note storage — it's a system for **studying and remembering**
-any book, video, or lecture. Read these three pages in order:
+Grafium isn't just note storage — it's a system for **studying and remembering** any book, video, or lecture. Read these three pages in order:
 
 1. [[The Grafium Study Method]] — why it works (CODE + PACER)
 2. [[PACER - Tag What You Read]] — label each note so you know how to use it
 3. [[The Study Loop]] — the exact steps: capture, digest, review
+4. [[How To Study a Book]] — a full worked example (studying an economics chapter)
 
 ## Learn The App
 
 - [[Try Block Editing]] — blocks, links, tags, and tasks
+- [[How To Create A Flashcard]] — text, image, audio & video cards (+ import Anki decks)
 - [[Create Your Own Graph]] — make your real graph in Documents
 
 ## Quick Editor Tips
@@ -488,8 +448,6 @@ Your personal notes should live in your own graph folder.
 "##;
 
     let create_graph_page = r##"# Create Your Own Graph
-
-![Create Graph Flow](../assets/tutorial/create-graph-flow.svg)
 
 ## Recommended Location
 
@@ -517,8 +475,6 @@ Example:
 
     let block_editing_page = r##"# Try Block Editing
 
-![Block Editing](../assets/tutorial/block-editing-basics.svg)
-
 Practice these directly in this page:
 
 - Press **Enter** to create a new block
@@ -538,33 +494,23 @@ Use search in sidebar to jump by page name or block content.
 
     let study_method_page = r##"# The Grafium Study Method
 
-![Study Method](../assets/tutorial/study-method.svg)
-
-Most people try to learn by **consuming more** — reading faster, watching at 2x.
-But we forget up to **90%** of what we read. The fix isn't consuming more; it's
-**digesting** what you consume.
+Most people try to learn by **consuming more** — reading faster, watching at 2x. But we forget up to **90%** of what we read. The fix isn't consuming more; it's **digesting** what you consume.
 
 Grafium combines two proven ideas:
 
-- **CODE / Second Brain** (Tiago Forte) — *where* notes live and how they link:
-  Capture, Organize, Distill, Express.
-- **PACER** (Justin Sung) — *how* to process each note so it sticks:
-  Procedural, Analogous, Conceptual, Evidence, Reference.
+- **CODE / Second Brain** (Tiago Forte) — *where* notes live and how they link: Capture, Organize, Distill, Express.
+- **PACER** (Justin Sung) — *how* to process each note so it sticks: Procedural, Analogous, Conceptual, Evidence, Reference.
 
-> **The core rule:** Learning = **consume + digest**, and the two must stay
-> **balanced**. If you can't digest what you're reading, slow down.
+> **The core rule:** Learning = **consume + digest**, and the two must stay **balanced**. If you can't digest what you're reading, slow down.
 
 ## The Two Stages
 
 1. **Consume** — capture ideas fast in your daily [[Journal]], tagging each one.
-2. **Digest** — later, turn the important notes into permanent, linked
-   [[concept page]]s. That is what builds your second brain (and your graph).
+2. **Digest** — later, turn the important notes into permanent, linked [[concept page]]s. That is what builds your second brain (and your graph).
 
 ## Watch The Source
 
-This method is based on Justin Sung's video on how to remember what you read.
-Search YouTube for **Justin Sung — "How to remember everything you read"** to
-watch his full explanation of the PACER system.
+This method is based on Justin Sung's video on how to remember what you read. Search YouTube for **Justin Sung — "How to remember everything you read"** to watch his full explanation of the PACER system.
 
 ## Next
 
@@ -574,11 +520,7 @@ watch his full explanation of the PACER system.
 
     let pacer_page = r##"# PACER - Tag What You Read
 
-![PACER](../assets/tutorial/pacer.svg)
-
-Not all information is equal. As you read, decide which of the **five PACER
-types** each note is, and tag it. That single decision *is* active learning —
-and it tells you how to digest the note later.
+Not all information is equal. As you read, decide which of the **five PACER types** each note is, and tag it. That single decision *is* active learning — and it tells you how to digest the note later.
 
 ## The Five Types
 
@@ -602,8 +544,7 @@ Use these to find notes again:
 - `#flashcard` — should become a spaced-repetition card
 - `#digested` — done; it now lives in a concept page
 
-> **Tip:** Click any tag to see every note with it. That is how you build your
-> review list.
+> **Tip:** Click any tag to see every note with it. That is how you build your review list.
 
 ## Next
 
@@ -611,8 +552,6 @@ Use these to find notes again:
 "##;
 
     let study_loop_page = r##"# The Study Loop
-
-![Study Loop](../assets/tutorial/study-loop.svg)
 
 Here is the exact step-by-step. Example: you're watching a video on learning.
 
@@ -625,8 +564,7 @@ Open today's **Journal** and add the source, then indent notes under it:
 
 ## 2. Consume (while watching)
 
-Capture each idea in your own words and **tag its PACER type**. Do not stop to
-memorize — just capture and tag:
+Capture each idea in your own words and **tag its PACER type**. Do not stop to memorize — just capture and tag:
 
 - Learning = consume + [[digest]], keep it balanced  #concept
 - Muscle contraction is like my swimming stroke  #analogy
@@ -644,69 +582,157 @@ Go back through today's journal and process each tag:
 - `#analogy` → write *why* it fits and where it breaks.
 - `#proc` → add a `TODO` to practice it.
 - `#evidence` → move it under its concept, then tag `#rehearse`.
-- `#ref` → turn it into a flashcard: write `Question :: Answer` (for example
-  `Capital of France :: Paris`). Review it later in **Flashcards** (sidebar).
+- `#ref` → turn it into a flashcard: write `Question :: Answer` (for example `Capital of France :: Paris`). Review it later in **Flashcards** (sidebar).
 
 Change each note from `#inbox` to `#digested` as you finish.
 
 ## 4. Review (ongoing)
 
-- **Flashcards (sidebar):** spaced-repetition review of every `Question :: Answer`
-  card. Grade each recall (Again / Hard / Good / Easy) and Grafium schedules when
-  you should see it next.
+- **Flashcards (sidebar):** spaced-repetition review of every `Question :: Answer` card. Grade each recall (Again / Hard / Good / Easy) and Grafium schedules when you should see it next.
 - **Rehearse list:** search the `#rehearse` tag to actively recall evidence notes.
-- **Graph view:** find **orphan** notes (captured but never linked = not learned
-  yet) and connect them; practice recall from your dense **hub** topics.
+- **Graph view:** find **orphan** notes (captured but never linked = not learned yet) and connect them; practice recall from your dense **hub** topics.
 
 ## That's The Whole System
 
-Capture fast → tag with PACER → digest into linked concept pages → review by tag
-and graph. Do this for any topic and your knowledge compounds forever.
+Capture fast → tag with PACER → digest into linked concept pages → review by tag and graph. Do this for any topic and your knowledge compounds forever.
+
+## See It In Action
+
+- [[How To Study a Book]] — the same loop applied end-to-end to a real chapter.
 "##;
 
-    let image_study_method = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <rect width='1280' height='720' fill='#0f172a'/>
-  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#1e293b' stroke='#a78bfa' stroke-width='2'/>
-  <text x='170' y='150' fill='#ede9fe' font-size='40' font-family='sans-serif'>Consume + Digest = Learning</text>
-  <rect x='170' y='210' width='430' height='360' rx='12' fill='#0f2235' stroke='#60a5fa' stroke-width='2'/>
-  <text x='200' y='275' fill='#bfdbfe' font-size='28' font-family='sans-serif'>1. Consume (fast)</text>
-  <text x='200' y='325' fill='#93c5fd' font-size='22' font-family='sans-serif'>Capture ideas in the Journal</text>
-  <text x='200' y='362' fill='#93c5fd' font-size='22' font-family='sans-serif'>Tag each with PACER</text>
-  <rect x='680' y='210' width='430' height='360' rx='12' fill='#0d2818' stroke='#4ade80' stroke-width='2'/>
-  <text x='710' y='275' fill='#bbf7d0' font-size='28' font-family='sans-serif'>2. Digest (later)</text>
-  <text x='710' y='325' fill='#86efac' font-size='22' font-family='sans-serif'>Map into concept pages</text>
-  <text x='710' y='362' fill='#86efac' font-size='22' font-family='sans-serif'>Review by tag + graph</text>
-  <text x='612' y='405' fill='#e5e7eb' font-size='48' font-family='sans-serif'>&#8594;</text>
-</svg>"##;
+    let study_book_page = r##"# How To Study a Book
 
-    let image_pacer = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <rect width='1280' height='720' fill='#111827'/>
-  <rect x='120' y='60' width='1040' height='600' rx='16' fill='#1f2937' stroke='#fbbf24' stroke-width='2'/>
-  <text x='170' y='135' fill='#fef3c7' font-size='38' font-family='sans-serif'>PACER: tag what you read</text>
-  <text x='170' y='215' fill='#fde68a' font-size='26' font-family='monospace'>P  Procedural  #proc      practice it</text>
-  <text x='170' y='270' fill='#fde68a' font-size='26' font-family='monospace'>A  Analogous   #analogy   critique it</text>
-  <text x='170' y='325' fill='#fde68a' font-size='26' font-family='monospace'>C  Conceptual  #concept   map it</text>
-  <text x='170' y='380' fill='#fde68a' font-size='26' font-family='monospace'>E  Evidence    #evidence  store + rehearse</text>
-  <text x='170' y='435' fill='#fde68a' font-size='26' font-family='monospace'>R  Reference   #ref       store + flashcard</text>
-</svg>"##;
+This is a full worked example: studying the first chapter of an intro **economics** textbook using the Grafium study loop. It adapts the classic *"summarize in the margins"* reading method (progressive summarization) to your graph.
 
-    let image_study_loop = r##"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'>
-  <rect width='1280' height='720' fill='#0b1f33'/>
-  <rect x='120' y='70' width='1040' height='580' rx='16' fill='#132f4c' stroke='#7dd3fc' stroke-width='2'/>
-  <text x='170' y='140' fill='#e0f2fe' font-size='38' font-family='sans-serif'>The Study Loop</text>
-  <text x='170' y='225' fill='#bae6fd' font-size='26' font-family='sans-serif'>1. Journal: add the source  #inbox</text>
-  <text x='170' y='285' fill='#bae6fd' font-size='26' font-family='sans-serif'>2. Consume: capture + tag PACER</text>
-  <text x='170' y='345' fill='#bae6fd' font-size='26' font-family='sans-serif'>3. Digest: map into concept pages</text>
-  <text x='170' y='405' fill='#bae6fd' font-size='26' font-family='sans-serif'>4. Review: #rehearse + graph</text>
-  <text x='170' y='480' fill='#7dd3fc' font-size='22' font-family='sans-serif'>capture -&gt; tag -&gt; digest -&gt; review -&gt; repeat</text>
-</svg>"##;
+## The One Rule: Summarize, Never Copy
 
-    write_text_file(&graph_root.join("assets/tutorial/welcome-overview.svg"), image_welcome)?;
-    write_text_file(&graph_root.join("assets/tutorial/create-graph-flow.svg"), image_create_graph)?;
-    write_text_file(&graph_root.join("assets/tutorial/block-editing-basics.svg"), image_blocks)?;
-    write_text_file(&graph_root.join("assets/tutorial/study-method.svg"), image_study_method)?;
-    write_text_file(&graph_root.join("assets/tutorial/pacer.svg"), image_pacer)?;
-    write_text_file(&graph_root.join("assets/tutorial/study-loop.svg"), image_study_loop)?;
+You only remember what you force your brain to process. Copying a sentence is passive — you can do it without understanding. **Summarizing in your own words is active** — you can only compress six sentences into one if you actually understood them. So for every chunk you read, you write **one sentence in your own words**. In Grafium, each summary is a block, and that block *is* your margin note.
+
+## The Progressive Summary Trick
+
+- Paragraph 1 → one block: a one-sentence summary of paragraph 1.
+- Paragraph 2 → one block: a one-sentence summary of paragraph 2.
+- Paragraph 3 and onward → **two** blocks: first a **rolling summary of everything so far**, then a summary of the new paragraph.
+
+The rolling summary is where the magic is: it forces you to connect and compress every idea so far into one line, every few paragraphs. That act of synthesis is what actually builds memory.
+
+## Step 1 — Set Up The Source (Journal)
+
+Open today's **Journal**, add the source, tag it `#inbox`, and indent your notes under it:
+
+- [[Source - Bernanke: Principles of Economics, Ch.1]]  #inbox
+  - (your one-sentence summaries go here, indented)
+
+## Step 2 — Read & Summarize (Consume)
+
+Read one paragraph, then write one sentence in your own words and **tag its PACER type**. Every third block or so, make it a *rolling* summary instead:
+
+- Economics = the study of how scarce resources get allocated  #concept
+- "Scarce" just means finite — money, sand, and time are all scarce  #concept
+- Rolling summary: economics studies who gets limited resources, and at what cost  #concept
+- Opportunity cost = the value of the next-best thing you gave up  #concept
+- Rolling summary: scarcity forces choices, and every choice has an opportunity cost  #concept
+
+Notice the two `Rolling summary` lines — that is the paragraph-3 move: compress everything so far into one line *before* adding the new idea.
+
+## Step 3 — Make Key Facts Stick (Flashcards)
+
+Turn the definitions worth memorizing into flashcards right inside your notes, using the `Question :: Answer` syntax:
+
+- Economics :: the study of the allocation of scarce resources  #economics
+- Opportunity cost :: the value of the next-best alternative you gave up  #economics
+
+Grafium turns these into spaced-repetition cards automatically — review them later in **Flashcards** (sidebar).
+
+Tip: the `#economics` tag turns these cards into a **study topic**. In **Flashcards** you can drill just one topic (e.g. `#economics` or `#chinese`) or study **Mixed** — pulling due cards from every topic at once.
+
+## Step 4 — Digest (That Evening)
+
+Go back through the journal and turn your **rolling summaries** into a permanent [[concept page]]. Your last, best rolling summary basically *is* the distilled page:
+
+- Open or create [[Economics]] and make your best rolling summary its opening line.
+- Link the concepts it touches: [[Scarcity]], [[Opportunity Cost]], [[Allocation]].
+- Change the source from `#inbox` to `#digested`.
+
+## Step 5 — Review (Later)
+
+- You **never reread the whole chapter** — you reread your one-line summaries.
+- **Flashcards (sidebar):** grade recall on each `Question :: Answer` card.
+- Search the `#rehearse` tag to actively recall the evidence you flagged.
+
+## Why This Works
+
+Every single step forces you to think through *meaning* — summarizing, connecting, and recalling — instead of passively passing your eyes over the page. That is the whole secret: no thinking, no memory.
+
+## Watch The Source
+
+This reading method comes from a well-known video by a philosophy professor on how to remember what you read. Search YouTube for **"how to remember what you read — summarize in the margins"** to watch the full explanation.
+
+## Next
+
+- [[The Study Loop]]
+- [[PACER - Tag What You Read]]
+"##;
+
+    let flashcard_page = r##"# How To Create A Flashcard
+
+Flashcards in Grafium are just blocks. Write a question and an answer on one line separated by ` :: ` and Grafium turns it into a spaced-repetition card automatically. Review your due cards any time from **Flashcards** in the sidebar.
+
+## The Syntax
+
+Write `Front :: Answer` in any block. The part before `::` is the front (the prompt); the part after is the back (the answer). Add a `#tag` to file the card into a study topic. Here are three real, reviewable cards:
+
+- What is the capital of France? :: Paris  #geography
+- Photosynthesis :: how plants convert light into chemical energy  #biology
+- 7 × 8 :: 56  #math
+
+Open **Flashcards** in the sidebar and you will see these appear under the `#geography`, `#biology`, and `#math` topics. Study one topic at a time, or pick **Mixed** to pull due cards from every topic at once.
+
+## Text Cards With Rich Answers
+
+The answer can contain normal markdown — **bold**, *italics*, `code`, and math. This is one single card (keep the whole card on one line):
+
+- What does $E = mc^2$ describe? :: the equivalence of **energy** and **mass**, where $c$ is the speed of light  #physics
+
+## Image Cards
+
+Add a picture to a card with image syntax: `![](path)`. Point it at a file in your graph's `assets` folder. This card shows a diagram on the back:
+
+- What shape is this? :: A rounded card sample → ![](../assets/tutorial/flashcard-demo.svg)  #demo
+
+Any local image works — PNG, JPG, GIF, WebP, or SVG. Drop the file into your graph's `assets` folder and reference it as `../assets/<your-file>`.
+
+## Audio Cards
+
+Use the same `![](path)` syntax with an audio file (`.mp3`, `.wav`, `.ogg`, `.m4a`, `.opus`, `.flac`). Grafium renders a little audio player right on the card — perfect for language pronunciation or ear training:
+
+`- How do you say "hello" in Mandarin? :: 你好 (nǐ hǎo) ![](../assets/audio/nihao.mp3)  #chinese`
+
+(The line above is shown as code because this tutorial graph doesn't ship an audio file — but the syntax is exactly that. Imported Anki language decks bring their pronunciation audio automatically.)
+
+## Video Cards
+
+Video works too (`.mp4`, `.webm`, `.mov`, `.mkv`). Great for a golf swing, a chemistry reaction, or a sign-language sign:
+
+`- Show the correct kettlebell swing :: ![](../assets/video/swing.mp4)  #fitness`
+
+## Import A Whole Anki Deck
+
+Already have an Anki deck? In **Flashcards** (sidebar), click **Import Anki deck** and pick a `.apkg` file. Grafium converts every note into a `Front :: Back` card on a new page, files them under a topic named after the deck, and copies the deck's audio and images into your graph so they play right on the card.
+
+## Tips
+
+- Keep each card on **one physical line** — a new line starts a new block (and a new card).
+- The `::` must have a space on each side: `Front :: Back`, not `Front::Back`.
+- Cards become reviewable as soon as the page is saved.
+- Tag every card (`#topic`) so you can study by subject.
+
+## Next
+
+- [[The Study Loop]]
+- [[How To Study a Book]]
+"##;
 
     write_text_file(&graph_root.join("pages/Welcome To Grafium.md"), start_here)?;
     write_text_file(&graph_root.join("pages/Create Your Own Graph.md"), create_graph_page)?;
@@ -714,8 +740,14 @@ and graph. Do this for any topic and your knowledge compounds forever.
     write_text_file(&graph_root.join("pages/The Grafium Study Method.md"), study_method_page)?;
     write_text_file(&graph_root.join("pages/PACER - Tag What You Read.md"), pacer_page)?;
     write_text_file(&graph_root.join("pages/The Study Loop.md"), study_loop_page)?;
+    write_text_file(&graph_root.join("pages/How To Study a Book.md"), study_book_page)?;
+    write_text_file(&graph_root.join("pages/How To Create A Flashcard.md"), flashcard_page)?;
 
-    write_text_file(&marker, "seeded_v6")?;
+    // Seed a tiny self-contained SVG so the image-card demo renders out of the box.
+    let demo_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140" viewBox="0 0 240 140"><rect x="6" y="6" width="228" height="128" rx="16" fill="#1e293b" stroke="#7dd3fc" stroke-width="3"/><text x="120" y="66" font-family="sans-serif" font-size="20" fill="#7dd3fc" text-anchor="middle">Flashcard</text><text x="120" y="96" font-family="sans-serif" font-size="13" fill="#94a3b8" text-anchor="middle">image demo</text></svg>"##;
+    write_text_file(&graph_root.join("assets/tutorial/flashcard-demo.svg"), demo_svg)?;
+
+    write_text_file(&marker, "seeded_v11")?;
     Ok(true)
 }
 
@@ -733,6 +765,168 @@ fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> Pat
     #[cfg(not(target_os = "android"))]
     {
         graph_root.join(metadata_dir_name(app)).join("index.db")
+    }
+}
+
+/// Serves local graph assets (images, audio, video) to the webview through the
+/// custom `grafium-asset://localhost/<relative-path>` scheme.
+///
+/// The path is resolved against the active graph's root directory. Requests are
+/// confined to that directory (path-traversal attempts are rejected) so the
+/// scheme can only read files inside the current graph.
+fn asset_scheme_handler(
+    app: &tauri::AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::{Response, StatusCode};
+
+    let not_found = || {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Vec::new())
+            .unwrap()
+    };
+
+    // Extract and percent-decode the request path (strip leading '/').
+    let raw_path = request.uri().path().trim_start_matches('/');
+    let decoded = match urlencoding::decode(raw_path) {
+        Ok(d) => d.into_owned(),
+        Err(_) => return not_found(),
+    };
+
+    // Reject absolute paths and any traversal component up-front.
+    if decoded.is_empty()
+        || decoded.starts_with('/')
+        || decoded.split('/').any(|c| c == "..")
+    {
+        return not_found();
+    }
+
+    // Resolve against the active graph root.
+    let root = match app.try_state::<AppState>() {
+        Some(state) => match state.graph.lock() {
+            Ok(g) => g.root_dir.clone(),
+            Err(_) => return not_found(),
+        },
+        None => return not_found(),
+    };
+
+    let candidate = root.join(&decoded);
+
+    // Canonicalize both and confirm the target stays within the graph root.
+    let (canon_root, canon_target) = match (root.canonicalize(), candidate.canonicalize()) {
+        (Ok(r), Ok(t)) => (r, t),
+        _ => return not_found(),
+    };
+    if !canon_target.starts_with(&canon_root) {
+        return not_found();
+    }
+
+    let bytes = match std::fs::read(&canon_target) {
+        Ok(b) => b,
+        Err(_) => return not_found(),
+    };
+
+    let mime = mime_for_path(&canon_target);
+    let total = bytes.len() as u64;
+
+    // WebKitGTK's media backend requires Range support for <audio>/<video>
+    // playback — without it the element fails to load ("error"). Honor a single
+    // byte-range request and always advertise Accept-Ranges.
+    let range = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| parse_byte_range(h, total));
+
+    if let Some((start, end)) = range {
+        let slice = bytes[start as usize..=end as usize].to_vec();
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Content-Type", mime)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Range", format!("bytes {start}-{end}/{total}"))
+            .header("Content-Length", (end - start + 1).to_string())
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Cache-Control", "public, max-age=31536000, immutable")
+            .body(slice)
+            .unwrap_or_else(|_| not_found());
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", total.to_string())
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Cache-Control", "public, max-age=31536000, immutable")
+        .body(bytes)
+        .unwrap_or_else(|_| not_found())
+}
+
+/// Parse a single `Range: bytes=START-END` header into an inclusive, clamped
+/// (start, end) pair. Supports open-ended (`bytes=500-`) and suffix
+/// (`bytes=-500`) forms. Returns None for an empty file or an unsatisfiable range.
+fn parse_byte_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = header.strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (s, e) = spec.split_once('-')?;
+    let (start, end) = if s.is_empty() {
+        // Suffix range: the last N bytes.
+        let n: u64 = e.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let start: u64 = s.parse().ok()?;
+        let end: u64 = if e.is_empty() {
+            total - 1
+        } else {
+            e.parse::<u64>().ok()?.min(total - 1)
+        };
+        (start, end)
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Best-effort MIME type from a file extension for the asset scheme.
+pub(crate) fn mime_for_path(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        // Images
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        // Audio
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        // Video
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "ogv" => "video/ogg",
+        _ => "application/octet-stream",
     }
 }
 
@@ -756,6 +950,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .register_uri_scheme_protocol("grafium-asset", |ctx, request| {
+            asset_scheme_handler(ctx.app_handle(), request)
+        })
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             let config_path = app_dir.join("graphs.json");
@@ -1038,9 +1235,11 @@ pub fn run() {
             commands::tasks::get_completed_tasks,
             commands::tasks::set_task_date,
             commands::flashcards::list_flashcards_due,
+            commands::flashcards::list_flashcard_topics,
             commands::flashcards::list_all_flashcards,
             commands::flashcards::update_flashcard_review,
             commands::flashcards::grade_flashcard,
+            commands::flashcards::import_anki_apkg,
             commands::favorites::add_favorite,
             commands::favorites::remove_favorite,
             commands::favorites::list_favorites,
@@ -1073,6 +1272,7 @@ pub fn run() {
             commands::theme::set_app_theme,
             commands::assets::download_asset,
             commands::assets::list_assets,
+            commands::assets::read_asset_data_url,
             commands::assets::find_orphaned_assets,
             commands::assets::delete_assets,
             commands::knowledge::ai_get_config,

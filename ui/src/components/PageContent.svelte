@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
@@ -31,6 +32,13 @@
   let undoCount = $state(0);
   let collapsedIds: Set<string> = $state(new Set());
 
+  // Windowed rendering: mounting one BlockEditor per block hangs WebKitGTK on huge
+  // pages (e.g. an imported Anki deck of 7000+ cards). Only render the first
+  // `renderLimit` visible blocks and grow the window as the user scrolls.
+  const RENDER_CHUNK = 120;
+  let renderLimit = $state(RENDER_CHUNK);
+  let sentinel = $state<HTMLElement | null>(null);
+
   function hasChildren(blockId: string): boolean {
     return blocks.some((b) => b.parent_id === blockId);
   }
@@ -44,6 +52,38 @@
       parentId = parent?.parent_id ?? null;
     }
     return true;
+  }
+
+  // Blocks that are not hidden by a collapsed ancestor, then capped to the current
+  // render window. Cross-block navigation to a block outside the window is handled
+  // by ensureBlockRendered().
+  const visibleBlocks = $derived(blocks.filter(isBlockVisible));
+  const windowedBlocks = $derived(visibleBlocks.slice(0, renderLimit));
+
+  // Grow the render window as the sentinel scrolls into view.
+  $effect(() => {
+    const el = sentinel;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (!entries[0]?.isIntersecting) return;
+      if (renderLimit >= visibleBlocks.length) return;
+      renderLimit = Math.min(renderLimit + RENDER_CHUNK, visibleBlocks.length);
+      // Force a fresh intersection callback in case the sentinel is still on
+      // screen after growing (e.g. many short blocks in a tall viewport).
+      io.unobserve(el);
+      requestAnimationFrame(() => io.observe(el));
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
+  // Ensure a block (by id) is inside the render window; used before focusing a
+  // block that may be beyond the current window (cross-block navigation, search).
+  function ensureBlockRendered(blockId: string) {
+    const idx = visibleBlocks.findIndex((b) => b.id === blockId);
+    if (idx >= 0 && idx >= renderLimit) {
+      renderLimit = Math.min(idx + RENDER_CHUNK, visibleBlocks.length);
+    }
   }
 
   function toggleCollapse(blockId: string) {
@@ -105,6 +145,7 @@
   async function loadBlocks() {
     try {
       loadError = null;
+      renderLimit = RENDER_CHUNK;
       blocks = await listBlocks(page.id);
       // If no blocks exist, create an empty one
       if (blocks.length === 0) {
@@ -429,11 +470,22 @@
       // Moving up lands on the target's BOTTOM line; down lands on its TOP.
       const edge: "top" | "bottom" = direction === "up" ? "bottom" : "top";
       focusedBlockId = target.id;
-      document.querySelector(`[data-block-id="${target.id}"]`)
-        ?.scrollIntoView({ block: "nearest" });
-      // Deterministic imperative focus — no synthetic click, no prop-timing
-      // race (both unreliable on WebKitGTK).
-      blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
+      // Grow the render window if the target is just past it, then focus once
+      // the BlockEditor for it has actually mounted.
+      const needsRender = targetIdx >= renderLimit;
+      if (needsRender) ensureBlockRendered(target.id);
+      const doFocus = () => {
+        document.querySelector(`[data-block-id="${target.id}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+        // Deterministic imperative focus — no synthetic click, no prop-timing
+        // race (both unreliable on WebKitGTK).
+        blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
+      };
+      if (needsRender) {
+        tick().then(doFocus);
+      } else {
+        doFocus();
+      }
     }
   }
 
@@ -597,8 +649,7 @@
   {/if}
 
   <div class="blocks-container">
-    {#each blocks as block (block.id)}
-      {#if isBlockVisible(block)}
+    {#each windowedBlocks as block (block.id)}
       <div id={`block-${block.id}`} data-block-id={block.id}>
         <BlockEditor
           bind:this={blockRefs[block.id]}
@@ -621,8 +672,12 @@
           onToggleCollapse={toggleCollapse}
         />
       </div>
-      {/if}
     {/each}
+    {#if renderLimit < visibleBlocks.length}
+      <div class="render-sentinel" bind:this={sentinel}>
+        Loading more… ({renderLimit} / {visibleBlocks.length})
+      </div>
+    {/if}
   </div>
 
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -705,6 +760,14 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .render-sentinel {
+    padding: 12px 0;
+    text-align: center;
+    font-size: 0.8rem;
+    opacity: 0.5;
+    user-select: none;
   }
 
   .click-below {

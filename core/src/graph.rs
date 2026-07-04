@@ -466,10 +466,21 @@ impl Graph {
                 )?;
             }
 
-            // Insert flashcard if detected
+            // Insert flashcard if detected. Any block written as
+            // `Question :: Answer` becomes a card (the parser sets is_flashcard
+            // and fills in front/back), whether or not it carries #flashcard.
             if pb.is_flashcard {
                 if let (Some(ref front), Some(ref back)) = (&pb.flashcard_front, &pb.flashcard_back) {
-                    self.db.upsert_flashcard(&block_id, front, back, &[])?;
+                    // Tags on the flashcard block act as its "topic(s)" (e.g.
+                    // #chinese, #physics), used to scope spaced-repetition study.
+                    let tags: Vec<String> = parser::extract_links(&pb.content)
+                        .into_iter()
+                        .filter_map(|l| match l {
+                            ExtractedLink::Tag(t) => Some(t),
+                            _ => None,
+                        })
+                        .collect();
+                    self.db.upsert_flashcard(&block_id, front, back, &tags)?;
                 }
             }
 

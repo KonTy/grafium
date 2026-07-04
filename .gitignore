@@ -32,3 +32,6 @@ android/captures/
 *.db
 *.db-wal
 *.db-shm
+
+# Experimental Anki decks
+*.apkg

@@ -1,5 +1,6 @@
 import { marked } from "marked";
 import katex from "katex";
+import { invoke } from "@tauri-apps/api/core";
 
 // Custom renderer for code blocks with line numbers.
 // Each line number is emitted as a CSS counter (::before) on its own
@@ -13,6 +14,60 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
     .join("");
   const langLabel = lang ? `<span class="code-lang">${escapeHtml(lang)}</span>` : "";
   return `<div class="code-block-wrapper">${langLabel}<pre class="code-block-pre"><code>${codeHtml}</code></pre></div>`;
+};
+
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "m4a", "flac", "aac"]);
+const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
+
+// Normalize a markdown asset reference to a graph-relative path (no scheme, no
+// leading ./ or ../). Used both for the custom scheme URL and for in-memory
+// hydration of media elements.
+function cleanAssetPath(href: string): string {
+  const h = href.trim();
+  const rel = h.replace(/^([./]*\/)+/, "").replace(/^\.\.?\//, "");
+  return rel.replace(/^(\.\.?\/)+/, "");
+}
+
+// Rewrite a markdown asset reference to a URL the webview can load.
+// Local, graph-relative paths (e.g. `../assets/anki/gre/word.mp3` or
+// `assets/img/foo.png`) are served through the custom `grafium-asset` scheme,
+// which resolves them against the active graph root in the Rust backend.
+// Absolute URLs (http/https/data/blob and grafium-asset itself) pass through.
+function resolveAssetUrl(href: string): string {
+  const h = href.trim();
+  if (/^(https?:|data:|blob:|grafium-asset:)/i.test(h)) return h;
+  return `grafium-asset://localhost/${encodeURI(cleanAssetPath(h))}`;
+}
+
+function extOf(url: string): string {
+  const noQuery = url.split(/[?#]/)[0];
+  const dot = noQuery.lastIndexOf(".");
+  return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : "";
+}
+
+// Media-aware image renderer: `![alt](path.ext)` becomes an <audio>/<video>/<img>
+// element depending on the file extension. This powers audio and video
+// flashcards (e.g. imported Anki pronunciation clips) as well as image cards.
+//
+// Audio/video use a `data-asset` attribute instead of a live `src`: WebKitGTK's
+// GStreamer media backend cannot fetch from our custom `grafium-asset` scheme,
+// so `hydrateAssetMedia()` loads their bytes as in-memory `data:` URLs after
+// the HTML is mounted. Images load fine straight from the scheme.
+renderer.image = function ({ href, title, text }: { href: string; title?: string | null; text?: string }) {
+  if (!href) return escapeHtml(text ?? "");
+  const ext = extOf(href);
+  const alt = escapeHtml(text ?? "");
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  if (AUDIO_EXTS.has(ext)) {
+    const rel = escapeHtml(cleanAssetPath(href));
+    return `<audio class="fc-audio" controls preload="none"${titleAttr} data-asset="${rel}"></audio>`;
+  }
+  if (VIDEO_EXTS.has(ext)) {
+    const rel = escapeHtml(cleanAssetPath(href));
+    return `<video class="fc-video" controls preload="metadata"${titleAttr} data-asset="${rel}"></video>`;
+  }
+  const src = resolveAssetUrl(href);
+  return `<img class="fc-img" loading="lazy" src="${src}" alt="${alt}"${titleAttr}>`;
 };
 
 function escapeHtml(str: string): string {
@@ -88,6 +143,29 @@ function renderMathOutsideCodeFences(markdown: string): string {
 }
 
 /**
+ * Apply an inline transform only to text OUTSIDE fenced code blocks and inline
+ * code spans, so that syntax like `#tag`, `[[link]]` or `((ref))` written
+ * inside backticks is preserved verbatim (and not turned into HTML that marked
+ * then escapes and shows as literal text).
+ */
+function transformOutsideCode(markdown: string, fn: (segment: string) => string): string {
+  const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
+  let out = "";
+  let last = 0;
+
+  for (const match of markdown.matchAll(codeRe)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    out += fn(markdown.slice(last, start));
+    out += match[0];
+    last = end;
+  }
+
+  out += fn(markdown.slice(last));
+  return out;
+}
+
+/**
  * Render a block's markdown content to HTML.
  * Handles [[page links]], #tags, ((block refs)), checkboxes, etc.
  */
@@ -101,23 +179,23 @@ export function renderBlock(content: string): string {
   // so that standard markdown links like [text](url) render correctly.
   processed = processed.replace(/\\([[\]])/g, "$1");
 
-  // Transform [[page links]] to clickable links
-  processed = processed.replace(
-    /\[\[([^\]]+)\]\]/g,
-    '<a class="page-link" data-page="$1">$1</a>'
-  );
-
-  // Transform #tags
-  processed = processed.replace(
-    /#([a-zA-Z0-9_-]+)/g,
-    '<a class="tag" data-tag="$1">#$1</a>'
-  );
-
-  // Transform ((block refs))
-  processed = processed.replace(
-    /\(\(([^)]+)\)\)/g,
-    '<span class="block-ref" data-ref="$1">(($1))</span>'
-  );
+  // Transform [[page links]], #tags and ((block refs)) — but only outside code
+  // spans/fences so `#tag`-style examples inside backticks stay verbatim.
+  processed = transformOutsideCode(processed, (segment) => {
+    return segment
+      .replace(
+        /\[\[([^\]]+)\]\]/g,
+        '<a class="page-link" data-page="$1">$1</a>'
+      )
+      .replace(
+        /#([a-zA-Z0-9_-]+)/g,
+        '<a class="tag" data-tag="$1">#$1</a>'
+      )
+      .replace(
+        /\(\(([^)]+)\)\)/g,
+        '<span class="block-ref" data-ref="$1">(($1))</span>'
+      );
+  });
 
   // Handle task markers
   processed = processed.replace(/^TODO\s+/i, '<span class="task-marker todo">TODO</span> ');
@@ -154,4 +232,38 @@ export function renderBlock(content: string): string {
 
   setCache(content, html);
   return html;
+}
+
+// In-memory cache of resolved data: URLs so re-rendering the same card (or
+// flipping front/back) doesn't re-read the file each time.
+const mediaUrlCache = new Map<string, string>();
+
+/**
+ * Load <audio>/<video> media inside a rendered container as in-memory `data:`
+ * URLs. WebKitGTK's GStreamer media backend can't fetch from our custom
+ * `grafium-asset` scheme, so audio/video are emitted with a `data-asset`
+ * attribute (see the image renderer) and their real `src` is filled in here
+ * after the HTML is mounted in the DOM.
+ *
+ * Call this after `{@html renderBlock(...)}` has been inserted (e.g. from a
+ * Svelte `$effect` keyed to the rendered content).
+ */
+export async function hydrateAssetMedia(root: HTMLElement | null | undefined): Promise<void> {
+  if (!root) return;
+  const els = root.querySelectorAll<HTMLMediaElement>("audio[data-asset], video[data-asset]");
+  for (const el of Array.from(els)) {
+    const rel = el.getAttribute("data-asset");
+    if (!rel) continue;
+    el.removeAttribute("data-asset");
+    try {
+      let url = mediaUrlCache.get(rel);
+      if (!url) {
+        url = await invoke<string>("read_asset_data_url", { path: rel });
+        mediaUrlCache.set(rel, url);
+      }
+      el.src = url;
+    } catch (e) {
+      console.error("Failed to load media asset", rel, e);
+    }
+  }
 }

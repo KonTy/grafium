@@ -118,7 +118,7 @@ fn test_flashcards() {
     assert_eq!(card.interval_days, 0);
 
     // List due cards (should include new cards)
-    let due = db.list_flashcards_due(10).unwrap();
+    let due = db.list_flashcards_due(None, 10).unwrap();
     assert_eq!(due.len(), 1);
 
     // Review
@@ -126,7 +126,7 @@ fn test_flashcards() {
     db.update_flashcard_review(&card.id, 2.6, 1, next_review).unwrap();
 
     // After review with future date, should not be due
-    let due = db.list_flashcards_due(10).unwrap();
+    let due = db.list_flashcards_due(None, 10).unwrap();
     assert_eq!(due.len(), 0);
 }
 

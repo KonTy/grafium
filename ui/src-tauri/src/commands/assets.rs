@@ -2,6 +2,38 @@ use std::fs;
 use tauri::State;
 use crate::AppState;
 
+/// Read a graph-local asset and return it as a `data:` URL (base64).
+///
+/// WebKitGTK's GStreamer media backend cannot load `<audio>`/`<video>` from our
+/// custom `grafium-asset://` scheme, so media is hydrated in-memory via this
+/// command instead. The path is graph-relative (e.g. `assets/anki/gre/x.mp3`);
+/// traversal outside the active graph root is rejected.
+#[tauri::command(rename_all = "camelCase")]
+pub fn read_asset_data_url(state: State<AppState>, path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let rel = path.trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+        return Err("invalid asset path".into());
+    }
+
+    let root = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph.root_dir.clone()
+    };
+    let candidate = root.join(rel);
+
+    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let canon_target = candidate.canonicalize().map_err(|e| e.to_string())?;
+    if !canon_target.starts_with(&canon_root) {
+        return Err("asset outside graph".into());
+    }
+
+    let bytes = fs::read(&canon_target).map_err(|e| e.to_string())?;
+    let mime = crate::mime_for_path(&canon_target);
+    Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&bytes)))
+}
+
 /// Download a remote image and save it to the graph's assets/ directory.
 /// Returns the relative path (e.g., "../assets/abc123.png") for use in markdown.
 #[tauri::command(rename_all = "camelCase")]

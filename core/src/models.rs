@@ -135,6 +135,17 @@ pub struct Flashcard {
     pub review_count: i32,
 }
 
+/// A study "topic" (deck) derived from a flashcard tag, with review counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlashcardTopic {
+    /// The tag that names this topic (empty string = untagged cards).
+    pub topic: String,
+    /// Total cards in this topic.
+    pub total: i64,
+    /// Cards currently due for review in this topic.
+    pub due: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TaskState {
     Todo,
