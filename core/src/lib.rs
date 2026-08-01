@@ -1,14 +1,20 @@
 pub mod ai;
+pub mod assistant;
+pub mod async_util;
 pub mod db;
 pub mod error;
 pub mod graph;
 pub mod ink;
 pub mod import;
 pub mod knowledge;
+pub mod media;
+pub mod model_library;
 pub mod models;
 pub mod parser;
+pub mod scraping;
 pub mod sync;
 
+pub use assistant::{handle_command as handle_assistant_command, AssistantResponse};
 pub use db::Database;
 pub use error::CoreError;
 pub use graph::{Graph, GraphValidationReport};

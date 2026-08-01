@@ -192,6 +192,21 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Rich task row used by the voice-assistant NLU layer. Joined with `blocks`
+/// and `pages` and includes the `priority` block-property (extracted via
+/// SQLite json_extract) so we can sort by priority without a schema change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantTaskRow {
+    pub block_id: String,
+    pub content: String,
+    pub page_title: String,
+    pub state: String,
+    pub priority: String,
+    pub scheduled_date: Option<String>,
+    pub deadline_date: Option<String>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Favorite {
     pub id: String,

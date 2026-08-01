@@ -13,9 +13,19 @@
         android:label="Grafium"
         android:supportsRtl="true">
 
-        <!-- Voice command receiver: SilentPulse discovers this via ASSISTANT_CAPABLE -->
+        <!-- Voice command receiver: SilentPulse discovers this via ASSISTANT_CAPABLE.
+
+             DEPRECATED (2025): the standalone `com.grafium.companion` app is
+             superseded by the Tauri Android build (`com.grafium.app`), which
+             shares the same Rust NLU (grafium_core::assistant) as the desktop
+             UI via JNI. This receiver is disabled so both apps cannot fire on
+             the same broadcast. To revive the standalone companion, set
+             android:enabled="true" — but note that its command grammar is
+             frozen and won't get parity with the Tauri app.
+        -->
         <receiver
             android:name=".VoiceCommandReceiver"
+            android:enabled="false"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.silentpulse.action.ASSISTANT_CAPABLE" />

@@ -10,3 +10,4 @@ pub mod sync;
 pub mod theme;
 pub mod assets;
 pub mod knowledge;
+pub mod assistant;

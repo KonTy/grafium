@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::model_library::LocalModelRef;
+
 /// Top-level AI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
@@ -73,12 +75,16 @@ pub struct LocalConfig {
     pub base_url: String,
     /// Optional API key for endpoint-based providers.
     pub api_key: Option<String>,
-    /// LLM model name.
+    /// LLM model name (used by endpoint-based providers: Ollama, vLLM/
+    /// OpenAI-compatible). Ignored for `ProviderType::HuggingFace`, which
+    /// uses `local_llm` instead.
     pub llm_model: String,
     /// Embedding model name.
     pub embedding_model: String,
-    /// Optional local model path for embedded local runtimes.
-    pub model_path: Option<PathBuf>,
+    /// Settings for the embedded local LLM runtime (llama.cpp), used only
+    /// when `provider == ProviderType::HuggingFace`. Mirrors
+    /// `media::config::WhisperSettings` — see `LocalLlmSettings`.
+    pub local_llm: LocalLlmSettings,
 }
 
 impl Default for LocalConfig {
@@ -89,9 +95,30 @@ impl Default for LocalConfig {
             api_key: None,
             llm_model: "llama3.2".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
-            model_path: None,
+            local_llm: LocalLlmSettings::default(),
         }
     }
+}
+
+/// Settings for the embedded local LLM runtime (llama.cpp via
+/// `llama-cpp-2`). Mirrors `media::config::WhisperSettings`'s shape — both
+/// wrap the same `LocalModelRef` because "which model file" is the same
+/// question, just resolved against a different `ModelKind`
+/// (`ModelKind::Llm` here, `ModelKind::Whisper` there).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalLlmSettings {
+    /// Which GGUF model file to use — see `model_library::LocalModelRef`
+    /// for the exact resolution rules (bare file name, absolute path, or
+    /// auto-pick). Flattened so the on-disk JSON stays flat.
+    #[serde(flatten)]
+    pub model_ref: LocalModelRef,
+    /// Context window size in tokens. `None` uses the model's own trained
+    /// context length (see `n_ctx_train` on the loaded model).
+    pub context_size: Option<u32>,
+    /// Number of transformer layers to offload to the GPU when built with
+    /// a GPU feature (`llm-local-vulkan`); ignored on CPU-only builds.
+    /// `None` offloads every layer — the common "just use the GPU" case.
+    pub gpu_layers: Option<u32>,
 }
 
 /// Cloud AI configuration.

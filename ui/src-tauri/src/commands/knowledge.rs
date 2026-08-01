@@ -1,6 +1,7 @@
 //! Tauri commands for the Knowledge Engine — AI, references, vector search, schemas.
 
-use grafium_core::ai::config::{AiConfig, AiMode, CloudConfig, LocalConfig, ProviderType};
+use grafium_core::ai::config::{AiConfig, AiMode, CloudConfig, LocalConfig, LocalLlmSettings, ProviderType};
+use grafium_core::model_library::LocalModelRef;
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::knowledge::engine::HealthStatus;
@@ -91,7 +92,12 @@ pub async fn ai_set_config(
             .local_base_url
             .unwrap_or_else(|| local_base_url_default.to_string()),
         api_key: payload.local_api_key,
-        model_path: payload.local_model_path.map(PathBuf::from),
+        local_llm: LocalLlmSettings {
+            model_ref: LocalModelRef {
+                model: payload.local_model_path,
+            },
+            ..Default::default()
+        },
         llm_model: payload
             .llm_model
             .unwrap_or_else(|| "llama3.2".to_string()),

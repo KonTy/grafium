@@ -54,6 +54,29 @@ pub fn get_completed_tasks(state: State<AppState>, days: Option<i64>) -> Result<
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+pub struct OpenTask {
+    pub timestamp: i64,
+    pub content: String,
+    pub page_title: String,
+    pub block_id: String,
+    pub state: String,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_open_tasks(state: State<AppState>, days: Option<i64>) -> Result<Vec<OpenTask>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.get_open_tasks(days.unwrap_or(182))
+        .map(|rows| rows.into_iter().map(|(ts, content, page, block_id, state)| OpenTask {
+            timestamp: ts,
+            content,
+            page_title: page,
+            block_id,
+            state,
+        }).collect())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_task_date(state: State<AppState>, block_id: String, kind: String, date: Option<String>) -> Result<String, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;

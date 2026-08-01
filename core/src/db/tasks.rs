@@ -1,4 +1,4 @@
-use crate::models::{Task, TaskState};
+use crate::models::{AssistantTaskRow, Task, TaskState};
 use crate::error::Result;
 use super::Database;
 use chrono::Utc;
@@ -160,6 +160,36 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get open tasks (TODO/DOING/NOW/LATER) with their last-updated timestamp,
+    /// block content, page title, block_id, and state.
+    ///
+    /// Returns rows sorted by most-recently updated first. Intended to power the
+    /// "Open Tasks" section in the UI so voice-added TODOs show up immediately.
+    pub fn get_open_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String, String)>> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
+        let mut stmt = conn.prepare(
+            "SELECT t.updated_at as ts, COALESCE(b.content, '') as content,
+                    COALESCE(p.title, '') as title, t.block_id, t.state
+             FROM tasks t
+             LEFT JOIN blocks b ON b.id = t.block_id
+             LEFT JOIN pages p ON p.id = b.page_id
+             WHERE t.state IN ('TODO', 'DOING', 'NOW', 'LATER')
+               AND t.updated_at >= ?1
+             ORDER BY t.updated_at DESC"
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Get completed tasks with their completion timestamp, block content, and page title.
     pub fn get_completed_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String)>> {
         let conn = self.conn()?;
@@ -186,4 +216,160 @@ impl Database {
         })?.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    // ── Voice-assistant queries ────────────────────────────────────────────
+    //
+    // These power the unified NLU layer (grafium_core::assistant). They join
+    // tasks with blocks/pages and extract the `priority` block-property via
+    // json_extract (rusqlite links against SQLite's JSON1 extension by default).
+
+    /// Open tasks (TODO/DOING/NOW/LATER) sorted by priority
+    /// (urgent > high > medium > low > none), then by updated_at desc.
+    pub fn list_open_tasks_prioritized(&self, limit: Option<i64>) -> Result<Vec<AssistantTaskRow>> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT t.block_id,
+                    COALESCE(b.content, '') as content,
+                    COALESCE(p.title, '') as title,
+                    t.state,
+                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    t.scheduled_date,
+                    t.deadline_date,
+                    t.updated_at
+             FROM tasks t
+             LEFT JOIN blocks b ON b.id = t.block_id
+             LEFT JOIN pages p ON p.id = b.page_id
+             WHERE t.state IN ('TODO','DOING','NOW','LATER')
+             ORDER BY CASE priority
+                        WHEN 'urgent' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3
+                        ELSE 4
+                      END,
+                      t.updated_at DESC
+             {}",
+            limit.map(|n| format!("LIMIT {}", n.max(1))).unwrap_or_default()
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_assistant_task)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Open tasks with deadline_date = date_iso.
+    pub fn list_open_tasks_by_due(&self, date_iso: &str) -> Result<Vec<AssistantTaskRow>> {
+        self.query_open_tasks(
+            "AND t.deadline_date = ?1",
+            &[&date_iso],
+        )
+    }
+
+    /// Open tasks with scheduled_date = date_iso.
+    pub fn list_open_tasks_by_scheduled(&self, date_iso: &str) -> Result<Vec<AssistantTaskRow>> {
+        self.query_open_tasks(
+            "AND t.scheduled_date = ?1",
+            &[&date_iso],
+        )
+    }
+
+    /// Open tasks with scheduled_date or deadline_date in [start_iso, end_iso].
+    pub fn list_open_tasks_in_range(&self, start_iso: &str, end_iso: &str) -> Result<Vec<AssistantTaskRow>> {
+        self.query_open_tasks(
+            "AND (
+                (t.scheduled_date IS NOT NULL AND t.scheduled_date BETWEEN ?1 AND ?2)
+                OR (t.deadline_date IS NOT NULL AND t.deadline_date BETWEEN ?1 AND ?2)
+            )",
+            &[&start_iso, &end_iso],
+        )
+    }
+
+    /// Open tasks that are relevant "today": scheduled on/before today,
+    /// deadline on/before today, or with no date but recently updated.
+    pub fn list_open_tasks_today(&self, today_iso: &str) -> Result<Vec<AssistantTaskRow>> {
+        self.query_open_tasks(
+            "AND (
+                t.scheduled_date IS NOT NULL AND t.scheduled_date <= ?1
+                OR t.deadline_date IS NOT NULL AND t.deadline_date <= ?1
+            )",
+            &[&today_iso],
+        )
+    }
+
+    /// Fuzzy search for open tasks by content substring.
+    pub fn find_open_tasks(&self, query: &str) -> Result<Vec<AssistantTaskRow>> {
+        let pattern = format!("%{}%", query.trim().to_lowercase());
+        self.query_open_tasks(
+            "AND LOWER(COALESCE(b.content, '')) LIKE ?1",
+            &[&pattern],
+        )
+    }
+
+    /// All block contents on the journal page whose title matches `date_iso`.
+    /// Used by the "read today's journal" voice command.
+    pub fn list_journal_entries_for_date(&self, date_iso: &str) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT b.content
+             FROM blocks b
+             JOIN pages p ON p.id = b.page_id
+             WHERE p.is_journal = 1
+               AND p.title = ?1
+             ORDER BY b.order_index ASC"
+        )?;
+        let rows = stmt.query_map(params![date_iso], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().filter(|s| !s.trim().is_empty()).collect())
+    }
+
+    // Internal helper used by the assistant queries above.
+    fn query_open_tasks(
+        &self,
+        extra_where: &str,
+        params_slice: &[&dyn rusqlite::types::ToSql],
+    ) -> Result<Vec<AssistantTaskRow>> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT t.block_id,
+                    COALESCE(b.content, '') as content,
+                    COALESCE(p.title, '') as title,
+                    t.state,
+                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    t.scheduled_date,
+                    t.deadline_date,
+                    t.updated_at
+             FROM tasks t
+             LEFT JOIN blocks b ON b.id = t.block_id
+             LEFT JOIN pages p ON p.id = b.page_id
+             WHERE t.state IN ('TODO','DOING','NOW','LATER')
+             {}
+             ORDER BY CASE priority
+                        WHEN 'urgent' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 3
+                        ELSE 4
+                      END,
+                      t.updated_at DESC",
+            extra_where
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_slice, row_to_assistant_task)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
+
+fn row_to_assistant_task(row: &rusqlite::Row) -> rusqlite::Result<AssistantTaskRow> {
+    Ok(AssistantTaskRow {
+        block_id: row.get(0)?,
+        content: row.get(1)?,
+        page_title: row.get(2)?,
+        state: row.get(3)?,
+        priority: row.get(4)?,
+        scheduled_date: row.get(5)?,
+        deadline_date: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+

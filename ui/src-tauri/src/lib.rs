@@ -1,5 +1,11 @@
 mod commands;
 
+// Android-only JNI bridge: exposes grafium_core::assistant::handle_command as
+// `Java_com_grafium_app_AssistantReceiver_nativeHandleCommand` so the Kotlin
+// receiver can share the same NLU as the desktop Tauri command above.
+#[cfg(target_os = "android")]
+mod android_jni;
+
 use commands::graph::GraphConfig;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use grafium_core::Graph;
@@ -1233,7 +1239,9 @@ pub fn run() {
             commands::tasks::cycle_task_state,
             commands::tasks::get_completion_counts,
             commands::tasks::get_completed_tasks,
+            commands::tasks::get_open_tasks,
             commands::tasks::set_task_date,
+            commands::assistant::handle_assistant_command,
             commands::flashcards::list_flashcards_due,
             commands::flashcards::list_flashcard_topics,
             commands::flashcards::list_all_flashcards,

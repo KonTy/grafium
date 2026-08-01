@@ -1,9 +1,9 @@
 [workspace]
-members = ["core", "ui/src-tauri"]
+members = ["core", "ui/src-tauri", "tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.101"
+version = "0.0.102"
 edition = "2021"
 license = "MIT"
 

@@ -91,9 +91,33 @@ impl KnowledgeEngine {
                             )));
                         }
                         ProviderType::HuggingFace => {
-                            return Err(CoreError::Other(
-                                "Embedded Hugging Face local runtime is not implemented yet. Use vLLM / OpenAI-compatible local endpoint mode for now.".to_string(),
-                            ));
+                            #[cfg(feature = "llm-local")]
+                            {
+                                self.llm = Some(Box::new(
+                                    crate::ai::providers::local_llm::LocalLlm::from_config(
+                                        &self.config,
+                                        &self.data_dir,
+                                    )?,
+                                ));
+                                // No local embedding backend yet — this leaves
+                                // `self.embedder` unset, the same "partial init"
+                                // pattern other branches already use when they
+                                // only set one of llm/embedder (see the cloud
+                                // `_ => {}` arms below). Full reference/vector
+                                // search needs an embedder too; a plain
+                                // completion consumer (e.g. video
+                                // summarization) only needs `self.llm` and can
+                                // use `LocalLlm::from_config` directly without
+                                // going through the engine at all.
+                            }
+                            #[cfg(not(feature = "llm-local"))]
+                            {
+                                return Err(CoreError::Other(
+                                    "Embedded Hugging Face local runtime requires building \
+                                     grafium-core with the `llm-local` (or `llm-local-vulkan`) \
+                                     Cargo feature enabled.".to_string(),
+                                ));
+                            }
                         }
                         _ => {
                             return Err(CoreError::Other(

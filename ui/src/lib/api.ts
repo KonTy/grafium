@@ -146,6 +146,31 @@ export function getCompletedTasks(days?: number): Promise<CompletedTask[]> {
   return invoke("get_completed_tasks", { days });
 }
 
+export interface OpenTask {
+  timestamp: number;
+  content: string;
+  page_title: string;
+  block_id: string;
+  state: string;
+}
+
+export function getOpenTasks(days?: number): Promise<OpenTask[]> {
+  return invoke("get_open_tasks", { days });
+}
+
+/** Response from the shared voice-assistant NLU (`grafium_core::assistant`).
+ *  Backs both the desktop UI and the Android AssistantReceiver JNI shim. */
+export interface AssistantResponse {
+  speech: string;
+  followup: boolean;
+}
+
+/** Send a raw voice / text transcript to the shared Rust NLU. The same code
+ *  path runs on Android via JNI, so the two platforms cannot drift. */
+export function handleAssistantCommand(transcript: string): Promise<AssistantResponse> {
+  return invoke("handle_assistant_command", { transcript });
+}
+
 export function getBlockPageTitle(blockId: string): Promise<string> {
   return invoke("get_block_page_title", { blockId });
 }

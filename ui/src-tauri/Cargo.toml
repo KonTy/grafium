@@ -1,6 +1,6 @@
 [package]
 name = "grafium"
-version = "0.0.101"
+version = "0.0.102"
 edition = "2021"
 
 [dependencies]
@@ -22,6 +22,11 @@ base64 = "0.22"
 webkit2gtk = "2.0.2"
 gtk = "0.18"
 gdk = "0.18"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# JNI bindings so the Android AssistantReceiver can call the shared Rust
+# NLU (grafium_core::assistant) instead of duplicating the grammar in Kotlin.
+jni = "0.21"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

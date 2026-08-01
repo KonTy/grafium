@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { getCompletionCounts, getCompletedTasks, cycleTaskState } from "../lib/api";
+  import { getCompletionCounts, getCompletedTasks, getOpenTasks, cycleTaskState } from "../lib/api";
   import { renderBlock } from "../lib/markdown";
-  import type { CompletedTask } from "../lib/api";
+  import type { CompletedTask, OpenTask } from "../lib/api";
 
   interface Props {
     onNavigate?: (title: string) => void;
@@ -11,6 +11,7 @@
 
   let completionMap = $state<Map<string, number>>(new Map());
   let completedTasks = $state<CompletedTask[]>([]);
+  let openTasks = $state<OpenTask[]>([]);
   let loading = $state(true);
   let totalCompleted = $state(0);
   let currentStreak = $state(0);
@@ -27,9 +28,10 @@
   async function loadStats() {
     loading = true;
     try {
-      const [counts, tasks] = await Promise.all([
+      const [counts, tasks, open] = await Promise.all([
         getCompletionCounts(DAYS),
         getCompletedTasks(DAYS),
+        getOpenTasks(DAYS),
       ]);
       const map = new Map<string, number>();
       let total = 0;
@@ -39,6 +41,7 @@
       }
       completionMap = map;
       completedTasks = tasks;
+      openTasks = open;
       totalCompleted = total;
       computeStreaks(map);
     } catch (e) {
@@ -190,6 +193,20 @@
     }
   }
 
+  async function completeTask(blockId: string) {
+    // Cycle forward until we reach DONE. TODO → DOING → DONE requires two clicks,
+    // so loop up to 3 times defensively.
+    try {
+      for (let i = 0; i < 3; i++) {
+        const next = await cycleTaskState(blockId);
+        if (next === "DONE") break;
+      }
+      await loadStats();
+    } catch (e) {
+      console.error("Failed to complete task:", e);
+    }
+  }
+
   $effect(() => {
     // dummy read to trigger reactivity
     completionMap;
@@ -284,6 +301,48 @@
         <br><span class="tooltip-date">{formatDate(hoveredDay.date)}</span>
       </div>
     {/if}
+
+    <!-- Open TODOs -->
+    <div class="open-tasks">
+      <h2 class="section-heading">
+        Open Tasks
+        <span class="section-count">{openTasks.length}</span>
+      </h2>
+      {#if openTasks.length === 0}
+        <div class="empty-state">
+          <p>No open tasks. Add one with a <code>- TODO ...</code> block, or say &quot;add todo &lt;text&gt;&quot; to your voice assistant.</p>
+        </div>
+      {:else}
+        <div class="task-list">
+          {#each openTasks as task}
+            <div class="task-item open">
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="task-check open"
+                title="Mark done"
+                onclick={() => completeTask(task.block_id)}
+              >&#9633;</div>
+              <div class="task-body">
+                <span class="task-content">
+                  <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
+                  {@html renderBlock(stripTaskMarker(task.content))}
+                </span>
+                <span class="task-meta">
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <span
+                    class="task-page"
+                    onclick={() => onNavigate?.(task.page_title)}
+                  >{task.page_title}</span>
+                  <span class="task-time">{formatDate(new Date(task.timestamp).toISOString().split("T")[0])}</span>
+                </span>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     <!-- Completed tasks grouped by date -->
     <div class="completed-tasks">
@@ -515,6 +574,50 @@
     color: var(--text-muted);
     font-size: 0.7rem;
   }
+
+  /* Open tasks section */
+  .open-tasks {
+    padding: 24px 24px 0;
+  }
+
+  .section-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    font-weight: 500;
+  }
+
+  .task-item.open .task-check.open {
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+
+  .task-item.open .task-check.open:hover {
+    color: var(--accent-secondary);
+  }
+
+  .task-state {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    vertical-align: 1px;
+  }
+
+  .task-state-todo { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  .task-state-doing { color: var(--accent-secondary); background: color-mix(in srgb, var(--accent-secondary) 15%, transparent); }
+  .task-state-now { color: var(--text-link); background: color-mix(in srgb, var(--text-link) 15%, transparent); }
+  .task-state-later { color: var(--text-muted); }
 
   /* Completed tasks */
   .completed-tasks {

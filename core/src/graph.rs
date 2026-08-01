@@ -698,6 +698,99 @@ impl Graph {
         Ok(new_content)
     }
 
+    /// Get today's journal page (yyyy-mm-dd title), creating it if missing.
+    /// This is the anchor point for voice-assistant additions so both the
+    /// desktop UI and Android receiver land TODOs / journal entries in a
+    /// predictable place.
+    pub fn get_or_create_today_journal(&self) -> Result<Page> {
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        match self.db.get_page_by_title(&today) {
+            Ok(p) => Ok(p),
+            Err(_) => self.create_page(&today, true),
+        }
+    }
+
+    /// Append a `TODO <text>` block to today's journal, tagged with optional
+    /// `priority:: <level>` block property and SCHEDULED/DEADLINE lines. The
+    /// block is inserted at the end of the page, the tasks table is upserted
+    /// so it shows up immediately in the Stats tab and voice-assistant
+    /// queries, and the .md file is rewritten so external tooling / sync
+    /// (Syncthing, Git, Logseq) picks it up.
+    pub fn add_task_to_today(
+        &self,
+        text: &str,
+        priority: Option<&str>,
+        scheduled_date: Option<&str>,
+        deadline_date: Option<&str>,
+    ) -> Result<Block> {
+        let page = self.get_or_create_today_journal()?;
+        let order = self.next_order_index_for_page(&page.id)?;
+
+        // Build the block content in the same format the parser produces so
+        // the file → re-index round-trip is stable.
+        let mut content = format!("TODO {}", text.trim());
+        if let Some(d) = scheduled_date {
+            let abbr = compute_day_abbr(d);
+            content.push_str(&format!("\nSCHEDULED: <{} {}>", d, abbr));
+        }
+        if let Some(d) = deadline_date {
+            let abbr = compute_day_abbr(d);
+            content.push_str(&format!("\nDEADLINE: <{} {}>", d, abbr));
+        }
+
+        let mut props = serde_json::Map::new();
+        if let Some(p) = priority {
+            if !p.is_empty() {
+                props.insert("priority".to_string(), serde_json::Value::String(p.to_string()));
+            }
+        }
+
+        let block = self.create_block(
+            &page.id,
+            None,
+            order,
+            &content,
+            BlockType::Text,
+            serde_json::Value::Object(props),
+        )?;
+
+        // create_block bypasses the parser, so explicitly upsert the task row
+        // (this is what powers the Stats tab and "list todos" voice queries).
+        self.db.upsert_task(
+            &block.id,
+            &crate::models::TaskState::Todo,
+            scheduled_date,
+            deadline_date,
+        )?;
+
+        Ok(block)
+    }
+
+    /// Append a plain-text entry to today's journal (non-task).
+    pub fn add_journal_entry_today(&self, text: &str) -> Result<Block> {
+        let page = self.get_or_create_today_journal()?;
+        let order = self.next_order_index_for_page(&page.id)?;
+        self.create_block(
+            &page.id,
+            None,
+            order,
+            text.trim(),
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+    }
+
+    fn next_order_index_for_page(&self, page_id: &str) -> Result<i32> {
+        let existing = self.db.list_blocks_for_page(page_id)?;
+        let max = existing
+            .iter()
+            .filter(|b| b.parent_id.is_none())
+            .map(|b| b.order_index)
+            .max()
+            .unwrap_or(-1);
+        Ok(max + 1)
+    }
+
     /// Delete a block: removes from DB, then writes .md file.
     pub fn delete_block(&self, block_id: &str) -> Result<()> {
         let block = self.db.get_block_by_id(block_id)?;

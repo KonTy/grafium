@@ -3,8 +3,6 @@
 //! or generics for compile-time monomorphization in hot paths.
 
 use serde::{Deserialize, Serialize};
-use std::future::Future;
-use std::pin::Pin;
 
 use crate::error::Result;
 
@@ -82,7 +80,10 @@ pub struct ChunkEmbedding {
 }
 
 // Type alias for async trait returns (avoids the `async_trait` macro overhead).
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+// Defined once in `async_util` and re-exported here so every AI provider
+// (and, elsewhere, `scraping::browser::BrowserDriver`) shares the exact same
+// type instead of each module declaring its own `Pin<Box<dyn Future<...>>>`.
+pub use crate::async_util::BoxFuture;
 
 /// LLM provider trait — abstracts over Ollama, OpenAI, Anthropic, etc.
 pub trait LlmProvider: Send + Sync {

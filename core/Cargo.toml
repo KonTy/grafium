@@ -14,6 +14,7 @@ rusqlite = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
 regex = "1"
+once_cell = "1"
 pulldown-cmark = "0.10"
 notify = { version = "6", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.4"
@@ -23,10 +24,39 @@ urlencoding = { version = "2", optional = true }
 tokio = { version = "1", features = ["sync", "rt"] }
 serde_yaml = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+whisper-rs = { version = "0.16", optional = true }
+hound = { version = "3", optional = true }
+llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler"], optional = true }
+encoding_rs = { version = "0.8", optional = true }
+scraper = "0.27"
+pdf-extract = "0.12"
+url = "2"
 
 [features]
 default = ["sync"]
 sync = ["urlencoding"]
+# Local video/audio transcription (`media::transcribe`). Optional because it
+# pulls in a C++ build of whisper.cpp — most consumers (e.g. the Android
+# build) don't need it, and it noticeably slows down a clean build.
+media = ["dep:whisper-rs", "dep:hound"]
+# Same as `media`, but offloads whisper.cpp inference to the GPU via Vulkan
+# (works with just the Vulkan loader + GPU driver already installed — no
+# full CUDA toolkit required).
+media-vulkan = ["media", "whisper-rs/vulkan"]
+# Embedded local LLM inference (`ai::providers::local_llm`), the LLM-side
+# counterpart to `media`. Optional for the same reason: pulls in a C++
+# build of llama.cpp. Built as a shared library (`llama-cpp-2/dynamic-link`)
+# rather than statically, because llama.cpp and whisper.cpp both vendor
+# their own copy of GGML — two *static* copies linked into the same binary
+# collide at link time with duplicate-symbol errors when both `media` and
+# `llm-local` are enabled together (as they will be for the video pipeline:
+# transcribe with Whisper, then summarize with a local LLM). Dynamic
+# linking keeps each engine's GGML copy in its own shared object so they
+# don't collide.
+llm-local = ["dep:llama-cpp-2", "dep:encoding_rs", "llama-cpp-2/dynamic-link"]
+# Same as `llm-local`, but offloads inference to the GPU via Vulkan (no
+# CUDA toolkit required — same rationale as `media-vulkan`).
+llm-local-vulkan = ["llm-local", "llama-cpp-2/vulkan"]
 
 [dev-dependencies]
 tempfile = "3"
