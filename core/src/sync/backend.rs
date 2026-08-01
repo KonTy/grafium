@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use std::path::Path;
 
 /// Metadata about a file on a sync backend.
@@ -8,7 +8,9 @@ pub struct FileMetadata {
     pub rel_path: String,
     /// Size in bytes
     pub size: u64,
-    /// Last modified timestamp (Unix epoch seconds)
+    /// Last modified timestamp since the Unix epoch. Backends may provide
+    /// second or finer precision; comparisons are only made within the same
+    /// side (local-vs-local, remote-vs-remote).
     pub modified_at: i64,
     /// Content hash (SHA-256 hex). None if not yet computed.
     pub hash: Option<String>,
@@ -25,6 +27,14 @@ pub trait SyncBackend: Send + Sync {
 
     /// List all .md files on the remote with their metadata.
     fn list_files(&self) -> Result<Vec<FileMetadata>>;
+
+    /// Fetch metadata for one remote file.
+    fn stat_file(&self, rel_path: &str) -> Result<FileMetadata> {
+        self.list_files()?
+            .into_iter()
+            .find(|file| file.rel_path == rel_path)
+            .ok_or_else(|| CoreError::NotFound(format!("Remote file not found: {rel_path}")))
+    }
 
     /// Read a file's content by relative path.
     fn read_file(&self, rel_path: &str) -> Result<Vec<u8>>;

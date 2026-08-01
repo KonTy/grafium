@@ -1,6 +1,55 @@
 use super::Database;
 use crate::error::Result;
-use rusqlite::params;
+use rusqlite::{params, Connection};
+
+fn sync_page_properties_on_conn(
+    conn: &Connection,
+    page_id: &str,
+    properties: &serde_json::Value,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM page_properties WHERE page_id = ?1",
+        params![page_id],
+    )?;
+
+    if let Some(obj) = properties.as_object() {
+        for (key, val) in obj {
+            let (value_str, value_type) = json_value_to_property(val);
+            conn.execute(
+                "INSERT OR REPLACE INTO page_properties (page_id, key, value, value_type) VALUES (?1, ?2, ?3, ?4)",
+                params![page_id, key, value_str, value_type],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_block_properties_on_conn(
+    conn: &Connection,
+    block_id: &str,
+    properties: &serde_json::Value,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM block_properties WHERE block_id = ?1",
+        params![block_id],
+    )?;
+
+    if let Some(obj) = properties.as_object() {
+        for (key, val) in obj {
+            if key == "id" {
+                continue;
+            }
+            let (value_str, value_type) = json_value_to_property(val);
+            conn.execute(
+                "INSERT OR REPLACE INTO block_properties (block_id, key, value, value_type) VALUES (?1, ?2, ?3, ?4)",
+                params![block_id, key, value_str, value_type],
+            )?;
+        }
+    }
+
+    Ok(())
+}
 
 impl Database {
     /// Sync page properties from JSON blob into the normalized `page_properties` table.
@@ -10,25 +59,7 @@ impl Database {
         properties: &serde_json::Value,
     ) -> Result<()> {
         let conn = self.conn()?;
-
-        // Clear existing properties for this page
-        conn.execute(
-            "DELETE FROM page_properties WHERE page_id = ?1",
-            params![page_id],
-        )?;
-
-        // Insert each key-value pair
-        if let Some(obj) = properties.as_object() {
-            for (key, val) in obj {
-                let (value_str, value_type) = json_value_to_property(val);
-                conn.execute(
-                    "INSERT OR REPLACE INTO page_properties (page_id, key, value, value_type) VALUES (?1, ?2, ?3, ?4)",
-                    params![page_id, key, value_str, value_type],
-                )?;
-            }
-        }
-
-        Ok(())
+        sync_page_properties_on_conn(&conn, page_id, properties)
     }
 
     /// Sync block properties from JSON blob into the normalized `block_properties` table.
@@ -38,29 +69,7 @@ impl Database {
         properties: &serde_json::Value,
     ) -> Result<()> {
         let conn = self.conn()?;
-
-        // Clear existing properties for this block
-        conn.execute(
-            "DELETE FROM block_properties WHERE block_id = ?1",
-            params![block_id],
-        )?;
-
-        // Insert each key-value pair
-        if let Some(obj) = properties.as_object() {
-            for (key, val) in obj {
-                // Skip internal "id" property
-                if key == "id" {
-                    continue;
-                }
-                let (value_str, value_type) = json_value_to_property(val);
-                conn.execute(
-                    "INSERT OR REPLACE INTO block_properties (block_id, key, value, value_type) VALUES (?1, ?2, ?3, ?4)",
-                    params![block_id, key, value_str, value_type],
-                )?;
-            }
-        }
-
-        Ok(())
+        sync_block_properties_on_conn(&conn, block_id, properties)
     }
 
     /// Delete all normalized properties for blocks belonging to a page.
@@ -71,6 +80,24 @@ impl Database {
             params![page_id],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn sync_page_properties_in_connection(
+        &self,
+        conn: &Connection,
+        page_id: &str,
+        properties: &serde_json::Value,
+    ) -> Result<()> {
+        sync_page_properties_on_conn(conn, page_id, properties)
+    }
+
+    pub(crate) fn sync_block_properties_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+        properties: &serde_json::Value,
+    ) -> Result<()> {
+        sync_block_properties_on_conn(conn, block_id, properties)
     }
 
     /// Backfill all properties from JSON blobs into normalized tables.

@@ -3,13 +3,14 @@
 //! sidebar's backlinks so together they cover both edge directions without
 //! either panel duplicating the other's data or rendering code.
 
-use std::rc::Rc;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::Span;
-use ratatui::widgets::{Block as RBlock, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block as RBlock, Borders, Paragraph};
 use ratatui::Frame;
 
 use grafium_core::models::{Block, Link, Page};
@@ -18,7 +19,7 @@ use crate::data::GraphRepository;
 use crate::panels::{Panel, PanelAction};
 use crate::widgets::editor_pane::EditorPane;
 use crate::widgets::list_panel::ListPanel;
-use crate::widgets::markdown_view::render_markdown;
+use crate::widgets::markdown_view::MarkdownRenderCache;
 use crate::widgets::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,7 +29,7 @@ pub enum CenterMode {
 }
 
 pub struct CenterPanel {
-    repo: Rc<dyn GraphRepository>,
+    repo: Arc<dyn GraphRepository>,
     mode: CenterMode,
     page: Option<Page>,
     blocks: Vec<Block>,
@@ -38,12 +39,14 @@ pub struct CenterPanel {
     scroll_offset: usize,
     editor: EditorPane<'static>,
     outlinks: Vec<(Link, String)>,
+    outlinks_loaded_for: Option<String>,
     outlinks_panel: ListPanel,
+    markdown_cache: MarkdownRenderCache,
     error: Option<String>,
 }
 
 impl CenterPanel {
-    pub fn new(repo: Rc<dyn GraphRepository>) -> Self {
+    pub fn new(repo: Arc<dyn GraphRepository>) -> Self {
         Self {
             repo,
             mode: CenterMode::Blocks,
@@ -53,7 +56,9 @@ impl CenterPanel {
             scroll_offset: 0,
             editor: EditorPane::new(),
             outlinks: Vec::new(),
+            outlinks_loaded_for: None,
             outlinks_panel: ListPanel::new(),
+            markdown_cache: MarkdownRenderCache::new(),
             error: None,
         }
     }
@@ -89,6 +94,9 @@ impl CenterPanel {
                     Some(0)
                 });
                 self.scroll_offset = 0;
+                self.outlinks.clear();
+                self.outlinks_loaded_for = None;
+                self.markdown_cache.clear();
                 self.error = None;
                 Ok(())
             }
@@ -102,32 +110,50 @@ impl CenterPanel {
     pub fn toggle_graph_mode(&mut self) {
         self.mode = match self.mode {
             CenterMode::Blocks => {
-                self.load_outlinks();
+                self.ensure_outlinks_loaded();
                 CenterMode::Graph
             }
             CenterMode::Graph => CenterMode::Blocks,
         };
     }
 
-    fn load_outlinks(&mut self) {
+    fn ensure_outlinks_loaded(&mut self) {
         let Some(page_id) = self.current_page_id() else {
             self.outlinks = Vec::new();
+            self.outlinks_loaded_for = None;
             return;
         };
-        self.outlinks = self
-            .repo
-            .get_links_from_page(&page_id)
-            .unwrap_or_default()
+        if self.outlinks_loaded_for.as_deref() == Some(page_id.as_str()) {
+            return;
+        }
+        let links = self.repo.get_links_from_page(&page_id).unwrap_or_default();
+        let mut seen_targets = HashSet::new();
+        let mut target_order = Vec::new();
+        for link in &links {
+            if seen_targets.insert(link.to_page_id.clone()) {
+                target_order.push(link.to_page_id.clone());
+            }
+        }
+        let mut titles_by_page = HashMap::new();
+        for target_page_id in target_order {
+            let title = self
+                .repo
+                .get_page_by_id(&target_page_id)
+                .map(|p| p.title)
+                .unwrap_or_else(|_| target_page_id.clone());
+            titles_by_page.insert(target_page_id, title);
+        }
+        self.outlinks = links
             .into_iter()
             .map(|link| {
-                let title = self
-                    .repo
-                    .get_page_by_id(&link.to_page_id)
-                    .map(|p| p.title)
-                    .unwrap_or_else(|_| link.to_page_id.clone());
+                let title = titles_by_page
+                    .get(&link.to_page_id)
+                    .cloned()
+                    .unwrap_or_else(|| link.to_page_id.clone());
                 (link, title)
             })
             .collect();
+        self.outlinks_loaded_for = Some(page_id);
         self.outlinks_panel.select(None);
     }
 
@@ -142,6 +168,8 @@ impl CenterPanel {
                             b.content = new_content;
                         }
                     }
+                    self.markdown_cache.clear();
+                    self.outlinks_loaded_for = None;
                     self.error = None;
                     Ok(Some("Saved.".to_string()))
                 }
@@ -222,6 +250,7 @@ impl CenterPanel {
                         self.block_list.select(Some(self.blocks.len() - 1));
                         self.editor.load(&block.id, &block.content);
                         self.editor.enter_insert_mode();
+                        self.markdown_cache.clear();
                         PanelAction::None
                     }
                     Err(e) => PanelAction::Status(format!("Create block failed: {e}")),
@@ -254,12 +283,23 @@ impl CenterPanel {
     /// Height (in terminal rows) this block currently needs: the raw
     /// textarea's line count while it's being edited, or the rendered
     /// markdown's line count otherwise. Used to lay out the document flow.
-    fn block_height(&self, block: &Block) -> u16 {
+    fn block_height(&mut self, block_index: usize, width: u16) -> u16 {
+        let block = &self.blocks[block_index];
         if self.editor.is_editing() && self.editor.block_id() == Some(block.id.as_str()) {
             self.editor.line_count() as u16
         } else {
-            render_markdown(&block.content).len().max(1) as u16
+            self.rendered_block_lines(block_index, width).len().max(1) as u16
         }
+    }
+
+    fn rendered_block_lines(
+        &mut self,
+        block_index: usize,
+        width: u16,
+    ) -> Arc<Vec<ratatui::text::Line<'static>>> {
+        let blocks = &self.blocks;
+        let cache = &mut self.markdown_cache;
+        cache.render(&blocks[block_index].content, width)
     }
 
     /// Ensures the selected block is visible by adjusting `scroll_offset`,
@@ -277,16 +317,19 @@ impl CenterPanel {
             return;
         }
 
+        let marker_width = if area.width > 1 { 2 } else { 0 };
+        let content_width = area.width.saturating_sub(marker_width).max(1);
+
         let selected = self.block_list.selected().unwrap_or(0);
         if selected < self.scroll_offset {
             self.scroll_offset = selected;
         }
         // Grow the offset until the selected block's bottom edge fits within `area`.
         loop {
-            let used: u16 = self.blocks[self.scroll_offset..=selected]
-                .iter()
-                .map(|b| self.block_height(b))
-                .sum();
+            let mut used = 0u16;
+            for idx in self.scroll_offset..=selected {
+                used = used.saturating_add(self.block_height(idx, content_width));
+            }
             if used <= area.height || self.scroll_offset >= selected {
                 break;
             }
@@ -300,12 +343,13 @@ impl CenterPanel {
             .flatten();
         let mut y = area.y;
         let bottom = area.y + area.height;
-        for (i, block) in self.blocks.iter().enumerate().skip(self.scroll_offset) {
+        for i in self.scroll_offset..self.blocks.len() {
             if y >= bottom {
                 break;
             }
+            let block = &self.blocks[i];
             let is_editing_this = editing_id.as_deref() == Some(block.id.as_str());
-            let height = self.block_height(block).min(bottom - y);
+            let height = self.block_height(i, content_width).min(bottom - y);
             let rect = Rect {
                 x: area.x,
                 y,
@@ -323,12 +367,18 @@ impl CenterPanel {
                     Style::default()
                 };
                 let marker = if is_selected { "▌" } else { " " };
-                let mut lines = render_markdown(&block.content);
-                for line in &mut lines {
-                    line.spans
-                        .insert(0, Span::styled(format!("{marker} "), marker_style));
+                let mut lines: Vec<_> = self
+                    .rendered_block_lines(i, content_width)
+                    .iter()
+                    .cloned()
+                    .collect();
+                if marker_width > 0 {
+                    for line in &mut lines {
+                        line.spans
+                            .insert(0, Span::styled(format!("{marker} "), marker_style));
+                    }
                 }
-                f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rect);
+                f.render_widget(Paragraph::new(lines), rect);
             }
             y += height;
         }
@@ -395,8 +445,8 @@ impl Panel for CenterPanel {
 mod tests {
     use super::*;
 
-    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use grafium_core::models::BlockType;
     use ratatui::crossterm::event::KeyModifiers;
@@ -405,8 +455,8 @@ mod tests {
 
     struct MockRepo {
         pages: HashMap<String, Page>,
-        blocks: RefCell<HashMap<String, Vec<Block>>>,
-        update_error: RefCell<Option<String>>,
+        blocks: Mutex<HashMap<String, Vec<Block>>>,
+        update_error: Mutex<Option<String>>,
     }
 
     impl MockRepo {
@@ -426,13 +476,13 @@ mod tests {
 
             Self {
                 pages: pages_by_id,
-                blocks: RefCell::new(blocks_by_page),
-                update_error: RefCell::new(None),
+                blocks: Mutex::new(blocks_by_page),
+                update_error: Mutex::new(None),
             }
         }
 
         fn fail_updates_with(&self, message: &str) {
-            *self.update_error.borrow_mut() = Some(message.to_string());
+            *self.update_error.lock().unwrap() = Some(message.to_string());
         }
     }
 
@@ -458,18 +508,19 @@ mod tests {
 
         fn list_blocks_for_page(&self, page_id: &str) -> RepoResult<Vec<Block>> {
             self.blocks
-                .borrow()
+                .lock()
+                .unwrap()
                 .get(page_id)
                 .cloned()
                 .ok_or_else(|| format!("missing blocks for page: {page_id}"))
         }
 
         fn update_block(&self, block_id: &str, content: &str) -> RepoResult<()> {
-            if let Some(err) = self.update_error.borrow().clone() {
+            if let Some(err) = self.update_error.lock().unwrap().clone() {
                 return Err(err);
             }
 
-            for blocks in self.blocks.borrow_mut().values_mut() {
+            for blocks in self.blocks.lock().unwrap().values_mut() {
                 if let Some(block) = blocks.iter_mut().find(|block| block.id == block_id) {
                     block.content = content.to_string();
                     return Ok(());
@@ -537,7 +588,7 @@ mod tests {
 
     #[test]
     fn failed_save_blocks_navigation_and_exposes_error_for_rendering() {
-        let repo = Rc::new(MockRepo::new(
+        let repo = Arc::new(MockRepo::new(
             vec![page("page-1", "Page One"), page("page-2", "Page Two")],
             vec![block("block-1", "page-1", "draft")],
         ));

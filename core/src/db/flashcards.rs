@@ -3,9 +3,48 @@ use crate::error::Result;
 use crate::models::Flashcard;
 use crate::models::FlashcardTopic;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+
+fn upsert_flashcard_on_conn(
+    conn: &Connection,
+    block_id: &str,
+    front: &str,
+    back: &str,
+    tags: &[String],
+) -> Result<Flashcard> {
+    let now = Utc::now().timestamp_millis();
+    let id = Uuid::new_v4().to_string();
+    let tags_json = serde_json::to_string(tags)?;
+
+    conn.execute(
+        "INSERT INTO flashcards (id, block_id, front, back, tags, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(block_id) DO UPDATE SET front = ?3, back = ?4, tags = ?5, updated_at = ?7",
+        params![id, block_id, front, back, tags_json, now, now],
+    )?;
+
+    Ok(Flashcard {
+        id,
+        block_id: block_id.to_string(),
+        front: front.to_string(),
+        back: back.to_string(),
+        tags: tags.to_vec(),
+        created_at: now,
+        updated_at: now,
+        last_reviewed_at: None,
+        next_review_at: None,
+        ease_factor: 2.5,
+        interval_days: 0,
+        review_count: 0,
+    })
+}
+
+fn delete_flashcard_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM flashcards WHERE block_id = ?1", params![block_id])?;
+    Ok(())
+}
 
 impl Database {
     pub fn upsert_flashcard(
@@ -16,31 +55,26 @@ impl Database {
         tags: &[String],
     ) -> Result<Flashcard> {
         let conn = self.conn()?;
-        let now = Utc::now().timestamp_millis();
-        let id = Uuid::new_v4().to_string();
-        let tags_json = serde_json::to_string(tags)?;
+        upsert_flashcard_on_conn(&conn, block_id, front, back, tags)
+    }
 
-        conn.execute(
-            "INSERT INTO flashcards (id, block_id, front, back, tags, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(block_id) DO UPDATE SET front = ?3, back = ?4, tags = ?5, updated_at = ?7",
-            params![id, block_id, front, back, tags_json, now, now],
-        )?;
+    pub(crate) fn upsert_flashcard_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+        front: &str,
+        back: &str,
+        tags: &[String],
+    ) -> Result<Flashcard> {
+        upsert_flashcard_on_conn(conn, block_id, front, back, tags)
+    }
 
-        Ok(Flashcard {
-            id,
-            block_id: block_id.to_string(),
-            front: front.to_string(),
-            back: back.to_string(),
-            tags: tags.to_vec(),
-            created_at: now,
-            updated_at: now,
-            last_reviewed_at: None,
-            next_review_at: None,
-            ease_factor: 2.5,
-            interval_days: 0,
-            review_count: 0,
-        })
+    pub(crate) fn delete_flashcard_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+    ) -> Result<()> {
+        delete_flashcard_on_conn(conn, block_id)
     }
 
     pub fn list_flashcards_due(&self, topic: Option<&str>, limit: i64) -> Result<Vec<Flashcard>> {

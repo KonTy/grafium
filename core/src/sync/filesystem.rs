@@ -40,7 +40,7 @@ impl FilesystemBackend {
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
+                    .map(|d| d.as_nanos() as i64)
                     .unwrap_or(0);
 
                 out.push(FileMetadata {
@@ -73,6 +73,24 @@ impl SyncBackend for FilesystemBackend {
         self.collect_md_files(&pages_dir, &self.root, &mut files)?;
         self.collect_md_files(&journals_dir, &self.root, &mut files)?;
         Ok(files)
+    }
+
+    fn stat_file(&self, rel_path: &str) -> Result<FileMetadata> {
+        let path = self.abs_path(rel_path);
+        let meta = fs::metadata(&path)?;
+        let modified_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+
+        Ok(FileMetadata {
+            rel_path: rel_path.to_string(),
+            size: meta.len(),
+            modified_at,
+            hash: None,
+        })
     }
 
     fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {

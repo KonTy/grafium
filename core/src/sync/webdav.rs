@@ -167,6 +167,48 @@ impl SyncBackend for WebDavBackend {
         Ok(all_files)
     }
 
+    fn stat_file(&self, rel_path: &str) -> Result<FileMetadata> {
+        let url = self.file_url(rel_path);
+        let response = self
+            .client
+            .head(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .map_err(|e| {
+                crate::error::CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("WebDAV HEAD failed: {} for {}", response.status(), rel_path),
+            )));
+        }
+
+        let size = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let modified_at = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_http_date)
+            .unwrap_or(0);
+
+        Ok(FileMetadata {
+            rel_path: rel_path.to_string(),
+            size,
+            modified_at,
+            hash: None,
+        })
+    }
+
     fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
         let url = self.file_url(rel_path);
         let response = self

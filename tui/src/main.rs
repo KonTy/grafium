@@ -9,11 +9,10 @@ mod widgets;
 
 use std::io;
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -43,7 +42,7 @@ fn open_or_create_graph(root: &std::path::Path) -> Result<Graph> {
 fn main() -> Result<()> {
     let root = graph_root_from_args();
     let graph = open_or_create_graph(&root)?;
-    let repo: Rc<dyn GraphRepository> = Rc::new(CoreRepository::new(graph));
+    let repo: Arc<dyn GraphRepository> = Arc::new(CoreRepository::new(graph));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -67,15 +66,21 @@ fn main() -> Result<()> {
 
 fn run(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
-    repo: Rc<dyn GraphRepository>,
+    repo: Arc<dyn GraphRepository>,
 ) -> Result<()> {
     let mut app = App::new(repo);
+    let mut redraw = true;
     loop {
-        terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                app.on_key(key);
-            }
+        if redraw {
+            terminal.draw(|f| app.draw(f))?;
+            redraw = false;
+        }
+
+        if event::poll(app.poll_timeout())? {
+            let event = event::read()?;
+            redraw |= app.handle_event(event);
+        } else {
+            redraw |= app.tick();
         }
         if app.should_quit {
             break;

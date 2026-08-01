@@ -5,9 +5,10 @@
 //! `PanelAction` and only `App` interprets it, so each panel stays a small,
 //! independently reasoned-about unit.
 
-use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
@@ -27,7 +28,7 @@ enum Focus {
 }
 
 pub struct App {
-    repo: Rc<dyn GraphRepository>,
+    repo: Arc<dyn GraphRepository>,
     left: LeftSidebar,
     center: CenterPanel,
     right: RightSidebar,
@@ -46,7 +47,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repo: Rc<dyn GraphRepository>) -> Self {
+    pub fn new(repo: Arc<dyn GraphRepository>) -> Self {
         let mut app = Self {
             left: LeftSidebar::new(repo.clone()),
             center: CenterPanel::new(repo.clone()),
@@ -67,6 +68,35 @@ impl App {
             app.open_page(&page.id);
         }
         app
+    }
+
+    pub fn handle_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) => {
+                self.on_key(key);
+                true
+            }
+            Event::Resize(_, _) => true,
+            _ => false,
+        }
+    }
+
+    pub fn poll_timeout(&self) -> Duration {
+        if self.search_open {
+            self.search
+                .poll_timeout()
+                .unwrap_or_else(|| Duration::from_secs(1))
+        } else {
+            Duration::from_secs(60)
+        }
+    }
+
+    pub fn tick(&mut self) -> bool {
+        if self.search_open {
+            self.search.tick()
+        } else {
+            false
+        }
     }
 
     fn open_page(&mut self, page_id: &str) {
@@ -162,6 +192,7 @@ impl App {
             }
             ('t', KeyCode::Char('r')) => {
                 self.right_visible = !self.right_visible;
+                self.right.set_visible(self.right_visible);
                 if !self.right_visible && self.focus == Focus::Right {
                     self.focus = Focus::Center;
                 }

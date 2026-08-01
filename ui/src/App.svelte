@@ -275,6 +275,15 @@
           logNav("restored block", { sourceBlockId: entry.sourceBlockId, sourcePageTitle: entry.sourcePageTitle, kind: entry.kind, title: entry.title });
           return true;
         }
+        if (entry.kind === "page" && currentPage) {
+          window.dispatchEvent(new CustomEvent("page-content-reveal-block", {
+            detail: {
+              pageId: currentPage.id,
+              blockId: entry.sourceBlockId,
+              align: "center",
+            },
+          }));
+        }
       }
 
       if (entry.kind === "journal" && entry.sourcePageTitle) {

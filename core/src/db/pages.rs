@@ -2,30 +2,57 @@ use super::Database;
 use crate::error::Result;
 use crate::models::Page;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use uuid::Uuid;
+
+fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Result<Page> {
+    let now = Utc::now().timestamp_millis();
+    let id = Uuid::new_v4().to_string();
+    let properties = serde_json::json!({});
+
+    conn.execute(
+        "INSERT INTO pages (id, title, created_at, updated_at, is_journal, properties) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, title, now, now, is_journal as i32, properties.to_string()],
+    )?;
+
+    Ok(Page {
+        id,
+        title: title.to_string(),
+        file_path: None,
+        created_at: now,
+        updated_at: now,
+        is_journal,
+        properties,
+    })
+}
+
+fn get_page_by_title_ci_on_conn(conn: &Connection, title: &str) -> Result<Page> {
+    let page = conn.query_row(
+        "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+         FROM pages
+         WHERE lower(title) = lower(?1)
+         ORDER BY updated_at DESC
+         LIMIT 1",
+        params![title],
+        |row| {
+            Ok(Page {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        },
+    )?;
+    Ok(page)
+}
 
 impl Database {
     pub fn create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
         let conn = self.conn()?;
-        let now = Utc::now().timestamp_millis();
-        let id = Uuid::new_v4().to_string();
-        let properties = serde_json::json!({});
-
-        conn.execute(
-            "INSERT INTO pages (id, title, created_at, updated_at, is_journal, properties) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, title, now, now, is_journal as i32, properties.to_string()],
-        )?;
-
-        Ok(Page {
-            id,
-            title: title.to_string(),
-            file_path: None,
-            created_at: now,
-            updated_at: now,
-            is_journal,
-            properties,
-        })
+        create_page_on_conn(&conn, title, is_journal)
     }
 
     pub fn get_page_by_id(&self, id: &str) -> Result<Page> {
@@ -70,32 +97,25 @@ impl Database {
 
     pub fn get_page_by_title_ci(&self, title: &str) -> Result<Page> {
         let conn = self.conn()?;
-        let page = conn.query_row(
-            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
-             FROM pages
-             WHERE lower(title) = lower(?1)
-             ORDER BY updated_at DESC
-             LIMIT 1",
-            params![title],
-            |row| {
-                Ok(Page {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    file_path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    is_journal: row.get::<_, i32>(5)? != 0,
-                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-                })
-            },
-        )?;
-        Ok(page)
+        get_page_by_title_ci_on_conn(&conn, title)
     }
 
     pub fn get_or_create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
         match self.get_page_by_title_ci(title) {
             Ok(page) => Ok(page),
             Err(_) => self.create_page(title, is_journal),
+        }
+    }
+
+    pub(crate) fn get_or_create_page_in_connection(
+        &self,
+        conn: &Connection,
+        title: &str,
+        is_journal: bool,
+    ) -> Result<Page> {
+        match get_page_by_title_ci_on_conn(conn, title) {
+            Ok(page) => Ok(page),
+            Err(_) => create_page_on_conn(conn, title, is_journal),
         }
     }
 

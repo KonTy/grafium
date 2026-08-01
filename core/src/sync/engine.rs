@@ -1,4 +1,4 @@
-use super::backend::{compute_hash, hash_file, SyncBackend};
+use super::backend::{compute_hash, FileMetadata, SyncBackend};
 use super::merge;
 use super::state::SyncState;
 use crate::error::Result;
@@ -120,12 +120,27 @@ impl SyncEngine {
         let mut state = SyncState::load(&self.state_path);
         let mut result = SyncResult::new();
 
-        // Step 1: Collect local files with hashes
-        let local_files = self.collect_local_files()?;
+        // Step 1: Collect local files with cheap metadata. Reuse cached hashes
+        // from sync state when size+mtime still match the last sync.
+        let mut local_files = self.collect_local_files()?;
+        for meta in local_files.values_mut() {
+            if meta.hash.is_none() {
+                if let Some(hash) = state.cached_local_hash(meta) {
+                    meta.hash = Some(hash.to_string());
+                }
+            }
+        }
 
-        // Step 2: Collect remote files
-        let remote_files_list = backend.list_files()?;
-        let remote_files: HashMap<String, _> = remote_files_list
+        // Step 2: Collect remote files and likewise seed cached hashes.
+        let mut remote_files_list = backend.list_files()?;
+        for meta in &mut remote_files_list {
+            if meta.hash.is_none() {
+                if let Some(hash) = state.cached_remote_hash(meta) {
+                    meta.hash = Some(hash.to_string());
+                }
+            }
+        }
+        let mut remote_files: HashMap<String, _> = remote_files_list
             .into_iter()
             .map(|f| (f.rel_path.clone(), f))
             .collect();
@@ -146,11 +161,25 @@ impl SyncEngine {
             match (local_exists, remote_exists, was_synced) {
                 // Both exist — check for changes
                 (true, true, true) => {
-                    self.sync_both_exist(backend, &rel_path, &local_files, &mut state, &mut result);
+                    self.sync_both_exist(
+                        backend,
+                        &rel_path,
+                        &mut local_files,
+                        &mut remote_files,
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Both exist but never synced — treat as potential conflict
                 (true, true, false) => {
-                    self.sync_both_new(backend, &rel_path, &local_files, &mut state, &mut result);
+                    self.sync_both_new(
+                        backend,
+                        &rel_path,
+                        &mut local_files,
+                        &mut remote_files,
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Only local exists, was previously synced — remote was deleted
                 (true, false, true) => {
@@ -167,7 +196,13 @@ impl SyncEngine {
                 }
                 // Only local exists, never synced — new local file, push
                 (true, false, false) => {
-                    self.push_to_remote(backend, &rel_path, &mut state, &mut result);
+                    self.push_to_remote(
+                        backend,
+                        &rel_path,
+                        &mut local_files,
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Only remote exists, was previously synced — local was deleted
                 (false, true, true) => {
@@ -183,7 +218,13 @@ impl SyncEngine {
                 }
                 // Only remote exists, never synced — new remote file, pull
                 (false, true, false) => {
-                    self.pull_from_remote(backend, &rel_path, &mut state, &mut result);
+                    self.pull_from_remote(
+                        backend,
+                        &rel_path,
+                        remote_files.get(&rel_path).cloned(),
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Neither exists but was synced — both deleted, just clean up state
                 (false, false, true) => {
@@ -206,51 +247,90 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
-        local_files: &HashMap<String, String>,
+        local_files: &mut HashMap<String, FileMetadata>,
+        remote_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        let local_hash = &local_files[rel_path];
-        let local_changed = state.has_local_changes(rel_path, local_hash);
-
-        // Get remote hash
-        let remote_hash = match backend.file_hash(rel_path) {
-            Ok(h) => h,
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Hash remote {}: {}", rel_path, e));
-                return;
-            }
-        };
         let sync_hash = state
             .files
             .get(rel_path)
-            .map(|r| r.hash_at_sync.as_str())
-            .unwrap_or("");
-        let remote_changed = remote_hash != sync_hash;
+            .map(|r| r.hash_at_sync.clone())
+            .unwrap_or_default();
+
+        let local_meta = match local_files.get(rel_path).cloned() {
+            Some(meta) => meta,
+            None => return,
+        };
+        let remote_meta = match remote_files.get(rel_path).cloned() {
+            Some(meta) => meta,
+            None => return,
+        };
+
+        let local_maybe_changed = !state.local_metadata_matches(&local_meta);
+        let remote_maybe_changed = !state.remote_metadata_matches(&remote_meta);
+
+        let local_hash = if local_maybe_changed {
+            match self.ensure_local_hash(rel_path, local_files) {
+                Ok(hash) => Some(hash),
+                Err(e) => {
+                    result.errors.push(format!("Hash local {}: {}", rel_path, e));
+                    return;
+                }
+            }
+        } else {
+            local_meta.hash.clone().or_else(|| Some(sync_hash.clone()))
+        };
+        let remote_hash = if remote_maybe_changed {
+            match self.ensure_remote_hash(backend, rel_path, remote_files) {
+                Ok(hash) => Some(hash),
+                Err(e) => {
+                    result.errors.push(format!("Hash remote {}: {}", rel_path, e));
+                    return;
+                }
+            }
+        } else {
+            remote_meta.hash.clone().or_else(|| Some(sync_hash.clone()))
+        };
+
+        let local_changed = local_hash.as_deref() != Some(sync_hash.as_str());
+        let remote_changed = remote_hash.as_deref() != Some(sync_hash.as_str());
 
         match (local_changed, remote_changed) {
-            (false, false) => {} // No changes anywhere
+            (false, false) => {
+                if local_maybe_changed || remote_maybe_changed {
+                    state.record_sync(rel_path, &sync_hash, Some(&local_meta), Some(&remote_meta));
+                }
+            }
             (true, false) => {
-                // Only local changed — push
-                self.push_to_remote(backend, rel_path, state, result);
+                self.push_to_remote(backend, rel_path, local_files, state, result);
             }
             (false, true) => {
-                // Only remote changed — pull
-                self.pull_from_remote(backend, rel_path, state, result);
+                self.pull_from_remote(
+                    backend,
+                    rel_path,
+                    Some(remote_meta.clone()),
+                    state,
+                    result,
+                );
             }
             (true, true) => {
-                // Both changed — conflict!
-                if local_hash == &remote_hash {
-                    // Same content — no real conflict, just update state + base
+                if local_hash == remote_hash {
                     let local_path = self.local_root.join(rel_path);
                     if let Ok(content) = fs::read(&local_path) {
                         self.save_base(rel_path, &content);
                     }
-                    state.record_sync(rel_path, local_hash);
+                    if let Some(ref hash) = local_hash {
+                        state.record_sync(rel_path, hash, Some(&local_meta), Some(&remote_meta));
+                    }
                 } else {
-                    self.handle_conflict(backend, rel_path, state, result);
+                    self.handle_conflict(
+                        backend,
+                        rel_path,
+                        Some(remote_meta.clone()),
+                        state,
+                        result,
+                    );
                 }
             }
         }
@@ -261,31 +341,50 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
-        local_files: &HashMap<String, String>,
+        local_files: &mut HashMap<String, FileMetadata>,
+        remote_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        let local_hash = &local_files[rel_path];
-        let remote_hash = match backend.file_hash(rel_path) {
-            Ok(h) => h,
+        let local_meta = match local_files.get(rel_path).cloned() {
+            Some(meta) => meta,
+            None => return,
+        };
+        let remote_meta = match remote_files.get(rel_path).cloned() {
+            Some(meta) => meta,
+            None => return,
+        };
+        let local_hash = match self.ensure_local_hash(rel_path, local_files) {
+            Ok(hash) => hash,
             Err(e) => {
-                result
-                    .errors
-                    .push(format!("Hash remote {}: {}", rel_path, e));
+                result.errors.push(format!("Hash local {}: {}", rel_path, e));
+                return;
+            }
+        };
+        let remote_hash = match self.ensure_remote_hash(backend, rel_path, remote_files) {
+            Ok(hash) => hash,
+            Err(e) => {
+                result.errors.push(format!("Hash remote {}: {}", rel_path, e));
                 return;
             }
         };
 
-        if local_hash == &remote_hash {
+        if local_hash == remote_hash {
             // Identical — record in state + save base for future merges
             let local_path = self.local_root.join(rel_path);
             if let Ok(content) = fs::read(&local_path) {
                 self.save_base(rel_path, &content);
             }
-            state.record_sync(rel_path, local_hash);
+            state.record_sync(rel_path, &local_hash, Some(&local_meta), Some(&remote_meta));
         } else {
             // Different content — conflict
-            self.handle_conflict(backend, rel_path, state, result);
+            self.handle_conflict(
+                backend,
+                rel_path,
+                Some(remote_meta.clone()),
+                state,
+                result,
+            );
         }
     }
 
@@ -294,6 +393,7 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        local_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
@@ -308,12 +408,17 @@ impl SyncEngine {
             }
         };
         let hash = compute_hash(&content);
+        if let Some(meta) = local_files.get_mut(rel_path) {
+            meta.hash = Some(hash.clone());
+        }
 
         if let Err(e) = backend.write_file(rel_path, &content) {
             result.errors.push(format!("Push {}: {}", rel_path, e));
         } else {
             self.save_base(rel_path, &content);
-            state.record_sync(rel_path, &hash);
+            let local_meta = local_files.get(rel_path).cloned();
+            let remote_meta = backend.stat_file(rel_path).ok();
+            state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
             result.pushed.push(rel_path.to_string());
         }
     }
@@ -323,6 +428,7 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        remote_meta: Option<FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
@@ -346,7 +452,8 @@ impl SyncEngine {
                 .push(format!("Write local {}: {}", rel_path, e));
         } else {
             self.save_base(rel_path, &content);
-            state.record_sync(rel_path, &hash);
+            let local_meta = self.current_local_metadata(rel_path).ok();
+            state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
             result.pulled.push(rel_path.to_string());
         }
     }
@@ -367,6 +474,7 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        remote_meta: Option<FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
@@ -438,7 +546,14 @@ impl SyncEngine {
         }
 
         self.save_base(rel_path, merged_bytes);
-        state.record_sync(rel_path, &merged_hash);
+        let local_meta = self.current_local_metadata(rel_path).ok();
+        let fresh_remote_meta = backend.stat_file(rel_path).ok().or(remote_meta);
+        state.record_sync(
+            rel_path,
+            &merged_hash,
+            local_meta.as_ref(),
+            fresh_remote_meta.as_ref(),
+        );
 
         if merge_result.has_conflicts {
             result.conflicts.push(rel_path.to_string());
@@ -447,22 +562,22 @@ impl SyncEngine {
         }
     }
 
-    /// Collect all local .md files under pages/ and journals/ with their hashes.
-    fn collect_local_files(&self) -> Result<HashMap<String, String>> {
+    /// Collect all local .md files under pages/ and journals/ with metadata.
+    fn collect_local_files(&self) -> Result<HashMap<String, FileMetadata>> {
         let mut files = HashMap::new();
         let pages_dir = self.local_root.join("pages");
         let journals_dir = self.local_root.join("journals");
 
-        self.collect_dir_hashes(&pages_dir, &self.local_root, &mut files)?;
-        self.collect_dir_hashes(&journals_dir, &self.local_root, &mut files)?;
+        self.collect_dir_metadata(&pages_dir, &self.local_root, &mut files)?;
+        self.collect_dir_metadata(&journals_dir, &self.local_root, &mut files)?;
         Ok(files)
     }
 
-    fn collect_dir_hashes(
+    fn collect_dir_metadata(
         &self,
         dir: &Path,
         base: &Path,
-        out: &mut HashMap<String, String>,
+        out: &mut HashMap<String, FileMetadata>,
     ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
@@ -471,21 +586,82 @@ impl SyncEngine {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                self.collect_dir_hashes(&path, base, out)?;
+                self.collect_dir_metadata(&path, base, out)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 // Skip .conflict backup files (e.g. foo.conflict_20260504_120000.md)
                 if path.to_string_lossy().contains(".conflict_") {
                     continue;
                 }
-                let rel = path
-                    .strip_prefix(base)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let hash = hash_file(&path)?;
-                out.insert(rel, hash);
+                let meta = Self::metadata_for_path(&path, base)?;
+                out.insert(meta.rel_path.clone(), meta);
             }
         }
         Ok(())
+    }
+
+    fn metadata_for_path(path: &Path, base: &Path) -> Result<FileMetadata> {
+        let meta = fs::metadata(path)?;
+        let modified_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let rel_path = path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        Ok(FileMetadata {
+            rel_path,
+            size: meta.len(),
+            modified_at,
+            hash: None,
+        })
+    }
+
+    fn current_local_metadata(&self, rel_path: &str) -> Result<FileMetadata> {
+        Self::metadata_for_path(&self.local_root.join(rel_path), &self.local_root)
+    }
+
+    fn ensure_local_hash(
+        &self,
+        rel_path: &str,
+        local_files: &mut HashMap<String, FileMetadata>,
+    ) -> Result<String> {
+        if let Some(hash) = local_files
+            .get(rel_path)
+            .and_then(|meta| meta.hash.clone())
+        {
+            return Ok(hash);
+        }
+
+        let content = fs::read(self.local_root.join(rel_path))?;
+        let hash = compute_hash(&content);
+        if let Some(meta) = local_files.get_mut(rel_path) {
+            meta.hash = Some(hash.clone());
+        }
+        Ok(hash)
+    }
+
+    fn ensure_remote_hash(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        remote_files: &mut HashMap<String, FileMetadata>,
+    ) -> Result<String> {
+        if let Some(hash) = remote_files
+            .get(rel_path)
+            .and_then(|meta| meta.hash.clone())
+        {
+            return Ok(hash);
+        }
+
+        let hash = backend.file_hash(rel_path)?;
+        if let Some(meta) = remote_files.get_mut(rel_path) {
+            meta.hash = Some(hash.clone());
+        }
+        Ok(hash)
     }
 }
 
@@ -502,5 +678,185 @@ fn make_conflict_path(rel_path: &str) -> String {
         )
     } else {
         format!("{}.conflict", rel_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Clone, Default)]
+    struct MockBackend {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        metadata: Arc<Mutex<HashMap<String, FileMetadata>>>,
+        file_hash_calls: Arc<AtomicUsize>,
+        read_file_calls: Arc<AtomicUsize>,
+    }
+
+    impl MockBackend {
+        fn with_files(files: Vec<(&str, &[u8], i64)>) -> Self {
+            let backend = Self::default();
+            for (rel_path, content, modified_at) in files {
+                backend.set_file(rel_path, content, modified_at);
+            }
+            backend
+        }
+
+        fn set_file(&self, rel_path: &str, content: &[u8], modified_at: i64) {
+            self.files
+                .lock()
+                .unwrap()
+                .insert(rel_path.to_string(), content.to_vec());
+            self.metadata.lock().unwrap().insert(
+                rel_path.to_string(),
+                FileMetadata {
+                    rel_path: rel_path.to_string(),
+                    size: content.len() as u64,
+                    modified_at,
+                    hash: None,
+                },
+            );
+        }
+
+        fn reset_counters(&self) {
+            self.file_hash_calls.store(0, Ordering::SeqCst);
+            self.read_file_calls.store(0, Ordering::SeqCst);
+        }
+
+        fn file_hash_calls(&self) -> usize {
+            self.file_hash_calls.load(Ordering::SeqCst)
+        }
+
+        fn read_file_calls(&self) -> usize {
+            self.read_file_calls.load(Ordering::SeqCst)
+        }
+
+        fn file_bytes(&self, rel_path: &str) -> Vec<u8> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(rel_path)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl SyncBackend for MockBackend {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn list_files(&self) -> Result<Vec<FileMetadata>> {
+            Ok(self.metadata.lock().unwrap().values().cloned().collect())
+        }
+
+        fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
+            self.read_file_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .get(rel_path)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn write_file(&self, rel_path: &str, content: &[u8]) -> Result<()> {
+            let modified_at = chrono::Utc::now().timestamp();
+            self.set_file(rel_path, content, modified_at);
+            Ok(())
+        }
+
+        fn delete_file(&self, rel_path: &str) -> Result<()> {
+            self.files.lock().unwrap().remove(rel_path);
+            self.metadata.lock().unwrap().remove(rel_path);
+            Ok(())
+        }
+
+        fn file_hash(&self, rel_path: &str) -> Result<String> {
+            self.file_hash_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(compute_hash(&self.file_bytes(rel_path)))
+        }
+    }
+
+    fn write_local_markdown(root: &Path, rel_path: &str, content: &str) -> Result<()> {
+        let path = root.join(rel_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_uses_cached_hashes_when_metadata_unchanged() -> Result<()> {
+        let temp = tempdir()?;
+        let rel_path = "pages/foo.md";
+        write_local_markdown(temp.path(), rel_path, "same content")?;
+
+        let backend = MockBackend::with_files(vec![(rel_path, b"same content", 42)]);
+        let engine = SyncEngine::new(temp.path().to_path_buf());
+
+        let first = engine.sync(&backend)?;
+        assert!(first.is_clean());
+
+        backend.reset_counters();
+
+        let local_path = temp.path().join(rel_path);
+        let original_permissions = fs::metadata(&local_path)?.permissions();
+        let mut no_read_permissions = original_permissions.clone();
+        no_read_permissions.set_mode(0o000);
+        fs::set_permissions(&local_path, no_read_permissions)?;
+
+        let second = engine.sync(&backend)?;
+
+        fs::set_permissions(&local_path, original_permissions)?;
+
+        assert!(second.is_clean());
+        assert_eq!(backend.file_hash_calls(), 0);
+        assert_eq!(backend.read_file_calls(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_detects_real_local_change_and_pushes_without_remote_hash() -> Result<()> {
+        let temp = tempdir()?;
+        let rel_path = "pages/foo.md";
+        write_local_markdown(temp.path(), rel_path, "base content")?;
+
+        let backend = MockBackend::with_files(vec![(rel_path, b"base content", 42)]);
+        let engine = SyncEngine::new(temp.path().to_path_buf());
+
+        let first = engine.sync(&backend)?;
+        assert!(first.is_clean());
+
+        backend.reset_counters();
+        write_local_markdown(temp.path(), rel_path, "base content updated")?;
+
+        let second = engine.sync(&backend)?;
+
+        assert_eq!(second.pushed, vec![rel_path.to_string()]);
+        assert_eq!(backend.file_hash_calls(), 0);
+        assert_eq!(backend.read_file_calls(), 0);
+        assert_eq!(backend.file_bytes(rel_path), b"base content updated");
+
+        backend.reset_counters();
+        let third = engine.sync(&backend)?;
+        assert!(third.is_clean());
+        assert_eq!(backend.file_hash_calls(), 0);
+        assert_eq!(backend.read_file_calls(), 0);
+        Ok(())
     }
 }

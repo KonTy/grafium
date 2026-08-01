@@ -6,12 +6,13 @@
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::models::{Block, BlockType, LinkType, Page};
+use crate::models::{Block, BlockType, LinkType, Page, TaskState};
 use crate::parser::links::ExtractedLink;
 use crate::parser::{self, ParsedBlock};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,10 @@ pub struct Graph {
     /// write. The filesystem watcher consults this to ignore self-inflicted
     /// events, preventing a write → watch → re-index feedback loop.
     self_writes: Arc<Mutex<HashMap<PathBuf, Instant>>>,
+    /// SHA-256 of the last successfully indexed or app-written content for each
+    /// file path. This lets duplicate watcher events skip a full parse/reindex
+    /// when the bytes on disk are unchanged.
+    indexed_content_hashes: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
@@ -51,6 +56,34 @@ pub struct GraphValidationReport {
     pub has_no_nested_graph_roots: bool,
     /// Detailed error message if invalid
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedParsedBlock {
+    id: String,
+    parent_id: Option<String>,
+    order_index: i32,
+    content: String,
+    block_type: BlockType,
+    properties: serde_json::Value,
+    task_state: Option<TaskState>,
+    scheduled_date: Option<String>,
+    deadline_date: Option<String>,
+    is_flashcard: bool,
+    flashcard_front: Option<String>,
+    flashcard_back: Option<String>,
+}
+
+type BlockSlot = (Option<String>, i32);
+
+impl IndexedParsedBlock {
+    fn matches_block(&self, block: &Block) -> bool {
+        block.parent_id == self.parent_id
+            && block.order_index == self.order_index
+            && block.content == self.content
+            && block.block_type == self.block_type
+            && block.properties == self.properties
+    }
 }
 
 impl Graph {
@@ -160,30 +193,45 @@ impl Graph {
 
     /// Auto-create all parent pages in a hierarchy.
     /// For "a/b/c", creates "a" and "a/b" if they don't exist.
-    fn ensure_parent_hierarchy(&self, title: &str) -> Result<()> {
+    fn ensure_parent_hierarchy_in_connection(
+        &self,
+        conn: &rusqlite::Connection,
+        title: &str,
+    ) -> Result<()> {
         let parts: Vec<&str> = title.split('/').collect();
 
         // Build up each parent level
         for i in 1..parts.len() {
             let parent_path = parts[0..i].join("/");
             // Try to get or create the parent
-            let _ = self.db.get_or_create_page(&parent_path, false);
+            let _ = self
+                .db
+                .get_or_create_page_in_connection(conn, &parent_path, false)?;
         }
         Ok(())
     }
 
     fn resolve_link_target(&self, link: ExtractedLink) -> Result<(String, LinkType)> {
+        let conn = self.db.conn()?;
+        self.resolve_link_target_in_connection(&conn, link)
+    }
+
+    fn resolve_link_target_in_connection(
+        &self,
+        conn: &rusqlite::Connection,
+        link: ExtractedLink,
+    ) -> Result<(String, LinkType)> {
         match link {
             ExtractedLink::Page(title) => {
                 // Auto-create parent hierarchy if title contains "/"
-                self.ensure_parent_hierarchy(&title)?;
-                let page = self.db.get_or_create_page(&title, false)?;
+                self.ensure_parent_hierarchy_in_connection(conn, &title)?;
+                let page = self.db.get_or_create_page_in_connection(conn, &title, false)?;
                 Ok((page.id, LinkType::Page))
             }
             ExtractedLink::Tag(tag) => {
                 // Auto-create parent hierarchy for tags too
-                self.ensure_parent_hierarchy(&tag)?;
-                let page = self.db.get_or_create_page(&tag, false)?;
+                self.ensure_parent_hierarchy_in_connection(conn, &tag)?;
+                let page = self.db.get_or_create_page_in_connection(conn, &tag, false)?;
                 Ok((page.id, LinkType::Tag))
             }
             ExtractedLink::BlockRef(block_id) => Ok((block_id, LinkType::BlockRef)),
@@ -348,6 +396,7 @@ impl Graph {
             pages_dir,
             journals_dir,
             self_writes: Arc::new(Mutex::new(HashMap::new())),
+            indexed_content_hashes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -368,6 +417,32 @@ impl Graph {
         }
     }
 
+    fn content_hash(content: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn indexed_content_matches(&self, path: &Path, content_hash: &str) -> bool {
+        self.indexed_content_hashes
+            .lock()
+            .ok()
+            .and_then(|map| map.get(path).cloned())
+            .map_or(false, |known_hash| known_hash == content_hash)
+    }
+
+    fn remember_indexed_content_hash(&self, path: &Path, content_hash: String) {
+        if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            map.insert(path.to_path_buf(), content_hash);
+        }
+    }
+
+    fn forget_indexed_content(&self, path: &Path) {
+        if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            map.remove(path);
+        }
+    }
+
     /// Full re-index: scan all .md files and rebuild the SQLite index.
     pub fn reindex_all(&self) -> Result<()> {
         // Migrate legacy %2F-encoded files to folder hierarchy
@@ -375,6 +450,9 @@ impl Graph {
 
         // Clear existing index
         self.db.clear_all()?;
+        if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            map.clear();
+        }
 
         // Index pages/ directory (recursive)
         self.index_directory(&self.pages_dir)?;
@@ -416,6 +494,10 @@ impl Graph {
     /// Index a single .md file into the database.
     pub fn index_file(&self, path: &Path) -> Result<()> {
         let content = fs::read_to_string(path)?;
+        let content_hash = Self::content_hash(&content);
+        if self.indexed_content_matches(path, &content_hash) {
+            return Ok(());
+        }
 
         let filename = path
             .file_name()
@@ -449,89 +531,208 @@ impl Graph {
             .to_string_lossy()
             .to_string();
 
-        // Upsert the page
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+
         let page = self
             .db
-            .upsert_page(&title, is_journal, Some(&rel_path), &parsed.properties)?;
+            .upsert_page_in_connection(&tx, &title, is_journal, Some(&rel_path), &parsed.properties)?;
 
-        // Sync normalized page properties, even when the map is empty, so
-        // stale rows are removed when properties are deleted from the source.
-        self.db.sync_page_properties(&page.id, &parsed.properties)?;
+        self.db
+            .sync_page_properties_in_connection(&tx, &page.id, &parsed.properties)?;
+        self.apply_parsed_blocks_in_connection(&tx, &page.id, &parsed.blocks)?;
 
-        // Delete old blocks for this page, then insert fresh
-        self.db.delete_blocks_for_page(&page.id)?;
-
-        // Flatten and insert blocks
-        self.insert_parsed_blocks(&page.id, &parsed.blocks, None)?;
+        tx.commit()?;
+        self.remember_indexed_content_hash(path, content_hash);
 
         Ok(())
     }
 
-    fn insert_parsed_blocks(
+    fn apply_parsed_blocks_in_connection(
         &self,
+        conn: &rusqlite::Connection,
         page_id: &str,
         blocks: &[ParsedBlock],
-        parent_id: Option<&str>,
     ) -> Result<()> {
-        for (i, pb) in blocks.iter().enumerate() {
-            let block_id = pb.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let existing_blocks = self.db.list_blocks_for_page_in_connection(conn, page_id)?;
+        let mut existing_by_id: HashMap<String, Block> = existing_blocks
+            .into_iter()
+            .map(|block| (block.id.clone(), block))
+            .collect();
+        let mut existing_ids_by_slot: HashMap<BlockSlot, Vec<String>> = HashMap::new();
+        for block in existing_by_id.values() {
+            existing_ids_by_slot
+                .entry((block.parent_id.clone(), block.order_index))
+                .or_default()
+                .push(block.id.clone());
+        }
 
-            self.db.insert_block_raw(
-                &block_id,
-                page_id,
-                parent_id,
-                i as i32,
-                &pb.content,
-                pb.block_type.clone(),
-                &pb.properties,
-            )?;
+        let mut flattened = Vec::new();
+        let mut used_ids = HashSet::new();
+        self.flatten_parsed_blocks(
+            blocks,
+            None,
+            &mut existing_ids_by_slot,
+            &mut used_ids,
+            &mut flattened,
+        );
 
-            // Sync normalized properties
-            if pb.properties.as_object().map_or(false, |o| !o.is_empty()) {
-                self.db.sync_block_properties(&block_id, &pb.properties)?;
-            }
-
-            // Insert tasks if detected
-            if let Some(ref state) = pb.task_state {
-                self.db.upsert_task(
-                    &block_id,
-                    state,
-                    pb.scheduled_date.as_deref(),
-                    pb.deadline_date.as_deref(),
-                )?;
-            }
-
-            // Insert flashcard if detected. Any block written as
-            // `Question :: Answer` becomes a card (the parser sets is_flashcard
-            // and fills in front/back), whether or not it carries #flashcard.
-            if pb.is_flashcard {
-                if let (Some(ref front), Some(ref back)) = (&pb.flashcard_front, &pb.flashcard_back)
-                {
-                    // Tags on the flashcard block act as its "topic(s)" (e.g.
-                    // #chinese, #physics), used to scope spaced-repetition study.
-                    let tags: Vec<String> = parser::extract_links(&pb.content)
-                        .into_iter()
-                        .filter_map(|l| match l {
-                            ExtractedLink::Tag(t) => Some(t),
-                            _ => None,
-                        })
-                        .collect();
-                    self.db.upsert_flashcard(&block_id, front, back, &tags)?;
+        for block in &flattened {
+            let block_changed = if let Some(existing) = existing_by_id.remove(&block.id) {
+                if block.matches_block(&existing) {
+                    false
+                } else {
+                    self.db.update_indexed_block_in_connection(
+                        conn,
+                        &block.id,
+                        page_id,
+                        block.parent_id.as_deref(),
+                        block.order_index,
+                        &block.content,
+                        block.block_type.clone(),
+                        &block.properties,
+                    )?;
+                    true
                 }
-            }
+            } else {
+                self.db.insert_block_raw_in_connection(
+                    conn,
+                    &block.id,
+                    page_id,
+                    block.parent_id.as_deref(),
+                    block.order_index,
+                    &block.content,
+                    block.block_type.clone(),
+                    &block.properties,
+                )?;
+                true
+            };
 
-            // Extract and insert links
-            let links = parser::extract_links(&pb.content);
-            for link in links {
-                let (target, link_type) = self.resolve_link_target(link)?;
-                self.db.insert_link(&block_id, &target, link_type)?;
-            }
-
-            // Recurse children
-            if !pb.children.is_empty() {
-                self.insert_parsed_blocks(page_id, &pb.children, Some(&block_id))?;
+            if block_changed {
+                self.sync_indexed_block_derived_state_in_connection(conn, &block.id, block)?;
             }
         }
+
+        for stale_block_id in existing_by_id.into_keys() {
+            self.db.delete_block_in_connection(conn, &stale_block_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn flatten_parsed_blocks(
+        &self,
+        blocks: &[ParsedBlock],
+        parent_id: Option<String>,
+        existing_ids_by_slot: &mut HashMap<BlockSlot, Vec<String>>,
+        used_ids: &mut HashSet<String>,
+        out: &mut Vec<IndexedParsedBlock>,
+    ) {
+        for (i, pb) in blocks.iter().enumerate() {
+            let slot = (parent_id.clone(), i as i32);
+            let block_id = if let Some(explicit_id) =
+                pb.id.as_deref().filter(|id| used_ids.insert((*id).to_string()))
+            {
+                explicit_id.to_string()
+            } else if let Some(existing_ids) = existing_ids_by_slot.get_mut(&slot) {
+                existing_ids
+                    .iter()
+                    .find_map(|candidate| {
+                        if used_ids.insert(candidate.clone()) {
+                            Some(candidate.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| loop {
+                        let candidate = Uuid::new_v4().to_string();
+                        if used_ids.insert(candidate.clone()) {
+                            break candidate;
+                        }
+                    })
+            } else {
+                loop {
+                    let candidate = Uuid::new_v4().to_string();
+                    if used_ids.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                }
+            };
+
+            out.push(IndexedParsedBlock {
+                id: block_id.clone(),
+                parent_id: parent_id.clone(),
+                order_index: i as i32,
+                content: pb.content.clone(),
+                block_type: pb.block_type.clone(),
+                properties: pb.properties.clone(),
+                task_state: pb.task_state.clone(),
+                scheduled_date: pb.scheduled_date.clone(),
+                deadline_date: pb.deadline_date.clone(),
+                is_flashcard: pb.is_flashcard,
+                flashcard_front: pb.flashcard_front.clone(),
+                flashcard_back: pb.flashcard_back.clone(),
+            });
+
+            if !pb.children.is_empty() {
+                self.flatten_parsed_blocks(
+                    &pb.children,
+                    Some(block_id),
+                    existing_ids_by_slot,
+                    used_ids,
+                    out,
+                );
+            }
+        }
+    }
+
+    fn sync_indexed_block_derived_state_in_connection(
+        &self,
+        conn: &rusqlite::Connection,
+        block_id: &str,
+        block: &IndexedParsedBlock,
+    ) -> Result<()> {
+        self.db
+            .sync_block_properties_in_connection(conn, block_id, &block.properties)?;
+
+        if let Some(ref state) = block.task_state {
+            self.db.upsert_task_in_connection(
+                conn,
+                block_id,
+                state,
+                block.scheduled_date.as_deref(),
+                block.deadline_date.as_deref(),
+            )?;
+        } else {
+            self.db.delete_task_in_connection(conn, block_id)?;
+        }
+
+        if block.is_flashcard {
+            if let (Some(ref front), Some(ref back)) = (&block.flashcard_front, &block.flashcard_back)
+            {
+                let tags: Vec<String> = parser::extract_links(&block.content)
+                    .into_iter()
+                    .filter_map(|link| match link {
+                        ExtractedLink::Tag(tag) => Some(tag),
+                        _ => None,
+                    })
+                    .collect();
+                self.db
+                    .upsert_flashcard_in_connection(conn, block_id, front, back, &tags)?;
+            } else {
+                self.db.delete_flashcard_in_connection(conn, block_id)?;
+            }
+        } else {
+            self.db.delete_flashcard_in_connection(conn, block_id)?;
+        }
+
+        self.db.delete_links_from_block_in_connection(conn, block_id)?;
+        for link in parser::extract_links(&block.content) {
+            let (target, link_type) = self.resolve_link_target_in_connection(conn, link)?;
+            self.db
+                .insert_link_in_connection(conn, block_id, &target, link_type)?;
+        }
+
         Ok(())
     }
 
@@ -837,14 +1038,7 @@ impl Graph {
     }
 
     fn next_order_index_for_page(&self, page_id: &str) -> Result<i32> {
-        let existing = self.db.list_blocks_for_page(page_id)?;
-        let max = existing
-            .iter()
-            .filter(|b| b.parent_id.is_none())
-            .map(|b| b.order_index)
-            .max()
-            .unwrap_or(-1);
-        Ok(max + 1)
+        self.db.next_root_order_index(page_id)
     }
 
     /// Delete a block: removes from DB, then writes .md file.
@@ -902,6 +1096,7 @@ impl Graph {
         // Delete from DB
         self.db.delete_blocks_for_page(page_id)?;
         self.db.delete_page(page_id)?;
+        self.forget_indexed_content(&full_path);
 
         Ok(())
     }
@@ -982,12 +1177,13 @@ impl Graph {
         let blocks = self.db.list_blocks_for_page(&page.id)?;
         let content = parser::serialize_page(&page.properties, &blocks);
 
-        fs::write(&file_path, content)?;
+        fs::write(&file_path, &content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
         // create/modify event instead of treating it as an external change
         // (which previously triggered a full, destructive reindex).
         self.note_self_write(&file_path);
+        self.remember_indexed_content_hash(&file_path, Self::content_hash(&content));
 
         Ok(())
     }
@@ -1029,6 +1225,12 @@ mod tests {
             params![page_id],
             |row| row.get(0),
         )?;
+        Ok(count)
+    }
+
+    fn count_with_param(graph: &Graph, sql: &str, param: &str) -> Result<i64> {
+        let conn = graph.db.conn()?;
+        let count = conn.query_row(sql, params![param], |row| row.get(0))?;
         Ok(count)
     }
 
@@ -1090,6 +1292,183 @@ mod tests {
             "Books/Chapter"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_skips_identical_rewrite_without_recreating_blocks() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("tracked", false)?;
+        let initial_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&initial_block.id, "Alpha", None)?;
+        graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Beta",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let file_path = graph.pages_dir.join("tracked.md");
+        let content = fs::read_to_string(&file_path)?;
+        let before_ids: Vec<String> = graph
+            .db
+            .list_blocks_for_page(&page.id)?
+            .into_iter()
+            .map(|block| block.id)
+            .collect();
+
+        fs::write(&file_path, &content)?;
+        graph.index_file(&file_path)?;
+
+        let after_ids: Vec<String> = graph
+            .db
+            .list_blocks_for_page(&page.id)?
+            .into_iter()
+            .map(|block| block.id)
+            .collect();
+
+        assert_eq!(after_ids, before_ids);
+        assert_eq!(fs::read_to_string(&file_path)?, content);
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_updates_changed_block_in_place() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("tracked-change", false)?;
+        let initial_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&initial_block.id, "Alpha", None)?;
+        graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Beta",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let before = graph.db.list_blocks_for_page(&page.id)?;
+        let alpha_id = before[0].id.clone();
+        let beta_id = before[1].id.clone();
+
+        let file_path = graph.pages_dir.join("tracked-change.md");
+        let content = fs::read_to_string(&file_path)?;
+        let updated = content.replacen("Beta", "Beta updated", 1);
+        fs::write(&file_path, updated)?;
+        graph.index_file(&file_path)?;
+
+        let after = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].id, alpha_id);
+        assert_eq!(after[0].content, "Alpha");
+        assert_eq!(after[1].id, beta_id);
+        assert_eq!(after[1].content, "Beta updated");
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_commits_page_and_derived_state_atomically() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("atomic.md");
+
+        fs::write(
+            &file_path,
+            "status:: active\n- TODO Review [[Target]]\n  priority:: high\n",
+        )?;
+        graph.index_file(&file_path)?;
+
+        let page = graph.db.get_page_by_title("atomic")?;
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        assert_eq!(page_property_count(&graph, &page.id)?, 1);
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM block_properties WHERE block_id = ?1",
+                &block.id,
+            )?,
+            1
+        );
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM tasks WHERE block_id = ?1",
+                &block.id,
+            )?,
+            1
+        );
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM links WHERE from_block_id = ?1",
+                &block.id,
+            )?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_rolls_back_all_writes_on_mid_index_failure() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("atomic-fail.md");
+
+        let conn = graph.db.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TRIGGER fail_link_insert
+            BEFORE INSERT ON links
+            BEGIN
+                SELECT RAISE(FAIL, 'forced link failure');
+            END;
+            ",
+        )?;
+        drop(conn);
+
+        fs::write(
+            &file_path,
+            "status:: active\n- TODO Review [[Target]]\n  priority:: high\n",
+        )?;
+
+        assert!(graph.index_file(&file_path).is_err());
+        assert_eq!(graph.db.count_pages()?, 0);
+
+        let conn = graph.db.conn()?;
+        for table in [
+            "pages",
+            "blocks",
+            "page_properties",
+            "block_properties",
+            "tasks",
+            "links",
+        ] {
+            let query = format!("SELECT COUNT(*) FROM {table}");
+            let count: i64 = conn.query_row(&query, [], |row| row.get(0))?;
+            assert_eq!(count, 0, "expected {table} to stay empty");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn next_order_index_for_page_uses_root_max_only() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("ordering.md");
+
+        fs::write(&file_path, "- First\n  - Child\n- Second\n- Third\n")?;
+        graph.index_file(&file_path)?;
+
+        let page = graph.db.get_page_by_title("ordering")?;
+        assert_eq!(graph.next_order_index_for_page(&page.id)?, 3);
         Ok(())
     }
 }

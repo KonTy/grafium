@@ -15,3 +15,4 @@ ratatui-textarea = { version = "0.9", features = ["crossterm"], default-features
 pulldown-cmark = "0.10"
 anyhow = "1"
 serde_json = "1"
+unicode-width = "0.2"

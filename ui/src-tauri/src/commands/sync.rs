@@ -186,10 +186,10 @@ pub fn sync_run(
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<SyncResult, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let config_path = snapshot
         .root_dir
-        .join(metadata_dir_name(&app))
+        .join(&snapshot.metadata_dir_name)
         .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
@@ -201,15 +201,20 @@ pub fn sync_run(
 
     let backend = create_backend(target)?;
     let engine =
-        SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
+        SyncEngine::new_with_metadata_dir(snapshot.root_dir.clone(), &snapshot.metadata_dir_name);
 
     let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
 
     // Reindex after sync to pick up pulled/conflict files
     if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty()
     {
-        if let Err(e) = graph.reindex_all() {
-            eprintln!("Reindex after sync failed: {}", e);
+        match crate::open_graph_snapshot(&snapshot) {
+            Ok(detached_graph) => {
+                if let Err(e) = detached_graph.reindex_all() {
+                    eprintln!("Reindex after sync failed: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Reindex after sync setup failed: {}", e),
         }
     }
 
@@ -219,15 +224,15 @@ pub fn sync_run(
 /// Sync all configured targets that are available and have auto_sync enabled.
 #[tauri::command]
 pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SyncResult>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let config_path = snapshot
         .root_dir
-        .join(metadata_dir_name(&app))
+        .join(&snapshot.metadata_dir_name)
         .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
     let engine =
-        SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
+        SyncEngine::new_with_metadata_dir(snapshot.root_dir.clone(), &snapshot.metadata_dir_name);
     let mut results = Vec::new();
     let mut needs_reindex = false;
 
@@ -259,8 +264,13 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
     }
 
     if needs_reindex {
-        if let Err(e) = graph.reindex_all() {
-            eprintln!("Reindex after sync failed: {}", e);
+        match crate::open_graph_snapshot(&snapshot) {
+            Ok(detached_graph) => {
+                if let Err(e) = detached_graph.reindex_all() {
+                    eprintln!("Reindex after sync failed: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Reindex after sync setup failed: {}", e),
         }
     }
 

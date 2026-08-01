@@ -8,6 +8,7 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::ai::config::ReferenceConfig;
 use crate::ai::traits::{
@@ -82,82 +83,95 @@ impl ReferenceEngine {
     ) -> Result<PageReferencesMeta> {
         let mut all_refs: Vec<GeneratedReference> = Vec::new();
         let mut ref_counter = 1;
+        let eligible_blocks = blocks
+            .iter()
+            .filter(|(_, content)| content.trim().len() >= 20)
+            .map(|(block_id, content)| (block_id.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
 
-        for (block_id, content) in blocks {
-            if content.trim().len() < 20 {
-                continue;
-            }
-
-            // Step 1: Extract key concepts from this block.
-            let concepts = self.extract_concepts(content, llm).await?;
-
-            if concepts.is_empty() {
-                continue;
-            }
-
-            // Step 2: For each concept, find related content via vector search.
-            for concept in &concepts {
-                let query_text = vec![format!("{} {}", page_title, concept.text)];
-                let embeddings = embedder.embed(&query_text).await?;
-
-                if embeddings.is_empty() {
-                    continue;
-                }
-
-                let filter_graph = if self.config.cross_graph {
-                    None
-                } else {
-                    Some(graph_id)
-                };
-
-                let results = store
-                    .search(
-                        &embeddings[0],
-                        self.config.max_refs_per_paragraph,
-                        filter_graph,
-                    )
-                    .await?;
-
-                // Filter out self-references and low-confidence results.
-                let relevant: Vec<&SearchResult> = results
-                    .iter()
-                    .filter(|r| r.page_id != page_id)
-                    .filter(|r| r.score >= self.config.min_similarity_score)
-                    .collect();
-
-                if relevant.is_empty() {
-                    continue;
-                }
-
-                let related_pages: Vec<RelatedPage> = relevant
-                    .iter()
-                    .map(|r| RelatedPage {
-                        page_id: r.page_id.clone(),
-                        page_title: r.page_title.clone(),
-                        graph_id: r.graph_id.clone(),
-                        score: r.score,
-                        snippet: truncate_snippet(&r.content, 150),
-                    })
-                    .collect();
-
-                let avg_score =
-                    related_pages.iter().map(|r| r.score).sum::<f32>() / related_pages.len() as f32;
-
-                let reference_text = self.format_reference(&concept.text, &related_pages).await;
-
-                all_refs.push(GeneratedReference {
-                    ref_number: ref_counter,
-                    block_id: block_id.clone(),
-                    anchor_text: concept.text.clone(),
-                    anchor_offset: concept.offset,
-                    reference_text,
-                    related_pages,
-                    confidence: avg_score,
-                    generated_at: Utc::now().timestamp_millis(),
+        let mut pending_references = Vec::new();
+        for ((block_id, _), concepts) in eligible_blocks.iter().copied().zip(
+            self.extract_concepts_batch(&eligible_blocks, llm)
+                .await?
+                .into_iter(),
+        ) {
+            for concept in concepts {
+                pending_references.push(PendingReference {
+                    block_id: block_id.to_string(),
+                    concept,
                 });
-
-                ref_counter += 1;
             }
+        }
+
+        let query_texts = pending_references
+            .iter()
+            .map(|pending| format!("{} {}", page_title, pending.concept.text))
+            .collect::<Vec<_>>();
+        let embeddings = if query_texts.is_empty() {
+            Vec::new()
+        } else {
+            embedder.embed(&query_texts).await?
+        };
+        if embeddings.len() != query_texts.len() {
+            return Err(CoreError::Other(format!(
+                "Embedder returned {} embeddings for {} texts",
+                embeddings.len(),
+                query_texts.len()
+            )));
+        }
+
+        let filter_graph = if self.config.cross_graph {
+            None
+        } else {
+            Some(graph_id)
+        };
+
+        for (pending, embedding) in pending_references.into_iter().zip(embeddings.into_iter()) {
+            let results = store
+                .search(&embedding, self.config.max_refs_per_paragraph, filter_graph)
+                .await?;
+
+            // Filter out self-references and low-confidence results.
+            let relevant: Vec<&SearchResult> = results
+                .iter()
+                .filter(|r| r.page_id != page_id)
+                .filter(|r| r.score >= self.config.min_similarity_score)
+                .collect();
+
+            if relevant.is_empty() {
+                continue;
+            }
+
+            let related_pages: Vec<RelatedPage> = relevant
+                .iter()
+                .map(|r| RelatedPage {
+                    page_id: r.page_id.clone(),
+                    page_title: r.page_title.clone(),
+                    graph_id: r.graph_id.clone(),
+                    score: r.score,
+                    snippet: truncate_snippet(&r.content, 150),
+                })
+                .collect();
+
+            let avg_score =
+                related_pages.iter().map(|r| r.score).sum::<f32>() / related_pages.len() as f32;
+
+            let reference_text = self
+                .format_reference(&pending.concept.text, &related_pages)
+                .await;
+
+            all_refs.push(GeneratedReference {
+                ref_number: ref_counter,
+                block_id: pending.block_id,
+                anchor_text: pending.concept.text,
+                anchor_offset: pending.concept.offset,
+                reference_text,
+                related_pages,
+                confidence: avg_score,
+                generated_at: Utc::now().timestamp_millis(),
+            });
+
+            ref_counter += 1;
         }
 
         let content_hash = {
@@ -195,16 +209,60 @@ impl ReferenceEngine {
             },
         ];
 
-        let options = CompletionOptions {
-            max_tokens: Some(512),
-            temperature: Some(0.1),
-            ..Default::default()
-        };
-
-        let response = llm.complete(&messages, &options).await?;
+        let response = llm
+            .complete(&messages, &concept_extraction_options())
+            .await?;
 
         // Parse the structured response.
         parse_concept_response(&response, content)
+    }
+
+    async fn extract_concepts_batch(
+        &self,
+        blocks: &[(&str, &str)],
+        llm: &dyn LlmProvider,
+    ) -> Result<Vec<Vec<ConceptExtraction>>> {
+        if blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if blocks.len() == 1 {
+            return Ok(vec![self.extract_concepts(blocks[0].1, llm).await?]);
+        }
+
+        let request = blocks
+            .iter()
+            .map(|(block_id, content)| ConceptExtractionBlockInput { block_id, content })
+            .collect::<Vec<_>>();
+        let request_body = serde_json::to_string(&request).map_err(|error| {
+            CoreError::Parse(format!(
+                "Failed to serialize batched concept extraction request: {error}"
+            ))
+        })?;
+        let messages = vec![
+            ChatMessage {
+                role: MessageRole::System,
+                content: BATCH_CONCEPT_EXTRACTION_PROMPT.to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: request_body,
+            },
+        ];
+
+        let response = llm
+            .complete(&messages, &concept_extraction_options())
+            .await?;
+        match parse_batched_concept_response(&response, blocks) {
+            Ok(parsed) => Ok(parsed),
+            Err(_) => {
+                let mut extracted = Vec::with_capacity(blocks.len());
+                for (_, content) in blocks {
+                    extracted.push(self.extract_concepts(content, llm).await?);
+                }
+                Ok(extracted)
+            }
+        }
     }
 
     /// Format a reference entry for display.
@@ -239,6 +297,24 @@ struct ConceptExtraction {
     offset: usize,
 }
 
+#[derive(Deserialize)]
+struct ConceptJson {
+    text: String,
+    #[serde(rename = "type")]
+    _type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ConceptExtractionBlockInput<'a> {
+    block_id: &'a str,
+    content: &'a str,
+}
+
+struct PendingReference {
+    block_id: String,
+    concept: ConceptExtraction,
+}
+
 const CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a knowledge extraction system. Given a text block, identify the key concepts, entities, and claims that would benefit from cross-referencing.
 
 Return a JSON array of objects with:
@@ -256,34 +332,45 @@ Example output:
 
 Return ONLY the JSON array, no other text."#;
 
+const BATCH_CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a knowledge extraction system. Given a JSON array of text blocks, identify the key concepts, entities, and claims in each block that would benefit from cross-referencing.
+
+Input format:
+[{"block_id": "block-1", "content": "..."}, {"block_id": "block-2", "content": "..."}]
+
+Return a JSON array of objects with:
+- "block_id": the matching block id from the input
+- "concepts": an array of objects with:
+  - "text": the exact phrase from that block's content (must be a substring)
+  - "type": one of "concept", "entity", "claim", "term"
+
+Rules:
+- Return one object per input block
+- Extract 0-5 items maximum per block
+- Only extract meaningful, referenceable items (not common words)
+- Each "text" must appear verbatim in that block's content
+- Prefer noun phrases and technical terms
+- If a block has no useful concepts, return an empty "concepts" array for it
+
+Example output:
+[{"block_id": "block-1", "concepts": [{"text": "machine learning", "type": "concept"}]}, {"block_id": "block-2", "concepts": []}]
+
+Return ONLY the JSON array, no other text."#;
+
+fn concept_extraction_options() -> CompletionOptions {
+    CompletionOptions {
+        max_tokens: Some(512),
+        temperature: Some(0.1),
+        ..Default::default()
+    }
+}
+
 /// Parse LLM response into ConceptExtraction structs.
 fn parse_concept_response(
     response: &str,
     original_content: &str,
 ) -> Result<Vec<ConceptExtraction>> {
-    // Try to parse as JSON array.
     let trimmed = response.trim();
-    let json_str = if trimmed.starts_with('[') {
-        trimmed
-    } else {
-        // Try to find JSON array within the response.
-        trimmed
-            .find('[')
-            .and_then(|start| {
-                trimmed[start..]
-                    .rfind(']')
-                    .map(|end| &trimmed[start..=start + end])
-            })
-            .ok_or_else(|| concept_parse_error("missing JSON array in response", trimmed))?
-    };
-
-    #[derive(Deserialize)]
-    struct ConceptJson {
-        text: String,
-        #[serde(rename = "type")]
-        _type: Option<String>,
-    }
-
+    let json_str = extract_json_array(trimmed)?;
     let parsed: Vec<ConceptJson> = serde_json::from_str(json_str).map_err(|error| {
         concept_parse_error(
             &format!("invalid concept extraction JSON: {}", error),
@@ -291,16 +378,82 @@ fn parse_concept_response(
         )
     })?;
 
-    Ok(parsed
+    Ok(parse_concepts_for_content(parsed, original_content))
+}
+
+fn parse_batched_concept_response(
+    response: &str,
+    original_blocks: &[(&str, &str)],
+) -> Result<Vec<Vec<ConceptExtraction>>> {
+    #[derive(Deserialize)]
+    struct BatchedConceptJson {
+        block_id: String,
+        #[serde(default)]
+        concepts: Vec<ConceptJson>,
+    }
+
+    let trimmed = response.trim();
+    let json_str = extract_json_array(trimmed)?;
+    let parsed: Vec<BatchedConceptJson> = serde_json::from_str(json_str).map_err(|error| {
+        concept_parse_error(
+            &format!("invalid batched concept extraction JSON: {}", error),
+            trimmed,
+        )
+    })?;
+
+    let original_content_by_block = original_blocks
+        .iter()
+        .copied()
+        .collect::<HashMap<&str, &str>>();
+    let mut concepts_by_block = HashMap::with_capacity(parsed.len());
+    for block in parsed {
+        let Some(content) = original_content_by_block
+            .get(block.block_id.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        concepts_by_block.insert(
+            block.block_id,
+            parse_concepts_for_content(block.concepts, content),
+        );
+    }
+
+    Ok(original_blocks
+        .iter()
+        .map(|(block_id, _)| concepts_by_block.remove(*block_id).unwrap_or_default())
+        .collect())
+}
+
+fn extract_json_array(response: &str) -> Result<&str> {
+    if response.starts_with('[') {
+        return Ok(response);
+    }
+
+    response
+        .find('[')
+        .and_then(|start| {
+            response[start..]
+                .rfind(']')
+                .map(|end| &response[start..=start + end])
+        })
+        .ok_or_else(|| concept_parse_error("missing JSON array in response", response))
+}
+
+fn parse_concepts_for_content(
+    parsed: Vec<ConceptJson>,
+    original_content: &str,
+) -> Vec<ConceptExtraction> {
+    parsed
         .into_iter()
-        .filter_map(|c| {
-            let offset = original_content.find(&c.text)?;
+        .filter_map(|concept| {
+            let offset = original_content.find(&concept.text)?;
             Some(ConceptExtraction {
-                text: c.text,
+                text: concept.text,
                 offset,
             })
         })
-        .collect())
+        .collect()
 }
 
 fn truncate_snippet(text: &str, max_len: usize) -> String {
@@ -321,6 +474,206 @@ fn concept_parse_error(reason: &str, response: &str) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::traits::BoxFuture;
+    use serde_json::json;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MockLlmState {
+        calls: usize,
+        user_messages: Vec<String>,
+    }
+
+    struct MockLlm {
+        responses: Arc<Mutex<VecDeque<String>>>,
+        state: Arc<Mutex<MockLlmState>>,
+    }
+
+    impl MockLlm {
+        fn new<I>(responses: I) -> (Self, Arc<Mutex<MockLlmState>>)
+        where
+            I: IntoIterator<Item = String>,
+        {
+            let state = Arc::new(Mutex::new(MockLlmState::default()));
+            (
+                Self {
+                    responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                    state: state.clone(),
+                },
+                state,
+            )
+        }
+    }
+
+    impl LlmProvider for MockLlm {
+        fn complete<'a>(
+            &'a self,
+            messages: &'a [ChatMessage],
+            _options: &'a CompletionOptions,
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                let user_message = messages
+                    .iter()
+                    .find(|message| message.role == MessageRole::User)
+                    .map(|message| message.content.clone())
+                    .unwrap_or_default();
+
+                let mut state = self.state.lock().unwrap();
+                state.calls += 1;
+                state.user_messages.push(user_message);
+                drop(state);
+
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| CoreError::Other("No mock LLM response queued".to_string()))
+            })
+        }
+
+        fn name(&self) -> &str {
+            "mock-llm"
+        }
+
+        fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async move { Ok(true) })
+        }
+    }
+
+    #[derive(Default)]
+    struct MockEmbedderState {
+        calls: usize,
+        batches: Vec<Vec<String>>,
+    }
+
+    struct MockEmbedder {
+        state: Arc<Mutex<MockEmbedderState>>,
+        embeddings: HashMap<String, Vec<f32>>,
+        dimension: usize,
+    }
+
+    impl MockEmbedder {
+        fn new(embeddings: HashMap<String, Vec<f32>>) -> (Self, Arc<Mutex<MockEmbedderState>>) {
+            let dimension = embeddings.values().next().map(Vec::len).unwrap_or(0);
+            let state = Arc::new(Mutex::new(MockEmbedderState::default()));
+            (
+                Self {
+                    state: state.clone(),
+                    embeddings,
+                    dimension,
+                },
+                state,
+            )
+        }
+    }
+
+    impl Embedder for MockEmbedder {
+        fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.calls += 1;
+                state.batches.push(texts.to_vec());
+                drop(state);
+
+                texts
+                    .iter()
+                    .map(|text| {
+                        self.embeddings.get(text).cloned().ok_or_else(|| {
+                            CoreError::Other(format!("Missing mock embedding for '{text}'"))
+                        })
+                    })
+                    .collect()
+            })
+        }
+
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-embedder"
+        }
+    }
+
+    struct MockVectorStore {
+        results: HashMap<String, Vec<SearchResult>>,
+    }
+
+    impl MockVectorStore {
+        fn new(results: HashMap<String, Vec<SearchResult>>) -> Self {
+            Self { results }
+        }
+    }
+
+    impl VectorStore for MockVectorStore {
+        fn upsert<'a>(
+            &'a self,
+            _chunks: &'a [crate::ai::traits::ChunkEmbedding],
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn search<'a>(
+            &'a self,
+            query_embedding: &'a [f32],
+            _top_k: usize,
+            _filter_graph_id: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<SearchResult>>> {
+            Box::pin(async move {
+                Ok(self
+                    .results
+                    .get(&embedding_key(query_embedding))
+                    .cloned()
+                    .unwrap_or_default())
+            })
+        }
+
+        fn delete_by_page<'a>(
+            &'a self,
+            _graph_id: &'a str,
+            _page_id: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn delete_chunks<'a>(
+            &'a self,
+            _graph_id: &'a str,
+            _chunk_ids: &'a [String],
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn delete_by_graph<'a>(&'a self, _graph_id: &'a str) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
+            Box::pin(async move { Ok(0) })
+        }
+    }
+
+    fn embedding_key(embedding: &[f32]) -> String {
+        embedding
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn search_result(page_id: &str, page_title: &str, score: f32, content: &str) -> SearchResult {
+        SearchResult {
+            chunk_id: format!("{page_id}-chunk"),
+            graph_id: "graph-2".to_string(),
+            page_id: page_id.to_string(),
+            block_id: Some(format!("{page_id}-block")),
+            page_title: page_title.to_string(),
+            content: content.to_string(),
+            score,
+            metadata: json!({}),
+        }
+    }
 
     #[test]
     fn truncate_snippet_handles_utf8_boundaries() {
@@ -340,5 +693,141 @@ mod tests {
 
         assert!(matches!(error, CoreError::Parse(_)));
         assert!(error.to_string().contains("Response snippet"));
+    }
+
+    #[tokio::test]
+    async fn generate_references_batches_page_concepts_and_embeddings() -> Result<()> {
+        let page_title = "Systems Page";
+        let blocks = vec![
+            (
+                "block-1".to_string(),
+                "Rust ownership enables memory safety in concurrent systems.".to_string(),
+            ),
+            (
+                "block-2".to_string(),
+                "Tokio provides async scheduling for Rust services.".to_string(),
+            ),
+        ];
+        let (llm, llm_state) = MockLlm::new([r#"
+            [
+              {"block_id":"block-1","concepts":[
+                {"text":"Rust ownership","type":"concept"},
+                {"text":"memory safety","type":"claim"}
+              ]},
+              {"block_id":"block-2","concepts":[
+                {"text":"Tokio","type":"entity"}
+              ]}
+            ]
+        "#
+        .to_string()]);
+        let (embedder, embedder_state) = MockEmbedder::new(HashMap::from([
+            (format!("{page_title} Rust ownership"), vec![1.0]),
+            (format!("{page_title} memory safety"), vec![2.0]),
+            (format!("{page_title} Tokio"), vec![3.0]),
+        ]));
+        let store = MockVectorStore::new(HashMap::from([
+            (
+                embedding_key(&[1.0]),
+                vec![
+                    search_result("page-self", "Systems Page", 0.99, "self result"),
+                    search_result("page-rust", "Rust Book", 0.9, "rust ownership overview"),
+                    search_result("page-low", "Low Score", 0.4, "too weak"),
+                ],
+            ),
+            (
+                embedding_key(&[2.0]),
+                vec![
+                    search_result(
+                        "page-borrow",
+                        "Borrow Checker",
+                        0.8,
+                        "borrow rules explained",
+                    ),
+                    search_result("page-own", "Ownership Guide", 0.7, "ownership patterns"),
+                ],
+            ),
+            (
+                embedding_key(&[3.0]),
+                vec![search_result(
+                    "page-tokio",
+                    "Tokio Runtime",
+                    0.95,
+                    "async runtime overview",
+                )],
+            ),
+        ]));
+        let engine = ReferenceEngine::new(ReferenceConfig {
+            max_refs_per_paragraph: 3,
+            min_similarity_score: 0.6,
+            ..Default::default()
+        });
+
+        let meta = engine
+            .generate_references(
+                "page-self",
+                page_title,
+                &blocks,
+                "graph-1",
+                &llm,
+                &embedder,
+                &store,
+            )
+            .await?;
+
+        let llm_state = llm_state.lock().unwrap();
+        assert_eq!(llm_state.calls, 1);
+        assert!(llm_state.user_messages[0].contains("\"block_id\":\"block-1\""));
+        assert!(llm_state.user_messages[0].contains("\"block_id\":\"block-2\""));
+        drop(llm_state);
+
+        let embedder_state = embedder_state.lock().unwrap();
+        assert_eq!(embedder_state.calls, 1);
+        assert_eq!(
+            embedder_state.batches,
+            vec![vec![
+                format!("{page_title} Rust ownership"),
+                format!("{page_title} memory safety"),
+                format!("{page_title} Tokio"),
+            ]]
+        );
+        drop(embedder_state);
+
+        assert_eq!(meta.reference_count, 3);
+        assert_eq!(
+            meta.references
+                .iter()
+                .map(|reference| (reference.block_id.as_str(), reference.anchor_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("block-1", "Rust ownership"),
+                ("block-1", "memory safety"),
+                ("block-2", "Tokio"),
+            ]
+        );
+        assert!((meta.references[0].confidence - 0.9).abs() < 1e-6);
+        assert!((meta.references[1].confidence - 0.75).abs() < 1e-6);
+        assert!((meta.references[2].confidence - 0.95).abs() < 1e-6);
+        assert_eq!(
+            meta.references[0]
+                .related_pages
+                .iter()
+                .map(|page| page.page_title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Rust Book"]
+        );
+        assert_eq!(
+            meta.references[1]
+                .related_pages
+                .iter()
+                .map(|page| page.page_title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Borrow Checker", "Ownership Guide"]
+        );
+        assert_eq!(
+            meta.references[1].reference_text,
+            "**memory safety**\n→ [[Borrow Checker]] (score: 80%): borrow rules explained\n→ [[Ownership Guide]] (score: 70%): ownership patterns"
+        );
+
+        Ok(())
     }
 }

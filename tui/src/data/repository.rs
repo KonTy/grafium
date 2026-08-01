@@ -8,11 +8,12 @@
 
 use grafium_core::models::{Block, Link, Page};
 use grafium_core::Graph;
+use std::collections::HashMap;
 
 pub type RepoResult<T> = Result<T, String>;
 
 /// Everything the TUI needs to read from / write to a graph.
-pub trait GraphRepository {
+pub trait GraphRepository: Send + Sync {
     /// Non-journal pages, most-recently-updated first, paginated.
     fn list_pages(&self, limit: i64, offset: i64) -> RepoResult<Vec<Page>>;
     /// Journal pages, most recent first, paginated.
@@ -110,13 +111,19 @@ impl GraphRepository for CoreRepository {
             .db
             .get_backlinks(page_id)
             .map_err(|e| Self::label_error("get_backlinks", e))?;
+        let mut titles_by_page = HashMap::new();
         raw.into_iter()
             .map(|(link, block)| {
-                let title = self
-                    .graph
-                    .db
-                    .get_block_page_title(&block.id)
-                    .unwrap_or_else(|_| "(unknown page)".to_string());
+                let title = titles_by_page
+                    .entry(block.page_id.clone())
+                    .or_insert_with(|| {
+                        self.graph
+                            .db
+                            .get_page_by_id(&block.page_id)
+                            .map(|page| page.title)
+                            .unwrap_or_else(|_| "(unknown page)".to_string())
+                    })
+                    .clone();
                 Ok((link, block, title))
             })
             .collect()

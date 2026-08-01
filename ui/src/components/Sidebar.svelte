@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, listPages, listJournalPages, searchFts, getPage, addFavorite, removeFavorite } from "../lib/api";
+  import { createSidebarSearchController } from "../lib/sidebarSearch";
   import type { Page, Block } from "../lib/api";
 
   interface Props {
@@ -19,13 +20,19 @@
   let favorites: Page[] = $state([]);
   let recentPages: Page[] = $state([]);
   let searchQuery = $state("");
-  let searchResults: Array<
+  type SearchResultItem =
     { kind: "page"; page: Page }
-    | { kind: "block"; block: Block }
-  > = $state([]);
+    | { kind: "block"; block: Block };
+  interface SearchablePage {
+    page: Page;
+    lowerTitle: string;
+    fuzzyTitle: string;
+  }
+
+  let searchResults: SearchResultItem[] = $state([]);
   let showSearch = $state(false);
   let searchInputEl: HTMLInputElement | null = $state(null);
-  let allSearchPages: Page[] = $state([]);
+  let allSearchPages: SearchablePage[] = $state([]);
   let pagesLoaded = $state(false);
 
   // Context menu state
@@ -137,21 +144,29 @@
     return null;
   }
 
-  function scorePageTitle(title: string, query: string, isoDateQuery: string | null): number | null {
-    const q = query.toLowerCase();
-    const t = title.toLowerCase();
-    const qn = normalizeForFuzzy(query);
-    const tn = normalizeForFuzzy(title);
+  function toSearchablePage(page: Page): SearchablePage {
+    return {
+      page,
+      lowerTitle: page.title.toLowerCase(),
+      fuzzyTitle: normalizeForFuzzy(page.title),
+    };
+  }
 
-    if (isoDateQuery && title === isoDateQuery) return 1200;
+  function scoreSearchablePage(
+    page: SearchablePage,
+    queryLower: string,
+    normalizedQuery: string,
+    isoDateQuery: string | null
+  ): number | null {
+    if (isoDateQuery && page.page.title === isoDateQuery) return 1200;
 
-    const exact = t.indexOf(q);
+    const exact = page.lowerTitle.indexOf(queryLower);
     if (exact >= 0) return 1000 - exact;
 
-    if (qn.length > 0) {
-      const fuzzyContains = tn.indexOf(qn);
+    if (normalizedQuery.length > 0) {
+      const fuzzyContains = page.fuzzyTitle.indexOf(normalizedQuery);
       if (fuzzyContains >= 0) return 800 - fuzzyContains;
-      if (isSubsequence(qn, tn)) return 500;
+      if (isSubsequence(normalizedQuery, page.fuzzyTitle)) return 500;
     }
 
     return null;
@@ -171,40 +186,72 @@
       if (!deduped.has(key)) deduped.set(key, p);
     }
 
-    allSearchPages = Array.from(deduped.values());
+    allSearchPages = Array.from(deduped.values()).map(toSearchablePage);
     pagesLoaded = true;
   }
 
-  async function handleSearch() {
-    if (searchQuery.trim().length < 1) {
+  const searchController = createSidebarSearchController<SearchResultItem[]>({
+    debounceMs: 120,
+    run: runSidebarSearch,
+    apply: (_query, results) => {
+      searchResults = results;
+    },
+    clear: () => {
       searchResults = [];
-      return;
+    },
+  });
+
+  $effect(() => {
+    return () => {
+      searchController.cancel();
+    };
+  });
+
+  async function runSidebarSearch(query: string): Promise<SearchResultItem[]> {
+    try {
+      await ensureSearchPagesLoaded();
+
+      const isoDateQuery = normalizeDateInput(query);
+      const queryLower = query.toLowerCase();
+      const normalizedQuery = normalizeForFuzzy(query);
+
+      const pageMatches = allSearchPages
+        .map((page) => ({
+          page: page.page,
+          score: scoreSearchablePage(page, queryLower, normalizedQuery, isoDateQuery),
+        }))
+        .filter((match): match is { page: Page; score: number } => match.score !== null)
+        .sort((a, b) => b.score - a.score || a.page.title.localeCompare(b.page.title))
+        .slice(0, 10)
+        .map((match) => ({ kind: "page" as const, page: match.page }));
+
+      const blockMatches = query.length >= 2
+        ? (await searchFts(query, 20)).slice(0, 12).map((block) => ({ kind: "block" as const, block }))
+        : [];
+
+      return [...pageMatches, ...blockMatches];
+    } catch (error) {
+      console.error("Sidebar search failed:", error);
+      return [];
     }
+  }
 
-    await ensureSearchPagesLoaded();
+  function handleSearchInput() {
+    searchController.submit(searchQuery);
+  }
 
-    const query = searchQuery.trim();
-    const isoDateQuery = normalizeDateInput(query);
-
-    const pageMatches = allSearchPages
-      .map((page) => ({ page, score: scorePageTitle(page.title, query, isoDateQuery) }))
-      .filter((x): x is { page: Page; score: number } => x.score !== null)
-      .sort((a, b) => b.score - a.score || a.page.title.localeCompare(b.page.title))
-      .slice(0, 10)
-      .map((x) => ({ kind: "page" as const, page: x.page }));
-
-    const blockMatches = query.length >= 2
-      ? (await searchFts(query, 20)).slice(0, 12).map((block) => ({ kind: "block" as const, block }))
-      : [];
-
-    searchResults = [...pageMatches, ...blockMatches];
+  function clearSearch(resetQuery = false) {
+    searchController.cancel();
+    if (resetQuery) {
+      searchQuery = "";
+    }
+    searchResults = [];
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       showSearch = false;
-      searchQuery = "";
-      searchResults = [];
+      clearSearch(true);
     }
   }
 
@@ -218,11 +265,22 @@
   function toggleSearch() {
     if (showSearch) {
       showSearch = false;
-      searchQuery = "";
-      searchResults = [];
+      clearSearch(true);
       return;
     }
     void openSearch();
+  }
+
+  function invalidateSearchPages() {
+    clearSearch(true);
+    pagesLoaded = false;
+    allSearchPages = [];
+  }
+
+  function handleSidebarGraphChanged() {
+    void loadSidebar();
+    invalidateSearchPages();
+    onGraphChanged();
   }
 
   $effect(() => {
@@ -240,8 +298,7 @@
 
   async function navigateToBlock(result: Block) {
     showSearch = false;
-    searchQuery = "";
-    searchResults = [];
+    clearSearch(true);
     try {
       let title = pageTitleCache.get(result.page_id);
       if (!title) {
@@ -266,15 +323,14 @@
 
   function navigateToPageResult(page: Page) {
     showSearch = false;
-    searchQuery = "";
-    searchResults = [];
+    clearSearch(true);
     onNavigate(page.title);
   }
 </script>
 
 <aside class="sidebar">
   <div class="sidebar-header">
-    <GraphMenu onGraphChanged={() => { loadSidebar(); pagesLoaded = false; allSearchPages = []; onGraphChanged(); }} />
+    <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
     <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="11" cy="11" r="8"></circle>
@@ -291,7 +347,7 @@
         placeholder="Search pages & blocks..."
         bind:this={searchInputEl}
         bind:value={searchQuery}
-        oninput={handleSearch}
+        oninput={handleSearchInput}
         onkeydown={handleSearchKeydown}
       />
       {#if searchResults.length > 0}

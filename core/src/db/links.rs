@@ -1,7 +1,28 @@
 use super::Database;
 use crate::error::Result;
 use crate::models::{Block, BlockType, Link, LinkType};
-use rusqlite::params;
+use rusqlite::{params, Connection};
+
+fn insert_link_on_conn(
+    conn: &Connection,
+    from_block_id: &str,
+    to_page_id: &str,
+    link_type: LinkType,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO links (from_block_id, to_page_id, link_type) VALUES (?1, ?2, ?3)",
+        params![from_block_id, to_page_id, link_type.as_str()],
+    )?;
+    Ok(())
+}
+
+fn delete_links_from_block_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM links WHERE from_block_id = ?1",
+        params![block_id],
+    )?;
+    Ok(())
+}
 
 impl Database {
     pub fn insert_link(
@@ -11,20 +32,30 @@ impl Database {
         link_type: LinkType,
     ) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO links (from_block_id, to_page_id, link_type) VALUES (?1, ?2, ?3)",
-            params![from_block_id, to_page_id, link_type.as_str()],
-        )?;
-        Ok(())
+        insert_link_on_conn(&conn, from_block_id, to_page_id, link_type)
     }
 
     pub fn delete_links_from_block(&self, block_id: &str) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute(
-            "DELETE FROM links WHERE from_block_id = ?1",
-            params![block_id],
-        )?;
-        Ok(())
+        delete_links_from_block_on_conn(&conn, block_id)
+    }
+
+    pub(crate) fn insert_link_in_connection(
+        &self,
+        conn: &Connection,
+        from_block_id: &str,
+        to_page_id: &str,
+        link_type: LinkType,
+    ) -> Result<()> {
+        insert_link_on_conn(conn, from_block_id, to_page_id, link_type)
+    }
+
+    pub(crate) fn delete_links_from_block_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+    ) -> Result<()> {
+        delete_links_from_block_on_conn(conn, block_id)
     }
 
     pub fn get_backlinks(&self, page_id: &str) -> Result<Vec<(Link, Block)>> {

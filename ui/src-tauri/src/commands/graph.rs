@@ -442,9 +442,10 @@ pub fn create_graph(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn reindex_current(state: State<AppState>) -> Result<(), String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.reindex_all().map_err(|e| e.to_string())
+pub fn reindex_current(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let detached_graph = crate::open_graph_snapshot(&snapshot)?;
+    detached_graph.reindex_all().map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -21,6 +21,42 @@ pub struct KnowledgeState {
     pub engine: Arc<RwLock<Option<KnowledgeEngine>>>,
 }
 
+const AI_INDEX_BATCH_SIZE: i64 = 100;
+
+struct PageBatchCursor {
+    batch_size: i64,
+    offset: i64,
+    finished: bool,
+}
+
+impl PageBatchCursor {
+    fn new(batch_size: i64) -> Self {
+        Self {
+            batch_size,
+            offset: 0,
+            finished: false,
+        }
+    }
+
+    fn next_batch<T, E>(
+        &mut self,
+        fetch: impl FnOnce(i64, i64) -> Result<Vec<T>, E>,
+    ) -> Result<Option<Vec<T>>, E> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        let batch = fetch(self.batch_size, self.offset)?;
+        if batch.is_empty() {
+            self.finished = true;
+            return Ok(None);
+        }
+
+        self.offset += batch.len() as i64;
+        Ok(Some(batch))
+    }
+}
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -225,6 +261,7 @@ pub async fn ai_index_page(
 
 #[tauri::command]
 pub async fn ai_index_all_pages(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
 ) -> Result<usize, String> {
@@ -237,12 +274,19 @@ pub async fn ai_index_all_pages(
         return Err("AI engine not ready — check configuration".to_string());
     }
 
-    let (pages_and_blocks, graph_id) = {
-        let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-        let pages = graph.db.list_pages(10000, 0).map_err(|e| e.to_string())?;
-        let graph_id = graph.root_dir.to_string_lossy().to_string();
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let graph_id = snapshot.root_dir.to_string_lossy().to_string();
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+    let mut cursor = PageBatchCursor::new(AI_INDEX_BATCH_SIZE);
+    let mut total = 0;
 
-        let mut pages_and_blocks = Vec::new();
+    while let Some(pages) = cursor.next_batch(|limit, offset| {
+        graph
+            .db
+            .list_pages_window(limit, offset, false)
+            .map_err(|e| e.to_string())
+    })? {
+        let mut pages_and_blocks = Vec::with_capacity(pages.len());
         for page in pages {
             let blocks = graph
                 .db
@@ -250,15 +294,13 @@ pub async fn ai_index_all_pages(
                 .map_err(|e| e.to_string())?;
             pages_and_blocks.push((page, blocks));
         }
-        (pages_and_blocks, graph_id)
-    };
 
-    let mut total = 0;
-    for (page, blocks) in &pages_and_blocks {
-        match engine.index_page(page, blocks, &graph_id).await {
-            Ok(count) => total += count,
-            Err(e) => {
-                eprintln!("Failed to index page '{}': {}", page.title, e);
+        for (page, blocks) in &pages_and_blocks {
+            match engine.index_page(page, blocks, &graph_id).await {
+                Ok(count) => total += count,
+                Err(e) => {
+                    eprintln!("Failed to index page '{}': {}", page.title, e);
+                }
             }
         }
     }
@@ -493,6 +535,47 @@ pub async fn ai_register_graph(
 
     let mut registry = engine.registry_mut().await;
     registry.register(graph).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageBatchCursor;
+
+    #[test]
+    fn page_batch_cursor_streams_past_legacy_ten_thousand_cap() {
+        let total_pages = 10_050usize;
+        let batch_size = 128i64;
+        let mut cursor = PageBatchCursor::new(batch_size);
+        let mut requested_windows = Vec::new();
+        let mut processed = 0usize;
+
+        while let Some(batch) = cursor
+            .next_batch(|limit, offset| {
+                requested_windows.push((limit, offset));
+                let start = offset as usize;
+                if start >= total_pages {
+                    return Ok::<Vec<usize>, &'static str>(Vec::new());
+                }
+                let end = (start + limit as usize).min(total_pages);
+                Ok((start..end).collect())
+            })
+            .expect("cursor should paginate cleanly")
+        {
+            assert!(
+                batch.len() <= batch_size as usize,
+                "batch should stay memory-bounded"
+            );
+            processed += batch.len();
+        }
+
+        assert_eq!(processed, total_pages);
+        assert!(
+            requested_windows
+                .iter()
+                .any(|(_, offset)| *offset >= 10_000),
+            "cursor should continue beyond the old 10k preload cap"
+        );
+    }
 }
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────

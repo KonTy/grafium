@@ -1,3 +1,4 @@
+use super::backend::FileMetadata;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,18 @@ pub struct FileSyncRecord {
     pub hash_at_sync: String,
     /// Timestamp of last sync (Unix epoch seconds)
     pub synced_at: i64,
+    /// Local size at last sync, when known.
+    #[serde(default)]
+    pub local_size: Option<u64>,
+    /// Local modified timestamp at last sync, when known.
+    #[serde(default)]
+    pub local_modified_at: Option<i64>,
+    /// Remote size at last sync, when known.
+    #[serde(default)]
+    pub remote_size: Option<u64>,
+    /// Remote modified timestamp at last sync, when known.
+    #[serde(default)]
+    pub remote_modified_at: Option<i64>,
 }
 
 /// Persistent sync state — stored in the local graph folder.
@@ -44,7 +57,13 @@ impl SyncState {
     }
 
     /// Record that a file was synced with the given content hash.
-    pub fn record_sync(&mut self, rel_path: &str, hash: &str) {
+    pub fn record_sync(
+        &mut self,
+        rel_path: &str,
+        hash: &str,
+        local: Option<&FileMetadata>,
+        remote: Option<&FileMetadata>,
+    ) {
         let now = chrono::Utc::now().timestamp();
         self.files.insert(
             rel_path.to_string(),
@@ -52,6 +71,10 @@ impl SyncState {
                 rel_path: rel_path.to_string(),
                 hash_at_sync: hash.to_string(),
                 synced_at: now,
+                local_size: local.map(|meta| meta.size),
+                local_modified_at: local.map(|meta| meta.modified_at),
+                remote_size: remote.map(|meta| meta.size),
+                remote_modified_at: remote.map(|meta| meta.modified_at),
             },
         );
     }
@@ -62,6 +85,34 @@ impl SyncState {
             Some(record) => record.hash_at_sync != current_hash,
             None => true, // New file, never synced
         }
+    }
+
+    pub fn local_metadata_matches(&self, meta: &FileMetadata) -> bool {
+        self.files.get(&meta.rel_path).map_or(false, |record| {
+            record.local_size == Some(meta.size)
+                && record.local_modified_at == Some(meta.modified_at)
+        })
+    }
+
+    pub fn remote_metadata_matches(&self, meta: &FileMetadata) -> bool {
+        self.files.get(&meta.rel_path).map_or(false, |record| {
+            record.remote_size == Some(meta.size)
+                && record.remote_modified_at == Some(meta.modified_at)
+        })
+    }
+
+    pub fn cached_local_hash<'a>(&'a self, meta: &FileMetadata) -> Option<&'a str> {
+        self.files
+            .get(&meta.rel_path)
+            .filter(|_| self.local_metadata_matches(meta))
+            .map(|record| record.hash_at_sync.as_str())
+    }
+
+    pub fn cached_remote_hash<'a>(&'a self, meta: &FileMetadata) -> Option<&'a str> {
+        self.files
+            .get(&meta.rel_path)
+            .filter(|_| self.remote_metadata_matches(meta))
+            .map(|record| record.hash_at_sync.as_str())
     }
 
     /// Remove a file record (e.g. after deletion sync).

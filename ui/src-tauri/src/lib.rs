@@ -23,6 +23,13 @@ pub struct AppState {
     watcher: Mutex<Option<GraphWatcherHandle>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphRuntimeSnapshot {
+    pub root_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub metadata_dir_name: String,
+}
+
 struct GraphWatcherHandle {
     stop_tx: mpsc::Sender<()>,
     join_handle: thread::JoinHandle<()>,
@@ -57,6 +64,44 @@ impl AppState {
         *guard = Some(handle);
         Ok(())
     }
+}
+
+pub(crate) fn snapshot_then<T, S, R>(
+    lock: &Mutex<T>,
+    snapshot: impl FnOnce(&T) -> Result<S, String>,
+    run: impl FnOnce(S) -> Result<R, String>,
+) -> Result<R, String> {
+    let snapshot = {
+        let guard = lock.lock().map_err(|e| e.to_string())?;
+        snapshot(&guard)?
+    };
+    run(snapshot)
+}
+
+pub(crate) fn current_graph_snapshot(
+    app: &tauri::AppHandle,
+    graph: &Mutex<Graph>,
+) -> Result<GraphRuntimeSnapshot, String> {
+    snapshot_then(
+        graph,
+        |graph| {
+            Ok(GraphRuntimeSnapshot {
+                root_dir: graph.root_dir.clone(),
+                db_path: platform_db_path(app, &graph.root_dir),
+                metadata_dir_name: metadata_dir_name(app),
+            })
+        },
+        |snapshot| Ok(snapshot),
+    )
+}
+
+pub(crate) fn open_graph_snapshot(snapshot: &GraphRuntimeSnapshot) -> Result<Graph, String> {
+    Graph::open_with_db_path_and_metadata_dir(
+        &snapshot.root_dir,
+        &snapshot.db_path,
+        &snapshot.metadata_dir_name,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn should_process_event(
@@ -263,13 +308,14 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
         loop {
             thread::sleep(check_interval);
 
-            let root_dir = match graph.lock() {
-                Ok(g) => g.root_dir.clone(),
+            let snapshot = match current_graph_snapshot(&app_handle, graph.as_ref()) {
+                Ok(snapshot) => snapshot,
                 Err(_) => continue,
             };
 
-            let config_path = root_dir
-                .join(metadata_dir_name(&app_handle))
+            let config_path = snapshot
+                .root_dir
+                .join(&snapshot.metadata_dir_name)
                 .join("sync-config.json");
             let configs = SyncConfigs::load(&config_path);
 
@@ -319,8 +365,8 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                     // Auto-sync if enabled
                     if target.auto_sync {
                         let engine = SyncEngine::new_with_metadata_dir(
-                            root_dir.clone(),
-                            &metadata_dir_name(&app_handle),
+                            snapshot.root_dir.clone(),
+                            &snapshot.metadata_dir_name,
                         );
                         match engine.sync(backend.as_ref()) {
                             Ok(result) => {
@@ -335,8 +381,8 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                                     || !result.conflicts.is_empty()
                                     || !result.deleted_local.is_empty()
                                 {
-                                    if let Ok(g) = graph.lock() {
-                                        let _ = g.reindex_all();
+                                    if let Ok(detached_graph) = open_graph_snapshot(&snapshot) {
+                                        let _ = detached_graph.reindex_all();
                                     }
                                     // Notify frontend to refresh
                                     let _ = app_handle.emit(
@@ -380,6 +426,46 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_then;
+
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn snapshot_then_releases_lock_before_running_work() {
+        let shared = Arc::new(Mutex::new(41usize));
+        let worker_shared = Arc::clone(&shared);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            snapshot_then(
+                worker_shared.as_ref(),
+                |value| Ok(*value + 1),
+                |snapshot| {
+                    started_tx.send(snapshot).unwrap();
+                    finish_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
+        assert!(
+            shared.try_lock().is_ok(),
+            "expensive work should not run while holding the shared graph mutex"
+        );
+
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+    }
 }
 
 #[cfg(target_os = "android")]

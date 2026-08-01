@@ -4,7 +4,7 @@
 //! Toggled between with the `g h` / `g j` leader sequences (handled by
 //! `App`, which then calls `set_mode`).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -32,7 +32,7 @@ pub struct LeftSidebar {
 }
 
 impl LeftSidebar {
-    pub fn new(repo: Rc<dyn GraphRepository>) -> Self {
+    pub fn new(repo: Arc<dyn GraphRepository>) -> Self {
         Self {
             mode: LeftSidebarMode::Pages,
             pages: PaginatedList::new(Box::new(AllPagesSource::new(repo.clone())), PAGE_SIZE),

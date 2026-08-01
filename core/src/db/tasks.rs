@@ -2,8 +2,41 @@ use super::Database;
 use crate::error::Result;
 use crate::models::{AssistantTaskRow, Task, TaskState};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use uuid::Uuid;
+
+fn upsert_task_on_conn(
+    conn: &Connection,
+    block_id: &str,
+    state: &TaskState,
+    scheduled_date: Option<&str>,
+    deadline_date: Option<&str>,
+) -> Result<Task> {
+    let now = Utc::now().timestamp_millis();
+    let id = Uuid::new_v4().to_string();
+
+    conn.execute(
+        "INSERT INTO tasks (id, block_id, state, scheduled_date, deadline_date, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(block_id) DO UPDATE SET state = ?3, scheduled_date = ?4, deadline_date = ?5, updated_at = ?7",
+        params![id, block_id, state.as_str(), scheduled_date, deadline_date, now, now],
+    )?;
+
+    Ok(Task {
+        id,
+        block_id: block_id.to_string(),
+        state: state.clone(),
+        scheduled_date: scheduled_date.map(|s| s.to_string()),
+        deadline_date: deadline_date.map(|s| s.to_string()),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn delete_task_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM tasks WHERE block_id = ?1", params![block_id])?;
+    Ok(())
+}
 
 impl Database {
     pub fn upsert_task(
@@ -14,25 +47,7 @@ impl Database {
         deadline_date: Option<&str>,
     ) -> Result<Task> {
         let conn = self.conn()?;
-        let now = Utc::now().timestamp_millis();
-        let id = Uuid::new_v4().to_string();
-
-        conn.execute(
-            "INSERT INTO tasks (id, block_id, state, scheduled_date, deadline_date, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(block_id) DO UPDATE SET state = ?3, scheduled_date = ?4, deadline_date = ?5, updated_at = ?7",
-            params![id, block_id, state.as_str(), scheduled_date, deadline_date, now, now],
-        )?;
-
-        Ok(Task {
-            id,
-            block_id: block_id.to_string(),
-            state: state.clone(),
-            scheduled_date: scheduled_date.map(|s| s.to_string()),
-            deadline_date: deadline_date.map(|s| s.to_string()),
-            created_at: now,
-            updated_at: now,
-        })
+        upsert_task_on_conn(&conn, block_id, state, scheduled_date, deadline_date)
     }
 
     pub fn update_task_state(&self, block_id: &str, state: &TaskState) -> Result<()> {
@@ -154,8 +169,26 @@ impl Database {
 
     pub fn delete_task(&self, block_id: &str) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute("DELETE FROM tasks WHERE block_id = ?1", params![block_id])?;
-        Ok(())
+        delete_task_on_conn(&conn, block_id)
+    }
+
+    pub(crate) fn upsert_task_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+        state: &TaskState,
+        scheduled_date: Option<&str>,
+        deadline_date: Option<&str>,
+    ) -> Result<Task> {
+        upsert_task_on_conn(conn, block_id, state, scheduled_date, deadline_date)
+    }
+
+    pub(crate) fn delete_task_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+    ) -> Result<()> {
+        delete_task_on_conn(conn, block_id)
     }
 
     /// Get daily completion counts for the heatmap.

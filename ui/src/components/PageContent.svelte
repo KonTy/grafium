@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { SvelteMap } from "svelte/reactivity";
   import { tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
+  import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
@@ -41,58 +43,151 @@
   let collapsedIds: Set<string> = $state(new Set());
   const pageLoadState = createPageLoadState();
 
-  // Windowed rendering: mounting one BlockEditor per block hangs WebKitGTK on huge
-  // pages (e.g. an imported Anki deck of 7000+ cards). Only render the first
-  // `renderLimit` visible blocks and grow the window as the user scrolls.
-  const RENDER_CHUNK = 120;
-  let renderLimit = $state(RENDER_CHUNK);
-  let sentinel = $state<HTMLElement | null>(null);
+  const BLOCK_SHELL_GAP = 2;
+  const DEFAULT_BLOCK_HEIGHT = 68;
+  const BLOCK_WINDOW_OVERSCAN_PX = 720;
 
-  function hasChildren(blockId: string): boolean {
-    return blocks.some((b) => b.parent_id === blockId);
-  }
+  let blockHeights = new SvelteMap<string, number>();
+  let blocksViewportEl: HTMLDivElement | null = $state(null);
+  let blocksRelTop = $state(0);
+  let blocksViewportHeight = $state(800);
+  let windowAnchorBlockId: string | null = $state(null);
 
-  function isBlockVisible(block: Block): boolean {
-    // A block is visible if none of its ancestors are collapsed
-    let parentId = block.parent_id;
-    while (parentId) {
-      if (collapsedIds.has(parentId)) return false;
-      const parent = blocks.find((b) => b.id === parentId);
-      parentId = parent?.parent_id ?? null;
-    }
-    return true;
-  }
+  const blockRenderState = $derived.by(() => buildBlockRenderState(blocks, collapsedIds));
+  const visibleBlocks = $derived(blockRenderState.visibleBlocks);
+  const virtualWindow = $derived.by(() => {
+    const anchorIndex = windowAnchorBlockId
+      ? blockRenderState.visibleIndexById.get(windowAnchorBlockId) ?? null
+      : null;
 
-  // Blocks that are not hidden by a collapsed ancestor, then capped to the current
-  // render window. Cross-block navigation to a block outside the window is handled
-  // by ensureBlockRendered().
-  const visibleBlocks = $derived(blocks.filter(isBlockVisible));
-  const windowedBlocks = $derived(visibleBlocks.slice(0, renderLimit));
-
-  // Grow the render window as the sentinel scrolls into view.
-  $effect(() => {
-    const el = sentinel;
-    if (!el) return;
-    const io = new IntersectionObserver((entries) => {
-      if (!entries[0]?.isIntersecting) return;
-      if (renderLimit >= visibleBlocks.length) return;
-      renderLimit = Math.min(renderLimit + RENDER_CHUNK, visibleBlocks.length);
-      // Force a fresh intersection callback in case the sentinel is still on
-      // screen after growing (e.g. many short blocks in a tall viewport).
-      io.unobserve(el);
-      requestAnimationFrame(() => io.observe(el));
+    return computeVirtualWindow(visibleBlocks, {
+      scrollTop: Math.max(0, blocksRelTop),
+      viewportHeight: blocksViewportHeight,
+      measuredHeights: blockHeights,
+      defaultHeight: DEFAULT_BLOCK_HEIGHT,
+      overscanPx: BLOCK_WINDOW_OVERSCAN_PX,
+      anchorIndex,
     });
-    io.observe(el);
-    return () => io.disconnect();
+  });
+  const windowedBlocks = $derived(virtualWindow.items);
+
+  $effect(() => {
+    const activeIds = new Set(blocks.map((block) => block.id));
+    for (const id of Array.from(blockHeights.keys())) {
+      if (!activeIds.has(id)) {
+        blockHeights.delete(id);
+      }
+    }
   });
 
-  // Ensure a block (by id) is inside the render window; used before focusing a
-  // block that may be beyond the current window (cross-block navigation, search).
-  function ensureBlockRendered(blockId: string) {
-    const idx = visibleBlocks.findIndex((b) => b.id === blockId);
-    if (idx >= 0 && idx >= renderLimit) {
-      renderLimit = Math.min(idx + RENDER_CHUNK, visibleBlocks.length);
+  $effect(() => {
+    if (!blocksViewportEl) return;
+    const parent = blocksViewportEl.closest(".main-content") as HTMLElement | null;
+    if (!parent) return;
+
+    const update = () => {
+      const parentRect = parent.getBoundingClientRect();
+      const viewportRect = blocksViewportEl!.getBoundingClientRect();
+      blocksRelTop = Math.max(0, parentRect.top - viewportRect.top);
+      blocksViewportHeight = parent.clientHeight;
+    };
+
+    update();
+    parent.addEventListener("scroll", update, { passive: true });
+
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(parent);
+    resizeObserver.observe(blocksViewportEl);
+
+    return () => {
+      parent.removeEventListener("scroll", update);
+      resizeObserver.disconnect();
+    };
+  });
+
+  $effect(() => {
+    const pageId = page.id;
+    const handleRevealBlock = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string; blockId: string; align?: ScrollLogicalPosition }>).detail;
+      if (!detail || detail.pageId !== pageId) return;
+      void revealBlock(detail.blockId, detail.align ?? "center");
+    };
+
+    window.addEventListener("page-content-reveal-block", handleRevealBlock);
+    return () => window.removeEventListener("page-content-reveal-block", handleRevealBlock);
+  });
+
+  function hasChildren(blockId: string): boolean {
+    return (blockRenderState.childrenByParent.get(blockId)?.length ?? 0) > 0;
+  }
+
+  function isBlockVisible(blockId: string): boolean {
+    return blockRenderState.visibleIds.has(blockId);
+  }
+
+  function getBlockDepth(blockId: string): number {
+    return blockRenderState.depthById.get(blockId) ?? 0;
+  }
+
+  function trackBlockHeight(node: HTMLElement, blockId: string) {
+    let currentBlockId = blockId;
+
+    const update = () => {
+      const nextHeight = Math.max(1, Math.ceil(node.getBoundingClientRect().height)) + BLOCK_SHELL_GAP;
+      if (blockHeights.get(currentBlockId) === nextHeight) return;
+      blockHeights.set(currentBlockId, nextHeight);
+    };
+
+    update();
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(node);
+
+    return {
+      update(nextBlockId: string) {
+        currentBlockId = nextBlockId;
+        update();
+      },
+      destroy() {
+        resizeObserver.disconnect();
+      },
+    };
+  }
+
+  function getRenderedBlockEl(blockId: string): HTMLElement | null {
+    return document.querySelector(`[data-block-id="${blockId}"]`) as HTMLElement | null;
+  }
+
+  async function ensureBlockRendered(blockId: string): Promise<boolean> {
+    if (!isBlockVisible(blockId)) return false;
+    if (getRenderedBlockEl(blockId)) return true;
+
+    windowAnchorBlockId = blockId;
+    await tick();
+    return getRenderedBlockEl(blockId) !== null;
+  }
+
+  async function revealBlock(
+    blockId: string,
+    align: ScrollLogicalPosition = "nearest"
+  ): Promise<boolean> {
+    const rendered = await ensureBlockRendered(blockId);
+    const blockEl = getRenderedBlockEl(blockId);
+    if (!rendered || !blockEl) {
+      if (windowAnchorBlockId === blockId) {
+        windowAnchorBlockId = null;
+      }
+      return false;
     }
+
+    blockEl.scrollIntoView({ block: align });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (windowAnchorBlockId === blockId) {
+          windowAnchorBlockId = null;
+        }
+      });
+    });
+    return true;
   }
 
   function toggleCollapse(blockId: string) {
@@ -137,7 +232,8 @@
     try {
       if (isCurrentPageLoad(pageLoadState, request)) {
         loadError = null;
-        renderLimit = RENDER_CHUNK;
+        windowAnchorBlockId = null;
+        blockHeights.clear();
       }
 
       const loadedBlocks = await listBlocks(request.pageId);
@@ -281,7 +377,7 @@
     focusedBlockId = blockId;
     selectedBlockIds = new Set();
     // Snapshot the block content before the user edits it
-    const block = blocks.find((b) => b.id === blockId);
+    const block = blockRenderState.blockById.get(blockId);
     if (block) {
       preEditSnapshots.set(blockId, { ...block });
     }
@@ -296,17 +392,6 @@
       return;
     }
     preEditSnapshots.delete(blockId);
-  }
-
-  function getBlockDepth(block: Block): number {
-    let depth = 0;
-    let parentId = block.parent_id;
-    while (parentId) {
-      depth++;
-      const parent = blocks.find((b) => b.id === parentId);
-      parentId = parent?.parent_id ?? null;
-    }
-    return depth;
   }
 
   async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean) {
@@ -484,30 +569,17 @@
 
   function handleNavigate(blockId: string, direction: "up" | "down", caretX?: number) {
     navigatingBlock = true;
-    const visibleBlocks = blocks.filter((b) => isBlockVisible(b));
-    const idx = visibleBlocks.findIndex((b) => b.id === blockId);
+    const idx = blockRenderState.visibleIndexById.get(blockId) ?? -1;
     const targetIdx = direction === "up" ? idx - 1 : idx + 1;
     if (targetIdx >= 0 && targetIdx < visibleBlocks.length) {
       const target = visibleBlocks[targetIdx];
       // Moving up lands on the target's BOTTOM line; down lands on its TOP.
       const edge: "top" | "bottom" = direction === "up" ? "bottom" : "top";
       focusedBlockId = target.id;
-      // Grow the render window if the target is just past it, then focus once
-      // the BlockEditor for it has actually mounted.
-      const needsRender = targetIdx >= renderLimit;
-      if (needsRender) ensureBlockRendered(target.id);
-      const doFocus = () => {
-        document.querySelector(`[data-block-id="${target.id}"]`)
-          ?.scrollIntoView({ block: "nearest" });
-        // Deterministic imperative focus — no synthetic click, no prop-timing
-        // race (both unreliable on WebKitGTK).
+      void revealBlock(target.id).then((rendered) => {
+        if (!rendered) return;
         blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
-      };
-      if (needsRender) {
-        tick().then(doFocus);
-      } else {
-        doFocus();
-      }
+      });
     }
   }
 
@@ -669,15 +741,23 @@
     </div>
   {/if}
 
-  <div class="blocks-container">
+  <div class="blocks-container" bind:this={blocksViewportEl}>
+    {#if virtualWindow.topSpacer > 0}
+      <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
+    {/if}
     {#each windowedBlocks as block (block.id)}
-      <div id={`block-${block.id}`} data-block-id={block.id}>
+      <div
+        class="block-shell"
+        id={`block-${block.id}`}
+        data-block-id={block.id}
+        use:trackBlockHeight={block.id}
+      >
         <BlockEditor
           bind:this={blockRefs[block.id]}
           {block}
           pageId={page.id}
           pageTitle={page.title}
-          depth={getBlockDepth(block)}
+          depth={getBlockDepth(block.id)}
           focused={focusedBlockId === block.id}
           selected={selectedBlockIds.has(block.id)}
           hasChildren={hasChildren(block.id)}
@@ -694,10 +774,8 @@
         />
       </div>
     {/each}
-    {#if renderLimit < visibleBlocks.length}
-      <div class="render-sentinel" bind:this={sentinel}>
-        Loading more… ({renderLimit} / {visibleBlocks.length})
-      </div>
+    {#if virtualWindow.bottomSpacer > 0}
+      <div class="virtual-spacer" style={`height: ${virtualWindow.bottomSpacer}px;`} aria-hidden="true"></div>
     {/if}
   </div>
 
@@ -782,15 +860,16 @@
   .blocks-container {
     display: flex;
     flex-direction: column;
-    gap: 2px;
   }
 
-  .render-sentinel {
-    padding: 12px 0;
-    text-align: center;
-    font-size: 0.8rem;
-    opacity: 0.5;
-    user-select: none;
+  .block-shell {
+    padding-bottom: 2px;
+    box-sizing: border-box;
+  }
+
+  .virtual-spacer {
+    width: 100%;
+    pointer-events: none;
   }
 
   .click-below {
