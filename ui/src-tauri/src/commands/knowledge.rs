@@ -1,13 +1,15 @@
 //! Tauri commands for the Knowledge Engine — AI, references, vector search, schemas.
 
-use grafium_core::ai::config::{AiConfig, AiMode, CloudConfig, LocalConfig, LocalLlmSettings, ProviderType};
-use grafium_core::model_library::LocalModelRef;
+use grafium_core::ai::config::{
+    AiConfig, AiMode, CloudConfig, LocalConfig, LocalLlmSettings, ProviderType,
+};
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::knowledge::engine::HealthStatus;
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
+use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,9 +44,7 @@ pub struct AiConfigPayload {
 }
 
 #[tauri::command]
-pub async fn ai_get_config(
-    state: State<'_, KnowledgeState>,
-) -> Result<serde_json::Value, String> {
+pub async fn ai_get_config(state: State<'_, KnowledgeState>) -> Result<serde_json::Value, String> {
     let guard = state.engine.read().await;
     if let Some(engine) = guard.as_ref() {
         serde_json::to_value(engine.config()).map_err(|e| e.to_string())
@@ -98,9 +98,7 @@ pub async fn ai_set_config(
             },
             ..Default::default()
         },
-        llm_model: payload
-            .llm_model
-            .unwrap_or_else(|| "llama3.2".to_string()),
+        llm_model: payload.llm_model.unwrap_or_else(|| "llama3.2".to_string()),
         embedding_model: payload
             .embedding_model
             .unwrap_or_else(|| "nomic-embed-text".to_string()),
@@ -172,9 +170,7 @@ pub async fn ai_set_config(
 // ─── Health ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn ai_health_check(
-    state: State<'_, KnowledgeState>,
-) -> Result<HealthStatus, String> {
+pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthStatus, String> {
     let guard = state.engine.read().await;
     if let Some(engine) = guard.as_ref() {
         engine.health_check().await.map_err(|e| e.to_string())
@@ -213,7 +209,10 @@ pub async fn ai_index_page(
             .db
             .get_page_by_id(&page_id)
             .map_err(|e| e.to_string())?;
-        let blocks = graph.db.list_blocks_for_page(&page_id).map_err(|e| e.to_string())?;
+        let blocks = graph
+            .db
+            .list_blocks_for_page(&page_id)
+            .map_err(|e| e.to_string())?;
         let graph_id = graph.root_dir.to_string_lossy().to_string();
         (page, blocks, graph_id)
     };
@@ -245,7 +244,10 @@ pub async fn ai_index_all_pages(
 
         let mut pages_and_blocks = Vec::new();
         for page in pages {
-            let blocks = graph.db.list_blocks_for_page(&page.id).map_err(|e| e.to_string())?;
+            let blocks = graph
+                .db
+                .list_blocks_for_page(&page.id)
+                .map_err(|e| e.to_string())?;
             pages_and_blocks.push((page, blocks));
         }
         (pages_and_blocks, graph_id)
@@ -311,13 +313,14 @@ pub async fn ai_generate_references(
             .db
             .get_page_by_id(&page_id)
             .map_err(|e| e.to_string())?;
-        let blocks = graph.db.list_blocks_for_page(&page_id).map_err(|e| e.to_string())?;
+        let blocks = graph
+            .db
+            .list_blocks_for_page(&page_id)
+            .map_err(|e| e.to_string())?;
         let graph_id = graph.root_dir.to_string_lossy().to_string();
 
-        let blocks_data: Vec<(String, String)> = blocks
-            .into_iter()
-            .map(|b| (b.id, b.content))
-            .collect();
+        let blocks_data: Vec<(String, String)> =
+            blocks.into_iter().map(|b| (b.id, b.content)).collect();
 
         (page.title, blocks_data, graph_id)
     };
@@ -495,12 +498,10 @@ pub async fn ai_register_graph(
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn ai_list_schemas(
-    app_state: State<'_, crate::AppState>,
-) -> Result<Vec<Schema>, String> {
+pub async fn ai_list_schemas(app_state: State<'_, crate::AppState>) -> Result<Vec<Schema>, String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-    let manager = grafium_core::knowledge::SchemaManager::load(&graph.root_dir)
-        .map_err(|e| e.to_string())?;
+    let manager =
+        grafium_core::knowledge::SchemaManager::load(&graph.root_dir).map_err(|e| e.to_string())?;
     Ok(manager.list().into_iter().cloned().collect())
 }
 
@@ -510,8 +511,8 @@ pub async fn ai_save_schema(
     schema: Schema,
 ) -> Result<(), String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-    let mut manager = grafium_core::knowledge::SchemaManager::load(&graph.root_dir)
-        .map_err(|e| e.to_string())?;
+    let mut manager =
+        grafium_core::knowledge::SchemaManager::load(&graph.root_dir).map_err(|e| e.to_string())?;
     manager.save_schema(schema).map_err(|e| e.to_string())
 }
 
@@ -520,7 +521,7 @@ pub async fn ai_create_default_schemas(
     app_state: State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-    let mut manager = grafium_core::knowledge::SchemaManager::load(&graph.root_dir)
-        .map_err(|e| e.to_string())?;
+    let mut manager =
+        grafium_core::knowledge::SchemaManager::load(&graph.root_dir).map_err(|e| e.to_string())?;
     manager.create_defaults().map_err(|e| e.to_string())
 }

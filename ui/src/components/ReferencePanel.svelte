@@ -9,6 +9,7 @@
     type SemanticSearchResult,
     type HealthStatus,
   } from "../lib/knowledge";
+  import type { PageNavigationTarget } from "../lib/navigation";
 
   // Props
   let {
@@ -16,13 +17,13 @@
     pageId = "",
     pageTitle = "",
     onClose = () => {},
-    onNavigate = (_pageId: string) => {},
+    onNavigate = (_target: PageNavigationTarget) => {},
   }: {
     visible?: boolean;
     pageId?: string;
     pageTitle?: string;
     onClose?: () => void;
-    onNavigate?: (pageId: string) => void;
+    onNavigate?: (target: PageNavigationTarget) => void;
   } = $props();
 
   // State
@@ -183,7 +184,7 @@
                     {#each ref.related_pages as related}
                       <button
                         class="related-page"
-                        onclick={() => onNavigate(related.page_id)}
+                        onclick={() => onNavigate({ id: related.page_id })}
                       >
                         <span class="related-title">{related.page_title}</span>
                         <span class="related-score">{formatScore(related.score)}</span>
@@ -226,7 +227,7 @@
             {#each searchResults as result}
               <button
                 class="search-result"
-                onclick={() => onNavigate(result.page_id)}
+                onclick={() => onNavigate({ id: result.page_id })}
               >
                 <div class="result-header">
                   <span class="result-title">{result.page_title}</span>

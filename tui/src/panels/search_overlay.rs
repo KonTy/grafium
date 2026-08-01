@@ -11,8 +11,8 @@ use ratatui::Frame;
 
 use grafium_core::models::Block;
 
-use crate::data::GraphRepository;
 use crate::data::sources::SearchSource;
+use crate::data::GraphRepository;
 use crate::panels::{Panel, PanelAction};
 use crate::widgets::paginated_list::PaginatedList;
 use crate::widgets::theme;
@@ -41,8 +41,10 @@ impl SearchOverlay {
     /// Reset to a blank query each time the overlay is (re)opened.
     pub fn reopen(&mut self) {
         self.query.clear();
-        self.results
-            .reset(Box::new(SearchSource::new(self.repo.clone(), String::new())));
+        self.results.reset(Box::new(SearchSource::new(
+            self.repo.clone(),
+            String::new(),
+        )));
     }
 
     fn refresh(&mut self) {
@@ -100,7 +102,6 @@ impl Panel for SearchOverlay {
             let snippet: String = b.content.chars().take(72).collect();
             snippet.replace('\n', " ")
         };
-        self.results
-            .render(f, chunks[1], "Results", label, focused);
+        self.results.render(f, chunks[1], "Results", label, focused);
     }
 }

@@ -12,8 +12,8 @@ use ratatui::Frame;
 
 use grafium_core::models::Page;
 
-use crate::data::GraphRepository;
 use crate::data::sources::{AllPagesSource, JournalSource};
+use crate::data::GraphRepository;
 use crate::panels::{Panel, PanelAction};
 use crate::widgets::paginated_list::PaginatedList;
 

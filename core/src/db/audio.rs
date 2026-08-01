@@ -1,12 +1,17 @@
-use crate::models::{AudioNote, AudioTranscript};
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::{AudioNote, AudioTranscript};
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
 
 impl Database {
-    pub fn register_audio_note(&self, block_id: &str, audio_path: &str, duration_ms: i64) -> Result<AudioNote> {
+    pub fn register_audio_note(
+        &self,
+        block_id: &str,
+        audio_path: &str,
+        duration_ms: i64,
+    ) -> Result<AudioNote> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
         let id = Uuid::new_v4().to_string();
@@ -43,7 +48,13 @@ impl Database {
         Ok(note)
     }
 
-    pub fn save_audio_transcript(&self, audio_id: &str, transcript: &str, is_relevant: bool, meta: &serde_json::Value) -> Result<AudioTranscript> {
+    pub fn save_audio_transcript(
+        &self,
+        audio_id: &str,
+        transcript: &str,
+        is_relevant: bool,
+        meta: &serde_json::Value,
+    ) -> Result<AudioTranscript> {
         let conn = self.conn()?;
         let id = Uuid::new_v4().to_string();
 
@@ -66,15 +77,17 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, audio_id, transcript, is_relevant, meta FROM audio_transcripts WHERE audio_id = ?1"
         )?;
-        let transcripts = stmt.query_map(params![audio_id], |row| {
-            Ok(AudioTranscript {
-                id: row.get(0)?,
-                audio_id: row.get(1)?,
-                transcript: row.get(2)?,
-                is_relevant: row.get::<_, i32>(3)? != 0,
-                meta: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let transcripts = stmt
+            .query_map(params![audio_id], |row| {
+                Ok(AudioTranscript {
+                    id: row.get(0)?,
+                    audio_id: row.get(1)?,
+                    transcript: row.get(2)?,
+                    is_relevant: row.get::<_, i32>(3)? != 0,
+                    meta: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(transcripts)
     }
 }

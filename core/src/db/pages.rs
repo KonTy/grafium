@@ -1,6 +1,6 @@
-use crate::models::Page;
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::Page;
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
@@ -103,11 +103,10 @@ impl Database {
     /// that `list_pages` performs, so opening a large graph stays responsive.
     pub fn has_any_page(&self) -> Result<bool> {
         let conn = self.conn()?;
-        let exists: i64 = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pages LIMIT 1)",
-            [],
-            |row| row.get(0),
-        )?;
+        let exists: i64 =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM pages LIMIT 1)", [], |row| {
+                row.get(0)
+            })?;
         Ok(exists != 0)
     }
 
@@ -122,7 +121,7 @@ impl Database {
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
              FROM pages
              WHERE is_journal = 0
-             ORDER BY updated_at DESC"
+             ORDER BY updated_at DESC",
         )?;
 
         let offset = offset.max(0) as usize;
@@ -178,7 +177,12 @@ impl Database {
     /// Sorts server-side and pages with LIMIT/OFFSET straight off a partial
     /// index (`idx_pages_title_regular` / `idx_pages_updated_regular`), so any
     /// window stays fast (~20ms) regardless of how many pages or journals exist.
-    pub fn list_pages_window(&self, limit: i64, offset: i64, sort_by_title: bool) -> Result<Vec<Page>> {
+    pub fn list_pages_window(
+        &self,
+        limit: i64,
+        offset: i64,
+        sort_by_title: bool,
+    ) -> Result<Vec<Page>> {
         let conn = self.conn()?;
         let sql = if sort_by_title {
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
@@ -188,17 +192,19 @@ impl Database {
              FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"
         };
         let mut stmt = conn.prepare(sql)?;
-        let pages = stmt.query_map(params![limit, offset.max(0)], |row| {
-            Ok(Page {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                is_journal: row.get::<_, i32>(5)? != 0,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages = stmt
+            .query_map(params![limit, offset.max(0)], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
     }
 
@@ -207,21 +213,28 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE is_journal = 1 ORDER BY title DESC LIMIT ?1 OFFSET ?2"
         )?;
-        let pages = stmt.query_map(params![limit, offset], |row| {
-            Ok(Page {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                is_journal: true,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages = stmt
+            .query_map(params![limit, offset], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: true,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
     }
 
-    pub fn update_page(&self, id: &str, title: Option<&str>, properties: Option<&serde_json::Value>) -> Result<()> {
+    pub fn update_page(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        properties: Option<&serde_json::Value>,
+    ) -> Result<()> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
 
@@ -236,6 +249,10 @@ impl Database {
                 "UPDATE pages SET properties = ?1, updated_at = ?2 WHERE id = ?3",
                 params![props.to_string(), now, id],
             )?;
+        }
+        drop(conn);
+        if let Some(props) = properties {
+            self.sync_page_properties(id, props)?;
         }
         Ok(())
     }
@@ -276,19 +293,21 @@ impl Database {
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
              FROM pages
              WHERE lower(title) >= ?1 AND lower(title) < ?2
-             ORDER BY title ASC"
+             ORDER BY title ASC",
         )?;
-        let pages = stmt.query_map(params![low, high], |row| {
-            Ok(Page {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                is_journal: row.get::<_, i32>(5)? != 0,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages = stmt
+            .query_map(params![low, high], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
     }
 

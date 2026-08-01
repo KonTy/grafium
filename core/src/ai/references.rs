@@ -9,12 +9,11 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::traits::{
-    ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole, SearchResult,
-    VectorStore,
-};
 use crate::ai::config::ReferenceConfig;
-use crate::error::Result;
+use crate::ai::traits::{
+    ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole, SearchResult, VectorStore,
+};
+use crate::error::{CoreError, Result};
 
 /// A generated reference for a specific location in a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +111,11 @@ impl ReferenceEngine {
                 };
 
                 let results = store
-                    .search(&embeddings[0], self.config.max_refs_per_paragraph, filter_graph)
+                    .search(
+                        &embeddings[0],
+                        self.config.max_refs_per_paragraph,
+                        filter_graph,
+                    )
                     .await?;
 
                 // Filter out self-references and low-confidence results.
@@ -140,9 +143,7 @@ impl ReferenceEngine {
                 let avg_score =
                     related_pages.iter().map(|r| r.score).sum::<f32>() / related_pages.len() as f32;
 
-                let reference_text = self
-                    .format_reference(&concept.text, &related_pages)
-                    .await;
+                let reference_text = self.format_reference(&concept.text, &related_pages).await;
 
                 all_refs.push(GeneratedReference {
                     ref_number: ref_counter,
@@ -256,7 +257,10 @@ Example output:
 Return ONLY the JSON array, no other text."#;
 
 /// Parse LLM response into ConceptExtraction structs.
-fn parse_concept_response(response: &str, original_content: &str) -> Result<Vec<ConceptExtraction>> {
+fn parse_concept_response(
+    response: &str,
+    original_content: &str,
+) -> Result<Vec<ConceptExtraction>> {
     // Try to parse as JSON array.
     let trimmed = response.trim();
     let json_str = if trimmed.starts_with('[') {
@@ -270,7 +274,7 @@ fn parse_concept_response(response: &str, original_content: &str) -> Result<Vec<
                     .rfind(']')
                     .map(|end| &trimmed[start..=start + end])
             })
-            .unwrap_or("[]")
+            .ok_or_else(|| concept_parse_error("missing JSON array in response", trimmed))?
     };
 
     #[derive(Deserialize)]
@@ -280,7 +284,12 @@ fn parse_concept_response(response: &str, original_content: &str) -> Result<Vec<
         _type: Option<String>,
     }
 
-    let parsed: Vec<ConceptJson> = serde_json::from_str(json_str).unwrap_or_default();
+    let parsed: Vec<ConceptJson> = serde_json::from_str(json_str).map_err(|error| {
+        concept_parse_error(
+            &format!("invalid concept extraction JSON: {}", error),
+            trimmed,
+        )
+    })?;
 
     Ok(parsed
         .into_iter()
@@ -298,6 +307,38 @@ fn truncate_snippet(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
-        format!("{}…", &text[..max_len])
+        format!("{}…", super::truncate_to_char_boundary(text, max_len))
+    }
+}
+
+fn concept_parse_error(reason: &str, response: &str) -> CoreError {
+    CoreError::Parse(format!(
+        "Failed to parse concept extraction response ({reason}). Response snippet: {}",
+        truncate_snippet(response, 200)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_snippet_handles_utf8_boundaries() {
+        let snippet = truncate_snippet("abcdefghij🙂klm", 11);
+
+        assert_eq!(snippet, "abcdefghij…");
+        assert!(std::str::from_utf8(snippet.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parse_concept_response_returns_error_for_malformed_json() {
+        let error = match parse_concept_response(r#"[{"text":"Rust""#, "Rust makes parsing strict")
+        {
+            Ok(_) => panic!("malformed concept JSON should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CoreError::Parse(_)));
+        assert!(error.to_string().contains("Response snippet"));
     }
 }

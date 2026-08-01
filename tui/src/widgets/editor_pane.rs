@@ -87,15 +87,17 @@ impl<'a> EditorPane<'a> {
     /// Leaves insert mode and persists the content via the repository if it
     /// changed. Returns `Ok(true)` if a save actually happened.
     pub fn exit_and_save(&mut self, repo: &dyn GraphRepository) -> Result<bool, String> {
-        self.mode = EditorMode::Normal;
         if !self.dirty {
+            self.mode = EditorMode::Normal;
             return Ok(false);
         }
         let Some(id) = self.block_id.clone() else {
+            self.mode = EditorMode::Normal;
             return Ok(false);
         };
         repo.update_block(&id, &self.content())?;
         self.dirty = false;
+        self.mode = EditorMode::Normal;
         Ok(true)
     }
 

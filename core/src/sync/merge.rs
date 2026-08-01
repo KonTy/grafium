@@ -39,14 +39,26 @@ pub struct MergeResult {
 pub fn three_way_merge(base: &str, local: &str, remote: &str) -> MergeResult {
     // Fast-path: identical
     if local == remote {
-        return MergeResult { content: local.to_string(), has_conflicts: false, conflict_count: 0 };
+        return MergeResult {
+            content: local.to_string(),
+            has_conflicts: false,
+            conflict_count: 0,
+        };
     }
     // Fast-path: only one side changed
     if local == base {
-        return MergeResult { content: remote.to_string(), has_conflicts: false, conflict_count: 0 };
+        return MergeResult {
+            content: remote.to_string(),
+            has_conflicts: false,
+            conflict_count: 0,
+        };
     }
     if remote == base {
-        return MergeResult { content: local.to_string(), has_conflicts: false, conflict_count: 0 };
+        return MergeResult {
+            content: local.to_string(),
+            has_conflicts: false,
+            conflict_count: 0,
+        };
     }
 
     let base_lines: Vec<&str> = base.lines().collect();
@@ -58,14 +70,24 @@ pub fn three_way_merge(base: &str, local: &str, remote: &str) -> MergeResult {
     let remote_regions = diff_regions(&base_lines, &remote_lines);
 
     // Merge the two sets of regions
-    merge_change_regions(&base_lines, &local_lines, &remote_lines, &local_regions, &remote_regions)
+    merge_change_regions(
+        &base_lines,
+        &local_lines,
+        &remote_lines,
+        &local_regions,
+        &remote_regions,
+    )
 }
 
 /// 2-way merge (no base available). Finds common lines via LCS, marks all
 /// differing sections as conflicts.
 pub fn two_way_merge(local: &str, remote: &str) -> MergeResult {
     if local == remote {
-        return MergeResult { content: local.to_string(), has_conflicts: false, conflict_count: 0 };
+        return MergeResult {
+            content: local.to_string(),
+            has_conflicts: false,
+            conflict_count: 0,
+        };
     }
     // Use empty base → everything that differs is a conflict
     three_way_merge("", local, remote)
@@ -231,10 +253,15 @@ fn merge_change_regions(
     while b <= base.len() {
         // 1. Handle any pure insertions at this base position
         emit_insertions(
-            b, &local_ins, &remote_ins,
-            local_regions, remote_regions,
-            local, remote,
-            &mut output, &mut conflicts,
+            b,
+            &local_ins,
+            &remote_ins,
+            local_regions,
+            remote_regions,
+            local,
+            remote,
+            &mut output,
+            &mut conflicts,
         );
 
         if b >= base.len() {
@@ -510,8 +537,10 @@ mod tests {
     #[test]
     fn test_markdown_properties_conflict() {
         let base = "title:: My Page\ntags:: #rust\n\n- block 1\n- block 2\n";
-        let local = "title:: My Page\ntags:: #rust, #code\n\n- block 1\n- block 2\n- block 3 local\n";
-        let remote = "title:: My Page\ntags:: #rust, #docs\n\n- block 1\n- block 2\n- block 3 remote\n";
+        let local =
+            "title:: My Page\ntags:: #rust, #code\n\n- block 1\n- block 2\n- block 3 local\n";
+        let remote =
+            "title:: My Page\ntags:: #rust, #docs\n\n- block 1\n- block 2\n- block 3 remote\n";
         let r = three_way_merge(base, local, remote);
         // The tags line changed differently → conflict
         assert!(r.has_conflicts);

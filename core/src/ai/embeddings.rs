@@ -6,7 +6,7 @@
 //! - Background-friendly: yields between batches
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ai::config::EmbeddingConfig;
 use crate::ai::traits::{ChunkEmbedding, Embedder, VectorStore};
@@ -22,6 +22,13 @@ pub struct TextChunk {
     pub page_title: String,
     pub content: String,
     pub content_hash: String,
+}
+
+/// Planned page update derived from the current chunk set and cached hashes.
+#[derive(Debug, Clone)]
+pub struct PageChunkDiff {
+    pub dirty_chunks: Vec<TextChunk>,
+    pub removed_chunk_ids: Vec<String>,
 }
 
 /// Pipeline state for embedding operations.
@@ -83,22 +90,50 @@ impl EmbeddingPipeline {
         chunks
     }
 
-    /// Filter out chunks that haven't changed (hash match).
-    pub fn filter_unchanged(&mut self, chunks: Vec<TextChunk>) -> Vec<TextChunk> {
-        chunks
+    /// Compute which chunks need to be re-embedded and which stale chunk IDs
+    /// should be removed after a successful update.
+    pub fn diff_page_chunks(&self, page_id: &str, chunks: Vec<TextChunk>) -> PageChunkDiff {
+        let current_chunk_ids: HashSet<String> =
+            chunks.iter().map(|chunk| chunk.chunk_id.clone()).collect();
+
+        let dirty_chunks = chunks
             .into_iter()
             .filter(|chunk| {
-                let cached = self.hash_cache.get(&chunk.chunk_id);
-                let is_new = cached.map_or(true, |h| h != &chunk.content_hash);
-                if !is_new {
-                    return false;
-                }
-                // Update cache.
                 self.hash_cache
-                    .insert(chunk.chunk_id.clone(), chunk.content_hash.clone());
-                true
+                    .get(&chunk.chunk_id)
+                    .map_or(true, |cached_hash| cached_hash != &chunk.content_hash)
             })
-            .collect()
+            .collect();
+
+        let removed_chunk_ids = self
+            .hash_cache
+            .keys()
+            .filter(|chunk_id| {
+                Self::chunk_belongs_to_page(chunk_id, page_id)
+                    && !current_chunk_ids.contains(*chunk_id)
+            })
+            .cloned()
+            .collect();
+
+        PageChunkDiff {
+            dirty_chunks,
+            removed_chunk_ids,
+        }
+    }
+
+    /// Mark successfully written chunks as clean in the hash cache.
+    pub fn mark_chunks_clean(&mut self, chunks: &[TextChunk]) {
+        for chunk in chunks {
+            self.hash_cache
+                .insert(chunk.chunk_id.clone(), chunk.content_hash.clone());
+        }
+    }
+
+    /// Remove stale chunk IDs from the hash cache.
+    pub fn remove_chunks(&mut self, chunk_ids: &[String]) {
+        for chunk_id in chunk_ids {
+            self.hash_cache.remove(chunk_id);
+        }
     }
 
     /// Embed and store chunks in batches.
@@ -163,7 +198,7 @@ impl EmbeddingPipeline {
                 chunks.push(current.clone());
                 // Overlap: keep the last portion.
                 if current.len() > overlap_chars {
-                    current = current[current.len() - overlap_chars..].to_string();
+                    current = super::suffix_to_char_boundary(&current, overlap_chars).to_string();
                 }
                 // Don't clear completely — overlap preserved above.
             }
@@ -185,11 +220,41 @@ impl EmbeddingPipeline {
 
     /// Invalidate cache for a specific page (forces re-embedding on next run).
     pub fn invalidate_page(&mut self, page_id: &str) {
-        self.hash_cache.retain(|k, _| !k.starts_with(page_id));
+        self.hash_cache
+            .retain(|chunk_id, _| !Self::chunk_belongs_to_page(chunk_id, page_id));
     }
 
     /// Clear entire hash cache.
     pub fn clear_cache(&mut self) {
         self.hash_cache.clear();
+    }
+
+    fn chunk_belongs_to_page(chunk_id: &str, page_id: &str) -> bool {
+        matches!(chunk_id.strip_prefix(page_id), Some(rest) if rest.starts_with(':'))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::config::EmbeddingConfig;
+
+    #[test]
+    fn split_block_handles_utf8_overlap_boundaries() {
+        let pipeline = EmbeddingPipeline::new(EmbeddingConfig {
+            chunk_max_tokens: 4,
+            chunk_overlap_tokens: 1,
+            batch_size: 1,
+            vector_store_path: None,
+        });
+
+        let chunks = pipeline.split_block("aaaaaaaaaa🙂. B.");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "aaaaaaaaaa🙂.");
+        assert!(chunks[1].starts_with('🙂'));
+        assert!(chunks
+            .iter()
+            .all(|chunk| std::str::from_utf8(chunk.as_bytes()).is_ok()));
     }
 }

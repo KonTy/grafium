@@ -1,5 +1,5 @@
-use grafium_core::Database;
 use grafium_core::models::*;
+use grafium_core::Database;
 
 #[test]
 fn test_full_workflow() {
@@ -11,20 +11,38 @@ fn test_full_workflow() {
     assert!(!page.is_journal);
 
     // Create blocks
-    let block1 = db.create_block(
-        &page.id, None, 0, "Hello [[World]]",
-        BlockType::Text, serde_json::json!({})
-    ).unwrap();
+    let block1 = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "Hello [[World]]",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
 
-    let block2 = db.create_block(
-        &page.id, None, 1, "TODO Buy groceries",
-        BlockType::Text, serde_json::json!({})
-    ).unwrap();
+    let block2 = db
+        .create_block(
+            &page.id,
+            None,
+            1,
+            "TODO Buy groceries",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
 
-    let _child = db.create_block(
-        &page.id, Some(&block1.id), 0, "Child block with #rust tag",
-        BlockType::Text, serde_json::json!({})
-    ).unwrap();
+    let _child = db
+        .create_block(
+            &page.id,
+            Some(&block1.id),
+            0,
+            "Child block with #rust tag",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
 
     // List blocks
     let blocks = db.list_blocks_for_page(&page.id).unwrap();
@@ -35,7 +53,8 @@ fn test_full_workflow() {
     assert_eq!(children.len(), 1);
 
     // Update block
-    db.update_block(&block1.id, "Updated content", None).unwrap();
+    db.update_block(&block1.id, "Updated content", None)
+        .unwrap();
     let updated = db.get_block(&block1.id).unwrap();
     assert_eq!(updated.content, "Updated content");
 
@@ -45,7 +64,9 @@ fn test_full_workflow() {
     assert_eq!(results[0].id, block2.id);
 
     // Tasks
-    let task = db.upsert_task(&block2.id, &TaskState::Todo, Some("2024-01-15"), None).unwrap();
+    let task = db
+        .upsert_task(&block2.id, &TaskState::Todo, Some("2024-01-15"), None)
+        .unwrap();
     assert_eq!(task.state, TaskState::Todo);
 
     let tasks = db.list_tasks(Some(&TaskState::Todo), None, None).unwrap();
@@ -71,7 +92,8 @@ fn test_full_workflow() {
     assert_eq!(recent.len(), 1);
 
     // Links
-    db.insert_link(&block1.id, &page.id, LinkType::Page).unwrap();
+    db.insert_link(&block1.id, &page.id, LinkType::Page)
+        .unwrap();
     let backlinks = db.get_backlinks(&page.id).unwrap();
     assert_eq!(backlinks.len(), 1);
 
@@ -106,14 +128,25 @@ fn test_flashcards() {
     let db = Database::in_memory().unwrap();
 
     let page = db.create_page("Flashcard Page", false).unwrap();
-    let block = db.create_block(
-        &page.id, None, 0, "Capital of France :: Paris #flashcard",
-        BlockType::Flashcard, serde_json::json!({})
-    ).unwrap();
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "Capital of France :: Paris #flashcard",
+            BlockType::Flashcard,
+            serde_json::json!({}),
+        )
+        .unwrap();
 
-    let card = db.upsert_flashcard(
-        &block.id, "Capital of France", "Paris", &["geography".to_string()]
-    ).unwrap();
+    let card = db
+        .upsert_flashcard(
+            &block.id,
+            "Capital of France",
+            "Paris",
+            &["geography".to_string()],
+        )
+        .unwrap();
     assert_eq!(card.ease_factor, 2.5);
     assert_eq!(card.interval_days, 0);
 
@@ -123,7 +156,8 @@ fn test_flashcards() {
 
     // Review
     let next_review = chrono::Utc::now().timestamp_millis() + 86400000;
-    db.update_flashcard_review(&card.id, 2.6, 1, next_review).unwrap();
+    db.update_flashcard_review(&card.id, 2.6, 1, next_review)
+        .unwrap();
 
     // After review with future date, should not be due
     let due = db.list_flashcards_due(None, 10).unwrap();
@@ -146,12 +180,40 @@ fn test_block_reorder() {
     let db = Database::in_memory().unwrap();
 
     let page = db.create_page("Reorder Test", false).unwrap();
-    let b1 = db.create_block(&page.id, None, 0, "First", BlockType::Text, serde_json::json!({})).unwrap();
-    let b2 = db.create_block(&page.id, None, 1, "Second", BlockType::Text, serde_json::json!({})).unwrap();
-    let b3 = db.create_block(&page.id, None, 2, "Third", BlockType::Text, serde_json::json!({})).unwrap();
+    let b1 = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "First",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let b2 = db
+        .create_block(
+            &page.id,
+            None,
+            1,
+            "Second",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let b3 = db
+        .create_block(
+            &page.id,
+            None,
+            2,
+            "Third",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
 
     // Reverse order
-    db.reorder_blocks(&page.id, &[b3.id.clone(), b2.id.clone(), b1.id.clone()]).unwrap();
+    db.reorder_blocks(&page.id, &[b3.id.clone(), b2.id.clone(), b1.id.clone()])
+        .unwrap();
 
     let blocks = db.list_blocks_for_page(&page.id).unwrap();
     assert_eq!(blocks[0].content, "Third");
@@ -188,11 +250,17 @@ fn test_list_pages_case_insensitive_dedup() {
     let lower_titles: Vec<String> = pages.iter().map(|p| p.title.to_lowercase()).collect();
 
     // Should contain "test" exactly once
-    assert_eq!(lower_titles.iter().filter(|t| *t == "test").count(), 1,
-        "expected exactly one 'test' entry, got: {:?}", pages.iter().map(|p| &p.title).collect::<Vec<_>>());
+    assert_eq!(
+        lower_titles.iter().filter(|t| *t == "test").count(),
+        1,
+        "expected exactly one 'test' entry, got: {:?}",
+        pages.iter().map(|p| &p.title).collect::<Vec<_>>()
+    );
     // Journal pages must not appear
-    assert!(!lower_titles.contains(&"2026-01-01".to_string()),
-        "journal pages must not appear in list_pages");
+    assert!(
+        !lower_titles.contains(&"2026-01-01".to_string()),
+        "journal pages must not appear in list_pages"
+    );
 }
 
 #[test]
@@ -211,16 +279,26 @@ fn test_properties_normalized() {
     db.sync_page_properties(&page.id, &props).unwrap();
 
     // Create block with properties
-    let block = db.create_block(
-        &page.id, None, 0, "TODO Read next chapter",
-        BlockType::Text, serde_json::json!({"priority": "high", "deadline": "2026-06-01"})
-    ).unwrap();
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Read next chapter",
+            BlockType::Text,
+            serde_json::json!({"priority": "high", "deadline": "2026-06-01"}),
+        )
+        .unwrap();
     let block_props = serde_json::json!({"priority": "high", "deadline": "2026-06-01"});
     db.sync_block_properties(&block.id, &block_props).unwrap();
 
     // Query page properties
     let keys = db.get_property_keys().unwrap();
-    assert!(keys.len() >= 4, "expected at least 4 property keys, got {:?}", keys);
+    assert!(
+        keys.len() >= 4,
+        "expected at least 4 property keys, got {:?}",
+        keys
+    );
 
     // Query page property values
     let authors = db.get_property_values("author", "page").unwrap();
@@ -231,11 +309,14 @@ fn test_properties_normalized() {
     assert_eq!(priorities, vec!["high"]);
 
     // Test raw query using normalized tables
-    let results = db.run_raw_select(
-        "SELECT pp.value FROM page_properties pp WHERE pp.key = 'author'"
-    ).unwrap();
+    let results = db
+        .run_raw_select("SELECT pp.value FROM page_properties pp WHERE pp.key = 'author'")
+        .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0].1, serde_json::Value::String("Frank Herbert".to_string()));
+    assert_eq!(
+        results[0][0].1,
+        serde_json::Value::String("Frank Herbert".to_string())
+    );
 }
 
 #[test]

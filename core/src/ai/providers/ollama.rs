@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::canonicalize_messages;
 use crate::ai::traits::{
     BoxFuture, ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole,
 };
@@ -66,6 +67,35 @@ struct OllamaResponseMessage {
     content: String,
 }
 
+fn build_chat_request(
+    model: &str,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> OllamaChatRequest {
+    let messages = canonicalize_messages(messages, options)
+        .into_iter()
+        .map(|message| OllamaMessage {
+            role: match message.role {
+                MessageRole::System => "system".to_string(),
+                MessageRole::User => "user".to_string(),
+                MessageRole::Assistant => "assistant".to_string(),
+            },
+            content: message.content,
+        })
+        .collect();
+
+    OllamaChatRequest {
+        model: model.to_string(),
+        messages,
+        stream: false,
+        options: Some(OllamaOptions {
+            temperature: options.temperature,
+            num_predict: options.max_tokens,
+            stop: options.stop.clone(),
+        }),
+    }
+}
+
 impl LlmProvider for OllamaLlm {
     fn complete<'a>(
         &'a self,
@@ -73,28 +103,7 @@ impl LlmProvider for OllamaLlm {
         options: &'a CompletionOptions,
     ) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let ollama_messages: Vec<OllamaMessage> = messages
-                .iter()
-                .map(|m| OllamaMessage {
-                    role: match m.role {
-                        MessageRole::System => "system".to_string(),
-                        MessageRole::User => "user".to_string(),
-                        MessageRole::Assistant => "assistant".to_string(),
-                    },
-                    content: m.content.clone(),
-                })
-                .collect();
-
-            let request = OllamaChatRequest {
-                model: self.model.clone(),
-                messages: ollama_messages,
-                stream: false,
-                options: Some(OllamaOptions {
-                    temperature: options.temperature,
-                    num_predict: options.max_tokens,
-                    stop: options.stop.clone(),
-                }),
-            };
+            let request = build_chat_request(&self.model, messages, options);
 
             let resp = self
                 .client
@@ -222,5 +231,36 @@ impl Embedder for OllamaEmbedder {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_chat_request_includes_system_prompt_message() {
+        let request = build_chat_request(
+            "ollama-test",
+            &[ChatMessage {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+            }],
+            &CompletionOptions {
+                system_prompt: Some("stay grounded".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "stay grounded"})
+        );
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "hello"})
+        );
     }
 }

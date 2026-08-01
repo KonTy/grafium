@@ -3,10 +3,7 @@ use crate::models::Block;
 /// Serialize a list of blocks (belonging to one page) back into a outline-style markdown file.
 /// Blocks are expected to be sorted by order_index already.
 /// Page-level properties can be prepended separately.
-pub fn serialize_page(
-    page_properties: &serde_json::Value,
-    blocks: &[Block],
-) -> String {
+pub fn serialize_page(page_properties: &serde_json::Value, blocks: &[Block]) -> String {
     let mut out = String::new();
 
     // Write page-level properties at the top

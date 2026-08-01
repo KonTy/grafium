@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::error::Result;
+use std::path::Path;
 
 /// Metadata about a file on a sync backend.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -44,7 +44,7 @@ pub trait SyncBackend: Send + Sync {
 
 /// Compute SHA-256 hash of content, returned as hex string.
 pub fn compute_hash(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())

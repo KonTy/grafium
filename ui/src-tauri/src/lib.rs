@@ -7,13 +7,13 @@ mod commands;
 mod android_jni;
 
 use commands::graph::GraphConfig;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use grafium_core::Graph;
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
@@ -45,7 +45,11 @@ impl AppState {
 
         let (pages_dir, journals_dir, self_writes) = {
             let graph = self.graph.lock().map_err(|e| e.to_string())?;
-            (graph.pages_dir.clone(), graph.journals_dir.clone(), graph.self_write_tracker())
+            (
+                graph.pages_dir.clone(),
+                graph.journals_dir.clone(),
+                graph.self_write_tracker(),
+            )
         };
 
         let handle = start_graph_watcher(self.graph.clone(), pages_dir, journals_dir, self_writes)?;
@@ -55,7 +59,11 @@ impl AppState {
     }
 }
 
-fn should_process_event(event: &Event, pages_dir: &std::path::Path, journals_dir: &std::path::Path) -> bool {
+fn should_process_event(
+    event: &Event,
+    pages_dir: &std::path::Path,
+    journals_dir: &std::path::Path,
+) -> bool {
     event.paths.iter().any(|p| {
         p.extension().and_then(|e| e.to_str()) == Some("md")
             && (p.starts_with(pages_dir) || p.starts_with(journals_dir))
@@ -65,10 +73,7 @@ fn should_process_event(event: &Event, pages_dir: &std::path::Path, journals_dir
 /// Returns true if `path` was written by the app itself within the last few
 /// seconds. Used to ignore self-inflicted filesystem events so a normal block
 /// save doesn't get mistaken for an external edit.
-fn was_recent_self_write(
-    self_writes: &Arc<Mutex<HashMap<PathBuf, Instant>>>,
-    path: &Path,
-) -> bool {
+fn was_recent_self_write(self_writes: &Arc<Mutex<HashMap<PathBuf, Instant>>>, path: &Path) -> bool {
     if let Ok(mut map) = self_writes.lock() {
         let now = Instant::now();
         map.retain(|_, t| now.duration_since(*t).as_secs() < 30);
@@ -189,7 +194,10 @@ fn start_graph_watcher(
         }
     });
 
-    Ok(GraphWatcherHandle { stop_tx, join_handle })
+    Ok(GraphWatcherHandle {
+        stop_tx,
+        join_handle,
+    })
 }
 
 /// Watch ~/.config/smplos/current/theme.name for changes and emit event to frontend
@@ -206,7 +214,10 @@ fn start_smplos_theme_watcher(app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         use std::fs;
 
-        let mut last_content = fs::read_to_string(&theme_path).unwrap_or_default().trim().to_string();
+        let mut last_content = fs::read_to_string(&theme_path)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
         loop {
             thread::sleep(Duration::from_secs(2));
@@ -217,11 +228,17 @@ fn start_smplos_theme_watcher(app_handle: tauri::AppHandle) {
             };
 
             if current != last_content && !current.is_empty() {
-                eprintln!("[theme-watcher] smplos theme changed: {} -> {}", last_content, current);
+                eprintln!(
+                    "[theme-watcher] smplos theme changed: {} -> {}",
+                    last_content, current
+                );
                 last_content = current.clone();
-                let _ = app_handle.emit("smplos-theme-changed", serde_json::json!({
-                    "theme": current,
-                }));
+                let _ = app_handle.emit(
+                    "smplos-theme-changed",
+                    serde_json::json!({
+                        "theme": current,
+                    }),
+                );
             }
         }
     });
@@ -230,19 +247,17 @@ fn start_smplos_theme_watcher(app_handle: tauri::AppHandle) {
 /// Background thread that periodically checks if sync targets become available.
 /// When a target that was unavailable becomes available, it emits a Tauri event
 /// and optionally triggers auto-sync.
-fn start_sync_monitor(
-    app_handle: tauri::AppHandle,
-    graph: Arc<Mutex<Graph>>,
-) {
+fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
     use grafium_core::sync::{
-        SyncEngine,
         filesystem::FilesystemBackend,
+        state::{BackendConfig, SyncConfigs},
         webdav::WebDavBackend,
-        state::{SyncConfigs, BackendConfig},
+        SyncEngine,
     };
 
     thread::spawn(move || {
-        let mut was_available: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let mut was_available: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         let check_interval = Duration::from_secs(5);
 
         loop {
@@ -263,11 +278,26 @@ fn start_sync_monitor(
                     BackendConfig::Filesystem { path } => {
                         Box::new(FilesystemBackend::new(path.clone(), target.name.clone()))
                     }
-                    BackendConfig::WebDav { url, username, password } => {
-                        Box::new(WebDavBackend::new(
-                            url.clone(), username.clone(), password.clone(), target.name.clone(),
-                        ))
-                    }
+                    BackendConfig::WebDav {
+                        url,
+                        username,
+                        password,
+                    } => match WebDavBackend::new(
+                        url.clone(),
+                        username.clone(),
+                        password.clone(),
+                        target.name.clone(),
+                    ) {
+                        Ok(backend) => Box::new(backend),
+                        Err(err) => {
+                            eprintln!(
+                                "[sync-monitor] Skipping target '{}' because WebDAV backend initialization failed: {}",
+                                target.name,
+                                err
+                            );
+                            continue;
+                        }
+                    },
                 };
 
                 let now_available = backend.is_available();
@@ -278,47 +308,72 @@ fn start_sync_monitor(
                     eprintln!("[sync-monitor] Target '{}' is now available", target.name);
 
                     // Emit event to frontend
-                    let _ = app_handle.emit("sync-target-available", serde_json::json!({
-                        "target_id": target.id,
-                        "target_name": target.name,
-                    }));
+                    let _ = app_handle.emit(
+                        "sync-target-available",
+                        serde_json::json!({
+                            "target_id": target.id,
+                            "target_name": target.name,
+                        }),
+                    );
 
                     // Auto-sync if enabled
                     if target.auto_sync {
-                        let engine = SyncEngine::new_with_metadata_dir(root_dir.clone(), &metadata_dir_name(&app_handle));
+                        let engine = SyncEngine::new_with_metadata_dir(
+                            root_dir.clone(),
+                            &metadata_dir_name(&app_handle),
+                        );
                         match engine.sync(backend.as_ref()) {
                             Ok(result) => {
-                                eprintln!("[sync-monitor] Auto-sync '{}': {}", target.name, result.summary());
+                                eprintln!(
+                                    "[sync-monitor] Auto-sync '{}': {}",
+                                    target.name,
+                                    result.summary()
+                                );
 
                                 // Reindex if we pulled files
-                                if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty() {
+                                if !result.pulled.is_empty()
+                                    || !result.conflicts.is_empty()
+                                    || !result.deleted_local.is_empty()
+                                {
                                     if let Ok(g) = graph.lock() {
                                         let _ = g.reindex_all();
                                     }
                                     // Notify frontend to refresh
-                                    let _ = app_handle.emit("sync-completed", serde_json::json!({
-                                        "target_name": target.name,
-                                        "pushed": result.pushed.len(),
-                                        "pulled": result.pulled.len(),
-                                        "conflicts": result.conflicts.len(),
-                                    }));
+                                    let _ = app_handle.emit(
+                                        "sync-completed",
+                                        serde_json::json!({
+                                            "target_name": target.name,
+                                            "pushed": result.pushed.len(),
+                                            "pulled": result.pulled.len(),
+                                            "conflicts": result.conflicts.len(),
+                                        }),
+                                    );
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[sync-monitor] Auto-sync '{}' failed: {}", target.name, e);
-                                let _ = app_handle.emit("sync-error", serde_json::json!({
-                                    "target_name": target.name,
-                                    "error": e.to_string(),
-                                }));
+                                eprintln!(
+                                    "[sync-monitor] Auto-sync '{}' failed: {}",
+                                    target.name, e
+                                );
+                                let _ = app_handle.emit(
+                                    "sync-error",
+                                    serde_json::json!({
+                                        "target_name": target.name,
+                                        "error": e.to_string(),
+                                    }),
+                                );
                             }
                         }
                     }
                 } else if !now_available && previously_available {
                     // Target disconnected
-                    let _ = app_handle.emit("sync-target-disconnected", serde_json::json!({
-                        "target_id": target.id,
-                        "target_name": target.name,
-                    }));
+                    let _ = app_handle.emit(
+                        "sync-target-disconnected",
+                        serde_json::json!({
+                            "target_id": target.id,
+                            "target_name": target.name,
+                        }),
+                    );
                 }
 
                 was_available.insert(target.id.clone(), now_available);
@@ -347,12 +402,22 @@ fn metadata_dir_name(app: &tauri::AppHandle) -> String {
 
     let slug = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string();
 
-    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    let normalized = if slug.is_empty() {
+        "grafium".to_string()
+    } else {
+        slug
+    };
     format!(".{}", normalized)
 }
 
@@ -741,17 +806,38 @@ Already have an Anki deck? In **Flashcards** (sidebar), click **Import Anki deck
 "##;
 
     write_text_file(&graph_root.join("pages/Welcome To Grafium.md"), start_here)?;
-    write_text_file(&graph_root.join("pages/Create Your Own Graph.md"), create_graph_page)?;
-    write_text_file(&graph_root.join("pages/Try Block Editing.md"), block_editing_page)?;
-    write_text_file(&graph_root.join("pages/The Grafium Study Method.md"), study_method_page)?;
-    write_text_file(&graph_root.join("pages/PACER - Tag What You Read.md"), pacer_page)?;
+    write_text_file(
+        &graph_root.join("pages/Create Your Own Graph.md"),
+        create_graph_page,
+    )?;
+    write_text_file(
+        &graph_root.join("pages/Try Block Editing.md"),
+        block_editing_page,
+    )?;
+    write_text_file(
+        &graph_root.join("pages/The Grafium Study Method.md"),
+        study_method_page,
+    )?;
+    write_text_file(
+        &graph_root.join("pages/PACER - Tag What You Read.md"),
+        pacer_page,
+    )?;
     write_text_file(&graph_root.join("pages/The Study Loop.md"), study_loop_page)?;
-    write_text_file(&graph_root.join("pages/How To Study a Book.md"), study_book_page)?;
-    write_text_file(&graph_root.join("pages/How To Create A Flashcard.md"), flashcard_page)?;
+    write_text_file(
+        &graph_root.join("pages/How To Study a Book.md"),
+        study_book_page,
+    )?;
+    write_text_file(
+        &graph_root.join("pages/How To Create A Flashcard.md"),
+        flashcard_page,
+    )?;
 
     // Seed a tiny self-contained SVG so the image-card demo renders out of the box.
     let demo_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140" viewBox="0 0 240 140"><rect x="6" y="6" width="228" height="128" rx="16" fill="#1e293b" stroke="#7dd3fc" stroke-width="3"/><text x="120" y="66" font-family="sans-serif" font-size="20" fill="#7dd3fc" text-anchor="middle">Flashcard</text><text x="120" y="96" font-family="sans-serif" font-size="13" fill="#94a3b8" text-anchor="middle">image demo</text></svg>"##;
-    write_text_file(&graph_root.join("assets/tutorial/flashcard-demo.svg"), demo_svg)?;
+    write_text_file(
+        &graph_root.join("assets/tutorial/flashcard-demo.svg"),
+        demo_svg,
+    )?;
 
     write_text_file(&marker, "seeded_v11")?;
     Ok(true)
@@ -801,10 +887,7 @@ fn asset_scheme_handler(
     };
 
     // Reject absolute paths and any traversal component up-front.
-    if decoded.is_empty()
-        || decoded.starts_with('/')
-        || decoded.split('/').any(|c| c == "..")
-    {
+    if decoded.is_empty() || decoded.starts_with('/') || decoded.split('/').any(|c| c == "..") {
         return not_found();
     }
 
@@ -962,7 +1045,8 @@ pub fn run() {
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             let config_path = app_dir.join("graphs.json");
-            let config = GraphConfig::load(&config_path);
+            let config = GraphConfig::load(&config_path)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
             // Use last-used graph, or fall back to default graph dir.
             // Validate the saved path before trusting it — if it no longer has a proper
@@ -1081,7 +1165,9 @@ pub fn run() {
             if config.current.is_none() {
                 config.current = Some(path_str);
             }
-            config.save(&config_path);
+            config
+                .save(&config_path)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
             let state = AppState {
                 graph: Arc::new(Mutex::new(graph)),
@@ -1125,91 +1211,106 @@ pub fn run() {
             // toplevel GtkWindow, we intercept BEFORE WebKitGTK processes them.
             #[cfg(target_os = "linux")]
             {
-                let window = app.get_webview_window("main").unwrap();
-                let win_for_eval = window.clone();
-                window.with_webview(move |webview| {
-                    use gtk::prelude::*;
+                if let Some(window) = app.get_webview_window("main") {
+                    let win_for_eval = window.clone();
+                    if let Err(err) = window.with_webview(move |webview| {
+                        use gtk::prelude::*;
 
-                    let wk_webview = webview.inner();
-                    // Get the toplevel GtkWindow - key events go here first
-                    let toplevel = wk_webview.toplevel().unwrap();
-                    let gtk_window = toplevel.downcast::<gtk::Window>().unwrap();
+                        let wk_webview = webview.inner();
+                        // Get the toplevel GtkWindow - key events go here first
+                        if let Some(toplevel) = wk_webview.toplevel() {
+                            if let Ok(gtk_window) = toplevel.downcast::<gtk::Window>() {
+                                let eval_window = win_for_eval.clone();
+                                gtk_window.connect_key_press_event(move |_, event| {
+                                    let state = event.state();
+                                    let keyval = event.keyval();
+                                    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                                    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                    let eval_window = win_for_eval.clone();
-                    gtk_window.connect_key_press_event(move |_, event| {
-                        let state = event.state();
-                        let keyval = event.keyval();
-                        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                                    eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
-                        eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
-
-                        // Ctrl+. toggles reference panel
-                        if ctrl && !shift && *keyval == 46 /* period */ {
-                            eprintln!("[GTK-WINDOW] => Ctrl+. detected, toggling reference panel");
-                            let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-
-                        if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                            eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
-                            // Call undo AND capture console output via a self-reporting mechanism
-                            let result = eval_window.eval(r#"
-                                (function() {
-                                    var msg = 'EVAL_OK: __handleNativeUndo exists=' + (typeof window.__handleNativeUndo) + ' activeView=' + !!(window.__activeEditorView);
-                                    var el = document.getElementById('__dbg');
-                                    if (el) { el.innerHTML += '<br>' + msg; }
-                                    if (window.__handleNativeUndo) {
-                                        window.__handleNativeUndo();
-                                    } else {
-                                        document.title = 'ERROR: __handleNativeUndo not found!';
+                                    // Ctrl+. toggles reference panel
+                                    if ctrl && !shift && *keyval == 46 /* period */ {
+                                        eprintln!("[GTK-WINDOW] => Ctrl+. detected, toggling reference panel");
+                                        let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
+                                        return gtk::glib::Propagation::Stop;
                                     }
-                                })();
-                            "#);
-                            eprintln!("[GTK-WINDOW] => eval result: {:?}", result);
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                            eprintln!("[GTK-WINDOW] => Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
-                            let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                            eprintln!("[GTK-WINDOW] => Ctrl+Y detected, calling eval(__handleNativeRedo)");
-                            let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        gtk::glib::Propagation::Proceed
-                    });
 
-                    // ALSO connect directly on the WebView widget itself
-                    let eval_window2 = win_for_eval.clone();
-                    wk_webview.connect_key_press_event(move |_, event| {
-                        let state = event.state();
-                        let keyval = event.keyval();
-                        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                                    if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                                        eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                        // Call undo AND capture console output via a self-reporting mechanism
+                                        let result = eval_window.eval(r#"
+                                            (function() {
+                                                var msg = 'EVAL_OK: __handleNativeUndo exists=' + (typeof window.__handleNativeUndo) + ' activeView=' + !!(window.__activeEditorView);
+                                                var el = document.getElementById('__dbg');
+                                                if (el) { el.innerHTML += '<br>' + msg; }
+                                                if (window.__handleNativeUndo) {
+                                                    window.__handleNativeUndo();
+                                                } else {
+                                                    document.title = 'ERROR: __handleNativeUndo not found!';
+                                                }
+                                            })();
+                                        "#);
+                                        eprintln!("[GTK-WINDOW] => eval result: {:?}", result);
+                                        return gtk::glib::Propagation::Stop;
+                                    }
+                                    if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                                        eprintln!("[GTK-WINDOW] => Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
+                                        let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                                        return gtk::glib::Propagation::Stop;
+                                    }
+                                    if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
+                                        eprintln!("[GTK-WINDOW] => Ctrl+Y detected, calling eval(__handleNativeRedo)");
+                                        let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                                        return gtk::glib::Propagation::Stop;
+                                    }
+                                    gtk::glib::Propagation::Proceed
+                                });
+                            } else {
+                                eprintln!("Warning: Linux shortcut setup skipped because the webview toplevel is not a GtkWindow");
+                            }
+                        } else {
+                            eprintln!("Warning: Linux shortcut setup skipped because the webview toplevel is unavailable");
+                        }
 
-                        eprintln!("[GTK-WEBVIEW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+                        // ALSO connect directly on the WebView widget itself
+                        let eval_window2 = win_for_eval.clone();
+                        wk_webview.connect_key_press_event(move |_, event| {
+                            let state = event.state();
+                            let keyval = event.keyval();
+                            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                            let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                        if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                            eprintln!("[GTK-WEBVIEW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
-                            let _ = eval_window2.eval("window.__handleNativeUndo && window.__handleNativeUndo()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                            eprintln!("[GTK-WEBVIEW] => Ctrl+Shift+Z detected");
-                            let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                            eprintln!("[GTK-WEBVIEW] => Ctrl+Y detected");
-                            let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
-                            return gtk::glib::Propagation::Stop;
-                        }
-                        gtk::glib::Propagation::Proceed
-                    });
-                }).expect("Failed to access webview");
+                            eprintln!("[GTK-WEBVIEW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+
+                            if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                                eprintln!("[GTK-WEBVIEW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                let _ = eval_window2.eval("window.__handleNativeUndo && window.__handleNativeUndo()");
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
+                                eprintln!("[GTK-WEBVIEW] => Ctrl+Shift+Z detected");
+                                let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
+                                eprintln!("[GTK-WEBVIEW] => Ctrl+Y detected");
+                                let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            gtk::glib::Propagation::Proceed
+                        });
+                    }) {
+                        eprintln!(
+                            "Warning: failed to access the main webview for Linux shortcut setup: {}",
+                            err
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "Warning: Linux shortcut setup skipped because the main webview window is unavailable"
+                    );
+                }
             }
 
             Ok(())

@@ -393,7 +393,8 @@ impl InkSvgParser {
             // Also check for start-of-tag (first attribute)
             let alt = format!("<{} ", attr_name);
             // If not found with space prefix, try with newline or tab
-            content.find(&format!("\t{}=\"", attr_name))
+            content
+                .find(&format!("\t{}=\"", attr_name))
                 .or_else(|| content.find(&format!("\n{}=\"", attr_name)))
         })?;
         let attr_start = content[start..].find(&format!("{}=\"", attr_name))?;
@@ -403,7 +404,11 @@ impl InkSvgParser {
     }
 
     /// Extract content between two markers.
-    fn extract_between<'a>(content: &'a str, start_marker: &str, end_marker: &str) -> Option<&'a str> {
+    fn extract_between<'a>(
+        content: &'a str,
+        start_marker: &str,
+        end_marker: &str,
+    ) -> Option<&'a str> {
         let start = content.find(start_marker)?;
         let after_start = start + start_marker.len();
         let end = content[after_start..].find(end_marker)?;
@@ -421,10 +426,34 @@ mod tests {
         page.add_stroke(Stroke {
             id: "stroke-1".into(),
             points: vec![
-                StrokePoint { x: 100.0, y: 200.0, pressure: 0.5, tilt: 0.0, timestamp_ms: 0 },
-                StrokePoint { x: 110.0, y: 205.0, pressure: 0.7, tilt: 0.1, timestamp_ms: 16 },
-                StrokePoint { x: 120.0, y: 210.0, pressure: 0.9, tilt: 0.1, timestamp_ms: 32 },
-                StrokePoint { x: 130.0, y: 208.0, pressure: 0.6, tilt: 0.0, timestamp_ms: 48 },
+                StrokePoint {
+                    x: 100.0,
+                    y: 200.0,
+                    pressure: 0.5,
+                    tilt: 0.0,
+                    timestamp_ms: 0,
+                },
+                StrokePoint {
+                    x: 110.0,
+                    y: 205.0,
+                    pressure: 0.7,
+                    tilt: 0.1,
+                    timestamp_ms: 16,
+                },
+                StrokePoint {
+                    x: 120.0,
+                    y: 210.0,
+                    pressure: 0.9,
+                    tilt: 0.1,
+                    timestamp_ms: 32,
+                },
+                StrokePoint {
+                    x: 130.0,
+                    y: 208.0,
+                    pressure: 0.6,
+                    tilt: 0.0,
+                    timestamp_ms: 48,
+                },
             ],
             tool: PenTool::Pen,
             color: "#1a1a1a".into(),
@@ -453,9 +482,13 @@ mod tests {
         let mut page = InkPage::new(800.0, 600.0);
         page.add_stroke(Stroke {
             id: "dot-1".into(),
-            points: vec![
-                StrokePoint { x: 400.0, y: 300.0, pressure: 0.8, tilt: 0.0, timestamp_ms: 0 },
-            ],
+            points: vec![StrokePoint {
+                x: 400.0,
+                y: 300.0,
+                pressure: 0.8,
+                tilt: 0.0,
+                timestamp_ms: 0,
+            }],
             tool: PenTool::Pen,
             color: "#ff0000".into(),
             width: 4.0,
@@ -476,8 +509,20 @@ mod tests {
         page.add_stroke(Stroke {
             id: "hl-1".into(),
             points: vec![
-                StrokePoint { x: 10.0, y: 20.0, pressure: 0.5, tilt: 0.0, timestamp_ms: 0 },
-                StrokePoint { x: 200.0, y: 20.0, pressure: 0.5, tilt: 0.0, timestamp_ms: 100 },
+                StrokePoint {
+                    x: 10.0,
+                    y: 20.0,
+                    pressure: 0.5,
+                    tilt: 0.0,
+                    timestamp_ms: 0,
+                },
+                StrokePoint {
+                    x: 200.0,
+                    y: 20.0,
+                    pressure: 0.5,
+                    tilt: 0.0,
+                    timestamp_ms: 100,
+                },
             ],
             tool: PenTool::Highlighter,
             color: "#ffff00".into(),

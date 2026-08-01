@@ -1,6 +1,6 @@
+use crate::AppState;
 use std::fs;
 use tauri::State;
-use crate::AppState;
 
 /// Read a graph-local asset and return it as a `data:` URL (base64).
 ///
@@ -46,14 +46,17 @@ pub async fn download_asset(state: State<'_, AppState>, url: String) -> Result<S
     fs::create_dir_all(&assets_dir).map_err(|e| e.to_string())?;
 
     // Download the image
-    let response = reqwest::get(&url).await.map_err(|e| format!("Download failed: {}", e))?;
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
 
     // Determine extension from content-type or URL
-    let content_type = response.headers()
+    let content_type = response
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
@@ -64,14 +67,18 @@ pub async fn download_asset(state: State<'_, AppState>, url: String) -> Result<S
         .unwrap_or("png");
 
     // Generate a unique filename
-    let filename = format!("{}_{}.{}", 
+    let filename = format!(
+        "{}_{}.{}",
         chrono_timestamp(),
         &uuid::Uuid::new_v4().to_string()[..8],
         ext
     );
 
     let dest_path = assets_dir.join(&filename);
-    let bytes = response.bytes().await.map_err(|e| format!("Read failed: {}", e))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Read failed: {}", e))?;
     fs::write(&dest_path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
 
     // Return the relative path from pages/journals to assets
@@ -123,7 +130,9 @@ pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>
     }
 
     // Query all block content to check for references
-    let all_content = graph.db.get_all_block_content()
+    let all_content = graph
+        .db
+        .get_all_block_content()
         .map_err(|e| e.to_string())?;
 
     let mut orphans = Vec::new();
@@ -185,17 +194,28 @@ fn extension_from_content_type(ct: &str) -> Option<&'static str> {
 
 fn extension_from_url(url: &str) -> Option<&'static str> {
     let path = url.split('?').next().unwrap_or(url);
-    if path.ends_with(".png") { Some("png") }
-    else if path.ends_with(".jpg") || path.ends_with(".jpeg") { Some("jpg") }
-    else if path.ends_with(".gif") { Some("gif") }
-    else if path.ends_with(".webp") { Some("webp") }
-    else if path.ends_with(".svg") { Some("svg") }
-    else if path.ends_with(".avif") { Some("avif") }
-    else { None }
+    if path.ends_with(".png") {
+        Some("png")
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        Some("jpg")
+    } else if path.ends_with(".gif") {
+        Some("gif")
+    } else if path.ends_with(".webp") {
+        Some("webp")
+    } else if path.ends_with(".svg") {
+        Some("svg")
+    } else if path.ends_with(".avif") {
+        Some("avif")
+    } else {
+        None
+    }
 }
 
 fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     format!("{}", secs)
 }

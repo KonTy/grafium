@@ -1,6 +1,6 @@
-use crate::models::{AssistantTaskRow, Task, TaskState};
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::{AssistantTaskRow, Task, TaskState};
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
@@ -41,7 +41,11 @@ impl Database {
 
         // Get current state for the event log
         let from_state: Option<String> = conn
-            .query_row("SELECT state FROM tasks WHERE block_id = ?1", params![block_id], |row| row.get(0))
+            .query_row(
+                "SELECT state FROM tasks WHERE block_id = ?1",
+                params![block_id],
+                |row| row.get(0),
+            )
             .ok();
 
         conn.execute(
@@ -64,7 +68,11 @@ impl Database {
     pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
         let conn = self.conn()?;
         let current: String = conn
-            .query_row("SELECT state FROM tasks WHERE block_id = ?1", params![block_id], |row| row.get(0))
+            .query_row(
+                "SELECT state FROM tasks WHERE block_id = ?1",
+                params![block_id],
+                |row| row.get(0),
+            )
             .unwrap_or_else(|_| "TODO".to_string());
 
         let next = match current.as_str() {
@@ -91,7 +99,12 @@ impl Database {
         Ok(next.to_string())
     }
 
-    pub fn list_tasks(&self, state: Option<&TaskState>, scheduled_date: Option<&str>, deadline_before: Option<&str>) -> Result<Vec<Task>> {
+    pub fn list_tasks(
+        &self,
+        state: Option<&TaskState>,
+        scheduled_date: Option<&str>,
+        deadline_before: Option<&str>,
+    ) -> Result<Vec<Task>> {
         let conn = self.conn()?;
         let mut sql = String::from(
             "SELECT id, block_id, state, scheduled_date, deadline_date, created_at, updated_at FROM tasks WHERE 1=1"
@@ -103,29 +116,39 @@ impl Database {
             param_values.push(Box::new(s.as_str().to_string()));
         }
         if let Some(date) = scheduled_date {
-            sql.push_str(&format!(" AND scheduled_date = ?{}", param_values.len() + 1));
+            sql.push_str(&format!(
+                " AND scheduled_date = ?{}",
+                param_values.len() + 1
+            ));
             param_values.push(Box::new(date.to_string()));
         }
         if let Some(date) = deadline_before {
-            sql.push_str(&format!(" AND deadline_date <= ?{}", param_values.len() + 1));
+            sql.push_str(&format!(
+                " AND deadline_date <= ?{}",
+                param_values.len() + 1
+            ));
             param_values.push(Box::new(date.to_string()));
         }
 
         sql.push_str(" ORDER BY updated_at DESC");
 
         let mut stmt = conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let tasks = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                block_id: row.get(1)?,
-                state: TaskState::from_str(&row.get::<_, String>(2)?).unwrap_or(TaskState::Todo),
-                scheduled_date: row.get(3)?,
-                deadline_date: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let tasks = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(Task {
+                    id: row.get(0)?,
+                    block_id: row.get(1)?,
+                    state: TaskState::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or(TaskState::Todo),
+                    scheduled_date: row.get(3)?,
+                    deadline_date: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(tasks)
     }
 
@@ -154,9 +177,11 @@ impl Database {
                 GROUP BY day
              ) GROUP BY day ORDER BY day ASC"
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -176,17 +201,19 @@ impl Database {
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO', 'DOING', 'NOW', 'LATER')
                AND t.updated_at >= ?1
-             ORDER BY t.updated_at DESC"
+             ORDER BY t.updated_at DESC",
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -211,9 +238,16 @@ impl Database {
                   AND NOT EXISTS (SELECT 1 FROM task_events te WHERE te.block_id = t.block_id AND te.to_state = 'DONE')
              ) ORDER BY ts DESC"
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -249,32 +283,33 @@ impl Database {
                       END,
                       t.updated_at DESC
              {}",
-            limit.map(|n| format!("LIMIT {}", n.max(1))).unwrap_or_default()
+            limit
+                .map(|n| format!("LIMIT {}", n.max(1)))
+                .unwrap_or_default()
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], row_to_assistant_task)?
+        let rows = stmt
+            .query_map([], row_to_assistant_task)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
     /// Open tasks with deadline_date = date_iso.
     pub fn list_open_tasks_by_due(&self, date_iso: &str) -> Result<Vec<AssistantTaskRow>> {
-        self.query_open_tasks(
-            "AND t.deadline_date = ?1",
-            &[&date_iso],
-        )
+        self.query_open_tasks("AND t.deadline_date = ?1", &[&date_iso])
     }
 
     /// Open tasks with scheduled_date = date_iso.
     pub fn list_open_tasks_by_scheduled(&self, date_iso: &str) -> Result<Vec<AssistantTaskRow>> {
-        self.query_open_tasks(
-            "AND t.scheduled_date = ?1",
-            &[&date_iso],
-        )
+        self.query_open_tasks("AND t.scheduled_date = ?1", &[&date_iso])
     }
 
     /// Open tasks with scheduled_date or deadline_date in [start_iso, end_iso].
-    pub fn list_open_tasks_in_range(&self, start_iso: &str, end_iso: &str) -> Result<Vec<AssistantTaskRow>> {
+    pub fn list_open_tasks_in_range(
+        &self,
+        start_iso: &str,
+        end_iso: &str,
+    ) -> Result<Vec<AssistantTaskRow>> {
         self.query_open_tasks(
             "AND (
                 (t.scheduled_date IS NOT NULL AND t.scheduled_date BETWEEN ?1 AND ?2)
@@ -299,10 +334,7 @@ impl Database {
     /// Fuzzy search for open tasks by content substring.
     pub fn find_open_tasks(&self, query: &str) -> Result<Vec<AssistantTaskRow>> {
         let pattern = format!("%{}%", query.trim().to_lowercase());
-        self.query_open_tasks(
-            "AND LOWER(COALESCE(b.content, '')) LIKE ?1",
-            &[&pattern],
-        )
+        self.query_open_tasks("AND LOWER(COALESCE(b.content, '')) LIKE ?1", &[&pattern])
     }
 
     /// All block contents on the journal page whose title matches `date_iso`.
@@ -315,9 +347,10 @@ impl Database {
              JOIN pages p ON p.id = b.page_id
              WHERE p.is_journal = 1
                AND p.title = ?1
-             ORDER BY b.order_index ASC"
+             ORDER BY b.order_index ASC",
         )?;
-        let rows = stmt.query_map(params![date_iso], |row| row.get::<_, String>(0))?
+        let rows = stmt
+            .query_map(params![date_iso], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows.into_iter().filter(|s| !s.trim().is_empty()).collect())
     }
@@ -354,7 +387,8 @@ impl Database {
             extra_where
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_slice, row_to_assistant_task)?
+        let rows = stmt
+            .query_map(params_slice, row_to_assistant_task)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -372,4 +406,3 @@ fn row_to_assistant_task(row: &rusqlite::Row) -> rusqlite::Result<AssistantTaskR
         updated_at: row.get(7)?,
     })
 }
-

@@ -11,13 +11,20 @@ impl Database {
         // Only allow SELECT statements
         let upper = trimmed.to_uppercase();
         if !upper.starts_with("SELECT") {
-            return Err(CoreError::Parse("Only SELECT queries are allowed".to_string()));
+            return Err(CoreError::Parse(
+                "Only SELECT queries are allowed".to_string(),
+            ));
         }
         // Reject dangerous keywords (whole-word match only)
-        for forbidden in &["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH", "PRAGMA"] {
+        for forbidden in &[
+            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH", "PRAGMA",
+        ] {
             let pat = format!(r"\b{}\b", forbidden);
             if regex::Regex::new(&pat).unwrap().is_match(&upper) && *forbidden != "SELECT" {
-                return Err(CoreError::Parse(format!("Query contains forbidden keyword: {}", forbidden)));
+                return Err(CoreError::Parse(format!(
+                    "Query contains forbidden keyword: {}",
+                    forbidden
+                )));
             }
         }
 
@@ -31,27 +38,29 @@ impl Database {
             .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
             .collect();
 
-        let rows = stmt.query_map([], |row| {
-            let mut record = Vec::with_capacity(col_count);
-            for i in 0..col_count {
-                let val = match row.get_ref(i) {
-                    Ok(rusqlite::types::ValueRef::Null) => Value::Null,
-                    Ok(rusqlite::types::ValueRef::Integer(n)) => Value::Number(n.into()),
-                    Ok(rusqlite::types::ValueRef::Real(f)) => {
-                        Value::Number(serde_json::Number::from_f64(f).unwrap_or(0.into()))
-                    }
-                    Ok(rusqlite::types::ValueRef::Text(s)) => {
-                        Value::String(String::from_utf8_lossy(s).to_string())
-                    }
-                    Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                        Value::String(format!("<blob {} bytes>", b.len()))
-                    }
-                    Err(_) => Value::Null,
-                };
-                record.push((col_names[i].clone(), val));
-            }
-            Ok(record)
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let mut record = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    let val = match row.get_ref(i) {
+                        Ok(rusqlite::types::ValueRef::Null) => Value::Null,
+                        Ok(rusqlite::types::ValueRef::Integer(n)) => Value::Number(n.into()),
+                        Ok(rusqlite::types::ValueRef::Real(f)) => {
+                            Value::Number(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+                        }
+                        Ok(rusqlite::types::ValueRef::Text(s)) => {
+                            Value::String(String::from_utf8_lossy(s).to_string())
+                        }
+                        Ok(rusqlite::types::ValueRef::Blob(b)) => {
+                            Value::String(format!("<blob {} bytes>", b.len()))
+                        }
+                        Err(_) => Value::Null,
+                    };
+                    record.push((col_names[i].clone(), val));
+                }
+                Ok(record)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Limit to 200 rows
         Ok(rows.into_iter().take(200).collect())
@@ -75,10 +84,22 @@ fn inject_block_id(sql: &str) -> String {
         if trimmed.to_uppercase().starts_with("AS ") {
             // "blocks AS x" — grab alias after AS
             let alias_part = trimmed[3..].trim_start();
-            alias_part.split(|c: char| !c.is_alphanumeric() && c != '_').next()
-        } else if trimmed.starts_with(|c: char| c.is_alphabetic()) && !trimmed.to_uppercase().starts_with("WHERE") && !trimmed.to_uppercase().starts_with("ON") && !trimmed.to_uppercase().starts_with("JOIN") && !trimmed.to_uppercase().starts_with("LEFT") && !trimmed.to_uppercase().starts_with("GROUP") && !trimmed.to_uppercase().starts_with("ORDER") && !trimmed.to_uppercase().starts_with("LIMIT") {
+            alias_part
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+        } else if trimmed.starts_with(|c: char| c.is_alphabetic())
+            && !trimmed.to_uppercase().starts_with("WHERE")
+            && !trimmed.to_uppercase().starts_with("ON")
+            && !trimmed.to_uppercase().starts_with("JOIN")
+            && !trimmed.to_uppercase().starts_with("LEFT")
+            && !trimmed.to_uppercase().starts_with("GROUP")
+            && !trimmed.to_uppercase().starts_with("ORDER")
+            && !trimmed.to_uppercase().starts_with("LIMIT")
+        {
             // "blocks b" — the word after is the alias
-            trimmed.split(|c: char| !c.is_alphanumeric() && c != '_').next()
+            trimmed
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
         } else {
             Some("blocks")
         }

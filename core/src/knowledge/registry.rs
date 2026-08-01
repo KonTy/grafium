@@ -58,7 +58,13 @@ impl GraphRegistry {
     pub fn load(config_path: &Path) -> Result<Self> {
         let graphs = if config_path.exists() {
             let content = std::fs::read_to_string(config_path)?;
-            serde_json::from_str(&content).unwrap_or_default()
+            serde_json::from_str(&content).map_err(|error| {
+                CoreError::Parse(format!(
+                    "Failed to parse graph registry {}: {}",
+                    config_path.display(),
+                    error
+                ))
+            })?
         } else {
             HashMap::new()
         };
@@ -138,11 +144,58 @@ impl GraphRegistry {
 
     /// Find which graph a file path belongs to.
     pub fn find_graph_for_path(&self, file_path: &Path) -> Option<&RegisteredGraph> {
-        self.graphs.values().find(|g| file_path.starts_with(&g.path))
+        self.graphs
+            .values()
+            .find(|g| file_path.starts_with(&g.path))
     }
 
     /// Generate a unique graph ID.
     pub fn generate_id() -> String {
         uuid::Uuid::new_v4().to_string()[..8].to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestRegistryFile {
+        path: PathBuf,
+    }
+
+    impl TestRegistryFile {
+        fn new() -> Self {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test-artifacts")
+                .join(format!("graph-registry-{}.json", uuid::Uuid::new_v4()));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestRegistryFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn load_returns_error_for_malformed_registry_json() {
+        let file = TestRegistryFile::new();
+        std::fs::write(file.path(), "{ definitely not valid json").unwrap();
+
+        let error = match GraphRegistry::load(file.path()) {
+            Ok(_) => panic!("malformed registry should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CoreError::Parse(_)));
+        assert!(error.to_string().contains("Failed to parse graph registry"));
     }
 }

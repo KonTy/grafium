@@ -1,7 +1,7 @@
-mod markdown;
 pub mod links;
+mod markdown;
 pub mod serializer;
 
-pub use markdown::{parse_page, ParsedPage, ParsedBlock};
 pub use links::extract_links;
+pub use markdown::{parse_page, ParsedBlock, ParsedPage};
 pub use serializer::serialize_page;

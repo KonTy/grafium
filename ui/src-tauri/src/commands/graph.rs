@@ -1,13 +1,13 @@
-use tauri::State;
-use tauri::AppHandle;
-use tauri::Manager;
 use crate::AppState;
+use grafium_core::graph::GraphValidationReport;
+use grafium_core::Graph;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use grafium_core::Graph;
-use grafium_core::graph::GraphValidationReport;
 use std::thread;
+use tauri::AppHandle;
+use tauri::Manager;
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphInfo {
@@ -42,21 +42,51 @@ pub struct GraphConfig {
 }
 
 impl GraphConfig {
-    pub fn load(config_path: &Path) -> Self {
-        if config_path.exists() {
-            let content = fs::read_to_string(config_path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Self::default()
+    pub fn load(config_path: &Path) -> Result<Self, String> {
+        if !config_path.exists() {
+            return Ok(Self::default());
         }
+
+        let content = fs::read_to_string(config_path).map_err(|e| {
+            format!(
+                "Failed to read graph config '{}': {}",
+                config_path.display(),
+                e
+            )
+        })?;
+        serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "Failed to parse graph config '{}': {}",
+                config_path.display(),
+                e
+            )
+        })
     }
 
-    pub fn save(&self, config_path: &Path) {
+    pub fn save(&self, config_path: &Path) -> Result<(), String> {
         if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent).ok();
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create graph config directory '{}': {}",
+                    parent.display(),
+                    e
+                )
+            })?;
         }
-        let content = serde_json::to_string_pretty(self).unwrap_or_default();
-        fs::write(config_path, content).ok();
+        let content = serde_json::to_string_pretty(self).map_err(|e| {
+            format!(
+                "Failed to serialize graph config '{}': {}",
+                config_path.display(),
+                e
+            )
+        })?;
+        fs::write(config_path, content).map_err(|e| {
+            format!(
+                "Failed to write graph config '{}': {}",
+                config_path.display(),
+                e
+            )
+        })
     }
 
     pub fn add_graph(&mut self, name: &str, path: &str) {
@@ -70,9 +100,12 @@ impl GraphConfig {
     }
 }
 
-fn config_path(app: &AppHandle) -> PathBuf {
-    let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
-    app_dir.join("graphs.json")
+fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(app_dir.join("graphs.json"))
 }
 
 fn metadata_dir_name(app: &AppHandle) -> String {
@@ -84,12 +117,22 @@ fn metadata_dir_name(app: &AppHandle) -> String {
 
     let slug = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string();
 
-    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    let normalized = if slug.is_empty() {
+        "grafium".to_string()
+    } else {
+        slug
+    };
     format!(".{}", normalized)
 }
 
@@ -97,14 +140,19 @@ fn metadata_dir_name(app: &AppHandle) -> String {
 pub fn get_graph_info(state: State<AppState>, app: AppHandle) -> Result<GraphInfo, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let path = graph.root_dir.to_string_lossy().to_string();
-    let name = graph.root_dir.file_name()
+    let name = graph
+        .root_dir
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("graph")
         .to_string();
 
     // Check config for a custom name
-    let config = GraphConfig::load(&config_path(&app));
-    let display_name = config.graphs.iter()
+    let cp = config_path(&app)?;
+    let config = GraphConfig::load(&cp)?;
+    let display_name = config
+        .graphs
+        .iter()
         .find(|g| g.path == path)
         .map(|g| g.name.clone())
         .unwrap_or(name);
@@ -144,12 +192,17 @@ pub fn get_graph_data(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_graphs(app: AppHandle) -> Result<Vec<GraphInfo>, String> {
-    let config = GraphConfig::load(&config_path(&app));
+    let cp = config_path(&app)?;
+    let config = GraphConfig::load(&cp)?;
     Ok(config.graphs)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Result<GraphInfo, String> {
+pub fn open_graph(
+    state: State<AppState>,
+    app: AppHandle,
+    path: String,
+) -> Result<GraphInfo, String> {
     let graph_path = PathBuf::from(&path);
     if !graph_path.exists() {
         return Err(format!("Path does not exist: {}", path));
@@ -159,7 +212,7 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     let metadata_dir = metadata_dir_name(&app);
     let validation = Graph::validate_structure_with_metadata_dir(&graph_path, &metadata_dir);
     if !validation.is_valid {
-        return Err(validation.error_message.unwrap_or_else(|| 
+        return Err(validation.error_message.unwrap_or_else(||
             format!(
                 "Invalid graph structure. Please ensure the directory contains pages/, journals/, and {}/ subdirectories.",
                 metadata_dir
@@ -170,22 +223,24 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
     let db_path = platform_db_path(&app, &graph_path)?;
 
     // Open the graph. If DB is corrupted, recover by rotating index.db and recreating it.
-    let new_graph = match Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir) {
-        Ok(g) => g,
-        Err(first_err) => {
-            if try_recover_corrupt_index_db(&db_path).is_ok() {
-                Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir).map_err(|second_err| {
-                    format!(
+    let new_graph =
+        match Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir) {
+            Ok(g) => g,
+            Err(first_err) => {
+                if try_recover_corrupt_index_db(&db_path).is_ok() {
+                    Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir)
+                        .map_err(|second_err| {
+                            format!(
                         "Failed to open graph after DB recovery. First error: {}. Second error: {}",
                         first_err,
                         second_err
                     )
-                })?
-            } else {
-                return Err(first_err.to_string());
+                        })?
+                } else {
+                    return Err(first_err.to_string());
+                }
             }
-        }
-    };
+        };
 
     // Keep graph open instantaneous. Only schedule a background rebuild when
     // the index is empty (fresh/corrupt-recovered DB).
@@ -196,17 +251,18 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
         .unwrap_or(true);
 
     // Derive name from folder name
-    let name = graph_path.file_name()
+    let name = graph_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("graph")
         .to_string();
 
     // Update config
-    let cp = config_path(&app);
-    let mut config = GraphConfig::load(&cp);
+    let cp = config_path(&app)?;
+    let mut config = GraphConfig::load(&cp)?;
     config.add_graph(&name, &path);
     config.current = Some(path.clone());
-    config.save(&cp);
+    config.save(&cp)?;
 
     // Swap the graph in app state
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -228,7 +284,11 @@ pub fn open_graph(state: State<AppState>, app: AppHandle, path: String) -> Resul
 
 fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf, metadata_dir_name: String) {
     thread::spawn(move || {
-        let graph = match Graph::open_with_db_path_and_metadata_dir(&graph_root, &db_path, &metadata_dir_name) {
+        let graph = match Graph::open_with_db_path_and_metadata_dir(
+            &graph_root,
+            &db_path,
+            &metadata_dir_name,
+        ) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!(
@@ -315,19 +375,27 @@ pub fn validate_graph(app: AppHandle, path: String) -> Result<GraphValidationRep
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: String) -> Result<GraphInfo, String> {
+pub fn create_graph(
+    state: State<AppState>,
+    app: AppHandle,
+    path: String,
+    name: String,
+) -> Result<GraphInfo, String> {
     let graph_path = if PathBuf::from(&path).is_absolute() {
         PathBuf::from(&path)
     } else {
         // Relative path → resolve under ~/Documents/grafium/
-        let docs = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+        let docs = dirs::document_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
         docs.join("grafium").join(&path)
     };
     let path = graph_path.to_string_lossy().to_string();
 
     // Never allow creating a graph inside another graph (e.g. inside journals/).
     let metadata_dir = metadata_dir_name(&app);
-    if let Some(parent_graph) = Graph::find_ancestor_graph_root_with_metadata_dir(&graph_path, &metadata_dir) {
+    if let Some(parent_graph) =
+        Graph::find_ancestor_graph_root_with_metadata_dir(&graph_path, &metadata_dir)
+    {
         return Err(format!(
             "Cannot create graph inside another graph. Parent graph root: {}",
             parent_graph.display()
@@ -354,11 +422,11 @@ pub fn create_graph(state: State<AppState>, app: AppHandle, path: String, name: 
         .map_err(|e| e.to_string())?;
 
     // Update config
-    let cp = config_path(&app);
-    let mut config = GraphConfig::load(&cp);
+    let cp = config_path(&app)?;
+    let mut config = GraphConfig::load(&cp)?;
     config.add_graph(&name, &path);
     config.current = Some(path.clone());
-    config.save(&cp);
+    config.save(&cp)?;
 
     // Swap the graph in app state
     let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -381,13 +449,13 @@ pub fn reindex_current(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn remove_graph(app: AppHandle, path: String) -> Result<(), String> {
-    let cp = config_path(&app);
-    let mut config = GraphConfig::load(&cp);
+    let cp = config_path(&app)?;
+    let mut config = GraphConfig::load(&cp)?;
     config.graphs.retain(|g| g.path != path);
     if config.current.as_deref() == Some(&path) {
         config.current = config.graphs.first().map(|g| g.path.clone());
     }
-    config.save(&cp);
+    config.save(&cp)?;
     Ok(())
 }
 
@@ -415,7 +483,9 @@ pub fn list_directory(app: AppHandle, path: String) -> Result<DirListing, String
         #[cfg(target_os = "android")]
         {
             use tauri::Manager;
-            app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/"))
+            app.path()
+                .app_data_dir()
+                .unwrap_or_else(|_| PathBuf::from("/"))
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -426,7 +496,8 @@ pub fn list_directory(app: AppHandle, path: String) -> Result<DirListing, String
                 dirs::home_dir(),
                 Some(PathBuf::from("/")),
             ];
-            candidates.into_iter()
+            candidates
+                .into_iter()
                 .flatten()
                 .find(|p| p.exists() && p.is_dir())
                 .unwrap_or_else(|| PathBuf::from("/"))
@@ -476,8 +547,12 @@ pub fn list_directory(app: AppHandle, path: String) -> Result<DirListing, String
     }
 
     entries.sort_by(|a, b| {
-        if a.name == ".." { return std::cmp::Ordering::Less; }
-        if b.name == ".." { return std::cmp::Ordering::Greater; }
+        if a.name == ".." {
+            return std::cmp::Ordering::Less;
+        }
+        if b.name == ".." {
+            return std::cmp::Ordering::Greater;
+        }
         a.name.to_lowercase().cmp(&b.name.to_lowercase())
     });
 
@@ -502,7 +577,8 @@ pub fn get_default_graph_base(app: AppHandle) -> String {
     {
         let _ = &app; // suppress unused warning
     }
-    let docs = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+    let docs = dirs::document_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
     docs.join("grafium").to_string_lossy().to_string()
 }
 
@@ -518,7 +594,7 @@ fn notify_android_graph_changed(graph_path: &str, graph_name: &str) {
         let status_dir = dirs::document_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/sdcard/Android/data"))
             .join("com.grafium.companion");
-        
+
         if let Ok(_) = std::fs::create_dir_all(&status_dir) {
             let status_file = status_dir.join("current_graph.json");
             let status = json!({
@@ -529,16 +605,96 @@ fn notify_android_graph_changed(graph_path: &str, graph_name: &str) {
                     .unwrap_or_default()
                     .as_secs()
             });
-            
+
             if let Ok(json_str) = serde_json::to_string_pretty(&status) {
                 let _ = std::fs::write(status_file, json_str);
             }
         }
     }
-    
+
     // On desktop, we don't need to notify Android, so this is a no-op
     #[cfg(not(target_os = "android"))]
     {
         let _ = (graph_path, graph_name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestScratchDir {
+        path: PathBuf,
+    }
+
+    impl TestScratchDir {
+        fn new(test_name: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let unique = format!(
+                "{}-{}-{}-{}",
+                test_name,
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, Ordering::Relaxed),
+            );
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(".test-scratch")
+                .join("graph-config")
+                .join(unique);
+
+            fs::create_dir_all(&path).expect("failed to create graph config test scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestScratchDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn graph_config_load_returns_err_on_malformed_json() {
+        let scratch = TestScratchDir::new("malformed-json");
+        let config_path = scratch.path().join("graphs.json");
+        fs::write(&config_path, "{not valid json").expect("failed to write malformed config");
+
+        let err = GraphConfig::load(&config_path)
+            .expect_err("malformed config should not silently default anymore");
+
+        assert!(err.contains("Failed to parse graph config"));
+        assert!(err.contains("graphs.json"));
+    }
+
+    #[test]
+    fn graph_config_save_returns_err_when_parent_is_not_a_directory() {
+        let scratch = TestScratchDir::new("save-error");
+        let parent_file = scratch.path().join("not-a-directory");
+        fs::write(&parent_file, "occupied").expect("failed to create parent file");
+
+        let config = GraphConfig {
+            graphs: vec![GraphInfo {
+                name: "Example".to_string(),
+                path: "/graphs/example".to_string(),
+            }],
+            current: Some("/graphs/example".to_string()),
+        };
+
+        let err = config
+            .save(&parent_file.join("graphs.json"))
+            .expect_err("save should fail when the parent path is a file");
+
+        assert!(err.contains("Failed to create graph config directory"));
     }
 }

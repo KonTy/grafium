@@ -70,9 +70,16 @@ impl App {
     }
 
     fn open_page(&mut self, page_id: &str) {
-        self.center.open_page(page_id);
-        self.right.set_target_page(page_id);
-        self.focus = Focus::Center;
+        match self.center.open_page(page_id) {
+            Ok(()) => {
+                self.right.set_target_page(page_id);
+                self.focus = Focus::Center;
+            }
+            Err(message) => {
+                self.status = message;
+                self.focus = Focus::Center;
+            }
+        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -98,7 +105,11 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('g') | KeyCode::Char('t') => {
-                    self.pending_leader = Some(if key.code == KeyCode::Char('g') { 'g' } else { 't' });
+                    self.pending_leader = Some(if key.code == KeyCode::Char('g') {
+                        'g'
+                    } else {
+                        't'
+                    });
                     return;
                 }
                 KeyCode::Char('/') => {
@@ -242,7 +253,8 @@ impl App {
             self.left.draw(f, chunks[idx], self.focus == Focus::Left);
             idx += 1;
         }
-        self.center.draw(f, chunks[idx], self.focus == Focus::Center);
+        self.center
+            .draw(f, chunks[idx], self.focus == Focus::Center);
         idx += 1;
         if self.right_visible {
             self.right.draw(f, chunks[idx], self.focus == Focus::Right);

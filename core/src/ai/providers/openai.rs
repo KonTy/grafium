@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::canonicalize_messages;
 use crate::ai::traits::{
     BoxFuture, ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole,
 };
@@ -62,6 +63,32 @@ struct OpenAiResponseMessage {
     content: Option<String>,
 }
 
+fn build_chat_request(
+    model: &str,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> OpenAiChatRequest {
+    let messages = canonicalize_messages(messages, options)
+        .into_iter()
+        .map(|message| OpenAiMessage {
+            role: match message.role {
+                MessageRole::System => "system".to_string(),
+                MessageRole::User => "user".to_string(),
+                MessageRole::Assistant => "assistant".to_string(),
+            },
+            content: message.content,
+        })
+        .collect();
+
+    OpenAiChatRequest {
+        model: model.to_string(),
+        messages,
+        max_tokens: options.max_tokens,
+        temperature: options.temperature,
+        stop: options.stop.clone(),
+    }
+}
+
 impl LlmProvider for OpenAiLlm {
     fn complete<'a>(
         &'a self,
@@ -69,25 +96,7 @@ impl LlmProvider for OpenAiLlm {
         options: &'a CompletionOptions,
     ) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let oai_messages: Vec<OpenAiMessage> = messages
-                .iter()
-                .map(|m| OpenAiMessage {
-                    role: match m.role {
-                        MessageRole::System => "system".to_string(),
-                        MessageRole::User => "user".to_string(),
-                        MessageRole::Assistant => "assistant".to_string(),
-                    },
-                    content: m.content.clone(),
-                })
-                .collect();
-
-            let request = OpenAiChatRequest {
-                model: self.model.clone(),
-                messages: oai_messages,
-                max_tokens: options.max_tokens,
-                temperature: options.temperature,
-                stop: options.stop.clone(),
-            };
+            let request = build_chat_request(&self.model, messages, options);
 
             let resp = self
                 .client
@@ -227,5 +236,36 @@ impl Embedder for OpenAiEmbedder {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_chat_request_includes_system_prompt_message() {
+        let request = build_chat_request(
+            "gpt-test",
+            &[ChatMessage {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+            }],
+            &CompletionOptions {
+                system_prompt: Some("be concise".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "be concise"})
+        );
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "hello"})
+        );
     }
 }

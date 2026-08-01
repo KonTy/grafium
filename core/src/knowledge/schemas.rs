@@ -100,7 +100,10 @@ impl SchemaManager {
             for entry in std::fs::read_dir(&schemas_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml") {
+                if path
+                    .extension()
+                    .map_or(false, |ext| ext == "yaml" || ext == "yml")
+                {
                     match Self::load_schema(&path) {
                         Ok(schema) => {
                             schemas.insert(schema.tag.clone(), schema);

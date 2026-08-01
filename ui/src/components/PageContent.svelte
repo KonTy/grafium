@@ -4,8 +4,17 @@
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { renderBlock } from "../lib/markdown";
+  import { hydrateRenderedMedia } from "../lib/renderedMedia";
+  import {
+    applyIfCurrentPageLoad,
+    beginPageLoad,
+    capturePageLoad,
+    createPageLoadState,
+    isCurrentPageLoad,
+    type PageLoadRequest,
+  } from "../lib/pageContentLoad";
   import type { BacklinkResult, Block, Page } from "../lib/api";
-  import { pushUndo, setUndoCallback, removeUndoCallback, performUndo, performRedo, canUndo, getUndoStackSize } from "../lib/undoStack";
+  import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
 
   interface Props {
@@ -29,8 +38,8 @@
   let childPages: Page[] = $state([]);
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
-  let undoCount = $state(0);
   let collapsedIds: Set<string> = $state(new Set());
+  const pageLoadState = createPageLoadState();
 
   // Windowed rendering: mounting one BlockEditor per block hangs WebKitGTK on huge
   // pages (e.g. an imported Anki deck of 7000+ cards). Only render the first
@@ -96,36 +105,15 @@
     collapsedIds = newSet;
   }
 
-  function updateUndoCount() {
-    undoCount = getUndoStackSize();
+  function currentPageLoad(): PageLoadRequest {
+    return capturePageLoad(pageLoadState, page.id, page.title);
   }
-
-  // Listen for app-undo/app-redo custom DOM events (dispatched by main.ts)
-  $effect(() => {
-    const handleUndo = async () => {
-      console.log("[PageContent] performing app-level undo");
-      await performUndo();
-      updateUndoCount();
-    };
-    const handleRedo = async () => {
-      console.log("[PageContent] performing app-level redo");
-      await performRedo();
-      updateUndoCount();
-    };
-    window.addEventListener("app-undo", handleUndo);
-    window.addEventListener("app-redo", handleRedo);
-    return () => {
-      window.removeEventListener("app-undo", handleUndo);
-      window.removeEventListener("app-redo", handleRedo);
-    };
-  });
 
   // Register undo callback for THIS page (supports multiple instances in journal view)
   $effect(() => {
     if (page?.id) {
       setUndoCallback(page.id, (_action: UndoAction) => {
-        loadBlocks();
-        updateUndoCount();
+        void loadBlocks(currentPageLoad());
       });
       return () => {
         removeUndoCallback(page.id);
@@ -135,56 +123,88 @@
 
   // Load blocks when page changes
   $effect(() => {
-    if (page?.id) {
-      loadBlocks();
-      loadBacklinks();
-      loadHierarchy();
+    const pageId = page?.id;
+    const pageTitle = page?.title;
+    if (pageId) {
+      const request = beginPageLoad(pageLoadState, pageId, pageTitle ?? "");
+      void loadBlocks(request);
+      void loadBacklinks(request);
+      void loadHierarchy(request);
     }
   });
 
-  async function loadBlocks() {
+  async function loadBlocks(request: PageLoadRequest = currentPageLoad()) {
     try {
-      loadError = null;
-      renderLimit = RENDER_CHUNK;
-      blocks = await listBlocks(page.id);
-      // If no blocks exist, create an empty one
-      if (blocks.length === 0) {
-        const newBlock = await createBlock(page.id, null, 0, "");
-        blocks = [newBlock];
+      if (isCurrentPageLoad(pageLoadState, request)) {
+        loadError = null;
+        renderLimit = RENDER_CHUNK;
       }
+
+      const loadedBlocks = await listBlocks(request.pageId);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+
+      let nextBlocks = loadedBlocks;
+      // If no blocks exist, create an empty one
+      if (nextBlocks.length === 0) {
+        const newBlock = await createBlock(request.pageId, null, 0, "");
+        if (!isCurrentPageLoad(pageLoadState, request)) return;
+        nextBlocks = [newBlock];
+      }
+      blocks = nextBlocks;
     } catch (e: any) {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
       loadError = e?.toString() || "Unknown error loading blocks";
       console.error("loadBlocks failed:", e);
     }
   }
 
-  async function loadHierarchy() {
+  async function loadHierarchy(request: PageLoadRequest = currentPageLoad()) {
+    if (isCurrentPageLoad(pageLoadState, request)) {
+      parentPage = null;
+      childPages = [];
+    }
+
     try {
-      if (page.title.includes("/")) {
-        parentPage = await getParentPage(page.title);
-      } else {
-        parentPage = null;
-      }
-      childPages = await getChildPages(page.title);
+      await applyIfCurrentPageLoad(
+        pageLoadState,
+        request,
+        async () => {
+          const [nextParentPage, nextChildPages] = await Promise.all([
+            request.pageTitle.includes("/") ? getParentPage(request.pageTitle) : Promise.resolve(null),
+            getChildPages(request.pageTitle),
+          ]);
+          return { nextParentPage, nextChildPages };
+        },
+        ({ nextParentPage, nextChildPages }) => {
+          parentPage = nextParentPage;
+          childPages = nextChildPages;
+        }
+      );
     } catch (e) {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
       console.warn("[hierarchy] Failed to load hierarchy:", e);
       parentPage = null;
       childPages = [];
     }
   }
 
-  async function loadBacklinks() {
+  async function loadBacklinks(request: PageLoadRequest = currentPageLoad()) {
+    if (isCurrentPageLoad(pageLoadState, request)) {
+      backlinks = [];
+    }
+
     try {
-      const backlinkResults = await getBacklinks(page.id);
+      const backlinkResults = await getBacklinks(request.pageId);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
       console.log("[telemetry] backlinks fetched", JSON.stringify({
-        pageId: page.id,
-        pageTitle: page.title,
+        pageId: request.pageId,
+        pageTitle: request.pageTitle,
         count: backlinkResults.length,
       }));
       const pageBlockCache = new Map<string, Block[]>();
       const pageTitleCache = new Map<string, string>();
 
-      backlinks = await Promise.all(backlinkResults.map(async (result) => {
+      const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
         let sourceBlocks = pageBlockCache.get(result.block.page_id);
         if (!sourceBlocks) {
           sourceBlocks = await listBlocks(result.block.page_id);
@@ -204,9 +224,11 @@
           tree: buildBacklinkTree(result.block.id, sourceBlocks),
         };
       }));
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      backlinks = renderedBacklinks;
       console.log("[telemetry] backlinks rendered", JSON.stringify({
-        pageId: page.id,
-        pageTitle: page.title,
+        pageId: request.pageId,
+        pageTitle: request.pageTitle,
         renderedCount: backlinks.length,
         items: backlinks.map((b) => ({
           sourcePageTitle: b.sourcePageTitle,
@@ -216,6 +238,7 @@
         })),
       }));
     } catch {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
       backlinks = [];
     }
   }
@@ -439,7 +462,6 @@
       const snapshot = preEditSnapshots.get(blockId) || block;
       console.log("[DELETE] pushing to undo stack, content:", snapshot.content.substring(0, 40));
       pushUndo({ type: "delete_blocks", blocks: [snapshot], pageId: page.id });
-      updateUndoCount();
       preEditSnapshots.delete(blockId);
     } else {
       console.log("[DELETE] block not found!");
@@ -598,7 +620,6 @@
     // Save deleted blocks for undo
     const deletedBlocks = blocks.filter((b) => selectedBlockIds.has(b.id));
     pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
-    updateUndoCount();
 
     for (const id of toDelete) {
       await deleteBlock(id);
@@ -733,7 +754,9 @@
                   title="Jump to this block"
                 >
                   <span class="backlink-bullet">•</span>
-                  <div class="backlink-content">{@html renderBlock(node.block.content)}</div>
+                  <div class="backlink-content" use:hydrateRenderedMedia={node.block.content}>
+                    {@html renderBlock(node.block.content)}
+                  </div>
                 </button>
               {/each}
             </div>

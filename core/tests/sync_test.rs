@@ -1,10 +1,10 @@
+use grafium_core::error::CoreError;
+use grafium_core::sync::backend::{compute_hash, FileMetadata, SyncBackend};
+use grafium_core::sync::engine::SyncEngine;
+use grafium_core::sync::merge::{three_way_merge, two_way_merge};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use grafium_core::sync::engine::SyncEngine;
-use grafium_core::sync::backend::{SyncBackend, FileMetadata, compute_hash};
-use grafium_core::sync::merge::{three_way_merge, two_way_merge};
-use grafium_core::error::CoreError;
 
 // ---------------------------------------------------------------------------
 // In-memory mock backend for testing (no real filesystem needed for remote)
@@ -26,7 +26,10 @@ impl MockBackend {
     }
 
     fn set_file(&self, rel_path: &str, content: &[u8]) {
-        self.files.lock().unwrap().insert(rel_path.to_string(), content.to_vec());
+        self.files
+            .lock()
+            .unwrap()
+            .insert(rel_path.to_string(), content.to_vec());
     }
 
     fn get_file(&self, rel_path: &str) -> Option<Vec<u8>> {
@@ -57,27 +60,30 @@ impl SyncBackend for MockBackend {
 
     fn list_files(&self) -> grafium_core::error::Result<Vec<FileMetadata>> {
         let files = self.files.lock().unwrap();
-        Ok(files.iter().map(|(path, content)| {
-            FileMetadata {
+        Ok(files
+            .iter()
+            .map(|(path, content)| FileMetadata {
                 rel_path: path.clone(),
                 size: content.len() as u64,
                 modified_at: 0,
                 hash: Some(compute_hash(content)),
-            }
-        }).collect())
+            })
+            .collect())
     }
 
     fn read_file(&self, rel_path: &str) -> grafium_core::error::Result<Vec<u8>> {
         let files = self.files.lock().unwrap();
-        files.get(rel_path)
+        files
+            .get(rel_path)
             .cloned()
-            .ok_or_else(|| CoreError::NotFound(
-                format!("File not found: {}", rel_path)
-            ))
+            .ok_or_else(|| CoreError::NotFound(format!("File not found: {}", rel_path)))
     }
 
     fn write_file(&self, rel_path: &str, content: &[u8]) -> grafium_core::error::Result<()> {
-        self.files.lock().unwrap().insert(rel_path.to_string(), content.to_vec());
+        self.files
+            .lock()
+            .unwrap()
+            .insert(rel_path.to_string(), content.to_vec());
         Ok(())
     }
 
@@ -156,7 +162,10 @@ fn test_fresh_sync_pulls_remote_to_empty_local() {
     assert_eq!(result.pulled.len(), 2);
     assert!(result.pushed.is_empty());
     assert!(result.conflicts.is_empty());
-    assert_eq!(read_local(local.path(), "pages/remote-page.md"), "# From Remote\n");
+    assert_eq!(
+        read_local(local.path(), "pages/remote-page.md"),
+        "# From Remote\n"
+    );
 }
 
 #[test]
@@ -214,7 +223,10 @@ fn test_remote_edit_pulls_to_local() {
 
     let r = engine.sync(&backend).unwrap();
     assert_eq!(r.pulled, vec!["pages/doc.md"]);
-    assert_eq!(read_local(local.path(), "pages/doc.md"), "edited remotely\n");
+    assert_eq!(
+        read_local(local.path(), "pages/doc.md"),
+        "edited remotely\n"
+    );
 }
 
 #[test]
@@ -260,18 +272,47 @@ fn test_conflict_creates_markers_and_backup() {
 
     // The merged file should contain conflict markers
     let merged = read_local(local.path(), "pages/doc.md");
-    assert!(merged.contains("<<<<<<< local"), "Missing local marker in:\n{}", merged);
-    assert!(merged.contains("local edit"), "Missing local content in:\n{}", merged);
-    assert!(merged.contains("======="), "Missing separator in:\n{}", merged);
-    assert!(merged.contains("remote edit"), "Missing remote content in:\n{}", merged);
-    assert!(merged.contains(">>>>>>> remote"), "Missing remote marker in:\n{}", merged);
+    assert!(
+        merged.contains("<<<<<<< local"),
+        "Missing local marker in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("local edit"),
+        "Missing local content in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("======="),
+        "Missing separator in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("remote edit"),
+        "Missing remote content in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains(">>>>>>> remote"),
+        "Missing remote marker in:\n{}",
+        merged
+    );
 
     // Unchanged lines should be preserved
-    assert!(merged.contains("line1"), "Missing unchanged line1 in:\n{}", merged);
-    assert!(merged.contains("line3"), "Missing unchanged line3 in:\n{}", merged);
+    assert!(
+        merged.contains("line1"),
+        "Missing unchanged line1 in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("line3"),
+        "Missing unchanged line3 in:\n{}",
+        merged
+    );
 
     // A .conflict backup file should exist
-    let conflict_files: Vec<_> = fs::read_dir(local.path().join("pages")).unwrap()
+    let conflict_files: Vec<_> = fs::read_dir(local.path().join("pages"))
+        .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().contains(".conflict"))
         .collect();
@@ -307,14 +348,30 @@ fn test_3way_merge_auto_resolves_non_overlapping_changes() {
     let r = engine.sync(&backend).unwrap();
 
     // Should auto-merge without conflicts
-    assert!(r.conflicts.is_empty(), "Expected auto-merge but got conflicts: {:?}", r.conflicts);
+    assert!(
+        r.conflicts.is_empty(),
+        "Expected auto-merge but got conflicts: {:?}",
+        r.conflicts
+    );
     assert_eq!(r.merged.len(), 1, "Expected 1 merged file, got: {:?}", r);
 
     // Merged content should contain both changes
     let merged = read_local(local.path(), "pages/doc.md");
-    assert!(merged.contains("local paragraph 1"), "Missing local change in:\n{}", merged);
-    assert!(merged.contains("remote paragraph 2"), "Missing remote change in:\n{}", merged);
-    assert!(!merged.contains("<<<<<<< local"), "Should not have conflict markers in:\n{}", merged);
+    assert!(
+        merged.contains("local paragraph 1"),
+        "Missing local change in:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("remote paragraph 2"),
+        "Missing remote change in:\n{}",
+        merged
+    );
+    assert!(
+        !merged.contains("<<<<<<< local"),
+        "Should not have conflict markers in:\n{}",
+        merged
+    );
 }
 
 #[test]
@@ -381,8 +438,16 @@ fn test_new_files_on_both_sides_no_conflict() {
 #[test]
 fn test_hierarchical_folders_sync() {
     let local = setup_local_graph();
-    write_local(local.path(), "pages/Books/Rust/Chapter1.md", "# Chapter 1\n");
-    write_local(local.path(), "pages/Books/Rust/Chapter2.md", "# Chapter 2\n");
+    write_local(
+        local.path(),
+        "pages/Books/Rust/Chapter1.md",
+        "# Chapter 1\n",
+    );
+    write_local(
+        local.path(),
+        "pages/Books/Rust/Chapter2.md",
+        "# Chapter 2\n",
+    );
 
     let backend = MockBackend::new("test");
     let engine = SyncEngine::new(local.path().to_path_buf());
@@ -404,7 +469,10 @@ fn test_remote_hierarchical_pull_creates_dirs() {
 
     assert_eq!(r.pulled.len(), 1);
     assert!(local_exists(local.path(), "pages/Projects/Alpha/README.md"));
-    assert_eq!(read_local(local.path(), "pages/Projects/Alpha/README.md"), "# Alpha\n");
+    assert_eq!(
+        read_local(local.path(), "pages/Projects/Alpha/README.md"),
+        "# Alpha\n"
+    );
 }
 
 #[test]
@@ -412,7 +480,11 @@ fn test_conflict_file_skipped_during_sync() {
     let local = setup_local_graph();
     write_local(local.path(), "pages/doc.md", "content\n");
     // Manually create a conflict file — should be ignored by the sync engine
-    write_local(local.path(), "pages/doc.conflict_20260504_120000.md", "old conflict\n");
+    write_local(
+        local.path(),
+        "pages/doc.conflict_20260504_120000.md",
+        "old conflict\n",
+    );
 
     let backend = MockBackend::new("test");
     let engine = SyncEngine::new(local.path().to_path_buf());
@@ -500,8 +572,16 @@ fn test_sync_result_summary() {
     let r = engine.sync(&backend).unwrap();
 
     let summary = r.summary();
-    assert!(summary.contains("↑1"), "Summary should show 1 push: {}", summary);
-    assert!(summary.contains("↓1"), "Summary should show 1 pull: {}", summary);
+    assert!(
+        summary.contains("↑1"),
+        "Summary should show 1 push: {}",
+        summary
+    );
+    assert!(
+        summary.contains("↓1"),
+        "Summary should show 1 pull: {}",
+        summary
+    );
 }
 
 // ===========================================================================
@@ -551,10 +631,22 @@ tags:: #review, #planning
     // Local changed tags and added a line to review section
     // Remote added a line to plan section
     // These are non-overlapping → should auto-merge
-    assert!(!r.has_conflicts, "Expected clean merge but got conflicts:\n{}", r.content);
+    assert!(
+        !r.has_conflicts,
+        "Expected clean merge but got conflicts:\n{}",
+        r.content
+    );
     assert!(r.content.contains("#work"), "Missing local tag change");
-    assert!(r.content.contains("Carried-over items"), "Missing local addition:\n{}", r.content);
-    assert!(r.content.contains("Book room for standup"), "Missing remote addition:\n{}", r.content);
+    assert!(
+        r.content.contains("Carried-over items"),
+        "Missing local addition:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("Book room for standup"),
+        "Missing remote addition:\n{}",
+        r.content
+    );
 }
 
 #[test]
@@ -567,7 +659,10 @@ fn test_merge_preserves_properties() {
 
     // status changed by local, author changed by remote → both non-overlapping
     assert!(!r.has_conflicts, "Expected clean merge:\n{}", r.content);
-    assert!(r.content.contains("status:: in-review"), "Missing local status");
+    assert!(
+        r.content.contains("status:: in-review"),
+        "Missing local status"
+    );
     assert!(r.content.contains("author:: Bob"), "Missing remote author");
 }
 

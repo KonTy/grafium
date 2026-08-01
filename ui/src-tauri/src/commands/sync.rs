@@ -1,15 +1,15 @@
-use tauri::State;
-use tauri::AppHandle;
 use crate::AppState;
-use serde::Serialize;
-use std::path::PathBuf;
 use grafium_core::sync::{
-    SyncEngine, SyncBackend,
     engine::SyncResult,
     filesystem::FilesystemBackend,
+    state::{BackendConfig, BackendType, SyncConfig, SyncConfigs},
     webdav::WebDavBackend,
-    state::{SyncConfig, SyncConfigs, BackendType, BackendConfig},
+    SyncBackend, SyncEngine,
 };
+use serde::Serialize;
+use std::path::PathBuf;
+use tauri::AppHandle;
+use tauri::State;
 
 #[derive(Debug, Serialize)]
 pub struct SyncStatus {
@@ -27,20 +27,36 @@ fn metadata_dir_name(app: &AppHandle) -> String {
 
     let slug = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string();
 
-    let normalized = if slug.is_empty() { "grafium".to_string() } else { slug };
+    let normalized = if slug.is_empty() {
+        "grafium".to_string()
+    } else {
+        slug
+    };
     format!(".{}", normalized)
 }
 
 /// List configured sync targets for the current graph.
 #[tauri::command]
-pub fn sync_list_targets(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SyncConfig>, String> {
+pub fn sync_list_targets(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<SyncConfig>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
     Ok(configs.targets)
 }
@@ -54,14 +70,19 @@ pub fn sync_add_filesystem_target(
     path: String,
 ) -> Result<SyncConfig, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
 
     let config = SyncConfig {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         backend_type: BackendType::Filesystem,
-        config: BackendConfig::Filesystem { path: PathBuf::from(path) },
+        config: BackendConfig::Filesystem {
+            path: PathBuf::from(path),
+        },
         auto_sync: true,
     };
 
@@ -81,14 +102,21 @@ pub fn sync_add_webdav_target(
     password: String,
 ) -> Result<SyncConfig, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
 
     let config = SyncConfig {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         backend_type: BackendType::WebDav,
-        config: BackendConfig::WebDav { url, username, password },
+        config: BackendConfig::WebDav {
+            url,
+            username,
+            password,
+        },
         auto_sync: true,
     };
 
@@ -105,7 +133,10 @@ pub fn sync_remove_target(
     target_id: String,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
     configs.targets.retain(|t| t.id != target_id);
     configs.save(&config_path).map_err(|e| e.to_string())?;
@@ -120,17 +151,25 @@ pub fn sync_check_status(
     target_id: String,
 ) -> Result<SyncStatus, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
-    let target = configs.targets.iter()
+    let target = configs
+        .targets
+        .iter()
         .find(|t| t.id == target_id)
         .ok_or("Sync target not found")?;
 
     let backend = create_backend(target)?;
     let available = backend.is_available();
 
-    let state_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-state.json");
+    let state_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-state.json");
     let sync_state = grafium_core::sync::state::SyncState::load(&state_path);
 
     Ok(SyncStatus {
@@ -148,20 +187,27 @@ pub fn sync_run(
     target_id: String,
 ) -> Result<SyncResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
-    let target = configs.targets.iter()
+    let target = configs
+        .targets
+        .iter()
         .find(|t| t.id == target_id)
         .ok_or("Sync target not found")?;
 
     let backend = create_backend(target)?;
-    let engine = SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
+    let engine =
+        SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
 
     let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
 
     // Reindex after sync to pick up pulled/conflict files
-    if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty() {
+    if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty()
+    {
         if let Err(e) = graph.reindex_all() {
             eprintln!("Reindex after sync failed: {}", e);
         }
@@ -174,10 +220,14 @@ pub fn sync_run(
 #[tauri::command]
 pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SyncResult>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph.root_dir.join(metadata_dir_name(&app)).join("sync-config.json");
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
-    let engine = SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
+    let engine =
+        SyncEngine::new_with_metadata_dir(graph.root_dir.clone(), &metadata_dir_name(&app));
     let mut results = Vec::new();
     let mut needs_reindex = false;
 
@@ -194,7 +244,10 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         }
         match engine.sync(backend.as_ref()) {
             Ok(result) => {
-                if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty() {
+                if !result.pulled.is_empty()
+                    || !result.conflicts.is_empty()
+                    || !result.deleted_local.is_empty()
+                {
                     needs_reindex = true;
                 }
                 results.push(result);
@@ -217,16 +270,21 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
 /// Create a backend instance from a sync config.
 fn create_backend(config: &SyncConfig) -> Result<Box<dyn SyncBackend>, String> {
     match &config.config {
-        BackendConfig::Filesystem { path } => {
-            Ok(Box::new(FilesystemBackend::new(path.clone(), config.name.clone())))
-        }
-        BackendConfig::WebDav { url, username, password } => {
-            Ok(Box::new(WebDavBackend::new(
-                url.clone(),
-                username.clone(),
-                password.clone(),
-                config.name.clone(),
-            )))
-        }
+        BackendConfig::Filesystem { path } => Ok(Box::new(FilesystemBackend::new(
+            path.clone(),
+            config.name.clone(),
+        ))),
+        BackendConfig::WebDav {
+            url,
+            username,
+            password,
+        } => WebDavBackend::new(
+            url.clone(),
+            username.clone(),
+            password.clone(),
+            config.name.clone(),
+        )
+        .map(|backend| Box::new(backend) as Box<dyn SyncBackend>)
+        .map_err(|e| e.to_string()),
     }
 }

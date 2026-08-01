@@ -8,7 +8,7 @@ export interface UndoAction {
 }
 
 // Store on window to guarantee single instance across all module imports
-const w = window as any;
+const w = globalThis as any;
 if (!w.__undoStack) w.__undoStack = [];
 if (!w.__redoStack) w.__redoStack = [];
 

@@ -4,19 +4,19 @@
 //! and maintains a SQLite index for fast queries. All mutations write to .md files first,
 //! then update the index. External file changes are detected and re-indexed.
 
-use std::path::{Path, PathBuf};
+use crate::db::Database;
+use crate::error::Result;
+use crate::models::{Block, BlockType, LinkType, Page};
+use crate::parser::links::ExtractedLink;
+use crate::parser::{self, ParsedBlock};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::collections::HashMap;
-use crate::db::Database;
-use crate::models::{Block, BlockType, LinkType, Page};
-use crate::parser::{self, ParsedBlock};
-use crate::parser::links::ExtractedLink;
-use crate::error::Result;
-use chrono::Utc;
 use uuid::Uuid;
-use serde::{Deserialize, Serialize};
 
 pub struct Graph {
     pub db: Database,
@@ -75,7 +75,10 @@ impl Graph {
         Self::find_ancestor_graph_root_with_metadata_dir(path, Self::default_metadata_dir_name())
     }
 
-    pub fn find_ancestor_graph_root_with_metadata_dir(path: &Path, metadata_dir_name: &str) -> Option<PathBuf> {
+    pub fn find_ancestor_graph_root_with_metadata_dir(
+        path: &Path,
+        metadata_dir_name: &str,
+    ) -> Option<PathBuf> {
         for ancestor in path.ancestors().skip(1) {
             if Self::is_graph_root_dir_with_metadata_dir(ancestor, metadata_dir_name) {
                 return Some(ancestor.to_path_buf());
@@ -92,7 +95,10 @@ impl Graph {
         Self::find_nested_graph_root_with_metadata_dir(root_dir, Self::default_metadata_dir_name())
     }
 
-    pub fn find_nested_graph_root_with_metadata_dir(root_dir: &Path, metadata_dir_name: &str) -> Option<PathBuf> {
+    pub fn find_nested_graph_root_with_metadata_dir(
+        root_dir: &Path,
+        metadata_dir_name: &str,
+    ) -> Option<PathBuf> {
         let mut stack: Vec<(PathBuf, usize)> = vec![(root_dir.to_path_buf(), 0)];
         let max_depth = 2usize;
         let max_dirs_scanned = 512usize;
@@ -156,7 +162,7 @@ impl Graph {
     /// For "a/b/c", creates "a" and "a/b" if they don't exist.
     fn ensure_parent_hierarchy(&self, title: &str) -> Result<()> {
         let parts: Vec<&str> = title.split('/').collect();
-        
+
         // Build up each parent level
         for i in 1..parts.len() {
             let parent_path = parts[0..i].join("/");
@@ -185,7 +191,7 @@ impl Graph {
     }
 
     /// Validate that a directory contains a valid Grafium graph structure.
-    /// 
+    ///
     /// A valid graph must have:
     /// - `pages/` directory
     /// - `journals/` directory
@@ -198,7 +204,10 @@ impl Graph {
         Self::validate_structure_with_metadata_dir(root_dir, Self::default_metadata_dir_name())
     }
 
-    pub fn validate_structure_with_metadata_dir(root_dir: &Path, metadata_dir_name: &str) -> GraphValidationReport {
+    pub fn validate_structure_with_metadata_dir(
+        root_dir: &Path,
+        metadata_dir_name: &str,
+    ) -> GraphValidationReport {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
         let metadata_dir = root_dir.join(metadata_dir_name);
@@ -217,8 +226,10 @@ impl Graph {
             true
         };
 
-        let not_nested_in_another_graph = Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
-        let has_no_nested_graph_roots = Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
+        let not_nested_in_another_graph =
+            Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
+        let has_no_nested_graph_roots =
+            Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
 
         // A valid graph has all three directories and no nested-graph ambiguity.
         // A corrupted DB is recoverable and should not block opening.
@@ -242,10 +253,15 @@ impl Graph {
                 missing.push(format!("{}/", metadata_dir_name));
             }
             if !has_valid_db && db_path.exists() {
-                missing.push(format!("{}/index.db (invalid or corrupted database)", metadata_dir_name));
+                missing.push(format!(
+                    "{}/index.db (invalid or corrupted database)",
+                    metadata_dir_name
+                ));
             }
             if !not_nested_in_another_graph {
-                if let Some(parent_root) = Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name) {
+                if let Some(parent_root) =
+                    Self::find_ancestor_graph_root_with_metadata_dir(root_dir, metadata_dir_name)
+                {
                     missing.push(format!(
                         "graph is nested inside another graph: {}",
                         parent_root.display()
@@ -255,7 +271,9 @@ impl Graph {
                 }
             }
             if !has_no_nested_graph_roots {
-                if let Some(nested_root) = Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name) {
+                if let Some(nested_root) =
+                    Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name)
+                {
                     missing.push(format!(
                         "contains nested graph root: {}",
                         nested_root.display()
@@ -289,7 +307,9 @@ impl Graph {
     /// Creates pages/ and journals/ subdirectories if needed.
     /// SQLite index is stored at root_dir/<metadata>/index.db
     pub fn open(root_dir: &Path) -> Result<Self> {
-        let db_path = root_dir.join(Self::default_metadata_dir_name()).join("index.db");
+        let db_path = root_dir
+            .join(Self::default_metadata_dir_name())
+            .join("index.db");
         Self::open_with_db_path(root_dir, &db_path)
     }
 
@@ -297,10 +317,18 @@ impl Graph {
     /// This is used on Android where scoped storage can block writes to hidden
     /// files under shared storage (e.g. /Documents/.../.grafium/index.db).
     pub fn open_with_db_path(root_dir: &Path, db_path: &Path) -> Result<Self> {
-        Self::open_with_db_path_and_metadata_dir(root_dir, db_path, Self::default_metadata_dir_name())
+        Self::open_with_db_path_and_metadata_dir(
+            root_dir,
+            db_path,
+            Self::default_metadata_dir_name(),
+        )
     }
 
-    pub fn open_with_db_path_and_metadata_dir(root_dir: &Path, db_path: &Path, metadata_dir_name: &str) -> Result<Self> {
+    pub fn open_with_db_path_and_metadata_dir(
+        root_dir: &Path,
+        db_path: &Path,
+        metadata_dir_name: &str,
+    ) -> Result<Self> {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
         let metadata_dir = root_dir.join(metadata_dir_name);
@@ -312,7 +340,7 @@ impl Graph {
             fs::create_dir_all(parent)?;
         }
 
-        let db = Database::new(db_path.to_str().unwrap())?;
+        let db = Database::new(db_path)?;
 
         Ok(Self {
             db,
@@ -370,7 +398,8 @@ impl Graph {
             let path = entry.path();
             if path.is_dir() {
                 // Skip hidden directories (e.g. metadata directory)
-                if path.file_name()
+                if path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .map_or(false, |n| n.starts_with('.'))
                 {
@@ -388,7 +417,8 @@ impl Graph {
     pub fn index_file(&self, path: &Path) -> Result<()> {
         let content = fs::read_to_string(path)?;
 
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("untitled.md");
 
@@ -398,30 +428,35 @@ impl Graph {
         // Derive title from relative path within pages/ or journals/ dir
         // e.g. pages/Books/MyCoolBook/Chapter1.md → "Books/MyCoolBook/Chapter1"
         let title = parsed.title.unwrap_or_else(|| {
-            let base_dir = if is_journal { &self.journals_dir } else { &self.pages_dir };
+            let base_dir = if is_journal {
+                &self.journals_dir
+            } else {
+                &self.pages_dir
+            };
             if let Ok(rel) = path.strip_prefix(base_dir) {
                 let rel_str = rel.to_string_lossy();
                 let without_ext = rel_str.trim_end_matches(".md");
-                // Also handle legacy %2F encoding
-                without_ext.replace("%2F", "/").replace('%', " ")
+                decode_legacy_title_path(without_ext)
             } else {
-                filename.trim_end_matches(".md").replace('%', " ").to_string()
+                decode_legacy_title_path(filename.trim_end_matches(".md"))
             }
         });
 
         // Compute relative path from root_dir
-        let rel_path = path.strip_prefix(&self.root_dir)
+        let rel_path = path
+            .strip_prefix(&self.root_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
 
         // Upsert the page
-        let page = self.db.upsert_page(&title, is_journal, Some(&rel_path), &parsed.properties)?;
+        let page = self
+            .db
+            .upsert_page(&title, is_journal, Some(&rel_path), &parsed.properties)?;
 
-        // Sync normalized page properties
-        if parsed.properties.as_object().map_or(false, |o| !o.is_empty()) {
-            self.db.sync_page_properties(&page.id, &parsed.properties)?;
-        }
+        // Sync normalized page properties, even when the map is empty, so
+        // stale rows are removed when properties are deleted from the source.
+        self.db.sync_page_properties(&page.id, &parsed.properties)?;
 
         // Delete old blocks for this page, then insert fresh
         self.db.delete_blocks_for_page(&page.id)?;
@@ -470,7 +505,8 @@ impl Graph {
             // `Question :: Answer` becomes a card (the parser sets is_flashcard
             // and fills in front/back), whether or not it carries #flashcard.
             if pb.is_flashcard {
-                if let (Some(ref front), Some(ref back)) = (&pb.flashcard_front, &pb.flashcard_back) {
+                if let (Some(ref front), Some(ref back)) = (&pb.flashcard_front, &pb.flashcard_back)
+                {
                     // Tags on the flashcard block act as its "topic(s)" (e.g.
                     // #chinese, #physics), used to scope spaced-repetition study.
                     let tags: Vec<String> = parser::extract_links(&pb.content)
@@ -620,7 +656,9 @@ impl Graph {
         // 2. Update block content to reflect the new marker
         let block = self.db.get_block_by_id(block_id)?;
         let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re.replace(&block.content, &format!("{} ", new_state)).to_string();
+        let new_content = task_re
+            .replace(&block.content, &format!("{} ", new_state))
+            .to_string();
 
         if new_content != block.content {
             let page = self.db.get_page_by_id(&block.page_id)?;
@@ -632,14 +670,20 @@ impl Graph {
     }
 
     /// Set a task to a specific state, updating block content and .md file.
-    pub fn update_task_state(&self, block_id: &str, state: &crate::models::TaskState) -> Result<()> {
+    pub fn update_task_state(
+        &self,
+        block_id: &str,
+        state: &crate::models::TaskState,
+    ) -> Result<()> {
         // 1. Update tasks table + log event
         self.db.update_task_state(block_id, state)?;
 
         // 2. Update block content
         let block = self.db.get_block_by_id(block_id)?;
         let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re.replace(&block.content, &format!("{} ", state.as_str())).to_string();
+        let new_content = task_re
+            .replace(&block.content, &format!("{} ", state.as_str()))
+            .to_string();
 
         if new_content != block.content {
             let page = self.db.get_page_by_id(&block.page_id)?;
@@ -659,7 +703,11 @@ impl Graph {
         let page = self.db.get_page_by_id(&block.page_id)?;
 
         // Build the timestamp line (outline/org-mode format)
-        let keyword = if kind == "deadline" { "DEADLINE" } else { "SCHEDULED" };
+        let keyword = if kind == "deadline" {
+            "DEADLINE"
+        } else {
+            "SCHEDULED"
+        };
         let re = regex::Regex::new(&format!(r"(?m)^{}: <[^>]+>\n?", keyword)).unwrap();
 
         // Remove existing line for this keyword
@@ -686,11 +734,13 @@ impl Graph {
 
         // Get or derive task state from content
         let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let state = task_re.captures(&new_content)
+        let state = task_re
+            .captures(&new_content)
             .and_then(|c| crate::models::TaskState::from_str(&c[1]))
             .unwrap_or(crate::models::TaskState::Todo);
 
-        self.db.upsert_task(block_id, &state, scheduled.as_deref(), deadline.as_deref())?;
+        self.db
+            .upsert_task(block_id, &state, scheduled.as_deref(), deadline.as_deref())?;
 
         // Write to disk
         self.write_page_to_disk(&page)?;
@@ -703,7 +753,10 @@ impl Graph {
     /// desktop UI and Android receiver land TODOs / journal entries in a
     /// predictable place.
     pub fn get_or_create_today_journal(&self) -> Result<Page> {
-        let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let today = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         match self.db.get_page_by_title(&today) {
             Ok(p) => Ok(p),
             Err(_) => self.create_page(&today, true),
@@ -741,7 +794,10 @@ impl Graph {
         let mut props = serde_json::Map::new();
         if let Some(p) = priority {
             if !p.is_empty() {
-                props.insert("priority".to_string(), serde_json::Value::String(p.to_string()));
+                props.insert(
+                    "priority".to_string(),
+                    serde_json::Value::String(p.to_string()),
+                );
             }
         }
 
@@ -805,7 +861,12 @@ impl Graph {
     }
 
     /// Move a block to a new parent (indent/outdent).
-    pub fn move_block(&self, block_id: &str, new_parent_id: Option<&str>, order_index: i32) -> Result<()> {
+    pub fn move_block(
+        &self,
+        block_id: &str,
+        new_parent_id: Option<&str>,
+        order_index: i32,
+    ) -> Result<()> {
         let block = self.db.get_block_by_id(block_id)?;
         let page = self.db.get_page_by_id(&block.page_id)?;
 
@@ -826,7 +887,8 @@ impl Graph {
         let full_path = if let Some(ref file_path) = page.file_path {
             self.root_dir.join(file_path)
         } else if page.is_journal {
-            self.journals_dir.join(format!("{}.md", page.title.replace('/', "_")))
+            self.journals_dir
+                .join(format!("{}.md", page.title.replace('/', "_")))
         } else {
             self.pages_dir.join(format!("{}.md", page.title))
         };
@@ -861,15 +923,13 @@ impl Graph {
         let mut count = 0u32;
         let entries: Vec<_> = fs::read_dir(&self.pages_dir)?
             .flatten()
-            .filter(|e| {
-                e.path().is_file()
-                    && e.file_name().to_string_lossy().contains("%2F")
-            })
+            .filter(|e| e.path().is_file() && e.file_name().to_string_lossy().contains("%2F"))
             .collect();
 
         for entry in entries {
             let old_path = entry.path();
-            let old_name = old_path.file_name()
+            let old_name = old_path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -909,7 +969,8 @@ impl Graph {
                     full_path
                 };
                 // Update the page record with the file path
-                let rel = path.strip_prefix(&self.root_dir)
+                let rel = path
+                    .strip_prefix(&self.root_dir)
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .to_string();
@@ -948,5 +1009,87 @@ fn compute_day_abbr(date: &str) -> &'static str {
         }
     } else {
         "???"
+    }
+}
+
+fn decode_legacy_title_path(path: &str) -> String {
+    path.replace("%2F", "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+    use tempfile::tempdir;
+
+    fn page_property_count(graph: &Graph, page_id: &str) -> Result<i64> {
+        let conn = graph.db.conn()?;
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM page_properties WHERE page_id = ?1",
+            params![page_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    #[test]
+    fn index_file_clears_normalized_page_properties_when_properties_removed() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("property-page.md");
+
+        fs::write(&file_path, "status:: active\nowner:: alice\n- Body\n")?;
+        graph.index_file(&file_path)?;
+
+        let page = graph.db.get_page_by_title("property-page")?;
+        assert_eq!(page_property_count(&graph, &page.id)?, 2);
+
+        fs::write(&file_path, "- Body\n")?;
+        graph.index_file(&file_path)?;
+
+        let page = graph.db.get_page_by_title("property-page")?;
+        assert_eq!(page_property_count(&graph, &page.id)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn update_page_clears_normalized_page_properties_when_properties_removed() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("updated-page.md");
+
+        fs::write(&file_path, "status:: active\n- Body\n")?;
+        graph.index_file(&file_path)?;
+
+        let page = graph.db.get_page_by_title("updated-page")?;
+        assert_eq!(page_property_count(&graph, &page.id)?, 1);
+
+        graph
+            .db
+            .update_page(&page.id, None, Some(&serde_json::json!({})))?;
+
+        assert_eq!(page_property_count(&graph, &page.id)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_preserves_literal_percent_and_decodes_legacy_slashes() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+
+        let literal_percent = graph.pages_dir.join("100%.md");
+        fs::write(&literal_percent, "- Body\n")?;
+        graph.index_file(&literal_percent)?;
+        assert_eq!(graph.db.get_page_by_title("100%")?.title, "100%");
+
+        let legacy_slash = graph.pages_dir.join("Books%2FChapter.md");
+        fs::write(&legacy_slash, "- Body\n")?;
+        graph.index_file(&legacy_slash)?;
+        assert_eq!(
+            graph.db.get_page_by_title("Books/Chapter")?.title,
+            "Books/Chapter"
+        );
+
+        Ok(())
     }
 }

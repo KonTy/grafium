@@ -4,11 +4,18 @@ use rusqlite::params;
 
 impl Database {
     /// Sync page properties from JSON blob into the normalized `page_properties` table.
-    pub fn sync_page_properties(&self, page_id: &str, properties: &serde_json::Value) -> Result<()> {
+    pub fn sync_page_properties(
+        &self,
+        page_id: &str,
+        properties: &serde_json::Value,
+    ) -> Result<()> {
         let conn = self.conn()?;
 
         // Clear existing properties for this page
-        conn.execute("DELETE FROM page_properties WHERE page_id = ?1", params![page_id])?;
+        conn.execute(
+            "DELETE FROM page_properties WHERE page_id = ?1",
+            params![page_id],
+        )?;
 
         // Insert each key-value pair
         if let Some(obj) = properties.as_object() {
@@ -25,11 +32,18 @@ impl Database {
     }
 
     /// Sync block properties from JSON blob into the normalized `block_properties` table.
-    pub fn sync_block_properties(&self, block_id: &str, properties: &serde_json::Value) -> Result<()> {
+    pub fn sync_block_properties(
+        &self,
+        block_id: &str,
+        properties: &serde_json::Value,
+    ) -> Result<()> {
         let conn = self.conn()?;
 
         // Clear existing properties for this block
-        conn.execute("DELETE FROM block_properties WHERE block_id = ?1", params![block_id])?;
+        conn.execute(
+            "DELETE FROM block_properties WHERE block_id = ?1",
+            params![block_id],
+        )?;
 
         // Insert each key-value pair
         if let Some(obj) = properties.as_object() {
@@ -67,9 +81,11 @@ impl Database {
 
         // Backfill page properties
         let mut stmt = conn.prepare("SELECT id, properties FROM pages WHERE properties != '{}'")?;
-        let pages: Vec<(String, String)> = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages: Vec<(String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
 
         for (page_id, props_str) in &pages {
@@ -88,10 +104,13 @@ impl Database {
         }
 
         // Backfill block properties
-        let mut stmt = conn.prepare("SELECT id, properties FROM blocks WHERE properties != '{}'")?;
-        let blocks: Vec<(String, String)> = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut stmt =
+            conn.prepare("SELECT id, properties FROM blocks WHERE properties != '{}'")?;
+        let blocks: Vec<(String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
 
         for (block_id, props_str) in &blocks {
@@ -122,11 +141,17 @@ impl Database {
             "SELECT key, COUNT(*) as cnt, 'page' as source FROM page_properties GROUP BY key
              UNION ALL
              SELECT key, COUNT(*) as cnt, 'block' as source FROM block_properties GROUP BY key
-             ORDER BY cnt DESC"
+             ORDER BY cnt DESC",
         )?;
-        let keys = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let keys = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(keys)
     }
 
@@ -138,9 +163,9 @@ impl Database {
             _ => "SELECT DISTINCT value FROM block_properties WHERE key = ?1 ORDER BY value LIMIT 100",
         };
         let mut stmt = conn.prepare(sql)?;
-        let values = stmt.query_map(params![key], |row| {
-            row.get::<_, String>(0)
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let values = stmt
+            .query_map(params![key], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(values)
     }
 }
@@ -160,10 +185,13 @@ fn json_value_to_property(val: &serde_json::Value) -> (String, &'static str) {
         serde_json::Value::Bool(b) => (b.to_string(), "boolean"),
         serde_json::Value::Array(arr) => {
             // Store as comma-separated for simple queries
-            let parts: Vec<String> = arr.iter().map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }).collect();
+            let parts: Vec<String> = arr
+                .iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect();
             (parts.join(", "), "list")
         }
         serde_json::Value::Null => (String::new(), "string"),

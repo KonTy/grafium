@@ -56,7 +56,9 @@ fn move_block_preserves_content_and_backlinks() {
         )
         .unwrap();
 
-    graph.move_block(&linked.id, Some(&container.id), 0).unwrap();
+    graph
+        .move_block(&linked.id, Some(&container.id), 0)
+        .unwrap();
 
     let moved = graph.db.get_block_by_id(&linked.id).unwrap();
     assert_eq!(moved.content, "[[test]]");

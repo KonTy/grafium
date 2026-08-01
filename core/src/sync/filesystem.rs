@@ -1,7 +1,7 @@
+use super::backend::{compute_hash, FileMetadata, SyncBackend};
+use crate::error::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::error::Result;
-use super::backend::{FileMetadata, SyncBackend, compute_hash};
 
 /// Filesystem-based sync backend.
 /// Works with USB drives, network mounts, or any locally-accessible directory.
@@ -31,11 +31,13 @@ impl FilesystemBackend {
             if path.is_dir() {
                 self.collect_md_files(&path, base, out)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                let rel = path.strip_prefix(base)
+                let rel = path
+                    .strip_prefix(base)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let meta = entry.metadata()?;
-                let modified_at = meta.modified()
+                let modified_at = meta
+                    .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)

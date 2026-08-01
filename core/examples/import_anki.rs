@@ -11,8 +11,12 @@ use std::path::PathBuf;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let apkg = args.next().expect("usage: import_anki <path.apkg> <graph_dir>");
-    let graph_dir = args.next().expect("usage: import_anki <path.apkg> <graph_dir>");
+    let apkg = args
+        .next()
+        .expect("usage: import_anki <path.apkg> <graph_dir>");
+    let graph_dir = args
+        .next()
+        .expect("usage: import_anki <path.apkg> <graph_dir>");
 
     let graph = Graph::open(&PathBuf::from(&graph_dir)).expect("open graph");
     let start = std::time::Instant::now();

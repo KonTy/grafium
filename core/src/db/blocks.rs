@@ -1,6 +1,6 @@
-use crate::models::{Block, BlockType};
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::{Block, BlockType};
 use chrono::Utc;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -133,23 +133,28 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, page_id, parent_id, order_index, content, block_type, properties, created_at, updated_at FROM blocks WHERE page_id = ?1"
         )?;
-        let blocks = stmt.query_map(params![page_id], |row| {
-            Ok(Block {
-                id: row.get(0)?,
-                page_id: row.get(1)?,
-                parent_id: row.get(2)?,
-                order_index: row.get(3)?,
-                content: row.get(4)?,
-                block_type: BlockType::from_str(&row.get::<_, String>(5)?),
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let blocks = stmt
+            .query_map(params![page_id], |row| {
+                Ok(Block {
+                    id: row.get(0)?,
+                    page_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    order_index: row.get(3)?,
+                    content: row.get(4)?,
+                    block_type: BlockType::from_str(&row.get::<_, String>(5)?),
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut grouped: HashMap<Option<String>, Vec<Block>> = HashMap::new();
         for block in blocks {
-            grouped.entry(block.parent_id.clone()).or_default().push(block);
+            grouped
+                .entry(block.parent_id.clone())
+                .or_default()
+                .push(block);
         }
 
         let mut ordered = Vec::new();
@@ -162,23 +167,30 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, page_id, parent_id, order_index, content, block_type, properties, created_at, updated_at FROM blocks WHERE parent_id = ?1 ORDER BY order_index"
         )?;
-        let blocks = stmt.query_map(params![parent_id], |row| {
-            Ok(Block {
-                id: row.get(0)?,
-                page_id: row.get(1)?,
-                parent_id: row.get(2)?,
-                order_index: row.get(3)?,
-                content: row.get(4)?,
-                block_type: BlockType::from_str(&row.get::<_, String>(5)?),
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let blocks = stmt
+            .query_map(params![parent_id], |row| {
+                Ok(Block {
+                    id: row.get(0)?,
+                    page_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    order_index: row.get(3)?,
+                    content: row.get(4)?,
+                    block_type: BlockType::from_str(&row.get::<_, String>(5)?),
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(blocks)
     }
 
-    pub fn update_block(&self, id: &str, content: &str, properties: Option<&serde_json::Value>) -> Result<()> {
+    pub fn update_block(
+        &self,
+        id: &str,
+        content: &str,
+        properties: Option<&serde_json::Value>,
+    ) -> Result<()> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
 
@@ -209,16 +221,20 @@ impl Database {
 
     pub fn reorder_blocks(&self, page_id: &str, block_ids: &[String]) -> Result<()> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "UPDATE blocks SET order_index = ?1 WHERE id = ?2 AND page_id = ?3"
-        )?;
+        let mut stmt =
+            conn.prepare("UPDATE blocks SET order_index = ?1 WHERE id = ?2 AND page_id = ?3")?;
         for (i, id) in block_ids.iter().enumerate() {
             stmt.execute(params![i as i32, id, page_id])?;
         }
         Ok(())
     }
 
-    pub fn move_block(&self, id: &str, new_parent_id: Option<&str>, order_index: i32) -> Result<()> {
+    pub fn move_block(
+        &self,
+        id: &str,
+        new_parent_id: Option<&str>,
+        order_index: i32,
+    ) -> Result<()> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
         conn.execute(
@@ -238,19 +254,21 @@ impl Database {
              ORDER BY rank
              LIMIT ?2"
         )?;
-        let blocks = stmt.query_map(params![query, limit], |row| {
-            Ok(Block {
-                id: row.get(0)?,
-                page_id: row.get(1)?,
-                parent_id: row.get(2)?,
-                order_index: row.get(3)?,
-                content: row.get(4)?,
-                block_type: BlockType::from_str(&row.get::<_, String>(5)?),
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let blocks = stmt
+            .query_map(params![query, limit], |row| {
+                Ok(Block {
+                    id: row.get(0)?,
+                    page_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    order_index: row.get(3)?,
+                    content: row.get(4)?,
+                    block_type: BlockType::from_str(&row.get::<_, String>(5)?),
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(blocks)
     }
 
@@ -258,7 +276,8 @@ impl Database {
     pub fn get_all_block_content(&self) -> Result<Vec<String>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT content FROM blocks WHERE content != ''")?;
-        let rows = stmt.query_map([], |row| row.get(0))?
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
         Ok(rows)
     }

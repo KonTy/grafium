@@ -49,7 +49,12 @@ fn main() -> Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport: Viewport::Fullscreen })?;
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        },
+    )?;
 
     let result = run(&mut terminal, repo);
 

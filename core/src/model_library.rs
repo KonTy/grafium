@@ -162,7 +162,11 @@ pub fn import_model(source: &Path, models_dir: &Path) -> Result<ModelInfo> {
 ///   * If `configured` is `None`, auto-pick the first model of `kind` found
 ///     in `models_dir`, so a single downloaded/imported model "just works"
 ///     without the user having to type its exact file name into settings.
-pub fn resolve_model(configured: Option<&str>, models_dir: &Path, kind: ModelKind) -> Result<PathBuf> {
+pub fn resolve_model(
+    configured: Option<&str>,
+    models_dir: &Path,
+    kind: ModelKind,
+) -> Result<PathBuf> {
     if let Some(configured) = configured {
         let as_path = PathBuf::from(configured);
         if as_path.is_absolute() && as_path.is_file() {
@@ -209,7 +213,9 @@ impl LocalModelRef {
     /// or path in hand (e.g. tests, or a CLI flag) rather than deserializing
     /// one from settings.
     pub fn named(model: impl Into<String>) -> Self {
-        Self { model: Some(model.into()) }
+        Self {
+            model: Some(model.into()),
+        }
     }
 
     /// Resolves this reference to an actual file path, against `models_dir`
@@ -252,7 +258,10 @@ mod tests {
         assert_eq!(classify("ggml-medium.bin"), ModelKind::Whisper);
         assert_eq!(classify("ggml-large-v3.bin"), ModelKind::Whisper);
         assert_eq!(classify("whisper-large-v3-q5_0.gguf"), ModelKind::Whisper);
-        assert_eq!(classify("llama-3.1-8b-instruct.Q4_K_M.gguf"), ModelKind::Llm);
+        assert_eq!(
+            classify("llama-3.1-8b-instruct.Q4_K_M.gguf"),
+            ModelKind::Llm
+        );
         assert_eq!(classify("qwen2.5-14b-instruct-q4_k_m.gguf"), ModelKind::Llm);
         assert_eq!(classify("notes.txt"), ModelKind::Unknown);
     }
@@ -268,7 +277,11 @@ mod tests {
     fn scan_models_dir_skips_partial_downloads() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("ggml-base.en.bin"), b"fake model bytes").unwrap();
-        fs::write(dir.path().join("ggml-medium.bin.part"), b"still downloading").unwrap();
+        fs::write(
+            dir.path().join("ggml-medium.bin.part"),
+            b"still downloading",
+        )
+        .unwrap();
         let models = scan_models_dir(dir.path()).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].file_name, "ggml-base.en.bin");
@@ -283,7 +296,10 @@ mod tests {
 
         let info = import_model(&source_path, models_dir.path()).unwrap();
 
-        assert!(source_path.exists(), "import_model must not delete the original file");
+        assert!(
+            source_path.exists(),
+            "import_model must not delete the original file"
+        );
         assert_eq!(info.path, models_dir.path().join("ggml-tiny.en.bin"));
         assert_eq!(info.kind, ModelKind::Whisper);
         assert_eq!(fs::read(&info.path).unwrap(), b"pretend model weights");

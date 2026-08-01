@@ -135,6 +135,13 @@ pub trait VectorStore: Send + Sync {
         page_id: &'a str,
     ) -> BoxFuture<'a, Result<()>>;
 
+    /// Delete a specific set of chunks within a graph.
+    fn delete_chunks<'a>(
+        &'a self,
+        graph_id: &'a str,
+        chunk_ids: &'a [String],
+    ) -> BoxFuture<'a, Result<()>>;
+
     /// Delete all chunks belonging to a specific graph.
     fn delete_by_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<()>>;
 

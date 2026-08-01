@@ -1,12 +1,12 @@
 //! Extra database methods needed by the Graph layer for file-first indexing.
 
-use crate::models::{Block, BlockType};
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::Page;
+use crate::models::{Block, BlockType};
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
-use crate::models::Page;
 
 impl Database {
     /// Insert or update a page by title.
@@ -140,7 +140,8 @@ impl Database {
     /// Clear all indexed data (for full re-index).
     pub fn clear_all(&self) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             DELETE FROM fts_blocks;
             DELETE FROM fts_block_rowid;
             DELETE FROM links;
@@ -150,7 +151,8 @@ impl Database {
             DELETE FROM page_properties;
             DELETE FROM blocks;
             DELETE FROM pages;
-        ")?;
+        ",
+        )?;
         Ok(())
     }
 }

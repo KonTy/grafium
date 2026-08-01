@@ -88,7 +88,9 @@ fn download_audio(url: &str, workdir: &Path, job_id: &str) -> Result<PathBuf> {
         ])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| CoreError::Other(format!("failed to launch yt-dlp (is it installed?): {e}")))?;
+        .map_err(|e| {
+            CoreError::Other(format!("failed to launch yt-dlp (is it installed?): {e}"))
+        })?;
     if !output.status.success() {
         return Err(CoreError::Other(format!(
             "yt-dlp failed ({}): {}",
@@ -129,7 +131,9 @@ fn normalize_to_wav(input: &Path, output: &Path) -> Result<()> {
         ])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| CoreError::Other(format!("failed to launch ffmpeg (is it installed?): {e}")))?;
+        .map_err(|e| {
+            CoreError::Other(format!("failed to launch ffmpeg (is it installed?): {e}"))
+        })?;
     if !result.status.success() {
         return Err(CoreError::Other(format!(
             "ffmpeg failed ({}): {}",

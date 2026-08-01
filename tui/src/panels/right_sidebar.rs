@@ -77,6 +77,7 @@ impl Panel for RightSidebar {
             let snippet: String = block.content.chars().take(48).collect();
             format!("{page_title} — {snippet}")
         };
-        self.panel.render(f, area, &title, &self.items, label, focused);
+        self.panel
+            .render(f, area, &title, &self.items, label, focused);
     }
 }

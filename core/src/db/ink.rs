@@ -134,19 +134,22 @@ impl Database {
             "SELECT id, block_id, file_path, recognized_text, status, model_version, confidence, created_at, recognized_at FROM ink_pages WHERE status = 'pending' ORDER BY created_at ASC"
         )?;
 
-        let results = stmt.query_map([], |row| {
-            Ok(InkIndex {
-                id: row.get(0)?,
-                block_id: row.get(1)?,
-                file_path: row.get(2)?,
-                recognized_text: row.get(3)?,
-                status: RecognitionStatus::from_str(&row.get::<_, String>(4)?),
-                model_version: row.get(5)?,
-                confidence: row.get(6)?,
-                created_at: row.get(7)?,
-                recognized_at: row.get(8)?,
-            })
-        })?.filter_map(|r| r.ok()).collect();
+        let results = stmt
+            .query_map([], |row| {
+                Ok(InkIndex {
+                    id: row.get(0)?,
+                    block_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    recognized_text: row.get(3)?,
+                    status: RecognitionStatus::from_str(&row.get::<_, String>(4)?),
+                    model_version: row.get(5)?,
+                    confidence: row.get(6)?,
+                    created_at: row.get(7)?,
+                    recognized_at: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(results)
     }
@@ -163,19 +166,22 @@ impl Database {
              LIMIT ?2"
         )?;
 
-        let results = stmt.query_map(rusqlite::params![query, limit], |row| {
-            Ok(InkIndex {
-                id: row.get(0)?,
-                block_id: row.get(1)?,
-                file_path: row.get(2)?,
-                recognized_text: row.get(3)?,
-                status: RecognitionStatus::from_str(&row.get::<_, String>(4)?),
-                model_version: row.get(5)?,
-                confidence: row.get(6)?,
-                created_at: row.get(7)?,
-                recognized_at: row.get(8)?,
-            })
-        })?.filter_map(|r| r.ok()).collect();
+        let results = stmt
+            .query_map(rusqlite::params![query, limit], |row| {
+                Ok(InkIndex {
+                    id: row.get(0)?,
+                    block_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    recognized_text: row.get(3)?,
+                    status: RecognitionStatus::from_str(&row.get::<_, String>(4)?),
+                    model_version: row.get(5)?,
+                    confidence: row.get(6)?,
+                    created_at: row.get(7)?,
+                    recognized_at: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(results)
     }
@@ -216,19 +222,23 @@ impl Database {
             "SELECT id, ink_id, stroke_ids, original_text, corrected_text, created_at, used_in_training FROM ink_corrections WHERE used_in_training = 0 ORDER BY created_at ASC"
         )?;
 
-        let results = stmt.query_map([], |row| {
-            let stroke_ids_json: String = row.get(2)?;
-            let stroke_ids: Vec<String> = serde_json::from_str(&stroke_ids_json).unwrap_or_default();
-            Ok(InkCorrection {
-                id: row.get(0)?,
-                ink_id: row.get(1)?,
-                stroke_ids,
-                original_text: row.get(3)?,
-                corrected_text: row.get(4)?,
-                created_at: row.get(5)?,
-                used_in_training: row.get::<_, i32>(6)? != 0,
-            })
-        })?.filter_map(|r| r.ok()).collect();
+        let results = stmt
+            .query_map([], |row| {
+                let stroke_ids_json: String = row.get(2)?;
+                let stroke_ids: Vec<String> =
+                    serde_json::from_str(&stroke_ids_json).unwrap_or_default();
+                Ok(InkCorrection {
+                    id: row.get(0)?,
+                    ink_id: row.get(1)?,
+                    stroke_ids,
+                    original_text: row.get(3)?,
+                    corrected_text: row.get(4)?,
+                    created_at: row.get(5)?,
+                    used_in_training: row.get::<_, i32>(6)? != 0,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(results)
     }
@@ -236,9 +246,8 @@ impl Database {
     /// Mark corrections as used in training.
     pub fn mark_corrections_trained(&self, correction_ids: &[String]) -> Result<()> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
-            "UPDATE ink_corrections SET used_in_training = 1 WHERE id = ?1"
-        )?;
+        let mut stmt =
+            conn.prepare("UPDATE ink_corrections SET used_in_training = 1 WHERE id = ?1")?;
         for id in correction_ids {
             stmt.execute(rusqlite::params![id])?;
         }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCompletionCounts, getCompletedTasks, getOpenTasks, cycleTaskState } from "../lib/api";
   import { renderBlock } from "../lib/markdown";
+  import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import type { CompletedTask, OpenTask } from "../lib/api";
 
   interface Props {
@@ -324,7 +325,7 @@
                 onclick={() => completeTask(task.block_id)}
               >&#9633;</div>
               <div class="task-body">
-                <span class="task-content">
+                <span class="task-content" use:hydrateRenderedMedia={task.content}>
                   <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
                   {@html renderBlock(stripTaskMarker(task.content))}
                 </span>
@@ -363,7 +364,9 @@
                 <div class="task-item">
                   <div class="task-check">&#10003;</div>
                   <div class="task-body">
-                    <span class="task-content">{@html renderBlock(stripTaskMarker(task.content))}</span>
+                    <span class="task-content" use:hydrateRenderedMedia={task.content}>
+                      {@html renderBlock(stripTaskMarker(task.content))}
+                    </span>
                     <span class="task-meta">
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_static_element_interactions -->

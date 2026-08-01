@@ -61,7 +61,12 @@ impl<'a> WebClipper<'a> {
     /// Enables multi-page crawling: `llm` decides, per page, whether it's
     /// relevant to `goal` and which of its links to follow next, up to
     /// `max_pages` total pages and `max_depth` link-hops from the start URL.
-    pub fn with_crawl(mut self, llm: &'a dyn LlmProvider, max_pages: usize, max_depth: usize) -> Self {
+    pub fn with_crawl(
+        mut self,
+        llm: &'a dyn LlmProvider,
+        max_pages: usize,
+        max_depth: usize,
+    ) -> Self {
         self.llm = Some(llm);
         self.max_pages = max_pages.max(1);
         self.max_depth = max_depth;
@@ -151,7 +156,11 @@ fn build_prompt(goal: &str, content: &PageContent) -> String {
     if !content.links.is_empty() {
         prompt.push_str("\nLinks on this page:\n");
         for (i, link) in content.links.iter().take(40).enumerate() {
-            prompt.push_str(&format!("{i}: {} ({})\n", truncate(&link.text, 80), link.url));
+            prompt.push_str(&format!(
+                "{i}: {} ({})\n",
+                truncate(&link.text, 80),
+                link.url
+            ));
         }
     }
 
@@ -212,7 +221,10 @@ fn render_markdown(goal: &str, pages: &[ClippedPage]) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Clipped: {goal}\n\n"));
     for page in pages {
-        out.push_str(&format!("## {}\n\nSource: {}\n\n{}\n\n", page.title, page.url, page.text));
+        out.push_str(&format!(
+            "## {}\n\nSource: {}\n\n{}\n\n",
+            page.title, page.url, page.text
+        ));
     }
     out
 }
@@ -299,7 +311,10 @@ mod tests {
         let result = clipper.clip("https://example.com/a").await.unwrap();
 
         assert_eq!(result.pages.len(), 2);
-        assert!(result.pages.iter().any(|p| p.url == "https://example.com/b"));
+        assert!(result
+            .pages
+            .iter()
+            .any(|p| p.url == "https://example.com/b"));
     }
 
     #[tokio::test]

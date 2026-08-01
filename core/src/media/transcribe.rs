@@ -147,10 +147,17 @@ impl Transcriber for WhisperTranscriber {
                 full_text.push(' ');
             }
             full_text.push_str(&text);
-            segments.push(TranscriptSegment { start_ms, end_ms, text });
+            segments.push(TranscriptSegment {
+                start_ms,
+                end_ms,
+                text,
+            });
         }
 
-        Ok(Transcript { segments, full_text })
+        Ok(Transcript {
+            segments,
+            full_text,
+        })
     }
 }
 
@@ -169,7 +176,8 @@ fn read_wav_as_f32_mono(path: &Path) -> Result<Vec<f32>> {
     }
 
     let samples: std::result::Result<Vec<i16>, _> = reader.samples::<i16>().collect();
-    let samples = samples.map_err(|e| CoreError::Other(format!("failed reading WAV samples: {e}")))?;
+    let samples =
+        samples.map_err(|e| CoreError::Other(format!("failed reading WAV samples: {e}")))?;
 
     let mut floats = vec![0.0f32; samples.len()];
     whisper_rs::convert_integer_to_float_audio(&samples, &mut floats)

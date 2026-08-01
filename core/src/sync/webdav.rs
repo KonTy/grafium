@@ -1,5 +1,5 @@
-use crate::error::Result;
-use super::backend::{FileMetadata, SyncBackend, compute_hash};
+use super::backend::{compute_hash, FileMetadata, SyncBackend};
+use crate::error::{CoreError, Result};
 
 /// WebDAV-based sync backend for Nextcloud, ownCloud, or any WebDAV server.
 pub struct WebDavBackend {
@@ -12,19 +12,19 @@ pub struct WebDavBackend {
 }
 
 impl WebDavBackend {
-    pub fn new(base_url: String, username: String, password: String, name: String) -> Self {
+    pub fn new(base_url: String, username: String, password: String, name: String) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| CoreError::Other(format!("Failed to create HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             username,
             password,
             name,
             client,
-        }
+        })
     }
 
     fn file_url(&self, rel_path: &str) -> String {
@@ -38,8 +38,7 @@ impl WebDavBackend {
         // Simple XML parsing for WebDAV PROPFIND responses.
         // Looks for <d:href>, <d:getcontentlength>, <d:getlastmodified>
         for response_block in xml.split("<d:response>").skip(1) {
-            let href = extract_tag(response_block, "d:href")
-                .unwrap_or_default();
+            let href = extract_tag(response_block, "d:href").unwrap_or_default();
 
             // Skip collection entries (directories)
             if extract_tag(response_block, "d:collection").is_some() {
@@ -108,8 +107,12 @@ impl SyncBackend for WebDavBackend {
 
     fn is_available(&self) -> bool {
         // Try a simple PROPFIND on the base URL to check connectivity
-        let result = self.client
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &self.base_url)
+        let result = self
+            .client
+            .request(
+                reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+                &self.base_url,
+            )
             .basic_auth(&self.username, Some(&self.password))
             .header("Depth", "0")
             .send();
@@ -124,28 +127,37 @@ impl SyncBackend for WebDavBackend {
 
         for subdir in &["pages", "journals"] {
             let url = format!("{}/{}", self.base_url, subdir);
-            let response = self.client
+            let response = self
+                .client
                 .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
                 .basic_auth(&self.username, Some(&self.password))
                 .header("Depth", "infinity")
                 .header("Content-Type", "application/xml")
-                .body(r#"<?xml version="1.0" encoding="UTF-8"?>
+                .body(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:getcontentlength/>
     <d:getlastmodified/>
     <d:resourcetype/>
   </d:prop>
-</d:propfind>"#)
+</d:propfind>"#,
+                )
                 .send()
-                .map_err(|e| crate::error::CoreError::Io(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                ))?;
+                .map_err(|e| {
+                    crate::error::CoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })?;
 
             if response.status().as_u16() == 207 || response.status().is_success() {
-                let xml = response.text().map_err(|e| crate::error::CoreError::Io(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                ))?;
+                let xml = response.text().map_err(|e| {
+                    crate::error::CoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })?;
                 let mut files = self.parse_propfind_response(&xml)?;
                 all_files.append(&mut files);
             }
@@ -157,28 +169,31 @@ impl SyncBackend for WebDavBackend {
 
     fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
         let url = self.file_url(rel_path);
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .basic_auth(&self.username, Some(&self.password))
             .send()
-            .map_err(|e| crate::error::CoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            ))?;
+            .map_err(|e| {
+                crate::error::CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
 
         if !response.status().is_success() {
-            return Err(crate::error::CoreError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("WebDAV GET failed: {} for {}", response.status(), rel_path),
-                )
-            ));
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("WebDAV GET failed: {} for {}", response.status(), rel_path),
+            )));
         }
 
-        response.bytes()
-            .map(|b| b.to_vec())
-            .map_err(|e| crate::error::CoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+        response.bytes().map(|b| b.to_vec()).map_err(|e| {
+            crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
             ))
+        })
     }
 
     fn write_file(&self, rel_path: &str, content: &[u8]) -> Result<()> {
@@ -192,7 +207,8 @@ impl SyncBackend for WebDavBackend {
             current_path.push_str(part);
             let dir_url = format!("{}/{}/", self.base_url, current_path);
             // MKCOL — ignore errors (dir might already exist)
-            let _ = self.client
+            let _ = self
+                .client
                 .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &dir_url)
                 .basic_auth(&self.username, Some(&self.password))
                 .send();
@@ -200,45 +216,56 @@ impl SyncBackend for WebDavBackend {
 
         // PUT the file
         let url = self.file_url(rel_path);
-        let response = self.client
+        let response = self
+            .client
             .put(&url)
             .basic_auth(&self.username, Some(&self.password))
             .header("Content-Type", "text/markdown")
             .body(content.to_vec())
             .send()
-            .map_err(|e| crate::error::CoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            ))?;
-
-        if !response.status().is_success() && response.status().as_u16() != 201 && response.status().as_u16() != 204 {
-            return Err(crate::error::CoreError::Io(
-                std::io::Error::new(
+            .map_err(|e| {
+                crate::error::CoreError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("WebDAV PUT failed: {} for {}", response.status(), rel_path),
-                )
-            ));
+                    e.to_string(),
+                ))
+            })?;
+
+        if !response.status().is_success()
+            && response.status().as_u16() != 201
+            && response.status().as_u16() != 204
+        {
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("WebDAV PUT failed: {} for {}", response.status(), rel_path),
+            )));
         }
         Ok(())
     }
 
     fn delete_file(&self, rel_path: &str) -> Result<()> {
         let url = self.file_url(rel_path);
-        let response = self.client
+        let response = self
+            .client
             .request(reqwest::Method::DELETE, &url)
             .basic_auth(&self.username, Some(&self.password))
             .send()
-            .map_err(|e| crate::error::CoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            ))?;
+            .map_err(|e| {
+                crate::error::CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
 
         // 204 No Content or 404 Not Found are both acceptable
         if !response.status().is_success() && response.status().as_u16() != 404 {
-            return Err(crate::error::CoreError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("WebDAV DELETE failed: {} for {}", response.status(), rel_path),
-                )
-            ));
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "WebDAV DELETE failed: {} for {}",
+                    response.status(),
+                    rel_path
+                ),
+            )));
         }
         Ok(())
     }
@@ -272,9 +299,29 @@ fn parse_http_date(date_str: &str) -> Option<i64> {
             // Try the common WebDAV format: "Fri, 02 May 2025 10:30:00 GMT"
             chrono::NaiveDateTime::parse_from_str(
                 date_str.trim_end_matches(" GMT"),
-                "%a, %d %b %Y %H:%M:%S"
+                "%a, %d %b %Y %H:%M:%S",
             )
             .ok()
             .map(|dt| dt.and_utc().timestamp())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebDavBackend;
+    use crate::error::Result;
+    use crate::sync::SyncBackend;
+
+    #[test]
+    fn webdav_backend_new_returns_result_in_normal_case() -> Result<()> {
+        let backend = WebDavBackend::new(
+            "https://example.com/remote.php/dav/files/user/Notes".to_string(),
+            "user".to_string(),
+            "password".to_string(),
+            "webdav".to_string(),
+        )?;
+
+        assert_eq!(backend.name(), "webdav");
+        Ok(())
+    }
 }

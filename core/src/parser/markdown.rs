@@ -1,11 +1,16 @@
+use crate::models::{BlockType, TaskState};
 use regex::Regex;
 use std::sync::LazyLock;
-use crate::models::{BlockType, TaskState};
 
-static PROPERTY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([a-zA-Z_-]+)::(.*)$").unwrap());
-static TASK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\s+(.*)").unwrap());
-static SCHEDULED_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
-static DEADLINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"DEADLINE:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
+static PROPERTY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([a-zA-Z_-]+)::(.*)$").unwrap());
+static TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\s+(.*)").unwrap()
+});
+static SCHEDULED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
+static DEADLINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"DEADLINE:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
 static FLASHCARD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#flashcard").unwrap());
 static FLASHCARD_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*::\s*").unwrap());
 static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{query\s+(.+?)\}\}").unwrap());
@@ -269,13 +274,16 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     }
 
     // Detect task
-    let task_state = TASK_RE.captures(&full_content)
+    let task_state = TASK_RE
+        .captures(&full_content)
         .and_then(|cap| TaskState::from_str(&cap[1]));
 
     // Detect scheduled/deadline
-    let scheduled_date = SCHEDULED_RE.captures(&full_content)
+    let scheduled_date = SCHEDULED_RE
+        .captures(&full_content)
         .map(|cap| cap[1].to_string());
-    let deadline_date = DEADLINE_RE.captures(&full_content)
+    let deadline_date = DEADLINE_RE
+        .captures(&full_content)
         .map(|cap| cap[1].to_string());
 
     // Detect flashcard. A block is a card if it carries #flashcard, OR it is
@@ -399,7 +407,10 @@ mod tests {
         let content = "- TODO Buy groceries\n  SCHEDULED: <2024-01-15>";
         let parsed = parse_page(content, "test.md");
         assert_eq!(parsed.blocks[0].task_state, Some(TaskState::Todo));
-        assert_eq!(parsed.blocks[0].scheduled_date, Some("2024-01-15".to_string()));
+        assert_eq!(
+            parsed.blocks[0].scheduled_date,
+            Some("2024-01-15".to_string())
+        );
     }
 
     #[test]
@@ -414,7 +425,10 @@ mod tests {
         let content = "- Capital of France :: Paris #flashcard";
         let parsed = parse_page(content, "test.md");
         assert!(parsed.blocks[0].is_flashcard);
-        assert_eq!(parsed.blocks[0].flashcard_front, Some("Capital of France".to_string()));
+        assert_eq!(
+            parsed.blocks[0].flashcard_front,
+            Some("Capital of France".to_string())
+        );
     }
 
     #[test]
@@ -432,7 +446,8 @@ mod tests {
 
     #[test]
     fn test_normalize_split_fence_sibling_blocks() {
-        let content = "- ```\n- this is some code block test\n- 2nd line more of it\n- 3rd line\n- ```";
+        let content =
+            "- ```\n- this is some code block test\n- 2nd line more of it\n- 3rd line\n- ```";
         let parsed = parse_page(content, "test.md");
 
         assert_eq!(parsed.blocks.len(), 1);

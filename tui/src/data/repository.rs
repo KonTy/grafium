@@ -6,8 +6,8 @@
 //! UI layer trivially mockable/testable, and means that if the underlying
 //! query changes shape, only this file needs to change.
 
-use grafium_core::Graph;
 use grafium_core::models::{Block, Link, Page};
+use grafium_core::Graph;
 
 pub type RepoResult<T> = Result<T, String>;
 

@@ -49,10 +49,16 @@ pub struct AssistantResponse {
 
 impl AssistantResponse {
     fn say(s: impl Into<String>) -> Self {
-        Self { speech: s.into(), followup: false }
+        Self {
+            speech: s.into(),
+            followup: false,
+        }
     }
     fn ask(s: impl Into<String>) -> Self {
-        Self { speech: s.into(), followup: true }
+        Self {
+            speech: s.into(),
+            followup: true,
+        }
     }
 }
 
@@ -64,55 +70,73 @@ impl AssistantResponse {
 pub fn handle_command(graph: &Graph, transcript: &str) -> Result<AssistantResponse> {
     let raw = transcript.trim();
     if raw.is_empty() {
-        return Ok(AssistantResponse::ask("I didn't catch that. What would you like to do?"));
+        return Ok(AssistantResponse::ask(
+            "I didn't catch that. What would you like to do?",
+        ));
     }
 
     // Normalize: lowercase + strip trailing punctuation.
-    let mut c = raw.to_lowercase();
-    while let Some(last) = c.chars().last() {
+    let mut normalized = raw.to_lowercase();
+    while let Some(last) = normalized.chars().last() {
         if matches!(last, '.' | '!' | '?' | ',' | ' ') {
-            c.pop();
+            normalized.pop();
         } else {
             break;
         }
     }
-    let c = c.as_str();
+    let c = normalized.as_str();
 
     // Order matters: more-specific patterns first so e.g. "list todos due today"
     // is not swallowed by the generic "list todos" branch.
 
     // Mark <query> done/doing/complete/cancel
-    if let Some(rest) = strip_any_prefix(c, &["mark "]) {
+    if let Some(rest) = strip_any_prefix(raw, c, &["mark "]) {
         return handle_mark(graph, rest);
     }
 
     // Find / search todo
-    if let Some(rest) = strip_any_prefix(c, &[
-        "find todo ", "find task ", "search todo ", "search task ",
-    ]) {
+    if let Some(rest) = strip_any_prefix(
+        raw,
+        c,
+        &["find todo ", "find task ", "search todo ", "search task "],
+    ) {
         return handle_find(graph, rest);
     }
 
     // Add journal / note (before add todo, since "add note" is journal not todo)
-    if let Some(rest) = strip_any_prefix(c, &[
-        "add journal ", "add note ", "journal ", "note ",
-    ]) {
+    if let Some(rest) =
+        strip_any_prefix(raw, c, &["add journal ", "add note ", "journal ", "note "])
+    {
         return handle_add_journal(graph, rest, raw);
     }
 
     // Add todo — widest set of triggers (the Android manifest whitelists them
     // in `command_prefixes` so SilentPulse dispatches the whole utterance
     // regardless of which trigger the user chose).
-    if let Some(rest) = strip_any_prefix(c, &[
-        "add todo ", "add task ", "add to-do ", "add to do ",
-        "todo ", "to-do ", "to do ", "task ",
-        "remind me to ", "note to self ",
-    ]) {
+    if let Some(rest) = strip_any_prefix(
+        raw,
+        c,
+        &[
+            "add todo ",
+            "add task ",
+            "add to-do ",
+            "add to do ",
+            "todo ",
+            "to-do ",
+            "to do ",
+            "task ",
+            "remind me to ",
+            "note to self ",
+        ],
+    ) {
         return handle_add_todo(graph, rest, raw);
     }
 
     // Read today's journal
-    if c.contains("read journal") || c.contains("read today's journal") || c.contains("today's journal") {
+    if c.contains("read journal")
+        || c.contains("read today's journal")
+        || c.contains("today's journal")
+    {
         return handle_read_journal(graph);
     }
 
@@ -147,10 +171,14 @@ pub fn handle_command(graph: &Graph, transcript: &str) -> Result<AssistantRespon
 
 // ── Utterance detectors ─────────────────────────────────────────────────────
 
-fn strip_any_prefix<'a>(s: &'a str, prefixes: &[&str]) -> Option<&'a str> {
-    for p in prefixes {
-        if s.starts_with(p) {
-            return Some(&s[p.len()..]);
+fn strip_any_prefix<'a>(
+    original: &'a str,
+    normalized_lower: &str,
+    prefixes: &[&str],
+) -> Option<&'a str> {
+    for prefix in prefixes {
+        if normalized_lower.starts_with(prefix) {
+            return Some(&original[prefix.len()..]);
         }
     }
     None
@@ -175,7 +203,8 @@ static TOP_N_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 fn parse_top_n(c: &str) -> Option<u32> {
-    let looks_like_top = c.contains("top") || c.contains("highest priority") || c.contains("most important");
+    let looks_like_top =
+        c.contains("top") || c.contains("highest priority") || c.contains("most important");
     if !looks_like_top {
         return None;
     }
@@ -218,17 +247,19 @@ fn word_to_num(s: &str) -> Option<u32> {
 static TRAILING_PRIORITY_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\s+(?:with\s+)?(urgent|high|medium|low)\s+priority\s*$").unwrap()
 });
-static TRAILING_PRIORITY_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\s+priority\s+(urgent|high|medium|low)\s*$").unwrap()
-});
-static LEADING_PRIORITY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(urgent|high|medium|low)\s+priority\s+").unwrap()
-});
+static TRAILING_PRIORITY_SUFFIX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\s+priority\s+(urgent|high|medium|low)\s*$").unwrap());
+static LEADING_PRIORITY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(urgent|high|medium|low)\s+priority\s+").unwrap());
 
 /// Extract `priority high|medium|low|urgent` markers from `text`. Returns the
 /// canonical priority string plus the cleaned text (marker removed).
 fn extract_priority(text: &str) -> (Option<&'static str>, String) {
-    for re in [&TRAILING_PRIORITY_RE, &TRAILING_PRIORITY_SUFFIX_RE, &LEADING_PRIORITY_RE] {
+    for re in [
+        &TRAILING_PRIORITY_RE,
+        &TRAILING_PRIORITY_SUFFIX_RE,
+        &LEADING_PRIORITY_RE,
+    ] {
         if let Some(cap) = re.captures(text) {
             let p = normalize_priority(&cap[1]);
             let cleaned = re.replace(text, "").trim().to_string();
@@ -253,10 +284,7 @@ fn normalize_priority(s: &str) -> &'static str {
 fn extract_when_tail(text: &str) -> (Option<NaiveDate>, String) {
     let today = Local::now().date_naive();
     let lower = text.to_lowercase();
-    let candidates: &[(&str, i64)] = &[
-        (" today", 0),
-        (" tomorrow", 1),
-    ];
+    let candidates: &[(&str, i64)] = &[(" today", 0), (" tomorrow", 1)];
     for (phrase, offset) in candidates {
         if lower.ends_with(phrase) {
             let base_len = text.len() - phrase.len();
@@ -349,7 +377,10 @@ fn handle_add_journal(graph: &Graph, rest: &str, _original: &str) -> Result<Assi
         return Ok(AssistantResponse::ask("What should I add to your journal?"));
     }
     graph.add_journal_entry_today(&text)?;
-    Ok(AssistantResponse::say(format!("Added to today's journal: {}", text)))
+    Ok(AssistantResponse::say(format!(
+        "Added to today's journal: {}",
+        text
+    )))
 }
 
 fn handle_list_top_priority(graph: &Graph, n: u32) -> Result<AssistantResponse> {
@@ -431,7 +462,10 @@ fn handle_find(graph: &Graph, rest: &str) -> Result<AssistantResponse> {
     }
     let rows = graph.db.find_open_tasks(&q)?;
     if rows.is_empty() {
-        return Ok(AssistantResponse::say(format!("No open todos matching {}.", q)));
+        return Ok(AssistantResponse::say(format!(
+            "No open todos matching {}.",
+            q
+        )));
     }
     Ok(AssistantResponse::say(format!(
         "Found {}: {}",
@@ -466,7 +500,10 @@ fn handle_mark(graph: &Graph, rest: &str) -> Result<AssistantResponse> {
 
     let matches = graph.db.find_open_tasks(&query)?;
     if matches.is_empty() {
-        return Ok(AssistantResponse::say(format!("No matching todo for {}.", query)));
+        return Ok(AssistantResponse::say(format!(
+            "No matching todo for {}.",
+            query
+        )));
     }
     let target = &matches[0];
     graph.update_task_state(&target.block_id, &state)?;
@@ -527,6 +564,31 @@ fn pretty_date(d: NaiveDate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    struct TestGraphDir {
+        path: PathBuf,
+    }
+
+    impl TestGraphDir {
+        fn new() -> Self {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test-artifacts")
+                .join(format!("assistant-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestGraphDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn strips_task_marker_from_multiline_content() {
@@ -559,7 +621,10 @@ mod tests {
     fn parses_top_n_by_priority() {
         assert_eq!(parse_top_n("list my top 3 todos by priority"), Some(3));
         assert_eq!(parse_top_n("show my top todos"), Some(5));
-        assert_eq!(parse_top_n("list my top three todos sorted by priority"), Some(3));
+        assert_eq!(
+            parse_top_n("list my top three todos sorted by priority"),
+            Some(3)
+        );
         assert_eq!(parse_top_n("what are my top 10 tasks"), Some(10));
         assert_eq!(parse_top_n("read my journal"), None);
     }
@@ -578,5 +643,20 @@ mod tests {
         let (d, cleaned) = extract_when_tail("clean my room today");
         assert!(d.is_some());
         assert_eq!(cleaned, "clean my room");
+    }
+
+    #[test]
+    fn add_todo_preserves_original_casing() -> Result<()> {
+        let dir = TestGraphDir::new();
+        let graph = Graph::open(dir.path())?;
+
+        let response = handle_command(&graph, "Add todo Fix OAuth for GitHub")?;
+        assert!(response.speech.contains("Fix OAuth for GitHub"));
+
+        let tasks = graph.db.list_open_tasks_prioritized(Some(10))?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(strip_task_marker(&tasks[0].content), "Fix OAuth for GitHub");
+
+        Ok(())
     }
 }

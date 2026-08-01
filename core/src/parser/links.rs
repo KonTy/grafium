@@ -18,7 +18,8 @@ impl ExtractedLink {
 
 static PAGE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9_/\\\-]+)").unwrap());
-static BLOCK_REF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(\(([a-f0-9\-]+)\)\)").unwrap());
+static BLOCK_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(\(([a-f0-9\-]+)\)\)").unwrap());
 
 pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
@@ -51,44 +52,57 @@ mod tests {
     #[test]
     fn test_extract_page_links() {
         let links = extract_links("Hello [[World]] and [[Test Page]]");
-        assert_eq!(links, vec![
-            ExtractedLink::Page("World".to_string()),
-            ExtractedLink::Page("Test Page".to_string()),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                ExtractedLink::Page("World".to_string()),
+                ExtractedLink::Page("Test Page".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_extract_hierarchical_page_links() {
         let links = extract_links("See [[test/page]] and [[test\\child]]");
-        assert_eq!(links, vec![
-            ExtractedLink::Page("test/page".to_string()),
-            ExtractedLink::Page("test/child".to_string()),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                ExtractedLink::Page("test/page".to_string()),
+                ExtractedLink::Page("test/child".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_extract_tags() {
         let links = extract_links("Hello #rust and #programming");
-        assert_eq!(links, vec![
-            ExtractedLink::Tag("rust".to_string()),
-            ExtractedLink::Tag("programming".to_string()),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                ExtractedLink::Tag("rust".to_string()),
+                ExtractedLink::Tag("programming".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_extract_hierarchical_tags() {
         let links = extract_links("Tags: #test/sys and #test\\other");
-        assert_eq!(links, vec![
-            ExtractedLink::Tag("test/sys".to_string()),
-            ExtractedLink::Tag("test/other".to_string()),
-        ]);
+        assert_eq!(
+            links,
+            vec![
+                ExtractedLink::Tag("test/sys".to_string()),
+                ExtractedLink::Tag("test/other".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_extract_block_refs() {
         let links = extract_links("See ((abc-123-def))");
-        assert_eq!(links, vec![
-            ExtractedLink::BlockRef("abc-123-def".to_string()),
-        ]);
+        assert_eq!(
+            links,
+            vec![ExtractedLink::BlockRef("abc-123-def".to_string()),]
+        );
     }
 }

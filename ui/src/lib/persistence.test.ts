@@ -35,6 +35,20 @@ describe("persistence regressions", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("rejects and leaves local block content unchanged when the save fails", async () => {
+    const block = { id: "b1", content: "before" };
+    const update = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+
+    await expect(
+      persistBlockContentIfChanged(block, "after", update)
+    ).rejects.toThrow("disk full");
+
+    expect(block.content).toBe("before");
+    expect(update).toHaveBeenCalledWith("b1", "after");
+  });
+
   it("runs persistence before structural operation", async () => {
     const order: string[] = [];
 

@@ -1,6 +1,6 @@
-use tauri::State;
 use crate::AppState;
 use grafium_core::models::{Flashcard, FlashcardTopic};
+use tauri::State;
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_flashcards_due(
     state: State<AppState>,
@@ -8,7 +8,8 @@ pub fn list_flashcards_due(
     topic: Option<String>,
 ) -> Result<Vec<Flashcard>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.db
+    graph
+        .db
         .list_flashcards_due(topic.as_deref(), limit.unwrap_or(20))
         .map_err(|e| e.to_string())
 }
@@ -20,9 +21,15 @@ pub fn list_flashcard_topics(state: State<AppState>) -> Result<Vec<FlashcardTopi
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_all_flashcards(state: State<AppState>, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Flashcard>, String> {
+pub fn list_all_flashcards(
+    state: State<AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<Flashcard>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.db.list_flashcards(limit.unwrap_or(100), offset.unwrap_or(0))
+    graph
+        .db
+        .list_flashcards(limit.unwrap_or(100), offset.unwrap_or(0))
         .map_err(|e| e.to_string())
 }
 
@@ -35,14 +42,23 @@ pub fn update_flashcard_review(
     next_review_at: i64,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.db.update_flashcard_review(&id, ease_factor, interval_days, next_review_at)
+    graph
+        .db
+        .update_flashcard_review(&id, ease_factor, interval_days, next_review_at)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn grade_flashcard(state: State<AppState>, id: String, quality: i32) -> Result<Flashcard, String> {
+pub fn grade_flashcard(
+    state: State<AppState>,
+    id: String,
+    quality: i32,
+) -> Result<Flashcard, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.db.grade_flashcard(&id, quality).map_err(|e| e.to_string())
+    graph
+        .db
+        .grade_flashcard(&id, quality)
+        .map_err(|e| e.to_string())
 }
 
 /// Import an Anki `.apkg` deck into the active graph. The deck is converted into

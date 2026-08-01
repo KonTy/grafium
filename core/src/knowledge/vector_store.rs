@@ -11,7 +11,7 @@
 //! - Metadata indexed for fast filtering
 //! - Top-k via partial sort (no full sort needed)
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +25,8 @@ pub struct SqliteVectorStore {
 }
 
 impl SqliteVectorStore {
+    const EMBEDDING_DIMENSION_KEY: &'static str = "embedding_dimension";
+
     /// Open or create a vector store at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -48,6 +50,10 @@ impl SqliteVectorStore {
                 embedding BLOB NOT NULL,
                 metadata TEXT DEFAULT '{}',
                 created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+            );
+            CREATE TABLE IF NOT EXISTS vector_store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_vectors_graph ON vectors(graph_id);
             CREATE INDEX IF NOT EXISTS idx_vectors_page ON vectors(graph_id, page_id);",
@@ -117,6 +123,107 @@ impl SqliteVectorStore {
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect()
     }
+
+    fn stored_dimension(conn: &Connection) -> Result<Option<usize>> {
+        let dimension = conn
+            .query_row(
+                "SELECT value FROM vector_store_meta WHERE key = ?1",
+                params![Self::EMBEDDING_DIMENSION_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if let Some(dimension) = dimension {
+            return dimension.parse::<usize>().map(Some).map_err(|error| {
+                CoreError::Parse(format!(
+                    "Stored embedding dimension is invalid ({}): {}",
+                    dimension, error
+                ))
+            });
+        }
+
+        let legacy_blob_len = conn
+            .query_row("SELECT length(embedding) FROM vectors LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+
+        if let Some(blob_len) = legacy_blob_len {
+            if blob_len % 4 != 0 {
+                return Err(CoreError::Parse(format!(
+                    "Stored embedding blob has invalid byte length {}",
+                    blob_len
+                )));
+            }
+            let dimension = (blob_len as usize) / 4;
+            Self::persist_dimension(conn, dimension)?;
+            Ok(Some(dimension))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn persist_dimension(conn: &Connection, dimension: usize) -> Result<()> {
+        conn.execute(
+            "INSERT OR REPLACE INTO vector_store_meta (key, value) VALUES (?1, ?2)",
+            params![Self::EMBEDDING_DIMENSION_KEY, dimension.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_store_dimension(conn: &Connection, actual_dimension: usize) -> Result<usize> {
+        match Self::stored_dimension(conn)? {
+            Some(expected_dimension) if expected_dimension != actual_dimension => {
+                Err(CoreError::Other(format!(
+                    "Embedding dimension mismatch: store expects {}, got {}",
+                    expected_dimension, actual_dimension
+                )))
+            }
+            Some(expected_dimension) => Ok(expected_dimension),
+            None => {
+                Self::persist_dimension(conn, actual_dimension)?;
+                Ok(actual_dimension)
+            }
+        }
+    }
+
+    fn validate_upsert_dimensions(conn: &Connection, chunks: &[ChunkEmbedding]) -> Result<()> {
+        let Some(first_chunk) = chunks.first() else {
+            return Ok(());
+        };
+
+        let batch_dimension = first_chunk.embedding.len();
+        for chunk in chunks {
+            if chunk.embedding.len() != batch_dimension {
+                return Err(CoreError::Other(format!(
+                    "Embedding batch contains mixed dimensions: chunk {} has {}, expected {}",
+                    chunk.chunk_id,
+                    chunk.embedding.len(),
+                    batch_dimension
+                )));
+            }
+        }
+
+        Self::ensure_store_dimension(conn, batch_dimension)?;
+        Ok(())
+    }
+
+    fn validate_query_dimension(
+        conn: &Connection,
+        query_embedding: &[f32],
+    ) -> Result<Option<usize>> {
+        match Self::stored_dimension(conn)? {
+            Some(expected_dimension) if expected_dimension != query_embedding.len() => {
+                Err(CoreError::Other(format!(
+                    "Embedding dimension mismatch: store expects {}, got {}",
+                    expected_dimension,
+                    query_embedding.len()
+                )))
+            }
+            Some(expected_dimension) => Ok(Some(expected_dimension)),
+            None => Ok(None),
+        }
+    }
 }
 
 impl VectorStore for SqliteVectorStore {
@@ -126,6 +233,8 @@ impl VectorStore for SqliteVectorStore {
                 .conn
                 .lock()
                 .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+
+            Self::validate_upsert_dimensions(&conn, chunks)?;
 
             let tx = conn.unchecked_transaction()?;
 
@@ -169,6 +278,7 @@ impl VectorStore for SqliteVectorStore {
                 .conn
                 .lock()
                 .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+            let expected_dimension = Self::validate_query_dimension(&conn, query_embedding)?;
 
             // Fetch all vectors (with optional graph filter) and compute similarity in Rust.
             // For <100k vectors this is plenty fast (~10ms on modern hardware).
@@ -196,6 +306,16 @@ impl VectorStore for SqliteVectorStore {
                 for row in rows {
                     let row = row?;
                     let embedding = Self::bytes_to_vec(&row.embedding);
+                    if let Some(expected_dimension) = expected_dimension {
+                        if embedding.len() != expected_dimension {
+                            return Err(CoreError::Other(format!(
+                                "Stored embedding dimension mismatch for chunk {}: expected {}, got {}",
+                                row.chunk_id,
+                                expected_dimension,
+                                embedding.len()
+                            )));
+                        }
+                    }
                     let score = Self::cosine_similarity(query_embedding, &embedding);
                     scored.push((score, row));
                 }
@@ -208,13 +328,25 @@ impl VectorStore for SqliteVectorStore {
                 for row in rows {
                     let row = row?;
                     let embedding = Self::bytes_to_vec(&row.embedding);
+                    if let Some(expected_dimension) = expected_dimension {
+                        if embedding.len() != expected_dimension {
+                            return Err(CoreError::Other(format!(
+                                "Stored embedding dimension mismatch for chunk {}: expected {}, got {}",
+                                row.chunk_id,
+                                expected_dimension,
+                                embedding.len()
+                            )));
+                        }
+                    }
                     let score = Self::cosine_similarity(query_embedding, &embedding);
                     scored.push((score, row));
                 }
             };
 
             // Partial sort for top-k (more efficient than full sort).
-            scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_unstable_by(|a, b| {
+                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+            });
             scored.truncate(top_k);
 
             let results = scored
@@ -253,6 +385,35 @@ impl VectorStore for SqliteVectorStore {
         })
     }
 
+    fn delete_chunks<'a>(
+        &'a self,
+        graph_id: &'a str,
+        chunk_ids: &'a [String],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if chunk_ids.is_empty() {
+                return Ok(());
+            }
+
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+
+            let placeholders = (0..chunk_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "DELETE FROM vectors WHERE graph_id = ?1 AND chunk_id IN ({})",
+                placeholders
+            );
+            let params = std::iter::once(graph_id.to_string()).chain(chunk_ids.iter().cloned());
+            conn.execute(&sql, params_from_iter(params))?;
+            Ok(())
+        })
+    }
+
     fn delete_by_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let conn = self
@@ -287,4 +448,47 @@ struct VectorRow {
     content: String,
     embedding: Vec<u8>,
     metadata: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_chunk(chunk_id: &str, dimension: usize) -> ChunkEmbedding {
+        ChunkEmbedding {
+            chunk_id: chunk_id.to_string(),
+            graph_id: "graph-1".to_string(),
+            page_id: "page-1".to_string(),
+            block_id: Some("block-1".to_string()),
+            page_title: "Page".to_string(),
+            content: "chunk content".to_string(),
+            embedding: vec![0.5; dimension],
+            metadata: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_dimension_mismatches_on_upsert_and_search() -> Result<()> {
+        let store = SqliteVectorStore::in_memory()?;
+        store.upsert(&[test_chunk("chunk-1", 3)]).await?;
+
+        let upsert_error = match store.upsert(&[test_chunk("chunk-2", 2)]).await {
+            Ok(_) => panic!("mismatched upsert should fail"),
+            Err(error) => error,
+        };
+        assert!(upsert_error
+            .to_string()
+            .contains("Embedding dimension mismatch: store expects 3, got 2"));
+
+        let search_error = match store.search(&[0.25, 0.75], 5, None).await {
+            Ok(_) => panic!("mismatched search should fail"),
+            Err(error) => error,
+        };
+        assert!(search_error
+            .to_string()
+            .contains("Embedding dimension mismatch: store expects 3, got 2"));
+
+        Ok(())
+    }
 }

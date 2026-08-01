@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::canonicalize_messages;
 use crate::ai::traits::{
     BoxFuture, ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole,
 };
@@ -72,6 +73,32 @@ struct OpenAiResponseMessage {
     content: Option<String>,
 }
 
+fn build_chat_request(
+    model: &str,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> OpenAiChatRequest {
+    let messages = canonicalize_messages(messages, options)
+        .into_iter()
+        .map(|message| OpenAiMessage {
+            role: match message.role {
+                MessageRole::System => "system".to_string(),
+                MessageRole::User => "user".to_string(),
+                MessageRole::Assistant => "assistant".to_string(),
+            },
+            content: message.content,
+        })
+        .collect();
+
+    OpenAiChatRequest {
+        model: model.to_string(),
+        messages,
+        max_tokens: options.max_tokens,
+        temperature: options.temperature,
+        stop: options.stop.clone(),
+    }
+}
+
 impl LlmProvider for OpenAiCompatibleLlm {
     fn complete<'a>(
         &'a self,
@@ -79,35 +106,15 @@ impl LlmProvider for OpenAiCompatibleLlm {
         options: &'a CompletionOptions,
     ) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let oai_messages: Vec<OpenAiMessage> = messages
-                .iter()
-                .map(|m| OpenAiMessage {
-                    role: match m.role {
-                        MessageRole::System => "system".to_string(),
-                        MessageRole::User => "user".to_string(),
-                        MessageRole::Assistant => "assistant".to_string(),
-                    },
-                    content: m.content.clone(),
-                })
-                .collect();
-
-            let request = OpenAiChatRequest {
-                model: self.model.clone(),
-                messages: oai_messages,
-                max_tokens: options.max_tokens,
-                temperature: options.temperature,
-                stop: options.stop.clone(),
-            };
+            let request = build_chat_request(&self.model, messages, options);
 
             let req = self
                 .client
                 .post(format!("{}/chat/completions", self.base_url))
                 .json(&request);
-            let resp = self
-                .with_auth(req)
-                .send()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI-compatible request failed: {}", e)))?;
+            let resp = self.with_auth(req).send().await.map_err(|e| {
+                CoreError::Other(format!("OpenAI-compatible request failed: {}", e))
+            })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -127,7 +134,9 @@ impl LlmProvider for OpenAiCompatibleLlm {
                 .choices
                 .first()
                 .and_then(|c| c.message.content.clone())
-                .ok_or_else(|| CoreError::Other("OpenAI-compatible returned empty response".to_string()))
+                .ok_or_else(|| {
+                    CoreError::Other("OpenAI-compatible returned empty response".to_string())
+                })
         })
     }
 
@@ -147,16 +156,18 @@ impl LlmProvider for OpenAiCompatibleLlm {
 
             // GitHub Models uses /inference/chat/completions and may not expose /models.
             if self.base_url.contains("models.github.ai/inference") {
-                let request = OpenAiChatRequest {
-                    model: self.model.clone(),
-                    messages: vec![OpenAiMessage {
-                        role: "user".to_string(),
+                let request = build_chat_request(
+                    &self.model,
+                    &[ChatMessage {
+                        role: MessageRole::User,
                         content: "ping".to_string(),
                     }],
-                    max_tokens: Some(1),
-                    temperature: Some(0.0),
-                    stop: None,
-                };
+                    &CompletionOptions {
+                        max_tokens: Some(1),
+                        temperature: Some(0.0),
+                        ..Default::default()
+                    },
+                );
                 let req = self
                     .client
                     .post(format!("{}/chat/completions", self.base_url))
@@ -236,11 +247,9 @@ impl Embedder for OpenAiCompatibleEmbedder {
                 .client
                 .post(format!("{}/embeddings", self.base_url))
                 .json(&request);
-            let resp = self
-                .with_auth(req)
-                .send()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI-compatible embed request failed: {}", e)))?;
+            let resp = self.with_auth(req).send().await.map_err(|e| {
+                CoreError::Other(format!("OpenAI-compatible embed request failed: {}", e))
+            })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -251,10 +260,9 @@ impl Embedder for OpenAiCompatibleEmbedder {
                 )));
             }
 
-            let response: OpenAiEmbedResponse = resp
-                .json()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI-compatible embed parse error: {}", e)))?;
+            let response: OpenAiEmbedResponse = resp.json().await.map_err(|e| {
+                CoreError::Other(format!("OpenAI-compatible embed parse error: {}", e))
+            })?;
 
             Ok(response.data.into_iter().map(|d| d.embedding).collect())
         })
@@ -266,5 +274,36 @@ impl Embedder for OpenAiCompatibleEmbedder {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_chat_request_includes_system_prompt_message() {
+        let request = build_chat_request(
+            "compatible-test",
+            &[ChatMessage {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+            }],
+            &CompletionOptions {
+                system_prompt: Some("be consistent".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "be consistent"})
+        );
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "hello"})
+        );
     }
 }

@@ -1,6 +1,6 @@
-use crate::models::{Favorite, Page};
-use crate::error::Result;
 use super::Database;
+use crate::error::Result;
+use crate::models::{Favorite, Page};
 use chrono::Utc;
 use rusqlite::params;
 use uuid::Uuid;
@@ -37,17 +37,19 @@ impl Database {
              JOIN pages p ON p.id = f.page_id
              ORDER BY f.created_at DESC"
         )?;
-        let pages = stmt.query_map([], |row| {
-            Ok(Page {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                is_journal: row.get::<_, i32>(5)? != 0,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages = stmt
+            .query_map([], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
     }
 
@@ -87,19 +89,21 @@ impl Database {
              ) deduped
              WHERE rn = 1
              ORDER BY last_opened_at DESC
-             LIMIT ?1"
+             LIMIT ?1",
         )?;
-        let pages = stmt.query_map(params![limit], |row| {
-            Ok(Page {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                file_path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                is_journal: row.get::<_, i32>(5)? != 0,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let pages = stmt
+            .query_map(params![limit], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
     }
 }

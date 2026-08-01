@@ -17,3 +17,27 @@ pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;
 pub use references::ReferenceEngine;
 pub use traits::{CompletionOptions, Embedder, LlmProvider, SearchResult, VectorStore};
+
+pub(crate) fn truncate_to_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+pub(crate) fn suffix_to_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let mut start = text.len() - max_bytes;
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    &text[start..]
+}

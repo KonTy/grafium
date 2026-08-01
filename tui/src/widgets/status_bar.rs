@@ -9,7 +9,8 @@ use ratatui::Frame;
 
 use crate::widgets::theme;
 
-const HELP: &str = "g h/j/g:nav  t l/r:toggle sidebars  /:search  Tab:focus  Enter:open/edit  Esc:back  q:quit";
+const HELP: &str =
+    "g h/j/g:nav  t l/r:toggle sidebars  /:search  Tab:focus  Enter:open/edit  Esc:back  q:quit";
 
 pub fn render(f: &mut Frame, area: Rect, status: &str, pending_leader: Option<char>) {
     let mut spans = vec![Span::raw(status.to_string())];

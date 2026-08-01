@@ -1,11 +1,11 @@
+use super::backend::{compute_hash, hash_file, SyncBackend};
+use super::merge;
+use super::state::SyncState;
+use crate::error::Result;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use chrono::Utc;
-use crate::error::Result;
-use super::backend::{SyncBackend, compute_hash, hash_file};
-use super::merge;
-use super::state::SyncState;
 
 /// Result of a sync operation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -82,7 +82,11 @@ impl SyncEngine {
     pub fn new_with_metadata_dir(local_root: PathBuf, metadata_dir_name: &str) -> Self {
         let state_path = local_root.join(metadata_dir_name).join("sync-state.json");
         let bases_dir = local_root.join(metadata_dir_name).join("sync-bases");
-        Self { local_root, state_path, bases_dir }
+        Self {
+            local_root,
+            state_path,
+            bases_dir,
+        }
     }
 
     /// Path to the cached base content for a given relative path.
@@ -107,12 +111,10 @@ impl SyncEngine {
     /// Run a full bidirectional sync against the given backend.
     pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {
         if !backend.is_available() {
-            return Err(crate::error::CoreError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    format!("Sync target '{}' is not available", backend.name()),
-                )
-            ));
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                format!("Sync target '{}' is not available", backend.name()),
+            )));
         }
 
         let mut state = SyncState::load(&self.state_path);
@@ -155,7 +157,9 @@ impl SyncEngine {
                     // Remote deletion: delete locally
                     let local_path = self.local_root.join(&rel_path);
                     if let Err(e) = fs::remove_file(&local_path) {
-                        result.errors.push(format!("Delete local {}: {}", rel_path, e));
+                        result
+                            .errors
+                            .push(format!("Delete local {}: {}", rel_path, e));
                     } else {
                         state.remove_record(&rel_path);
                         result.deleted_local.push(rel_path);
@@ -169,7 +173,9 @@ impl SyncEngine {
                 (false, true, true) => {
                     // Local deletion: delete on remote
                     if let Err(e) = backend.delete_file(&rel_path) {
-                        result.errors.push(format!("Delete remote {}: {}", rel_path, e));
+                        result
+                            .errors
+                            .push(format!("Delete remote {}: {}", rel_path, e));
                     } else {
                         state.remove_record(&rel_path);
                         result.deleted_remote.push(rel_path);
@@ -211,11 +217,17 @@ impl SyncEngine {
         let remote_hash = match backend.file_hash(rel_path) {
             Ok(h) => h,
             Err(e) => {
-                result.errors.push(format!("Hash remote {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Hash remote {}: {}", rel_path, e));
                 return;
             }
         };
-        let sync_hash = state.files.get(rel_path).map(|r| r.hash_at_sync.as_str()).unwrap_or("");
+        let sync_hash = state
+            .files
+            .get(rel_path)
+            .map(|r| r.hash_at_sync.as_str())
+            .unwrap_or("");
         let remote_changed = remote_hash != sync_hash;
 
         match (local_changed, remote_changed) {
@@ -257,7 +269,9 @@ impl SyncEngine {
         let remote_hash = match backend.file_hash(rel_path) {
             Ok(h) => h,
             Err(e) => {
-                result.errors.push(format!("Hash remote {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Hash remote {}: {}", rel_path, e));
                 return;
             }
         };
@@ -287,7 +301,9 @@ impl SyncEngine {
         let content = match fs::read(&local_path) {
             Ok(c) => c,
             Err(e) => {
-                result.errors.push(format!("Read local {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Read local {}: {}", rel_path, e));
                 return;
             }
         };
@@ -325,7 +341,9 @@ impl SyncEngine {
         }
 
         if let Err(e) = fs::write(&local_path, &content) {
-            result.errors.push(format!("Write local {}: {}", rel_path, e));
+            result
+                .errors
+                .push(format!("Write local {}: {}", rel_path, e));
         } else {
             self.save_base(rel_path, &content);
             state.record_sync(rel_path, &hash);
@@ -357,14 +375,18 @@ impl SyncEngine {
         let local_content = match fs::read(&local_path) {
             Ok(c) => c,
             Err(e) => {
-                result.errors.push(format!("Read local for conflict {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Read local for conflict {}: {}", rel_path, e));
                 return;
             }
         };
         let remote_content = match backend.read_file(rel_path) {
             Ok(c) => c,
             Err(e) => {
-                result.errors.push(format!("Read remote for conflict {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Read remote for conflict {}: {}", rel_path, e));
                 return;
             }
         };
@@ -388,11 +410,15 @@ impl SyncEngine {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(&local_conflict_path, &remote_content) {
-            result.errors.push(format!("Write conflict backup {}: {}", conflict_path, e));
+            result
+                .errors
+                .push(format!("Write conflict backup {}: {}", conflict_path, e));
         }
         // Push conflict backup to remote too so both devices see it
         if let Err(e) = backend.write_file(&conflict_path, &remote_content) {
-            result.errors.push(format!("Push conflict backup {}: {}", conflict_path, e));
+            result
+                .errors
+                .push(format!("Push conflict backup {}: {}", conflict_path, e));
         }
 
         // Write the merged content to local and remote
@@ -400,11 +426,15 @@ impl SyncEngine {
         let merged_hash = compute_hash(merged_bytes);
 
         if let Err(e) = fs::write(&local_path, merged_bytes) {
-            result.errors.push(format!("Write merged local {}: {}", rel_path, e));
+            result
+                .errors
+                .push(format!("Write merged local {}: {}", rel_path, e));
             return;
         }
         if let Err(e) = backend.write_file(rel_path, merged_bytes) {
-            result.errors.push(format!("Push merged {}: {}", rel_path, e));
+            result
+                .errors
+                .push(format!("Push merged {}: {}", rel_path, e));
         }
 
         self.save_base(rel_path, merged_bytes);
@@ -428,7 +458,12 @@ impl SyncEngine {
         Ok(files)
     }
 
-    fn collect_dir_hashes(&self, dir: &Path, base: &Path, out: &mut HashMap<String, String>) -> Result<()> {
+    fn collect_dir_hashes(
+        &self,
+        dir: &Path,
+        base: &Path,
+        out: &mut HashMap<String, String>,
+    ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -442,7 +477,8 @@ impl SyncEngine {
                 if path.to_string_lossy().contains(".conflict_") {
                     continue;
                 }
-                let rel = path.strip_prefix(base)
+                let rel = path
+                    .strip_prefix(base)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let hash = hash_file(&path)?;
@@ -458,7 +494,12 @@ impl SyncEngine {
 fn make_conflict_path(rel_path: &str) -> String {
     if let Some(dot_idx) = rel_path.rfind('.') {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        format!("{}.conflict_{}{}", &rel_path[..dot_idx], timestamp, &rel_path[dot_idx..])
+        format!(
+            "{}.conflict_{}{}",
+            &rel_path[..dot_idx],
+            timestamp,
+            &rel_path[dot_idx..]
+        )
     } else {
         format!("{}.conflict", rel_path)
     }

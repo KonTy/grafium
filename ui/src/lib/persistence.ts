@@ -32,8 +32,8 @@ export async function persistBlockContentIfChanged(
     return false;
   }
 
-  block.content = nextContent;
   await updateBlockFn(block.id, nextContent);
+  block.content = nextContent;
   return true;
 }
 

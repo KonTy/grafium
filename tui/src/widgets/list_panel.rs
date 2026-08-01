@@ -53,7 +53,11 @@ impl ListPanel {
             self.state.select(Some(0));
         }
         let list_items: Vec<ListItem> = items.iter().map(|it| ListItem::new(label(it))).collect();
-        let border_style = if focused { theme::focused() } else { theme::unfocused() };
+        let border_style = if focused {
+            theme::focused()
+        } else {
+            theme::unfocused()
+        };
         let block = RBlock::default()
             .title(title.to_string())
             .borders(Borders::ALL)

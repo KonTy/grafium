@@ -13,7 +13,10 @@
   import ReferencePanel from "./components/ReferencePanel.svelte";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
+  import type { PageNavigationTarget } from "./lib/navigation";
+  import { resolvePageLookup } from "./lib/navigation";
   import { applyTheme, getThemeById } from "./lib/themes";
+  import { attachAppUndoRedoListeners } from "./lib/undoEvents";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
@@ -570,6 +573,13 @@
   }
 
   $effect(() => {
+    const detachUndoRedo = attachAppUndoRedoListeners();
+    return () => {
+      detachUndoRedo();
+    };
+  });
+
+  $effect(() => {
     loadUiZoomPreference();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("mouseup", handleMouseNavigation);
@@ -656,13 +666,20 @@
     }
   }
 
-  async function navigateToPage(title: string, isJournal = false, skipHistory = false, restoreEntry?: HistoryEntry, sourceBlockId?: string, sourcePageTitle?: string) {
+  async function navigateToPage(
+    target: PageNavigationTarget,
+    isJournal = false,
+    skipHistory = false,
+    restoreEntry?: HistoryEntry,
+    sourceBlockId?: string,
+    sourcePageTitle?: string
+  ) {
     if (!skipHistory) {
       saveCurrentHistoryState(sourceBlockId, sourcePageTitle);
     }
 
     // Handle special routes
-    if (title === "__all_pages__") {
+    if (target === "__all_pages__") {
       currentView = "all-pages";
       currentPage = null;
       error = null;
@@ -676,7 +693,7 @@
       }
       return;
     }
-    if (title === "__graph__") {
+    if (target === "__graph__") {
       currentView = "graph";
       error = null;
       loading = false;
@@ -686,7 +703,7 @@
       await tick();
       return;
     }
-    if (title === "__flashcards__") {
+    if (target === "__flashcards__") {
       currentView = "flashcards";
       currentPage = null;
       error = null;
@@ -700,7 +717,7 @@
       }
       return;
     }
-    if (title === "__statistics__") {
+    if (target === "__statistics__") {
       currentView = "statistics";
       currentPage = null;
       error = null;
@@ -714,7 +731,7 @@
       }
       return;
     }
-    if (title === "__settings__") {
+    if (target === "__settings__") {
       currentView = "settings";
       currentPage = null;
       error = null;
@@ -728,7 +745,7 @@
       }
       return;
     }
-    if (title === "__chat__") {
+    if (target === "__chat__") {
       currentView = "chat";
       currentPage = null;
       error = null;
@@ -743,15 +760,25 @@
       return;
     }
 
+    const pageLookup = resolvePageLookup(target);
+
     loading = true;
     error = null;
     try {
       // Try to get existing page
-      currentPage = await getPage({ title });
-    } catch {
+      currentPage = await getPage(pageLookup);
+    } catch (e) {
       // Create it if it doesn't exist
+      if (!pageLookup.title) {
+        error = `Failed to load page: ${e}`;
+        loading = false;
+        return;
+      }
       try {
-        currentPage = await createPage(title, isJournal || /^\d{4}-\d{2}-\d{2}$/.test(title));
+        currentPage = await createPage(
+          pageLookup.title,
+          isJournal || /^\d{4}-\d{2}-\d{2}$/.test(pageLookup.title)
+        );
       } catch (e) {
         error = `Failed to load page: ${e}`;
         loading = false;
@@ -766,7 +793,13 @@
     currentView = "page";
     loading = false;
     if (!skipHistory) {
-      pushHistoryEntry({ kind: "page", title, scrollTop: 0, sourceBlockId, sourcePageTitle });
+      pushHistoryEntry({
+        kind: "page",
+        title: currentPage.title,
+        scrollTop: 0,
+        sourceBlockId,
+        sourcePageTitle,
+      });
     }
     await tick();
     if (restoreEntry) {
@@ -782,17 +815,17 @@
   let showCreateGraphDialog = $state(false);
   let newGraphName = $state("");
 
-  function handleNavigate(title: string) {
-    if (title === "__journal__") {
+  function handleNavigate(target: PageNavigationTarget) {
+    if (target === "__journal__") {
       navigateToJournal();
       return;
     }
-    if (title === "__new_page__") {
+    if (target === "__new_page__") {
       newPageName = "";
       showNewPageDialog = true;
       return;
     }
-    navigateToPage(title);
+    navigateToPage(target);
   }
 
   function submitNewPage() {
@@ -1026,7 +1059,7 @@
           pageId={currentPage?.id || ""}
           pageTitle={currentPage?.title || ""}
           onClose={() => (referencePanelVisible = false)}
-          onNavigate={(pageId) => { referencePanelVisible = false; handleNavigate(pageId); }}
+          onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
         />
       </div>
     {/if}

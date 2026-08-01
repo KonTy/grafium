@@ -1,7 +1,7 @@
 use grafium_core::Graph;
-use tempfile::TempDir;
 use std::fs;
 use std::path::Path;
+use tempfile::TempDir;
 
 /// Test that validation correctly identifies a valid graph structure
 #[test]
@@ -20,9 +20,18 @@ fn test_validate_structure_valid_graph() {
     assert!(report.has_journals_dir, "Should have journals dir");
     assert!(report.has_metadata_dir, "Should have .grafium dir");
     assert!(report.has_valid_db, "DB missing is acceptable");
-    assert!(report.not_nested_in_another_graph, "Top-level graph should not be nested");
-    assert!(report.has_no_nested_graph_roots, "Graph should not contain nested roots");
-    assert_eq!(report.error_message, None, "Valid graph should have no error");
+    assert!(
+        report.not_nested_in_another_graph,
+        "Top-level graph should not be nested"
+    );
+    assert!(
+        report.has_no_nested_graph_roots,
+        "Graph should not contain nested roots"
+    );
+    assert_eq!(
+        report.error_message, None,
+        "Valid graph should have no error"
+    );
 }
 
 /// Test that validation rejects a directory missing pages/
@@ -120,8 +129,14 @@ fn test_validate_structure_nonexistent_path() {
     let report = Graph::validate_structure(Path::new("/nonexistent/path/12345678"));
     assert!(!report.is_valid, "Nonexistent path should fail");
     assert!(!report.has_pages_dir, "Nonexistent path has no pages dir");
-    assert!(!report.has_journals_dir, "Nonexistent path has no journals dir");
-    assert!(!report.has_metadata_dir, "Nonexistent path has no .grafium dir");
+    assert!(
+        !report.has_journals_dir,
+        "Nonexistent path has no journals dir"
+    );
+    assert!(
+        !report.has_metadata_dir,
+        "Nonexistent path has no .grafium dir"
+    );
 }
 
 /// Test that open_graph refuses to open invalid structures
@@ -136,11 +151,17 @@ fn test_open_graph_rejects_invalid_structure() {
 
     // validate_structure should catch this before any open operation
     let validation = Graph::validate_structure(root);
-    assert!(!validation.is_valid, "validate_structure should catch invalid structure");
+    assert!(
+        !validation.is_valid,
+        "validate_structure should catch invalid structure"
+    );
 
     // Graph::open still succeeds by design (open-or-create semantics)
     let result = Graph::open(root);
-    assert!(result.is_ok(), "Graph::open creates missing dirs (open or create semantics)");
+    assert!(
+        result.is_ok(),
+        "Graph::open creates missing dirs (open or create semantics)"
+    );
 }
 
 /// Test that a newly created graph passes validation
@@ -154,13 +175,28 @@ fn test_validate_structure_newly_created_graph() {
 
     // Now validate it
     let report = Graph::validate_structure(root);
-    assert!(report.is_valid, "Newly created graph should pass validation");
+    assert!(
+        report.is_valid,
+        "Newly created graph should pass validation"
+    );
     assert!(report.has_pages_dir, "Created graph should have pages dir");
-    assert!(report.has_journals_dir, "Created graph should have journals dir");
-    assert!(report.has_metadata_dir, "Created graph should have .grafium dir");
+    assert!(
+        report.has_journals_dir,
+        "Created graph should have journals dir"
+    );
+    assert!(
+        report.has_metadata_dir,
+        "Created graph should have .grafium dir"
+    );
     assert!(report.has_valid_db, "Created graph should have valid DB");
-    assert!(report.not_nested_in_another_graph, "Created graph should not be nested");
-    assert!(report.has_no_nested_graph_roots, "Created graph should not contain nested roots");
+    assert!(
+        report.not_nested_in_another_graph,
+        "Created graph should not be nested"
+    );
+    assert!(
+        report.has_no_nested_graph_roots,
+        "Created graph should not contain nested roots"
+    );
 }
 
 /// Test that a graph nested inside another graph is rejected.
@@ -181,10 +217,20 @@ fn test_validate_structure_rejects_nested_graph_root() {
     fs::create_dir_all(inner.join(".grafium")).unwrap();
 
     let inner_report = Graph::validate_structure(&inner);
-    assert!(!inner_report.is_valid, "Nested graph root should be rejected");
-    assert!(!inner_report.not_nested_in_another_graph, "Inner root must be marked nested");
     assert!(
-        inner_report.error_message.as_ref().unwrap().contains("nested inside another graph"),
+        !inner_report.is_valid,
+        "Nested graph root should be rejected"
+    );
+    assert!(
+        !inner_report.not_nested_in_another_graph,
+        "Inner root must be marked nested"
+    );
+    assert!(
+        inner_report
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("nested inside another graph"),
         "Error should explain nested root rejection"
     );
 }
@@ -207,10 +253,20 @@ fn test_validate_structure_rejects_graph_with_nested_graphs_inside() {
     fs::create_dir_all(nested.join(".grafium")).unwrap();
 
     let root_report = Graph::validate_structure(&root);
-    assert!(!root_report.is_valid, "Root containing nested graph should be rejected");
-    assert!(!root_report.has_no_nested_graph_roots, "Nested graph presence should be flagged");
     assert!(
-        root_report.error_message.as_ref().unwrap().contains("contains nested graph root"),
+        !root_report.is_valid,
+        "Root containing nested graph should be rejected"
+    );
+    assert!(
+        !root_report.has_no_nested_graph_roots,
+        "Nested graph presence should be flagged"
+    );
+    assert!(
+        root_report
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("contains nested graph root"),
         "Error should explain nested graph presence"
     );
 }

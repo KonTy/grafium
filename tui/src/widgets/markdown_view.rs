@@ -37,7 +37,8 @@ pub fn render_markdown(source: &str) -> Vec<Line<'static>> {
                     let base = *style_stack.last().unwrap();
                     style_stack.push(base.patch(theme::code()));
                 }
-                Tag::CodeBlock(CodeBlockKind::Fenced(_)) | Tag::CodeBlock(CodeBlockKind::Indented) => {
+                Tag::CodeBlock(CodeBlockKind::Fenced(_))
+                | Tag::CodeBlock(CodeBlockKind::Indented) => {
                     in_code_block = true;
                     if !current.is_empty() {
                         flush_line!();

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::fs;
-use serde::{Deserialize, Serialize};
 use crate::error::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Per-file sync record: what we knew about a file at the last sync point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,11 +46,14 @@ impl SyncState {
     /// Record that a file was synced with the given content hash.
     pub fn record_sync(&mut self, rel_path: &str, hash: &str) {
         let now = chrono::Utc::now().timestamp();
-        self.files.insert(rel_path.to_string(), FileSyncRecord {
-            rel_path: rel_path.to_string(),
-            hash_at_sync: hash.to_string(),
-            synced_at: now,
-        });
+        self.files.insert(
+            rel_path.to_string(),
+            FileSyncRecord {
+                rel_path: rel_path.to_string(),
+                hash_at_sync: hash.to_string(),
+                synced_at: now,
+            },
+        );
     }
 
     /// Check if a file has changed since last sync by comparing hashes.

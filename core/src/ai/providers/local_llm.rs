@@ -73,7 +73,11 @@ impl LocalLlm {
     /// there's no GPU backend to offload to, so this is a harmless no-op).
     /// `None` for either means "use a sensible default" (the model's
     /// trained context length, and "offload everything", respectively).
-    pub fn load(model_path: &Path, context_size: Option<u32>, gpu_layers: Option<u32>) -> Result<Self> {
+    pub fn load(
+        model_path: &Path,
+        context_size: Option<u32>,
+        gpu_layers: Option<u32>,
+    ) -> Result<Self> {
         // llama.cpp/GGML log verbosely to stderr by default, which would
         // corrupt a raw-mode terminal (e.g. the TUI) — same concern and
         // same fix as whisper.cpp in `media::transcribe::WhisperTranscriber`.
@@ -201,8 +205,9 @@ fn build_chat_prompt(
 
     let template = match model.chat_template(None) {
         Ok(template) => template,
-        Err(_) => LlamaChatTemplate::new("chatml")
-            .map_err(|e| CoreError::Other(format!("failed to build fallback chat template: {e}")))?,
+        Err(_) => LlamaChatTemplate::new("chatml").map_err(|e| {
+            CoreError::Other(format!("failed to build fallback chat template: {e}"))
+        })?,
     };
 
     model

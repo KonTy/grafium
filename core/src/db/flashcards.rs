@@ -1,11 +1,11 @@
+use super::Database;
+use crate::error::Result;
 use crate::models::Flashcard;
 use crate::models::FlashcardTopic;
-use crate::error::Result;
-use super::Database;
 use chrono::Utc;
 use rusqlite::params;
-use uuid::Uuid;
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 impl Database {
     pub fn upsert_flashcard(
@@ -142,7 +142,8 @@ impl Database {
              ORDER BY updated_at DESC
              LIMIT ?1 OFFSET ?2"
         )?;
-        let cards = stmt.query_map(params![limit, offset], Self::row_to_flashcard)?
+        let cards = stmt
+            .query_map(params![limit, offset], Self::row_to_flashcard)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(cards)
     }

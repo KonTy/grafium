@@ -1,5 +1,5 @@
-use rusqlite::Connection;
 use crate::error::Result;
+use rusqlite::Connection;
 
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("

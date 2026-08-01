@@ -1,19 +1,20 @@
-mod schema;
-mod pages;
-mod blocks;
-mod links;
-mod tasks;
-mod flashcards;
 mod audio;
+mod blocks;
 mod favorites;
+mod flashcards;
 mod graph_support;
 mod ink;
-mod raw_query;
+mod links;
+mod pages;
 mod properties;
+mod raw_query;
+mod schema;
+mod tasks;
 
+use crate::error::Result;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use crate::error::Result;
+use std::path::Path;
 
 struct FunctionCustomizer;
 
@@ -24,24 +25,40 @@ impl std::fmt::Debug for FunctionCustomizer {
 }
 
 impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for FunctionCustomizer {
-    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
+    fn on_acquire(
+        &self,
+        conn: &mut rusqlite::Connection,
+    ) -> std::result::Result<(), rusqlite::Error> {
         use chrono::Utc;
 
-        conn.create_scalar_function("days_ago", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
-            let days: i64 = ctx.get(0)?;
-            let ms = Utc::now().timestamp_millis() - (days * 86_400_000);
-            Ok(ms)
-        })?;
+        conn.create_scalar_function(
+            "days_ago",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let days: i64 = ctx.get(0)?;
+                let ms = Utc::now().timestamp_millis() - (days * 86_400_000);
+                Ok(ms)
+            },
+        )?;
 
-        conn.create_scalar_function("hours_ago", 1, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
-            let hours: i64 = ctx.get(0)?;
-            let ms = Utc::now().timestamp_millis() - (hours * 3_600_000);
-            Ok(ms)
-        })?;
+        conn.create_scalar_function(
+            "hours_ago",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let hours: i64 = ctx.get(0)?;
+                let ms = Utc::now().timestamp_millis() - (hours * 3_600_000);
+                Ok(ms)
+            },
+        )?;
 
-        conn.create_scalar_function("now_ms", 0, rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |_ctx| {
-            Ok(Utc::now().timestamp_millis())
-        })?;
+        conn.create_scalar_function(
+            "now_ms",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |_ctx| Ok(Utc::now().timestamp_millis()),
+        )?;
 
         Ok(())
     }
@@ -52,8 +69,8 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn new(path: &str) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(path);
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let manager = SqliteConnectionManager::file(path.as_ref());
         let pool = Pool::builder()
             .max_size(8)
             .connection_customizer(Box::new(FunctionCustomizer))
@@ -83,7 +100,8 @@ impl Database {
     fn initialize(&self) -> Result<()> {
         let conn = self.conn()?;
         // Performance pragmas for millions of records
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA cache_size = -64000;
@@ -91,7 +109,8 @@ impl Database {
             PRAGMA temp_store = MEMORY;
             PRAGMA mmap_size = 268435456;
             PRAGMA page_size = 4096;
-        ")?;
+        ",
+        )?;
         schema::create_tables(&conn)?;
 
         // Migration: recreate task_events without CASCADE to preserve history across reindexes
@@ -122,9 +141,9 @@ impl Database {
         }
 
         // Backfill normalized properties if tables are empty but JSON blobs have data
-        let prop_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM page_properties", [], |row| row.get(0)
-        ).unwrap_or(0);
+        let prop_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM page_properties", [], |row| row.get(0))
+            .unwrap_or(0);
         drop(conn);
 
         if prop_count == 0 {
@@ -219,6 +238,23 @@ pub(crate) fn fts_insert_block(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::Result;
+    use tempfile::tempdir;
+
+    #[test]
+    fn database_new_accepts_path_and_initializes() -> Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join("index.db");
+        let db = Database::new(db_path.as_path())?;
+
+        assert_eq!(db.count_pages()?, 0);
+        Ok(())
+    }
+}
+
 /// Delete a block's FTS row by its mapped rowid (O(1)). Falls back to the slow
 /// UNINDEXED scan only for legacy rows not yet in `fts_block_rowid`.
 pub(crate) fn fts_delete_block(conn: &rusqlite::Connection, block_id: &str) -> Result<()> {
@@ -232,7 +268,10 @@ pub(crate) fn fts_delete_block(conn: &rusqlite::Connection, block_id: &str) -> R
         .optional()?;
 
     if let Some(rowid) = rowid {
-        conn.execute("DELETE FROM fts_blocks WHERE rowid = ?1", rusqlite::params![rowid])?;
+        conn.execute(
+            "DELETE FROM fts_blocks WHERE rowid = ?1",
+            rusqlite::params![rowid],
+        )?;
         conn.execute(
             "DELETE FROM fts_block_rowid WHERE block_id = ?1",
             rusqlite::params![block_id],

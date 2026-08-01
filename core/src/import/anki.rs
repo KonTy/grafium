@@ -69,7 +69,11 @@ pub fn import_apkg_with_progress(
     apkg_path: &Path,
     on_progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<AnkiImportSummary> {
-    on_progress(ImportProgress { phase: "reading".into(), current: 0, total: 0 });
+    on_progress(ImportProgress {
+        phase: "reading".into(),
+        current: 0,
+        total: 0,
+    });
 
     let deck = apkg_path
         .file_stem()
@@ -132,7 +136,11 @@ pub fn import_apkg_with_progress(
             let _ = &names; // field names currently unused; kept for future labeling
 
             let front_idx = if sortf < fields.len() { sortf } else { 0 };
-            let front = clean_field(fields.get(front_idx).copied().unwrap_or(""), &topic, &mut referenced);
+            let front = clean_field(
+                fields.get(front_idx).copied().unwrap_or(""),
+                &topic,
+                &mut referenced,
+            );
 
             let mut back_parts: Vec<String> = Vec::new();
             for (i, f) in fields.iter().enumerate() {
@@ -165,10 +173,18 @@ pub fn import_apkg_with_progress(
     let mut media_count = 0usize;
     let to_extract: Vec<(String, String)> = referenced
         .iter()
-        .filter_map(|name| name_to_num.get(name).map(|num| ((*num).clone(), name.clone())))
+        .filter_map(|name| {
+            name_to_num
+                .get(name)
+                .map(|num| ((*num).clone(), name.clone()))
+        })
         .collect();
     let media_total = to_extract.len() as u64;
-    on_progress(ImportProgress { phase: "media".into(), current: 0, total: media_total });
+    on_progress(ImportProgress {
+        phase: "media".into(),
+        current: 0,
+        total: media_total,
+    });
     for (i, (num, name)) in to_extract.into_iter().enumerate() {
         if let Ok(mut entry) = zip.by_name(&num) {
             let mut buf = Vec::new();
@@ -216,7 +232,11 @@ pub fn import_apkg_with_progress(
     });
     graph.index_file(&file_path)?;
 
-    on_progress(ImportProgress { phase: "done".into(), current: 0, total: 0 });
+    on_progress(ImportProgress {
+        phase: "done".into(),
+        current: 0,
+        total: 0,
+    });
 
     Ok(AnkiImportSummary {
         deck,
@@ -270,7 +290,10 @@ fn clean_field(raw: &str, topic: &str, referenced: &mut HashSet<String>) -> Stri
 
     // Line breaks -> separators (keep everything on ONE physical line: grafium
     // splits each newline into its own block).
-    s = s.replace("<br>", " / ").replace("<br/>", " / ").replace("<br />", " / ");
+    s = s
+        .replace("<br>", " / ")
+        .replace("<br/>", " / ")
+        .replace("<br />", " / ");
 
     // Strip any remaining HTML tags.
     s = strip_html_tags(&s);

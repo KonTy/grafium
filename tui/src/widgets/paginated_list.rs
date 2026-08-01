@@ -57,7 +57,10 @@ impl<T> PaginatedList<T> {
     }
 
     pub fn move_selection(&mut self, delta: i32) {
-        if let Some(idx) = self.panel.move_selection(delta, self.paginator.items().len()) {
+        if let Some(idx) = self
+            .panel
+            .move_selection(delta, self.paginator.items().len())
+        {
             self.paginator.ensure_loaded_near(idx, PREFETCH_THRESHOLD);
         }
     }
@@ -75,7 +78,13 @@ impl<T> PaginatedList<T> {
         } else {
             format!("{title} [{}]", self.paginator.items().len())
         };
-        self.panel
-            .render(f, area, &display_title, self.paginator.items(), label, focused);
+        self.panel.render(
+            f,
+            area,
+            &display_title,
+            self.paginator.items(),
+            label,
+            focused,
+        );
     }
 }

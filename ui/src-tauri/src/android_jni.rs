@@ -58,7 +58,10 @@ pub extern "system" fn Java_com_grafium_app_AssistantReceiver_nativeHandleComman
     string_to_jstring(&mut env, &json)
 }
 
-fn open_and_dispatch(graph_path: &str, transcript: &str) -> Result<grafium_core::AssistantResponse, String> {
+fn open_and_dispatch(
+    graph_path: &str,
+    transcript: &str,
+) -> Result<grafium_core::AssistantResponse, String> {
     let root = Path::new(graph_path);
     if !root.exists() {
         return Err(format!("Graph path does not exist: {}", graph_path));

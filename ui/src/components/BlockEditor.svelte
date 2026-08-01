@@ -31,7 +31,7 @@
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
     onBulletClick?: (blockId: string, event: MouseEvent) => void;
-    onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void;
+    onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void | Promise<void>;
     onToggleCollapse?: (blockId: string) => void;
   }
 
@@ -63,6 +63,9 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content));
+  let saveError = $state<string | null>(null);
+  let pendingSaveContent = $state<string | null>(null);
+  let finishEditingPromise: Promise<boolean> | null = null;
 
   // Rendered-content container, used to hydrate <audio>/<video> media that
   // WebKitGTK can't load from the custom asset scheme.
@@ -311,9 +314,74 @@
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
     console.log("[telemetry] savecontext", JSON.stringify(context));
-    const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
-    if (changed) {
-      console.log("[telemetry] saveContent", JSON.stringify(context));
+    try {
+      const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
+      saveError = null;
+      pendingSaveContent = null;
+      if (changed) {
+        console.log("[telemetry] saveContent", JSON.stringify(context));
+      }
+      return changed;
+    } catch (e) {
+      pendingSaveContent = content;
+      saveError = `Failed to save changes: ${e instanceof Error ? e.message : String(e)}`;
+      console.error("Failed to save block content:", e);
+      throw e;
+    }
+  }
+
+  function teardownEditor(view: EditorView, notifyBlur: boolean) {
+    savedState = view.state;
+    if ((window as any).__activeEditorView === view) {
+      (window as any).__activeEditorView = undefined;
+    }
+    view.destroy();
+    if (editorView === view) {
+      editorView = undefined;
+    }
+    isEditing = false;
+    keymap_manager.isEditing = false;
+    if (notifyBlur) {
+      onBlur?.(block.id);
+    }
+  }
+
+  async function closeEditorAfterSave(view: EditorView, notifyBlur: boolean): Promise<boolean> {
+    if (finishEditingPromise) {
+      return finishEditingPromise;
+    }
+
+    finishEditingPromise = (async () => {
+      const content = view.state.doc.toString();
+      try {
+        await saveContent(content);
+      } catch {
+        if (editorView === view) {
+          queueMicrotask(() => view.focus());
+        }
+        return false;
+      }
+
+      if (editorView === view) {
+        teardownEditor(view, notifyBlur);
+      }
+      return true;
+    })();
+
+    try {
+      return await finishEditingPromise;
+    } finally {
+      finishEditingPromise = null;
+    }
+  }
+
+  async function retrySave() {
+    const content = editorView?.state.doc.toString() ?? pendingSaveContent;
+    if (content == null) return;
+    try {
+      await saveContent(content);
+    } catch {
+      // saveContent already surfaces the error state
     }
   }
 
@@ -541,9 +609,7 @@
             {
               key: "Escape",
               run: (view) => {
-                const content = view.state.doc.toString();
-                saveContent(content);
-                stopEditing();
+                void stopEditing();
                 return true;
               },
             },
@@ -636,12 +702,16 @@
                   selection: EditorSelection.cursor(from + md.length),
                 });
                 // Download images in background and update content
-                localizeImages(md, downloadAsset).then((localized) => {
+                void localizeImages(md, downloadAsset).then(async (localized) => {
                   if (localized !== md) {
                     const doc = view.state.doc.toString();
                     const updated = doc.replace(md, localized);
                     view.dispatch({ changes: { from: 0, to: doc.length, insert: updated } });
-                    saveContent(updated);
+                    try {
+                      await saveContent(updated);
+                    } catch {
+                      // saveContent already surfaces the error state
+                    }
                   }
                 });
               } else {
@@ -656,19 +726,28 @@
                 // Remaining chunks become new blocks (with depth info)
                 if (chunks.length > 1) {
                   const content = view.state.doc.toString();
-                  saveContent(content);
-                  block.content = content;
-                  onPasteBlocks(block.id, chunks.slice(1));
+                  void (async () => {
+                    try {
+                      await saveContent(content);
+                      await onPasteBlocks?.(block.id, chunks.slice(1));
+                    } catch {
+                      // saveContent already surfaces the error state
+                    }
+                  })();
                 }
                 // Download images in all pasted blocks in background
-                localizeImages(md, downloadAsset).then((localized) => {
+                void localizeImages(md, downloadAsset).then(async (localized) => {
                   if (localized !== md) {
                     // Re-split and update the first block
                     const localChunks = splitMarkdownIntoBlocks(localized);
                     if (localChunks[0]?.content !== chunks[0]?.content) {
                       const newContent = view.state.doc.toString().replace(chunks[0].content, localChunks[0].content);
                       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: newContent } });
-                      saveContent(newContent);
+                      try {
+                        await saveContent(newContent);
+                      } catch {
+                        // saveContent already surfaces the error state
+                      }
                     }
                   }
                 });
@@ -702,15 +781,8 @@
                 }
 
                 const content = view.state.doc.toString();
-                saveContent(content);
-                savedState = view.state;
-                (window as any).__activeEditorView = undefined;
-                editorView?.destroy();
-                editorView = undefined;
-                isEditing = false;
-                keymap_manager.isEditing = false;
-                onBlur?.(block.id);
                 blurTeardownTimer = undefined;
+                void closeEditorAfterSave(view, true);
               }, 120);
             },
           }),
@@ -795,19 +867,22 @@
       placeNavCaret(editorView);
   }
 
-  function stopEditing() {
+  async function stopEditing() {
     if (blurTeardownTimer !== undefined) {
       window.clearTimeout(blurTeardownTimer);
       blurTeardownTimer = undefined;
     }
-    if (editorView) {
-      const content = editorView.state.doc.toString();
-      saveContent(content);
-      editorView.destroy();
-      editorView = undefined;
+
+    if (!editorView) {
+      isEditing = false;
+      keymap_manager.isEditing = false;
+      return true;
     }
-    isEditing = false;
-    keymap_manager.isEditing = false;
+
+    const didClose = await closeEditorAfterSave(editorView, false);
+    if (!didClose) {
+      return false;
+    }
 
     // Ensure focus does not remain on a stale contenteditable node.
     requestAnimationFrame(() => {
@@ -817,6 +892,7 @@
         active.blur();
       }
     });
+    return true;
   }
 
   // Clean up
@@ -1013,7 +1089,17 @@
   {/if}
   <div class="block-content" class:quote-block={isQuoteBlock && !isEditing} onclick={handleClick}>
     {#if isEditing}
-      <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
+      <div class="editor-shell">
+        <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
+        {#if saveError}
+          <div class="save-error" role="alert">
+            <span>{saveError}</span>
+            <button class="save-retry" type="button" onclick={(e) => { e.stopPropagation(); void retrySave(); }}>
+              Retry
+            </button>
+          </div>
+        {/if}
+      </div>
     {:else if queryExpression !== null}
       <!-- Query block rendered view -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1202,6 +1288,42 @@
     font-size: inherit;
     font-weight: inherit;
     line-height: inherit;
+  }
+
+  .editor-shell {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .save-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(243, 139, 168, 0.35);
+    background: rgba(243, 139, 168, 0.12);
+    color: #f38ba8;
+    font-size: 12px;
+  }
+
+  .save-retry {
+    border: none;
+    border-radius: 4px;
+    background: rgba(243, 139, 168, 0.18);
+    color: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .save-retry:hover {
+    background: rgba(243, 139, 168, 0.28);
   }
 
   .editor-wrapper :global(.cm-editor),
