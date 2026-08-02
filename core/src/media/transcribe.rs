@@ -16,24 +16,8 @@ use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::error::{CoreError, Result};
+use crate::media::types::{Transcript, TranscriptSegment};
 use crate::model_library::{self, LocalModelRef, ModelKind};
-
-/// One timestamped span of the transcript.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TranscriptSegment {
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub text: String,
-}
-
-/// Full transcription result. Summarization/fact-checking typically only
-/// need `full_text`; `segments` are kept for anything that wants to jump to
-/// a moment in the source video (e.g. citing "at 3:42 they claim...").
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Transcript {
-    pub segments: Vec<TranscriptSegment>,
-    pub full_text: String,
-}
 
 /// Anything that can turn a 16kHz mono WAV file (exactly what
 /// `media::ingest::fetch_audio` produces) into a [`Transcript`].

@@ -391,3 +391,8 @@ export function findOrphanedAssets(): Promise<OrphanedAsset[]> {
 export function deleteAssets(filenames: string[]): Promise<number> {
   return invoke("delete_assets", { filenames });
 }
+
+// Media import (video/audio transcript -> page)
+export function mediaImportVideo(url: string, pageTitle?: string, lang?: string): Promise<Page> {
+  return invoke("media_import_video", { url, pageTitle, lang });
+}

@@ -1485,6 +1485,7 @@ pub fn run() {
             commands::knowledge::ai_list_schemas,
             commands::knowledge::ai_save_schema,
             commands::knowledge::ai_create_default_schemas,
+            commands::media::media_import_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,6 +6,7 @@ pub mod flashcards;
 pub mod graph;
 pub mod knowledge;
 pub mod links;
+pub mod media;
 pub mod pages;
 pub mod query;
 pub mod sync;

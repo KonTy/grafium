@@ -785,29 +785,49 @@ impl Graph {
     /// For hierarchical titles like "Books/MyCoolBook/Chapter1",
     /// creates pages/Books/MyCoolBook/Chapter1.md (mkdir -p for parents).
     pub fn create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
-        let file_path = if is_journal {
-            let filename = format!("{}.md", title.replace('/', "_"));
-            self.journals_dir.join(&filename)
-        } else {
-            // Use folder hierarchy: "Books/MyCoolBook/Chapter1" → pages/Books/MyCoolBook/Chapter1.md
-            let rel_path = format!("{}.md", title);
-            let full_path = self.pages_dir.join(&rel_path);
-            // Create parent directories
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            full_path
-        };
+        // Empty page with just a bullet — the same starting point every
+        // page begins from when created through the normal "new page" UI.
+        self.create_page_with_content(title, is_journal, "- \n")
+    }
 
-        // Create initial .md content (empty page with just a bullet)
-        let initial_content = format!("- \n");
-        fs::write(&file_path, &initial_content)?;
+    /// Same as [`Self::create_page`], but seeds the file with `content`
+    /// instead of a single empty bullet — used by callers that already
+    /// have full markdown to write (e.g. `media::notes::transcript_to_markdown`
+    /// producing an imported video/audio transcript note) instead of
+    /// building it up block-by-block via repeated `create_block` calls.
+    pub fn create_page_with_content(
+        &self,
+        title: &str,
+        is_journal: bool,
+        content: &str,
+    ) -> Result<Page> {
+        let file_path = self.page_file_path(title, is_journal)?;
+        fs::write(&file_path, content)?;
 
         // Index the file
         self.index_file(&file_path)?;
 
         // Return the page from DB
         self.db.get_page_by_title(title)
+    }
+
+    /// Resolves the on-disk `.md` path a page titled `title` would live at,
+    /// creating any parent directories a hierarchical title (e.g.
+    /// `"Books/MyCoolBook/Chapter1"`) needs. Shared by every "create a page"
+    /// entry point so file-path resolution rules live in exactly one place.
+    fn page_file_path(&self, title: &str, is_journal: bool) -> Result<PathBuf> {
+        if is_journal {
+            let filename = format!("{}.md", title.replace('/', "_"));
+            Ok(self.journals_dir.join(&filename))
+        } else {
+            // Use folder hierarchy: "Books/MyCoolBook/Chapter1" → pages/Books/MyCoolBook/Chapter1.md
+            let rel_path = format!("{}.md", title);
+            let full_path = self.pages_dir.join(&rel_path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            Ok(full_path)
+        }
     }
 
     /// Create a block: updates the .md file, then re-indexes.
@@ -1449,6 +1469,40 @@ mod tests {
             graph.db.get_page_by_title("Books/Chapter")?.title,
             "Books/Chapter"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_page_with_content_seeds_file_and_indexes_it() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let content = "- First line\n- Second line\n";
+
+        let page = graph.create_page_with_content("Imported/Video", false, content)?;
+
+        assert_eq!(page.title, "Imported/Video");
+        let file_path = graph.pages_dir.join("Imported/Video.md");
+        assert_eq!(fs::read_to_string(&file_path)?, content);
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].content, "First line");
+        assert_eq!(blocks[1].content, "Second line");
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_page_still_seeds_default_empty_bullet() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+
+        let page = graph.create_page("plain-page", false)?;
+
+        let file_path = graph.pages_dir.join("plain-page.md");
+        assert_eq!(fs::read_to_string(&file_path)?, "- \n");
+        assert_eq!(graph.db.list_blocks_for_page(&page.id)?.len(), 1);
 
         Ok(())
     }
