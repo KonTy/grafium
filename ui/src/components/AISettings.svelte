@@ -26,6 +26,7 @@
   let localBaseUrl = $state("http://localhost:8000/v1");
   let localApiKey = $state("");
   let localModelPath = $state("");
+  let localModelsDir = $state("");
   let llmModel = $state("llama3.2");
   let embeddingModel = $state("nomic-embed-text");
   let cloudProvider = $state("openai");
@@ -59,7 +60,8 @@
           localProvider = normalizeProvider(config.local.provider);
           localBaseUrl = config.local.base_url || "http://localhost:8000/v1";
           localApiKey = config.local.api_key || "";
-          localModelPath = config.local.model_path || "";
+          localModelPath = config.local.local_llm?.model || "";
+          localModelsDir = config.local.models_dir || "";
           llmModel = config.local.llm_model || "llama3.2";
           embeddingModel = config.local.embedding_model || "nomic-embed-text";
         }
@@ -92,6 +94,7 @@
         local_base_url: localBaseUrl,
         local_api_key: localApiKey || undefined,
         local_model_path: localModelPath || undefined,
+        local_models_dir: localModelsDir || undefined,
         llm_model: llmModel,
         embedding_model: embeddingModel,
         cloud_provider: cloudProvider,
@@ -194,7 +197,7 @@
             <div class="choice-row">
               <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
               <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => (localProvider = "ollama")}>Ollama</button>
-              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded (planned)</button>
+              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded (not in this build)</button>
             </div>
           </div>
           <div class="field-group">
@@ -206,9 +209,26 @@
             <input type="password" bind:value={localApiKey} class="field-input" placeholder="Bearer key if endpoint requires auth" />
           </div>
           <div class="field-group">
-            <label class="field-label">Embedded Model Path (future)</label>
-            <input type="text" bind:value={localModelPath} class="field-input" placeholder="/path/to/local/model (for embedded runtime mode)" />
+            <label class="field-label">Embedded Model File (GGUF)</label>
+            <input type="text" bind:value={localModelPath} class="field-input" placeholder="qwen3-4b-instruct.Q4_K_M.gguf, or an absolute path" disabled={localProvider !== "huggingface"} />
           </div>
+          <div class="field-group">
+            <label class="field-label">Models Directory (optional)</label>
+            <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files instead of Grafium's own data dir" disabled={localProvider !== "huggingface"} />
+            <p class="field-hint">
+              Point this at a folder you already keep local models in (shared with Ollama, LM
+              Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
+              Leave blank to use Grafium's own managed models folder.
+            </p>
+          </div>
+          {#if localProvider === "huggingface"}
+            <p class="field-hint">
+              Embedded in-process inference isn't compiled into this build yet (it needs a
+              llama.cpp toolchain bundled with the app) — these fields are saved for when it
+              ships, but won't be used until then. In the meantime, run a server like Ollama or
+              llama-server and use "vLLM / OpenAI-compatible" or "Ollama" above instead.
+            </p>
+          {/if}
           {#if mode === "local"}
             <div class="field-group">
               <label class="field-label">LLM Model</label>
@@ -389,6 +409,13 @@
   .field-label {
     font-size: 12px;
     color: var(--text-muted, #888);
+  }
+
+  .field-hint {
+    font-size: 11px;
+    color: var(--text-muted, #888);
+    margin: 2px 0 0;
+    line-height: 1.4;
   }
 
   .field-input,

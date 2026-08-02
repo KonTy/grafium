@@ -67,6 +67,12 @@ pub struct AiConfigPayload {
     pub local_base_url: Option<String>,
     pub local_api_key: Option<String>,
     pub local_model_path: Option<String>,
+    /// Shared directory to search for local model files (embedded LLM
+    /// GGUF, and in future Whisper) instead of Grafium's own managed
+    /// `<data_dir>/models` folder — lets a user point at e.g.
+    /// `~/Documents/models` shared with other apps. `None`/empty keeps the
+    /// default.
+    pub local_models_dir: Option<String>,
     pub llm_model: Option<String>,
     pub embedding_model: Option<String>,
     pub cloud_provider: Option<String>,
@@ -128,6 +134,10 @@ pub async fn ai_set_config(
             .local_base_url
             .unwrap_or_else(|| local_base_url_default.to_string()),
         api_key: payload.local_api_key,
+        models_dir: payload
+            .local_models_dir
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from),
         local_llm: LocalLlmSettings {
             model_ref: LocalModelRef {
                 model: payload.local_model_path,

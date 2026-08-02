@@ -11,7 +11,10 @@ export interface AiConfig {
     provider: string;
     base_url: string;
     api_key?: string;
-    model_path?: string;
+    models_dir?: string;
+    local_llm?: {
+      model?: string;
+    };
     llm_model: string;
     embedding_model: string;
   };
@@ -34,6 +37,7 @@ export interface AiConfigPayload {
   local_base_url?: string;
   local_api_key?: string;
   local_model_path?: string;
+  local_models_dir?: string;
   llm_model?: string;
   embedding_model?: string;
   cloud_provider?: string;

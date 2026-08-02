@@ -140,7 +140,10 @@ impl LocalLlm {
             .local
             .as_ref()
             .ok_or_else(|| CoreError::Other("No local AI provider configured".to_string()))?;
-        let models_dir = model_library::default_models_dir(data_dir);
+        let models_dir = local
+            .models_dir
+            .clone()
+            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
         Self::from_settings(&models_dir, &local.local_llm)
     }
 }
@@ -326,4 +329,67 @@ fn generate(
     }
 
     Ok(output.trim().to_string())
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use crate::ai::config::{AiConfig, LocalConfig, ProviderType};
+
+    /// `from_config` must resolve the model against `LocalConfig::models_dir`
+    /// when it's set, rather than always falling back to
+    /// `<data_dir>/models` — this is what lets a user point Grafium at a
+    /// models folder shared with other apps (e.g. `~/Documents/models`)
+    /// instead of duplicating multi-gigabyte GGUF files into Grafium's own
+    /// data directory. We don't need a real model file to prove this: the
+    /// "no model found" error message names the directory that was
+    /// actually searched, so asserting on that message is enough.
+    #[test]
+    fn from_config_honors_models_dir_override_over_default_data_dir() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let custom_models_dir = tempfile::tempdir().unwrap();
+
+        let mut ai_config = AiConfig::default();
+        ai_config.local = Some(LocalConfig {
+            provider: ProviderType::HuggingFace,
+            models_dir: Some(custom_models_dir.path().to_path_buf()),
+            ..LocalConfig::default()
+        });
+
+        let err = LocalLlm::from_config(&ai_config, data_dir.path())
+            .map(|_| ()).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains(&custom_models_dir.path().display().to_string()),
+            "expected error to name the configured models_dir ({}), got: {message}",
+            custom_models_dir.path().display()
+        );
+        assert!(
+            !message.contains(&data_dir.path().join("models").display().to_string()),
+            "must not fall back to the default data_dir/models path when an override is set, got: {message}"
+        );
+    }
+
+    #[test]
+    fn from_config_falls_back_to_default_models_dir_when_unset() {
+        let data_dir = tempfile::tempdir().unwrap();
+
+        let mut ai_config = AiConfig::default();
+        ai_config.local = Some(LocalConfig {
+            provider: ProviderType::HuggingFace,
+            models_dir: None,
+            ..LocalConfig::default()
+        });
+
+        let err = LocalLlm::from_config(&ai_config, data_dir.path())
+            .map(|_| ()).unwrap_err();
+
+        let default_dir = data_dir.path().join("models");
+        assert!(
+            err.to_string().contains(&default_dir.display().to_string()),
+            "expected default models_dir ({}) in error, got: {err}",
+            default_dir.display()
+        );
+    }
 }

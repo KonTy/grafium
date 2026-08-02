@@ -81,6 +81,18 @@ pub struct LocalConfig {
     pub llm_model: String,
     /// Embedding model name.
     pub embedding_model: String,
+    /// Where imported/downloaded model files live for the embedded local
+    /// LLM (`local_llm`, used when `provider == ProviderType::HuggingFace`).
+    /// `None` means the default (`<data_dir>/models` — see
+    /// `model_library::default_models_dir`). Overridable so a user can
+    /// point at a models folder they already keep elsewhere (e.g. a shared
+    /// `~/Documents/models` used by several apps, or an external drive)
+    /// instead of duplicating multi-gigabyte GGUF files into Grafium's own
+    /// data directory. Mirrors `media::config::MediaConfig::models_dir`
+    /// exactly — both are meant to be pointed at the very same shared
+    /// folder once a Settings screen surfaces both.
+    #[serde(default)]
+    pub models_dir: Option<std::path::PathBuf>,
     /// Settings for the embedded local LLM runtime (llama.cpp), used only
     /// when `provider == ProviderType::HuggingFace`. Mirrors
     /// `media::config::WhisperSettings` — see `LocalLlmSettings`.
@@ -95,6 +107,7 @@ impl Default for LocalConfig {
             api_key: None,
             llm_model: "llama3.2".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
+            models_dir: None,
             local_llm: LocalLlmSettings::default(),
         }
     }
@@ -187,5 +200,44 @@ impl Default for ReferenceConfig {
             staleness_days: 7,
             cross_graph: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_config_defaults_to_no_models_dir_override() {
+        assert_eq!(LocalConfig::default().models_dir, None);
+    }
+
+    #[test]
+    fn local_config_models_dir_round_trips_through_json() {
+        let mut config = LocalConfig::default();
+        config.models_dir = Some(std::path::PathBuf::from("/home/user/Documents/models"));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: LocalConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed.models_dir,
+            Some(std::path::PathBuf::from("/home/user/Documents/models"))
+        );
+    }
+
+    #[test]
+    fn local_config_missing_models_dir_field_deserializes_to_none() {
+        // Old configs saved before this field existed must still load fine.
+        let json = r#"{
+            "provider": "openaicompatible",
+            "base_url": "http://localhost:8000/v1",
+            "api_key": null,
+            "llm_model": "llama3.2",
+            "embedding_model": "nomic-embed-text",
+            "local_llm": {}
+        }"#;
+        let parsed: LocalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.models_dir, None);
     }
 }
