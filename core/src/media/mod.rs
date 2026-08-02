@@ -27,6 +27,7 @@ pub mod captions;
 pub mod config;
 pub mod ingest;
 pub mod notes;
+mod tooling;
 #[cfg(feature = "media")]
 pub mod transcribe;
 pub mod types;

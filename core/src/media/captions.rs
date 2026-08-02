@@ -21,6 +21,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::error::{CoreError, Result};
+use crate::media::tooling;
 use crate::media::types::{Transcript, TranscriptSegment, TranscriptSource};
 
 /// Metadata about a remote video, fetched without downloading it.
@@ -40,9 +41,7 @@ pub fn fetch_metadata(url: &str) -> Result<VideoMetadata> {
         .args(["--dump-json", "--skip-download", "--no-playlist", url])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| {
-            CoreError::Other(format!("failed to launch yt-dlp (is it installed?): {e}"))
-        })?;
+        .map_err(|e| tooling::missing_tool_error("yt-dlp", tooling::YT_DLP_INSTALL_HINT, e))?;
     if !output.status.success() {
         return Err(CoreError::Other(format!(
             "yt-dlp failed to fetch metadata ({}): {}",
@@ -135,9 +134,7 @@ fn fetch_caption_track(
         ])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| {
-            CoreError::Other(format!("failed to launch yt-dlp (is it installed?): {e}"))
-        })?;
+        .map_err(|e| tooling::missing_tool_error("yt-dlp", tooling::YT_DLP_INSTALL_HINT, e))?;
     if !output.status.success() {
         return Err(CoreError::Other(format!(
             "yt-dlp failed ({}): {}",
