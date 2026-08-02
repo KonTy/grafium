@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::models::Page;
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Result<Page> {
@@ -75,6 +76,31 @@ impl Database {
         Ok(page)
     }
 
+    pub fn get_page_titles(&self, page_ids: &[String]) -> Result<HashMap<String, String>> {
+        if page_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn()?;
+        let placeholders = page_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id, title FROM pages WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let bind: Vec<&dyn rusqlite::ToSql> = page_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut titles = HashMap::with_capacity(page_ids.len());
+        for row in stmt.query_map(bind.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (id, title) = row?;
+            titles.insert(id, title);
+        }
+
+        Ok(titles)
+    }
+
     pub fn get_page_by_title(&self, title: &str) -> Result<Page> {
         let conn = self.conn()?;
         let page = conn.query_row(
@@ -98,6 +124,35 @@ impl Database {
     pub fn get_page_by_title_ci(&self, title: &str) -> Result<Page> {
         let conn = self.conn()?;
         get_page_by_title_ci_on_conn(&conn, title)
+    }
+
+    pub fn search_page_titles(&self, query: &str, limit: i64) -> Result<Vec<Page>> {
+        if query.trim().is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE lower(title) LIKE '%' || lower(?1) || '%'
+             ORDER BY title ASC
+             LIMIT ?2",
+        )?;
+        let pages = stmt
+            .query_map(params![query, limit], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
     }
 
     pub fn get_or_create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
@@ -341,5 +396,55 @@ impl Database {
         let conn = self.conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::Result;
+
+    #[test]
+    fn get_page_titles_batches_ids_and_omits_missing_pages() -> Result<()> {
+        let db = Database::in_memory()?;
+        let alpha = db.create_page("Alpha", false)?;
+        let beta = db.create_page("Beta", false)?;
+
+        let titles = db.get_page_titles(&[
+            alpha.id.clone(),
+            "missing-page".to_string(),
+            beta.id.clone(),
+        ])?;
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles.get(&alpha.id), Some(&alpha.title));
+        assert_eq!(titles.get(&beta.id), Some(&beta.title));
+        assert!(!titles.contains_key("missing-page"));
+
+        assert!(db.get_page_titles(&[])?.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_page_titles_is_case_insensitive_and_respects_limit() -> Result<()> {
+        let db = Database::in_memory()?;
+        let alpha_one = db.create_page("Alpha One", false)?;
+        let alpha_two = db.create_page("alpha two", false)?;
+        db.create_page("Project Alpha", false)?;
+        db.create_page("Completely Different", false)?;
+
+        let exact = db.search_page_titles("TWO", 10)?;
+        assert!(exact.iter().any(|page| page.id == alpha_two.id));
+
+        let limited = db.search_page_titles("alpha", 2)?;
+        assert_eq!(limited.len(), 2);
+        assert!(limited
+            .iter()
+            .all(|page| { page.title.to_lowercase().contains("alpha") }));
+        assert!(limited
+            .iter()
+            .any(|page| page.id == alpha_one.id || page.id == alpha_two.id));
+
+        Ok(())
     }
 }

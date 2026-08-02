@@ -1,6 +1,24 @@
 use crate::AppState;
 use grafium_core::models::Page;
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, State};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PageSummary {
+    pub id: String,
+    pub title: String,
+    pub is_journal: bool,
+}
+
+impl From<Page> for PageSummary {
+    fn from(page: Page) -> Self {
+        Self {
+            id: page.id,
+            title: page.title,
+            is_journal: page.is_journal,
+        }
+    }
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_pages(
@@ -111,5 +129,21 @@ pub fn get_child_pages(state: State<AppState>, parent_title: String) -> Result<V
     graph
         .db
         .get_child_pages(&parent_title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn search_page_titles(
+    app: AppHandle,
+    state: State<AppState>,
+    query: String,
+    limit: i64,
+) -> Result<Vec<PageSummary>, String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+    graph
+        .db
+        .search_page_titles(&query, limit)
+        .map(|pages| pages.into_iter().map(PageSummary::from).collect())
         .map_err(|e| e.to_string())
 }

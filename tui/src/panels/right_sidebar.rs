@@ -137,7 +137,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn search_blocks(&self, _query: &str, _limit: i64) -> RepoResult<Vec<Block>> {
+        fn search_blocks(&self, _query: &str, _limit: i64, _offset: i64) -> RepoResult<Vec<Block>> {
             Ok(Vec::new())
         }
 

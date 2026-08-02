@@ -9,6 +9,12 @@ export interface Page {
   properties: Record<string, unknown>;
 }
 
+export interface PageSummary {
+  id: string;
+  title: string;
+  is_journal: boolean;
+}
+
 export interface Block {
   id: string;
   page_id: string;
@@ -71,6 +77,10 @@ export function getParentPage(title: string): Promise<Page | null> {
 
 export function getChildPages(parentTitle: string): Promise<Page[]> {
   return invoke("get_child_pages", { parentTitle });
+}
+
+export function searchPageTitles(query: string, limit = 10): Promise<PageSummary[]> {
+  return invoke("search_page_titles", { query, limit });
 }
 
 // Blocks

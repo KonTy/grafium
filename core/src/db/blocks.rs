@@ -291,11 +291,7 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn delete_block_in_connection(
-        &self,
-        conn: &Connection,
-        id: &str,
-    ) -> Result<()> {
+    pub(crate) fn delete_block_in_connection(&self, conn: &Connection, id: &str) -> Result<()> {
         super::fts_delete_block(conn, id)?;
         conn.execute("DELETE FROM blocks WHERE id = ?1", params![id])?;
         Ok(())
@@ -312,17 +308,21 @@ impl Database {
     }
 
     pub fn search_fts(&self, query: &str, limit: i64) -> Result<Vec<Block>> {
+        self.search_fts_window(query, limit, 0)
+    }
+
+    pub fn search_fts_window(&self, query: &str, limit: i64, offset: i64) -> Result<Vec<Block>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT b.id, b.page_id, b.parent_id, b.order_index, b.content, b.block_type, b.properties, b.created_at, b.updated_at
              FROM fts_blocks f
              JOIN blocks b ON b.id = f.block_id
              WHERE fts_blocks MATCH ?1
-             ORDER BY rank
-             LIMIT ?2"
+             ORDER BY rank, b.id
+             LIMIT ?2 OFFSET ?3"
         )?;
         let blocks = stmt
-            .query_map(params![query, limit], |row| {
+            .query_map(params![query, limit, offset.max(0)], |row| {
                 Ok(Block {
                     id: row.get(0)?,
                     page_id: row.get(1)?,
@@ -347,5 +347,65 @@ impl Database {
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::Result;
+    use crate::models::BlockType;
+    use std::collections::HashSet;
+
+    #[test]
+    fn search_fts_window_pages_results_without_overlap() -> Result<()> {
+        let db = Database::in_memory()?;
+        let page = db.create_page("fts-window", false)?;
+
+        for (i, content) in [
+            "alpha alpha alpha",
+            "alpha alpha",
+            "alpha beta",
+            "alpha gamma",
+            "alpha delta",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.create_block(
+                &page.id,
+                None,
+                i as i32,
+                content,
+                BlockType::Text,
+                serde_json::json!({}),
+            )?;
+        }
+
+        let page_size = 2;
+        let first_page = db.search_fts_window("alpha", page_size, 0)?;
+        let second_page = db.search_fts_window("alpha", page_size, page_size)?;
+        let full = db.search_fts("alpha", 10)?;
+
+        assert_eq!(first_page.len(), page_size as usize);
+        assert_eq!(second_page.len(), page_size as usize);
+
+        let first_ids: HashSet<&str> = first_page.iter().map(|block| block.id.as_str()).collect();
+        let second_ids: HashSet<&str> = second_page.iter().map(|block| block.id.as_str()).collect();
+        assert!(first_ids.is_disjoint(&second_ids));
+
+        let paged_ids: Vec<&str> = first_page
+            .iter()
+            .chain(second_page.iter())
+            .map(|block| block.id.as_str())
+            .collect();
+        let expected_ids: Vec<&str> = full
+            .iter()
+            .take(paged_ids.len())
+            .map(|block| block.id.as_str())
+            .collect();
+        assert_eq!(paged_ids, expected_ids);
+
+        Ok(())
     }
 }

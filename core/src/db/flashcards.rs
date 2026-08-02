@@ -42,7 +42,10 @@ fn upsert_flashcard_on_conn(
 }
 
 fn delete_flashcard_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM flashcards WHERE block_id = ?1", params![block_id])?;
+    conn.execute(
+        "DELETE FROM flashcards WHERE block_id = ?1",
+        params![block_id],
+    )?;
     Ok(())
 }
 

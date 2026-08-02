@@ -8,7 +8,7 @@
 
 use grafium_core::models::{Block, Link, Page};
 use grafium_core::Graph;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 pub type RepoResult<T> = Result<T, String>;
 
@@ -18,9 +18,8 @@ pub trait GraphRepository: Send + Sync {
     fn list_pages(&self, limit: i64, offset: i64) -> RepoResult<Vec<Page>>;
     /// Journal pages, most recent first, paginated.
     fn list_journal_pages(&self, limit: i64, offset: i64) -> RepoResult<Vec<Page>>;
-    /// Full-text search across block content, paginated by re-querying with a growing limit
-    /// (FTS ranking is stable, so this is cheap and correct for "load more").
-    fn search_blocks(&self, query: &str, limit: i64) -> RepoResult<Vec<Block>>;
+    /// Full-text search across block content, paginated with SQL LIMIT/OFFSET windows.
+    fn search_blocks(&self, query: &str, limit: i64, offset: i64) -> RepoResult<Vec<Block>>;
 
     fn get_page_by_id(&self, page_id: &str) -> RepoResult<Page>;
     fn list_blocks_for_page(&self, page_id: &str) -> RepoResult<Vec<Block>>;
@@ -50,6 +49,33 @@ impl CoreRepository {
     }
 }
 
+fn hydrate_backlinks_with_titles<F>(
+    raw: Vec<(Link, Block)>,
+    fetch_titles: F,
+) -> RepoResult<Vec<(Link, Block, String)>>
+where
+    F: FnOnce(&[String]) -> RepoResult<HashMap<String, String>>,
+{
+    let page_ids: Vec<String> = raw
+        .iter()
+        .map(|(_, block)| block.page_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let titles_by_page = fetch_titles(&page_ids)?;
+
+    Ok(raw
+        .into_iter()
+        .map(|(link, block)| {
+            let title = titles_by_page
+                .get(&block.page_id)
+                .cloned()
+                .unwrap_or_else(|| "(unknown page)".to_string());
+            (link, block, title)
+        })
+        .collect())
+}
+
 impl GraphRepository for CoreRepository {
     fn list_pages(&self, limit: i64, offset: i64) -> RepoResult<Vec<Page>> {
         self.graph
@@ -65,10 +91,10 @@ impl GraphRepository for CoreRepository {
             .map_err(|e| Self::label_error("list_journal_pages", e))
     }
 
-    fn search_blocks(&self, query: &str, limit: i64) -> RepoResult<Vec<Block>> {
+    fn search_blocks(&self, query: &str, limit: i64, offset: i64) -> RepoResult<Vec<Block>> {
         self.graph
             .db
-            .search_fts(query, limit)
+            .search_fts_window(query, limit, offset)
             .map_err(|e| Self::label_error("search_blocks", e))
     }
 
@@ -111,22 +137,12 @@ impl GraphRepository for CoreRepository {
             .db
             .get_backlinks(page_id)
             .map_err(|e| Self::label_error("get_backlinks", e))?;
-        let mut titles_by_page = HashMap::new();
-        raw.into_iter()
-            .map(|(link, block)| {
-                let title = titles_by_page
-                    .entry(block.page_id.clone())
-                    .or_insert_with(|| {
-                        self.graph
-                            .db
-                            .get_page_by_id(&block.page_id)
-                            .map(|page| page.title)
-                            .unwrap_or_else(|_| "(unknown page)".to_string())
-                    })
-                    .clone();
-                Ok((link, block, title))
-            })
-            .collect()
+        hydrate_backlinks_with_titles(raw, |page_ids| {
+            self.graph
+                .db
+                .get_page_titles(page_ids)
+                .map_err(|e| Self::label_error("get_backlinks", e))
+        })
     }
 
     fn get_links_from_page(&self, page_id: &str) -> RepoResult<Vec<Link>> {
@@ -140,5 +156,92 @@ impl GraphRepository for CoreRepository {
         self.graph
             .get_or_create_today_journal()
             .map_err(|e| Self::label_error("get_or_create_today_journal", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::cell::{Cell, RefCell};
+
+    use grafium_core::models::{BlockType, LinkType};
+
+    fn block(id: &str, page_id: &str, content: &str) -> Block {
+        Block {
+            id: id.to_string(),
+            page_id: page_id.to_string(),
+            parent_id: None,
+            order_index: 0,
+            content: content.to_string(),
+            block_type: BlockType::Text,
+            properties: serde_json::json!({}),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn link(from_block_id: &str, to_page_id: &str) -> Link {
+        Link {
+            from_block_id: from_block_id.to_string(),
+            to_page_id: to_page_id.to_string(),
+            link_type: LinkType::Page,
+        }
+    }
+
+    #[test]
+    fn hydrate_backlinks_with_titles_batches_lookup_once() {
+        let raw = vec![
+            (
+                link("block-1", "target"),
+                block("block-1", "page-2", "second page"),
+            ),
+            (
+                link("block-2", "target"),
+                block("block-2", "page-1", "first page"),
+            ),
+            (
+                link("block-3", "target"),
+                block("block-3", "page-2", "same page again"),
+            ),
+            (
+                link("block-4", "target"),
+                block("block-4", "page-3", "missing title"),
+            ),
+        ];
+        let call_count = Cell::new(0);
+        let requested_ids = RefCell::new(Vec::new());
+
+        let resolved = hydrate_backlinks_with_titles(raw, |page_ids| {
+            call_count.set(call_count.get() + 1);
+            *requested_ids.borrow_mut() = page_ids.to_vec();
+            Ok(HashMap::from([
+                ("page-1".to_string(), "Page One".to_string()),
+                ("page-2".to_string(), "Page Two".to_string()),
+            ]))
+        })
+        .expect("batched title lookup should succeed");
+
+        assert_eq!(call_count.get(), 1);
+        assert_eq!(
+            requested_ids.into_inner(),
+            vec![
+                "page-1".to_string(),
+                "page-2".to_string(),
+                "page-3".to_string()
+            ]
+        );
+        assert_eq!(
+            resolved
+                .into_iter()
+                .map(|(_, _, title)| title)
+                .collect::<Vec<_>>(),
+            vec![
+                "Page Two".to_string(),
+                "Page One".to_string(),
+                "Page Two".to_string(),
+                "(unknown page)".to_string()
+            ]
+        );
     }
 }

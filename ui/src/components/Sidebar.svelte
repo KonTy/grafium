@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, listPages, listJournalPages, searchFts, getPage, addFavorite, removeFavorite } from "../lib/api";
-  import { createSidebarSearchController } from "../lib/sidebarSearch";
-  import type { Page, Block } from "../lib/api";
+  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
+  import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
+  import type { Page, PageSummary, Block } from "../lib/api";
+  import type { SidebarSearchResult } from "../lib/sidebarSearch";
 
   interface Props {
     currentPage?: Page | null;
@@ -20,20 +21,9 @@
   let favorites: Page[] = $state([]);
   let recentPages: Page[] = $state([]);
   let searchQuery = $state("");
-  type SearchResultItem =
-    { kind: "page"; page: Page }
-    | { kind: "block"; block: Block };
-  interface SearchablePage {
-    page: Page;
-    lowerTitle: string;
-    fuzzyTitle: string;
-  }
-
-  let searchResults: SearchResultItem[] = $state([]);
+  let searchResults: SidebarSearchResult[] = $state([]);
   let showSearch = $state(false);
   let searchInputEl: HTMLInputElement | null = $state(null);
-  let allSearchPages: SearchablePage[] = $state([]);
-  let pagesLoaded = $state(false);
 
   // Context menu state
   interface ContextMenu {
@@ -97,100 +87,7 @@
     favorites = await listFavorites().catch(() => []);
   }
 
-  function normalizeForFuzzy(value: string): string {
-    return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-  }
-
-  function isSubsequence(needle: string, haystack: string): boolean {
-    let i = 0;
-    let j = 0;
-    while (i < needle.length && j < haystack.length) {
-      if (needle[i] === haystack[j]) i += 1;
-      j += 1;
-    }
-    return i === needle.length;
-  }
-
-  function toIsoDate(year: number, month: number, day: number): string | null {
-    const dt = new Date(year, month - 1, day);
-    if (
-      dt.getFullYear() !== year ||
-      dt.getMonth() !== month - 1 ||
-      dt.getDate() !== day
-    ) {
-      return null;
-    }
-    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  }
-
-  function normalizeDateInput(raw: string): string | null {
-    const value = raw.trim();
-    if (!value) return null;
-
-    let match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-    if (match) {
-      return toIsoDate(Number(match[1]), Number(match[2]), Number(match[3]));
-    }
-
-    match = value.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2}|\d{4})$/);
-    if (match) {
-      const month = Number(match[1]);
-      const day = Number(match[2]);
-      const yrRaw = Number(match[3]);
-      const year = match[3].length === 2 ? 2000 + yrRaw : yrRaw;
-      return toIsoDate(year, month, day);
-    }
-
-    return null;
-  }
-
-  function toSearchablePage(page: Page): SearchablePage {
-    return {
-      page,
-      lowerTitle: page.title.toLowerCase(),
-      fuzzyTitle: normalizeForFuzzy(page.title),
-    };
-  }
-
-  function scoreSearchablePage(
-    page: SearchablePage,
-    queryLower: string,
-    normalizedQuery: string,
-    isoDateQuery: string | null
-  ): number | null {
-    if (isoDateQuery && page.page.title === isoDateQuery) return 1200;
-
-    const exact = page.lowerTitle.indexOf(queryLower);
-    if (exact >= 0) return 1000 - exact;
-
-    if (normalizedQuery.length > 0) {
-      const fuzzyContains = page.fuzzyTitle.indexOf(normalizedQuery);
-      if (fuzzyContains >= 0) return 800 - fuzzyContains;
-      if (isSubsequence(normalizedQuery, page.fuzzyTitle)) return 500;
-    }
-
-    return null;
-  }
-
-  async function ensureSearchPagesLoaded() {
-    if (pagesLoaded) return;
-
-    const [journalPages, regularPages] = await Promise.all([
-      listJournalPages(5000, 0),
-      listPages(5000, 0),
-    ]);
-
-    const deduped = new Map<string, Page>();
-    for (const p of [...journalPages, ...regularPages]) {
-      const key = p.title.toLowerCase();
-      if (!deduped.has(key)) deduped.set(key, p);
-    }
-
-    allSearchPages = Array.from(deduped.values()).map(toSearchablePage);
-    pagesLoaded = true;
-  }
-
-  const searchController = createSidebarSearchController<SearchResultItem[]>({
+  const searchController = createSidebarSearchController<SidebarSearchResult[]>({
     debounceMs: 120,
     run: runSidebarSearch,
     apply: (_query, results) => {
@@ -206,35 +103,6 @@
       searchController.cancel();
     };
   });
-
-  async function runSidebarSearch(query: string): Promise<SearchResultItem[]> {
-    try {
-      await ensureSearchPagesLoaded();
-
-      const isoDateQuery = normalizeDateInput(query);
-      const queryLower = query.toLowerCase();
-      const normalizedQuery = normalizeForFuzzy(query);
-
-      const pageMatches = allSearchPages
-        .map((page) => ({
-          page: page.page,
-          score: scoreSearchablePage(page, queryLower, normalizedQuery, isoDateQuery),
-        }))
-        .filter((match): match is { page: Page; score: number } => match.score !== null)
-        .sort((a, b) => b.score - a.score || a.page.title.localeCompare(b.page.title))
-        .slice(0, 10)
-        .map((match) => ({ kind: "page" as const, page: match.page }));
-
-      const blockMatches = query.length >= 2
-        ? (await searchFts(query, 20)).slice(0, 12).map((block) => ({ kind: "block" as const, block }))
-        : [];
-
-      return [...pageMatches, ...blockMatches];
-    } catch (error) {
-      console.error("Sidebar search failed:", error);
-      return [];
-    }
-  }
 
   function handleSearchInput() {
     searchController.submit(searchQuery);
@@ -271,15 +139,13 @@
     void openSearch();
   }
 
-  function invalidateSearchPages() {
+  function resetSearchState() {
     clearSearch(true);
-    pagesLoaded = false;
-    allSearchPages = [];
   }
 
   function handleSidebarGraphChanged() {
     void loadSidebar();
-    invalidateSearchPages();
+    resetSearchState();
     onGraphChanged();
   }
 
@@ -321,7 +187,7 @@
     onNavigate("__journal__");
   }
 
-  function navigateToPageResult(page: Page) {
+  function navigateToPageResult(page: PageSummary) {
     showSearch = false;
     clearSearch(true);
     onNavigate(page.title);

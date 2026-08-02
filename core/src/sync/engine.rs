@@ -274,7 +274,9 @@ impl SyncEngine {
             match self.ensure_local_hash(rel_path, local_files) {
                 Ok(hash) => Some(hash),
                 Err(e) => {
-                    result.errors.push(format!("Hash local {}: {}", rel_path, e));
+                    result
+                        .errors
+                        .push(format!("Hash local {}: {}", rel_path, e));
                     return;
                 }
             }
@@ -285,7 +287,9 @@ impl SyncEngine {
             match self.ensure_remote_hash(backend, rel_path, remote_files) {
                 Ok(hash) => Some(hash),
                 Err(e) => {
-                    result.errors.push(format!("Hash remote {}: {}", rel_path, e));
+                    result
+                        .errors
+                        .push(format!("Hash remote {}: {}", rel_path, e));
                     return;
                 }
             }
@@ -306,13 +310,7 @@ impl SyncEngine {
                 self.push_to_remote(backend, rel_path, local_files, state, result);
             }
             (false, true) => {
-                self.pull_from_remote(
-                    backend,
-                    rel_path,
-                    Some(remote_meta.clone()),
-                    state,
-                    result,
-                );
+                self.pull_from_remote(backend, rel_path, Some(remote_meta.clone()), state, result);
             }
             (true, true) => {
                 if local_hash == remote_hash {
@@ -357,14 +355,18 @@ impl SyncEngine {
         let local_hash = match self.ensure_local_hash(rel_path, local_files) {
             Ok(hash) => hash,
             Err(e) => {
-                result.errors.push(format!("Hash local {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Hash local {}: {}", rel_path, e));
                 return;
             }
         };
         let remote_hash = match self.ensure_remote_hash(backend, rel_path, remote_files) {
             Ok(hash) => hash,
             Err(e) => {
-                result.errors.push(format!("Hash remote {}: {}", rel_path, e));
+                result
+                    .errors
+                    .push(format!("Hash remote {}: {}", rel_path, e));
                 return;
             }
         };
@@ -378,13 +380,7 @@ impl SyncEngine {
             state.record_sync(rel_path, &local_hash, Some(&local_meta), Some(&remote_meta));
         } else {
             // Different content — conflict
-            self.handle_conflict(
-                backend,
-                rel_path,
-                Some(remote_meta.clone()),
-                state,
-                result,
-            );
+            self.handle_conflict(backend, rel_path, Some(remote_meta.clone()), state, result);
         }
     }
 
@@ -629,10 +625,7 @@ impl SyncEngine {
         rel_path: &str,
         local_files: &mut HashMap<String, FileMetadata>,
     ) -> Result<String> {
-        if let Some(hash) = local_files
-            .get(rel_path)
-            .and_then(|meta| meta.hash.clone())
-        {
+        if let Some(hash) = local_files.get(rel_path).and_then(|meta| meta.hash.clone()) {
             return Ok(hash);
         }
 

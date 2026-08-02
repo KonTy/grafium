@@ -32,6 +32,10 @@ pub struct Graph {
     /// file path. This lets duplicate watcher events skip a full parse/reindex
     /// when the bytes on disk are unchanged.
     indexed_content_hashes: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// SHA-256 of the last canonical serializer output the app itself wrote for
+    /// each file path. Incremental single-block patching is only attempted when
+    /// the current on-disk bytes still match one of these canonical writes.
+    canonical_content_hashes: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
@@ -75,6 +79,12 @@ struct IndexedParsedBlock {
 }
 
 type BlockSlot = (Option<String>, i32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageWriteStrategy {
+    FullRewrite,
+    IncrementalPatch,
+}
 
 impl IndexedParsedBlock {
     fn matches_block(&self, block: &Block) -> bool {
@@ -225,13 +235,17 @@ impl Graph {
             ExtractedLink::Page(title) => {
                 // Auto-create parent hierarchy if title contains "/"
                 self.ensure_parent_hierarchy_in_connection(conn, &title)?;
-                let page = self.db.get_or_create_page_in_connection(conn, &title, false)?;
+                let page = self
+                    .db
+                    .get_or_create_page_in_connection(conn, &title, false)?;
                 Ok((page.id, LinkType::Page))
             }
             ExtractedLink::Tag(tag) => {
                 // Auto-create parent hierarchy for tags too
                 self.ensure_parent_hierarchy_in_connection(conn, &tag)?;
-                let page = self.db.get_or_create_page_in_connection(conn, &tag, false)?;
+                let page = self
+                    .db
+                    .get_or_create_page_in_connection(conn, &tag, false)?;
                 Ok((page.id, LinkType::Tag))
             }
             ExtractedLink::BlockRef(block_id) => Ok((block_id, LinkType::BlockRef)),
@@ -397,6 +411,7 @@ impl Graph {
             journals_dir,
             self_writes: Arc::new(Mutex::new(HashMap::new())),
             indexed_content_hashes: Arc::new(Mutex::new(HashMap::new())),
+            canonical_content_hashes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -431,14 +446,31 @@ impl Graph {
             .map_or(false, |known_hash| known_hash == content_hash)
     }
 
+    fn canonical_content_matches(&self, path: &Path, content_hash: &str) -> bool {
+        self.canonical_content_hashes
+            .lock()
+            .ok()
+            .and_then(|map| map.get(path).cloned())
+            .map_or(false, |known_hash| known_hash == content_hash)
+    }
+
     fn remember_indexed_content_hash(&self, path: &Path, content_hash: String) {
         if let Ok(mut map) = self.indexed_content_hashes.lock() {
             map.insert(path.to_path_buf(), content_hash);
         }
     }
 
+    fn remember_canonical_content_hash(&self, path: &Path, content_hash: String) {
+        if let Ok(mut map) = self.canonical_content_hashes.lock() {
+            map.insert(path.to_path_buf(), content_hash);
+        }
+    }
+
     fn forget_indexed_content(&self, path: &Path) {
         if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            map.remove(path);
+        }
+        if let Ok(mut map) = self.canonical_content_hashes.lock() {
             map.remove(path);
         }
     }
@@ -451,6 +483,9 @@ impl Graph {
         // Clear existing index
         self.db.clear_all()?;
         if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            map.clear();
+        }
+        if let Ok(mut map) = self.canonical_content_hashes.lock() {
             map.clear();
         }
 
@@ -534,9 +569,13 @@ impl Graph {
         let mut conn = self.db.conn()?;
         let tx = conn.transaction()?;
 
-        let page = self
-            .db
-            .upsert_page_in_connection(&tx, &title, is_journal, Some(&rel_path), &parsed.properties)?;
+        let page = self.db.upsert_page_in_connection(
+            &tx,
+            &title,
+            is_journal,
+            Some(&rel_path),
+            &parsed.properties,
+        )?;
 
         self.db
             .sync_page_properties_in_connection(&tx, &page.id, &parsed.properties)?;
@@ -630,8 +669,10 @@ impl Graph {
     ) {
         for (i, pb) in blocks.iter().enumerate() {
             let slot = (parent_id.clone(), i as i32);
-            let block_id = if let Some(explicit_id) =
-                pb.id.as_deref().filter(|id| used_ids.insert((*id).to_string()))
+            let block_id = if let Some(explicit_id) = pb
+                .id
+                .as_deref()
+                .filter(|id| used_ids.insert((*id).to_string()))
             {
                 explicit_id.to_string()
             } else if let Some(existing_ids) = existing_ids_by_slot.get_mut(&slot) {
@@ -708,7 +749,8 @@ impl Graph {
         }
 
         if block.is_flashcard {
-            if let (Some(ref front), Some(ref back)) = (&block.flashcard_front, &block.flashcard_back)
+            if let (Some(ref front), Some(ref back)) =
+                (&block.flashcard_front, &block.flashcard_back)
             {
                 let tags: Vec<String> = parser::extract_links(&block.content)
                     .into_iter()
@@ -726,7 +768,8 @@ impl Graph {
             self.db.delete_flashcard_in_connection(conn, block_id)?;
         }
 
-        self.db.delete_links_from_block_in_connection(conn, block_id)?;
+        self.db
+            .delete_links_from_block_in_connection(conn, block_id)?;
         for link in parser::extract_links(&block.content) {
             let (target, link_type) = self.resolve_link_target_in_connection(conn, link)?;
             self.db
@@ -833,8 +876,11 @@ impl Graph {
         // Update in DB
         self.db.update_block(block_id, content, properties)?;
 
-        // Re-serialize to disk
-        self.write_page_to_disk(&page)?;
+        if properties.is_none() {
+            let _ = self.write_single_block_update_to_disk(&page, &block)?;
+        } else {
+            self.write_page_to_disk(&page)?;
+        }
 
         // Update links
         self.db.delete_links_from_block(block_id)?;
@@ -864,7 +910,7 @@ impl Graph {
         if new_content != block.content {
             let page = self.db.get_page_by_id(&block.page_id)?;
             self.db.update_block(block_id, &new_content, None)?;
-            self.write_page_to_disk(&page)?;
+            let _ = self.write_single_block_update_to_disk(&page, &block)?;
         }
 
         Ok(new_state)
@@ -889,7 +935,7 @@ impl Graph {
         if new_content != block.content {
             let page = self.db.get_page_by_id(&block.page_id)?;
             self.db.update_block(block_id, &new_content, None)?;
-            self.write_page_to_disk(&page)?;
+            let _ = self.write_single_block_update_to_disk(&page, &block)?;
         }
 
         Ok(())
@@ -944,7 +990,7 @@ impl Graph {
             .upsert_task(block_id, &state, scheduled.as_deref(), deadline.as_deref())?;
 
         // Write to disk
-        self.write_page_to_disk(&page)?;
+        let _ = self.write_single_block_update_to_disk(&page, &block)?;
 
         Ok(new_content)
     }
@@ -1142,12 +1188,10 @@ impl Graph {
             fs::rename(&old_path, &new_path)?;
             count += 1;
         }
-
         Ok(count)
     }
 
-    /// Serialize all blocks for a page and write the .md file.
-    fn write_page_to_disk(&self, page: &Page) -> Result<()> {
+    fn resolve_page_file_path(&self, page: &Page) -> Result<PathBuf> {
         let file_path = match &page.file_path {
             Some(fp) => self.root_dir.join(fp),
             None => {
@@ -1173,20 +1217,134 @@ impl Graph {
                 path
             }
         };
+        Ok(file_path)
+    }
 
-        let blocks = self.db.list_blocks_for_page(&page.id)?;
-        let content = parser::serialize_page(&page.properties, &blocks);
-
+    fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
         fs::write(&file_path, &content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
         // create/modify event instead of treating it as an external change
         // (which previously triggered a full, destructive reindex).
         self.note_self_write(&file_path);
-        self.remember_indexed_content_hash(&file_path, Self::content_hash(&content));
+        let content_hash = Self::content_hash(content);
+        self.remember_indexed_content_hash(&file_path, content_hash.clone());
+        self.remember_canonical_content_hash(&file_path, content_hash);
 
         Ok(())
     }
+
+    fn byte_range_for_source_lines(
+        content: &str,
+        source_line_range: &std::ops::Range<usize>,
+    ) -> Option<std::ops::Range<usize>> {
+        if source_line_range.start > source_line_range.end || content.contains('\r') {
+            return None;
+        }
+
+        let mut offsets = vec![0usize];
+        let mut total = 0usize;
+        for segment in content.split_inclusive('\n') {
+            total += segment.len();
+            offsets.push(total);
+        }
+
+        if source_line_range.start >= offsets.len() || source_line_range.end >= offsets.len() {
+            return None;
+        }
+
+        Some(offsets[source_line_range.start]..offsets[source_line_range.end])
+    }
+
+    fn write_single_block_update_to_disk(
+        &self,
+        page: &Page,
+        previous_block: &Block,
+    ) -> Result<PageWriteStrategy> {
+        let file_path = self.resolve_page_file_path(page)?;
+        let current_content = match fs::read_to_string(&file_path) {
+            Ok(content) => content,
+            Err(_) => {
+                self.write_page_to_disk(page)?;
+                return Ok(PageWriteStrategy::FullRewrite);
+            }
+        };
+
+        let current_hash = Self::content_hash(&current_content);
+        if !self.canonical_content_matches(&file_path, &current_hash)
+            || current_content.contains('\r')
+        {
+            self.write_page_to_disk(page)?;
+            return Ok(PageWriteStrategy::FullRewrite);
+        }
+
+        let filename = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("untitled.md");
+        let parsed = parser::parse_page(&current_content, filename);
+        let Some(parsed_block) = find_parsed_block_by_id(&parsed.blocks, &previous_block.id) else {
+            self.write_page_to_disk(page)?;
+            return Ok(PageWriteStrategy::FullRewrite);
+        };
+
+        if parsed_block.content != previous_block.content
+            || parsed_block.properties != previous_block.properties
+        {
+            self.write_page_to_disk(page)?;
+            return Ok(PageWriteStrategy::FullRewrite);
+        }
+
+        let Some(byte_range) =
+            Self::byte_range_for_source_lines(&current_content, &parsed_block.source_line_range)
+        else {
+            self.write_page_to_disk(page)?;
+            return Ok(PageWriteStrategy::FullRewrite);
+        };
+
+        let blocks = self.db.list_blocks_for_page(&page.id)?;
+        let Some(fragment) = parser::serializer::serialize_block_subtree(
+            &blocks,
+            &previous_block.id,
+            parsed_block.indent_level as usize,
+        ) else {
+            self.write_page_to_disk(page)?;
+            return Ok(PageWriteStrategy::FullRewrite);
+        };
+
+        let mut patched = String::with_capacity(
+            current_content.len() - (byte_range.end - byte_range.start) + fragment.len(),
+        );
+        patched.push_str(&current_content[..byte_range.start]);
+        patched.push_str(&fragment);
+        patched.push_str(&current_content[byte_range.end..]);
+        self.persist_page_content(&file_path, &patched)?;
+
+        Ok(PageWriteStrategy::IncrementalPatch)
+    }
+
+    /// Serialize all blocks for a page and write the .md file.
+    fn write_page_to_disk(&self, page: &Page) -> Result<()> {
+        let file_path = self.resolve_page_file_path(page)?;
+        let blocks = self.db.list_blocks_for_page(&page.id)?;
+        let content = parser::serialize_page(&page.properties, &blocks);
+        self.persist_page_content(&file_path, &content)
+    }
+}
+
+fn find_parsed_block_by_id<'a>(
+    blocks: &'a [ParsedBlock],
+    block_id: &str,
+) -> Option<&'a ParsedBlock> {
+    for block in blocks {
+        if block.id.as_deref() == Some(block_id) {
+            return Some(block);
+        }
+        if let Some(found) = find_parsed_block_by_id(&block.children, block_id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Compute the 3-letter day abbreviation from an ISO date string (YYYY-MM-DD).
@@ -1469,6 +1627,84 @@ mod tests {
 
         let page = graph.db.get_page_by_title("ordering")?;
         assert_eq!(graph.next_order_index_for_page(&page.id)?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn single_block_patch_matches_full_rewrite_bytes() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("patch-target", false)?;
+        let initial_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&initial_block.id, "Alpha", None)?;
+        let middle = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Beta\nsecond line",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        graph.create_block(
+            &page.id,
+            None,
+            2,
+            "Gamma",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let before_edit = graph.db.get_block_by_id(&middle.id)?;
+        graph
+            .db
+            .update_block(&middle.id, "Beta updated\nsecond line", None)?;
+
+        let strategy = graph.write_single_block_update_to_disk(&page, &before_edit)?;
+        assert_eq!(strategy, PageWriteStrategy::IncrementalPatch);
+
+        let file_path = graph.pages_dir.join("patch-target.md");
+        let patched_content = fs::read_to_string(&file_path)?;
+
+        graph.write_page_to_disk(&page)?;
+        let full_rewrite_content = fs::read_to_string(&file_path)?;
+
+        assert_eq!(patched_content, full_rewrite_content);
+        assert!(patched_content.contains("Beta updated"));
+        Ok(())
+    }
+
+    #[test]
+    fn single_block_patch_falls_back_to_full_rewrite_for_crlf_files() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("patch-fallback", false)?;
+        let initial_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&initial_block.id, "Alpha", None)?;
+
+        let file_path = graph.pages_dir.join("patch-fallback.md");
+        let lf_content = fs::read_to_string(&file_path)?;
+        let crlf_content = lf_content.replace('\n', "\r\n");
+        fs::write(&file_path, &crlf_content)?;
+        let crlf_hash = Graph::content_hash(&crlf_content);
+        graph.remember_indexed_content_hash(&file_path, crlf_hash.clone());
+        graph.remember_canonical_content_hash(&file_path, crlf_hash);
+
+        let before_edit = graph.db.get_block_by_id(&initial_block.id)?;
+        graph.db.update_block(&initial_block.id, "Beta", None)?;
+
+        let strategy = graph.write_single_block_update_to_disk(&page, &before_edit)?;
+        assert_eq!(strategy, PageWriteStrategy::FullRewrite);
+
+        let final_content = fs::read_to_string(&file_path)?;
+        let expected = crate::parser::serialize_page(
+            &page.properties,
+            &graph.db.list_blocks_for_page(&page.id)?,
+        );
+        assert_eq!(final_content, expected);
+        assert!(final_content.contains("Beta"));
+        assert!(!final_content.contains("\r\n"));
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use crate::models::{BlockType, TaskState};
 use regex::Regex;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 static PROPERTY_RE: LazyLock<Regex> =
@@ -37,6 +38,7 @@ pub struct ParsedBlock {
     pub id: Option<String>,
     pub content: String,
     pub indent_level: u32,
+    pub source_line_range: Range<usize>,
     pub block_type: BlockType,
     pub properties: serde_json::Value,
     pub task_state: Option<TaskState>,
@@ -138,6 +140,8 @@ fn normalize_fenced_code_sequences(blocks: Vec<ParsedBlock>) -> Vec<ParsedBlock>
                     content.push_str(first_line_trimmed(&blocks[end].content));
 
                     merged.content = content;
+                    merged.source_line_range =
+                        blocks[i].source_line_range.start..blocks[end].source_line_range.end;
                     merged.children = Vec::new();
                     out.push(merged);
                     i = end + 1;
@@ -335,6 +339,7 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
         id: block_id,
         content: full_content,
         indent_level,
+        source_line_range: start..start + consumed,
         block_type,
         properties: serde_json::Value::Object(properties),
         task_state,
@@ -418,6 +423,16 @@ mod tests {
         assert!(is_journal_filename("2024_01_15.md"));
         assert!(is_journal_filename("2024-01-15.md"));
         assert!(!is_journal_filename("my_page.md"));
+    }
+
+    #[test]
+    fn test_source_line_range_covers_entire_block_subtree() {
+        let content =
+            "- Parent\n  id:: parent\n  - Child\n    id:: child\n- Sibling\n  id:: sibling\n";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks[0].source_line_range, 0..4);
+        assert_eq!(parsed.blocks[1].source_line_range, 4..6);
     }
 
     #[test]

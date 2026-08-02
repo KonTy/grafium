@@ -1412,6 +1412,7 @@ pub fn run() {
             commands::pages::delete_page,
             commands::pages::get_parent_page,
             commands::pages::get_child_pages,
+            commands::pages::search_page_titles,
             commands::blocks::list_blocks,
             commands::blocks::create_block,
             commands::blocks::update_block,
