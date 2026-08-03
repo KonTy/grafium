@@ -480,9 +480,9 @@ pub fn text_wrap_known_terms(content: String, terms: Vec<String>) -> String {
     grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
 }
 
-/// Inserts an AI-generated page summary (title answer + prose summary) as
-/// a new block at the very top of the page (right after the title), and
-/// wraps each of the summary's `tags` in place — as `[[wiki-link]]`s —
+/// Inserts an AI-generated page summary (title answer + one paragraph per
+/// topic) as a new block at the very top of the page (right after the
+/// title), and wraps each topic's `tags` in place — as `[[wiki-link]]`s —
 /// across the page's existing block content wherever those terms already
 /// appear verbatim. Used by the "Insert into page" button in
 /// `ReferencePanel.svelte`, which only fires on explicit user action so
@@ -492,8 +492,7 @@ pub fn ai_insert_page_summary(
     app_state: State<'_, crate::AppState>,
     page_id: String,
     title_answer: Option<String>,
-    summary: String,
-    tags: Vec<String>,
+    topics: Vec<grafium_core::ai::references::TopicSummary>,
 ) -> Result<(), String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
 
@@ -504,19 +503,35 @@ pub fn ai_insert_page_summary(
             summary_text.push_str("\n\n");
         }
     }
-    summary_text.push_str(summary.trim());
+    // One heading + paragraph per topic, same shape as the media-import
+    // transcript notes, so a multi-subject "Research this page" summary
+    // (e.g. a long podcast transcript) keeps every topic distinguishable.
+    let mut all_tags: Vec<String> = Vec::new();
+    for (i, topic) in topics.iter().enumerate() {
+        if i > 0 {
+            summary_text.push_str("\n\n");
+        }
+        summary_text.push_str(&format!("### {}\n\n", topic.topic.trim()));
+        summary_text.push_str(topic.summary.trim());
+        for tag in &topic.tags {
+            if !all_tags.iter().any(|t: &String| t.eq_ignore_ascii_case(tag)) {
+                all_tags.push(tag.clone());
+            }
+        }
+    }
 
     graph
         .insert_block_at_top(&page_id, &summary_text)
         .map_err(|e| e.to_string())?;
 
-    if !tags.is_empty() {
+    if !all_tags.is_empty() {
         let blocks = graph
             .db
             .list_blocks_for_page(&page_id)
             .map_err(|e| e.to_string())?;
         for block in blocks {
-            let wrapped = grafium_core::parser::wrap_known_terms_as_links(&block.content, &tags);
+            let wrapped =
+                grafium_core::parser::wrap_known_terms_as_links(&block.content, &all_tags);
             if wrapped != block.content {
                 graph
                     .update_block(&block.id, &wrapped, None)

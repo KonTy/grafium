@@ -8,6 +8,8 @@
 //! `transcript_source` frontmatter field.
 
 use crate::ai::references::PageSummary;
+#[cfg(test)]
+use crate::ai::references::TopicSummary;
 use crate::media::captions::VideoMetadata;
 use crate::media::types::{Transcript, TranscriptSource};
 
@@ -20,9 +22,10 @@ const TIMESTAMP_GROUP_MS: i64 = 30_000;
 /// Builds the full markdown content for a transcript note: YAML
 /// frontmatter (source URL, title, uploader, duration, where the
 /// transcript came from, when it was fetched), an optional AI-generated
-/// "## Summary" section (title-answer, prose summary, `#hashtag` tags) when
-/// `summary` is available, followed by the transcript body, grouped into
-/// `~30s` chunks each prefixed with a `**[mm:ss]**` timestamp marker.
+/// "## Summary" section — one `###`-headed paragraph + `#hashtag` tags per
+/// distinct topic discussed, plus a title-answer line — when `summary` is
+/// available, followed by the transcript body, grouped into `~30s` chunks
+/// each prefixed with a `**[mm:ss]**` timestamp marker.
 pub fn transcript_to_markdown(
     url: &str,
     metadata: &VideoMetadata,
@@ -49,9 +52,9 @@ pub fn transcript_to_markdown(
         chrono::Utc::now().to_rfc3339()
     ));
     if let Some(summary) = summary {
-        if !summary.tags.is_empty() {
-            let tags_yaml = summary
-                .tags
+        let all_tags = summary.all_tags();
+        if !all_tags.is_empty() {
+            let tags_yaml = all_tags
                 .iter()
                 .map(|tag| format!("\"{}\"", escape_yaml(tag)))
                 .collect::<Vec<_>>()
@@ -71,17 +74,25 @@ pub fn transcript_to_markdown(
         if let Some(title_answer) = &summary.title_answer {
             out.push_str(&format!("**{title_answer}**\n\n"));
         }
-        out.push_str(summary.summary.trim());
-        out.push_str("\n\n");
-        if !summary.tags.is_empty() {
-            let hashtags = summary
-                .tags
-                .iter()
-                .map(|tag| format!("#{tag}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&hashtags);
+        // One heading + paragraph per distinct topic, rather than a single
+        // blended summary, so a long multi-subject recording (e.g. a
+        // podcast covering many topics) keeps every topic distinguishable
+        // once the transcript below is eventually deleted and this
+        // section becomes the only record of what was discussed.
+        for topic in &summary.topics {
+            out.push_str(&format!("### {}\n\n", topic.topic.trim()));
+            out.push_str(topic.summary.trim());
             out.push_str("\n\n");
+            if !topic.tags.is_empty() {
+                let hashtags = topic
+                    .tags
+                    .iter()
+                    .map(|tag| format!("#{tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push_str(&hashtags);
+                out.push_str("\n\n");
+            }
         }
     }
 
@@ -270,9 +281,12 @@ mod tests {
     fn renders_summary_section_with_title_answer_and_hashtags_before_transcript() {
         let summary = PageSummary {
             title_answer: Some("Yes, magnesium helps with sleep.".to_string()),
-            summary: "The video covers magnesium's role in sleep and insulin sensitivity."
-                .to_string(),
-            tags: vec!["magnesium".to_string(), "insulin_resistance".to_string()],
+            topics: vec![TopicSummary {
+                topic: "Magnesium and sleep".to_string(),
+                summary: "The video covers magnesium's role in sleep and insulin sensitivity."
+                    .to_string(),
+                tags: vec!["magnesium".to_string(), "insulin_resistance".to_string()],
+            }],
         };
         let md = transcript_to_markdown(
             "https://youtu.be/abc123",
@@ -284,11 +298,45 @@ mod tests {
         assert!(md.contains("tags: [\"magnesium\", \"insulin_resistance\"]"));
         assert!(md.contains("## Summary"));
         assert!(md.contains("**Yes, magnesium helps with sleep.**"));
+        assert!(md.contains("### Magnesium and sleep"));
         assert!(md.contains(
             "The video covers magnesium's role in sleep and insulin sensitivity."
         ));
         assert!(md.contains("#magnesium #insulin_resistance"));
         // Summary must come before the transcript body.
         assert!(md.find("## Summary").unwrap() < md.find("## Transcript").unwrap());
+    }
+
+    #[test]
+    fn renders_multiple_topics_as_separate_headed_paragraphs() {
+        let summary = PageSummary {
+            title_answer: None,
+            topics: vec![
+                TopicSummary {
+                    topic: "Magnesium and sleep".to_string(),
+                    summary: "Magnesium glycinate can improve sleep onset.".to_string(),
+                    tags: vec!["magnesium".to_string()],
+                },
+                TopicSummary {
+                    topic: "Insulin resistance".to_string(),
+                    summary: "Cutting refined carbs helps insulin sensitivity.".to_string(),
+                    tags: vec!["insulin_resistance".to_string()],
+                },
+            ],
+        };
+        let md = transcript_to_markdown(
+            "https://youtu.be/abc123",
+            &VideoMetadata::default(),
+            &sample_transcript(),
+            TranscriptSource::Whisper,
+            Some(&summary),
+        );
+        assert!(md.contains("### Magnesium and sleep"));
+        assert!(md.contains("Magnesium glycinate can improve sleep onset."));
+        assert!(md.contains("### Insulin resistance"));
+        assert!(md.contains("Cutting refined carbs helps insulin sensitivity."));
+        // Both topics' tags should be merged into the frontmatter tags list.
+        assert!(md.contains("tags: [\"magnesium\", \"insulin_resistance\"]"));
+        assert!(md.find("Magnesium and sleep").unwrap() < md.find("Insulin resistance").unwrap());
     }
 }

@@ -78,18 +78,18 @@
   }
 
   /// Writes the current summary into the actual page: a new block right
-  /// after the title (title-answer + prose summary), plus the summary's
-  /// tags wrapped in place as `[[wiki-link]]`s across the page's existing
-  /// blocks. Explicit opt-in button rather than automatic on every
-  /// "Research this page" run, so re-running research never silently
-  /// duplicates content on the page.
+  /// after the title (title-answer + one heading/paragraph per topic),
+  /// plus each topic's tags wrapped in place as `[[wiki-link]]`s across
+  /// the page's existing blocks. Explicit opt-in button rather than
+  /// automatic on every "Research this page" run, so re-running research
+  /// never silently duplicates content on the page.
   async function insertSummaryIntoPage() {
     if (!pageId || !references?.summary || isInsertingSummary) return;
     isInsertingSummary = true;
     error = "";
     try {
-      const { title_answer, summary, tags } = references.summary;
-      await aiInsertPageSummary(pageId, title_answer, summary, tags ?? []);
+      const { title_answer, topics } = references.summary;
+      await aiInsertPageSummary(pageId, title_answer, topics ?? []);
       insertedSummary = true;
       window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId } }));
     } catch (e: any) {
@@ -217,14 +217,19 @@
                 {#if references.summary.title_answer}
                   <div class="summary-title-answer">{references.summary.title_answer}</div>
                 {/if}
-                <div class="summary-text">{references.summary.summary}</div>
-                {#if references.summary.tags?.length}
-                  <div class="summary-tags">
-                    {#each references.summary.tags as tag}
-                      <span class="summary-tag">#{tag}</span>
-                    {/each}
+                {#each references.summary.topics as topic}
+                  <div class="summary-topic">
+                    <div class="summary-topic-title">{topic.topic}</div>
+                    <div class="summary-text">{topic.summary}</div>
+                    {#if topic.tags?.length}
+                      <div class="summary-tags">
+                        {#each topic.tags as tag}
+                          <span class="summary-tag">#{tag}</span>
+                        {/each}
+                      </div>
+                    {/if}
                   </div>
-                {/if}
+                {/each}
                 <button
                   class="insert-summary-btn"
                   onclick={insertSummaryIntoPage}
@@ -536,6 +541,23 @@
     font-weight: 600;
     color: var(--text-primary, #fff);
     line-height: 1.4;
+  }
+
+  .summary-topic {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .summary-topic + .summary-topic {
+    padding-top: 8px;
+    border-top: 1px solid var(--bg-secondary, #1a1a24);
+  }
+
+  .summary-topic-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-color, #7c3aed);
   }
 
   .summary-text {

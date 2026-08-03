@@ -100,10 +100,15 @@ export interface RelatedPage {
   snippet: string;
 }
 
-export interface PageSummary {
-  title_answer: string | null;
+export interface TopicSummary {
+  topic: string;
   summary: string;
   tags: string[];
+}
+
+export interface PageSummary {
+  title_answer: string | null;
+  topics: TopicSummary[];
 }
 
 export interface PageReferencesMeta {
@@ -191,9 +196,10 @@ export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta
 }
 
 // Summarizes an arbitrary text selection (e.g. concatenated content of
-// selected blocks), returning the same title-answer/summary/tags shape
-// as `PageReferencesMeta.summary` — used by "Analyze Selected" in
-// PageContent.svelte to insert a summary block right after a selection.
+// selected blocks), returning the same title-answer/per-topic-summary
+// shape as `PageReferencesMeta.summary` (one paragraph + tags per distinct
+// topic covered) — used by "Analyze Selected" in PageContent.svelte to
+// insert a summary block right after a selection.
 export function aiSummarizeSelection(text: string, title?: string): Promise<PageSummary> {
   return invoke("ai_summarize_selection", { text, title });
 }
@@ -208,16 +214,16 @@ export function wrapKnownTermsInText(content: string, terms: string[]): Promise<
 }
 
 // Inserts an AI-generated page summary as a new block at the top of the
-// page (right after the title) and wraps its tags in place as
-// `[[wiki-link]]`s across the page's existing blocks. Used by the
-// "Insert into page" button in ReferencePanel.svelte.
+// page (right after the title) — one heading + paragraph per topic — and
+// wraps each topic's tags in place as `[[wiki-link]]`s across the page's
+// existing blocks. Used by the "Insert into page" button in
+// ReferencePanel.svelte.
 export function aiInsertPageSummary(
   pageId: string,
   titleAnswer: string | null,
-  summary: string,
-  tags: string[]
+  topics: TopicSummary[]
 ): Promise<void> {
-  return invoke("ai_insert_page_summary", { pageId, titleAnswer, summary, tags });
+  return invoke("ai_insert_page_summary", { pageId, titleAnswer, topics });
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────

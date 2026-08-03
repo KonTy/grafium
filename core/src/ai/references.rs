@@ -64,7 +64,12 @@ pub struct PageReferencesMeta {
     pub summary: Option<PageSummary>,
 }
 
-/// A short AI-generated digest of a page's content.
+/// A short AI-generated digest of a page's content, broken out per topic
+/// so multi-subject content (e.g. a long podcast transcript jumping
+/// between many unrelated subjects) gets one paragraph per subject
+/// instead of a single blended summary that risks dropping topics —
+/// important since the eventual workflow is to delete the original
+/// transcript/source text and keep only this summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageSummary {
     /// A single sentence directly answering/addressing the page title, when
@@ -72,15 +77,48 @@ pub struct PageSummary {
     /// title like "Is Rust Faster Than C++?" gets a one-line answer).
     /// `None` for purely descriptive titles (e.g. "Meeting Notes").
     pub title_answer: Option<String>,
-    /// A concise multi-sentence summary of the page's content.
+    /// One entry per distinct topic/subject discussed in the content, in
+    /// the order they're covered. Content about a single subject still
+    /// produces exactly one entry.
+    pub topics: Vec<TopicSummary>,
+}
+
+impl PageSummary {
+    /// All tags across every topic, in first-seen order and deduplicated
+    /// case-insensitively — used when a caller just needs a flat term list
+    /// to wrap in place (e.g. across a whole selection) and topic
+    /// boundaries don't matter.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for topic in &self.topics {
+            for tag in &topic.tags {
+                if seen.insert(tag.to_lowercase()) {
+                    out.push(tag.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A single topic's summary paragraph and key terms, one of potentially
+/// many that make up a [`PageSummary`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicSummary {
+    /// Short label for this specific topic (e.g. "Magnesium and sleep
+    /// quality"), not the overall content's title.
+    pub topic: String,
+    /// A concise paragraph summarizing what the content says about this
+    /// topic specifically (not the whole piece).
     pub summary: String,
     /// Short key-term labels (snake_case/hyphenated for multi-word topics,
-    /// e.g. `"magnesium"`, `"insulin_resistance"`) identifying the main
-    /// subjects covered. Each tag should be a term that actually appears
-    /// (verbatim, case-insensitive, ignoring the underscore/hyphen joiner)
-    /// in the source content, so callers can find-and-wrap it in place as a
-    /// real `[[wiki-link]]` in the original text rather than only showing
-    /// it in a separate summary panel.
+    /// e.g. `"magnesium"`, `"insulin_resistance"`) identifying this topic.
+    /// Each tag should be a term that actually appears (verbatim,
+    /// case-insensitive, ignoring the underscore/hyphen joiner) in the
+    /// source content, so callers can find-and-wrap it in place as a real
+    /// `[[wiki-link]]` in the original text rather than only showing it in
+    /// a separate summary panel.
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -515,21 +553,25 @@ fn concept_extraction_options() -> CompletionOptions {
     }
 }
 
-const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You are given an article's title and content.
+const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You are given a title and content (an article, video/podcast transcript, or similar).
+
+The content may cover a single subject or many distinct, unrelated subjects — for example a long podcast episode that jumps between many topics over its runtime. Identify EVERY distinct topic discussed. Do not skip minor topics and do not blend separate subjects into one paragraph: this summary may later fully replace the original content, so nothing meaningfully discussed should be lost.
 
 Return a JSON object with:
 - "title_answer": if the title poses a question or makes a claim that the content answers or supports/refutes, one sentence directly answering it using the content. If the title is purely descriptive (e.g. a name, a date, "Meeting Notes"), use null.
-- "summary": a concise 3-5 sentence summary of the article's key points, in your own words.
-- "tags": an array of 2-6 short key terms for the main subjects covered, taken VERBATIM from the article content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only include a term if the underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary. Use [] if nothing distinct stands out.
+- "topics": an array with one object per distinct topic/subject discussed, in the order they're covered (or most-to-least important if a topic recurs throughout). If the content only covers one subject, return a single-element array. Each object has:
+  - "topic": a short label for this specific subject (e.g. "Magnesium and sleep quality"), not the overall title.
+  - "summary": a 2-5 sentence paragraph, in your own words, covering everything meaningful said about THIS topic specifically (not the whole piece).
+  - "tags": an array of 1-4 short key terms for this topic, taken VERBATIM from the content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only include a term if the underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary.
 
-Example output:
-{"title_answer": "Yes, Rust generally outperforms C++ in memory-safety-critical workloads without sacrificing raw speed.", "summary": "The article compares Rust and C++ across compile-time safety, runtime performance, and tooling. It concludes Rust's ownership model prevents whole classes of bugs common in C++ with comparable benchmark performance in most workloads.", "tags": ["rust", "cpp", "memory_safety", "performance"]}
+Example output (a two-topic segment):
+{"title_answer": null, "topics": [{"topic": "Magnesium and sleep", "summary": "Magnesium glycinate was discussed as a supplement that can improve sleep onset and quality when taken before bed. The speaker noted most people are mildly deficient due to modern soil depletion and processed diets.", "tags": ["magnesium", "sleep"]}, {"topic": "Insulin resistance and diet", "summary": "The conversation shifted to insulin resistance, describing it as reduced cellular sensitivity to insulin that drives fat storage and fatigue. Cutting refined carbohydrates and adding resistance training were recommended as the most effective interventions.", "tags": ["insulin_resistance", "refined_carbohydrates"]}]}
 
 Return ONLY the JSON object, no other text."##;
 
 fn summary_options() -> CompletionOptions {
     CompletionOptions {
-        max_tokens: Some(400),
+        max_tokens: Some(1200),
         temperature: Some(0.3),
         ..Default::default()
     }
@@ -628,12 +670,19 @@ fn extract_json_object(response: &str) -> Result<&str> {
 
 fn parse_summary_response(response: &str) -> Result<PageSummary> {
     #[derive(Deserialize)]
-    struct SummaryJson {
-        #[serde(default)]
-        title_answer: Option<String>,
+    struct TopicJson {
+        topic: String,
         summary: String,
         #[serde(default)]
         tags: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct SummaryJson {
+        #[serde(default)]
+        title_answer: Option<String>,
+        #[serde(default)]
+        topics: Vec<TopicJson>,
     }
 
     let trimmed = response.trim();
@@ -642,17 +691,27 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
         concept_parse_error(&format!("invalid page summary JSON: {}", error), trimmed)
     })?;
 
+    let topics = parsed
+        .topics
+        .into_iter()
+        .filter(|topic| !topic.summary.trim().is_empty())
+        .map(|topic| TopicSummary {
+            topic: topic.topic.trim().to_string(),
+            summary: topic.summary.trim().to_string(),
+            tags: topic
+                .tags
+                .into_iter()
+                .map(|tag| tag.trim().trim_start_matches('#').to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect(),
+        })
+        .collect();
+
     Ok(PageSummary {
         title_answer: parsed
             .title_answer
             .filter(|answer| !answer.trim().is_empty()),
-        summary: parsed.summary,
-        tags: parsed
-            .tags
-            .into_iter()
-            .map(|tag| tag.trim().trim_start_matches('#').to_string())
-            .filter(|tag| !tag.is_empty())
-            .collect(),
+        topics,
     })
 }
 
@@ -937,7 +996,7 @@ mod tests {
             ]
         "#
             .to_string(),
-            r#"{"title_answer": null, "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling.", "tags": ["rust", "tokio"]}"#
+            r#"{"title_answer": null, "topics": [{"topic": "Rust and Tokio", "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling.", "tags": ["rust", "tokio"]}]}"#
                 .to_string(),
         ]);
         let (embedder, embedder_state) = MockEmbedder::new(HashMap::from([
@@ -1051,11 +1110,19 @@ mod tests {
 
         let summary = meta.summary.expect("summary should be generated");
         assert_eq!(summary.title_answer, None);
+        assert_eq!(summary.topics.len(), 1);
         assert_eq!(
-            summary.summary,
+            summary.topics[0].summary,
             "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."
         );
-        assert_eq!(summary.tags, vec!["rust".to_string(), "tokio".to_string()]);
+        assert_eq!(
+            summary.topics[0].tags,
+            vec!["rust".to_string(), "tokio".to_string()]
+        );
+        assert_eq!(
+            summary.all_tags(),
+            vec!["rust".to_string(), "tokio".to_string()]
+        );
 
         Ok(())
     }

@@ -737,10 +737,12 @@
   /// identified key terms as `[[wiki-link]]`s wherever they verbatim occur
   /// in the selected blocks' own text (so tagging is an actual edit to
   /// the page, not just a label in the summary), and inserts a clean
-  /// title-answer + prose summary as a new block right after the last
-  /// selected block — the same summary shape used by "Research this page"
-  /// and media imports, just applied to a manual text/block selection
-  /// instead of a whole page.
+  /// title-answer + one heading/paragraph per topic as a new block right
+  /// after the last selected block — the same per-topic summary shape
+  /// used by "Research this page" and media imports (so a selection
+  /// covering several distinct subjects gets a paragraph per subject
+  /// instead of one blended summary), just applied to a manual
+  /// text/block selection instead of a whole page.
   async function handleAnalyzeSelected() {
     if (selectedBlockIds.size === 0 || analyzingSelection) return;
     // Document order, not click order, so the summary reads coherently
@@ -757,11 +759,14 @@
     });
     try {
       const summary = await aiSummarizeSelection(text, page.title);
+      const allTags = Array.from(
+        new Set(summary.topics.flatMap((t) => t.tags ?? []).map((t) => t.trim()).filter(Boolean))
+      );
 
-      if (summary.tags?.length) {
+      if (allTags.length) {
         analyzeSelectionProgress = "Linking key terms...";
         for (const block of selected) {
-          const wrapped = await wrapKnownTermsInText(block.content, summary.tags);
+          const wrapped = await wrapKnownTermsInText(block.content, allTags);
           if (wrapped !== block.content) {
             await updateBlock(block.id, wrapped);
             blocks = blocks.map((b) => (b.id === block.id ? { ...b, content: wrapped } : b));
@@ -771,7 +776,9 @@
 
       const parts: string[] = [];
       if (summary.title_answer) parts.push(`**${summary.title_answer}**`);
-      parts.push(summary.summary);
+      for (const topic of summary.topics) {
+        parts.push(`### ${topic.topic}\n\n${topic.summary}`);
+      }
       const content = parts.join("\n\n");
 
       const lastBlock = selected[selected.length - 1];
