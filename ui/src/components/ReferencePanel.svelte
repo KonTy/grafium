@@ -49,6 +49,7 @@
     | { kind: "block"; block: Block; pageTitle: string };
   let quickMatches = $state<QuickMatch[]>([]);
   let isQuickSearching = $state(false);
+  let selectedResultIndex = $state(-1);
   let askQuery = $state("");
   let askAnswer = $state("");
   let isLoading = $state(false);
@@ -276,10 +277,30 @@
   let quickSearchVersion = 0;
   let quickSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Unified list backing keyboard navigation: quick (instant) matches first,
+  // then AI semantic results, so Up/Down/Enter can move through everything
+  // shown on screen regardless of which section it came from.
+  type CombinedResult =
+    | { source: "quick"; match: QuickMatch }
+    | { source: "ai"; result: SemanticSearchResult };
+  let combinedResults = $derived<CombinedResult[]>([
+    ...quickMatches.map((match) => ({ source: "quick" as const, match })),
+    ...searchResults.map((result) => ({ source: "ai" as const, result })),
+  ]);
+
+  function navigateToCombinedResult(entry: CombinedResult) {
+    if (entry.source === "quick") {
+      navigateToQuickMatch(entry.match);
+    } else {
+      onNavigate({ id: entry.result.page_id });
+    }
+  }
+
   // Instant, partial-word literal search (page titles + block content),
   // triggered on every keystroke -- like Logseq, typing "magn" finds
   // "magnesium" immediately without waiting for/needing an embedding model.
   function handleSearchInput() {
+    selectedResultIndex = -1;
     const trimmed = searchQuery.trim();
     quickSearchVersion += 1;
     const requestVersion = quickSearchVersion;
@@ -329,6 +350,33 @@
     }, 120);
   }
 
+  // Arrow keys move a highlighted selection through the combined results
+  // list without ever moving focus off the input, so typing always resumes
+  // right where you left off (focus "snaps back" for free -- it never left).
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === "ArrowDown") {
+      if (combinedResults.length === 0) return;
+      e.preventDefault();
+      selectedResultIndex = Math.min(selectedResultIndex + 1, combinedResults.length - 1);
+    } else if (e.key === "ArrowUp") {
+      if (combinedResults.length === 0) return;
+      e.preventDefault();
+      selectedResultIndex = Math.max(selectedResultIndex - 1, -1);
+    } else if (e.key === "Enter") {
+      if (selectedResultIndex >= 0 && selectedResultIndex < combinedResults.length) {
+        e.preventDefault();
+        navigateToCombinedResult(combinedResults[selectedResultIndex]);
+      } else if (combinedResults.length > 0) {
+        // Nothing explicitly highlighted yet -- Enter jumps to the top result.
+        e.preventDefault();
+        navigateToCombinedResult(combinedResults[0]);
+      }
+      // Otherwise let the form's onsubmit run the deeper AI search.
+    } else if (e.key === "Escape") {
+      selectedResultIndex = -1;
+    }
+  }
+
   function navigateToQuickMatch(match: QuickMatch) {
     if (match.kind === "page") {
       onNavigate({ id: match.page.id });
@@ -345,6 +393,7 @@
     if (!searchQuery.trim()) return;
     isLoading = true;
     error = "";
+    selectedResultIndex = -1;
     try {
       searchResults = await aiSearch(searchQuery, 20);
     } catch (e: any) {
@@ -658,6 +707,7 @@
                 bind:this={searchInputEl}
                 bind:value={searchQuery}
                 oninput={handleSearchInput}
+                onkeydown={handleSearchKeydown}
                 placeholder="Type to find pages & blocks (e.g. 'magn' finds 'magnesium')..."
                 class="search-input"
               />
@@ -674,16 +724,24 @@
               <div class="quick-matches-label">
                 Quick matches{isQuickSearching ? "…" : ""}
               </div>
-              {#each quickMatches as match}
+              {#each quickMatches as match, i}
                 {#if match.kind === "page"}
-                  <button class="search-result quick-match" onclick={() => navigateToQuickMatch(match)}>
+                  <button
+                    class="search-result quick-match"
+                    class:selected={selectedResultIndex === i}
+                    onclick={() => navigateToQuickMatch(match)}
+                  >
                     <div class="result-header">
                       <span class="result-kind-tag">Page</span>
                       <span class="result-title">{match.page.title}</span>
                     </div>
                   </button>
                 {:else}
-                  <button class="search-result quick-match" onclick={() => navigateToQuickMatch(match)}>
+                  <button
+                    class="search-result quick-match"
+                    class:selected={selectedResultIndex === i}
+                    onclick={() => navigateToQuickMatch(match)}
+                  >
                     <div class="result-header">
                       <span class="result-kind-tag">Block</span>
                       <span class="result-title">{match.pageTitle}</span>
@@ -697,9 +755,10 @@
             {#if searchResults.length > 0}
               <div class="quick-matches-label">AI semantic results</div>
             {/if}
-            {#each searchResults as result}
+            {#each searchResults as result, j}
               <button
                 class="search-result"
+                class:selected={selectedResultIndex === quickMatches.length + j}
                 onclick={() => onNavigate({ id: result.page_id })}
               >
                 <div class="result-header">
@@ -1150,6 +1209,11 @@
 
   .search-result:hover {
     border-color: var(--accent-color, #7c3aed);
+  }
+
+  .search-result.selected {
+    border-color: var(--accent-color, #7c3aed);
+    background: var(--bg-hover, #2d2d40);
   }
 
   .result-header {
