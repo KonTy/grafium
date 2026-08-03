@@ -23,6 +23,26 @@ pub struct KnowledgeState {
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
 
+/// Error message for commands that need semantic search (indexing, vector
+/// search, "research this page" references) when the engine's LLM is fine
+/// but no embedder is configured — most commonly because the Embedded
+/// (llama.cpp) local provider is chat-only and doesn't include one. Distinct
+/// from the plain "not ready at all" case so the user gets an actionable
+/// explanation instead of a generic "not ready" that reads like a bug even
+/// when the provider is loaded and working fine for chat.
+fn semantic_search_unavailable_error(engine: &KnowledgeEngine) -> String {
+    if !engine.is_llm_ready() {
+        "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
+            .to_string()
+    } else {
+        "This needs a search embedding model, which the Embedded (llama.cpp) local provider \
+         doesn't include. Switch the local provider to Ollama or vLLM / OpenAI-compatible (or \
+         configure a cloud embedding provider) in Settings \u{2192} AI / Knowledge Engine to \
+         enable semantic search, indexing, and \"Research this page\"."
+            .to_string()
+    }
+}
+
 struct PageBatchCursor {
     batch_size: i64,
     offset: i64,
@@ -249,7 +269,7 @@ pub async fn ai_index_page(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_ready() {
-        return Err("AI engine not ready — check configuration".to_string());
+        return Err(semantic_search_unavailable_error(engine));
     }
 
     let (page, blocks, graph_id) = {
@@ -284,7 +304,7 @@ pub async fn ai_index_all_pages(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_ready() {
-        return Err("AI engine not ready — check configuration".to_string());
+        return Err(semantic_search_unavailable_error(engine));
     }
 
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
@@ -336,7 +356,7 @@ pub async fn ai_search(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
+        return Err(semantic_search_unavailable_error(engine));
     }
 
     engine
@@ -359,7 +379,7 @@ pub async fn ai_generate_references(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
+        return Err(semantic_search_unavailable_error(engine));
     }
 
     let (page_title, blocks_data, graph_id) = {
@@ -399,8 +419,12 @@ pub async fn ai_ask(
         .as_ref()
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
+    if !engine.is_llm_ready() {
+        return Err(
+            "AI chat isn't ready — configure and save a Local or Cloud provider in Settings \
+             \u{2192} AI / Knowledge Engine first."
+                .to_string(),
+        );
     }
 
     engine
@@ -430,8 +454,12 @@ pub async fn ai_ask_stream(
         .as_ref()
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
+    if !engine.is_llm_ready() {
+        return Err(
+            "AI chat isn't ready — configure and save a Local or Cloud provider in Settings \
+             \u{2192} AI / Knowledge Engine first."
+                .to_string(),
+        );
     }
 
     let answer = engine

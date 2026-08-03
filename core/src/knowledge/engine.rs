@@ -291,12 +291,25 @@ impl KnowledgeEngine {
         Ok(())
     }
 
-    /// Check if the engine is ready (providers initialized).
+    /// Check if the engine is ready for operations that need semantic
+    /// search (indexing, vector search, "research this page" references) —
+    /// these fundamentally require an embedding model, so the Embedded
+    /// (llama.cpp) local provider — which is chat-only, see the
+    /// `ProviderType::HuggingFace` branch in `initialize_providers` — never
+    /// satisfies this, by design.
     pub fn is_ready(&self) -> bool {
         self.config.enabled
             && self.llm.is_some()
             && self.embedder.is_some()
             && self.vector_store.is_some()
+    }
+
+    /// Check if the engine is ready for LLM-only operations (chat/"Ask") —
+    /// deliberately does *not* require an embedder, unlike [`Self::is_ready`],
+    /// since [`Self::ask`] degrades gracefully to a non-RAG direct answer
+    /// when no embedder is configured (e.g. the Embedded local provider).
+    pub fn is_llm_ready(&self) -> bool {
+        self.config.enabled && self.llm.is_some()
     }
 
     /// Health check — verify all providers are reachable.
@@ -432,14 +445,23 @@ impl KnowledgeEngine {
     }
 
     /// Ask a question against the knowledge base (RAG).
+    ///
+    /// Falls back to a direct (non-RAG) answer when no embedder is
+    /// configured — the Embedded (llama.cpp) local provider is chat-only,
+    /// so requiring semantic search here would make "Ask" completely
+    /// unusable for it even though the LLM itself works fine.
     pub async fn ask(&self, question: &str, graph_id: Option<&str>) -> Result<String> {
         let llm = self
             .llm
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        // Search for relevant context.
-        let results = self.search(question, 10, graph_id).await?;
+        // Search for relevant context, if semantic search is available.
+        let results = if self.embedder.is_some() {
+            self.search(question, 10, graph_id).await?
+        } else {
+            Vec::new()
+        };
 
         if results.is_empty() {
             // No context found, answer directly.
