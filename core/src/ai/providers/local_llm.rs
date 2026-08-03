@@ -48,6 +48,135 @@ const DEFAULT_CTX_SIZE: u32 = 4096;
 /// than this can still opt in explicitly via `context_size` in Settings.
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
+/// Safety margin subtracted from detected free VRAM before deciding whether
+/// a model fits — leaves headroom for the KV cache/context buffers (which
+/// scale with context size and aren't accounted for by the model file size
+/// alone) and for other GPU consumers (compositor, other apps).
+const VRAM_SAFETY_MARGIN_BYTES: u64 = 1536 * 1024 * 1024; // 1.5 GiB
+
+/// Picks a default `n_gpu_layers` for a model the caller hasn't pinned an
+/// explicit `gpu_layers` setting for.
+///
+/// Best-effort only: queries free VRAM via `nvidia-smi` (present whenever
+/// there's an NVIDIA GPU, which is what free-VRAM auto-detection can
+/// realistically support without vendor-specific APIs) and compares it
+/// against the GGUF file's on-disk size as a rough proxy for how much VRAM
+/// full offload would need. This is deliberately coarse — no attempt to
+/// count layers or split partially — because the goal here is narrow: stop
+/// defaulting to "offload everything" for a model that obviously can't
+/// fit at all (e.g. an ~18GB file on a 16GB card), which previously caused
+/// a hard load failure. When detection isn't possible (no `nvidia-smi`,
+/// non-NVIDIA GPU, parse failure, etc.) this falls back to the previous
+/// "offload everything" default rather than guessing further — a Vulkan
+/// backend on a card we can't query is treated the same as before.
+fn default_gpu_layers_for(model_path: &Path) -> u32 {
+    let Some(free_vram_bytes) = detect_free_vram_bytes() else {
+        return OFFLOAD_ALL_LAYERS;
+    };
+
+    let Ok(model_size_bytes) = std::fs::metadata(model_path).map(|m| m.len()) else {
+        return OFFLOAD_ALL_LAYERS;
+    };
+
+    if model_size_bytes + VRAM_SAFETY_MARGIN_BYTES > free_vram_bytes {
+        tracing::warn!(
+            "Model {} is ~{} MiB but only ~{} MiB VRAM is free — defaulting to CPU-only \
+             (gpu_layers=0) instead of offloading everything, since it would not fit. Set an \
+             explicit \"GPU layers\" value in Settings to force partial GPU offload.",
+            model_path.display(),
+            model_size_bytes / (1024 * 1024),
+            free_vram_bytes / (1024 * 1024)
+        );
+        0
+    } else {
+        OFFLOAD_ALL_LAYERS
+    }
+}
+
+/// Free VRAM in bytes on the first NVIDIA GPU reported by `nvidia-smi`, or
+/// `None` if the tool isn't installed / no GPU is reported / its output
+/// can't be parsed.
+fn detect_free_vram_bytes() -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let first_line = text.lines().next()?.trim();
+    let free_mib: u64 = first_line.parse().ok()?;
+    Some(free_mib * 1024 * 1024)
+}
+
+/// Multiplier applied to a GGUF file's on-disk size to estimate the *host
+/// RAM* required to load and run it fully on CPU. Loading the raw weights
+/// alone would only need ~1x the file size, but llama.cpp additionally
+/// needs KV cache buffers (scaling with context size) and per-op compute
+/// buffers, and MoE architectures in particular (this exists because of a
+/// real incident loading an ~17.3GB Q4_K_M MoE GGUF, which peaked at
+/// ~32-34GB resident) can need substantially more scratch space than a
+/// dense model of the same file size. This factor is deliberately generous
+/// (over-cautious) estimate — better to sometimes refuse a model that
+/// would actually have fit than to let the kernel OOM-kill the whole
+/// process, which previously happened twice in a row and is not
+/// recoverable (unlike a clean `Err` from this function, which the caller
+/// already treats as best-effort/non-fatal).
+const CPU_RAM_SIZE_FACTOR: f64 = 2.5;
+
+/// Returns `Err` if loading `model_path` fully on CPU is estimated to need
+/// more RAM than is currently available, rather than letting the OS decide
+/// (via the OOM killer) partway through a multi-gigabyte allocation. Only
+/// meaningful when the model will actually run on CPU (`gpu_layers == 0`);
+/// GPU-resident layers are already accounted for by `default_gpu_layers_for`
+/// / an explicit `gpu_layers` setting, not this check.
+fn check_cpu_ram_budget(model_path: &Path) -> Result<()> {
+    let Ok(model_size_bytes) = std::fs::metadata(model_path).map(|m| m.len()) else {
+        return Ok(()); // Can't stat it; let the real load attempt surface the error.
+    };
+    let Some(available_bytes) = available_system_ram_bytes() else {
+        return Ok(()); // Can't detect (non-Linux, parse failure); proceed as before.
+    };
+
+    let required_bytes = (model_size_bytes as f64 * CPU_RAM_SIZE_FACTOR) as u64;
+    if required_bytes > available_bytes {
+        return Err(CoreError::Other(format!(
+            "refusing to load {} fully on CPU: estimated RAM need (~{} MiB, {}x its ~{} MiB \
+             file size) exceeds currently available RAM (~{} MiB). Loading anyway risks the \
+             OS killing the whole app outright instead of a clean error. Free up RAM, close \
+             other applications, or pick a smaller/more quantized model.",
+            model_path.display(),
+            required_bytes / (1024 * 1024),
+            CPU_RAM_SIZE_FACTOR,
+            model_size_bytes / (1024 * 1024),
+            available_bytes / (1024 * 1024)
+        )));
+    }
+    Ok(())
+}
+
+/// Currently available system RAM in bytes (`MemAvailable` from
+/// `/proc/meminfo` on Linux — already accounts for reclaimable page cache,
+/// unlike `MemFree`). `None` on other platforms or if parsing fails.
+fn available_system_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in contents.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                let kib: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+                return Some(kib * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Runs a GGUF model fully in-process via llama.cpp. Stateless per call
 /// beyond the loaded model, so one instance can be reused across many
 /// `complete()` calls (avoids re-loading the model each time — same
@@ -87,42 +216,28 @@ impl LocalLlm {
     ) -> Result<Self> {
         let backend = shared_backend();
 
-        let requested_gpu_layers = gpu_layers.unwrap_or(OFFLOAD_ALL_LAYERS);
+        // Only one load attempt is ever made — deliberately NOT "try GPU,
+        // retry fully-on-CPU on failure": llama.cpp/ggml gives no guarantee
+        // that a failed load releases whatever buffers it *did* manage to
+        // allocate before hitting the fatal one, so a retry-after-failure
+        // pattern here can leak the first attempt's memory and then
+        // allocate the *entire* model again for the second attempt — for
+        // an ~18GB model that's enough to exhaust RAM+swap and get the
+        // whole process OOM-killed by the kernel (observed in practice).
+        // Instead, when the caller hasn't pinned an explicit `gpu_layers`,
+        // proactively estimate whether the model can plausibly fit in free
+        // VRAM at all and decide up front, so we only ever allocate once.
+        let requested_gpu_layers =
+            gpu_layers.unwrap_or_else(|| default_gpu_layers_for(model_path));
+
+        if requested_gpu_layers == 0 {
+            check_cpu_ram_budget(model_path)?;
+        }
+
         let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
 
-        let model = match LlamaModel::load_from_file(&backend, model_path, &model_params) {
-            Ok(model) => model,
-            Err(gpu_err) if requested_gpu_layers > 0 => {
-                // GPU offload can fail outright (rather than silently
-                // spilling individual buffers to host RAM) when the model
-                // simply doesn't fit in VRAM at all — e.g. a Q4_K_M ~18GB
-                // file on a 16GB card fully offloaded. Rather than letting
-                // the whole engine fail to initialize (which previously
-                // left the app reporting "AI is not configured" even
-                // though the user picked a perfectly valid model — the
-                // model just needed CPU offload), retry once fully on CPU.
-                // Slower, but a working model beats none; the user can
-                // still tune `gpu_layers` down (a partial split) in
-                // Settings for a faster middle ground.
-                tracing::warn!(
-                    "GPU offload failed loading {} ({gpu_err}); retrying fully on CPU \
-                     (gpu_layers=0) — the model may not fit in available VRAM. Consider \
-                     setting a lower \"GPU layers\" value in Settings for a faster partial \
-                     offload once you know how many layers fit.",
-                    model_path.display()
-                );
-                let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
-                LlamaModel::load_from_file(&backend, model_path, &cpu_params).map_err(|e| {
-                    CoreError::Other(format!(
-                        "failed to load LLM model (also failed CPU-only fallback after GPU \
-                         offload error: {gpu_err}): {e}"
-                    ))
-                })?
-            }
-            Err(e) => {
-                return Err(CoreError::Other(format!("failed to load LLM model: {e}")));
-            }
-        };
+        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+            .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
 
         let ctx_size = context_size
             .filter(|&n| n > 0)
