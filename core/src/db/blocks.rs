@@ -6,6 +6,24 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Turns a free-text user query into an FTS5 MATCH expression that does
+/// prefix matching per word (so typing "magn" finds "magnesium"), like
+/// Logseq's incremental search. Each whitespace-separated token is quoted
+/// (to neutralize FTS5 query-syntax characters like `-`/`:`/`(`) and given
+/// a trailing `*` for prefix matching; tokens are ANDed together (FTS5's
+/// implicit default) so multi-word queries narrow down further.
+fn build_fts_prefix_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|tok| !tok.is_empty())
+        .map(|tok| {
+            let escaped = tok.replace('"', "\"\"");
+            format!("\"{escaped}\"*")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn flatten_blocks_in_tree_order(
     grouped: &mut HashMap<Option<String>, Vec<Block>>,
     parent_id: Option<String>,
@@ -312,6 +330,11 @@ impl Database {
     }
 
     pub fn search_fts_window(&self, query: &str, limit: i64, offset: i64) -> Result<Vec<Block>> {
+        let fts_query = build_fts_prefix_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT b.id, b.page_id, b.parent_id, b.order_index, b.content, b.block_type, b.properties, b.created_at, b.updated_at
@@ -322,7 +345,7 @@ impl Database {
              LIMIT ?2 OFFSET ?3"
         )?;
         let blocks = stmt
-            .query_map(params![query, limit, offset.max(0)], |row| {
+            .query_map(params![fts_query, limit, offset.max(0)], |row| {
                 Ok(Block {
                     id: row.get(0)?,
                     page_id: row.get(1)?,
@@ -356,6 +379,42 @@ mod tests {
     use crate::error::Result;
     use crate::models::BlockType;
     use std::collections::HashSet;
+
+    #[test]
+    fn search_fts_matches_word_prefix() -> Result<()> {
+        let db = Database::in_memory()?;
+        let page = db.create_page("fts-prefix", false)?;
+        db.create_block(
+            &page.id,
+            None,
+            0,
+            "Magnesium helps with insulin resistance",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        db.create_block(
+            &page.id,
+            None,
+            1,
+            "Completely unrelated block",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let results = db.search_fts("magn", 10)?;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("Magnesium"));
+
+        // Multi-word prefix query should AND the terms together.
+        let results = db.search_fts("magn insul", 10)?;
+        assert_eq!(results.len(), 1);
+
+        // A prefix with no matches returns nothing (not an error).
+        let results = db.search_fts("zzz_no_match", 10)?;
+        assert!(results.is_empty());
+
+        Ok(())
+    }
 
     #[test]
     fn search_fts_window_pages_results_without_overlap() -> Result<()> {

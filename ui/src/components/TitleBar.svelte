@@ -11,6 +11,7 @@
     onGoForward?: () => void;
     onToggleReferencePanel?: () => void;
     onOpenSearch?: () => void;
+    onOpenSettings?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
     onZoomReset?: () => void;
@@ -25,6 +26,7 @@
     onGoForward = () => {},
     onToggleReferencePanel = () => {},
     onOpenSearch = () => {},
+    onOpenSettings = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
     onZoomReset = () => {},
@@ -59,7 +61,7 @@
   {/if}
 
   <div class="titlebar-right" data-tauri-drag-region>
-    <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} />
+    <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} onOpenSettings={onOpenSettings} />
     <div class="nav-controls" data-tauri-drag-region="false">
       <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title="Back" disabled={!canGoBack}>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">

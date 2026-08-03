@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
+  import { searchFts, searchPageTitles, getPage, type Block, type PageSummary as ApiPageSummary } from "../lib/api";
   import {
     aiGenerateReferences,
     aiSearch,
@@ -43,6 +44,11 @@
   let references = $state<PageReferencesMeta | null>(null);
   let searchQuery = $state("");
   let searchResults = $state<SemanticSearchResult[]>([]);
+  type QuickMatch =
+    | { kind: "page"; page: ApiPageSummary }
+    | { kind: "block"; block: Block; pageTitle: string };
+  let quickMatches = $state<QuickMatch[]>([]);
+  let isQuickSearching = $state(false);
   let askQuery = $state("");
   let askAnswer = $state("");
   let isLoading = $state(false);
@@ -265,6 +271,75 @@
   }
 
   // ─── Search ────────────────────────────────────────────────────────────────
+
+  const pageTitleCache = new Map<string, string>();
+  let quickSearchVersion = 0;
+  let quickSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Instant, partial-word literal search (page titles + block content),
+  // triggered on every keystroke -- like Logseq, typing "magn" finds
+  // "magnesium" immediately without waiting for/needing an embedding model.
+  function handleSearchInput() {
+    const trimmed = searchQuery.trim();
+    quickSearchVersion += 1;
+    const requestVersion = quickSearchVersion;
+    if (quickSearchTimer) clearTimeout(quickSearchTimer);
+
+    if (!trimmed) {
+      quickMatches = [];
+      isQuickSearching = false;
+      return;
+    }
+
+    isQuickSearching = true;
+    quickSearchTimer = setTimeout(async () => {
+      try {
+        const [pages, blocks] = await Promise.all([
+          searchPageTitles(trimmed, 8),
+          searchFts(trimmed, 15),
+        ]);
+        if (requestVersion !== quickSearchVersion) return;
+
+        const blockMatches: QuickMatch[] = await Promise.all(
+          blocks.slice(0, 12).map(async (block) => {
+            let title = pageTitleCache.get(block.page_id);
+            if (!title) {
+              try {
+                const page = await getPage({ id: block.page_id });
+                title = page.title;
+                pageTitleCache.set(block.page_id, title);
+              } catch {
+                title = "(unknown page)";
+              }
+            }
+            return { kind: "block" as const, block, pageTitle: title };
+          })
+        );
+        if (requestVersion !== quickSearchVersion) return;
+
+        quickMatches = [
+          ...pages.map((page) => ({ kind: "page" as const, page })),
+          ...blockMatches,
+        ];
+      } catch {
+        // Quick search is best-effort; ignore failures silently.
+      } finally {
+        if (requestVersion === quickSearchVersion) isQuickSearching = false;
+      }
+    }, 120);
+  }
+
+  function navigateToQuickMatch(match: QuickMatch) {
+    if (match.kind === "page") {
+      onNavigate({ id: match.page.id });
+      return;
+    }
+    window.dispatchEvent(
+      new CustomEvent("navigate-page", {
+        detail: { pageName: match.pageTitle, targetBlockId: match.block.id },
+      })
+    );
+  }
 
   async function doSearch() {
     if (!searchQuery.trim()) return;
@@ -582,11 +657,12 @@
                 type="text"
                 bind:this={searchInputEl}
                 bind:value={searchQuery}
-                placeholder="Semantic search across all graphs..."
+                oninput={handleSearchInput}
+                placeholder="Type to find pages & blocks (e.g. 'magn' finds 'magnesium')..."
                 class="search-input"
               />
-              <button type="submit" class="action-btn" disabled={isLoading}>
-                {isLoading ? "..." : "Search"}
+              <button type="submit" class="action-btn" disabled={isLoading} title="Deeper AI semantic search across all graphs">
+                {isLoading ? "..." : "AI Search"}
               </button>
             </form>
 
@@ -594,6 +670,33 @@
               <div class="error-msg">{error}</div>
             {/if}
 
+            {#if quickMatches.length > 0}
+              <div class="quick-matches-label">
+                Quick matches{isQuickSearching ? "…" : ""}
+              </div>
+              {#each quickMatches as match}
+                {#if match.kind === "page"}
+                  <button class="search-result quick-match" onclick={() => navigateToQuickMatch(match)}>
+                    <div class="result-header">
+                      <span class="result-kind-tag">Page</span>
+                      <span class="result-title">{match.page.title}</span>
+                    </div>
+                  </button>
+                {:else}
+                  <button class="search-result quick-match" onclick={() => navigateToQuickMatch(match)}>
+                    <div class="result-header">
+                      <span class="result-kind-tag">Block</span>
+                      <span class="result-title">{match.pageTitle}</span>
+                    </div>
+                    <div class="result-snippet">{match.block.content.replace(/^[-*>\s#]+/, "").slice(0, 160) || "(empty block)"}</div>
+                  </button>
+                {/if}
+              {/each}
+            {/if}
+
+            {#if searchResults.length > 0}
+              <div class="quick-matches-label">AI semantic results</div>
+            {/if}
             {#each searchResults as result}
               <button
                 class="search-result"
@@ -1071,6 +1174,30 @@
     font-size: 12px;
     color: var(--text-secondary, #aaa);
     line-height: 1.4;
+  }
+
+  .quick-matches-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-muted, #888);
+    margin: 4px 0 -2px;
+  }
+
+  .result-kind-tag {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--accent-color, #7c3aed);
+    background: var(--bg-secondary, #1a1a24);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-right: 6px;
+  }
+
+  .quick-match .result-header {
+    justify-content: flex-start;
   }
 
   .ask-answer {

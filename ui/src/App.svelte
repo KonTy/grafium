@@ -1077,6 +1077,7 @@
       onGoForward={goForward}
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
       onOpenSearch={openGlobalSearch}
+      onOpenSettings={() => navigateToPage("__settings__")}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}
