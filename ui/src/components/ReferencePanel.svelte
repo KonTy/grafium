@@ -271,7 +271,7 @@
                 onclick={generateReferences}
                 disabled={isLoading || !pageId}
               >
-                {isLoading ? "Analyzing..." : "Research this page"}
+                {isLoading ? "Analyzing..." : "Analyze this Page"}
               </button>
               <button
                 class="action-btn"
@@ -413,7 +413,7 @@
               {/if}
             {:else if !isLoading}
               <div class="panel-notice">
-                Click "Research this page" to discover connections.
+                Click "Analyze this Page" to discover connections.
               </div>
             {/if}
           </div>

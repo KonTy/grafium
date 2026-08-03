@@ -392,12 +392,12 @@
                   {/each}
                 </select>
                 <p class="field-hint">
-                  Powers semantic search, indexing, and "Research this page" — separate from the
+                  Powers semantic search, indexing, and "Analyze this Page" — separate from the
                   chat model above.
                 </p>
               {:else}
                 <p class="field-hint warning">
-                  No embedding GGUF file found yet, so semantic search / "Research this page"
+                  No embedding GGUF file found yet, so semantic search / "Analyze this Page"
                   is disabled. Download one (e.g. nomic-embed-text-v1.5-GGUF or
                   bge-small-en-v1.5-gguf from Hugging Face) into the Models Directory above, then
                   hit Refresh.
