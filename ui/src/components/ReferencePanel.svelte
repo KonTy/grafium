@@ -1,5 +1,6 @@
 <script lang="ts">
   import { listen } from "@tauri-apps/api/event";
+  import { open as openExternal } from "@tauri-apps/plugin-shell";
   import {
     aiGenerateReferences,
     aiSearch,
@@ -7,9 +8,11 @@
     aiAsk,
     aiInsertPageSummary,
     aiSummarizeSelection,
+    aiResearchWeb,
     type GeneratedReference,
     type PageReferencesMeta,
     type PageSummary,
+    type WebResearchResult,
     type SemanticSearchResult,
     type HealthStatus,
   } from "../lib/knowledge";
@@ -53,6 +56,73 @@
   let selectionProgress = $state("");
   let isInsertingSelectionSummary = $state(false);
   let insertedSelectionSummary = $state(false);
+
+  // ─── Web Research (real internet search + cited synthesis) ──────────────────
+  let webResearchResult = $state<WebResearchResult | null>(null);
+  let isResearchingWeb = $state(false);
+  let webResearchError = $state("");
+  let webResearchProgress = $state("");
+  let isInsertingWebResearch = $state(false);
+  let insertedWebResearch = $state(false);
+
+  async function researchWeb() {
+    if (!pageId || isResearchingWeb) return;
+    isResearchingWeb = true;
+    webResearchError = "";
+    insertedWebResearch = false;
+    webResearchResult = null;
+    webResearchProgress = "Starting web research...";
+    const unlisten = await listen<string>("ai-web-research-progress", (e) => {
+      webResearchProgress = e.payload;
+    });
+    try {
+      // Selected/visible page content isn't available here directly, so
+      // the seed text is just the title — the LLM plans search queries
+      // from the title alone, same as a user typing a topic into a search
+      // engine themselves.
+      webResearchResult = await aiResearchWeb(pageTitle, pageTitle);
+    } catch (e: any) {
+      webResearchError = e?.toString() || "Web research failed";
+    } finally {
+      unlisten();
+      isResearchingWeb = false;
+      webResearchProgress = "";
+    }
+  }
+
+  async function insertWebResearchIntoPage() {
+    if (!pageId || !webResearchResult || isInsertingWebResearch) return;
+    isInsertingWebResearch = true;
+    webResearchError = "";
+    try {
+      // Append a numbered "Sources" list after each topic paragraph so the
+      // inline [n] markers the AI wrote stay meaningful once inserted into
+      // the page, same shape as the on-screen citation list below.
+      const sourcesList = webResearchResult.citations
+        .map((c) => `${c.number}. [${c.title}](${c.url})`)
+        .join("\n");
+      const topicsWithSources = webResearchResult.topics.map((t, i) => ({
+        ...t,
+        summary:
+          i === webResearchResult!.topics.length - 1 && sourcesList
+            ? `${t.summary}\n\n**Sources:**\n${sourcesList}`
+            : t.summary,
+      }));
+      await writeSummaryIntoPage({
+        title_answer: webResearchResult.title_answer,
+        topics: topicsWithSources,
+      });
+      insertedWebResearch = true;
+    } catch (e: any) {
+      webResearchError = e?.toString() || "Failed to insert research into page";
+    } finally {
+      isInsertingWebResearch = false;
+    }
+  }
+
+  function openCitation(url: string) {
+    openExternal(url).catch(() => {});
+  }
 
   // Tracks whether the browser currently has a non-empty text selection
   // anywhere on the page (e.g. the user dragged over prose inside a
@@ -282,6 +352,14 @@
               >
                 {isAnalyzingSelection ? "Analyzing selection..." : "Analyze Selection"}
               </button>
+              <button
+                class="action-btn"
+                onclick={researchWeb}
+                disabled={isResearchingWeb || !pageId}
+                title="Search the internet for this topic and write a cited summary with clickable sources"
+              >
+                {isResearchingWeb ? "Researching..." : "Web Research"}
+              </button>
               {#if health}
                 <span class="vector-count">{health.vector_count} vectors indexed</span>
               {/if}
@@ -336,6 +414,66 @@
                   {#if insertedSelectionSummary}
                     Inserted into page ✓
                   {:else if isInsertingSelectionSummary}
+                    Inserting...
+                  {:else}
+                    Insert into page
+                  {/if}
+                </button>
+              </div>
+            {/if}
+
+            {#if webResearchError}
+              <div class="error-msg">{webResearchError}</div>
+            {/if}
+
+            {#if isResearchingWeb && webResearchProgress}
+              <div class="progress-status">
+                <span class="progress-spinner"></span>
+                <span class="progress-text">{webResearchProgress}</span>
+              </div>
+            {/if}
+
+            {#if webResearchResult}
+              <div class="summary-card">
+                <div class="summary-card-label">Web research</div>
+                {#if webResearchResult.title_answer}
+                  <div class="summary-title-answer">{webResearchResult.title_answer}</div>
+                {/if}
+                {#each webResearchResult.topics as topic}
+                  <div class="summary-topic">
+                    <div class="summary-topic-title">{topic.topic}</div>
+                    <div class="summary-text">{topic.summary}</div>
+                    {#if topic.tags?.length}
+                      <div class="summary-tags">
+                        {#each topic.tags as tag}
+                          <span class="summary-tag">#{tag.qualified ?? tag.term}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+                {#if webResearchResult.citations.length}
+                  <div class="citations-list">
+                    <div class="citations-label">Sources</div>
+                    {#each webResearchResult.citations as citation}
+                      <button
+                        class="citation-link"
+                        onclick={() => openCitation(citation.url)}
+                        title={citation.url}
+                      >
+                        [{citation.number}] {citation.title}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+                <button
+                  class="insert-summary-btn"
+                  onclick={insertWebResearchIntoPage}
+                  disabled={isInsertingWebResearch || insertedWebResearch}
+                >
+                  {#if insertedWebResearch}
+                    Inserted into page ✓
+                  {:else if isInsertingWebResearch}
                     Inserting...
                   {:else}
                     Insert into page
@@ -719,6 +857,38 @@
     background: var(--bg-secondary, #1a1a24);
     border-radius: 4px;
     padding: 2px 6px;
+  }
+
+  .citations-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+  }
+
+  .citations-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary, #888);
+  }
+
+  .citation-link {
+    align-self: flex-start;
+    font-size: 12px;
+    text-align: left;
+    color: var(--accent-color, #7c3aed);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .citation-link:hover {
+    color: var(--text-primary, #fff);
   }
 
   .insert-summary-btn {

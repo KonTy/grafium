@@ -21,7 +21,9 @@
 pub mod browser;
 pub mod clipper;
 pub mod extract;
+pub mod search;
 
 pub use browser::{BrowserDriver, FetchedResource, HttpBrowserDriver};
 pub use clipper::{ClipResult, ClippedPage, WebClipper};
 pub use extract::PageContent;
+pub use search::{web_search, SearchResult};

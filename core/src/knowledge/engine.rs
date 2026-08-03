@@ -480,6 +480,30 @@ impl KnowledgeEngine {
             .await
     }
 
+    /// Actually researches `title`/`seed_text` on the open internet — plans
+    /// search queries, searches, picks sources, fetches them, and
+    /// synthesizes a cited summary — as opposed to `summarize_text`, which
+    /// only ever reflects content already given to it. Only needs
+    /// `self.llm` (a plain HTTP fetch is used for both search and page
+    /// fetching, requiring no separate configuration), so it works with
+    /// any configured provider, local or cloud.
+    pub async fn research_web(
+        &self,
+        title: &str,
+        seed_text: &str,
+        on_progress: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<crate::ai::web_research::WebResearchResult> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        let browser = crate::scraping::HttpBrowserDriver::new();
+        crate::ai::web_research::WebResearchEngine::new(llm.as_ref(), &browser)
+            .research(title, seed_text, on_progress)
+            .await
+    }
+
     /// Ask a question against the knowledge base (RAG).
     ///
     /// Falls back to a direct (non-RAG) answer when no embedder is

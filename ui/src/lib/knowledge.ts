@@ -125,6 +125,29 @@ export interface PageReferencesMeta {
   summary: PageSummary | null;
 }
 
+// A cited web source found and read by "Web Research".
+export interface Citation {
+  number: number;
+  title: string;
+  url: string;
+}
+
+// A topic's cited summary paragraph — same shape as TopicSummary, but
+// `summary` contains inline "[n]" markers pointing into the parent
+// WebResearchResult's `citations` list, since claims here come from
+// external sources rather than content already in the page.
+export interface ResearchTopic {
+  topic: string;
+  summary: string;
+  tags: TagTerm[];
+}
+
+export interface WebResearchResult {
+  title_answer: string | null;
+  topics: ResearchTopic[];
+  citations: Citation[];
+}
+
 export interface RegisteredGraph {
   id: string;
   name: string;
@@ -207,6 +230,16 @@ export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta
 // insert a summary block right after a selection.
 export function aiSummarizeSelection(text: string, title?: string): Promise<PageSummary> {
   return invoke("ai_summarize_selection", { text, title });
+}
+
+// Actually researches `title`/`seedText` on the open internet — plans
+// search queries, searches, reads the most relevant results, and returns a
+// cited topic-by-topic summary (inline "[n]" markers pointing at real
+// source URLs in the returned `citations`). Unlike `aiGenerateReferences`/
+// `aiSummarizeSelection`, this can take a while (multiple web fetches) and
+// reports progress via the "ai-web-research-progress" event.
+export function aiResearchWeb(title: string, seedText: string): Promise<WebResearchResult> {
+  return invoke("ai_research_web", { title, seedText });
 }
 
 // Wraps the first verbatim, whole-word occurrence of each term found in

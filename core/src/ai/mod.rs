@@ -12,11 +12,13 @@ pub mod embeddings;
 pub mod providers;
 pub mod references;
 pub mod traits;
+pub mod web_research;
 
 pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;
 pub use references::ReferenceEngine;
 pub use traits::{CompletionOptions, Embedder, LlmProvider, SearchResult, VectorStore};
+pub use web_research::{Citation, ResearchTopic, WebResearchConfig, WebResearchEngine, WebResearchResult};
 
 pub(crate) fn truncate_to_char_boundary(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {

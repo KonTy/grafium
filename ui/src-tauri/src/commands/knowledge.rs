@@ -435,7 +435,7 @@ pub async fn ai_generate_references(
 
 /// Analyzes arbitrary selected text (one or more selected blocks'
 /// concatenated content) and returns a short AI summary + hashtag-style
-/// topic tags — the same shape/prompt used for "Research this page" and
+/// topic tags — the same shape/prompt used for "Analyze this Page" and
 /// media-import summaries, just applied to a text selection instead of a
 /// whole page. The caller (`PageContent.svelte`'s "Analyze Selected"
 /// action) inserts the result as a new block right after the selection.
@@ -465,6 +465,47 @@ pub async fn ai_summarize_selection(
 
     engine
         .summarize_text(&title, &text, &mut emit_progress)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Actually researches `title`/`seed_text` on the open internet: plans
+/// search queries, searches the web (a plain HTML scrape of Brave's
+/// results page — no paid search API/keys involved), reads the most
+/// relevant results, and synthesizes a topic-by-topic summary with inline
+/// `[n]` citation markers pointing at real, clickable source URLs. Unlike
+/// `ai_generate_references`/`ai_summarize_selection`, this can surface
+/// information not already present anywhere in the user's graph, so the
+/// result always carries its sources for the user to verify. Works with
+/// whatever LLM provider is configured — local (embedded llama.cpp,
+/// Ollama) or a remote OpenAI-compatible endpoint (e.g. vLLM reachable
+/// over Tailscale/LAN) — since it only needs `engine.is_llm_ready()`, not
+/// an embedder/vector store.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ai_research_web(
+    app: tauri::AppHandle,
+    state: State<'_, KnowledgeState>,
+    title: String,
+    seed_text: String,
+) -> Result<grafium_core::ai::web_research::WebResearchResult, String> {
+    let guard = state.engine.read().await;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+
+    if !engine.is_llm_ready() {
+        return Err(
+            "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
+                .to_string(),
+        );
+    }
+
+    let mut emit_progress = move |message: &str| {
+        let _ = app.emit("ai-web-research-progress", message);
+    };
+
+    engine
+        .research_web(&title, &seed_text, &mut emit_progress)
         .await
         .map_err(|e| e.to_string())
 }

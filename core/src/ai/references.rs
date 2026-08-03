@@ -670,7 +670,7 @@ fn extract_json_array(response: &str) -> Result<&str> {
         .ok_or_else(|| concept_parse_error("missing JSON array in response", response))
 }
 
-fn extract_json_object(response: &str) -> Result<&str> {
+pub(crate) fn extract_json_object(response: &str) -> Result<&str> {
     if response.starts_with('{') {
         return Ok(response);
     }
@@ -685,34 +685,48 @@ fn extract_json_object(response: &str) -> Result<&str> {
         .ok_or_else(|| concept_parse_error("missing JSON object in response", response))
 }
 
+/// Accepts either a plain string tag (the old shape, or a model that
+/// doesn't follow the newer `{term, qualified}` schema) or a full
+/// `{term, qualified}` object, so tag-array parsing stays robust to LLM
+/// output that doesn't perfectly match the documented format. Shared by
+/// [`parse_summary_response`] and [`crate::ai::web_research`]'s synthesis
+/// parsing so both AI-tagging call sites decode the same JSON shape
+/// identically instead of each re-implementing this leniency.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum TagJson {
+    Plain(String),
+    Qualified {
+        term: String,
+        #[serde(default)]
+        qualified: Option<String>,
+    },
+}
+
+/// Converts raw parsed `tags` into cleaned [`TagTerm`]s: trims whitespace
+/// and a leading `#` off `term`, trims `qualified` and drops it if empty,
+/// and drops any tag whose `term` ends up empty.
+pub(crate) fn clean_tag_terms(tags: Vec<TagJson>) -> Vec<TagTerm> {
+    tags.into_iter()
+        .map(|tag| match tag {
+            TagJson::Plain(term) => TagTerm {
+                term,
+                qualified: None,
+            },
+            TagJson::Qualified { term, qualified } => TagTerm { term, qualified },
+        })
+        .map(|tag| TagTerm {
+            term: tag.term.trim().trim_start_matches('#').to_string(),
+            qualified: tag
+                .qualified
+                .map(|q| q.trim().to_string())
+                .filter(|q| !q.is_empty()),
+        })
+        .filter(|tag| !tag.term.is_empty())
+        .collect()
+}
+
 fn parse_summary_response(response: &str) -> Result<PageSummary> {
-    // Accepts either a plain string tag (the old shape, or a model that
-    // doesn't follow the new schema) or a `{term, qualified}` object, so
-    // summary parsing stays robust to LLM output that doesn't perfectly
-    // match the documented format.
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum TagJson {
-        Plain(String),
-        Qualified {
-            term: String,
-            #[serde(default)]
-            qualified: Option<String>,
-        },
-    }
-
-    impl TagJson {
-        fn into_tag_term(self) -> TagTerm {
-            match self {
-                TagJson::Plain(term) => TagTerm {
-                    term,
-                    qualified: None,
-                },
-                TagJson::Qualified { term, qualified } => TagTerm { term, qualified },
-            }
-        }
-    }
-
     #[derive(Deserialize)]
     struct TopicJson {
         topic: String,
@@ -742,19 +756,7 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
         .map(|topic| TopicSummary {
             topic: topic.topic.trim().to_string(),
             summary: topic.summary.trim().to_string(),
-            tags: topic
-                .tags
-                .into_iter()
-                .map(TagJson::into_tag_term)
-                .map(|tag| TagTerm {
-                    term: tag.term.trim().trim_start_matches('#').to_string(),
-                    qualified: tag
-                        .qualified
-                        .map(|q| q.trim().to_string())
-                        .filter(|q| !q.is_empty()),
-                })
-                .filter(|tag| !tag.term.is_empty())
-                .collect(),
+            tags: clean_tag_terms(topic.tags),
         })
         .collect();
 
@@ -782,7 +784,7 @@ fn parse_concepts_for_content(
         .collect()
 }
 
-fn truncate_snippet(text: &str, max_len: usize) -> String {
+pub(crate) fn truncate_snippet(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
@@ -790,7 +792,7 @@ fn truncate_snippet(text: &str, max_len: usize) -> String {
     }
 }
 
-fn concept_parse_error(reason: &str, response: &str) -> CoreError {
+pub(crate) fn concept_parse_error(reason: &str, response: &str) -> CoreError {
     CoreError::Parse(format!(
         "Failed to parse concept extraction response ({reason}). Response snippet: {}",
         truncate_snippet(response, 200)
