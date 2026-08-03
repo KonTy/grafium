@@ -113,12 +113,43 @@ impl KnowledgeEngine {
                         ProviderType::HuggingFace => {
                             #[cfg(feature = "llm-local")]
                             {
-                                self.llm = Some(Box::new(
-                                    crate::ai::providers::local_llm::LocalLlm::from_config(
-                                        &self.config,
-                                        &self.models_root,
-                                    )?,
-                                ));
+                                // Best-effort, like the embedder below: a
+                                // local GGUF chat model can fail to load
+                                // for reasons entirely orthogonal to
+                                // whether the *config itself* is valid —
+                                // out-of-VRAM being the most common (see
+                                // `LocalLlm::load`'s own CPU-fallback
+                                // retry, which already covers the typical
+                                // case, but e.g. a corrupt/incompatible
+                                // GGUF file could still fail even that).
+                                // Previously this used `?`, which made
+                                // `initialize_providers` — and therefore
+                                // `KnowledgeEngine::new`/`reconfigure` —
+                                // fail outright, leaving the whole engine
+                                // as `None` (app startup) or the config
+                                // change rejected (Settings save) even
+                                // though the user's config was fine; the
+                                // UI then misleadingly reported "AI is not
+                                // configured" instead of "model failed to
+                                // load". Keeping the engine alive lets
+                                // health checks/logs surface the real
+                                // error and lets the user retry (e.g. after
+                                // freeing VRAM or picking a smaller model)
+                                // without restarting the app.
+                                match crate::ai::providers::local_llm::LocalLlm::from_config(
+                                    &self.config,
+                                    &self.models_root,
+                                ) {
+                                    Ok(llm) => self.llm = Some(Box::new(llm)),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Embedded local chat model failed to load (chat / \
+                                             \"Ask\" will be unavailable until this is \
+                                             resolved — check the model file, available VRAM, \
+                                             and the \"GPU layers\" setting): {e}"
+                                        );
+                                    }
+                                }
                                 // Best-effort: an embedding model is a
                                 // separate download from the chat LLM, so a
                                 // user who's only set up the latter should

@@ -87,11 +87,42 @@ impl LocalLlm {
     ) -> Result<Self> {
         let backend = shared_backend();
 
-        let model_params =
-            LlamaModelParams::default().with_n_gpu_layers(gpu_layers.unwrap_or(OFFLOAD_ALL_LAYERS));
+        let requested_gpu_layers = gpu_layers.unwrap_or(OFFLOAD_ALL_LAYERS);
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
 
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
-            .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
+        let model = match LlamaModel::load_from_file(&backend, model_path, &model_params) {
+            Ok(model) => model,
+            Err(gpu_err) if requested_gpu_layers > 0 => {
+                // GPU offload can fail outright (rather than silently
+                // spilling individual buffers to host RAM) when the model
+                // simply doesn't fit in VRAM at all — e.g. a Q4_K_M ~18GB
+                // file on a 16GB card fully offloaded. Rather than letting
+                // the whole engine fail to initialize (which previously
+                // left the app reporting "AI is not configured" even
+                // though the user picked a perfectly valid model — the
+                // model just needed CPU offload), retry once fully on CPU.
+                // Slower, but a working model beats none; the user can
+                // still tune `gpu_layers` down (a partial split) in
+                // Settings for a faster middle ground.
+                tracing::warn!(
+                    "GPU offload failed loading {} ({gpu_err}); retrying fully on CPU \
+                     (gpu_layers=0) — the model may not fit in available VRAM. Consider \
+                     setting a lower \"GPU layers\" value in Settings for a faster partial \
+                     offload once you know how many layers fit.",
+                    model_path.display()
+                );
+                let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
+                LlamaModel::load_from_file(&backend, model_path, &cpu_params).map_err(|e| {
+                    CoreError::Other(format!(
+                        "failed to load LLM model (also failed CPU-only fallback after GPU \
+                         offload error: {gpu_err}): {e}"
+                    ))
+                })?
+            }
+            Err(e) => {
+                return Err(CoreError::Other(format!("failed to load LLM model: {e}")));
+            }
+        };
 
         let ctx_size = context_size
             .filter(|&n| n > 0)
