@@ -1486,6 +1486,8 @@ pub fn run() {
             commands::knowledge::ai_save_schema,
             commands::knowledge::ai_create_default_schemas,
             commands::media::media_import_video,
+            commands::media::media_get_config,
+            commands::media::media_set_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

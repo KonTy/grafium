@@ -9,6 +9,7 @@
     type AiConfigPayload,
     type HealthStatus,
   } from "../lib/knowledge";
+  import { mediaGetConfig, mediaSetConfig, type MediaConfigPayload } from "../lib/api";
 
   let config = $state<AiConfig | null>(null);
   let health = $state<HealthStatus | null>(null);
@@ -37,6 +38,16 @@
   let cloudEmbeddingBaseUrl = $state("");
   let cloudEmbeddingApiKey = $state("");
   let cloudEmbeddingModel = $state("text-embedding-3-small");
+
+  // Whisper transcription (video/audio import fallback) — independent of
+  // the chat/search config above, since it's used by "Import Video" rather
+  // than the assistant, but lives in this same dialog since that's where
+  // users look for anything AI/model-related.
+  let mediaEnabled = $state(true);
+  let mediaModelPath = $state("");
+  let mediaModelsDir = $state("");
+  let mediaLanguage = $state("");
+  let isSavingMedia = $state(false);
 
   function normalizeProvider(p?: string): string {
     if (!p) return "openai_compatible";
@@ -75,6 +86,7 @@
   // Load config on mount
   $effect(() => {
     loadConfig();
+    loadMediaConfig();
   });
 
   async function loadConfig() {
@@ -155,6 +167,36 @@
       showMessage("Indexing failed: " + e, "error");
     } finally {
       isIndexing = false;
+    }
+  }
+
+  async function loadMediaConfig() {
+    try {
+      const mediaConfig = await mediaGetConfig();
+      mediaEnabled = mediaConfig.enabled;
+      mediaModelPath = mediaConfig.whisper?.model || "";
+      mediaModelsDir = mediaConfig.models_dir || "";
+      mediaLanguage = mediaConfig.whisper?.language || "";
+    } catch (e: any) {
+      showMessage("Failed to load transcription config: " + e, "error");
+    }
+  }
+
+  async function saveMediaConfig() {
+    isSavingMedia = true;
+    try {
+      const payload: MediaConfigPayload = {
+        enabled: mediaEnabled,
+        models_dir: mediaModelsDir || undefined,
+        whisper_model_path: mediaModelPath || undefined,
+        language: mediaLanguage || undefined,
+      };
+      await mediaSetConfig(payload);
+      showMessage("Transcription settings saved!", "success");
+    } catch (e: any) {
+      showMessage("Failed to save: " + e, "error");
+    } finally {
+      isSavingMedia = false;
     }
   }
 
@@ -368,6 +410,50 @@
         <div class="index-result">Indexed {indexCount} chunks into vector store.</div>
       {/if}
     {/if}
+
+    <!-- Whisper transcription (video/audio import) — independent of the
+         chat/search "Enable AI features" toggle above, since importing a
+         video and transcribing it locally doesn't need chat or search at
+         all, and is the thing "Import Video" reaches for regardless. -->
+    <div class="settings-section">
+      <h4>Whisper Transcription (video/audio import)</h4>
+      <p class="field-hint">
+        When importing a video/audio URL, Grafium scrapes existing captions
+        first (fast, free). If none exist, it falls back to transcribing the
+        audio locally with Whisper — no cloud service or API key involved.
+      </p>
+      <label class="toggle-row">
+        <input type="checkbox" bind:checked={mediaEnabled} />
+        <span>Fall back to local Whisper transcription when no captions exist</span>
+      </label>
+      {#if mediaEnabled}
+        <div class="field-group">
+          <label class="field-label">Whisper Model File</label>
+          <input type="text" bind:value={mediaModelPath} class="field-input" placeholder="ggml-base.en.bin, or an absolute path" />
+          <p class="field-hint">
+            Leave blank to auto-pick the only Whisper model file in the models directory below,
+            if there's exactly one.
+          </p>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Models Directory (optional)</label>
+          <input type="text" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
+          <p class="field-hint">
+            Point this at a folder you already keep local models in so Grafium never duplicates
+            multi-gigabyte model files. Leave blank to use Grafium's own managed models folder.
+          </p>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Language (optional)</label>
+          <input type="text" bind:value={mediaLanguage} class="field-input" placeholder="en — leave blank to auto-detect" />
+        </div>
+      {/if}
+      <div class="actions-section">
+        <button class="action-btn primary" onclick={saveMediaConfig} disabled={isSavingMedia}>
+          {isSavingMedia ? "Saving..." : "Save Transcription Settings"}
+        </button>
+      </div>
+    </div>
 
     {#if message}
       <div class="message" class:error={messageType === "error"}>

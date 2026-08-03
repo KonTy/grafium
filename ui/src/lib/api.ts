@@ -396,3 +396,28 @@ export function deleteAssets(filenames: string[]): Promise<number> {
 export function mediaImportVideo(url: string, pageTitle?: string, lang?: string): Promise<Page> {
   return invoke("media_import_video", { url, pageTitle, lang });
 }
+
+// Media / Whisper transcription settings
+export interface MediaConfig {
+  enabled: boolean;
+  models_dir?: string;
+  whisper: {
+    model?: string;
+    language?: string;
+  };
+}
+
+export interface MediaConfigPayload {
+  enabled: boolean;
+  models_dir?: string;
+  whisper_model_path?: string;
+  language?: string;
+}
+
+export function mediaGetConfig(): Promise<MediaConfig> {
+  return invoke("media_get_config");
+}
+
+export function mediaSetConfig(payload: MediaConfigPayload): Promise<void> {
+  return invoke("media_set_config", { payload });
+}
