@@ -35,6 +35,12 @@ use crate::model_library::{self, ModelKind};
 /// commonly-hit case.
 const DEFAULT_CTX_SIZE: u32 = 2048;
 
+/// Upper bound applied to a model's own trained context length when
+/// auto-deriving a default — same defensive cap `local_llm` applies, in
+/// case a future embedding checkpoint advertises an unexpectedly huge
+/// trained context (KV cache allocation scales directly with this).
+const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
+
 /// Runs a GGUF embedding model fully in-process via llama.cpp. Stateless
 /// per call beyond the loaded model, so one instance is reused across many
 /// `embed()` calls — mirrors `LocalLlm` exactly.
@@ -61,6 +67,7 @@ impl LocalEmbedder {
 
         let ctx_size = Some(model.n_ctx_train())
             .filter(|&n| n > 0)
+            .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
             .and_then(NonZeroU32::new)
             .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
 

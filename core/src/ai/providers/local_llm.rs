@@ -38,6 +38,16 @@ use crate::model_library::{self, ModelKind};
 /// nor an explicit `context_size` setting is usable.
 const DEFAULT_CTX_SIZE: u32 = 4096;
 
+/// Upper bound applied to a model's *own* trained context length when
+/// auto-deriving a default (i.e. when the user hasn't set an explicit
+/// `context_size`). Modern models increasingly advertise very large trained
+/// context windows (some Qwen3 checkpoints report 262144) — allocating a
+/// llama.cpp KV cache that size by default pins tens of gigabytes of RAM
+/// and can peg every CPU core for a single request, even for a short
+/// prompt, which reads as "it's just stuck". Users who actually need more
+/// than this can still opt in explicitly via `context_size` in Settings.
+const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
+
 /// Runs a GGUF model fully in-process via llama.cpp. Stateless per call
 /// beyond the loaded model, so one instance can be reused across many
 /// `complete()` calls (avoids re-loading the model each time — same
@@ -68,7 +78,8 @@ impl LocalLlm {
     /// GPU (only meaningful when built with `llm-local-vulkan` — otherwise
     /// there's no GPU backend to offload to, so this is a harmless no-op).
     /// `None` for either means "use a sensible default" (the model's
-    /// trained context length, and "offload everything", respectively).
+    /// trained context length capped at `DEFAULT_AUTO_CTX_CAP`, and
+    /// "offload everything", respectively).
     pub fn load(
         model_path: &Path,
         context_size: Option<u32>,
@@ -84,7 +95,11 @@ impl LocalLlm {
 
         let ctx_size = context_size
             .filter(|&n| n > 0)
-            .or_else(|| Some(model.n_ctx_train()).filter(|&n| n > 0))
+            .or_else(|| {
+                Some(model.n_ctx_train())
+                    .filter(|&n| n > 0)
+                    .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
+            })
             .and_then(NonZeroU32::new)
             .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
 
