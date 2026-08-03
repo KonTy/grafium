@@ -13,7 +13,7 @@ use crate::ai::providers::anthropic::AnthropicLlm;
 use crate::ai::providers::ollama::{OllamaEmbedder, OllamaLlm};
 use crate::ai::providers::openai::{OpenAiEmbedder, OpenAiLlm};
 use crate::ai::providers::openai_compatible::{OpenAiCompatibleEmbedder, OpenAiCompatibleLlm};
-use crate::ai::references::{PageReferencesMeta, ReferenceEngine};
+use crate::ai::references::{PageReferencesMeta, PageSummary, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
 use crate::knowledge::registry::GraphRegistry;
@@ -455,6 +455,28 @@ impl KnowledgeEngine {
                 store.as_ref(),
                 on_progress,
             )
+            .await
+    }
+
+    /// Summarize an arbitrary piece of text (title-answer, prose summary,
+    /// hashtag-style topic tags) using the configured LLM — the same shape
+    /// `generate_references` produces for "Research this page", reused here
+    /// so callers like the media-import pipeline (video/audio transcripts)
+    /// don't need their own copy of the summarization prompt/parsing.
+    /// Only needs `self.llm`, not the embedder/vector store, so it works
+    /// even with the Embedded (llama.cpp) provider, which is chat-only.
+    pub async fn summarize_text(
+        &self,
+        title: &str,
+        full_text: &str,
+        on_progress: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<PageSummary> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        crate::ai::references::generate_page_summary(title, full_text, llm.as_ref(), on_progress)
             .await
     }
 

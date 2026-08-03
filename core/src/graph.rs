@@ -811,6 +811,41 @@ impl Graph {
         self.db.get_page_by_title(title)
     }
 
+    /// Append `content_to_append` (raw markdown, e.g. blank-line-separated
+    /// `-`-prefixed bullets) to the end of an existing page's file, then
+    /// re-index so the new bullets become real blocks. Used by the
+    /// media-import "insert into today's journal" flow, where the target
+    /// page (today's journal) already has existing content that must be
+    /// preserved rather than overwritten.
+    pub fn append_content_to_page(&self, page_id: &str, content_to_append: &str) -> Result<Page> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let file_path = self.resolve_page_file_path(&page)?;
+
+        // Re-serialize from the DB (source of truth for already-indexed
+        // blocks) rather than trusting the on-disk file verbatim, mirroring
+        // `write_page_to_disk`'s approach.
+        let blocks = self.db.list_blocks_for_page(&page.id)?;
+        let existing_content = parser::serialize_page(&page.properties, &blocks);
+
+        let mut new_content = existing_content.trim_end().to_string();
+        if !new_content.is_empty() {
+            new_content.push_str("\n\n");
+        }
+        new_content.push_str(content_to_append.trim_end());
+        new_content.push('\n');
+
+        // Unlike `persist_page_content` (used when the DB already holds the
+        // up-to-date blocks and the file is just being flushed to match),
+        // here the new content hasn't been indexed into the DB yet — so we
+        // write the file directly and let `index_file` parse + apply the
+        // newly-appended blocks, the same way `create_page_with_content` does.
+        self.note_self_write(&file_path);
+        fs::write(&file_path, &new_content)?;
+        self.index_file(&file_path)?;
+
+        self.db.get_page_by_id(&page.id)
+    }
+
     /// Resolves the on-disk `.md` path a page titled `title` would live at,
     /// creating any parent directories a hierarchical title (e.g.
     /// `"Books/MyCoolBook/Chapter1"`) needs. Shared by every "create a page"
@@ -1503,6 +1538,32 @@ mod tests {
         let file_path = graph.pages_dir.join("plain-page.md");
         assert_eq!(fs::read_to_string(&file_path)?, "- \n");
         assert_eq!(graph.db.list_blocks_for_page(&page.id)?.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn append_content_to_page_preserves_existing_blocks_and_adds_new_ones() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+
+        let page = graph.create_page_with_content("Journal Page", false, "- Existing note\n")?;
+
+        let updated = graph.append_content_to_page(&page.id, "- Imported line one\n- Imported line two\n")?;
+        assert_eq!(updated.id, page.id);
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].content, "Existing note");
+        assert_eq!(blocks[1].content, "Imported line one");
+        assert_eq!(blocks[2].content, "Imported line two");
+
+        // Appending again should keep everything (no duplication/loss) and
+        // simply grow the block list further.
+        let updated2 = graph.append_content_to_page(&page.id, "- Third batch\n")?;
+        let blocks2 = graph.db.list_blocks_for_page(&updated2.id)?;
+        assert_eq!(blocks2.len(), 4);
+        assert_eq!(blocks2[3].content, "Third batch");
 
         Ok(())
     }

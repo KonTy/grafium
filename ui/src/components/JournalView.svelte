@@ -119,7 +119,7 @@
 
   function handleImportMediaClick() {
     contextMenu = null;
-    onNavigate?.("__import_media__");
+    onNavigate?.("__import_media_journal__");
   }
 
   async function loadJournals() {

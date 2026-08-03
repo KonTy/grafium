@@ -392,9 +392,16 @@ export function deleteAssets(filenames: string[]): Promise<number> {
   return invoke("delete_assets", { filenames });
 }
 
-// Media import (video/audio transcript -> page)
-export function mediaImportVideo(url: string, pageTitle?: string, lang?: string): Promise<Page> {
-  return invoke("media_import_video", { url, pageTitle, lang });
+// Media import (video/audio transcript -> page, or appended to today's journal)
+export type MediaImportTarget = "new_page" | "journal";
+
+export function mediaImportVideo(
+  url: string,
+  pageTitle?: string,
+  lang?: string,
+  target?: MediaImportTarget,
+): Promise<Page> {
+  return invoke("media_import_video", { url, pageTitle, lang, target });
 }
 
 // Media / Whisper transcription settings

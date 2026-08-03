@@ -838,6 +838,10 @@
       openImportMediaDialog();
       return;
     }
+    if (target === "__import_media_journal__") {
+      openImportMediaDialog("journal");
+      return;
+    }
     navigateToPage(target);
   }
 
@@ -869,12 +873,14 @@
   let importMediaBusy = $state(false);
   let importMediaError = $state("");
   let importMediaProgress = $state("");
+  let importMediaTarget: "new_page" | "journal" = $state("new_page");
 
-  function openImportMediaDialog() {
+  function openImportMediaDialog(defaultTarget: "new_page" | "journal" = "new_page") {
     importMediaUrl = "";
     importMediaError = "";
     importMediaProgress = "";
     importMediaBusy = false;
+    importMediaTarget = defaultTarget;
     showImportMediaDialog = true;
   }
 
@@ -895,10 +901,14 @@
       importMediaProgress = e.payload;
     });
     try {
-      const page = await mediaImportVideo(url);
+      const page = await mediaImportVideo(url, undefined, undefined, importMediaTarget);
       showImportMediaDialog = false;
       importMediaUrl = "";
-      navigateToPage(page.title);
+      if (importMediaTarget === "journal") {
+        navigateToJournal();
+      } else {
+        navigateToPage(page.title);
+      }
     } catch (e) {
       importMediaError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -1287,6 +1297,11 @@
         if available; otherwise it falls back to local Whisper transcription if enabled in
         Settings.
       </p>
+      <label class="dialog-label" for="import-media-target">Save as</label>
+      <select id="import-media-target" class="dialog-input" bind:value={importMediaTarget} disabled={importMediaBusy}>
+        <option value="new_page">New page</option>
+        <option value="journal">Add to today's journal</option>
+      </select>
       <input
         type="text"
         class="dialog-input"
@@ -1512,6 +1527,14 @@
     color: var(--text-secondary, #999);
     margin: 8px 0 0 0;
     font-style: italic;
+  }
+
+  .dialog-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #999);
+    margin: 0 0 6px 0;
   }
 
   .dialog-input {

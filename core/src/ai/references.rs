@@ -74,6 +74,11 @@ pub struct PageSummary {
     pub title_answer: Option<String>,
     /// A concise multi-sentence summary of the page's content.
     pub summary: String,
+    /// Short topic labels (no `#` prefix, snake_case for multi-word topics,
+    /// e.g. `"magnesium"`, `"insulin_resistance"`) identifying the main
+    /// subjects covered — meant to be rendered as `#hashtag`s.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// The reference engine — orchestrates AI analysis + vector search.
@@ -229,10 +234,7 @@ impl ReferenceEngine {
                 .map(|(_, content)| *content)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            match self
-                .generate_page_summary(page_title, &full_text, llm, on_progress)
-                .await
-            {
+            match generate_page_summary(page_title, &full_text, llm, on_progress).await {
                 Ok(summary) => Some(summary),
                 Err(error) => {
                     on_progress(&format!("Could not generate a summary: {error}"));
@@ -355,50 +357,6 @@ impl ReferenceEngine {
         parts.join("\n")
     }
 
-    /// Use the LLM to produce a one-line answer to the page's title (when
-    /// it poses a question/claim) plus a short prose summary of its content.
-    async fn generate_page_summary(
-        &self,
-        page_title: &str,
-        full_text: &str,
-        llm: &dyn LlmProvider,
-        on_progress: &mut (dyn FnMut(&str) + Send),
-    ) -> Result<PageSummary> {
-        // Keep the summarization prompt well within the context window even
-        // for very long pages — this is a summary, not a full re-read, so a
-        // generous prefix is enough context without risking the same
-        // `n_ctx`-sized costs the concept-extraction pass already has to
-        // manage for the full page.
-        const MAX_SUMMARY_INPUT_CHARS: usize = 8000;
-        let truncated_text = if full_text.len() > MAX_SUMMARY_INPUT_CHARS {
-            super::truncate_to_char_boundary(full_text, MAX_SUMMARY_INPUT_CHARS)
-        } else {
-            full_text
-        };
-
-        let messages = vec![
-            ChatMessage {
-                role: MessageRole::System,
-                content: PAGE_SUMMARY_PROMPT.to_string(),
-            },
-            ChatMessage {
-                role: MessageRole::User,
-                content: format!("Title: {page_title}\n\nContent:\n{truncated_text}"),
-            },
-        ];
-
-        let response = stream_completion(
-            llm,
-            &messages,
-            &summary_options(),
-            "Summarizing: ",
-            on_progress,
-        )
-        .await?;
-
-        parse_summary_response(&response)
-    }
-
     /// Check if a page's references are stale.
     pub fn is_stale(&self, meta: &PageReferencesMeta) -> bool {
         let now = Utc::now().timestamp_millis();
@@ -431,6 +389,52 @@ async fn stream_completion(
         }
     };
     llm.complete_stream(messages, options, &mut on_token).await
+}
+
+/// Use the LLM to produce a one-line answer to a title (when it poses a
+/// question/claim), a short prose summary, and topic hashtags for a piece
+/// of content. Shared by `ReferenceEngine::generate_references` ("Research
+/// this page") and the media-import pipeline (video/audio transcripts) —
+/// both want the exact same "answer the title, summarize, tag" shape.
+pub async fn generate_page_summary(
+    title: &str,
+    full_text: &str,
+    llm: &dyn LlmProvider,
+    on_progress: &mut (dyn FnMut(&str) + Send),
+) -> Result<PageSummary> {
+    // Keep the summarization prompt well within the context window even
+    // for very long pages — this is a summary, not a full re-read, so a
+    // generous prefix is enough context without risking the same
+    // `n_ctx`-sized costs the concept-extraction pass already has to
+    // manage for the full page.
+    const MAX_SUMMARY_INPUT_CHARS: usize = 8000;
+    let truncated_text = if full_text.len() > MAX_SUMMARY_INPUT_CHARS {
+        super::truncate_to_char_boundary(full_text, MAX_SUMMARY_INPUT_CHARS)
+    } else {
+        full_text
+    };
+
+    let messages = vec![
+        ChatMessage {
+            role: MessageRole::System,
+            content: PAGE_SUMMARY_PROMPT.to_string(),
+        },
+        ChatMessage {
+            role: MessageRole::User,
+            content: format!("Title: {title}\n\nContent:\n{truncated_text}"),
+        },
+    ];
+
+    let response = stream_completion(
+        llm,
+        &messages,
+        &summary_options(),
+        "Summarizing: ",
+        on_progress,
+    )
+    .await?;
+
+    parse_summary_response(&response)
 }
 
 /// An extracted concept from text.
@@ -507,16 +511,17 @@ fn concept_extraction_options() -> CompletionOptions {
     }
 }
 
-const PAGE_SUMMARY_PROMPT: &str = r#"You are a careful research assistant. You are given an article's title and content.
+const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You are given an article's title and content.
 
 Return a JSON object with:
 - "title_answer": if the title poses a question or makes a claim that the content answers or supports/refutes, one sentence directly answering it using the content. If the title is purely descriptive (e.g. a name, a date, "Meeting Notes"), use null.
 - "summary": a concise 3-5 sentence summary of the article's key points, in your own words.
+- "tags": an array of 2-6 short topic labels for the main subjects covered (lowercase, use underscores instead of spaces for multi-word topics, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Use [] if nothing distinct stands out.
 
 Example output:
-{"title_answer": "Yes, Rust generally outperforms C++ in memory-safety-critical workloads without sacrificing raw speed.", "summary": "The article compares Rust and C++ across compile-time safety, runtime performance, and tooling. It concludes Rust's ownership model prevents whole classes of bugs common in C++ with comparable benchmark performance in most workloads."}
+{"title_answer": "Yes, Rust generally outperforms C++ in memory-safety-critical workloads without sacrificing raw speed.", "summary": "The article compares Rust and C++ across compile-time safety, runtime performance, and tooling. It concludes Rust's ownership model prevents whole classes of bugs common in C++ with comparable benchmark performance in most workloads.", "tags": ["rust", "cpp", "memory_safety", "performance"]}
 
-Return ONLY the JSON object, no other text."#;
+Return ONLY the JSON object, no other text."##;
 
 fn summary_options() -> CompletionOptions {
     CompletionOptions {
@@ -623,6 +628,8 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
         #[serde(default)]
         title_answer: Option<String>,
         summary: String,
+        #[serde(default)]
+        tags: Vec<String>,
     }
 
     let trimmed = response.trim();
@@ -636,6 +643,12 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
             .title_answer
             .filter(|answer| !answer.trim().is_empty()),
         summary: parsed.summary,
+        tags: parsed
+            .tags
+            .into_iter()
+            .map(|tag| tag.trim().trim_start_matches('#').to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect(),
     })
 }
 
@@ -920,7 +933,7 @@ mod tests {
             ]
         "#
             .to_string(),
-            r#"{"title_answer": null, "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."}"#
+            r#"{"title_answer": null, "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling.", "tags": ["rust", "tokio"]}"#
                 .to_string(),
         ]);
         let (embedder, embedder_state) = MockEmbedder::new(HashMap::from([
@@ -1038,6 +1051,7 @@ mod tests {
             summary.summary,
             "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."
         );
+        assert_eq!(summary.tags, vec!["rust".to_string(), "tokio".to_string()]);
 
         Ok(())
     }

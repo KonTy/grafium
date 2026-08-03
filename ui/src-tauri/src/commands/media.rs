@@ -1,3 +1,4 @@
+use crate::commands::knowledge::KnowledgeState;
 use crate::AppState;
 use grafium_core::media::{fetch_metadata, transcript_to_markdown, MediaConfig};
 use grafium_core::models::Page;
@@ -184,21 +185,32 @@ fn fetch_transcript_blocking(
         })
 }
 
-/// Imports a video/audio URL as a new page containing its transcript.
+/// Imports a video/audio URL, either as a new page or appended to the end
+/// of today's journal, containing its transcript.
 ///
 /// Tries captions that YouTube (or another `yt-dlp`-supported site) already
 /// has — creator-uploaded first, then auto-generated. When none exist and
 /// this build has local Whisper transcription compiled in (see the `media`
 /// Cargo feature docs on `grafium_core::media`) and it's enabled in
 /// Settings, downloads the audio and transcribes it locally instead.
+///
+/// After transcription, best-effort asks the configured LLM (if any) for a
+/// one-line title-answer, a prose summary, and topic hashtags — rendered
+/// in a "## Summary" section before the transcript so the reader gets the
+/// gist immediately and can delete the raw transcript once verified.
+/// Summarization failures never abort the import; the transcript itself is
+/// the important part.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn media_import_video(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    knowledge_state: State<'_, KnowledgeState>,
     url: String,
     page_title: Option<String>,
     lang: Option<String>,
+    target: Option<String>,
 ) -> Result<Page, String> {
+    let insert_into_journal = target.as_deref() == Some("journal");
     let lang = lang.unwrap_or_else(|| "en".to_string());
     let workdir = std::env::temp_dir();
     let media_config = load_media_config(&app)?;
@@ -240,10 +252,45 @@ pub async fn media_import_video(
         .or_else(|| metadata.title.clone())
         .unwrap_or_else(|| url.clone());
 
-    let content = transcript_to_markdown(&url, &metadata, &transcript, source);
+    let mut emit_summary_progress = {
+        let progress_app = app.clone();
+        move |message: &str| {
+            let _ = progress_app.emit("media-import-progress", message);
+        }
+    };
+    let summary = {
+        let guard = knowledge_state.engine.read().await;
+        match guard.as_ref() {
+            Some(engine) if engine.is_llm_ready() => {
+                emit_summary_progress("Summarizing transcript...");
+                match engine
+                    .summarize_text(&title, &transcript.full_text, &mut emit_summary_progress)
+                    .await
+                {
+                    Ok(summary) => Some(summary),
+                    Err(error) => {
+                        emit_summary_progress(&format!("Could not generate a summary: {error}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let content = transcript_to_markdown(&url, &metadata, &transcript, source, summary.as_ref());
 
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph
-        .create_page_with_content(&title, false, &content)
-        .map_err(|e| e.to_string())
+    if insert_into_journal {
+        let journal_page = graph
+            .get_or_create_today_journal()
+            .map_err(|e| e.to_string())?;
+        graph
+            .append_content_to_page(&journal_page.id, &content)
+            .map_err(|e| e.to_string())
+    } else {
+        graph
+            .create_page_with_content(&title, false, &content)
+            .map_err(|e| e.to_string())
+    }
 }

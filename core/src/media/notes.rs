@@ -7,6 +7,7 @@
 //! [`Transcript`] — the only difference a reader sees is the
 //! `transcript_source` frontmatter field.
 
+use crate::ai::references::PageSummary;
 use crate::media::captions::VideoMetadata;
 use crate::media::types::{Transcript, TranscriptSource};
 
@@ -18,14 +19,16 @@ const TIMESTAMP_GROUP_MS: i64 = 30_000;
 
 /// Builds the full markdown content for a transcript note: YAML
 /// frontmatter (source URL, title, uploader, duration, where the
-/// transcript came from, when it was fetched) followed by the transcript
-/// body, grouped into `~30s` chunks each prefixed with a `**[mm:ss]**`
-/// timestamp marker.
+/// transcript came from, when it was fetched), an optional AI-generated
+/// "## Summary" section (title-answer, prose summary, `#hashtag` tags) when
+/// `summary` is available, followed by the transcript body, grouped into
+/// `~30s` chunks each prefixed with a `**[mm:ss]**` timestamp marker.
 pub fn transcript_to_markdown(
     url: &str,
     metadata: &VideoMetadata,
     transcript: &Transcript,
     source: TranscriptSource,
+    summary: Option<&PageSummary>,
 ) -> String {
     let mut out = String::new();
 
@@ -45,12 +48,43 @@ pub fn transcript_to_markdown(
         "fetched_at: \"{}\"\n",
         chrono::Utc::now().to_rfc3339()
     ));
+    if let Some(summary) = summary {
+        if !summary.tags.is_empty() {
+            let tags_yaml = summary
+                .tags
+                .iter()
+                .map(|tag| format!("\"{}\"", escape_yaml(tag)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("tags: [{tags_yaml}]\n"));
+        }
+    }
     out.push_str("---\n\n");
 
     if let Some(title) = &metadata.title {
         out.push_str(&format!("# {title}\n\n"));
     }
     out.push_str(&format!("Source: {url}\n\n"));
+
+    if let Some(summary) = summary {
+        out.push_str("## Summary\n\n");
+        if let Some(title_answer) = &summary.title_answer {
+            out.push_str(&format!("**{title_answer}**\n\n"));
+        }
+        out.push_str(summary.summary.trim());
+        out.push_str("\n\n");
+        if !summary.tags.is_empty() {
+            let hashtags = summary
+                .tags
+                .iter()
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&hashtags);
+            out.push_str("\n\n");
+        }
+    }
+
     out.push_str("## Transcript\n\n");
 
     if transcript.segments.is_empty() {
@@ -150,6 +184,7 @@ mod tests {
             &metadata,
             &sample_transcript(),
             TranscriptSource::CreatorCaptions,
+            None,
         );
         assert!(md.starts_with("---\n"));
         assert!(md.contains("source_url: \"https://youtu.be/abc123\""));
@@ -167,6 +202,7 @@ mod tests {
             &VideoMetadata::default(),
             &sample_transcript(),
             TranscriptSource::AutoCaptions,
+            None,
         );
         assert!(!md.contains("title:"));
         assert!(!md.contains("uploader:"));
@@ -181,6 +217,7 @@ mod tests {
             &VideoMetadata::default(),
             &sample_transcript(),
             TranscriptSource::Whisper,
+            None,
         );
         // First two segments (0ms, 5000ms) are within one 30s group starting
         // at 0:00; the third segment starts at 32s, past the 30s window, so
@@ -207,6 +244,7 @@ mod tests {
             &metadata,
             &sample_transcript(),
             TranscriptSource::Whisper,
+            None,
         );
         assert!(md.contains(r#"title: "A \"quoted\" title \\ with backslash""#));
     }
@@ -222,8 +260,35 @@ mod tests {
             &VideoMetadata::default(),
             &transcript,
             TranscriptSource::Whisper,
+            None,
         );
         assert!(md.contains("Just some text, no timing info."));
         assert!(!md.contains("**["));
+    }
+
+    #[test]
+    fn renders_summary_section_with_title_answer_and_hashtags_before_transcript() {
+        let summary = PageSummary {
+            title_answer: Some("Yes, magnesium helps with sleep.".to_string()),
+            summary: "The video covers magnesium's role in sleep and insulin sensitivity."
+                .to_string(),
+            tags: vec!["magnesium".to_string(), "insulin_resistance".to_string()],
+        };
+        let md = transcript_to_markdown(
+            "https://youtu.be/abc123",
+            &VideoMetadata::default(),
+            &sample_transcript(),
+            TranscriptSource::Whisper,
+            Some(&summary),
+        );
+        assert!(md.contains("tags: [\"magnesium\", \"insulin_resistance\"]"));
+        assert!(md.contains("## Summary"));
+        assert!(md.contains("**Yes, magnesium helps with sleep.**"));
+        assert!(md.contains(
+            "The video covers magnesium's role in sleep and insulin sensitivity."
+        ));
+        assert!(md.contains("#magnesium #insulin_resistance"));
+        // Summary must come before the transcript body.
+        assert!(md.find("## Summary").unwrap() < md.find("## Transcript").unwrap());
     }
 }
