@@ -163,6 +163,11 @@ fn embed_all(
         .unwrap_or(4);
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
+        // See the matching comment in `local_llm::generate` — without this,
+        // a text longer than n_batch's default (2048) crashes the whole
+        // process instead of returning an error.
+        .with_n_batch(ctx_size.get())
+        .with_n_ubatch(ctx_size.get())
         .with_n_threads(n_threads)
         .with_n_threads_batch(n_threads)
         .with_embeddings(true);

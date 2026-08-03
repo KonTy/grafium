@@ -257,6 +257,15 @@ fn generate(
         .unwrap_or(4);
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
+        // llama.cpp's decode() asserts the whole batch fits within
+        // `n_batch` (default 2048), independent of `n_ctx` — without this,
+        // a single-shot prompt longer than 2048 tokens (easy to hit once
+        // page content is included) crashes the whole process instead of
+        // returning an error. Matching n_batch/n_ubatch to the context
+        // size means "fits in the context window" is the only limit a
+        // caller needs to reason about.
+        .with_n_batch(ctx_size.get())
+        .with_n_ubatch(ctx_size.get())
         .with_n_threads(n_threads)
         .with_n_threads_batch(n_threads);
 
