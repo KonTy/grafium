@@ -470,7 +470,99 @@
 
     <!-- Content -->
     <div class="panel-content">
-      {#if !health?.enabled}
+      {#if activeTab === "search"}
+        <!-- Search doesn't require AI at all -- "Quick matches" below is
+             plain SQLite FTS (build_fts_prefix_query in core/src/db/blocks.rs),
+             so it works with no model configured/reachable at all (e.g. on a
+             phone build with no local LLM). Only the "AI Search" button
+             (semantic search) needs a working embedder, and it already
+             degrades gracefully via its own try/catch in doSearch() --
+             so unlike References/Ask below, this tab is never gated behind
+             the health check. -->
+        <div class="tab-content">
+          <form class="search-form" onsubmit={(e) => { e.preventDefault(); doSearch(); }}>
+            <input
+              type="text"
+              bind:this={searchInputEl}
+              bind:value={searchQuery}
+              oninput={handleSearchInput}
+              onkeydown={handleSearchKeydown}
+              placeholder="Type to find pages & blocks (e.g. 'magn' finds 'magnesium')..."
+              class="search-input"
+            />
+            <button
+              type="submit"
+              class="action-btn"
+              disabled={isLoading || !health?.embedder_available}
+              title={health?.embedder_available
+                ? "Deeper AI semantic search across all graphs"
+                : "AI semantic search needs a configured, reachable embedding model -- text search above still works without it"}
+            >
+              {isLoading ? "..." : "AI Search"}
+            </button>
+          </form>
+
+          {#if !health?.embedder_available}
+            <div class="panel-notice notice-sub-only">
+              AI semantic search isn't available (no embedding model configured/reachable) --
+              text search above still works.
+            </div>
+          {/if}
+
+          {#if error}
+            <div class="error-msg">{error}</div>
+          {/if}
+
+          {#if quickMatches.length > 0}
+            <div class="quick-matches-label">
+              Quick matches{isQuickSearching ? "…" : ""}
+            </div>
+            {#each quickMatches as match, i}
+              {#if match.kind === "page"}
+                <button
+                  class="search-result quick-match"
+                  class:selected={selectedResultIndex === i}
+                  onclick={() => navigateToQuickMatch(match)}
+                >
+                  <div class="result-header">
+                    <span class="result-kind-tag">Page</span>
+                    <span class="result-title">{match.page.title}</span>
+                  </div>
+                </button>
+              {:else}
+                <button
+                  class="search-result quick-match"
+                  class:selected={selectedResultIndex === i}
+                  onclick={() => navigateToQuickMatch(match)}
+                >
+                  <div class="result-header">
+                    <span class="result-kind-tag">Block</span>
+                    <span class="result-title">{match.pageTitle}</span>
+                  </div>
+                  <div class="result-snippet">{match.block.content.replace(/^[-*>\s#]+/, "").slice(0, 160) || "(empty block)"}</div>
+                </button>
+              {/if}
+            {/each}
+          {/if}
+
+          {#if searchResults.length > 0}
+            <div class="quick-matches-label">AI semantic results</div>
+          {/if}
+          {#each searchResults as result, j}
+            <button
+              class="search-result"
+              class:selected={selectedResultIndex === quickMatches.length + j}
+              onclick={() => onNavigate({ id: result.page_id })}
+            >
+              <div class="result-header">
+                <span class="result-title">{result.page_title}</span>
+                <span class="result-score">{formatScore(result.score)}</span>
+              </div>
+              <div class="result-snippet">{result.content.slice(0, 200)}</div>
+            </button>
+          {/each}
+        </div>
+      {:else if !health?.enabled}
         <div class="panel-notice">
           <p>AI is not configured.</p>
           <p class="notice-sub">Go to Settings → AI to set up a provider.</p>
@@ -705,78 +797,6 @@
             {/if}
           </div>
 
-        <!-- Search Tab -->
-        {:else if activeTab === "search"}
-          <div class="tab-content">
-            <form class="search-form" onsubmit={(e) => { e.preventDefault(); doSearch(); }}>
-              <input
-                type="text"
-                bind:this={searchInputEl}
-                bind:value={searchQuery}
-                oninput={handleSearchInput}
-                onkeydown={handleSearchKeydown}
-                placeholder="Type to find pages & blocks (e.g. 'magn' finds 'magnesium')..."
-                class="search-input"
-              />
-              <button type="submit" class="action-btn" disabled={isLoading} title="Deeper AI semantic search across all graphs">
-                {isLoading ? "..." : "AI Search"}
-              </button>
-            </form>
-
-            {#if error}
-              <div class="error-msg">{error}</div>
-            {/if}
-
-            {#if quickMatches.length > 0}
-              <div class="quick-matches-label">
-                Quick matches{isQuickSearching ? "…" : ""}
-              </div>
-              {#each quickMatches as match, i}
-                {#if match.kind === "page"}
-                  <button
-                    class="search-result quick-match"
-                    class:selected={selectedResultIndex === i}
-                    onclick={() => navigateToQuickMatch(match)}
-                  >
-                    <div class="result-header">
-                      <span class="result-kind-tag">Page</span>
-                      <span class="result-title">{match.page.title}</span>
-                    </div>
-                  </button>
-                {:else}
-                  <button
-                    class="search-result quick-match"
-                    class:selected={selectedResultIndex === i}
-                    onclick={() => navigateToQuickMatch(match)}
-                  >
-                    <div class="result-header">
-                      <span class="result-kind-tag">Block</span>
-                      <span class="result-title">{match.pageTitle}</span>
-                    </div>
-                    <div class="result-snippet">{match.block.content.replace(/^[-*>\s#]+/, "").slice(0, 160) || "(empty block)"}</div>
-                  </button>
-                {/if}
-              {/each}
-            {/if}
-
-            {#if searchResults.length > 0}
-              <div class="quick-matches-label">AI semantic results</div>
-            {/if}
-            {#each searchResults as result, j}
-              <button
-                class="search-result"
-                class:selected={selectedResultIndex === quickMatches.length + j}
-                onclick={() => onNavigate({ id: result.page_id })}
-              >
-                <div class="result-header">
-                  <span class="result-title">{result.page_title}</span>
-                  <span class="result-score">{formatScore(result.score)}</span>
-                </div>
-                <div class="result-snippet">{result.content.slice(0, 200)}</div>
-              </button>
-            {/each}
-          </div>
-
         <!-- Ask Tab -->
         {:else if activeTab === "ask"}
           <div class="tab-content">
@@ -897,6 +917,13 @@
   .notice-sub {
     font-size: 12px;
     margin-top: 4px;
+    opacity: 0.7;
+  }
+
+  .panel-notice.notice-sub-only {
+    text-align: left;
+    padding: 4px 2px;
+    font-size: 12px;
     opacity: 0.7;
   }
 
