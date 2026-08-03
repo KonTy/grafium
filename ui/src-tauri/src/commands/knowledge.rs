@@ -381,6 +381,7 @@ pub async fn ai_search(
 
 #[tauri::command]
 pub async fn ai_generate_references(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
     page_id: String,
@@ -412,8 +413,22 @@ pub async fn ai_generate_references(
         (page.title, blocks_data, graph_id)
     };
 
+    // Mirrors `media_import_video`'s `media-import-progress` convention —
+    // "Research this page" can take minutes on a local CPU-bound model, so
+    // the UI needs live status instead of an unexplained "Analyzing..."
+    // that reads like a hang.
+    let mut emit_progress = move |message: &str| {
+        let _ = app.emit("ai-reference-progress", message);
+    };
+
     engine
-        .generate_references(&page_id, &page_title, &blocks_data, &graph_id)
+        .generate_references(
+            &page_id,
+            &page_title,
+            &blocks_data,
+            &graph_id,
+            &mut emit_progress,
+        )
         .await
         .map_err(|e| e.to_string())
 }

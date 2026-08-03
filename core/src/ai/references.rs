@@ -80,6 +80,7 @@ impl ReferenceEngine {
         llm: &dyn LlmProvider,
         embedder: &dyn Embedder,
         store: &dyn VectorStore,
+        on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<PageReferencesMeta> {
         let mut all_refs: Vec<GeneratedReference> = Vec::new();
         let mut ref_counter = 1;
@@ -88,6 +89,13 @@ impl ReferenceEngine {
             .filter(|(_, content)| content.trim().len() >= 20)
             .map(|(block_id, content)| (block_id.as_str(), content.as_str()))
             .collect::<Vec<_>>();
+
+        on_progress(&format!(
+            "Analyzing {} block{} for key concepts (this can take a while on a local CPU \
+             model)...",
+            eligible_blocks.len(),
+            if eligible_blocks.len() == 1 { "" } else { "s" }
+        ));
 
         let mut pending_references = Vec::new();
         for ((block_id, _), concepts) in eligible_blocks.iter().copied().zip(
@@ -110,6 +118,11 @@ impl ReferenceEngine {
         let embeddings = if query_texts.is_empty() {
             Vec::new()
         } else {
+            on_progress(&format!(
+                "Generating embeddings for {} concept{}...",
+                query_texts.len(),
+                if query_texts.len() == 1 { "" } else { "s" }
+            ));
             embedder.embed(&query_texts).await?
         };
         if embeddings.len() != query_texts.len() {
@@ -125,6 +138,10 @@ impl ReferenceEngine {
         } else {
             Some(graph_id)
         };
+
+        if !pending_references.is_empty() {
+            on_progress("Searching related pages...");
+        }
 
         for (pending, embedding) in pending_references.into_iter().zip(embeddings.into_iter()) {
             let results = store
@@ -771,6 +788,7 @@ mod tests {
                 &llm,
                 &embedder,
                 &store,
+                &mut |_| {},
             )
             .await?;
 

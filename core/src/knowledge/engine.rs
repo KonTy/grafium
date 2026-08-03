@@ -429,6 +429,7 @@ impl KnowledgeEngine {
         page_title: &str,
         blocks: &[(String, String)], // (block_id, content)
         graph_id: &str,
+        on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<PageReferencesMeta> {
         let llm = self
             .llm
@@ -452,6 +453,7 @@ impl KnowledgeEngine {
                 llm.as_ref(),
                 embedder.as_ref(),
                 store.as_ref(),
+                on_progress,
             )
             .await
     }

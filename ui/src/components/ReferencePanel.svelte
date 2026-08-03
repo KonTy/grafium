@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import {
     aiGenerateReferences,
     aiSearch,
@@ -36,6 +37,7 @@
   let isLoading = $state(false);
   let error = $state("");
   let health = $state<HealthStatus | null>(null);
+  let researchProgress = $state("");
 
   // Check AI health on mount
   $effect(() => {
@@ -50,12 +52,18 @@
     if (!pageId) return;
     isLoading = true;
     error = "";
+    researchProgress = "Starting analysis...";
+    const unlisten = await listen<string>("ai-reference-progress", (e) => {
+      researchProgress = e.payload;
+    });
     try {
       references = await aiGenerateReferences(pageId);
     } catch (e: any) {
       error = e?.toString() || "Failed to generate references";
     } finally {
+      unlisten();
       isLoading = false;
+      researchProgress = "";
     }
   }
 
@@ -163,6 +171,13 @@
 
             {#if error}
               <div class="error-msg">{error}</div>
+            {/if}
+
+            {#if isLoading && researchProgress}
+              <div class="progress-status">
+                <span class="progress-spinner"></span>
+                <span class="progress-text">{researchProgress}</span>
+              </div>
             {/if}
 
             {#if references}
@@ -405,6 +420,40 @@
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 12px;
+  }
+
+  .progress-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-tertiary, #252535);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-secondary, #aaa);
+  }
+
+  .progress-spinner {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    border: 2px solid var(--border-color, #444);
+    border-top-color: var(--accent-color, #7c3aed);
+    border-radius: 50%;
+    animation: progress-spin 0.8s linear infinite;
+  }
+
+  .progress-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @keyframes progress-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .refs-meta {
