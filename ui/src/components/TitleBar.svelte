@@ -10,6 +10,7 @@
     onGoBack?: () => void;
     onGoForward?: () => void;
     onToggleReferencePanel?: () => void;
+    onOpenSearch?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
     onZoomReset?: () => void;
@@ -23,6 +24,7 @@
     onGoBack = () => {},
     onGoForward = () => {},
     onToggleReferencePanel = () => {},
+    onOpenSearch = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
     onZoomReset = () => {},
@@ -70,6 +72,12 @@
         </svg>
       </button>
     </div>
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onOpenSearch} title="Search (Ctrl+K)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"></circle>
+        <path d="m21 21-4.35-4.35"></path>
+      </svg>
+    </button>
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title="Knowledge Panel">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>

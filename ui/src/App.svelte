@@ -57,6 +57,8 @@
   let appLayoutEl: HTMLDivElement | null = null;
   let zenMode = $state(false);
   let referencePanelVisible = $state(false);
+  let referencePanelTab = $state<"references" | "search" | "ask">("references");
+  let referencePanelFocusTrigger = $state(0);
   let mainContentEl: HTMLElement | null = null;
   let restoreTimer: number | null = null;
   let pendingJournalRestore: HistoryEntry | null = $state(null);
@@ -412,6 +414,16 @@
     await navigateToHistoryEntry(navHistory[navIndex]);
   }
 
+  // Opens the Knowledge Panel (right pane) on its "Search" tab and focuses the
+  // search input. Works regardless of whether the left sidebar is open/closed,
+  // fixing the old Ctrl+K-does-nothing-when-sidebar-closed bug, since search
+  // now lives in the always-available toolbar/right pane instead of the sidebar.
+  function openGlobalSearch() {
+    referencePanelTab = "search";
+    referencePanelFocusTrigger += 1;
+    referencePanelVisible = true;
+  }
+
   // Register hotkeys
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
@@ -445,8 +457,7 @@
       goBack();
     },
     search: () => {
-      // Trigger sidebar search
-      window.dispatchEvent(new CustomEvent("toggle-search"));
+      openGlobalSearch();
     },
     searchInPage: () => {
       window.dispatchEvent(new CustomEvent("toggle-search"));
@@ -504,7 +515,7 @@
     // Keep search shortcut global, including while editing.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      window.dispatchEvent(new CustomEvent("toggle-search"));
+      openGlobalSearch();
       return;
     }
 
@@ -1065,6 +1076,7 @@
       onGoBack={goBack}
       onGoForward={goForward}
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
+      onOpenSearch={openGlobalSearch}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}
@@ -1136,6 +1148,8 @@
           visible={true}
           pageId={currentPage?.id || ""}
           pageTitle={currentPage?.title || ""}
+          initialTab={referencePanelTab}
+          focusTrigger={referencePanelFocusTrigger}
           onClose={() => (referencePanelVisible = false)}
           onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
         />

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import {
@@ -23,12 +24,16 @@
     visible = false,
     pageId = "",
     pageTitle = "",
+    initialTab,
+    focusTrigger = 0,
     onClose = () => {},
     onNavigate = (_target: PageNavigationTarget) => {},
   }: {
     visible?: boolean;
     pageId?: string;
     pageTitle?: string;
+    initialTab?: "references" | "search" | "ask";
+    focusTrigger?: number;
     onClose?: () => void;
     onNavigate?: (target: PageNavigationTarget) => void;
   } = $props();
@@ -46,6 +51,19 @@
   let researchProgress = $state("");
   let isInsertingSummary = $state(false);
   let insertedSummary = $state(false);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+
+  // Jump to (and focus) the requested tab whenever the parent bumps focusTrigger,
+  // e.g. from the toolbar "Search" button or the global Ctrl+K shortcut.
+  $effect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    focusTrigger;
+    if (!initialTab) return;
+    activeTab = initialTab;
+    if (initialTab === "search") {
+      tick().then(() => searchInputEl?.focus());
+    }
+  });
 
   // ─── Analyze Selection (arbitrary drag-selected text, not block-select) ──────
   let hasTextSelection = $state(false);
@@ -562,6 +580,7 @@
             <form class="search-form" onsubmit={(e) => { e.preventDefault(); doSearch(); }}>
               <input
                 type="text"
+                bind:this={searchInputEl}
                 bind:value={searchQuery}
                 placeholder="Semantic search across all graphs..."
                 class="search-input"
