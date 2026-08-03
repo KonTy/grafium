@@ -1481,6 +1481,8 @@ pub fn run() {
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_summarize_selection,
+            commands::knowledge::text_wrap_known_terms,
+            commands::knowledge::ai_insert_page_summary,
             commands::knowledge::ai_ask,
             commands::knowledge::ai_ask_stream,
             commands::knowledge::ai_list_registered_graphs,

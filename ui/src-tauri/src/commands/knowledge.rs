@@ -469,6 +469,65 @@ pub async fn ai_summarize_selection(
         .map_err(|e| e.to_string())
 }
 
+/// Wraps the first verbatim, whole-word occurrence of each `term` found in
+/// `content` with `[[wiki-link]]` syntax. Thin synchronous wrapper around
+/// [`grafium_core::parser::wrap_known_terms_as_links`] — kept as a single
+/// shared entry point so "Analyze Selected" and any other AI-tagging
+/// caller wrap terms identically instead of re-implementing matching
+/// logic per call site.
+#[tauri::command(rename_all = "camelCase")]
+pub fn text_wrap_known_terms(content: String, terms: Vec<String>) -> String {
+    grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
+}
+
+/// Inserts an AI-generated page summary (title answer + prose summary) as
+/// a new block at the very top of the page (right after the title), and
+/// wraps each of the summary's `tags` in place — as `[[wiki-link]]`s —
+/// across the page's existing block content wherever those terms already
+/// appear verbatim. Used by the "Insert into page" button in
+/// `ReferencePanel.svelte`, which only fires on explicit user action so
+/// repeated "Research this page" runs never duplicate content.
+#[tauri::command(rename_all = "camelCase")]
+pub fn ai_insert_page_summary(
+    app_state: State<'_, crate::AppState>,
+    page_id: String,
+    title_answer: Option<String>,
+    summary: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
+
+    let mut summary_text = String::new();
+    if let Some(answer) = title_answer {
+        if !answer.trim().is_empty() {
+            summary_text.push_str(answer.trim());
+            summary_text.push_str("\n\n");
+        }
+    }
+    summary_text.push_str(summary.trim());
+
+    graph
+        .insert_block_at_top(&page_id, &summary_text)
+        .map_err(|e| e.to_string())?;
+
+    if !tags.is_empty() {
+        let blocks = graph
+            .db
+            .list_blocks_for_page(&page_id)
+            .map_err(|e| e.to_string())?;
+        for block in blocks {
+            let wrapped = grafium_core::parser::wrap_known_terms_as_links(&block.content, &tags);
+            if wrapped != block.content {
+                graph
+                    .update_block(&block.id, &wrapped, None)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
 #[tauri::command]

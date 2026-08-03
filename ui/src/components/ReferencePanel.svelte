@@ -5,6 +5,7 @@
     aiSearch,
     aiHealthCheck,
     aiAsk,
+    aiInsertPageSummary,
     type GeneratedReference,
     type PageReferencesMeta,
     type SemanticSearchResult,
@@ -38,6 +39,8 @@
   let error = $state("");
   let health = $state<HealthStatus | null>(null);
   let researchProgress = $state("");
+  let isInsertingSummary = $state(false);
+  let insertedSummary = $state(false);
 
   // Check AI health on mount
   $effect(() => {
@@ -52,6 +55,7 @@
     if (!pageId) return;
     isLoading = true;
     error = "";
+    insertedSummary = false;
     researchProgress = "Starting analysis...";
     const unlisten = await listen<string>("ai-reference-progress", (e) => {
       // Cap what we keep in memory/DOM — streamed model output can grow
@@ -70,6 +74,28 @@
       unlisten();
       isLoading = false;
       researchProgress = "";
+    }
+  }
+
+  /// Writes the current summary into the actual page: a new block right
+  /// after the title (title-answer + prose summary), plus the summary's
+  /// tags wrapped in place as `[[wiki-link]]`s across the page's existing
+  /// blocks. Explicit opt-in button rather than automatic on every
+  /// "Research this page" run, so re-running research never silently
+  /// duplicates content on the page.
+  async function insertSummaryIntoPage() {
+    if (!pageId || !references?.summary || isInsertingSummary) return;
+    isInsertingSummary = true;
+    error = "";
+    try {
+      const { title_answer, summary, tags } = references.summary;
+      await aiInsertPageSummary(pageId, title_answer, summary, tags ?? []);
+      insertedSummary = true;
+      window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId } }));
+    } catch (e: any) {
+      error = e?.toString() || "Failed to insert summary into page";
+    } finally {
+      isInsertingSummary = false;
     }
   }
 
@@ -199,6 +225,19 @@
                     {/each}
                   </div>
                 {/if}
+                <button
+                  class="insert-summary-btn"
+                  onclick={insertSummaryIntoPage}
+                  disabled={isInsertingSummary || insertedSummary}
+                >
+                  {#if insertedSummary}
+                    Inserted into page ✓
+                  {:else if isInsertingSummary}
+                    Inserting...
+                  {:else}
+                    Insert into page
+                  {/if}
+                </button>
               </div>
             {/if}
 
@@ -517,6 +556,23 @@
     background: var(--bg-secondary, #1a1a24);
     border-radius: 4px;
     padding: 2px 6px;
+  }
+
+  .insert-summary-btn {
+    align-self: flex-start;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-primary, #fff);
+    background: var(--accent-color, #7c3aed);
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+
+  .insert-summary-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .refs-meta {

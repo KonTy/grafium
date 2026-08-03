@@ -74,9 +74,13 @@ pub struct PageSummary {
     pub title_answer: Option<String>,
     /// A concise multi-sentence summary of the page's content.
     pub summary: String,
-    /// Short topic labels (no `#` prefix, snake_case for multi-word topics,
+    /// Short key-term labels (snake_case/hyphenated for multi-word topics,
     /// e.g. `"magnesium"`, `"insulin_resistance"`) identifying the main
-    /// subjects covered — meant to be rendered as `#hashtag`s.
+    /// subjects covered. Each tag should be a term that actually appears
+    /// (verbatim, case-insensitive, ignoring the underscore/hyphen joiner)
+    /// in the source content, so callers can find-and-wrap it in place as a
+    /// real `[[wiki-link]]` in the original text rather than only showing
+    /// it in a separate summary panel.
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -516,7 +520,7 @@ const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You 
 Return a JSON object with:
 - "title_answer": if the title poses a question or makes a claim that the content answers or supports/refutes, one sentence directly answering it using the content. If the title is purely descriptive (e.g. a name, a date, "Meeting Notes"), use null.
 - "summary": a concise 3-5 sentence summary of the article's key points, in your own words.
-- "tags": an array of 2-6 short topic labels for the main subjects covered (lowercase, use underscores instead of spaces for multi-word topics, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Use [] if nothing distinct stands out.
+- "tags": an array of 2-6 short key terms for the main subjects covered, taken VERBATIM from the article content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only include a term if the underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary. Use [] if nothing distinct stands out.
 
 Example output:
 {"title_answer": "Yes, Rust generally outperforms C++ in memory-safety-critical workloads without sacrificing raw speed.", "summary": "The article compares Rust and C++ across compile-time safety, runtime performance, and tooling. It concludes Rust's ownership model prevents whole classes of bugs common in C++ with comparable benchmark performance in most workloads.", "tags": ["rust", "cpp", "memory_safety", "performance"]}

@@ -18,7 +18,7 @@
   import type { BacklinkResult, Block, Page } from "../lib/api";
   import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
-  import { aiSummarizeSelection } from "../lib/knowledge";
+  import { aiSummarizeSelection, wrapKnownTermsInText } from "../lib/knowledge";
   import { listen } from "@tauri-apps/api/event";
 
   interface Props {
@@ -117,6 +117,25 @@
 
     window.addEventListener("page-content-reveal-block", handleRevealBlock);
     return () => window.removeEventListener("page-content-reveal-block", handleRevealBlock);
+  });
+
+  // Fired by ReferencePanel's "Insert into page" action, which writes
+  // directly to the DB/disk via a Tauri command rather than through this
+  // component's own createBlock/updateBlock calls — so this component
+  // needs an explicit signal to refresh its local `blocks` state instead
+  // of going stale.
+  $effect(() => {
+    const pageId = page.id;
+    const handleReloadBlocks = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string }>).detail;
+      if (!detail || detail.pageId !== pageId) return;
+      void listBlocks(page.id).then((updated) => {
+        blocks = updated;
+      });
+    };
+
+    window.addEventListener("page-content-reload-blocks", handleReloadBlocks);
+    return () => window.removeEventListener("page-content-reload-blocks", handleReloadBlocks);
   });
 
   function hasChildren(blockId: string): boolean {
@@ -714,11 +733,14 @@
   let analyzeSelectionError = $state("");
   let analyzeSelectionProgress = $state("");
 
-  /// Summarizes the selected blocks' content and inserts the result (a
-  /// title-answer, prose summary, and `#hashtag` topic tags) as a new block
-  /// right after the last selected block — the same summary shape used by
-  /// "Research this page" and media imports, just applied to a manual
-  /// text/block selection instead of a whole page.
+  /// Summarizes the selected blocks' content, in-place wraps the AI's
+  /// identified key terms as `[[wiki-link]]`s wherever they verbatim occur
+  /// in the selected blocks' own text (so tagging is an actual edit to
+  /// the page, not just a label in the summary), and inserts a clean
+  /// title-answer + prose summary as a new block right after the last
+  /// selected block — the same summary shape used by "Research this page"
+  /// and media imports, just applied to a manual text/block selection
+  /// instead of a whole page.
   async function handleAnalyzeSelected() {
     if (selectedBlockIds.size === 0 || analyzingSelection) return;
     // Document order, not click order, so the summary reads coherently
@@ -735,10 +757,21 @@
     });
     try {
       const summary = await aiSummarizeSelection(text, page.title);
+
+      if (summary.tags?.length) {
+        analyzeSelectionProgress = "Linking key terms...";
+        for (const block of selected) {
+          const wrapped = await wrapKnownTermsInText(block.content, summary.tags);
+          if (wrapped !== block.content) {
+            await updateBlock(block.id, wrapped);
+            blocks = blocks.map((b) => (b.id === block.id ? { ...b, content: wrapped } : b));
+          }
+        }
+      }
+
       const parts: string[] = [];
       if (summary.title_answer) parts.push(`**${summary.title_answer}**`);
       parts.push(summary.summary);
-      if (summary.tags?.length) parts.push(summary.tags.map((t) => `#${t}`).join(" "));
       const content = parts.join("\n\n");
 
       const lastBlock = selected[selected.length - 1];

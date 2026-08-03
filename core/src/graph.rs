@@ -1210,6 +1210,43 @@ impl Graph {
         Ok(())
     }
 
+    /// Insert a new text block as the very first root-level block on a page
+    /// (used to place an AI-generated "Research this page" summary right
+    /// after the title). Reuses [`create_block`] to create the block and
+    /// [`reorder_blocks`] to move it to position 0 among existing
+    /// root-level blocks, rather than hand-rolling new order-shifting
+    /// logic — nested (non-root) blocks are untouched since
+    /// `reorder_blocks` only rewrites the `order_index` of the IDs it's
+    /// given.
+    pub fn insert_block_at_top(&self, page_id: &str, content: &str) -> Result<Block> {
+        let existing_root_ids: Vec<String> = self
+            .db
+            .list_blocks_for_page(page_id)?
+            .into_iter()
+            .filter(|b| b.parent_id.is_none())
+            .map(|b| b.id)
+            .collect();
+
+        let order = self.next_order_index_for_page(page_id)?;
+        let block = self.create_block(
+            page_id,
+            None,
+            order,
+            content,
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let mut ordered_ids = vec![block.id.clone()];
+        ordered_ids.extend(existing_root_ids);
+        self.reorder_blocks(page_id, &ordered_ids)?;
+
+        Ok(Block {
+            order_index: 0,
+            ..block
+        })
+    }
+
     // ─── Internal helpers ────────────────────────────────────────────────────────
 
     /// Migrate legacy %2F-encoded flat files to folder hierarchy.
@@ -1742,6 +1779,56 @@ mod tests {
 
         let page = graph.db.get_page_by_title("ordering")?;
         assert_eq!(graph.next_order_index_for_page(&page.id)?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_at_top_lands_before_existing_root_blocks() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("insert-top-target", false)?;
+
+        // create_page seeds one empty root block; add two more so we have
+        // a realistic multi-block page (plus a nested child, to confirm
+        // it's left untouched by the reorder).
+        let first_existing = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&first_existing.id, "First existing block", None)?;
+        let second_existing = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Second existing block",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let nested_child = graph.create_block(
+            &page.id,
+            Some(&second_existing.id),
+            0,
+            "Nested child block",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = graph.insert_block_at_top(&page.id, "AI summary block")?;
+        assert_eq!(inserted.order_index, 0);
+        assert!(inserted.parent_id.is_none());
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        let mut root_blocks: Vec<_> = blocks.iter().filter(|b| b.parent_id.is_none()).collect();
+        root_blocks.sort_by_key(|b| b.order_index);
+
+        assert_eq!(root_blocks.len(), 3);
+        assert_eq!(root_blocks[0].id, inserted.id);
+        assert_eq!(root_blocks[0].content, "AI summary block");
+        assert_eq!(root_blocks[1].id, first_existing.id);
+        assert_eq!(root_blocks[2].id, second_existing.id);
+
+        // Nested child's relative position/parent is untouched.
+        let child = blocks.iter().find(|b| b.id == nested_child.id).unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(second_existing.id.as_str()));
+        assert_eq!(child.order_index, 0);
+
         Ok(())
     }
 

@@ -198,6 +198,28 @@ export function aiSummarizeSelection(text: string, title?: string): Promise<Page
   return invoke("ai_summarize_selection", { text, title });
 }
 
+// Wraps the first verbatim, whole-word occurrence of each term found in
+// `content` with `[[wiki-link]]` syntax. Thin wrapper around the shared
+// core `wrap_known_terms_as_links` function — used by both "Analyze
+// Selected" and "Insert into page" so term-wrapping logic lives in one
+// place.
+export function wrapKnownTermsInText(content: string, terms: string[]): Promise<string> {
+  return invoke("text_wrap_known_terms", { content, terms });
+}
+
+// Inserts an AI-generated page summary as a new block at the top of the
+// page (right after the title) and wraps its tags in place as
+// `[[wiki-link]]`s across the page's existing blocks. Used by the
+// "Insert into page" button in ReferencePanel.svelte.
+export function aiInsertPageSummary(
+  pageId: string,
+  titleAnswer: string | null,
+  summary: string,
+  tags: string[]
+): Promise<void> {
+  return invoke("ai_insert_page_summary", { pageId, titleAnswer, summary, tags });
+}
+
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
 export function aiAsk(question: string, graphId?: string): Promise<string> {
