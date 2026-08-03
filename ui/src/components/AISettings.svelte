@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { open } from "@tauri-apps/plugin-dialog";
   import {
     aiGetConfig,
     aiSetConfig,
@@ -9,7 +10,7 @@
     type AiConfigPayload,
     type HealthStatus,
   } from "../lib/knowledge";
-  import { mediaGetConfig, mediaSetConfig, type MediaConfigPayload } from "../lib/api";
+  import { mediaGetConfig, mediaSetConfig, listLocalModels, type MediaConfigPayload, type LocalModelInfo } from "../lib/api";
 
   let config = $state<AiConfig | null>(null);
   let health = $state<HealthStatus | null>(null);
@@ -83,6 +84,62 @@
   // providers.
   let localSupportsEmbedding = $derived(localProvider !== "huggingface");
 
+  // Locally-downloaded model files, scanned from the configured (or
+  // default) Models Directory so Settings can offer a dropdown instead of
+  // asking the user to type an exact file name.
+  let localModelOptions = $state<LocalModelInfo[]>([]);
+  let mediaModelOptions = $state<LocalModelInfo[]>([]);
+
+  async function refreshLocalModelOptions() {
+    try {
+      const all = await listLocalModels(localModelsDir || undefined);
+      localModelOptions = all.filter((m) => m.kind === "llm");
+    } catch {
+      localModelOptions = [];
+    }
+  }
+
+  async function refreshMediaModelOptions() {
+    try {
+      const all = await listLocalModels(mediaModelsDir || undefined);
+      mediaModelOptions = all.filter((m) => m.kind === "whisper");
+    } catch {
+      mediaModelOptions = [];
+    }
+  }
+
+  async function browseLocalModelsDir() {
+    const selected = await open({ directory: true, multiple: false, title: "Choose Models Directory" });
+    if (selected && typeof selected === "string") {
+      localModelsDir = selected;
+    }
+  }
+
+  async function browseMediaModelsDir() {
+    const selected = await open({ directory: true, multiple: false, title: "Choose Models Directory" });
+    if (selected && typeof selected === "string") {
+      mediaModelsDir = selected;
+    }
+  }
+
+  function fmtModelSize(bytes: number): string {
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
+    return `${bytes} B`;
+  }
+
+  // Re-scan whenever the directory changes — manual edits, a "Browse..."
+  // pick, or the initial value loaded from saved config all flow through
+  // this same reactive read.
+  $effect(() => {
+    localModelsDir;
+    void refreshLocalModelOptions();
+  });
+  $effect(() => {
+    mediaModelsDir;
+    void refreshMediaModelOptions();
+  });
+
   // Load config on mount
   $effect(() => {
     loadConfig();
@@ -95,7 +152,12 @@
       config = await aiGetConfig();
       if (config) {
         enabled = config.enabled;
-        mode = config.mode || "local";
+        // Hybrid mode is no longer offered in this UI (it mixed too many
+        // concepts — base URLs, LLM models, and embedding models across two
+        // providers at once). Gracefully fall back to Local for anyone with
+        // an old config that still says "hybrid" rather than getting stuck
+        // on a mode with no matching button.
+        mode = config.mode === "hybrid" ? "local" : config.mode || "local";
         if (config.local) {
           localProvider = normalizeProvider(config.local.provider);
           localBaseUrl = config.local.base_url || "http://localhost:8000/v1";
@@ -218,7 +280,6 @@
   const MODE_DESCRIPTIONS: Record<string, string> = {
     local: "Chat and semantic search both run on this machine (or a local-network endpoint). Nothing leaves your computer.",
     cloud: "Chat and semantic search both use a cloud API (OpenAI, Anthropic, or a compatible endpoint). Requires an API key; your notes' content is sent to that provider.",
-    hybrid: "Semantic search runs locally (private, no cost per query) while chat uses a cloud API (stronger reasoning). Only your search query text and retrieved note snippets are sent to the cloud provider.",
   };
 
   const LOCAL_PROVIDER_DESCRIPTIONS: Record<string, string> = {
@@ -268,15 +329,14 @@
         <div class="choice-row">
           <button class="choice-btn" class:active={mode === "local"} onclick={() => (mode = "local")}>Local</button>
           <button class="choice-btn" class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
-          <button class="choice-btn" class:active={mode === "hybrid"} onclick={() => (mode = "hybrid")}>Hybrid</button>
         </div>
         <p class="field-hint">{MODE_DESCRIPTIONS[mode]}</p>
       </div>
 
       <!-- Local settings -->
-      {#if mode === "local" || mode === "hybrid"}
+      {#if mode === "local"}
         <div class="settings-section">
-          <h4>{mode === "hybrid" ? "Local Provider (embeddings / search)" : "Local Provider"}</h4>
+          <h4>Local Provider</h4>
           <div class="field-group">
             <label class="field-label">Provider</label>
             <div class="choice-row">
@@ -290,26 +350,38 @@
           {#if localProvider === "huggingface"}
             <!-- Embedded (llama.cpp): no server/URL/key involved at all. -->
             <div class="field-group">
-              <label class="field-label">Embedded Model File (GGUF)</label>
-              <input type="text" bind:value={localModelPath} class="field-input" placeholder="qwen3-4b-instruct.Q4_K_M.gguf, or an absolute path" />
-              <p class="field-hint">
-                Leave blank to auto-pick the only GGUF file in the models directory below, if
-                there's exactly one.
-              </p>
-            </div>
-            <div class="field-group">
-              <label class="field-label">Models Directory (optional)</label>
-              <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files instead of Grafium's own data dir" />
+              <label class="field-label">Models Directory</label>
+              <div class="browse-row">
+                <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
+                <button type="button" class="browse-btn" onclick={browseLocalModelsDir}>Browse...</button>
+                <button type="button" class="browse-btn" onclick={refreshLocalModelOptions} title="Re-scan this folder">Refresh</button>
+              </div>
               <p class="field-hint">
                 Point this at a folder you already keep local models in (shared with Ollama, LM
                 Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
                 Leave blank to use Grafium's own managed models folder.
               </p>
             </div>
+            <div class="field-group">
+              <label class="field-label">Embedded Model File (GGUF)</label>
+              {#if localModelOptions.length > 0}
+                <select bind:value={localModelPath} class="field-select">
+                  <option value="">Auto-detect (only GGUF file in folder)</option>
+                  {#each localModelOptions as m (m.file_name)}
+                    <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
+                  {/each}
+                </select>
+              {:else}
+                <p class="field-hint">
+                  No GGUF files found yet in the Models Directory above. Download one there, then
+                  hit Refresh — it'll show up here instead of needing to be typed by hand.
+                </p>
+              {/if}
+            </div>
             <p class="field-hint warning">
               Embedded chat doesn't include semantic search yet — there's no local embedding
               model behind it. "Index All Pages" and note search need an embedder, so pick
-              {mode === "hybrid" ? "a different local provider above" : "Hybrid mode, or Ollama / vLLM above,"} for that.
+              Ollama or vLLM / OpenAI-compatible above for that.
             </p>
           {:else}
             <!-- Ollama / vLLM-OpenAI-compatible: a real endpoint to reach. -->
@@ -323,12 +395,10 @@
                 <input type="password" bind:value={localApiKey} class="field-input" placeholder="****** if endpoint requires auth" />
               </div>
             {/if}
-            {#if mode === "local"}
-              <div class="field-group">
-                <label class="field-label">LLM Model</label>
-                <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
-              </div>
-            {/if}
+            <div class="field-group">
+              <label class="field-label">LLM Model</label>
+              <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
+            </div>
             <div class="field-group">
               <label class="field-label">Embedding Model</label>
               <input type="text" bind:value={embeddingModel} class="field-input" placeholder="nomic-embed-text" />
@@ -338,9 +408,9 @@
       {/if}
 
       <!-- Cloud settings -->
-      {#if mode === "cloud" || mode === "hybrid"}
+      {#if mode === "cloud"}
         <div class="settings-section">
-          <h4>{mode === "hybrid" ? "Cloud Provider (chat)" : "Cloud Provider"}</h4>
+          <h4>Cloud Provider</h4>
           <div class="field-group">
             <label class="field-label">Provider</label>
             <div class="choice-row">
@@ -362,29 +432,28 @@
             <label class="field-label">API Key</label>
             <input type="password" bind:value={cloudApiKey} class="field-input" placeholder="sk-..." />
           </div>
-          {#if mode === "cloud"}
-            <div class="field-group">
-              <label class="field-label">Embedding Provider</label>
-              <div class="choice-row">
-                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai"} onclick={() => (cloudEmbeddingProvider = "openai")}>OpenAI</button>
-                <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
-              </div>
+          <div class="field-group">
+            <label class="field-label">Embedding Provider</label>
+            <div class="choice-row">
+              <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai"} onclick={() => (cloudEmbeddingProvider = "openai")}>OpenAI</button>
+              <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
             </div>
-            <div class="field-group">
-              <label class="field-label">Embedding Base URL (optional)</label>
-              <input type="text" bind:value={cloudEmbeddingBaseUrl} class="field-input" placeholder="Defaults to cloud base URL" />
-            </div>
-            <div class="field-group">
-              <label class="field-label">Embedding Model</label>
-              <input type="text" bind:value={cloudEmbeddingModel} class="field-input" />
-            </div>
-            <div class="field-group">
-              <label class="field-label">Embedding API Key (optional)</label>
-              <input type="password" bind:value={cloudEmbeddingApiKey} class="field-input" placeholder="defaults to cloud API key" />
-            </div>
-          {/if}
+          </div>
+          <div class="field-group">
+            <label class="field-label">Embedding Base URL (optional)</label>
+            <input type="text" bind:value={cloudEmbeddingBaseUrl} class="field-input" placeholder="Defaults to cloud base URL" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Embedding Model</label>
+            <input type="text" bind:value={cloudEmbeddingModel} class="field-input" />
+          </div>
+          <div class="field-group">
+            <label class="field-label">Embedding API Key (optional)</label>
+            <input type="password" bind:value={cloudEmbeddingApiKey} class="field-input" placeholder="defaults to cloud API key" />
+          </div>
         </div>
       {/if}
+
 
       <!-- Actions -->
       <div class="actions-section">
@@ -428,20 +497,33 @@
       </label>
       {#if mediaEnabled}
         <div class="field-group">
-          <label class="field-label">Whisper Model File</label>
-          <input type="text" bind:value={mediaModelPath} class="field-input" placeholder="ggml-base.en.bin, or an absolute path" />
+          <label class="field-label">Models Directory</label>
+          <div class="browse-row">
+            <input type="text" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
+            <button type="button" class="browse-btn" onclick={browseMediaModelsDir}>Browse...</button>
+            <button type="button" class="browse-btn" onclick={refreshMediaModelOptions} title="Re-scan this folder">Refresh</button>
+          </div>
           <p class="field-hint">
-            Leave blank to auto-pick the only Whisper model file in the models directory below,
-            if there's exactly one.
+            Point this at a folder you already keep local models in so Grafium never duplicates
+            multi-gigabyte model files. Leave blank to use Grafium's own managed models folder
+            (the same one Embedded local chat uses).
           </p>
         </div>
         <div class="field-group">
-          <label class="field-label">Models Directory (optional)</label>
-          <input type="text" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
-          <p class="field-hint">
-            Point this at a folder you already keep local models in so Grafium never duplicates
-            multi-gigabyte model files. Leave blank to use Grafium's own managed models folder.
-          </p>
+          <label class="field-label">Whisper Model File</label>
+          {#if mediaModelOptions.length > 0}
+            <select bind:value={mediaModelPath} class="field-select">
+              <option value="">Auto-detect (only Whisper model in folder)</option>
+              {#each mediaModelOptions as m (m.file_name)}
+                <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
+              {/each}
+            </select>
+          {:else}
+            <p class="field-hint">
+              No Whisper model files found yet in the Models Directory above. Download one there
+              (e.g. ggml-base.en.bin), then hit Refresh.
+            </p>
+          {/if}
         </div>
         <div class="field-group">
           <label class="field-label">Language (optional)</label>
@@ -606,6 +688,44 @@
 
   .field-input:focus {
     border-color: var(--accent-color, #7c3aed);
+  }
+
+  .field-select {
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border-color, #333);
+    color: var(--text-primary, #fff);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .field-select:focus {
+    border-color: var(--accent-color, #7c3aed);
+  }
+
+  .browse-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .browse-row .field-input {
+    flex: 1;
+  }
+
+  .browse-btn {
+    background: var(--bg-input, #252536);
+    border: 1px solid var(--border, #333);
+    color: var(--text-primary, #fff);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .browse-btn:hover {
+    border-color: var(--accent, #7c3aed);
   }
 
   .actions-section {

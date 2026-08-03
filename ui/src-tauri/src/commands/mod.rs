@@ -7,6 +7,7 @@ pub mod graph;
 pub mod knowledge;
 pub mod links;
 pub mod media;
+pub mod model_library;
 pub mod pages;
 pub mod query;
 pub mod sync;

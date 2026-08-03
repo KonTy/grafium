@@ -206,7 +206,10 @@ pub async fn ai_set_config(
     if let Some(engine) = guard.as_mut() {
         engine.reconfigure(config).map_err(|e| e.to_string())?;
     } else {
-        let engine = KnowledgeEngine::new(&config_dir, config).map_err(|e| e.to_string())?;
+        let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let engine = KnowledgeEngine::new(&config_dir, config)
+            .map_err(|e| e.to_string())?
+            .with_models_root(app_data_dir);
         *guard = Some(engine);
     }
 

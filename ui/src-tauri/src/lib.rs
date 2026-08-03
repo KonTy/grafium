@@ -1284,7 +1284,9 @@ pub fn run() {
                 } else {
                     grafium_core::ai::config::AiConfig::default()
                 };
-                let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config).ok();
+                let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config)
+                    .map(|e| e.with_models_root(app_dir.clone()))
+                    .ok();
                 commands::knowledge::KnowledgeState {
                     engine: Arc::new(tokio::sync::RwLock::new(engine)),
                 }
@@ -1488,6 +1490,7 @@ pub fn run() {
             commands::media::media_import_video,
             commands::media::media_get_config,
             commands::media::media_set_config,
+            commands::model_library::list_local_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

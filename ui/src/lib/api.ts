@@ -421,3 +421,14 @@ export function mediaGetConfig(): Promise<MediaConfig> {
 export function mediaSetConfig(payload: MediaConfigPayload): Promise<void> {
   return invoke("media_set_config", { payload });
 }
+
+// Local model library (browse locally-downloaded model files for dropdowns)
+export interface LocalModelInfo {
+  file_name: string;
+  size_bytes: number;
+  kind: "llm" | "whisper" | "unknown";
+}
+
+export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {
+  return invoke("list_local_models", { modelsDir });
+}

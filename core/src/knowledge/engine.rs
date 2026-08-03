@@ -30,6 +30,18 @@ pub struct KnowledgeEngine {
     reference_engine: ReferenceEngine,
     registry: RwLock<GraphRegistry>,
     data_dir: PathBuf,
+    /// Where `model_library::default_models_dir` looks for locally-managed
+    /// model files (embedded LLM GGUFs) when `LocalConfig::models_dir` is
+    /// unset. Defaults to `data_dir` (old behaviour), but callers that keep
+    /// `data_dir` scoped to a feature-specific subfolder (e.g.
+    /// `<app_data_dir>/knowledge`, so vectors.db/graph_registry.json don't
+    /// share a folder with other data) should override this via
+    /// [`Self::with_models_root`] to the actual app data root, so "leave
+    /// Models Directory blank" resolves to the *same* shared folder the
+    /// Whisper settings default to as well — one shared models folder
+    /// instead of two different feature-namespaced ones a user would never
+    /// guess at.
+    models_root: PathBuf,
 }
 
 impl KnowledgeEngine {
@@ -51,6 +63,7 @@ impl KnowledgeEngine {
             reference_engine,
             registry: RwLock::new(registry),
             data_dir: data_dir.to_path_buf(),
+            models_root: data_dir.to_path_buf(),
         };
 
         if config.enabled {
@@ -58,6 +71,15 @@ impl KnowledgeEngine {
         }
 
         Ok(engine)
+    }
+
+    /// Overrides where the default (unconfigured) local models directory is
+    /// resolved from — see the `models_root` field doc for why a caller
+    /// would want this to differ from `data_dir`. Chainable so it reads
+    /// naturally right after `new(...)` at the call site.
+    pub fn with_models_root(mut self, root: PathBuf) -> Self {
+        self.models_root = root;
+        self
     }
 
     /// Initialize AI providers based on config.
@@ -94,7 +116,7 @@ impl KnowledgeEngine {
                                 self.llm = Some(Box::new(
                                     crate::ai::providers::local_llm::LocalLlm::from_config(
                                         &self.config,
-                                        &self.data_dir,
+                                        &self.models_root,
                                     )?,
                                 ));
                                 // No local embedding backend yet — this leaves
@@ -670,6 +692,7 @@ mod tests {
             reference_engine: ReferenceEngine::new(config.references.clone()),
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            models_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         })
     }
 

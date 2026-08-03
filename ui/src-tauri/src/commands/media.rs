@@ -189,7 +189,11 @@ pub async fn media_import_video(
     let lang = lang.unwrap_or_else(|| "en".to_string());
     let workdir = std::env::temp_dir();
     let media_config = load_media_config(&app)?;
-    let data_dir = media_data_dir(&app)?;
+    // Shared root for the "leave Models Directory blank" default — the same
+    // folder the embedded LLM (AI Settings) falls back to, so a user who
+    // drops files into one shared models folder doesn't have to guess which
+    // feature-specific subfolder each setting secretly expects.
+    let models_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     let url_for_blocking = url.clone();
     let lang_for_blocking = lang.clone();
@@ -201,7 +205,7 @@ pub async fn media_import_video(
             &workdir_for_blocking,
             &lang_for_blocking,
             &media_config,
-            &data_dir,
+            &models_root,
         );
         (metadata, transcript_result)
     })
