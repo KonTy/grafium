@@ -197,7 +197,7 @@
             <div class="choice-row">
               <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
               <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => (localProvider = "ollama")}>Ollama</button>
-              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded (not in this build)</button>
+              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded</button>
             </div>
           </div>
           <div class="field-group">
@@ -223,10 +223,10 @@
           </div>
           {#if localProvider === "huggingface"}
             <p class="field-hint">
-              Embedded in-process inference isn't compiled into this build yet (it needs a
-              llama.cpp toolchain bundled with the app) — these fields are saved for when it
-              ships, but won't be used until then. In the meantime, run a server like Ollama or
-              llama-server and use "vLLM / OpenAI-compatible" or "Ollama" above instead.
+              Runs llama.cpp in-process — no separate server needed. Point "Models Directory"
+              above at a folder containing your GGUF file (e.g. a Qwen3 or Llama model), then set
+              "Embedded Model File" to that file's name (or an absolute path). First load of a
+              large model can take a while; subsequent requests reuse the loaded model.
             </p>
           {/if}
           {#if mode === "local"}

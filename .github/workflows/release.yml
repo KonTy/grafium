@@ -90,6 +90,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `build.rs` copies the shared libraries the `llm-local` feature
+          # needs (libllama/libggml*) into target/release/bundled-libs so
+          # tauri.conf.json can bundle them. linuxdeploy (used for the
+          # AppImage target) resolves each binary's *own* dependencies via
+          # LD_LIBRARY_PATH rather than the rpath we bake into the built
+          # binary itself (that rpath only helps at final app runtime), so
+          # it needs this set to find libggml* while scanning libllama.so.
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release/bundled-libs
         with:
           projectPath: ui
           tauriScript: npx tauri
