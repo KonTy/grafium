@@ -44,6 +44,34 @@
     return p;
   }
 
+  // Sensible default Base URL per local provider, so switching providers
+  // doesn't leave a stale/wrong-looking URL behind (e.g. an OpenAI-compatible
+  // `/v1` URL left in place after switching to Ollama). Only auto-fills when
+  // the field still holds one of these known defaults (or is empty) — never
+  // clobbers a URL the user actually typed in themselves.
+  const LOCAL_BASE_URL_DEFAULTS: Record<string, string> = {
+    openai_compatible: "http://localhost:8000/v1",
+    ollama: "http://localhost:11434",
+  };
+
+  function selectLocalProvider(provider: string) {
+    const knownDefaults = Object.values(LOCAL_BASE_URL_DEFAULTS);
+    if (!localBaseUrl.trim() || knownDefaults.includes(localBaseUrl)) {
+      localBaseUrl = LOCAL_BASE_URL_DEFAULTS[provider] || "";
+    }
+    localProvider = provider;
+  }
+
+  // The embedded (llama.cpp) provider only implements chat/completion —
+  // there's no local embedding backend behind it yet (see
+  // `KnowledgeEngine::initialize_providers` in core/src/knowledge/engine.rs,
+  // which leaves `self.embedder` unset for `ProviderType::HuggingFace`).
+  // Semantic search / "Index All Pages" needs an embedder, so the Embedding
+  // Model field (and the LLM Model field, which Embedded also ignores in
+  // favor of its own GGUF file) only make sense for the endpoint-based
+  // providers.
+  let localSupportsEmbedding = $derived(localProvider !== "huggingface");
+
   // Load config on mount
   $effect(() => {
     loadConfig();
@@ -144,6 +172,18 @@
     messageType = type;
     setTimeout(() => (message = ""), 4000);
   }
+
+  const MODE_DESCRIPTIONS: Record<string, string> = {
+    local: "Chat and semantic search both run on this machine (or a local-network endpoint). Nothing leaves your computer.",
+    cloud: "Chat and semantic search both use a cloud API (OpenAI, Anthropic, or a compatible endpoint). Requires an API key; your notes' content is sent to that provider.",
+    hybrid: "Semantic search runs locally (private, no cost per query) while chat uses a cloud API (stronger reasoning). Only your search query text and retrieved note snippets are sent to the cloud provider.",
+  };
+
+  const LOCAL_PROVIDER_DESCRIPTIONS: Record<string, string> = {
+    openai_compatible: "Connects to a server you run yourself that speaks the OpenAI API (vLLM, llama-server, LM Studio, etc.).",
+    ollama: "Connects to a running Ollama server on this machine or your local network.",
+    huggingface: "Runs llama.cpp in-process, built into Grafium itself — no server to start or keep running.",
+  };
 </script>
 
 <div class="ai-settings">
@@ -165,7 +205,9 @@
             Not connected
           {/if}
         </span>
-        {#if health.vector_count > 0}
+        {#if health.enabled && health.llm_available && !health.embedder_available}
+          <span class="status-vectors warning">no search embedder</span>
+        {:else if health.vector_count > 0}
           <span class="status-vectors">{health.vector_count} vectors</span>
         {/if}
       </div>
@@ -186,66 +228,77 @@
           <button class="choice-btn" class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
           <button class="choice-btn" class:active={mode === "hybrid"} onclick={() => (mode = "hybrid")}>Hybrid</button>
         </div>
+        <p class="field-hint">{MODE_DESCRIPTIONS[mode]}</p>
       </div>
 
       <!-- Local settings -->
       {#if mode === "local" || mode === "hybrid"}
         <div class="settings-section">
-          <h4>Local Provider</h4>
+          <h4>{mode === "hybrid" ? "Local Provider (embeddings / search)" : "Local Provider"}</h4>
           <div class="field-group">
             <label class="field-label">Provider</label>
             <div class="choice-row">
-              <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => (localProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
-              <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => (localProvider = "ollama")}>Ollama</button>
-              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => (localProvider = "huggingface")}>Embedded</button>
+              <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => selectLocalProvider("openai_compatible")}>vLLM / OpenAI-compatible</button>
+              <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => selectLocalProvider("ollama")}>Ollama</button>
+              <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => selectLocalProvider("huggingface")}>Embedded</button>
             </div>
+            <p class="field-hint">{LOCAL_PROVIDER_DESCRIPTIONS[localProvider]}</p>
           </div>
-          <div class="field-group">
-            <label class="field-label">Base URL</label>
-            <input type="text" bind:value={localBaseUrl} class="field-input" placeholder="http://localhost:8000/v1 or http://192.168.1.10:11434" />
-          </div>
-          <div class="field-group">
-            <label class="field-label">API Key (optional)</label>
-            <input type="password" bind:value={localApiKey} class="field-input" placeholder="Bearer key if endpoint requires auth" />
-          </div>
-          <div class="field-group">
-            <label class="field-label">Embedded Model File (GGUF)</label>
-            <input type="text" bind:value={localModelPath} class="field-input" placeholder="qwen3-4b-instruct.Q4_K_M.gguf, or an absolute path" disabled={localProvider !== "huggingface"} />
-          </div>
-          <div class="field-group">
-            <label class="field-label">Models Directory (optional)</label>
-            <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files instead of Grafium's own data dir" disabled={localProvider !== "huggingface"} />
-            <p class="field-hint">
-              Point this at a folder you already keep local models in (shared with Ollama, LM
-              Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
-              Leave blank to use Grafium's own managed models folder.
-            </p>
-          </div>
+
           {#if localProvider === "huggingface"}
-            <p class="field-hint">
-              Runs llama.cpp in-process — no separate server needed. Point "Models Directory"
-              above at a folder containing your GGUF file (e.g. a Qwen3 or Llama model), then set
-              "Embedded Model File" to that file's name (or an absolute path). First load of a
-              large model can take a while; subsequent requests reuse the loaded model.
-            </p>
-          {/if}
-          {#if mode === "local"}
+            <!-- Embedded (llama.cpp): no server/URL/key involved at all. -->
             <div class="field-group">
-              <label class="field-label">LLM Model</label>
-              <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
+              <label class="field-label">Embedded Model File (GGUF)</label>
+              <input type="text" bind:value={localModelPath} class="field-input" placeholder="qwen3-4b-instruct.Q4_K_M.gguf, or an absolute path" />
+              <p class="field-hint">
+                Leave blank to auto-pick the only GGUF file in the models directory below, if
+                there's exactly one.
+              </p>
+            </div>
+            <div class="field-group">
+              <label class="field-label">Models Directory (optional)</label>
+              <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files instead of Grafium's own data dir" />
+              <p class="field-hint">
+                Point this at a folder you already keep local models in (shared with Ollama, LM
+                Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
+                Leave blank to use Grafium's own managed models folder.
+              </p>
+            </div>
+            <p class="field-hint warning">
+              Embedded chat doesn't include semantic search yet — there's no local embedding
+              model behind it. "Index All Pages" and note search need an embedder, so pick
+              {mode === "hybrid" ? "a different local provider above" : "Hybrid mode, or Ollama / vLLM above,"} for that.
+            </p>
+          {:else}
+            <!-- Ollama / vLLM-OpenAI-compatible: a real endpoint to reach. -->
+            <div class="field-group">
+              <label class="field-label">Base URL</label>
+              <input type="text" bind:value={localBaseUrl} class="field-input" placeholder={LOCAL_BASE_URL_DEFAULTS[localProvider]} />
+            </div>
+            {#if localProvider === "openai_compatible"}
+              <div class="field-group">
+                <label class="field-label">API Key (optional)</label>
+                <input type="password" bind:value={localApiKey} class="field-input" placeholder="****** if endpoint requires auth" />
+              </div>
+            {/if}
+            {#if mode === "local"}
+              <div class="field-group">
+                <label class="field-label">LLM Model</label>
+                <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
+              </div>
+            {/if}
+            <div class="field-group">
+              <label class="field-label">Embedding Model</label>
+              <input type="text" bind:value={embeddingModel} class="field-input" placeholder="nomic-embed-text" />
             </div>
           {/if}
-          <div class="field-group">
-            <label class="field-label">Embedding Model</label>
-            <input type="text" bind:value={embeddingModel} class="field-input" placeholder="nomic-embed-text" />
-          </div>
         </div>
       {/if}
 
       <!-- Cloud settings -->
       {#if mode === "cloud" || mode === "hybrid"}
         <div class="settings-section">
-          <h4>Cloud Provider</h4>
+          <h4>{mode === "hybrid" ? "Cloud Provider (chat)" : "Cloud Provider"}</h4>
           <div class="field-group">
             <label class="field-label">Provider</label>
             <div class="choice-row">
@@ -296,7 +349,14 @@
         <button class="action-btn primary" onclick={saveConfig} disabled={isSaving}>
           {isSaving ? "Saving..." : "Save Configuration"}
         </button>
-        <button class="action-btn" onclick={indexAll} disabled={isIndexing || !health?.enabled}>
+        <button
+          class="action-btn"
+          onclick={indexAll}
+          disabled={isIndexing || !health?.enabled || !health?.embedder_available}
+          title={health?.enabled && !health?.embedder_available
+            ? "No search embedder configured — pick Ollama or vLLM/OpenAI-compatible as the local provider (or a cloud provider) to enable this."
+            : undefined}
+        >
           {isIndexing ? "Indexing..." : "Index All Pages"}
         </button>
         <button class="action-btn" onclick={createSchemas}>
@@ -376,6 +436,11 @@
     opacity: 0.7;
   }
 
+  .status-vectors.warning {
+    color: #fbbf24;
+    opacity: 1;
+  }
+
   .toggle-row {
     display: flex;
     align-items: center;
@@ -418,8 +483,11 @@
     line-height: 1.4;
   }
 
-  .field-input,
-  .field-select {
+  .field-hint.warning {
+    color: #fbbf24;
+  }
+
+  .field-input {
     background: var(--bg-secondary, #1e1e2e);
     border: 1px solid var(--border-color, #333);
     color: var(--text-primary, #fff);
@@ -427,14 +495,6 @@
     border-radius: 6px;
     font-size: 13px;
     outline: none;
-  }
-
-  .field-select {
-    display: none;
-  }
-
-  .field-select option {
-    display: none;
   }
 
   .choice-row {
@@ -458,8 +518,7 @@
     border-color: var(--accent, #7c3aed);
   }
 
-  .field-input:focus,
-  .field-select:focus {
+  .field-input:focus {
     border-color: var(--accent-color, #7c3aed);
   }
 
