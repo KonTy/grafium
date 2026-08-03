@@ -40,6 +40,11 @@ pub enum ModelKind {
     Whisper,
     /// A general LLM checkpoint (llama.cpp-style `*.gguf` quantization).
     Llm,
+    /// A text embedding model (e.g. `nomic-embed-text`, `bge-*`, `gte-*`,
+    /// `e5-*`, `*-minilm-*`) — used for local semantic search via
+    /// `ai::providers::local_embedder::LocalEmbedder`, distinct from a
+    /// general chat/completion LLM even though both ship as `.gguf` files.
+    Embedding,
     /// Didn't match any recognized naming convention.
     Unknown,
 }
@@ -66,12 +71,36 @@ pub fn default_models_dir(data_dir: &Path) -> PathBuf {
 /// `whisper-large-v3-q5_0.gguf`, ...).
 const WHISPER_SIZE_NAMES: &[&str] = &["tiny", "base", "small", "medium", "large-v"];
 
+/// Naming fragments the common local embedding model families always
+/// include somewhere in the file name. Checked *before* the whisper
+/// heuristic below since several of these families reuse whisper's generic
+/// size words (e.g. `bge-base-en-v1.5.gguf`, `gte-small.gguf`) — without
+/// this ordering those would be misclassified as whisper checkpoints.
+const EMBEDDING_MARKERS: &[&str] = &[
+    "embed",
+    "bge-",
+    "bge_",
+    "gte-",
+    "gte_",
+    "e5-",
+    "e5_",
+    "minilm",
+    "arctic-embed",
+    "granite-embedding",
+    "gist-embed",
+    "sentence-transformer",
+];
+
 /// Classifies a file name by the naming conventions its ecosystem uses:
-/// whisper.cpp checkpoints are `ggml-*` or otherwise mention "whisper" or a
-/// whisper size name; llama.cpp quantizations are `*.gguf` (or the older
-/// `*.bin`) without those markers.
+/// embedding models mention "embed" or one of a handful of well-known
+/// embedding family prefixes; whisper.cpp checkpoints are `ggml-*` or
+/// otherwise mention "whisper" or a whisper size name; llama.cpp
+/// quantizations are `*.gguf` (or the older `*.bin`) without those markers.
 pub fn classify(file_name: &str) -> ModelKind {
     let lower = file_name.to_lowercase();
+    if EMBEDDING_MARKERS.iter().any(|m| lower.contains(m)) {
+        return ModelKind::Embedding;
+    }
     let looks_like_whisper = lower.starts_with("ggml-")
         || lower.contains("whisper")
         || WHISPER_SIZE_NAMES.iter().any(|s| lower.contains(s));
@@ -244,6 +273,12 @@ fn model_not_found_hint(models_dir: &Path, kind: ModelKind) -> String {
              the model name + \"GGUF\") and either place it in that directory or import it from Settings.",
             models_dir.display()
         ),
+        ModelKind::Embedding => format!(
+            "No embedding model found in {}. Download a GGUF embedding model (e.g. \
+             nomic-ai/nomic-embed-text-v1.5-GGUF or CompendiumLabs/bge-small-en-v1.5-gguf from \
+             Hugging Face) and either place it in that directory or import it from Settings.",
+            models_dir.display()
+        ),
         ModelKind::Unknown => format!("No matching model found in {}.", models_dir.display()),
     }
 }
@@ -264,6 +299,27 @@ mod tests {
         );
         assert_eq!(classify("qwen2.5-14b-instruct-q4_k_m.gguf"), ModelKind::Llm);
         assert_eq!(classify("notes.txt"), ModelKind::Unknown);
+    }
+
+    #[test]
+    fn classify_recognizes_embedding_model_naming_conventions() {
+        assert_eq!(
+            classify("nomic-embed-text-v1.5.f16.gguf"),
+            ModelKind::Embedding
+        );
+        assert_eq!(
+            classify("mxbai-embed-large-v1-q4_k_m.gguf"),
+            ModelKind::Embedding
+        );
+        assert_eq!(classify("gte-small.q8_0.gguf"), ModelKind::Embedding);
+        assert_eq!(classify("e5-small-v2.Q4_K_M.gguf"), ModelKind::Embedding);
+        // Several embedding families reuse whisper's generic size words
+        // ("base", "small") in their own names — the embedding check must
+        // win so these aren't misclassified as whisper checkpoints.
+        assert_eq!(
+            classify("bge-base-en-v1.5-q4_k_m.gguf"),
+            ModelKind::Embedding
+        );
     }
 
     #[test]

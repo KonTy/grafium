@@ -97,6 +97,13 @@ pub struct LocalConfig {
     /// when `provider == ProviderType::HuggingFace`. Mirrors
     /// `media::config::WhisperSettings` — see `LocalLlmSettings`.
     pub local_llm: LocalLlmSettings,
+    /// Settings for the embedded local embedding runtime (llama.cpp), used
+    /// only when `provider == ProviderType::HuggingFace`. Lets the
+    /// Embedded provider do semantic search / "Research this page" on its
+    /// own instead of requiring the user to switch to Ollama or vLLM just
+    /// to get an embedder. See `LocalEmbeddingSettings`.
+    #[serde(default)]
+    pub local_embedding: LocalEmbeddingSettings,
 }
 
 impl Default for LocalConfig {
@@ -109,6 +116,7 @@ impl Default for LocalConfig {
             embedding_model: "nomic-embed-text".to_string(),
             models_dir: None,
             local_llm: LocalLlmSettings::default(),
+            local_embedding: LocalEmbeddingSettings::default(),
         }
     }
 }
@@ -132,6 +140,21 @@ pub struct LocalLlmSettings {
     /// a GPU feature (`llm-local-vulkan`); ignored on CPU-only builds.
     /// `None` offloads every layer — the common "just use the GPU" case.
     pub gpu_layers: Option<u32>,
+}
+
+/// Settings for the embedded local embedding runtime (llama.cpp via
+/// `llama-cpp-2`), resolved against `ModelKind::Embedding` rather than
+/// `ModelKind::Llm`. Deliberately smaller than `LocalLlmSettings` — GGUF
+/// embedding models are tiny and fast enough that a configurable context
+/// size / GPU offload knob hasn't been needed so far; add fields here if
+/// that changes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalEmbeddingSettings {
+    /// Which GGUF embedding model file to use — see
+    /// `model_library::LocalModelRef` for the exact resolution rules.
+    /// Flattened so the on-disk JSON stays flat.
+    #[serde(flatten)]
+    pub model_ref: LocalModelRef,
 }
 
 /// Cloud AI configuration.

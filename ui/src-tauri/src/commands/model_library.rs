@@ -10,7 +10,7 @@ use tauri::Manager;
 pub struct ModelInfoPayload {
     pub file_name: String,
     pub size_bytes: u64,
-    /// `"llm"`, `"whisper"`, or `"unknown"` — mirrors
+    /// `"llm"`, `"whisper"`, `"embedding"`, or `"unknown"` — mirrors
     /// `grafium_core::model_library::ModelKind`, stringified so the
     /// frontend doesn't need to duplicate the enum.
     pub kind: String,
@@ -21,6 +21,7 @@ impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
         let kind = match info.kind {
             grafium_core::model_library::ModelKind::Llm => "llm",
             grafium_core::model_library::ModelKind::Whisper => "whisper",
+            grafium_core::model_library::ModelKind::Embedding => "embedding",
             grafium_core::model_library::ModelKind::Unknown => "unknown",
         };
         Self {

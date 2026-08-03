@@ -28,6 +28,7 @@
   let localBaseUrl = $state("http://localhost:8000/v1");
   let localApiKey = $state("");
   let localModelPath = $state("");
+  let localEmbeddingModelPath = $state("");
   let localModelsDir = $state("");
   let llmModel = $state("llama3.2");
   let embeddingModel = $state("nomic-embed-text");
@@ -82,20 +83,21 @@
   // Model field (and the LLM Model field, which Embedded also ignores in
   // favor of its own GGUF file) only make sense for the endpoint-based
   // providers.
-  let localSupportsEmbedding = $derived(localProvider !== "huggingface");
-
   // Locally-downloaded model files, scanned from the configured (or
   // default) Models Directory so Settings can offer a dropdown instead of
   // asking the user to type an exact file name.
   let localModelOptions = $state<LocalModelInfo[]>([]);
+  let localEmbeddingModelOptions = $state<LocalModelInfo[]>([]);
   let mediaModelOptions = $state<LocalModelInfo[]>([]);
 
   async function refreshLocalModelOptions() {
     try {
       const all = await listLocalModels(localModelsDir || undefined);
       localModelOptions = all.filter((m) => m.kind === "llm");
+      localEmbeddingModelOptions = all.filter((m) => m.kind === "embedding");
     } catch {
       localModelOptions = [];
+      localEmbeddingModelOptions = [];
     }
   }
 
@@ -163,6 +165,7 @@
           localBaseUrl = config.local.base_url || "http://localhost:8000/v1";
           localApiKey = config.local.api_key || "";
           localModelPath = config.local.local_llm?.model || "";
+          localEmbeddingModelPath = config.local.local_embedding?.model || "";
           localModelsDir = config.local.models_dir || "";
           llmModel = config.local.llm_model || "llama3.2";
           embeddingModel = config.local.embedding_model || "nomic-embed-text";
@@ -196,6 +199,7 @@
         local_base_url: localBaseUrl,
         local_api_key: localApiKey || undefined,
         local_model_path: localModelPath || undefined,
+        local_embedding_model_path: localEmbeddingModelPath || undefined,
         local_models_dir: localModelsDir || undefined,
         llm_model: llmModel,
         embedding_model: embeddingModel,
@@ -363,26 +367,43 @@
               </p>
             </div>
             <div class="field-group">
-              <label class="field-label">Embedded Model File (GGUF)</label>
+              <label class="field-label">Embedded LLM Model File (GGUF)</label>
               {#if localModelOptions.length > 0}
                 <select bind:value={localModelPath} class="field-select">
-                  <option value="">Auto-detect (only GGUF file in folder)</option>
+                  <option value="">Auto-detect (only chat GGUF file in folder)</option>
                   {#each localModelOptions as m (m.file_name)}
                     <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
                   {/each}
                 </select>
               {:else}
                 <p class="field-hint">
-                  No GGUF files found yet in the Models Directory above. Download one there, then
-                  hit Refresh — it'll show up here instead of needing to be typed by hand.
+                  No chat GGUF files found yet in the Models Directory above. Download one there,
+                  then hit Refresh — it'll show up here instead of needing to be typed by hand.
                 </p>
               {/if}
             </div>
-            <p class="field-hint warning">
-              Embedded chat doesn't include semantic search yet — there's no local embedding
-              model behind it. "Index All Pages" and note search need an embedder, so pick
-              Ollama or vLLM / OpenAI-compatible above for that.
-            </p>
+            <div class="field-group">
+              <label class="field-label">Embedding Model File (GGUF)</label>
+              {#if localEmbeddingModelOptions.length > 0}
+                <select bind:value={localEmbeddingModelPath} class="field-select">
+                  <option value="">Auto-detect (only embedding GGUF file in folder)</option>
+                  {#each localEmbeddingModelOptions as m (m.file_name)}
+                    <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
+                  {/each}
+                </select>
+                <p class="field-hint">
+                  Powers semantic search, indexing, and "Research this page" — separate from the
+                  chat model above.
+                </p>
+              {:else}
+                <p class="field-hint warning">
+                  No embedding GGUF file found yet, so semantic search / "Research this page"
+                  is disabled. Download one (e.g. nomic-embed-text-v1.5-GGUF or
+                  bge-small-en-v1.5-gguf from Hugging Face) into the Models Directory above, then
+                  hit Refresh.
+                </p>
+              {/if}
+            </div>
           {:else}
             <!-- Ollama / vLLM-OpenAI-compatible: a real endpoint to reach. -->
             <div class="field-group">

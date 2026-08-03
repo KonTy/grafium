@@ -1,7 +1,8 @@
 //! Tauri commands for the Knowledge Engine — AI, references, vector search, schemas.
 
 use grafium_core::ai::config::{
-    AiConfig, AiMode, CloudConfig, LocalConfig, LocalLlmSettings, ProviderType,
+    AiConfig, AiMode, CloudConfig, LocalConfig, LocalEmbeddingSettings, LocalLlmSettings,
+    ProviderType,
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
@@ -87,6 +88,11 @@ pub struct AiConfigPayload {
     pub local_base_url: Option<String>,
     pub local_api_key: Option<String>,
     pub local_model_path: Option<String>,
+    /// GGUF embedding model file for the Embedded (llama.cpp) local
+    /// provider — resolved against `ModelKind::Embedding` rather than
+    /// `ModelKind::Llm`, so an "Embedded" provider can do semantic search /
+    /// "Research this page" on its own. See `LocalEmbeddingSettings`.
+    pub local_embedding_model_path: Option<String>,
     /// Shared directory to search for local model files (embedded LLM
     /// GGUF, and in future Whisper) instead of Grafium's own managed
     /// `<data_dir>/models` folder — lets a user point at e.g.
@@ -163,6 +169,11 @@ pub async fn ai_set_config(
                 model: payload.local_model_path,
             },
             ..Default::default()
+        },
+        local_embedding: LocalEmbeddingSettings {
+            model_ref: LocalModelRef {
+                model: payload.local_embedding_model_path,
+            },
         },
         llm_model: payload.llm_model.unwrap_or_else(|| "llama3.2".to_string()),
         embedding_model: payload

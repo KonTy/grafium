@@ -119,16 +119,28 @@ impl KnowledgeEngine {
                                         &self.models_root,
                                     )?,
                                 ));
-                                // No local embedding backend yet — this leaves
-                                // `self.embedder` unset, the same "partial init"
-                                // pattern other branches already use when they
-                                // only set one of llm/embedder (see the cloud
-                                // `_ => {}` arms below). Full reference/vector
-                                // search needs an embedder too; a plain
-                                // completion consumer (e.g. video
-                                // summarization) only needs `self.llm` and can
-                                // use `LocalLlm::from_config` directly without
-                                // going through the engine at all.
+                                // Best-effort: an embedding model is a
+                                // separate download from the chat LLM, so a
+                                // user who's only set up the latter should
+                                // still get a working "Embedded" chat
+                                // provider — just without semantic search /
+                                // "Research this page" until they also point
+                                // Settings at a GGUF embedding model. Mirrors
+                                // the cloud branches' "only set what's
+                                // configured" partial-init pattern below.
+                                match crate::ai::providers::local_embedder::LocalEmbedder::from_config(
+                                    &self.config,
+                                    &self.models_root,
+                                ) {
+                                    Ok(embedder) => self.embedder = Some(Box::new(embedder)),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Embedded local embedding model not available yet \
+                                             (semantic search / \"Research this page\" will be \
+                                             disabled until one is configured): {e}"
+                                        );
+                                    }
+                                }
                             }
                             #[cfg(not(feature = "llm-local"))]
                             {

@@ -19,7 +19,7 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -27,17 +27,12 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
+use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
 use crate::ai::config::LocalLlmSettings;
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
-
-/// Offload every transformer layer to the GPU — the llama.cpp convention
-/// for "as many as exist" (the upstream `simple` example uses the same
-/// sentinel). A no-op unless built with a GPU feature (`llm-local-vulkan`).
-const OFFLOAD_ALL_LAYERS: u32 = 1_000_000;
 
 /// Context window used when neither the model's own trained context length
 /// nor an explicit `context_size` setting is usable.
@@ -61,8 +56,9 @@ pub struct LocalLlm {
 
 /// The process-wide llama.cpp backend. llama.cpp only wants to be
 /// initialized once; every `LocalLlm` instance shares the same handle
-/// rather than each `load()` call re-initializing it.
-static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
+/// rather than each `load()` call re-initializing it — see
+/// `llama_shared::shared_backend`, also used by `LocalEmbedder` so both can
+/// be in use in the same process at once.
 
 impl LocalLlm {
     /// Loads a GGUF model from `model_path`.
@@ -78,19 +74,7 @@ impl LocalLlm {
         context_size: Option<u32>,
         gpu_layers: Option<u32>,
     ) -> Result<Self> {
-        // llama.cpp/GGML log verbosely to stderr by default, which would
-        // corrupt a raw-mode terminal (e.g. the TUI) — same concern and
-        // same fix as whisper.cpp in `media::transcribe::WhisperTranscriber`.
-        static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
-        INSTALL_LOGGING.call_once(|| {
-            send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-        });
-
-        let backend = BACKEND
-            .get_or_init(|| {
-                Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend"))
-            })
-            .clone();
+        let backend = shared_backend();
 
         let model_params =
             LlamaModelParams::default().with_n_gpu_layers(gpu_layers.unwrap_or(OFFLOAD_ALL_LAYERS));

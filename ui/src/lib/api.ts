@@ -426,7 +426,7 @@ export function mediaSetConfig(payload: MediaConfigPayload): Promise<void> {
 export interface LocalModelInfo {
   file_name: string;
   size_bytes: number;
-  kind: "llm" | "whisper" | "unknown";
+  kind: "llm" | "whisper" | "embedding" | "unknown";
 }
 
 export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {
