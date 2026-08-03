@@ -1,9 +1,9 @@
 use crate::AppState;
-use grafium_core::media::{fetch_captions, fetch_metadata, transcript_to_markdown, MediaConfig};
+use grafium_core::media::{fetch_metadata, transcript_to_markdown, MediaConfig};
 use grafium_core::models::Page;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[cfg(not(target_os = "android"))]
 use grafium_core::media::{Transcript, TranscriptSource};
@@ -130,6 +130,10 @@ fn cached_transcriber(
 /// entirely synchronously/blocking — callers must invoke this from inside
 /// `spawn_blocking`, since it shells out to `yt-dlp`/`ffmpeg` and (in the
 /// fallback case) runs CPU-heavy whisper.cpp inference.
+///
+/// `on_progress` is called with a human-readable status line (e.g.
+/// "Downloading audio via yt-dlp...") at each stage, so the caller can
+/// forward it straight to the UI as a `media-import-progress` event.
 #[cfg(not(target_os = "android"))]
 fn fetch_transcript_blocking(
     url: &str,
@@ -137,9 +141,10 @@ fn fetch_transcript_blocking(
     lang: &str,
     media_config: &MediaConfig,
     data_dir: &std::path::Path,
+    on_progress: &mut dyn FnMut(&str),
 ) -> Result<(Transcript, TranscriptSource), String> {
     if !media_config.enabled {
-        return fetch_captions(url, workdir, lang)
+        return grafium_core::media::fetch_captions_with_progress(url, workdir, lang, on_progress)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 "No captions are available for this video. Local Whisper transcription is \
@@ -149,9 +154,16 @@ fn fetch_transcript_blocking(
             });
     }
 
+    on_progress("Loading Whisper model...");
     let transcriber = cached_transcriber(media_config, data_dir)?;
-    grafium_core::media::fetch_transcript(url, workdir, lang, transcriber.as_ref())
-        .map_err(|e| e.to_string())
+    grafium_core::media::fetch_transcript_with_progress(
+        url,
+        workdir,
+        lang,
+        transcriber.as_ref(),
+        on_progress,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "android")]
@@ -161,8 +173,9 @@ fn fetch_transcript_blocking(
     lang: &str,
     _media_config: &MediaConfig,
     _data_dir: &std::path::Path,
+    on_progress: &mut dyn FnMut(&str),
 ) -> Result<(grafium_core::media::Transcript, grafium_core::media::TranscriptSource), String> {
-    fetch_captions(url, workdir, lang)
+    grafium_core::media::fetch_captions_with_progress(url, workdir, lang, on_progress)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             "No captions are available for this video, and local transcription isn't enabled in \
@@ -195,10 +208,17 @@ pub async fn media_import_video(
     // feature-specific subfolder each setting secretly expects.
     let models_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
+    let progress_app = app.clone();
+    let emit_progress = move |message: &str| {
+        let _ = progress_app.emit("media-import-progress", message);
+    };
+
     let url_for_blocking = url.clone();
     let lang_for_blocking = lang.clone();
     let workdir_for_blocking = workdir.clone();
     let (metadata, transcript_result) = tauri::async_runtime::spawn_blocking(move || {
+        let mut emit_progress = emit_progress;
+        emit_progress("Fetching video info...");
         let metadata = fetch_metadata(&url_for_blocking).unwrap_or_default();
         let transcript_result = fetch_transcript_blocking(
             &url_for_blocking,
@@ -206,6 +226,7 @@ pub async fn media_import_video(
             &lang_for_blocking,
             &media_config,
             &models_root,
+            &mut emit_progress,
         );
         (metadata, transcript_result)
     })

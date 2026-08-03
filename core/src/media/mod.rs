@@ -32,9 +32,9 @@ mod tooling;
 pub mod transcribe;
 pub mod types;
 
-pub use captions::{fetch_captions, fetch_metadata, VideoMetadata};
+pub use captions::{fetch_captions, fetch_captions_with_progress, fetch_metadata, VideoMetadata};
 pub use config::{MediaConfig, WhisperSettings};
-pub use ingest::{fetch_audio, MediaSource};
+pub use ingest::{fetch_audio, fetch_audio_with_progress, MediaSource};
 pub use notes::transcript_to_markdown;
 #[cfg(feature = "media")]
 pub use transcribe::{Transcriber, WhisperTranscriber};
@@ -62,6 +62,16 @@ pub fn fetch_transcript(
     captions::fetch_captions(url, workdir, lang)
 }
 
+#[cfg(not(feature = "media"))]
+pub fn fetch_transcript_with_progress(
+    url: &str,
+    workdir: &Path,
+    lang: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<Option<(Transcript, TranscriptSource)>> {
+    captions::fetch_captions_with_progress(url, workdir, lang, on_progress)
+}
+
 /// Same as the non-`media` version, but falls back to local Whisper
 /// transcription (via `transcriber`) when no captions exist, so this
 /// always returns `Some` for any reachable, non-empty audio/video source.
@@ -72,12 +82,30 @@ pub fn fetch_transcript(
     lang: &str,
     transcriber: &dyn Transcriber,
 ) -> Result<(Transcript, TranscriptSource)> {
-    if let Some(result) = captions::fetch_captions(url, workdir, lang)? {
+    fetch_transcript_with_progress(url, workdir, lang, transcriber, &mut |_| {})
+}
+
+/// Same as [`fetch_transcript`], but reports each stage (checking captions,
+/// downloading audio, transcribing) through `on_progress` so a caller can
+/// surface live status instead of a silent multi-second/minute wait.
+#[cfg(feature = "media")]
+pub fn fetch_transcript_with_progress(
+    url: &str,
+    workdir: &Path,
+    lang: &str,
+    transcriber: &dyn Transcriber,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(Transcript, TranscriptSource)> {
+    if let Some(result) = captions::fetch_captions_with_progress(url, workdir, lang, on_progress)?
+    {
         return Ok(result);
     }
+    on_progress("No captions available — falling back to local transcription.");
     let source = MediaSource::parse(url);
-    let wav_path = ingest::fetch_audio(&source, workdir)?;
+    let wav_path = ingest::fetch_audio_with_progress(&source, workdir, on_progress)?;
+    on_progress("Transcribing audio locally with Whisper (this can take a while)...");
     let transcript = transcriber.transcribe(&wav_path)?;
+    on_progress("Transcription complete.");
     let _ = std::fs::remove_file(&wav_path);
     Ok((transcript, TranscriptSource::Whisper))
 }

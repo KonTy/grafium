@@ -868,10 +868,12 @@
   let importMediaUrl = $state("");
   let importMediaBusy = $state(false);
   let importMediaError = $state("");
+  let importMediaProgress = $state("");
 
   function openImportMediaDialog() {
     importMediaUrl = "";
     importMediaError = "";
+    importMediaProgress = "";
     importMediaBusy = false;
     showImportMediaDialog = true;
   }
@@ -888,6 +890,10 @@
     if (!url || importMediaBusy) return;
     importMediaBusy = true;
     importMediaError = "";
+    importMediaProgress = "Starting import...";
+    const unlisten = await listen<string>("media-import-progress", (e) => {
+      importMediaProgress = e.payload;
+    });
     try {
       const page = await mediaImportVideo(url);
       showImportMediaDialog = false;
@@ -896,7 +902,9 @@
     } catch (e) {
       importMediaError = e instanceof Error ? e.message : String(e);
     } finally {
+      unlisten();
       importMediaBusy = false;
+      importMediaProgress = "";
     }
   }
 
@@ -1288,6 +1296,9 @@
         disabled={importMediaBusy}
         autofocus
       />
+      {#if importMediaBusy && importMediaProgress}
+        <p class="dialog-progress">{importMediaProgress}</p>
+      {/if}
       {#if importMediaError}
         <p class="dialog-error">{importMediaError}</p>
       {/if}
@@ -1494,6 +1505,13 @@
     font-size: 12px;
     color: var(--error-color, #e57373);
     margin: 8px 0 0 0;
+  }
+
+  .dialog-progress {
+    font-size: 12px;
+    color: var(--text-secondary, #999);
+    margin: 8px 0 0 0;
+    font-style: italic;
   }
 
   .dialog-input {

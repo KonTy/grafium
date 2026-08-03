@@ -45,11 +45,25 @@ impl MediaSource {
 /// multiple calls — each call gets a unique filename so concurrent/repeated
 /// ingestions never collide.
 pub fn fetch_audio(source: &MediaSource, workdir: &Path) -> Result<PathBuf> {
+    fetch_audio_with_progress(source, workdir, &mut |_| {})
+}
+
+/// Same as [`fetch_audio`], but reports each step (download vs. reuse of a
+/// local file, then the ffmpeg normalization pass) through `on_progress` so
+/// a caller can show what's happening during what can be a slow download.
+pub fn fetch_audio_with_progress(
+    source: &MediaSource,
+    workdir: &Path,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<PathBuf> {
     std::fs::create_dir_all(workdir)?;
     let job_id = uuid::Uuid::new_v4();
 
     let raw_path = match source {
-        MediaSource::Url(url) => download_audio(url, workdir, &job_id.to_string())?,
+        MediaSource::Url(url) => {
+            on_progress("Downloading audio via yt-dlp...");
+            download_audio(url, workdir, &job_id.to_string())?
+        }
         MediaSource::LocalFile(path) => {
             if !path.exists() {
                 return Err(CoreError::NotFound(format!(
@@ -61,6 +75,7 @@ pub fn fetch_audio(source: &MediaSource, workdir: &Path) -> Result<PathBuf> {
         }
     };
 
+    on_progress("Converting audio to the format Whisper expects...");
     let wav_path = workdir.join(format!("{job_id}.wav"));
     normalize_to_wav(&raw_path, &wav_path)?;
 
