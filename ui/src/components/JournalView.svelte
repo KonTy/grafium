@@ -6,9 +6,10 @@
   interface Props {
     restorePageTitle?: string;
     restoreRequestId?: number;
+    onNavigate?: (target: string) => void;
   }
 
-  let { restorePageTitle = "", restoreRequestId = 0 }: Props = $props();
+  let { restorePageTitle = "", restoreRequestId = 0, onNavigate }: Props = $props();
 
   let journalPages: Page[] = $state([]);
   let loading = $state(true);
@@ -116,6 +117,11 @@
     }
   }
 
+  function handleImportMediaClick() {
+    contextMenu = null;
+    onNavigate?.("__import_media__");
+  }
+
   async function loadJournals() {
     loading = true;
     try {
@@ -214,6 +220,9 @@
       >
         <button class="context-menu-item danger" onclick={handleDeletePage}>
           Delete page
+        </button>
+        <button class="context-menu-item" onclick={handleImportMediaClick}>
+          Import from Media...
         </button>
       </div>
     {/if}

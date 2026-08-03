@@ -340,6 +340,15 @@
         <span>Create</span>
       {/if}
     </button>
+    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__import_media__") } title="Import from video/audio (URL or file)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="23 7 16 12 23 17 23 7"></polygon>
+        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+      </svg>
+      {#if !compactSidebar}
+        <span>Import Media</span>
+      {/if}
+    </button>
   </div>
 
   {#if contextMenu}
@@ -529,13 +538,17 @@
     margin-top: auto;
     padding-top: 12px;
     border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .sidebar-footer.compact {
     padding-top: 0;
     border-top: none;
-    display: flex;
+    flex-direction: row;
     justify-content: center;
+    gap: 6px;
   }
 
   .create-btn {

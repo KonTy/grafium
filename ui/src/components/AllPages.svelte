@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
-  import { countPages, listPagesWindow, createPage, deletePage, mediaImportVideo } from "../lib/api";
+  import { countPages, listPagesWindow, createPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -20,9 +20,6 @@
   let total = $state(0);
   let sortByTitle = $state(false); // false = Recent (updated_at), true = A-Z (title)
   let newPageTitle = $state("");
-  let importUrl = $state("");
-  let importing = $state(false);
-  let importError = $state<string | null>(null);
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
   // updates as windows stream in.
@@ -138,28 +135,6 @@
     await refreshCount();
   }
 
-  async function handleImportVideo() {
-    const url = importUrl.trim();
-    if (!url || importing) return;
-    importing = true;
-    importError = null;
-    try {
-      const page = await mediaImportVideo(url);
-      importUrl = "";
-      resetWindows();
-      await refreshCount();
-      onNavigate(page.title);
-    } catch (e) {
-      importError = e instanceof Error ? e.message : String(e);
-    } finally {
-      importing = false;
-    }
-  }
-
-  function handleImportKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") handleImportVideo();
-  }
-
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") handleCreatePage();
   }
@@ -186,30 +161,14 @@
       />
       <button onclick={handleCreatePage} class="btn-create">Create</button>
     </div>
+    <button onclick={() => onNavigate("__import_media__")} class="btn-import-media" title="Import from video/audio (URL or file)">
+      Import Media
+    </button>
     <div class="sort-controls">
       <button class="sort-btn" class:active={!sortByTitle} onclick={() => setSort(false)}>Recent</button>
       <button class="sort-btn" class:active={sortByTitle} onclick={() => setSort(true)}>A-Z</button>
     </div>
   </div>
-
-  <div class="controls import-controls">
-    <div class="new-page">
-      <input
-        type="text"
-        placeholder="Import from URL (YouTube captions -> page)..."
-        bind:value={importUrl}
-        onkeydown={handleImportKeydown}
-        disabled={importing}
-        class="new-page-input"
-      />
-      <button onclick={handleImportVideo} class="btn-create" disabled={importing || !importUrl.trim()}>
-        {importing ? "Importing…" : "Import"}
-      </button>
-    </div>
-  </div>
-  {#if importError}
-    <p class="import-error">{importError}</p>
-  {/if}
 
   {#if total === 0}
     <div class="empty-state">
@@ -313,14 +272,22 @@
     gap: 4px;
   }
 
-  .import-controls {
-    margin-top: -8px;
+  .btn-import-media {
+    padding: 8px 16px;
+    background: var(--btn-bg, transparent);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
   }
 
-  .import-error {
-    margin: -8px 0 16px;
-    color: var(--danger, #e5484d);
-    font-size: 13px;
+  .btn-import-media:hover {
+    background: var(--btn-bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
   }
 
   .sort-btn {

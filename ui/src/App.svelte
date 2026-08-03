@@ -11,7 +11,7 @@
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, type GraphInfo } from "./lib/api";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import type { PageNavigationTarget } from "./lib/navigation";
   import { resolvePageLookup } from "./lib/navigation";
@@ -834,6 +834,10 @@
       showNewPageDialog = true;
       return;
     }
+    if (target === "__import_media__") {
+      openImportMediaDialog();
+      return;
+    }
     navigateToPage(target);
   }
 
@@ -853,6 +857,52 @@
   function handleNewPageKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") submitNewPage();
     if (e.key === "Escape") cancelNewPage();
+  }
+
+  // Import from media (video/audio -> transcript page): a URL or local file
+  // path, transcribed via captions/Whisper (see `commands::media`) then
+  // opened like any other page. Shares the same dialog styling as "New
+  // Page" so it feels like one consistent affordance rather than a
+  // separate feature bolted on.
+  let showImportMediaDialog = $state(false);
+  let importMediaUrl = $state("");
+  let importMediaBusy = $state(false);
+  let importMediaError = $state("");
+
+  function openImportMediaDialog() {
+    importMediaUrl = "";
+    importMediaError = "";
+    importMediaBusy = false;
+    showImportMediaDialog = true;
+  }
+
+  function cancelImportMedia() {
+    if (importMediaBusy) return;
+    showImportMediaDialog = false;
+    importMediaUrl = "";
+    importMediaError = "";
+  }
+
+  async function submitImportMedia() {
+    const url = importMediaUrl.trim();
+    if (!url || importMediaBusy) return;
+    importMediaBusy = true;
+    importMediaError = "";
+    try {
+      const page = await mediaImportVideo(url);
+      showImportMediaDialog = false;
+      importMediaUrl = "";
+      navigateToPage(page.title);
+    } catch (e) {
+      importMediaError = e instanceof Error ? e.message : String(e);
+    } finally {
+      importMediaBusy = false;
+    }
+  }
+
+  function handleImportMediaKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") submitImportMedia();
+    if (e.key === "Escape") cancelImportMedia();
   }
 
   function toggleMoreMenu() {
@@ -1047,6 +1097,7 @@
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
+        onNavigate={handleNavigate}
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
@@ -1165,6 +1216,13 @@
           </svg>
           <span>Open Graph</span>
         </button>
+        <button class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__import_media__"); }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="23 7 16 12 23 17 23 7"></polygon>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          </svg>
+          <span>Import Media</span>
+        </button>
         <button class="more-menu-item" onclick={handleMobileCreateGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -1203,6 +1261,41 @@
       <div class="dialog-actions">
         <button class="dialog-btn dialog-btn-cancel" onclick={cancelNewPage}>Cancel</button>
         <button class="dialog-btn dialog-btn-ok" onclick={submitNewPage}>Create</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showImportMediaDialog}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="dialog-backdrop" onclick={cancelImportMedia}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+      <h3 class="dialog-title">Import from Video/Audio</h3>
+      <p class="dialog-description">
+        Paste a YouTube (or other yt-dlp-supported) URL, or a local file path. Captions are used
+        if available; otherwise it falls back to local Whisper transcription if enabled in
+        Settings.
+      </p>
+      <input
+        type="text"
+        class="dialog-input"
+        placeholder="https://youtube.com/watch?v=... or /path/to/video.mp4"
+        bind:value={importMediaUrl}
+        onkeydown={handleImportMediaKeydown}
+        disabled={importMediaBusy}
+        autofocus
+      />
+      {#if importMediaError}
+        <p class="dialog-error">{importMediaError}</p>
+      {/if}
+      <div class="dialog-actions">
+        <button class="dialog-btn dialog-btn-cancel" onclick={cancelImportMedia} disabled={importMediaBusy}>Cancel</button>
+        <button class="dialog-btn dialog-btn-ok" onclick={submitImportMedia} disabled={importMediaBusy || !importMediaUrl.trim()}>
+          {importMediaBusy ? "Importing…" : "Import"}
+        </button>
       </div>
     </div>
   </div>
@@ -1388,6 +1481,19 @@
     margin-bottom: 12px;
     font-family: monospace;
     word-break: break-all;
+  }
+
+  .dialog-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 12px 0;
+    line-height: 1.4;
+  }
+
+  .dialog-error {
+    font-size: 12px;
+    color: var(--error-color, #e57373);
+    margin: 8px 0 0 0;
   }
 
   .dialog-input {
