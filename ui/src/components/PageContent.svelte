@@ -18,7 +18,7 @@
   import type { BacklinkResult, Block, Page } from "../lib/api";
   import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
-  import { aiSummarizeSelection, wrapKnownTermsInText } from "../lib/knowledge";
+  import { aiSummarizeSelection, wrapKnownTermsInText, type TagTerm } from "../lib/knowledge";
   import { listen } from "@tauri-apps/api/event";
 
   interface Props {
@@ -759,9 +759,17 @@
     });
     try {
       const summary = await aiSummarizeSelection(text, page.title);
-      const allTags = Array.from(
-        new Set(summary.topics.flatMap((t) => t.tags ?? []).map((t) => t.trim()).filter(Boolean))
-      );
+      const allTags: TagTerm[] = [];
+      const seenTags = new Set<string>();
+      for (const topic of summary.topics) {
+        for (const tag of topic.tags ?? []) {
+          const key = tag.term.trim().toLowerCase();
+          if (key && !seenTags.has(key)) {
+            seenTags.add(key);
+            allTags.push(tag);
+          }
+        }
+      }
 
       if (allTags.length) {
         analyzeSelectionProgress = "Linking key terms...";

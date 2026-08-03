@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +46,60 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     links
 }
 
-/// Wraps the first occurrence of each `term` that already appears verbatim
+/// A key term to find verbatim in text and wrap as a `[[wiki-link]]`.
+///
+/// `qualified`, when set, lets a caller (typically the AI tagging
+/// pipeline) disambiguate a generic/ambiguous bare `term` — e.g. the word
+/// "absorption" could mean digestive/bodily absorption or soil/chemical
+/// absorption depending on context — by substituting a short qualified
+/// phrase (e.g. "body absorption") in place of the matched text instead of
+/// wrapping the ambiguous bare word as-is. This is the one deliberate
+/// exception to "never rewrite the prose": inserting a qualifier changes
+/// the visible text slightly so the resulting link/page target isn't
+/// conflated with unrelated senses of the same word across the graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TagTerm {
+    /// The exact phrase to search for, verbatim (case-insensitive,
+    /// whole-word) in the target text.
+    pub term: String,
+    /// A short disambiguated phrase to substitute for `term` when wrapping
+    /// it, if `term` alone would be ambiguous out of context. `None` (the
+    /// common case) means wrap the matched text unchanged.
+    #[serde(default)]
+    pub qualified: Option<String>,
+}
+
+impl TagTerm {
+    /// The display label for this term: the qualified phrase if present
+    /// and meaningfully different from the bare term, otherwise the term
+    /// itself.
+    pub fn label(&self) -> &str {
+        match &self.qualified {
+            Some(q) if !q.trim().is_empty() && !q.eq_ignore_ascii_case(self.term.trim()) => q,
+            _ => &self.term,
+        }
+    }
+}
+
+impl From<String> for TagTerm {
+    fn from(term: String) -> Self {
+        TagTerm {
+            term,
+            qualified: None,
+        }
+    }
+}
+
+impl From<&str> for TagTerm {
+    fn from(term: &str) -> Self {
+        TagTerm {
+            term: term.to_string(),
+            qualified: None,
+        }
+    }
+}
+
+/// Wraps the first occurrence of each term that already appears verbatim
 /// (case-insensitive, whole-word) in `content` with `[[...]]` wiki-link
 /// syntax, so AI-identified key concepts become real, clickable, indexed
 /// links (backlinks, page auto-creation) using the exact same `[[...]]`
@@ -53,33 +107,47 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
 /// separate "#hashtag" convention that can't express multi-word terms like
 /// "insulin resistance" without an awkward underscore/hyphen workaround.
 ///
-/// Deliberately does NOT rewrite the text otherwise: only bracket-wraps
-/// substrings that are already there, so the underlying prose is untouched
-/// and the user only sees new `[[ ]]` delimiters around terms they wrote
-/// (or that the transcript/source text already contained).
-pub fn wrap_known_terms_as_links(content: &str, terms: &[String]) -> String {
+/// For terms without a `qualified` override, this only bracket-wraps
+/// substrings that are already there, so the underlying prose is
+/// untouched. When a term does carry a `qualified` override (see
+/// [`TagTerm`]), the matched span is replaced by that qualified phrase
+/// (wrapped in brackets) instead of being left as-is — the one case where
+/// this function intentionally changes the visible text, to disambiguate
+/// a generic term for a specific sense.
+pub fn wrap_known_terms_as_links(content: &str, terms: &[TagTerm]) -> String {
     let protected = existing_wikilink_spans(content);
 
     // Longest term first so a multi-word phrase (e.g. "insulin resistance")
     // wins over a shorter substring also present in the tag list (e.g.
     // "insulin") instead of the shorter one claiming it first.
-    let mut candidates: Vec<String> = terms
+    let mut candidates: Vec<TagTerm> = terms
         .iter()
-        .map(|t| t.replace(['_', '-'], " ").trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter_map(|t| {
+            let term = t.term.replace(['_', '-'], " ").trim().to_string();
+            if term.is_empty() {
+                return None;
+            }
+            let qualified = t
+                .qualified
+                .as_ref()
+                .map(|q| q.replace(['_', '-'], " ").trim().to_string())
+                .filter(|q| !q.is_empty() && !q.eq_ignore_ascii_case(&term));
+            Some(TagTerm { term, qualified })
+        })
         .collect();
-    candidates.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
+    candidates.sort_by_key(|t| std::cmp::Reverse(t.term.chars().count()));
 
-    let mut wraps: Vec<(usize, usize)> = Vec::new();
+    let mut wraps: Vec<(usize, usize, Option<String>)> = Vec::new();
     for term in &candidates {
         let mut from = 0;
-        while let Some((start, end)) = find_case_insensitive(content, term, from) {
+        while let Some((start, end)) = find_case_insensitive(content, &term.term, from) {
             let overlaps = protected
                 .iter()
-                .chain(wraps.iter())
-                .any(|&(s, e)| start < e && end > s);
+                .copied()
+                .chain(wraps.iter().map(|&(s, e, _)| (s, e)))
+                .any(|(s, e)| start < e && end > s);
             if !overlaps && is_word_boundary(content, start) && is_word_boundary(content, end) {
-                wraps.push((start, end));
+                wraps.push((start, end, term.qualified.clone()));
                 break; // only the first clean occurrence per term
             }
             from = end.max(start + 1);
@@ -90,16 +158,19 @@ pub fn wrap_known_terms_as_links(content: &str, terms: &[String]) -> String {
         return content.to_string();
     }
 
-    wraps.sort_unstable();
+    wraps.sort_unstable_by_key(|&(start, end, _)| (start, end));
     let mut result = String::with_capacity(content.len() + wraps.len() * 4);
     let mut cursor = 0;
-    for (start, end) in wraps {
+    for (start, end, qualified) in wraps {
         if start < cursor {
             continue; // safety net against any accidental overlap
         }
         result.push_str(&content[cursor..start]);
         result.push_str("[[");
-        result.push_str(&content[start..end]);
+        match qualified {
+            Some(q) => result.push_str(&q),
+            None => result.push_str(&content[start..end]),
+        }
         result.push_str("]]");
         cursor = end;
     }
@@ -242,10 +313,7 @@ mod tests {
 
     #[test]
     fn test_wrap_known_terms_simple_match() {
-        let out = wrap_known_terms_as_links(
-            "Magnesium helps with sleep.",
-            &["Magnesium".to_string()],
-        );
+        let out = wrap_known_terms_as_links("Magnesium helps with sleep.", &["Magnesium".into()]);
         assert_eq!(out, "[[Magnesium]] helps with sleep.");
     }
 
@@ -253,7 +321,7 @@ mod tests {
     fn test_wrap_known_terms_multi_word_with_underscore_conversion() {
         let out = wrap_known_terms_as_links(
             "This article discusses insulin resistance in depth.",
-            &["insulin_resistance".to_string()],
+            &["insulin_resistance".into()],
         );
         assert_eq!(
             out,
@@ -263,10 +331,7 @@ mod tests {
 
     #[test]
     fn test_wrap_known_terms_preserves_original_casing() {
-        let out = wrap_known_terms_as_links(
-            "Vitamin D is important.",
-            &["vitamin d".to_string()],
-        );
+        let out = wrap_known_terms_as_links("Vitamin D is important.", &["vitamin d".into()]);
         assert_eq!(out, "[[Vitamin D]] is important.");
     }
 
@@ -276,12 +341,12 @@ mod tests {
         // embedded in "categories" and "cats"), so nothing should wrap.
         let out = wrap_known_terms_as_links(
             "This is about categories, not cats.",
-            &["cat".to_string()],
+            &["cat".into()],
         );
         assert_eq!(out, "This is about categories, not cats.");
 
         // But when "cat" does appear as a standalone word, it should wrap.
-        let out2 = wrap_known_terms_as_links("The cat sat down.", &["cat".to_string()]);
+        let out2 = wrap_known_terms_as_links("The cat sat down.", &["cat".into()]);
         assert_eq!(out2, "The [[cat]] sat down.");
     }
 
@@ -289,7 +354,7 @@ mod tests {
     fn test_wrap_known_terms_longest_term_wins_over_substring() {
         let out = wrap_known_terms_as_links(
             "Low insulin resistance is the goal.",
-            &["insulin".to_string(), "insulin resistance".to_string()],
+            &["insulin".into(), "insulin resistance".into()],
         );
         assert_eq!(out, "Low [[insulin resistance]] is the goal.");
     }
@@ -298,7 +363,7 @@ mod tests {
     fn test_wrap_known_terms_skips_existing_wikilinks() {
         let out = wrap_known_terms_as_links(
             "See [[Magnesium]] for more info on magnesium levels.",
-            &["magnesium".to_string()],
+            &["magnesium".into()],
         );
         // The first occurrence is already a link; the second bare mention
         // becomes the new wrap target instead of double-wrapping the first.
@@ -310,7 +375,40 @@ mod tests {
 
     #[test]
     fn test_wrap_known_terms_no_match_leaves_content_unchanged() {
-        let out = wrap_known_terms_as_links("Nothing relevant here.", &["zinc".to_string()]);
+        let out = wrap_known_terms_as_links("Nothing relevant here.", &["zinc".into()]);
         assert_eq!(out, "Nothing relevant here.");
+    }
+
+    #[test]
+    fn test_wrap_known_terms_substitutes_qualified_phrase_for_ambiguous_term() {
+        // "absorption" alone is ambiguous (could be bodily or soil/chemical
+        // absorption); a qualified override should replace the matched
+        // bare word with the disambiguated phrase instead of leaving it as-is.
+        let out = wrap_known_terms_as_links(
+            "The gut's absorption of magnesium was studied.",
+            &[TagTerm {
+                term: "absorption".to_string(),
+                qualified: Some("body absorption".to_string()),
+            }],
+        );
+        assert_eq!(
+            out,
+            "The gut's [[body absorption]] of magnesium was studied."
+        );
+    }
+
+    #[test]
+    fn test_wrap_known_terms_ignores_qualified_when_same_as_term() {
+        // A qualified value that's identical to the bare term (modulo case)
+        // is treated as "no override" so we don't emit redundant brackets
+        // around unchanged text via a pointless substitution path.
+        let out = wrap_known_terms_as_links(
+            "Magnesium helps with sleep.",
+            &[TagTerm {
+                term: "magnesium".to_string(),
+                qualified: Some("Magnesium".to_string()),
+            }],
+        );
+        assert_eq!(out, "[[Magnesium]] helps with sleep.");
     }
 }

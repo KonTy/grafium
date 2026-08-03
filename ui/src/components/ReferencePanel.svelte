@@ -322,7 +322,7 @@
                     {#if topic.tags?.length}
                       <div class="summary-tags">
                         {#each topic.tags as tag}
-                          <span class="summary-tag">#{tag}</span>
+                          <span class="summary-tag">#{tag.qualified ?? tag.term}</span>
                         {/each}
                       </div>
                     {/if}
@@ -356,7 +356,7 @@
                     {#if topic.tags?.length}
                       <div class="summary-tags">
                         {#each topic.tags as tag}
-                          <span class="summary-tag">#{tag}</span>
+                          <span class="summary-tag">#{tag.qualified ?? tag.term}</span>
                         {/each}
                       </div>
                     {/if}

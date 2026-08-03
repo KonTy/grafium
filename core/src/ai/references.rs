@@ -15,6 +15,7 @@ use crate::ai::traits::{
     ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole, SearchResult, VectorStore,
 };
 use crate::error::{CoreError, Result};
+use crate::parser::TagTerm;
 
 /// A generated reference for a specific location in a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,15 +86,29 @@ pub struct PageSummary {
 
 impl PageSummary {
     /// All tags across every topic, in first-seen order and deduplicated
-    /// case-insensitively — used when a caller just needs a flat term list
-    /// to wrap in place (e.g. across a whole selection) and topic
-    /// boundaries don't matter.
+    /// case-insensitively by term — used when a caller just needs a flat
+    /// display-label list to render (e.g. as hashtags) and topic
+    /// boundaries don't matter. Uses each tag's `label()` (the qualified
+    /// disambiguated phrase, if any, else the bare term).
     pub fn all_tags(&self) -> Vec<String> {
+        self.all_tag_terms()
+            .into_iter()
+            .map(|tag| tag.label().to_string())
+            .collect()
+    }
+
+    /// All tags across every topic as full [`TagTerm`] structs (preserving
+    /// any `qualified` disambiguation), in first-seen order and
+    /// deduplicated case-insensitively by `term` — used when a caller
+    /// needs to find-and-wrap the terms in place (e.g.
+    /// [`crate::parser::wrap_known_terms_as_links`]) rather than just
+    /// display them.
+    pub fn all_tag_terms(&self) -> Vec<TagTerm> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for topic in &self.topics {
             for tag in &topic.tags {
-                if seen.insert(tag.to_lowercase()) {
+                if seen.insert(tag.term.to_lowercase()) {
                     out.push(tag.clone());
                 }
             }
@@ -112,15 +127,15 @@ pub struct TopicSummary {
     /// A concise paragraph summarizing what the content says about this
     /// topic specifically (not the whole piece).
     pub summary: String,
-    /// Short key-term labels (snake_case/hyphenated for multi-word topics,
-    /// e.g. `"magnesium"`, `"insulin_resistance"`) identifying this topic.
-    /// Each tag should be a term that actually appears (verbatim,
-    /// case-insensitive, ignoring the underscore/hyphen joiner) in the
-    /// source content, so callers can find-and-wrap it in place as a real
-    /// `[[wiki-link]]` in the original text rather than only showing it in
-    /// a separate summary panel.
+    /// Key terms identifying this topic, each an already-verbatim (or
+    /// underscore/hyphen-joined) phrase found in the source content, with
+    /// an optional `qualified` disambiguation for terms that would be
+    /// ambiguous out of context (e.g. `term: "absorption"`,
+    /// `qualified: Some("body absorption")`). Callers find-and-wrap these
+    /// in place as real `[[wiki-link]]`s in the original text rather than
+    /// only showing them in a separate summary panel.
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub tags: Vec<TagTerm>,
 }
 
 /// The reference engine — orchestrates AI analysis + vector search.
@@ -562,10 +577,12 @@ Return a JSON object with:
 - "topics": an array with one object per distinct topic/subject discussed, in the order they're covered (or most-to-least important if a topic recurs throughout). If the content only covers one subject, return a single-element array. Each object has:
   - "topic": a short label for this specific subject (e.g. "Magnesium and sleep quality"), not the overall title.
   - "summary": a 2-5 sentence paragraph, in your own words, covering everything meaningful said about THIS topic specifically (not the whole piece).
-  - "tags": an array of 1-4 short key terms for this topic, taken VERBATIM from the content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only include a term if the underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary.
+  - "tags": an array of 1-4 key term objects for this topic. Each object has:
+    - "term": a phrase taken VERBATIM from the content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only use a term whose underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary. PREFER the longest already-verbatim phrase that is unambiguous on its own (e.g. use "soil_absorption" as the term if the content literally says "soil absorption"), rather than a short generic word.
+    - "qualified": OPTIONAL. Only set this if "term" is a short, generic word that would be ambiguous or confusing out of context when linked on its own (e.g. bare "absorption" could mean bodily absorption or soil/chemical absorption) AND no longer verbatim phrase already disambiguates it. Give a short 2-3 word disambiguated phrase (e.g. "body absorption"). Omit or use null otherwise — most tags should NOT set this.
 
-Example output (a two-topic segment):
-{"title_answer": null, "topics": [{"topic": "Magnesium and sleep", "summary": "Magnesium glycinate was discussed as a supplement that can improve sleep onset and quality when taken before bed. The speaker noted most people are mildly deficient due to modern soil depletion and processed diets.", "tags": ["magnesium", "sleep"]}, {"topic": "Insulin resistance and diet", "summary": "The conversation shifted to insulin resistance, describing it as reduced cellular sensitivity to insulin that drives fat storage and fatigue. Cutting refined carbohydrates and adding resistance training were recommended as the most effective interventions.", "tags": ["insulin_resistance", "refined_carbohydrates"]}]}
+Example output (a two-topic segment, with one disambiguated tag):
+{"title_answer": null, "topics": [{"topic": "Magnesium and sleep", "summary": "Magnesium glycinate was discussed as a supplement that can improve sleep onset and quality when taken before bed. The speaker noted most people are mildly deficient due to modern soil depletion and processed diets, and that the body's absorption of magnesium from food has declined.", "tags": [{"term": "magnesium"}, {"term": "sleep"}, {"term": "absorption", "qualified": "body absorption"}]}, {"topic": "Insulin resistance and diet", "summary": "The conversation shifted to insulin resistance, describing it as reduced cellular sensitivity to insulin that drives fat storage and fatigue. Cutting refined carbohydrates and adding resistance training were recommended as the most effective interventions.", "tags": [{"term": "insulin_resistance"}, {"term": "refined_carbohydrates"}]}]}
 
 Return ONLY the JSON object, no other text."##;
 
@@ -669,12 +686,39 @@ fn extract_json_object(response: &str) -> Result<&str> {
 }
 
 fn parse_summary_response(response: &str) -> Result<PageSummary> {
+    // Accepts either a plain string tag (the old shape, or a model that
+    // doesn't follow the new schema) or a `{term, qualified}` object, so
+    // summary parsing stays robust to LLM output that doesn't perfectly
+    // match the documented format.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TagJson {
+        Plain(String),
+        Qualified {
+            term: String,
+            #[serde(default)]
+            qualified: Option<String>,
+        },
+    }
+
+    impl TagJson {
+        fn into_tag_term(self) -> TagTerm {
+            match self {
+                TagJson::Plain(term) => TagTerm {
+                    term,
+                    qualified: None,
+                },
+                TagJson::Qualified { term, qualified } => TagTerm { term, qualified },
+            }
+        }
+    }
+
     #[derive(Deserialize)]
     struct TopicJson {
         topic: String,
         summary: String,
         #[serde(default)]
-        tags: Vec<String>,
+        tags: Vec<TagJson>,
     }
 
     #[derive(Deserialize)]
@@ -701,8 +745,15 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
             tags: topic
                 .tags
                 .into_iter()
-                .map(|tag| tag.trim().trim_start_matches('#').to_string())
-                .filter(|tag| !tag.is_empty())
+                .map(TagJson::into_tag_term)
+                .map(|tag| TagTerm {
+                    term: tag.term.trim().trim_start_matches('#').to_string(),
+                    qualified: tag
+                        .qualified
+                        .map(|q| q.trim().to_string())
+                        .filter(|q| !q.is_empty()),
+                })
+                .filter(|tag| !tag.term.is_empty())
                 .collect(),
         })
         .collect();
@@ -996,7 +1047,7 @@ mod tests {
             ]
         "#
             .to_string(),
-            r#"{"title_answer": null, "topics": [{"topic": "Rust and Tokio", "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling.", "tags": ["rust", "tokio"]}]}"#
+            r#"{"title_answer": null, "topics": [{"topic": "Rust and Tokio", "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling.", "tags": [{"term": "rust"}, {"term": "tokio"}]}]}"#
                 .to_string(),
         ]);
         let (embedder, embedder_state) = MockEmbedder::new(HashMap::from([
@@ -1116,8 +1167,12 @@ mod tests {
             "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."
         );
         assert_eq!(
-            summary.topics[0].tags,
-            vec!["rust".to_string(), "tokio".to_string()]
+            summary.topics[0]
+                .tags
+                .iter()
+                .map(|t| t.term.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rust", "tokio"]
         );
         assert_eq!(
             summary.all_tags(),

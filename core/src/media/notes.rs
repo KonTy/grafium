@@ -87,7 +87,7 @@ pub fn transcript_to_markdown(
                 let hashtags = topic
                     .tags
                     .iter()
-                    .map(|tag| format!("#{tag}"))
+                    .map(|tag| format!("#{}", tag.label().replace(' ', "_")))
                     .collect::<Vec<_>>()
                     .join(" ");
                 out.push_str(&hashtags);
@@ -162,6 +162,7 @@ fn escape_yaml(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::media::types::TranscriptSegment;
+    use crate::parser::TagTerm;
 
     fn sample_transcript() -> Transcript {
         Transcript::from_segments(vec![
@@ -285,7 +286,7 @@ mod tests {
                 topic: "Magnesium and sleep".to_string(),
                 summary: "The video covers magnesium's role in sleep and insulin sensitivity."
                     .to_string(),
-                tags: vec!["magnesium".to_string(), "insulin_resistance".to_string()],
+                tags: vec!["magnesium".into(), "insulin_resistance".into()],
             }],
         };
         let md = transcript_to_markdown(
@@ -308,6 +309,34 @@ mod tests {
     }
 
     #[test]
+    fn renders_qualified_tag_as_underscored_hashtag() {
+        // A disambiguated tag (e.g. "absorption" -> "body absorption")
+        // should render as a single underscored hashtag, since hashtags
+        // can't contain spaces, while the frontmatter tags list keeps the
+        // qualified label with its spaces intact (YAML strings can).
+        let summary = PageSummary {
+            title_answer: None,
+            topics: vec![TopicSummary {
+                topic: "Magnesium absorption".to_string(),
+                summary: "The gut's absorption of magnesium was studied.".to_string(),
+                tags: vec![TagTerm {
+                    term: "absorption".to_string(),
+                    qualified: Some("body absorption".to_string()),
+                }],
+            }],
+        };
+        let md = transcript_to_markdown(
+            "https://youtu.be/abc123",
+            &VideoMetadata::default(),
+            &sample_transcript(),
+            TranscriptSource::Whisper,
+            Some(&summary),
+        );
+        assert!(md.contains("tags: [\"body absorption\"]"));
+        assert!(md.contains("#body_absorption"));
+    }
+
+    #[test]
     fn renders_multiple_topics_as_separate_headed_paragraphs() {
         let summary = PageSummary {
             title_answer: None,
@@ -315,12 +344,12 @@ mod tests {
                 TopicSummary {
                     topic: "Magnesium and sleep".to_string(),
                     summary: "Magnesium glycinate can improve sleep onset.".to_string(),
-                    tags: vec!["magnesium".to_string()],
+                    tags: vec!["magnesium".into()],
                 },
                 TopicSummary {
                     topic: "Insulin resistance".to_string(),
                     summary: "Cutting refined carbs helps insulin sensitivity.".to_string(),
-                    tags: vec!["insulin_resistance".to_string()],
+                    tags: vec!["insulin_resistance".into()],
                 },
             ],
         };

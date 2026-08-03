@@ -100,10 +100,15 @@ export interface RelatedPage {
   snippet: string;
 }
 
+export interface TagTerm {
+  term: string;
+  qualified?: string | null;
+}
+
 export interface TopicSummary {
   topic: string;
   summary: string;
-  tags: string[];
+  tags: TagTerm[];
 }
 
 export interface PageSummary {
@@ -205,11 +210,12 @@ export function aiSummarizeSelection(text: string, title?: string): Promise<Page
 }
 
 // Wraps the first verbatim, whole-word occurrence of each term found in
-// `content` with `[[wiki-link]]` syntax. Thin wrapper around the shared
-// core `wrap_known_terms_as_links` function — used by both "Analyze
-// Selected" and "Insert into page" so term-wrapping logic lives in one
-// place.
-export function wrapKnownTermsInText(content: string, terms: string[]): Promise<string> {
+// `content` with `[[wiki-link]]` syntax (optionally substituting a
+// `qualified` disambiguation phrase in place of the matched text). Thin
+// wrapper around the shared core `wrap_known_terms_as_links` function —
+// used by both "Analyze Selected" and "Insert into page" so term-wrapping
+// logic lives in one place.
+export function wrapKnownTermsInText(content: string, terms: TagTerm[]): Promise<string> {
   return invoke("text_wrap_known_terms", { content, terms });
 }
 

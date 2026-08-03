@@ -469,24 +469,30 @@ pub async fn ai_summarize_selection(
         .map_err(|e| e.to_string())
 }
 
-/// Wraps the first verbatim, whole-word occurrence of each `term` found in
-/// `content` with `[[wiki-link]]` syntax. Thin synchronous wrapper around
+/// Wraps the first verbatim, whole-word occurrence of each term found in
+/// `content` with `[[wiki-link]]` syntax (optionally substituting a
+/// `qualified` disambiguation phrase — see
+/// [`grafium_core::parser::TagTerm`]). Thin synchronous wrapper around
 /// [`grafium_core::parser::wrap_known_terms_as_links`] — kept as a single
 /// shared entry point so "Analyze Selected" and any other AI-tagging
 /// caller wrap terms identically instead of re-implementing matching
 /// logic per call site.
 #[tauri::command(rename_all = "camelCase")]
-pub fn text_wrap_known_terms(content: String, terms: Vec<String>) -> String {
+pub fn text_wrap_known_terms(
+    content: String,
+    terms: Vec<grafium_core::parser::TagTerm>,
+) -> String {
     grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
 }
 
 /// Inserts an AI-generated page summary (title answer + one paragraph per
 /// topic) as a new block at the very top of the page (right after the
-/// title), and wraps each topic's `tags` in place — as `[[wiki-link]]`s —
-/// across the page's existing block content wherever those terms already
-/// appear verbatim. Used by the "Insert into page" button in
-/// `ReferencePanel.svelte`, which only fires on explicit user action so
-/// repeated "Research this page" runs never duplicate content.
+/// title), and wraps each topic's `tags` in place — as `[[wiki-link]]`s,
+/// substituting any `qualified` disambiguation phrase — across the page's
+/// existing block content wherever those terms already appear verbatim.
+/// Used by the "Insert into page" button in `ReferencePanel.svelte`, which
+/// only fires on explicit user action so repeated "Research this page"
+/// runs never duplicate content.
 #[tauri::command(rename_all = "camelCase")]
 pub fn ai_insert_page_summary(
     app_state: State<'_, crate::AppState>,
@@ -506,7 +512,7 @@ pub fn ai_insert_page_summary(
     // One heading + paragraph per topic, same shape as the media-import
     // transcript notes, so a multi-subject "Research this page" summary
     // (e.g. a long podcast transcript) keeps every topic distinguishable.
-    let mut all_tags: Vec<String> = Vec::new();
+    let mut all_tags: Vec<grafium_core::parser::TagTerm> = Vec::new();
     for (i, topic) in topics.iter().enumerate() {
         if i > 0 {
             summary_text.push_str("\n\n");
@@ -514,7 +520,10 @@ pub fn ai_insert_page_summary(
         summary_text.push_str(&format!("### {}\n\n", topic.topic.trim()));
         summary_text.push_str(topic.summary.trim());
         for tag in &topic.tags {
-            if !all_tags.iter().any(|t: &String| t.eq_ignore_ascii_case(tag)) {
+            if !all_tags
+                .iter()
+                .any(|t| t.term.eq_ignore_ascii_case(&tag.term))
+            {
                 all_tags.push(tag.clone());
             }
         }
