@@ -60,16 +60,23 @@
   let insertedSummary = $state(false);
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
-  // Jump to (and focus) the requested tab whenever the parent bumps focusTrigger,
-  // e.g. from the toolbar "Search" button or the global Ctrl+K shortcut.
+  // Jump to the requested tab whenever the parent bumps focusTrigger, e.g.
+  // from the toolbar "Search" button or the global Ctrl+K shortcut.
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     focusTrigger;
     if (!initialTab) return;
     activeTab = initialTab;
-    if (initialTab === "search") {
-      tick().then(() => searchInputEl?.focus());
-    }
+  });
+
+  // Focus the search input whenever the Search tab becomes active -- as its
+  // own effect keyed on activeTab (rather than bundled into the effect above)
+  // so it reliably re-fires once the tab's DOM (and the input) actually
+  // exists, including on the very first Ctrl+K press that both opens the
+  // panel and switches to this tab in the same update.
+  $effect(() => {
+    if (activeTab !== "search") return;
+    tick().then(() => tick()).then(() => searchInputEl?.focus());
   });
 
   // ─── Analyze Selection (arbitrary drag-selected text, not block-select) ──────
