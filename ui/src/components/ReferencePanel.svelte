@@ -54,7 +54,13 @@
     error = "";
     researchProgress = "Starting analysis...";
     const unlisten = await listen<string>("ai-reference-progress", (e) => {
-      researchProgress = e.payload;
+      // Cap what we keep in memory/DOM — streamed model output can grow
+      // unbounded over a multi-minute generation, but only the tail is
+      // useful to show as a "live" indicator.
+      const MAX_PROGRESS_CHARS = 400;
+      const text = e.payload;
+      researchProgress =
+        text.length > MAX_PROGRESS_CHARS ? "…" + text.slice(-MAX_PROGRESS_CHARS) : text;
     });
     try {
       references = await aiGenerateReferences(pageId);
@@ -177,6 +183,15 @@
               <div class="progress-status">
                 <span class="progress-spinner"></span>
                 <span class="progress-text">{researchProgress}</span>
+              </div>
+            {/if}
+
+            {#if references?.summary}
+              <div class="summary-card">
+                {#if references.summary.title_answer}
+                  <div class="summary-title-answer">{references.summary.title_answer}</div>
+                {/if}
+                <div class="summary-text">{references.summary.summary}</div>
               </div>
             {/if}
 
@@ -424,7 +439,7 @@
 
   .progress-status {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     background: var(--bg-tertiary, #252535);
     border: 1px solid var(--border-color, #333);
@@ -438,6 +453,7 @@
     width: 12px;
     height: 12px;
     flex-shrink: 0;
+    margin-top: 2px;
     border: 2px solid var(--border-color, #444);
     border-top-color: var(--accent-color, #7c3aed);
     border-radius: 50%;
@@ -445,15 +461,41 @@
   }
 
   .progress-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    max-height: 6.4em;
+    overflow-y: auto;
+    font-family: var(--mono-font, monospace);
+    line-height: 1.4;
   }
 
   @keyframes progress-spin {
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .summary-card {
+    background: var(--bg-tertiary, #252535);
+    border: 1px solid var(--accent-color, #7c3aed);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .summary-title-answer {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary, #fff);
+    line-height: 1.4;
+  }
+
+  .summary-text {
+    font-size: 12px;
+    color: var(--text-secondary, #aaa);
+    line-height: 1.5;
   }
 
   .refs-meta {

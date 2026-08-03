@@ -99,6 +99,30 @@ pub trait LlmProvider: Send + Sync {
 
     /// Check if the provider is available (connection test).
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
+
+    /// Same as `complete`, but reports incremental output through `on_token`
+    /// as it's produced, for callers that want to show the model "thinking"
+    /// live instead of a silent wait. Still returns the full text at the
+    /// end, same as `complete`.
+    ///
+    /// Providers that can't stream (e.g. a plain non-SSE HTTP JSON API) can
+    /// rely on this default: wait for the full response, then invoke
+    /// `on_token` once with it — callers should treat "one big chunk" and
+    /// "many small chunks" as equally valid. `LocalLlm` overrides this with
+    /// genuine token-by-token streaming, since that's the provider slow
+    /// enough (CPU-bound local inference) for live feedback to matter.
+    fn complete_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        options: &'a CompletionOptions,
+        on_token: &'a mut (dyn FnMut(&str) + Send),
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let text = self.complete(messages, options).await?;
+            on_token(&text);
+            Ok(text)
+        })
+    }
 }
 
 /// Embedding model trait — separate from LLM because embedding models are different.

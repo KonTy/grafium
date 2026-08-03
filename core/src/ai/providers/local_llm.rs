@@ -162,7 +162,7 @@ impl LlmProvider for LocalLlm {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let prompt = build_chat_prompt(&model, &messages, &options)?;
-                generate(&model, &backend, ctx_size, &prompt, &options)
+                generate(&model, &backend, ctx_size, &prompt, &options, None)
             })
             .await
             .map_err(|e| CoreError::Other(format!("LLM inference task panicked: {e}")))?
@@ -171,6 +171,42 @@ impl LlmProvider for LocalLlm {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn complete_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        options: &'a CompletionOptions,
+        on_token: &'a mut (dyn FnMut(&str) + Send),
+    ) -> BoxFuture<'a, Result<String>> {
+        let model = self.model.clone();
+        let backend = self.backend.clone();
+        let ctx_size = self.ctx_size;
+        let messages = messages.to_vec();
+        let options = options.clone();
+
+        Box::pin(async move {
+            // `generate()` runs on a blocking thread (llama.cpp is
+            // synchronous), so pieces are handed back here through a
+            // channel rather than calling `on_token` directly from that
+            // thread — `on_token` is an arbitrary `&mut` closure the caller
+            // owns, and this keeps it running only on this async task.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+            let generation = tokio::task::spawn_blocking(move || {
+                let prompt = build_chat_prompt(&model, &messages, &options)?;
+                generate(&model, &backend, ctx_size, &prompt, &options, Some(&tx))
+            });
+
+            let forward_tokens = async {
+                while let Some(piece) = rx.recv().await {
+                    on_token(&piece);
+                }
+            };
+
+            let (result, ()) = tokio::join!(generation, forward_tokens);
+            result.map_err(|e| CoreError::Other(format!("LLM inference task panicked: {e}")))?
+        })
     }
 
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
@@ -251,6 +287,7 @@ fn generate(
     ctx_size: NonZeroU32,
     prompt: &str,
     options: &CompletionOptions,
+    on_token: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<String> {
     let n_threads = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
@@ -315,6 +352,11 @@ fn generate(
         let piece = model
             .token_to_piece(token, &mut decoder, true, None)
             .map_err(|e| CoreError::Other(format!("failed to decode generated token: {e}")))?;
+        // Best-effort: if the receiving end was dropped (caller stopped
+        // listening), keep generating rather than aborting on a send error.
+        if let Some(tx) = on_token {
+            let _ = tx.send(piece.clone());
+        }
         output.push_str(&piece);
 
         if let Some(hit_len) = options

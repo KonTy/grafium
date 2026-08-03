@@ -57,6 +57,23 @@ pub struct PageReferencesMeta {
     pub content_hash: String,
     pub reference_count: usize,
     pub references: Vec<GeneratedReference>,
+    /// AI-generated summary of the page, produced alongside references.
+    /// `None` if summarization failed or produced no output — summary
+    /// generation is best-effort and never fails the whole "Research this
+    /// page" operation.
+    pub summary: Option<PageSummary>,
+}
+
+/// A short AI-generated digest of a page's content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageSummary {
+    /// A single sentence directly answering/addressing the page title, when
+    /// the title poses a question or makes a claim worth answering (e.g. a
+    /// title like "Is Rust Faster Than C++?" gets a one-line answer).
+    /// `None` for purely descriptive titles (e.g. "Meeting Notes").
+    pub title_answer: Option<String>,
+    /// A concise multi-sentence summary of the page's content.
+    pub summary: String,
 }
 
 /// The reference engine — orchestrates AI analysis + vector search.
@@ -99,7 +116,7 @@ impl ReferenceEngine {
 
         let mut pending_references = Vec::new();
         for ((block_id, _), concepts) in eligible_blocks.iter().copied().zip(
-            self.extract_concepts_batch(&eligible_blocks, llm)
+            self.extract_concepts_batch(&eligible_blocks, llm, on_progress)
                 .await?
                 .into_iter(),
         ) {
@@ -200,12 +217,37 @@ impl ReferenceEngine {
             format!("{:x}", hasher.finalize())[..16].to_string()
         };
 
+        // Summarization is best-effort: a failure here (bad JSON from a
+        // small/quantized model, provider hiccup, etc.) shouldn't discard
+        // the references work already done above.
+        let summary = if eligible_blocks.is_empty() {
+            None
+        } else {
+            on_progress("Summarizing article...");
+            let full_text = eligible_blocks
+                .iter()
+                .map(|(_, content)| *content)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            match self
+                .generate_page_summary(page_title, &full_text, llm, on_progress)
+                .await
+            {
+                Ok(summary) => Some(summary),
+                Err(error) => {
+                    on_progress(&format!("Could not generate a summary: {error}"));
+                    None
+                }
+            }
+        };
+
         Ok(PageReferencesMeta {
             page_id: page_id.to_string(),
             generated_at: Utc::now().timestamp_millis(),
             content_hash,
             reference_count: all_refs.len(),
             references: all_refs,
+            summary,
         })
     }
 
@@ -214,6 +256,7 @@ impl ReferenceEngine {
         &self,
         content: &str,
         llm: &dyn LlmProvider,
+        on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Vec<ConceptExtraction>> {
         let messages = vec![
             ChatMessage {
@@ -226,9 +269,14 @@ impl ReferenceEngine {
             },
         ];
 
-        let response = llm
-            .complete(&messages, &concept_extraction_options())
-            .await?;
+        let response = stream_completion(
+            llm,
+            &messages,
+            &concept_extraction_options(),
+            "Extracting concepts: ",
+            on_progress,
+        )
+        .await?;
 
         // Parse the structured response.
         parse_concept_response(&response, content)
@@ -238,13 +286,17 @@ impl ReferenceEngine {
         &self,
         blocks: &[(&str, &str)],
         llm: &dyn LlmProvider,
+        on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Vec<Vec<ConceptExtraction>>> {
         if blocks.is_empty() {
             return Ok(Vec::new());
         }
 
         if blocks.len() == 1 {
-            return Ok(vec![self.extract_concepts(blocks[0].1, llm).await?]);
+            return Ok(vec![
+                self.extract_concepts(blocks[0].1, llm, on_progress)
+                    .await?,
+            ]);
         }
 
         let request = blocks
@@ -267,15 +319,20 @@ impl ReferenceEngine {
             },
         ];
 
-        let response = llm
-            .complete(&messages, &concept_extraction_options())
-            .await?;
+        let response = stream_completion(
+            llm,
+            &messages,
+            &concept_extraction_options(),
+            "Extracting concepts: ",
+            on_progress,
+        )
+        .await?;
         match parse_batched_concept_response(&response, blocks) {
             Ok(parsed) => Ok(parsed),
             Err(_) => {
                 let mut extracted = Vec::with_capacity(blocks.len());
                 for (_, content) in blocks {
-                    extracted.push(self.extract_concepts(content, llm).await?);
+                    extracted.push(self.extract_concepts(content, llm, on_progress).await?);
                 }
                 Ok(extracted)
             }
@@ -298,6 +355,50 @@ impl ReferenceEngine {
         parts.join("\n")
     }
 
+    /// Use the LLM to produce a one-line answer to the page's title (when
+    /// it poses a question/claim) plus a short prose summary of its content.
+    async fn generate_page_summary(
+        &self,
+        page_title: &str,
+        full_text: &str,
+        llm: &dyn LlmProvider,
+        on_progress: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<PageSummary> {
+        // Keep the summarization prompt well within the context window even
+        // for very long pages — this is a summary, not a full re-read, so a
+        // generous prefix is enough context without risking the same
+        // `n_ctx`-sized costs the concept-extraction pass already has to
+        // manage for the full page.
+        const MAX_SUMMARY_INPUT_CHARS: usize = 8000;
+        let truncated_text = if full_text.len() > MAX_SUMMARY_INPUT_CHARS {
+            super::truncate_to_char_boundary(full_text, MAX_SUMMARY_INPUT_CHARS)
+        } else {
+            full_text
+        };
+
+        let messages = vec![
+            ChatMessage {
+                role: MessageRole::System,
+                content: PAGE_SUMMARY_PROMPT.to_string(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: format!("Title: {page_title}\n\nContent:\n{truncated_text}"),
+            },
+        ];
+
+        let response = stream_completion(
+            llm,
+            &messages,
+            &summary_options(),
+            "Summarizing: ",
+            on_progress,
+        )
+        .await?;
+
+        parse_summary_response(&response)
+    }
+
     /// Check if a page's references are stale.
     pub fn is_stale(&self, meta: &PageReferencesMeta) -> bool {
         let now = Utc::now().timestamp_millis();
@@ -305,6 +406,31 @@ impl ReferenceEngine {
         let staleness_ms = self.config.staleness_days as i64 * 24 * 60 * 60 * 1000;
         age_ms > staleness_ms
     }
+}
+
+/// Runs a completion through `LlmProvider::complete_stream`, forwarding
+/// accumulated output to `on_progress` in small chunks (mirroring the
+/// `ai_ask_stream` Tauri command's own chunking) rather than firing one
+/// progress event per token — that would flood the UI for no benefit, since
+/// all a caller needs is visibility that the model is actively producing
+/// output, not a token-perfect replay.
+async fn stream_completion(
+    llm: &dyn LlmProvider,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+    label: &str,
+    on_progress: &mut (dyn FnMut(&str) + Send),
+) -> Result<String> {
+    const CHUNK_CHARS: usize = 40;
+    let mut buffer = String::new();
+    let mut on_token = |piece: &str| {
+        buffer.push_str(piece);
+        if buffer.chars().count() >= CHUNK_CHARS {
+            on_progress(&format!("{label}{buffer}"));
+            buffer.clear();
+        }
+    };
+    llm.complete_stream(messages, options, &mut on_token).await
 }
 
 /// An extracted concept from text.
@@ -377,6 +503,25 @@ fn concept_extraction_options() -> CompletionOptions {
     CompletionOptions {
         max_tokens: Some(512),
         temperature: Some(0.1),
+        ..Default::default()
+    }
+}
+
+const PAGE_SUMMARY_PROMPT: &str = r#"You are a careful research assistant. You are given an article's title and content.
+
+Return a JSON object with:
+- "title_answer": if the title poses a question or makes a claim that the content answers or supports/refutes, one sentence directly answering it using the content. If the title is purely descriptive (e.g. a name, a date, "Meeting Notes"), use null.
+- "summary": a concise 3-5 sentence summary of the article's key points, in your own words.
+
+Example output:
+{"title_answer": "Yes, Rust generally outperforms C++ in memory-safety-critical workloads without sacrificing raw speed.", "summary": "The article compares Rust and C++ across compile-time safety, runtime performance, and tooling. It concludes Rust's ownership model prevents whole classes of bugs common in C++ with comparable benchmark performance in most workloads."}
+
+Return ONLY the JSON object, no other text."#;
+
+fn summary_options() -> CompletionOptions {
+    CompletionOptions {
+        max_tokens: Some(400),
+        temperature: Some(0.3),
         ..Default::default()
     }
 }
@@ -455,6 +600,43 @@ fn extract_json_array(response: &str) -> Result<&str> {
                 .map(|end| &response[start..=start + end])
         })
         .ok_or_else(|| concept_parse_error("missing JSON array in response", response))
+}
+
+fn extract_json_object(response: &str) -> Result<&str> {
+    if response.starts_with('{') {
+        return Ok(response);
+    }
+
+    response
+        .find('{')
+        .and_then(|start| {
+            response[start..]
+                .rfind('}')
+                .map(|end| &response[start..=start + end])
+        })
+        .ok_or_else(|| concept_parse_error("missing JSON object in response", response))
+}
+
+fn parse_summary_response(response: &str) -> Result<PageSummary> {
+    #[derive(Deserialize)]
+    struct SummaryJson {
+        #[serde(default)]
+        title_answer: Option<String>,
+        summary: String,
+    }
+
+    let trimmed = response.trim();
+    let json_str = extract_json_object(trimmed)?;
+    let parsed: SummaryJson = serde_json::from_str(json_str).map_err(|error| {
+        concept_parse_error(&format!("invalid page summary JSON: {}", error), trimmed)
+    })?;
+
+    Ok(PageSummary {
+        title_answer: parsed
+            .title_answer
+            .filter(|answer| !answer.trim().is_empty()),
+        summary: parsed.summary,
+    })
 }
 
 fn parse_concepts_for_content(
@@ -725,7 +907,8 @@ mod tests {
                 "Tokio provides async scheduling for Rust services.".to_string(),
             ),
         ];
-        let (llm, llm_state) = MockLlm::new([r#"
+        let (llm, llm_state) = MockLlm::new([
+            r#"
             [
               {"block_id":"block-1","concepts":[
                 {"text":"Rust ownership","type":"concept"},
@@ -736,7 +919,10 @@ mod tests {
               ]}
             ]
         "#
-        .to_string()]);
+            .to_string(),
+            r#"{"title_answer": null, "summary": "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."}"#
+                .to_string(),
+        ]);
         let (embedder, embedder_state) = MockEmbedder::new(HashMap::from([
             (format!("{page_title} Rust ownership"), vec![1.0]),
             (format!("{page_title} memory safety"), vec![2.0]),
@@ -793,7 +979,7 @@ mod tests {
             .await?;
 
         let llm_state = llm_state.lock().unwrap();
-        assert_eq!(llm_state.calls, 1);
+        assert_eq!(llm_state.calls, 2);
         assert!(llm_state.user_messages[0].contains("\"block_id\":\"block-1\""));
         assert!(llm_state.user_messages[0].contains("\"block_id\":\"block-2\""));
         drop(llm_state);
@@ -844,6 +1030,13 @@ mod tests {
         assert_eq!(
             meta.references[1].reference_text,
             "**memory safety**\n→ [[Borrow Checker]] (score: 80%): borrow rules explained\n→ [[Ownership Guide]] (score: 70%): ownership patterns"
+        );
+
+        let summary = meta.summary.expect("summary should be generated");
+        assert_eq!(summary.title_answer, None);
+        assert_eq!(
+            summary.summary,
+            "Rust's ownership model enables safe concurrency; Tokio adds async scheduling."
         );
 
         Ok(())

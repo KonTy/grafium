@@ -100,12 +100,18 @@ export interface RelatedPage {
   snippet: string;
 }
 
+export interface PageSummary {
+  title_answer: string | null;
+  summary: string;
+}
+
 export interface PageReferencesMeta {
   page_id: string;
   generated_at: number;
   content_hash: string;
   reference_count: number;
   references: GeneratedReference[];
+  summary: PageSummary | null;
 }
 
 export interface RegisteredGraph {
