@@ -6,8 +6,10 @@
     aiHealthCheck,
     aiAsk,
     aiInsertPageSummary,
+    aiSummarizeSelection,
     type GeneratedReference,
     type PageReferencesMeta,
+    type PageSummary,
     type SemanticSearchResult,
     type HealthStatus,
   } from "../lib/knowledge";
@@ -41,6 +43,83 @@
   let researchProgress = $state("");
   let isInsertingSummary = $state(false);
   let insertedSummary = $state(false);
+
+  // ─── Analyze Selection (arbitrary drag-selected text, not block-select) ──────
+  let hasTextSelection = $state(false);
+  let pendingSelectionText = $state("");
+  let selectionSummary = $state<PageSummary | null>(null);
+  let isAnalyzingSelection = $state(false);
+  let selectionError = $state("");
+  let selectionProgress = $state("");
+  let isInsertingSelectionSummary = $state(false);
+  let insertedSelectionSummary = $state(false);
+
+  // Tracks whether the browser currently has a non-empty text selection
+  // anywhere on the page (e.g. the user dragged over prose inside a
+  // block), so the "Analyze Selection" button can enable/disable itself
+  // without requiring the bullet-click block-selection mechanism.
+  $effect(() => {
+    if (!visible) return;
+    const update = () => {
+      hasTextSelection = (window.getSelection()?.toString().trim().length ?? 0) > 0;
+    };
+    update();
+    document.addEventListener("selectionchange", update);
+    return () => document.removeEventListener("selectionchange", update);
+  });
+
+  // Clicking the button would normally collapse the text selection before
+  // onclick fires (mousedown resets it) — preventing that on mousedown is
+  // the standard trick to let a toolbar button act on an existing text
+  // selection instead of stealing it.
+  function captureSelectionOnMouseDown(e: MouseEvent) {
+    e.preventDefault();
+    pendingSelectionText = window.getSelection()?.toString() ?? "";
+  }
+
+  async function analyzeSelection() {
+    const text = pendingSelectionText.trim();
+    if (!text || isAnalyzingSelection) return;
+    isAnalyzingSelection = true;
+    selectionError = "";
+    insertedSelectionSummary = false;
+    selectionProgress = "Analyzing selection...";
+    const unlisten = await listen<string>("ai-selection-summary-progress", (e) => {
+      selectionProgress = e.payload;
+    });
+    try {
+      selectionSummary = await aiSummarizeSelection(text, pageTitle);
+    } catch (e: any) {
+      selectionError = e?.toString() || "Failed to analyze selection";
+    } finally {
+      unlisten();
+      isAnalyzingSelection = false;
+      selectionProgress = "";
+    }
+  }
+
+  /// Shared by both the whole-page summary and the selection summary:
+  /// writes title-answer + one heading/paragraph per topic as a new block
+  /// at the top of the page, and wraps each topic's tags in place across
+  /// the page's existing blocks.
+  async function writeSummaryIntoPage(summary: PageSummary): Promise<void> {
+    await aiInsertPageSummary(pageId, summary.title_answer, summary.topics ?? []);
+    window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId } }));
+  }
+
+  async function insertSelectionSummaryIntoPage() {
+    if (!pageId || !selectionSummary || isInsertingSelectionSummary) return;
+    isInsertingSelectionSummary = true;
+    selectionError = "";
+    try {
+      await writeSummaryIntoPage(selectionSummary);
+      insertedSelectionSummary = true;
+    } catch (e: any) {
+      selectionError = e?.toString() || "Failed to insert summary into page";
+    } finally {
+      isInsertingSelectionSummary = false;
+    }
+  }
 
   // Check AI health on mount
   $effect(() => {
@@ -88,10 +167,8 @@
     isInsertingSummary = true;
     error = "";
     try {
-      const { title_answer, topics } = references.summary;
-      await aiInsertPageSummary(pageId, title_answer, topics ?? []);
+      await writeSummaryIntoPage(references.summary);
       insertedSummary = true;
-      window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId } }));
     } catch (e: any) {
       error = e?.toString() || "Failed to insert summary into page";
     } finally {
@@ -196,6 +273,15 @@
               >
                 {isLoading ? "Analyzing..." : "Research this page"}
               </button>
+              <button
+                class="action-btn"
+                onmousedown={captureSelectionOnMouseDown}
+                onclick={analyzeSelection}
+                disabled={isAnalyzingSelection || !hasTextSelection || !pageId}
+                title={hasTextSelection ? "Summarize the highlighted text" : "Highlight some text on the page first"}
+              >
+                {isAnalyzingSelection ? "Analyzing selection..." : "Analyze Selection"}
+              </button>
               {#if health}
                 <span class="vector-count">{health.vector_count} vectors indexed</span>
               {/if}
@@ -209,6 +295,52 @@
               <div class="progress-status">
                 <span class="progress-spinner"></span>
                 <span class="progress-text">{researchProgress}</span>
+              </div>
+            {/if}
+
+            {#if selectionError}
+              <div class="error-msg">{selectionError}</div>
+            {/if}
+
+            {#if isAnalyzingSelection && selectionProgress}
+              <div class="progress-status">
+                <span class="progress-spinner"></span>
+                <span class="progress-text">{selectionProgress}</span>
+              </div>
+            {/if}
+
+            {#if selectionSummary}
+              <div class="summary-card">
+                <div class="summary-card-label">Selection summary</div>
+                {#if selectionSummary.title_answer}
+                  <div class="summary-title-answer">{selectionSummary.title_answer}</div>
+                {/if}
+                {#each selectionSummary.topics as topic}
+                  <div class="summary-topic">
+                    <div class="summary-topic-title">{topic.topic}</div>
+                    <div class="summary-text">{topic.summary}</div>
+                    {#if topic.tags?.length}
+                      <div class="summary-tags">
+                        {#each topic.tags as tag}
+                          <span class="summary-tag">#{tag}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+                <button
+                  class="insert-summary-btn"
+                  onclick={insertSelectionSummaryIntoPage}
+                  disabled={isInsertingSelectionSummary || insertedSelectionSummary}
+                >
+                  {#if insertedSelectionSummary}
+                    Inserted into page ✓
+                  {:else if isInsertingSelectionSummary}
+                    Inserting...
+                  {:else}
+                    Insert into page
+                  {/if}
+                </button>
               </div>
             {/if}
 
@@ -451,6 +583,7 @@
   .tab-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
   }
 
@@ -534,6 +667,14 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .summary-card-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted, #888);
   }
 
   .summary-title-answer {
