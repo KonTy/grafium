@@ -38,6 +38,15 @@
   type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
 
   let backlinks: BacklinkView[] = $state([]);
+  // Rendering every linked reference at once is what actually crashes the
+  // app for pages with thousands of backlinks (e.g. a flashcard import
+  // where ~7500 blocks all tag the same topic): each entry runs full
+  // markdown rendering + a media-hydration DOM action, and doing that for
+  // thousands of entries synchronously balloons the WebKit renderer's
+  // memory by many GB and aborts it. Cap the initial render and let the
+  // user expand incrementally, same idea as Logseq's linked-references UX.
+  const BACKLINKS_PAGE_SIZE = 50;
+  let backlinksRenderLimit = $state(BACKLINKS_PAGE_SIZE);
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
   let loadError: string | null = $state(null);
@@ -305,62 +314,24 @@
     }
   }
 
-  async function loadBacklinks(request: PageLoadRequest = currentPageLoad()) {
-    if (isCurrentPageLoad(pageLoadState, request)) {
-      backlinks = [];
-    }
+  // Per-source-page index used by buildBacklinkTree, keyed by page_id.
+  // Building the blockMap/childrenByParent grouping is O(n) in the size of
+  // that source page's block list. A page can be referenced by MANY blocks
+  // within the SAME source page (e.g. a large flashcard import where every
+  // block tags the same topic), so `backlinkResults` can have thousands of
+  // entries that all share one `sourceBlocks` array. Previously this index
+  // was rebuilt from scratch on every single backlink result, which made
+  // rendering backlinks for such a page O(n^2) in the number of blocks
+  // (thousands of backlinks x thousands of blocks each = tens of millions
+  // of Map/array operations on the main thread) -- this froze and eventually
+  // crashed the app for large pages. Building the index once per source
+  // page and reusing it for every backlink result makes this O(n) overall.
+  type BacklinkSourceIndex = {
+    blockMap: Map<string, Block>;
+    childrenByParent: Map<string | null, Block[]>;
+  };
 
-    try {
-      const backlinkResults = await getBacklinks(request.pageId);
-      if (!isCurrentPageLoad(pageLoadState, request)) return;
-      console.log("[telemetry] backlinks fetched", JSON.stringify({
-        pageId: request.pageId,
-        pageTitle: request.pageTitle,
-        count: backlinkResults.length,
-      }));
-      const pageBlockCache = new Map<string, Block[]>();
-      const pageTitleCache = new Map<string, string>();
-
-      const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
-        let sourceBlocks = pageBlockCache.get(result.block.page_id);
-        if (!sourceBlocks) {
-          sourceBlocks = await listBlocks(result.block.page_id);
-          pageBlockCache.set(result.block.page_id, sourceBlocks);
-        }
-
-        let sourcePageTitle = pageTitleCache.get(result.block.page_id);
-        if (!sourcePageTitle) {
-          const sourcePage = await getPage({ id: result.block.page_id });
-          sourcePageTitle = sourcePage.title;
-          pageTitleCache.set(result.block.page_id, sourcePageTitle);
-        }
-
-        return {
-          ...result,
-          sourcePageTitle,
-          tree: buildBacklinkTree(result.block.id, sourceBlocks),
-        };
-      }));
-      if (!isCurrentPageLoad(pageLoadState, request)) return;
-      backlinks = renderedBacklinks;
-      console.log("[telemetry] backlinks rendered", JSON.stringify({
-        pageId: request.pageId,
-        pageTitle: request.pageTitle,
-        renderedCount: backlinks.length,
-        items: backlinks.map((b) => ({
-          sourcePageTitle: b.sourcePageTitle,
-          rootBlockId: b.block.id,
-          rootContent: b.block.content.slice(0, 80),
-          treeSize: b.tree.length,
-        })),
-      }));
-    } catch {
-      if (!isCurrentPageLoad(pageLoadState, request)) return;
-      backlinks = [];
-    }
-  }
-
-  function buildBacklinkTree(rootBlockId: string, sourceBlocks: Block[]): BacklinkTreeNode[] {
+  function buildBacklinkSourceIndex(sourceBlocks: Block[]): BacklinkSourceIndex {
     const blockMap = new Map(sourceBlocks.map((block) => [block.id, block]));
     const childrenByParent = new Map<string | null, Block[]>();
 
@@ -375,6 +346,75 @@
       childList.sort((a, b) => a.order_index - b.order_index);
     }
 
+    return { blockMap, childrenByParent };
+  }
+
+  async function loadBacklinks(request: PageLoadRequest = currentPageLoad()) {
+    if (isCurrentPageLoad(pageLoadState, request)) {
+      backlinks = [];
+      backlinksRenderLimit = BACKLINKS_PAGE_SIZE;
+    }
+
+    try {
+      const backlinkResults = await getBacklinks(request.pageId);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      console.log(
+        `[backlinks] page=${request.pageTitle} fetched ${backlinkResults.length} backlink(s)`
+      );
+
+      // Resolve per-source-page data (blocks, title, tree index) exactly
+      // once per unique page_id, not once per backlink result. A single
+      // source page can appear in `backlinkResults` thousands of times
+      // (e.g. every block on a page tags the same topic), and since
+      // `Array.map(async ...)` starts every callback synchronously up to
+      // its first `await`, a naive "check cache, then await + populate"
+      // pattern lets every one of those callbacks see an empty cache
+      // before any of them has finished populating it -- causing the
+      // exact same `listBlocks`/`getPage` IPC call to fire thousands of
+      // times in a race. Storing the in-flight Promise itself (computed
+      // synchronously, before any await) closes that race: concurrent
+      // lookups for the same page_id all await the same one promise.
+      const uniquePageIds = Array.from(new Set(backlinkResults.map((r) => r.block.page_id)));
+      const blocksPromiseCache = new Map<string, Promise<Block[]>>();
+      const titlePromiseCache = new Map<string, Promise<string>>();
+      for (const pageId of uniquePageIds) {
+        blocksPromiseCache.set(pageId, listBlocks(pageId));
+        titlePromiseCache.set(pageId, getPage({ id: pageId }).then((p) => p.title));
+      }
+
+      const indexCache = new Map<string, Promise<BacklinkSourceIndex>>();
+      for (const pageId of uniquePageIds) {
+        indexCache.set(
+          pageId,
+          blocksPromiseCache.get(pageId)!.then((sourceBlocks) => buildBacklinkSourceIndex(sourceBlocks))
+        );
+      }
+
+      const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
+        const [sourcePageTitle, index] = await Promise.all([
+          titlePromiseCache.get(result.block.page_id)!,
+          indexCache.get(result.block.page_id)!,
+        ]);
+
+        return {
+          ...result,
+          sourcePageTitle,
+          tree: buildBacklinkTree(result.block.id, index),
+        };
+      }));
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      backlinks = renderedBacklinks;
+      console.log(
+        `[backlinks] page=${request.pageTitle} rendered ${backlinks.length} backlink(s)`
+      );
+    } catch {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      backlinks = [];
+    }
+  }
+
+  function buildBacklinkTree(rootBlockId: string, index: BacklinkSourceIndex): BacklinkTreeNode[] {
+    const { blockMap, childrenByParent } = index;
     const root = blockMap.get(rootBlockId);
     if (!root) return [];
 
@@ -933,7 +973,7 @@
     <div class="backlinks-section">
       <h3 class="backlinks-title">{backlinks.length} Linked Reference{backlinks.length > 1 ? "s" : ""}</h3>
       <div class="backlinks-list">
-        {#each backlinks as bl}
+        {#each backlinks.slice(0, backlinksRenderLimit) as bl}
           <div class="backlink-item">
             <button
               class="backlink-source-page"
@@ -961,6 +1001,15 @@
             </div>
           </div>
         {/each}
+        {#if backlinks.length > backlinksRenderLimit}
+          <button
+            class="backlinks-show-more"
+            type="button"
+            onclick={() => { backlinksRenderLimit += BACKLINKS_PAGE_SIZE; }}
+          >
+            Show {Math.min(BACKLINKS_PAGE_SIZE, backlinks.length - backlinksRenderLimit)} more (of {backlinks.length - backlinksRenderLimit} remaining)
+          </button>
+        {/if}
       </div>
     </div>
   {/if}
@@ -1205,5 +1254,22 @@
   .backlink-content :global(.page-link),
   .backlink-content :global(.tag) {
     cursor: pointer;
+  }
+
+  .backlinks-show-more {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color, #444);
+    border-radius: 4px;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .backlinks-show-more:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 </style>

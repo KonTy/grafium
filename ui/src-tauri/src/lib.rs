@@ -1107,6 +1107,20 @@ pub(crate) fn mime_for_path(path: &Path) -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Without this, every `tracing::info!`/`tracing::warn!` call throughout
+    // the codebase (including grafium-core) silently went nowhere -- a real
+    // observability gap that hampered debugging the OOM-crash investigation.
+    // `RUST_LOG` still overrides the default if set; otherwise `info` is a
+    // reasonable default for a desktop app (not so verbose it drowns out
+    // the signal, but enough to see lifecycle/AI-provider/page-load events).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     // WebKitGTK on Wayland aborts with "Error 71 (Protocol error)" on some
     // GPU/compositor setups when the DMABUF renderer / accelerated compositing
     // is active. Disable them before the webview initializes so the app launches

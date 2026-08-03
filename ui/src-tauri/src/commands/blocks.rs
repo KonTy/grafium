@@ -4,11 +4,19 @@ use tauri::State;
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_blocks(state: State<AppState>, page_id: String) -> Result<Vec<Block>, String> {
+    let start = std::time::Instant::now();
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph
-        .db
-        .list_blocks_for_page(&page_id)
-        .map_err(|e| e.to_string())
+    let result = graph.db.list_blocks_for_page(&page_id).map_err(|e| e.to_string());
+    match &result {
+        Ok(blocks) => tracing::info!(
+            page_id = %page_id,
+            block_count = blocks.len(),
+            elapsed_ms = start.elapsed().as_millis(),
+            "list_blocks completed"
+        ),
+        Err(e) => tracing::warn!(page_id = %page_id, error = %e, "list_blocks failed"),
+    }
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
