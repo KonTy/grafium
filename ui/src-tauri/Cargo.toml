@@ -24,7 +24,7 @@ base64 = "0.22"
 # either. Desktop targets get both so the app is genuinely zero-setup —
 # no external server process for users to start themselves.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-grafium_core = { path = "../../core", package = "grafium-core", features = ["media", "llm-local"] }
+grafium_core = { path = "../../core", package = "grafium-core", features = ["media-vulkan", "llm-local-vulkan"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"
