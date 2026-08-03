@@ -103,6 +103,7 @@ export interface RelatedPage {
 export interface PageSummary {
   title_answer: string | null;
   summary: string;
+  tags: string[];
 }
 
 export interface PageReferencesMeta {
@@ -187,6 +188,14 @@ export function aiSearch(
 
 export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta> {
   return invoke("ai_generate_references", { pageId });
+}
+
+// Summarizes an arbitrary text selection (e.g. concatenated content of
+// selected blocks), returning the same title-answer/summary/tags shape
+// as `PageReferencesMeta.summary` — used by "Analyze Selected" in
+// PageContent.svelte to insert a summary block right after a selection.
+export function aiSummarizeSelection(text: string, title?: string): Promise<PageSummary> {
+  return invoke("ai_summarize_selection", { text, title });
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────

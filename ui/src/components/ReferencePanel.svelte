@@ -192,6 +192,13 @@
                   <div class="summary-title-answer">{references.summary.title_answer}</div>
                 {/if}
                 <div class="summary-text">{references.summary.summary}</div>
+                {#if references.summary.tags?.length}
+                  <div class="summary-tags">
+                    {#each references.summary.tags as tag}
+                      <span class="summary-tag">#{tag}</span>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/if}
 
@@ -496,6 +503,20 @@
     font-size: 12px;
     color: var(--text-secondary, #aaa);
     line-height: 1.5;
+  }
+
+  .summary-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .summary-tag {
+    font-size: 11px;
+    color: var(--accent-color, #7c3aed);
+    background: var(--bg-secondary, #1a1a24);
+    border-radius: 4px;
+    padding: 2px 6px;
   }
 
   .refs-meta {

@@ -18,6 +18,8 @@
   import type { BacklinkResult, Block, Page } from "../lib/api";
   import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
+  import { aiSummarizeSelection } from "../lib/knowledge";
+  import { listen } from "@tauri-apps/api/event";
 
   interface Props {
     page: Page;
@@ -708,6 +710,55 @@
     selectedBlockIds = new Set();
   }
 
+  let analyzingSelection = $state(false);
+  let analyzeSelectionError = $state("");
+  let analyzeSelectionProgress = $state("");
+
+  /// Summarizes the selected blocks' content and inserts the result (a
+  /// title-answer, prose summary, and `#hashtag` topic tags) as a new block
+  /// right after the last selected block — the same summary shape used by
+  /// "Research this page" and media imports, just applied to a manual
+  /// text/block selection instead of a whole page.
+  async function handleAnalyzeSelected() {
+    if (selectedBlockIds.size === 0 || analyzingSelection) return;
+    // Document order, not click order, so the summary reads coherently
+    // regardless of which block the user shift-clicked from.
+    const selected = blocks.filter((b) => selectedBlockIds.has(b.id));
+    const text = selected.map((b) => b.content).join("\n\n").trim();
+    if (!text) return;
+
+    analyzingSelection = true;
+    analyzeSelectionError = "";
+    analyzeSelectionProgress = "Analyzing selection...";
+    const unlisten = await listen<string>("ai-selection-summary-progress", (e) => {
+      analyzeSelectionProgress = e.payload;
+    });
+    try {
+      const summary = await aiSummarizeSelection(text, page.title);
+      const parts: string[] = [];
+      if (summary.title_answer) parts.push(`**${summary.title_answer}**`);
+      parts.push(summary.summary);
+      if (summary.tags?.length) parts.push(summary.tags.map((t) => `#${t}`).join(" "));
+      const content = parts.join("\n\n");
+
+      const lastBlock = selected[selected.length - 1];
+      const siblings = blocks.filter((b) => b.parent_id === lastBlock.parent_id);
+      const siblingIdx = siblings.findIndex((b) => b.id === lastBlock.id);
+      const newOrder = siblingIdx + 1;
+
+      const newBlock = await createBlock(page.id, lastBlock.parent_id, newOrder, content);
+      const insertAt = blocks.findIndex((b) => b.id === lastBlock.id);
+      blocks = [...blocks.slice(0, insertAt + 1), newBlock, ...blocks.slice(insertAt + 1)];
+      selectedBlockIds = new Set();
+    } catch (e) {
+      analyzeSelectionError = e instanceof Error ? e.message : String(e);
+    } finally {
+      unlisten();
+      analyzingSelection = false;
+      analyzeSelectionProgress = "";
+    }
+  }
+
   function handleKeydownForSelection(e: KeyboardEvent) {
     if (selectedBlockIds.size === 0) return;
     if (e.key === "Backspace" || e.key === "Delete") {
@@ -739,6 +790,28 @@
     <div class="load-error" style="color: #f38ba8; background: #1e1e2e; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-family: monospace; font-size: 13px; white-space: pre-wrap;">
       Error: {loadError}
     </div>
+  {/if}
+
+  {#if selectedBlockIds.size > 0}
+    <div class="selection-toolbar">
+      <span class="selection-count">{selectedBlockIds.size} selected</span>
+      <button
+        class="selection-toolbar-btn"
+        onclick={handleAnalyzeSelected}
+        disabled={analyzingSelection}
+      >
+        {analyzingSelection ? (analyzeSelectionProgress || "Analyzing…") : "Analyze Selected"}
+      </button>
+      <button class="selection-toolbar-btn danger" onclick={handleDeleteSelected} disabled={analyzingSelection}>
+        Delete
+      </button>
+      <button class="selection-toolbar-btn" onclick={() => { selectedBlockIds = new Set(); }} disabled={analyzingSelection}>
+        Clear
+      </button>
+    </div>
+    {#if analyzeSelectionError}
+      <div class="selection-toolbar-error">{analyzeSelectionError}</div>
+    {/if}
   {/if}
 
   <div class="blocks-container" bind:this={blocksViewportEl}>
@@ -860,6 +933,55 @@
   .blocks-container {
     display: flex;
     flex-direction: column;
+  }
+
+  .selection-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-tertiary, #252535);
+    border: 1px solid var(--accent-color, #7c3aed);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+  }
+
+  .selection-count {
+    font-size: 12px;
+    color: var(--text-secondary, #aaa);
+    margin-right: 4px;
+  }
+
+  .selection-toolbar-btn {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary, #1a1a24);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  .selection-toolbar-btn:hover:not(:disabled) {
+    border-color: var(--accent-color, #7c3aed);
+  }
+
+  .selection-toolbar-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .selection-toolbar-btn.danger {
+    color: var(--error-color, #e57373);
+  }
+
+  .selection-toolbar-error {
+    font-size: 12px;
+    color: var(--error-color, #e57373);
+    margin-bottom: 8px;
   }
 
   .block-shell {

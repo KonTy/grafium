@@ -433,6 +433,42 @@ pub async fn ai_generate_references(
         .map_err(|e| e.to_string())
 }
 
+/// Analyzes arbitrary selected text (one or more selected blocks'
+/// concatenated content) and returns a short AI summary + hashtag-style
+/// topic tags — the same shape/prompt used for "Research this page" and
+/// media-import summaries, just applied to a text selection instead of a
+/// whole page. The caller (`PageContent.svelte`'s "Analyze Selected"
+/// action) inserts the result as a new block right after the selection.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ai_summarize_selection(
+    app: tauri::AppHandle,
+    state: State<'_, KnowledgeState>,
+    text: String,
+    title: Option<String>,
+) -> Result<grafium_core::ai::references::PageSummary, String> {
+    let guard = state.engine.read().await;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+
+    if !engine.is_llm_ready() {
+        return Err(
+            "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
+                .to_string(),
+        );
+    }
+
+    let mut emit_progress = move |message: &str| {
+        let _ = app.emit("ai-selection-summary-progress", message);
+    };
+    let title = title.unwrap_or_else(|| "Selected text".to_string());
+
+    engine
+        .summarize_text(&title, &text, &mut emit_progress)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
 #[tauri::command]
