@@ -236,6 +236,40 @@ impl LocalLlm {
 
         let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
 
+        // Critical: llama.cpp defaults to `use_mmap(true)`, which makes
+        // `load_from_file` return almost immediately without actually
+        // reading the weights into RAM — pages are faulted in lazily,
+        // *later*, as generation touches each tensor (worse still for a
+        // MoE model like this, where different experts get paged in over
+        // the course of a run). That laziness is exactly what defeated
+        // `check_cpu_ram_budget` above in practice: it observed a stale,
+        // too-early snapshot of "available RAM" that had drifted by the
+        // time the real memory pressure hit, minutes later, during the
+        // token-generation loop. Forcing an eager (non-mmap) read for
+        // CPU-only loads makes the full cost of the model paid for, and
+        // checked, right here in one shot, immediately after the check
+        // above — closing that gap between "we checked" and "we actually
+        // used the memory". GPU-resident loads keep mmap enabled (its
+        // laziness/backing-store behavior only concerns host RAM, not
+        // VRAM, so it's not part of this specific hazard).
+        let model_params = if requested_gpu_layers == 0 {
+            model_params.with_use_mmap(false)
+        } else {
+            model_params
+        };
+
+        // NOTE: an OS-level `RLIMIT_AS` hard ceiling was also tried here as
+        // a last-resort safety net (in case the estimate above is still
+        // wrong), but was reverted: when llama.cpp/ggml's own allocator
+        // hits ENOMEM under a tightened `RLIMIT_AS`, it does not surface a
+        // clean `Result::Err` the way the Vulkan/GPU OOM path does — it
+        // segfaults (confirmed empirically: the process exited with
+        // SIGSEGV, code 139, the moment the self-imposed ceiling was hit).
+        // That's no safer than the kernel's own OOM killer, so the size
+        // estimate above (`check_cpu_ram_budget`) — now much more reliable
+        // since `use_mmap(false)` removes the drift window — is the only
+        // gate; if it's ever wrong, prefer lowering `CPU_RAM_SIZE_FACTOR`'s
+        // safety margin further rather than reintroducing a hard rlimit.
         let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
             .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
 
