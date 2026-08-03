@@ -306,6 +306,46 @@
   // Instant, partial-word literal search (page titles + block content),
   // triggered on every keystroke -- like Logseq, typing "magn" finds
   // "magnesium" immediately without waiting for/needing an embedding model.
+  // Extracted so both the live-as-you-type path (debounced, below) and the
+  // explicit "Search" button (immediate, no debounce, no AI involved at
+  // all) share one implementation -- this is the plain SQLite FTS path,
+  // completely independent of any local/cloud LLM or embedder.
+  async function runQuickSearch(trimmed: string, requestVersion: number) {
+    try {
+      const [pages, blocks] = await Promise.all([
+        searchPageTitles(trimmed, 8),
+        searchFts(trimmed, 15),
+      ]);
+      if (requestVersion !== quickSearchVersion) return;
+
+      const blockMatches: QuickMatch[] = await Promise.all(
+        blocks.slice(0, 12).map(async (block) => {
+          let title = pageTitleCache.get(block.page_id);
+          if (!title) {
+            try {
+              const page = await getPage({ id: block.page_id });
+              title = page.title;
+              pageTitleCache.set(block.page_id, title);
+            } catch {
+              title = "(unknown page)";
+            }
+          }
+          return { kind: "block" as const, block, pageTitle: title };
+        })
+      );
+      if (requestVersion !== quickSearchVersion) return;
+
+      quickMatches = [
+        ...pages.map((page) => ({ kind: "page" as const, page })),
+        ...blockMatches,
+      ];
+    } catch {
+      // Quick search is best-effort; ignore failures silently.
+    } finally {
+      if (requestVersion === quickSearchVersion) isQuickSearching = false;
+    }
+  }
+
   function handleSearchInput() {
     selectedResultIndex = -1;
     const trimmed = searchQuery.trim();
@@ -320,41 +360,21 @@
     }
 
     isQuickSearching = true;
-    quickSearchTimer = setTimeout(async () => {
-      try {
-        const [pages, blocks] = await Promise.all([
-          searchPageTitles(trimmed, 8),
-          searchFts(trimmed, 15),
-        ]);
-        if (requestVersion !== quickSearchVersion) return;
+    quickSearchTimer = setTimeout(() => runQuickSearch(trimmed, requestVersion), 120);
+  }
 
-        const blockMatches: QuickMatch[] = await Promise.all(
-          blocks.slice(0, 12).map(async (block) => {
-            let title = pageTitleCache.get(block.page_id);
-            if (!title) {
-              try {
-                const page = await getPage({ id: block.page_id });
-                title = page.title;
-                pageTitleCache.set(block.page_id, title);
-              } catch {
-                title = "(unknown page)";
-              }
-            }
-            return { kind: "block" as const, block, pageTitle: title };
-          })
-        );
-        if (requestVersion !== quickSearchVersion) return;
-
-        quickMatches = [
-          ...pages.map((page) => ({ kind: "page" as const, page })),
-          ...blockMatches,
-        ];
-      } catch {
-        // Quick search is best-effort; ignore failures silently.
-      } finally {
-        if (requestVersion === quickSearchVersion) isQuickSearching = false;
-      }
-    }, 120);
+  // Explicit, immediate plain-text search -- same SQLite FTS path as the
+  // live-as-you-type quick matches above, just triggered right away (no
+  // 120ms debounce) and with no AI/LLM/embedder involvement whatsoever.
+  // This is the "Search" button placed next to "AI Search".
+  function doPlainSearch() {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) return;
+    if (quickSearchTimer) clearTimeout(quickSearchTimer);
+    selectedResultIndex = -1;
+    quickSearchVersion += 1;
+    isQuickSearching = true;
+    void runQuickSearch(trimmed, quickSearchVersion);
   }
 
   // Arrow keys move a highlighted selection through the combined results
@@ -490,6 +510,15 @@
               placeholder="Type to find pages & blocks (e.g. 'magn' finds 'magnesium')..."
               class="search-input"
             />
+            <button
+              type="button"
+              class="action-btn"
+              onclick={doPlainSearch}
+              disabled={!searchQuery.trim()}
+              title="Plain text search (substring match on page titles & block content) -- no AI/model involved at all"
+            >
+              Search
+            </button>
             <button
               type="submit"
               class="action-btn"
@@ -1211,6 +1240,7 @@
   .search-form {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
   }
 
   .search-input {
