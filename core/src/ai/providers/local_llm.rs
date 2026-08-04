@@ -156,6 +156,42 @@ fn check_cpu_ram_budget(model_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Distinguishes `check_cpu_ram_budget`'s "won't fit in RAM" error from any
+/// other load failure (missing file, corrupt GGUF, etc.), purely by
+/// checking for its known message prefix — there's no dedicated
+/// `CoreError` variant for this yet, and adding one is more churn than
+/// warranted for a single internal call site. Used to decide whether a
+/// fallback-to-smaller-model retry is safe/appropriate: it only ever makes
+/// sense when the *reason* was "too big for available RAM", not e.g. "file
+/// doesn't exist" (falling back on that would silently mask what's likely
+/// a misconfiguration).
+const RAM_BUDGET_ERROR_PREFIX: &str = "refusing to load";
+
+fn is_ram_budget_error(e: &CoreError) -> bool {
+    matches!(e, CoreError::Other(msg) if msg.starts_with(RAM_BUDGET_ERROR_PREFIX))
+}
+
+/// When the configured (or auto-picked) chat model doesn't fit in
+/// available RAM, looks for another already-downloaded LLM-kind model in
+/// the same directory that does — preferring the largest one that still
+/// fits (best quality available), so chat "just works" with whatever's
+/// actually usable right now rather than being completely unavailable
+/// until the user manually reconfigures Settings. Mirrors the "it just
+/// works" expectation the embedded Whisper transcription pipeline already
+/// delivers for the exact same models directory.
+fn find_fallback_llm_model(models_dir: &Path, exclude: &Path) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<_> = model_library::scan_models_dir(models_dir)
+        .ok()?
+        .into_iter()
+        .filter(|m| m.kind == ModelKind::Llm && m.path != exclude)
+        .collect();
+    candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    candidates
+        .into_iter()
+        .find(|m| check_cpu_ram_budget(&m.path).is_ok())
+        .map(|m| m.path)
+}
+
 /// Currently available system RAM in bytes (`MemAvailable` from
 /// `/proc/meminfo` on Linux — already accounts for reclaimable page cache,
 /// unlike `MemFree`). `None` on other platforms or if parsing fails.
@@ -304,9 +340,36 @@ impl LocalLlm {
     /// makes "download a model from Hugging Face, put it in the models
     /// folder, it just works" apply identically to LLMs as it already does
     /// to Whisper.
+    ///
+    /// If the resolved model doesn't fit in available RAM, automatically
+    /// retries with the largest other already-downloaded LLM-kind model in
+    /// the same directory that does fit, instead of leaving chat entirely
+    /// unavailable — see `find_fallback_llm_model`. This is safe to do
+    /// (i.e. doesn't risk the double-allocation hazard `load()` warns
+    /// about) because `check_cpu_ram_budget` always runs *before* any
+    /// weights are actually read for a CPU-only load, so the first
+    /// (failing) attempt never allocated anything to begin with.
     pub fn from_settings(models_dir: &Path, settings: &LocalLlmSettings) -> Result<Self> {
         let model_path = settings.model_ref.resolve(models_dir, ModelKind::Llm)?;
-        Self::load(&model_path, settings.context_size, settings.gpu_layers)
+        match Self::load(&model_path, settings.context_size, settings.gpu_layers) {
+            Ok(llm) => Ok(llm),
+            Err(e) if is_ram_budget_error(&e) => {
+                match find_fallback_llm_model(models_dir, &model_path) {
+                    Some(fallback_path) => {
+                        tracing::warn!(
+                            configured = %model_path.display(),
+                            fallback = %fallback_path.display(),
+                            "Configured chat model doesn't fit in available RAM; falling back \
+                             to a smaller already-downloaded model so chat stays usable. Pick a \
+                             different model explicitly in Settings to change this."
+                        );
+                        Self::load(&fallback_path, settings.context_size, settings.gpu_layers)
+                    }
+                    None => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Same as [`Self::from_settings`], but takes the whole
@@ -622,4 +685,45 @@ mod config_tests {
             default_dir.display()
         );
     }
+
+    /// `find_fallback_llm_model` is what makes chat "just work" when the
+    /// configured/auto-picked model is too large for available RAM (e.g. a
+    /// user picked a 30B model but only has enough free RAM for a 4B one):
+    /// it should skip the excluded (too-large) model and pick the largest
+    /// *other* LLM-kind model that still passes the RAM budget check,
+    /// ignoring non-LLM files (embeddings) entirely.
+    #[test]
+    fn find_fallback_llm_model_prefers_largest_model_that_still_fits_ram_budget() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let too_big = dir.path().join("huge-model.gguf");
+        // Sparse file: reports a real (enormous) size via metadata without
+        // actually using that much disk space, guaranteeing it exceeds
+        // whatever RAM `check_cpu_ram_budget` sees on the test machine.
+        std::fs::File::create(&too_big)
+            .unwrap()
+            .set_len(10 * 1024 * 1024 * 1024 * 1024) // 10 TiB
+            .unwrap();
+
+        let fits_larger = dir.path().join("qwen-7b-instruct.gguf");
+        std::fs::write(&fits_larger, vec![0u8; 4096]).unwrap();
+        let fits_smaller = dir.path().join("qwen-4b-instruct.gguf");
+        std::fs::write(&fits_smaller, vec![0u8; 1024]).unwrap();
+        // Not an LLM at all — must never be picked as a chat-model fallback.
+        let embedding = dir.path().join("nomic-embed-text.gguf");
+        std::fs::write(&embedding, vec![0u8; 8192]).unwrap();
+
+        let fallback = find_fallback_llm_model(dir.path(), &too_big);
+        assert_eq!(fallback, Some(fits_larger));
+    }
+
+    #[test]
+    fn find_fallback_llm_model_returns_none_when_nothing_else_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let only_model = dir.path().join("qwen-2b-instruct.gguf");
+        std::fs::write(&only_model, vec![0u8; 1024]).unwrap();
+
+        assert_eq!(find_fallback_llm_model(dir.path(), &only_model), None);
+    }
 }
+
