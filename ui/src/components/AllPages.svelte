@@ -139,8 +139,14 @@
     if (e.key === "Enter") handleCreatePage();
   }
 
-  function fmtDate(ts: number): string {
-    return new Date(ts).toLocaleDateString();
+  // The backend stores timestamps as Unix *seconds* (i64), and they arrive
+  // typed loosely, so coerce and scale to milliseconds before formatting.
+  function fmtDate(ts: number | string): string {
+    const n = typeof ts === "number" ? ts : Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    const ms = n < 1e12 ? n * 1000 : n;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
   }
 </script>
 

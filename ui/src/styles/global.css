@@ -112,6 +112,36 @@ body {
   color: var(--bg-primary);
 }
 
+/* ============================================================
+   Baseline focus visibility.
+   Many components clear `outline` and signal focus only via border
+   colour, which is invisible for keyboard users on most controls.
+   This is a keyboard-only affordance (`:focus-visible`), so it never
+   appears on mouse click and cannot change the pointer experience.
+   ============================================================ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ============================================================
+   Reduced motion.
+   Honours the OS "reduce motion" preference. Durations are collapsed
+   rather than set to 0 so that `transitionend` / `animationend`
+   listeners still fire and no state machine stalls.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Force full-width content - override any scoped component styles */
 .page-content {
   max-width: 100% !important;
