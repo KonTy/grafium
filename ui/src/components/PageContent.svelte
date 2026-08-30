@@ -37,6 +37,12 @@
   type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
 
   let backlinks: BacklinkView[] = $state([]);
+  // Bounds for backlink rendering. A common tag page can be referenced by
+  // thousands of blocks, and each rendered tree costs IPC plus markdown.
+  const MAX_BACKLINKS = 50;
+  const MAX_BACKLINK_TREE_DEPTH = 4;
+  const MAX_BACKLINK_TREE_NODES = 40;
+  let backlinkTotal = $state(0);
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
   let loadError: string | null = $state(null);
@@ -288,6 +294,7 @@
   async function loadBacklinks(request: PageLoadRequest = currentPageLoad()) {
     if (isCurrentPageLoad(pageLoadState, request)) {
       backlinks = [];
+      backlinkTotal = 0;
     }
 
     try {
@@ -298,10 +305,15 @@
         pageTitle: request.pageTitle,
         count: backlinkResults.length,
       }));
+      // A heavily linked page (a common tag) can have thousands of backlinks,
+      // each costing IPC to load its source blocks. Render a bounded window
+      // rather than fanning out an unbounded number of concurrent calls.
+      backlinkTotal = backlinkResults.length;
+      const visibleResults = backlinkResults.slice(0, MAX_BACKLINKS);
       const pageBlockCache = new Map<string, Block[]>();
       const pageTitleCache = new Map<string, string>();
 
-      const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
+      const renderedBacklinks = await Promise.all(visibleResults.map(async (result) => {
         let sourceBlocks = pageBlockCache.get(result.block.page_id);
         if (!sourceBlocks) {
           sourceBlocks = await listBlocks(result.block.page_id);
@@ -337,6 +349,7 @@
     } catch {
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       backlinks = [];
+      backlinkTotal = 0;
     }
   }
 
@@ -359,8 +372,16 @@
     if (!root) return [];
 
     const tree: BacklinkTreeNode[] = [];
+    // `visited` guards against a cycle in parent_id, which would otherwise
+    // recurse forever and hang the window. The depth and node caps keep a
+    // deeply nested source page from rendering an enormous backlink preview.
+    const visited = new Set<string>();
     const visit = (block: Block, depth: number) => {
+      if (visited.has(block.id)) return;
+      visited.add(block.id);
+      if (tree.length >= MAX_BACKLINK_TREE_NODES) return;
       tree.push({ block, depth });
+      if (depth >= MAX_BACKLINK_TREE_DEPTH) return;
       const children = childrenByParent.get(block.id) ?? [];
       for (const child of children) {
         visit(child, depth + 1);
@@ -811,7 +832,7 @@
 
   {#if backlinks.length > 0}
     <div class="backlinks-section">
-      <h3 class="backlinks-title">{backlinks.length} Linked Reference{backlinks.length > 1 ? "s" : ""}</h3>
+      <h3 class="backlinks-title">{backlinkTotal} Linked Reference{backlinkTotal > 1 ? "s" : ""}{backlinkTotal > backlinks.length ? ` (showing ${backlinks.length})` : ""}</h3>
       <div class="backlinks-list">
         {#each backlinks as bl}
           <div class="backlink-item">
