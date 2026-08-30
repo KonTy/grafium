@@ -222,12 +222,19 @@ impl Database {
     }
 
     pub fn reorder_blocks(&self, page_id: &str, block_ids: &[String]) -> Result<()> {
-        let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("UPDATE blocks SET order_index = ?1 WHERE id = ?2 AND page_id = ?3")?;
-        for (i, id) in block_ids.iter().enumerate() {
-            stmt.execute(params![i as i32, id, page_id])?;
+        let mut conn = self.conn()?;
+        // One transaction for the whole reorder: without it each UPDATE commits
+        // separately, so a crash part-way leaves the page in a half-reordered
+        // state, and every row pays its own commit.
+        let tx = conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE blocks SET order_index = ?1 WHERE id = ?2 AND page_id = ?3")?;
+            for (i, id) in block_ids.iter().enumerate() {
+                stmt.execute(params![i as i32, id, page_id])?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
