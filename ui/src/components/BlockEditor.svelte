@@ -11,6 +11,7 @@
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
+  import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import DatePicker from "./DatePicker.svelte";
@@ -313,13 +314,13 @@
   // Save content on blur
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
-    console.log("[telemetry] savecontext", JSON.stringify(context));
+    telemetry("savecontext", () => (context));
     try {
       const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
       saveError = null;
       pendingSaveContent = null;
       if (changed) {
-        console.log("[telemetry] saveContent", JSON.stringify(context));
+        telemetry("saveContent", () => (context));
       }
       return changed;
     } catch (e) {

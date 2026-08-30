@@ -4,6 +4,7 @@
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
+  import { telemetry } from "../lib/telemetry";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
@@ -292,7 +293,7 @@
     try {
       const backlinkResults = await getBacklinks(request.pageId);
       if (!isCurrentPageLoad(pageLoadState, request)) return;
-      console.log("[telemetry] backlinks fetched", JSON.stringify({
+      telemetry("backlinks fetched", () => ({
         pageId: request.pageId,
         pageTitle: request.pageTitle,
         count: backlinkResults.length,
@@ -322,7 +323,7 @@
       }));
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       backlinks = renderedBacklinks;
-      console.log("[telemetry] backlinks rendered", JSON.stringify({
+      telemetry("backlinks rendered", () => ({
         pageId: request.pageId,
         pageTitle: request.pageTitle,
         renderedCount: backlinks.length,
@@ -595,7 +596,7 @@
       blocks = [...blocks];
     }
 
-    console.log("[telemetry] indent start", JSON.stringify({
+    telemetry("indent start", () => ({
       pageId: page.id,
       pageTitle: page.title,
       blockId,
@@ -621,7 +622,7 @@
         block.parent_id = prevSibling.id;
         block.order_index = childCount;
         blocks = [...blocks];
-        console.log("[telemetry] indent in done", JSON.stringify({
+        telemetry("indent in done", () => ({
           blockId: block.id,
           newParentId: block.parent_id,
           newOrderIndex: block.order_index,
@@ -646,7 +647,7 @@
         block.parent_id = newParentId;
         block.order_index = newOrder;
         blocks = [...blocks];
-        console.log("[telemetry] indent out done", JSON.stringify({
+        telemetry("indent out done", () => ({
           blockId: block.id,
           newParentId: block.parent_id,
           newOrderIndex: block.order_index,
