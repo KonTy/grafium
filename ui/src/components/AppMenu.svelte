@@ -1034,7 +1034,7 @@
   .sync-add-btn:hover {
     border-color: var(--accent);
     color: var(--accent);
-    background: rgba(var(--accent-rgb, 99, 102, 241), 0.05);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
 
   .sync-add-form {

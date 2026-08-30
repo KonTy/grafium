@@ -60,6 +60,26 @@
   --task-later-bg: #cba6f722;
   --task-later-fg: #cba6f7;
 
+  /* ------------------------------------------------------------
+     Compatibility aliases.
+     Several components were written against token names that were
+     never defined (--accent-color, --text, --border-color, --error,
+     --bg-alt, ...). Each use supplied a hardcoded fallback, so those
+     elements silently ignored the active theme and rendered a fixed
+     colour instead. Defining the aliases here makes them resolve to
+     the real theme tokens, so those surfaces theme correctly without
+     touching every call site. --warning-color maps to --task-todo-fg
+     because the theme factory derives both from the same `warning`.
+     ------------------------------------------------------------ */
+  --accent-color: var(--accent);
+  --border-color: var(--border);
+  --text: var(--text-primary);
+  --error: var(--danger);
+  --error-color: var(--danger);
+  --warning-color: var(--task-todo-fg);
+  --bg-alt: var(--bg-secondary);
+  --bg-tertiary: var(--surface-raised);
+
   /* Layout & spacing */
   --content-max-width: 100%;
   --content-padding-x: 8px;

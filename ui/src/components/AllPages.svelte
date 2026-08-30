@@ -130,7 +130,19 @@
   }
 
   async function handleDeletePage(page: Page) {
-    await deletePage(page.id);
+    // Deleting a page removes the underlying .md file from disk and is not
+    // undoable, so it must never happen on a single stray click.
+    const confirmed = window.confirm(
+      `Delete page '${page.title}'? This will delete the .md file from disk.`
+    );
+    if (!confirmed) return;
+
+    try {
+      await deletePage(page.id);
+    } catch (e) {
+      alert("Failed to delete page: " + e);
+      return;
+    }
     resetWindows();
     await refreshCount();
   }
@@ -193,7 +205,7 @@
               {/if}
             </button>
             <span class="page-date">{fmtDate(page.updated_at)}</span>
-            <button class="btn-delete" onclick={() => handleDeletePage(page)} title="Delete">×</button>
+            <button class="btn-delete" onclick={() => handleDeletePage(page)} title="Delete" aria-label="Delete page {page.title}">×</button>
           {:else}
             <span class="page-link placeholder">…</span>
           {/if}
@@ -384,7 +396,11 @@
     opacity: 0;
   }
 
-  .page-row:hover .btn-delete {
+  /* Revealed on hover, and on keyboard focus so the action is not
+     mouse-only. `:focus-visible` alone would not work here because the
+     button is `opacity: 0` and must become visible as focus arrives. */
+  .page-row:hover .btn-delete,
+  .page-row:focus-within .btn-delete {
     opacity: 1;
   }
 

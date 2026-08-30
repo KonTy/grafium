@@ -432,8 +432,56 @@ impl Graph {
         }
     }
 
-    fn content_hash(content: &str) -> String {
-        let mut hasher = Sha256::new();
+    /// Write `content` to `path` atomically.
+    ///
+    /// `fs::write` truncates the target before writing, so an interruption
+    /// (crash, power loss, full disk) can leave a note truncated or empty.
+    /// These files are the user's only copy, so instead write to a temporary
+    /// file in the same directory, flush and fsync it, then rename over the
+    /// target. Rename is atomic within a filesystem, so a reader sees either
+    /// the old content or the new content, never a partial write.
+    ///
+    /// The temporary file deliberately does not use a `.md` extension: the
+    /// filesystem watcher only reacts to `.md` files, so the scratch file
+    /// cannot trigger a spurious re-index.
+    fn atomic_write(path: &Path, content: &str) -> Result<()> {
+        use std::io::Write;
+
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        if !dir.exists() {
+            fs::create_dir_all(dir)?;
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("page.md");
+        let tmp_path = dir.join(format!(
+            ".{}.{}.tmp",
+            file_name,
+            Uuid::new_v4().as_simple()
+        ));
+
+        // Scope the handle so it is closed before the rename (required on
+        // Windows, harmless elsewhere).
+        {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+            // Durability: without this the rename can land before the data.
+            file.sync_all()?;
+        }
+
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            // Never leave scratch files behind in the user's graph.
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+
+        Ok(())
+    }
+
+    fn content_hash(content: &str) -> String {        let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         format!("{:x}", hasher.finalize())
     }
@@ -802,7 +850,7 @@ impl Graph {
         content: &str,
     ) -> Result<Page> {
         let file_path = self.page_file_path(title, is_journal)?;
-        fs::write(&file_path, content)?;
+        Self::atomic_write(&file_path, content)?;
 
         // Index the file
         self.index_file(&file_path)?;
@@ -1241,7 +1289,7 @@ impl Graph {
     }
 
     fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
-        fs::write(&file_path, &content)?;
+        Self::atomic_write(file_path, content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
         // create/modify event instead of treating it as an external change
@@ -1410,6 +1458,41 @@ mod tests {
         let conn = graph.db.conn()?;
         let count = conn.query_row(sql, params![param], |row| row.get(0))?;
         Ok(count)
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_scratch_files() -> Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path();
+        let target = dir.join("note.md");
+
+        Graph::atomic_write(&target, "- first\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- first\n");
+
+        // Overwriting must fully replace, not append or leave a tail behind.
+        Graph::atomic_write(&target, "- second\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- second\n");
+
+        // The temp file must be renamed away, never left in the user's graph.
+        let strays: Vec<_> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "note.md")
+            .collect();
+        assert!(strays.is_empty(), "unexpected leftover files: {strays:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_creates_missing_parent_directories() -> Result<()> {
+        let temp = tempdir()?;
+        let target = temp.path().join("nested").join("deep").join("note.md");
+
+        Graph::atomic_write(&target, "- body\n")?;
+
+        assert_eq!(fs::read_to_string(&target)?, "- body\n");
+        Ok(())
     }
 
     #[test]
