@@ -223,13 +223,17 @@ fn start_graph_watcher(
             // the entire index) followed by a full disk rescan. On a large
             // graph that both freezes the app for a long time and — if the
             // on-disk .md files are not a complete mirror of the index — can
-            // destroy data. Index only the changed files. Deletions are left
-            // alone (a stale entry is harmless; an explicit re-index fixes it).
+            // destroy data. Index only the changed files, and drop the index
+            // rows for files that have gone: a note deleted by a sync would
+            // otherwise stay searchable and keep its backlinks and tasks
+            // until the next explicit re-index.
             for path in pending_files.drain() {
                 if path.exists() {
                     if let Err(e) = g.index_file(&path) {
                         eprintln!("watch index file failed ({}): {}", path.display(), e);
                     }
+                } else if let Err(e) = g.deindex_file(&path) {
+                    eprintln!("watch deindex file failed ({}): {}", path.display(), e);
                 }
             }
 

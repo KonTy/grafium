@@ -271,6 +271,22 @@ impl SyncEngine {
             .collect();
 
         for rel_path in all_paths {
+            // A removable drive can be pulled out part way through. Once a
+            // file operation has failed, confirm the target is still there
+            // before working through the rest of the graph against it.
+            if !result.errors.is_empty() && !backend.is_available() {
+                state.last_sync = Some(Utc::now().timestamp());
+                let _ = state.save(&self.state_path);
+                return Err(crate::error::CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    format!(
+                        "Sync target '{}' disappeared part way through. {} file(s)                          were synced before it went away.",
+                        backend.name(),
+                        result.pushed.len() + result.pulled.len()
+                    ),
+                )));
+            }
+
             let local_exists = local_files.contains_key(&rel_path);
             let remote_exists = remote_files.contains_key(&rel_path);
             let was_synced = state.files.contains_key(&rel_path);

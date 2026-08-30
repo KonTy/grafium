@@ -975,3 +975,29 @@ fn binary_conflict_resolution_converges_on_both_machines() {
         "two machines resolved the same conflict differently"
     );
 }
+
+#[test]
+fn corrupt_sync_state_is_preserved_rather_than_silently_discarded() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- note\n");
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    let state_path = local
+        .path()
+        .join(grafium_core::graph::DEFAULT_METADATA_DIR_NAME)
+        .join("sync-state.json");
+    assert!(state_path.exists(), "sync state should exist after a sync");
+    fs::write(&state_path, "{ this is not json").unwrap();
+
+    // The graph must still be intact, and the damaged state kept for
+    // diagnosis rather than thrown away.
+    let _ = engine.sync(&backend);
+    assert!(local_exists(local.path(), "pages/note.md"));
+    assert!(
+        state_path.with_extension("json.corrupt").exists(),
+        "corrupt sync state was discarded instead of being moved aside"
+    );
+}

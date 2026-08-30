@@ -1212,6 +1212,32 @@ impl Graph {
     }
 
     /// Delete a page: removes the .md file and all DB records.
+    /// Drop a file's rows from the index after it has already gone from disk.
+    ///
+    /// The watcher only ever re-indexes paths that still exist, so a note
+    /// removed by a sync (or by anything outside the app) otherwise stays
+    /// searchable, keeps its backlinks, and keeps its tasks. Unlike
+    /// `delete_page` this touches only the index, because the file is gone.
+    ///
+    /// Returns whether anything was actually indexed for that path.
+    pub fn deindex_file(&self, path: &Path) -> Result<bool> {
+        let rel_path = path
+            .strip_prefix(&self.root_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        let Some(page) = self.db.find_page_by_file_path(&rel_path)? else {
+            self.forget_indexed_content(path);
+            return Ok(false);
+        };
+
+        self.db.delete_blocks_for_page(&page.id)?;
+        self.db.delete_page(&page.id)?;
+        self.forget_indexed_content(path);
+        Ok(true)
+    }
+
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
 

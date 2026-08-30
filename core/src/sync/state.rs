@@ -44,11 +44,33 @@ pub struct SyncState {
 
 impl SyncState {
     /// Load sync state from a JSON file, or create empty if not found.
+    ///
+    /// A state file that exists but cannot be parsed is moved aside rather
+    /// than silently discarded: losing it makes every file look never-synced,
+    /// which turns the next sync into a pile of conflicts, so the user needs
+    /// to know it happened and we want the original for diagnosis.
     pub fn load(path: &Path) -> Self {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Ok(raw) = fs::read_to_string(path) else {
+            return Self::default();
+        };
+        match serde_json::from_str(&raw) {
+            Ok(state) => state,
+            Err(e) => {
+                let salvaged = path.with_extension("json.corrupt");
+                let moved = fs::rename(path, &salvaged).is_ok();
+                eprintln!(
+                    "Sync state at {} could not be parsed ({}). {}",
+                    path.display(),
+                    e,
+                    if moved {
+                        format!("Moved it to {} and starting fresh.", salvaged.display())
+                    } else {
+                        "Starting fresh.".to_string()
+                    }
+                );
+                Self::default()
+            }
+        }
     }
 
     /// Save sync state to a JSON file.

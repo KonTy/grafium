@@ -40,6 +40,30 @@ impl WebDavBackend {
         format!("{}/{}", self.base_url, encoded)
     }
 
+    /// Verify that a freshly written file arrived intact.
+    ///
+    /// A PUT can return success while the body was truncated by a dropped
+    /// connection. Without this the engine records a torn upload as synced
+    /// and the next machine pulls the truncated copy over a good one.
+    fn verify_written(&self, rel_path: &str, expected_len: u64) -> Result<()> {
+        let remote = match self.stat_file(rel_path) {
+            Ok(meta) => meta,
+            // Not every server reports usable metadata; a failed check is not
+            // itself evidence that the write went wrong.
+            Err(_) => return Ok(()),
+        };
+        if remote.size != 0 && remote.size != expected_len {
+            return Err(crate::error::CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "WebDAV write of {} is {} bytes on the server, expected {}",
+                    rel_path, remote.size, expected_len
+                ),
+            )));
+        }
+        Ok(())
+    }
+
     /// Parse a PROPFIND XML response to extract file metadata.
     fn parse_propfind_response(&self, xml: &str) -> Result<Vec<FileMetadata>> {
         let mut files = Vec::new();
@@ -57,19 +81,25 @@ impl WebDavBackend {
                 continue;
             }
 
-            // Only process .md files
-            if !href.ends_with(".md") {
-                continue;
-            }
-
             // Extract relative path from the href
             let rel_path = self.href_to_rel_path(&href);
             if rel_path.is_empty() {
                 continue;
             }
 
-            // Only include files under pages/ or journals/
-            if !rel_path.starts_with("pages/") && !rel_path.starts_with("journals/") {
+            // Notes sync as markdown only; assets/ carries the media that
+            // notes reference, and may be any file type.
+            let is_note_dir =
+                rel_path.starts_with("pages/") || rel_path.starts_with("journals/");
+            let is_asset = rel_path.starts_with("assets/");
+            if is_note_dir && !rel_path.ends_with(".md") {
+                continue;
+            }
+            if !is_note_dir && !is_asset {
+                continue;
+            }
+            // Conflict copies are written explicitly by the engine.
+            if rel_path.contains(".conflict_") {
                 continue;
             }
 
@@ -290,7 +320,7 @@ impl SyncBackend for WebDavBackend {
                 format!("WebDAV PUT failed: {} for {}", response.status(), rel_path),
             )));
         }
-        Ok(())
+        self.verify_written(rel_path, content.len() as u64)
     }
 
     fn delete_file(&self, rel_path: &str) -> Result<()> {
