@@ -31,6 +31,22 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Functi
     ) -> std::result::Result<(), rusqlite::Error> {
         use chrono::Utc;
 
+        // `synchronous`, `cache_size`, `temp_store`, `mmap_size`, `foreign_keys`
+        // and `busy_timeout` are per-connection, not per-database. Setting them
+        // once at startup would leave every other pooled connection on SQLite
+        // defaults (fsync on every commit, a 2 MB cache, and immediate
+        // SQLITE_BUSY errors when the watcher or a reindex writes concurrently).
+        conn.execute_batch(
+            "
+            PRAGMA synchronous = NORMAL;
+            PRAGMA cache_size = -64000;
+            PRAGMA foreign_keys = ON;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA mmap_size = 268435456;
+            PRAGMA busy_timeout = 5000;
+        ",
+        )?;
+
         conn.create_scalar_function(
             "days_ago",
             1,
@@ -99,15 +115,12 @@ impl Database {
 
     fn initialize(&self) -> Result<()> {
         let conn = self.conn()?;
-        // Performance pragmas for millions of records
+        // Database-level pragmas, persisted in the file itself. Per-connection
+        // pragmas live in `FunctionCustomizer::on_acquire` so that every
+        // connection in the pool gets them.
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA cache_size = -64000;
-            PRAGMA foreign_keys = ON;
-            PRAGMA temp_store = MEMORY;
-            PRAGMA mmap_size = 268435456;
             PRAGMA page_size = 4096;
         ",
         )?;
@@ -251,6 +264,35 @@ mod tests {
         let db = Database::new(db_path.as_path())?;
 
         assert_eq!(db.count_pages()?, 0);
+        Ok(())
+    }
+
+    /// Pragmas like `foreign_keys` and `synchronous` are per-connection, not
+    /// per-database. Applying them to a single pooled connection leaves every
+    /// other connection on SQLite defaults, which silently disables the 13
+    /// `ON DELETE CASCADE` constraints in the schema.
+    #[test]
+    fn every_pooled_connection_gets_the_performance_pragmas() -> Result<()> {
+        let temp = tempdir()?;
+        let db = Database::new(temp.path().join("index.db"))?;
+
+        // Hold several connections at once so the pool must open new ones
+        // rather than handing back the single connection initialize() touched.
+        let conns: Vec<_> = (0..8)
+            .map(|_| db.conn().expect("pool connection"))
+            .collect();
+
+        for (i, conn) in conns.iter().enumerate() {
+            let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+            assert_eq!(foreign_keys, 1, "connection {i} has foreign_keys disabled");
+
+            let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+            assert_eq!(synchronous, 1, "connection {i} is not synchronous=NORMAL");
+
+            let busy_timeout: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+            assert!(busy_timeout > 0, "connection {i} has no busy_timeout");
+        }
+
         Ok(())
     }
 }
