@@ -85,9 +85,11 @@ marked.use({
   renderer,
 });
 
-// Simple LRU cache to avoid re-parsing unchanged blocks
+// Simple LRU cache to avoid re-parsing unchanged blocks. Sized to comfortably
+// cover a long page plus its backlinks, so blocks scrolled out of the
+// virtualised window and back in are not re-parsed on every pass.
 const cache = new Map<string, string>();
-const MAX_CACHE = 512;
+const MAX_CACHE = 2048;
 
 function getCached(key: string): string | undefined {
   const val = cache.get(key);

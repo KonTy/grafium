@@ -57,12 +57,14 @@
   });
 
   async function loadSidebar() {
-    try {
-      favorites = await listFavorites();
-    } catch { favorites = []; }
-    try {
-      recentPages = await listRecentPages(10);
-    } catch { recentPages = []; }
+    // Independent queries: run them concurrently so the sidebar is not gated
+    // on two sequential IPC round trips, while keeping each one's fallback.
+    const [fav, recent] = await Promise.allSettled([
+      listFavorites(),
+      listRecentPages(10),
+    ]);
+    favorites = fav.status === "fulfilled" ? fav.value : [];
+    recentPages = recent.status === "fulfilled" ? recent.value : [];
   }
 
   function favSet(): Set<string> {
