@@ -122,8 +122,21 @@ impl SyncEngine {
 
     /// Only files under the graph's note directories participate in sync. This
     /// also keeps the marker file out of the synced set.
+    ///
+    /// Paths originate from a remote listing, so a hostile or buggy server can
+    /// propose anything here. Reject traversal and absolute components: without
+    /// this, an href resolving to `pages/../../../etc/passwd` would be joined
+    /// onto the graph root and written outside it.
     fn is_syncable_path(rel_path: &str) -> bool {
-        rel_path.starts_with("pages/") || rel_path.starts_with("journals/")
+        if !rel_path.starts_with("pages/") && !rel_path.starts_with("journals/") {
+            return false;
+        }
+        if Path::new(rel_path).is_absolute() {
+            return false;
+        }
+        rel_path
+            .split(['/', '\\'])
+            .all(|component| !component.is_empty() && component != "." && component != "..")
     }
 
     fn read_remote_marker(backend: &dyn SyncBackend) -> Option<String> {

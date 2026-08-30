@@ -28,7 +28,16 @@ impl WebDavBackend {
     }
 
     fn file_url(&self, rel_path: &str) -> String {
-        format!("{}/{}", self.base_url, rel_path)
+        // Note titles routinely contain spaces, and may contain '#', '?' or
+        // '&'. Pasted raw into a URL these either truncate the path at a
+        // fragment/query boundary or fail to parse outright, so encode each
+        // segment while keeping the separators intact.
+        let encoded = rel_path
+            .split('/')
+            .map(|segment| urlencoding::encode(segment).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        format!("{}/{}", self.base_url, encoded)
     }
 
     /// Parse a PROPFIND XML response to extract file metadata.
@@ -364,6 +373,29 @@ mod tests {
         )?;
 
         assert_eq!(backend.name(), "webdav");
+        Ok(())
+    }
+
+    #[test]
+    fn file_url_encodes_characters_that_break_urls() -> Result<()> {
+        let backend = WebDavBackend::new(
+            "https://dav.example.com/notes".to_string(),
+            "user".to_string(),
+            "pw".to_string(),
+            "webdav".to_string(),
+        )?;
+
+        // A space is the common case; '#' would otherwise truncate the path
+        // at a fragment boundary and target the wrong resource entirely.
+        assert_eq!(
+            backend.file_url("pages/My Tasks #urgent.md"),
+            "https://dav.example.com/notes/pages/My%20Tasks%20%23urgent.md"
+        );
+        // Separators must survive encoding.
+        assert_eq!(
+            backend.file_url("pages/sub/foo.md"),
+            "https://dav.example.com/notes/pages/sub/foo.md"
+        );
         Ok(())
     }
 }

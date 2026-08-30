@@ -802,3 +802,38 @@ fn unmounted_usb_mount_point_does_not_wipe_the_graph() {
     // The real stick still works afterwards.
     assert!(engine.sync(&usb).is_ok());
 }
+
+#[test]
+fn remote_supplied_traversal_path_cannot_escape_the_graph() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- note\n");
+
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    fs::write(&victim, "original\n").unwrap();
+
+    let backend = MockBackend::new("hostile");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    // A compromised server (or a mangled PROPFIND href) offers a path that
+    // climbs out of the graph directory.
+    let escape = format!(
+        "pages/../../../../../../../../..{}",
+        victim.to_string_lossy()
+    );
+    backend.set_file(&escape, b"pwned\n");
+
+    let result = engine.sync(&backend).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "original\n",
+        "a remote path escaped the graph directory"
+    );
+    assert!(
+        !result.pulled.iter().any(|p| p.contains("..")),
+        "traversal path should never be pulled: {:?}",
+        result.pulled
+    );
+}
