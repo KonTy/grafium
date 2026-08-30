@@ -1001,3 +1001,40 @@ fn corrupt_sync_state_is_preserved_rather_than_silently_discarded() {
         "corrupt sync state was discarded instead of being moved aside"
     );
 }
+
+#[test]
+fn merge_preserves_crlf_and_absent_trailing_newline() {
+    // Both sides changed a different line, so this takes the real merge path
+    // rather than a fast path.
+    let base = "alpha\r\nbeta\r\ngamma\r\n";
+    let local = "alpha EDITED\r\nbeta\r\ngamma\r\n";
+    let remote = "alpha\r\nbeta\r\ngamma EDITED\r\n";
+
+    let merged = three_way_merge(base, local, remote);
+    assert!(!merged.has_conflicts);
+    assert!(
+        merged.content.contains("\r\n"),
+        "CRLF line endings were rewritten to LF: {:?}",
+        merged.content
+    );
+    assert!(
+        !merged.content.contains("\n\n") || merged.content.contains("\r\n\r\n"),
+        "stray bare LF introduced: {:?}",
+        merged.content
+    );
+
+    // A file with no trailing newline must not silently gain one.
+    let base = "alpha\nbeta\ngamma";
+    let local = "alpha EDITED\nbeta\ngamma";
+    let remote = "alpha\nbeta\ngamma EDITED";
+    let merged = three_way_merge(base, local, remote);
+    assert!(
+        !merged.content.ends_with('\n'),
+        "merge added a trailing newline that was not there: {:?}",
+        merged.content
+    );
+
+    // And one that had a trailing newline keeps it.
+    let merged = three_way_merge("a\nb\nc\n", "a EDITED\nb\nc\n", "a\nb\nc EDITED\n");
+    assert!(merged.content.ends_with('\n'));
+}
