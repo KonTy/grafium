@@ -4,13 +4,17 @@
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
   import AllPages from "./components/AllPages.svelte";
-  import GraphView from "./components/GraphView.svelte";
-  import Statistics from "./components/Statistics.svelte";
-  import FlashcardReview from "./components/FlashcardReview.svelte";
-  import ChatbotView from "./components/ChatbotView.svelte";
-  import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
+  import { lazyComponent } from "./lib/lazy";
+
+  // Heavy views the user may never open. Loading them on demand keeps them out
+  // of the initial chunk, which the app must parse before it can paint.
+  const graphView = lazyComponent(() => import("./components/GraphView.svelte"));
+  const statistics = lazyComponent(() => import("./components/Statistics.svelte"));
+  const flashcardReview = lazyComponent(() => import("./components/FlashcardReview.svelte"));
+  const chatbotView = lazyComponent(() => import("./components/ChatbotView.svelte"));
+  const settingsView = lazyComponent(() => import("./components/Settings.svelte"));
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import type { PageNavigationTarget } from "./lib/navigation";
@@ -1080,20 +1084,29 @@
     {:else if currentView === "all-pages"}
       <AllPages onNavigate={handleNavigate} />
     {:else if currentView === "graph"}
-      <GraphView
-        onNavigate={handleNavigate}
-        currentPageId={currentPage?.id ?? ""}
-        currentPageTitle={currentPage?.title ?? ""}
-      />
+      {#await graphView() then { default: GraphView }}
+        <GraphView
+          onNavigate={handleNavigate}
+          currentPageId={currentPage?.id ?? ""}
+          currentPageTitle={currentPage?.title ?? ""}
+        />
+      {/await}
     {:else if currentView === "statistics"}
-      <Statistics onNavigate={handleNavigate} />
+      {#await statistics() then { default: Statistics }}
+        <Statistics onNavigate={handleNavigate} />
+      {/await}
     {:else if currentView === "flashcards"}
-      <FlashcardReview onNavigate={handleNavigate} />
+      {#await flashcardReview() then { default: FlashcardReview }}
+        <FlashcardReview onNavigate={handleNavigate} />
+      {/await}
     {:else if currentView === "chat"}
-      <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
+      {#await chatbotView() then { default: ChatbotView }}
+        <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
+      {/await}
     {:else if currentView === "settings"}
-      <Settings />
-    {:else if currentView === "journal"}
+      {#await settingsView() then { default: Settings }}
+        <Settings />
+      {/await}    {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
