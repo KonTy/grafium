@@ -837,3 +837,141 @@ fn remote_supplied_traversal_path_cannot_escape_the_graph() {
         result.pulled
     );
 }
+
+// ===========================================================================
+// Assets / media
+// ===========================================================================
+
+/// A PNG header followed by bytes that are not valid UTF-8.
+fn fake_png(marker: u8) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&[0xff, 0xfe, 0xfd, marker, 0x00, 0x80]);
+    bytes
+}
+
+#[test]
+fn assets_are_synced_alongside_notes() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- ![](../assets/pic.png)\n");
+    let png = fake_png(1);
+    fs::create_dir_all(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/pic.png"), &png).unwrap();
+    fs::create_dir_all(local.path().join("assets/audio")).unwrap();
+    fs::write(local.path().join("assets/audio/note.mp3"), fake_png(2)).unwrap();
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let r = engine.sync(&backend).unwrap();
+
+    assert!(
+        r.pushed.contains(&"assets/pic.png".to_string()),
+        "asset was not pushed: {:?}",
+        r.pushed
+    );
+    assert!(
+        r.pushed.contains(&"assets/audio/note.mp3".to_string()),
+        "nested asset was not pushed: {:?}",
+        r.pushed
+    );
+    assert_eq!(
+        backend.get_file("assets/pic.png").unwrap(),
+        png,
+        "asset bytes were altered in transit"
+    );
+}
+
+#[test]
+fn remote_assets_are_pulled_with_bytes_intact() {
+    let local = setup_local_graph();
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    let png = fake_png(7);
+    backend.set_file("assets/from-phone.png", &png);
+
+    let r = engine.sync(&backend).unwrap();
+    assert!(r.pulled.contains(&"assets/from-phone.png".to_string()));
+    assert_eq!(
+        fs::read(local.path().join("assets/from-phone.png")).unwrap(),
+        png
+    );
+}
+
+#[test]
+fn conflicting_binary_assets_are_never_merged_and_both_survive() {
+    let local = setup_local_graph();
+    fs::create_dir_all(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    // Same asset replaced differently on each machine.
+    let local_version = fake_png(0xA1);
+    let remote_version = fake_png(0xB2);
+    fs::write(local.path().join("assets/pic.png"), &local_version).unwrap();
+    backend.set_file("assets/pic.png", &remote_version);
+
+    let r = engine.sync(&backend).unwrap();
+    assert_eq!(r.conflicts, vec!["assets/pic.png".to_string()]);
+    assert!(r.merged.is_empty(), "a binary must never be merged");
+
+    // Whatever won, the primary must be one of the two originals byte for
+    // byte, never a splice of them.
+    let primary = fs::read(local.path().join("assets/pic.png")).unwrap();
+    assert!(
+        primary == local_version || primary == remote_version,
+        "binary conflict produced corrupted content"
+    );
+
+    // And the other version must still exist somewhere.
+    let assets: Vec<Vec<u8>> = fs::read_dir(local.path().join("assets"))
+        .unwrap()
+        .map(|e| fs::read(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(assets.contains(&local_version), "local version was lost");
+    assert!(assets.contains(&remote_version), "remote version was lost");
+}
+
+#[test]
+fn binary_conflict_resolution_converges_on_both_machines() {
+    let local_version = fake_png(0xA1);
+    let remote_version = fake_png(0xB2);
+
+    // Machine A sees local=A1, remote=B2. Machine B sees them the other way
+    // round. Both must end up with the same primary and the same copy name.
+    let mut outcomes = Vec::new();
+    for (mine, theirs) in [
+        (&local_version, &remote_version),
+        (&remote_version, &local_version),
+    ] {
+        let local = setup_local_graph();
+        fs::create_dir_all(local.path().join("assets")).unwrap();
+        fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
+
+        let backend = MockBackend::new("usb");
+        let engine = SyncEngine::new(local.path().to_path_buf());
+        engine.sync(&backend).unwrap();
+
+        fs::write(local.path().join("assets/pic.png"), mine).unwrap();
+        backend.set_file("assets/pic.png", theirs);
+        engine.sync(&backend).unwrap();
+
+        let mut names: Vec<String> = fs::read_dir(local.path().join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        outcomes.push((
+            fs::read(local.path().join("assets/pic.png")).unwrap(),
+            names,
+        ));
+    }
+
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "two machines resolved the same conflict differently"
+    );
+}

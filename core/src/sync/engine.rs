@@ -120,6 +120,11 @@ impl SyncEngine {
     /// apart from "these files were genuinely deleted on the other machine".
     const REMOTE_MARKER_PATH: &'static str = ".grafium-sync-id";
 
+    /// Graph directories that participate in sync. `assets/` carries the media
+    /// that notes reference, so omitting it leaves broken links on the other
+    /// machine.
+    const SYNCED_DIRS: [&'static str; 3] = ["pages/", "journals/", "assets/"];
+
     /// Only files under the graph's note directories participate in sync. This
     /// also keeps the marker file out of the synced set.
     ///
@@ -128,7 +133,10 @@ impl SyncEngine {
     /// this, an href resolving to `pages/../../../etc/passwd` would be joined
     /// onto the graph root and written outside it.
     fn is_syncable_path(rel_path: &str) -> bool {
-        if !rel_path.starts_with("pages/") && !rel_path.starts_with("journals/") {
+        if !Self::SYNCED_DIRS
+            .iter()
+            .any(|dir| rel_path.starts_with(dir))
+        {
             return false;
         }
         if Path::new(rel_path).is_absolute() {
@@ -575,6 +583,83 @@ impl SyncEngine {
     /// The merged file (possibly with markers) is written to both local and
     /// remote so every device sees the same state. A `.conflict_*.md` backup
     /// of the remote version is still created so no data is ever lost.
+    /// Resolve a conflict between two versions of a non-text file.
+    ///
+    /// Both versions are always preserved. The winner is chosen by content
+    /// hash order rather than by which machine synced first, so two machines
+    /// resolving the same conflict independently arrive at the same result
+    /// instead of ping-ponging. The loser is kept alongside it under a name
+    /// derived from its own hash, which is likewise identical on both sides.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_binary_conflict(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        local_content: &[u8],
+        remote_content: &[u8],
+        remote_meta: Option<FileMetadata>,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) {
+        let local_hash = compute_hash(local_content);
+        let remote_hash = compute_hash(remote_content);
+
+        let (winner, winner_hash, loser, loser_hash) = if local_hash <= remote_hash {
+            (local_content, local_hash.clone(), remote_content, remote_hash.clone())
+        } else {
+            (remote_content, remote_hash.clone(), local_content, local_hash.clone())
+        };
+
+        let loser_path = make_content_conflict_path(rel_path, &loser_hash);
+        let local_loser_path = self.local_root.join(&loser_path);
+        if let Some(parent) = local_loser_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = crate::fsutil::atomic_write(&local_loser_path, loser) {
+            result
+                .errors
+                .push(format!("Write conflict copy {}: {}", loser_path, e));
+            // Without a preserved copy, overwriting the primary would lose
+            // that version for good, so stop here.
+            return;
+        }
+        if let Err(e) = backend.write_file(&loser_path, loser) {
+            result
+                .errors
+                .push(format!("Push conflict copy {}: {}", loser_path, e));
+            return;
+        }
+
+        let local_path = self.local_root.join(rel_path);
+        if winner_hash != local_hash {
+            if let Err(e) = crate::fsutil::atomic_write(&local_path, winner) {
+                result
+                    .errors
+                    .push(format!("Write winning {}: {}", rel_path, e));
+                return;
+            }
+        }
+        if winner_hash != remote_hash {
+            if let Err(e) = backend.write_file(rel_path, winner) {
+                result
+                    .errors
+                    .push(format!("Push winning {}: {}", rel_path, e));
+                return;
+            }
+        }
+
+        self.save_base(rel_path, winner);
+
+        let local_meta = Self::metadata_for_path(&local_path, &self.local_root).ok();
+        state.record_sync(
+            rel_path,
+            &winner_hash,
+            local_meta.as_ref(),
+            remote_meta.as_ref(),
+        );
+        result.conflicts.push(rel_path.to_string());
+    }
+
     fn handle_conflict(
         &self,
         backend: &dyn SyncBackend,
@@ -604,9 +689,23 @@ impl SyncEngine {
             }
         };
 
+        // A line-based merge only makes sense for text. Running it over a PNG
+        // or an MP3 would splice the two files together and destroy both.
+        if !is_mergeable(rel_path, &local_content, &remote_content) {
+            self.resolve_binary_conflict(
+                backend,
+                rel_path,
+                &local_content,
+                &remote_content,
+                remote_meta,
+                state,
+                result,
+            );
+            return;
+        }
+
         let local_text = String::from_utf8_lossy(&local_content);
         let remote_text = String::from_utf8_lossy(&remote_content);
-
         // Attempt 3-way merge if we have a cached base
         let merge_result = if let Some(base_content) = self.load_base(rel_path) {
             let base_text = String::from_utf8_lossy(&base_content);
@@ -670,11 +769,10 @@ impl SyncEngine {
     /// Collect all local .md files under pages/ and journals/ with metadata.
     fn collect_local_files(&self) -> Result<HashMap<String, FileMetadata>> {
         let mut files = HashMap::new();
-        let pages_dir = self.local_root.join("pages");
-        let journals_dir = self.local_root.join("journals");
-
-        self.collect_dir_metadata(&pages_dir, &self.local_root, &mut files)?;
-        self.collect_dir_metadata(&journals_dir, &self.local_root, &mut files)?;
+        let root = self.local_root.clone();
+        self.collect_dir_metadata(&root.join("pages"), &root, true, &mut files)?;
+        self.collect_dir_metadata(&root.join("journals"), &root, true, &mut files)?;
+        self.collect_dir_metadata(&root.join("assets"), &root, false, &mut files)?;
         Ok(files)
     }
 
@@ -682,6 +780,7 @@ impl SyncEngine {
         &self,
         dir: &Path,
         base: &Path,
+        markdown_only: bool,
         out: &mut HashMap<String, FileMetadata>,
     ) -> Result<()> {
         if !dir.exists() {
@@ -691,17 +790,28 @@ impl SyncEngine {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                self.collect_dir_metadata(&path, base, out)?;
-            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                // Skip .conflict backup files (e.g. foo.conflict_20260504_120000.md)
-                if path.to_string_lossy().contains(".conflict_") {
-                    continue;
-                }
+                self.collect_dir_metadata(&path, base, markdown_only, out)?;
+            } else if Self::is_collectable(&path, markdown_only) {
                 let meta = Self::metadata_for_path(&path, base)?;
                 out.insert(meta.rel_path.clone(), meta);
             }
         }
         Ok(())
+    }
+
+    /// Note folders sync only `.md`; `assets/` syncs arbitrary media. Conflict
+    /// copies and atomic-write scratch files are never collected.
+    fn is_collectable(path: &Path, markdown_only: bool) -> bool {
+        if path.to_string_lossy().contains(".conflict_") {
+            return false;
+        }
+        if markdown_only {
+            return path.extension().and_then(|e| e.to_str()) == Some("md");
+        }
+        !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"))
     }
 
     fn metadata_for_path(path: &Path, base: &Path) -> Result<FileMetadata> {
@@ -769,6 +879,30 @@ impl SyncEngine {
 
 /// Generate a conflict filename by inserting .conflict before the extension.
 /// e.g. "pages/foo.md" -> "pages/foo.conflict.md"
+/// True when a line-based merge is meaningful for this file: it must be a
+/// note, and both sides must actually be text.
+fn is_mergeable(rel_path: &str, local: &[u8], remote: &[u8]) -> bool {
+    rel_path.ends_with(".md")
+        && std::str::from_utf8(local).is_ok()
+        && std::str::from_utf8(remote).is_ok()
+}
+
+/// Conflict copy name derived from content rather than wall-clock time, so
+/// both machines produce the same filename and converge instead of each
+/// creating its own timestamped duplicate.
+fn make_content_conflict_path(rel_path: &str, hash: &str) -> String {
+    let short = &hash[..hash.len().min(8)];
+    match rel_path.rfind('.') {
+        Some(dot) => format!(
+            "{}.conflict_{}{}",
+            &rel_path[..dot],
+            short,
+            &rel_path[dot..]
+        ),
+        None => format!("{}.conflict_{}", rel_path, short),
+    }
+}
+
 fn make_conflict_path(rel_path: &str) -> String {
     if let Some(dot_idx) = rel_path.rfind('.') {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");

@@ -21,7 +21,16 @@ impl FilesystemBackend {
         self.root.join(rel_path)
     }
 
-    fn collect_md_files(&self, dir: &Path, base: &Path, out: &mut Vec<FileMetadata>) -> Result<()> {
+    /// Walk a synced directory. `markdown_only` distinguishes note folders,
+    /// where only `.md` participates, from `assets/`, which holds arbitrary
+    /// binary media.
+    fn collect_files(
+        &self,
+        dir: &Path,
+        base: &Path,
+        markdown_only: bool,
+        out: &mut Vec<FileMetadata>,
+    ) -> Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -29,8 +38,8 @@ impl FilesystemBackend {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                self.collect_md_files(&path, base, out)?;
-            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                self.collect_files(&path, base, markdown_only, out)?;
+            } else if Self::is_syncable_entry(&path, markdown_only) {
                 let rel = path
                     .strip_prefix(base)
                     .map(|p| p.to_string_lossy().to_string())
@@ -53,6 +62,23 @@ impl FilesystemBackend {
         }
         Ok(())
     }
+
+    fn is_syncable_entry(path: &Path, markdown_only: bool) -> bool {
+        // Conflict copies are written explicitly by the engine; never pick
+        // them up as ordinary files to sync.
+        if path.to_string_lossy().contains(".conflict_") {
+            return false;
+        }
+        if markdown_only {
+            path.extension().and_then(|e| e.to_str()) == Some("md")
+        } else {
+            // Skip the scratch files atomic_write leaves mid-rename.
+            !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"))
+        }
+    }
 }
 
 impl SyncBackend for FilesystemBackend {
@@ -66,12 +92,11 @@ impl SyncBackend for FilesystemBackend {
 
     fn list_files(&self) -> Result<Vec<FileMetadata>> {
         let mut files = Vec::new();
-        // Scan pages/ and journals/ subdirectories
-        let pages_dir = self.root.join("pages");
-        let journals_dir = self.root.join("journals");
-
-        self.collect_md_files(&pages_dir, &self.root, &mut files)?;
-        self.collect_md_files(&journals_dir, &self.root, &mut files)?;
+        self.collect_files(&self.root.join("pages"), &self.root, true, &mut files)?;
+        self.collect_files(&self.root.join("journals"), &self.root, true, &mut files)?;
+        // Media referenced by notes lives here; without it a synced note
+        // arrives on the other machine with broken image and audio links.
+        self.collect_files(&self.root.join("assets"), &self.root, false, &mut files)?;
         Ok(files)
     }
 
