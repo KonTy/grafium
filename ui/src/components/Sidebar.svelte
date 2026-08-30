@@ -3,6 +3,7 @@
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
+  import { showToast, describeError } from "../lib/toast.svelte";
   import type { Page, PageSummary, Block } from "../lib/api";
   import type { SidebarSearchResult } from "../lib/sidebarSearch";
 
@@ -81,10 +82,18 @@
     if (!contextMenu) return;
     const { page, isFav } = contextMenu;
     contextMenu = null;
-    if (isFav) {
-      await removeFavorite(page.id).catch(() => {});
-    } else {
-      await addFavorite(page.id).catch(() => {});
+    try {
+      if (isFav) {
+        await removeFavorite(page.id);
+      } else {
+        await addFavorite(page.id);
+      }
+    } catch (e) {
+      // The user clicked a menu item; failing silently here leaves them
+      // believing the favourite was toggled.
+      showToast(
+        `Could not ${isFav ? "remove" : "add"} favourite: ${describeError(e)}`
+      );
     }
     favorites = await listFavorites().catch(() => []);
   }

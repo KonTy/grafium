@@ -6,6 +6,7 @@
   import AllPages from "./components/AllPages.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
+  import Toaster from "./components/Toaster.svelte";
   import { lazyComponent } from "./lib/lazy";
 
   // Heavy views the user may never open. Loading them on demand keeps them out
@@ -1338,6 +1339,9 @@
     </div>
   </div>
 {/if}
+
+
+<Toaster />
 
 <style>
   .app-shell {
