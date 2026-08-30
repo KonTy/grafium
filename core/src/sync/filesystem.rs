@@ -103,8 +103,7 @@ impl SyncBackend for FilesystemBackend {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, content)?;
-        Ok(())
+        crate::fsutil::atomic_write(&path, content)
     }
 
     fn delete_file(&self, rel_path: &str) -> Result<()> {

@@ -3,6 +3,7 @@ pub mod assistant;
 pub mod async_util;
 pub mod db;
 pub mod error;
+pub mod fsutil;
 pub mod graph;
 pub mod import;
 pub mod ink;

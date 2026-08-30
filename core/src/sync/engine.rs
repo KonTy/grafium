@@ -39,8 +39,14 @@ impl SyncResult {
         }
     }
 
-    pub fn is_clean(&self) -> bool {
-        self.pushed.is_empty()
+    /// A result representing a target that could not be synced at all.
+    pub fn failed(message: impl Into<String>) -> Self {
+        let mut result = Self::new();
+        result.errors.push(message.into());
+        result
+    }
+
+    pub fn is_clean(&self) -> bool {        self.pushed.is_empty()
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
             && self.merged.is_empty()
@@ -108,9 +114,94 @@ impl SyncEngine {
         fs::read(self.base_path(rel_path)).ok()
     }
 
+    /// Path of the marker file written at the root of every sync target. It
+    /// carries a random id that identifies this particular remote, so we can
+    /// tell "the drive is empty / not mounted / not the one we synced with"
+    /// apart from "these files were genuinely deleted on the other machine".
+    const REMOTE_MARKER_PATH: &'static str = ".grafium-sync-id";
+
+    /// Only files under the graph's note directories participate in sync. This
+    /// also keeps the marker file out of the synced set.
+    fn is_syncable_path(rel_path: &str) -> bool {
+        rel_path.starts_with("pages/") || rel_path.starts_with("journals/")
+    }
+
+    fn read_remote_marker(backend: &dyn SyncBackend) -> Option<String> {
+        let bytes = backend.read_file(Self::REMOTE_MARKER_PATH).ok()?;
+        let id = String::from_utf8(bytes).ok()?.trim().to_string();
+        if id.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    /// Confirm the backend is the same remote we recorded last time.
+    ///
+    /// Without this check, a sync target that is reachable but empty — an
+    /// auto-mount point whose drive was never actually mounted, a different
+    /// stick, or a reformatted one — looks exactly like a remote on which
+    /// every file was deleted, and the engine happily deletes the entire
+    /// local graph to match it.
+    fn verify_remote_identity(
+        &self,
+        backend: &dyn SyncBackend,
+        state: &mut SyncState,
+        remote_count: usize,
+    ) -> Result<()> {
+        let marker = Self::read_remote_marker(backend);
+        let never_synced = state.files.is_empty() && state.remote_id.is_none();
+
+        match (marker, never_synced) {
+            // First sync against an already-initialised remote: adopt its id.
+            (Some(id), true) => {
+                state.remote_id = Some(id);
+            }
+            // First sync against a fresh remote: claim it.
+            (None, true) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                state.remote_id = Some(id);
+            }
+            (Some(id), false) => match &state.remote_id {
+                Some(known) if known != &id => {
+                    return Err(crate::error::CoreError::Other(format!(
+                        "Sync target '{}' is a different sync location than the one \
+                         this graph was last synced with. Refusing to sync so that \
+                         nothing is deleted. If you meant to switch to this location, \
+                         reset the sync state for this graph first.",
+                        backend.name()
+                    )));
+                }
+                Some(_) => {}
+                // State predates the marker; the remote already has one.
+                None => state.remote_id = Some(id),
+            },
+            (None, false) => {
+                // Synced before, but the remote has no marker.
+                if state.remote_id.is_none() && remote_count > 0 {
+                    // State predates the marker and the remote still holds
+                    // files: adopt it and write the marker for next time.
+                    let id = uuid::Uuid::new_v4().to_string();
+                    backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                    state.remote_id = Some(id);
+                } else {
+                    return Err(crate::error::CoreError::Other(format!(
+                        "Sync target '{}' does not contain this graph's sync marker. \
+                         The drive may not be mounted, may be a different device, or \
+                         may have been erased. Refusing to sync so that your {} local \
+                         note(s) are not deleted.",
+                        backend.name(),
+                        state.files.len()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run a full bidirectional sync against the given backend.
-    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {
-        if !backend.is_available() {
+    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {        if !backend.is_available() {
             return Err(crate::error::CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 format!("Sync target '{}' is not available", backend.name()),
@@ -119,6 +210,12 @@ impl SyncEngine {
 
         let mut state = SyncState::load(&self.state_path);
         let mut result = SyncResult::new();
+
+        // Step 0: Collect the remote listing and confirm this really is the
+        // sync target we used last time before we act on any deletion.
+        let mut remote_files_list = backend.list_files()?;
+        remote_files_list.retain(|f| Self::is_syncable_path(&f.rel_path));
+        self.verify_remote_identity(backend, &mut state, remote_files_list.len())?;
 
         // Step 1: Collect local files with cheap metadata. Reuse cached hashes
         // from sync state when size+mtime still match the last sync.
@@ -131,8 +228,7 @@ impl SyncEngine {
             }
         }
 
-        // Step 2: Collect remote files and likewise seed cached hashes.
-        let mut remote_files_list = backend.list_files()?;
+        // Step 2: Seed cached hashes for the remote listing gathered in step 0.
         for meta in &mut remote_files_list {
             if meta.hash.is_none() {
                 if let Some(hash) = state.cached_remote_hash(meta) {
@@ -755,7 +851,11 @@ mod tests {
         }
 
         fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
-            self.read_file_calls.fetch_add(1, Ordering::SeqCst);
+            // The counters measure note-content transfers. The sync-id marker
+            // is a small fixed metadata read on every sync, so exclude it.
+            if rel_path != SyncEngine::REMOTE_MARKER_PATH {
+                self.read_file_calls.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(self
                 .files
                 .lock()

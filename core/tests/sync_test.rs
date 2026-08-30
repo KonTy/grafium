@@ -709,3 +709,96 @@ fn test_two_way_merge_no_base() {
     // But the shared line should appear
     assert!(r.content.contains("shared line"));
 }
+
+// ===========================================================================
+// Regression: a reachable-but-wrong sync target must never wipe the graph
+// ===========================================================================
+
+#[test]
+fn empty_or_wrong_remote_does_not_delete_local_notes() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+    write_local(local.path(), "pages/note-b.md", "- important note B\n");
+    write_local(local.path(), "journals/2026-05-04.md", "- journal\n");
+
+    let usb = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+
+    let first = engine.sync(&usb).unwrap();
+    assert_eq!(first.pushed.len(), 3, "expected initial push of all notes");
+
+    // The mount point is reachable but holds nothing: the drive was never
+    // really mounted, is a different stick, or was reformatted.
+    let empty_usb = MockBackend::new("usb");
+
+    let err = engine
+        .sync(&empty_usb)
+        .expect_err("sync against an unrecognised target must fail loudly");
+    assert!(
+        err.to_string().contains("sync marker"),
+        "unexpected error: {}",
+        err
+    );
+
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+    assert!(local_exists(local.path(), "pages/note-b.md"));
+    assert!(local_exists(local.path(), "journals/2026-05-04.md"));
+}
+
+#[test]
+fn sync_target_with_a_different_marker_is_rejected() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let usb_a = MockBackend::new("usb-a");
+    engine.sync(&usb_a).unwrap();
+
+    // A second stick that is a valid Grafium sync target, but not ours.
+    let usb_b = MockBackend::new("usb-b");
+    usb_b.set_file(".grafium-sync-id", b"11111111-2222-3333-4444-555555555555");
+
+    let err = engine.sync(&usb_b).expect_err("must reject a foreign target");
+    assert!(
+        err.to_string().contains("different sync location"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+}
+
+#[test]
+fn unmounted_usb_mount_point_does_not_wipe_the_graph() {
+    use grafium_core::sync::filesystem::FilesystemBackend;
+
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+    write_local(local.path(), "pages/note-b.md", "- important note B\n");
+
+    let stick = tempfile::tempdir().unwrap();
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let usb = FilesystemBackend::new(stick.path().to_path_buf(), "USB".to_string());
+
+    let first = engine.sync(&usb).unwrap();
+    assert_eq!(first.pushed.len(), 2);
+
+    // The automount directory exists but the drive behind it is not mounted,
+    // so it is simply an empty directory. is_available() still returns true.
+    let bare_mount_point = tempfile::tempdir().unwrap();
+    let unmounted = FilesystemBackend::new(bare_mount_point.path().to_path_buf(), "USB".to_string());
+    assert!(
+        unmounted.is_available(),
+        "an empty mount point still looks available"
+    );
+
+    let err = engine
+        .sync(&unmounted)
+        .expect_err("must refuse to sync against an unmounted drive");
+    assert!(err.to_string().contains("sync marker"), "got: {}", err);
+
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+    assert!(local_exists(local.path(), "pages/note-b.md"));
+
+    // The real stick still works afterwards.
+    assert!(engine.sync(&usb).is_ok());
+}

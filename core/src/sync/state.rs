@@ -35,6 +35,11 @@ pub struct SyncState {
     pub files: HashMap<String, FileSyncRecord>,
     /// Timestamp of the last completed sync
     pub last_sync: Option<i64>,
+    /// Identity of the remote we last synced against, read from the remote's
+    /// marker file. Used to detect that the sync target has been swapped for a
+    /// different (or empty/unmounted) one before we propagate any deletions.
+    #[serde(default)]
+    pub remote_id: Option<String>,
 }
 
 impl SyncState {
@@ -52,8 +57,7 @@ impl SyncState {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
-        Ok(())
+        crate::fsutil::atomic_write(path, json.as_bytes())
     }
 
     /// Record that a file was synced with the given content hash.
@@ -175,7 +179,6 @@ impl SyncConfigs {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
-        Ok(())
+        crate::fsutil::atomic_write(path, json.as_bytes())
     }
 }

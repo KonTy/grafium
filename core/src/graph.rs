@@ -445,40 +445,7 @@ impl Graph {
     /// filesystem watcher only reacts to `.md` files, so the scratch file
     /// cannot trigger a spurious re-index.
     fn atomic_write(path: &Path, content: &str) -> Result<()> {
-        use std::io::Write;
-
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        if !dir.exists() {
-            fs::create_dir_all(dir)?;
-        }
-
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("page.md");
-        let tmp_path = dir.join(format!(
-            ".{}.{}.tmp",
-            file_name,
-            Uuid::new_v4().as_simple()
-        ));
-
-        // Scope the handle so it is closed before the rename (required on
-        // Windows, harmless elsewhere).
-        {
-            let mut file = fs::File::create(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.flush()?;
-            // Durability: without this the rename can land before the data.
-            file.sync_all()?;
-        }
-
-        if let Err(e) = fs::rename(&tmp_path, path) {
-            // Never leave scratch files behind in the user's graph.
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e.into());
-        }
-
-        Ok(())
+        crate::fsutil::atomic_write(path, content.as_bytes())
     }
 
     fn content_hash(content: &str) -> String {        let mut hasher = Sha256::new();
