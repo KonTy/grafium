@@ -442,10 +442,18 @@ pub fn create_graph(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn reindex_current(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+pub async fn reindex_current(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
-    let detached_graph = crate::open_graph_snapshot(&snapshot)?;
-    detached_graph.reindex_all().map_err(|e| e.to_string())
+    // A full reindex re-reads and re-parses every file in the graph. As a
+    // synchronous command it ran on the main thread and froze the window for
+    // the whole scan, so push it onto the blocking pool like media_import_video
+    // does. The caller still awaits completion, so progress UI is unaffected.
+    tauri::async_runtime::spawn_blocking(move || {
+        let detached_graph = crate::open_graph_snapshot(&snapshot)?;
+        detached_graph.reindex_all().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Reindex task failed: {}", e))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
