@@ -1,19 +1,19 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
   import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
-  import { keymap_manager } from "../lib/keymap";
-  import type { Shortcut } from "../lib/keymap";
+  import {
+    listSyncTargets,
+    addFilesystemTarget,
+    addWebdavTarget,
+    removeSyncTarget as removeSyncTargetById,
+    runSyncTarget,
+    summarizeSyncResult,
+    type SyncTarget,
+  } from "../lib/sync";
+  import { getShortcutsByCategory, formatBinding } from "../lib/shortcuts";
+  import { describeError } from "../lib/toast.svelte";
   import AISettings from "./AISettings.svelte";
-
-  interface SyncTarget {
-    id: string;
-    name: string;
-    backend_type: string;
-    auto_sync: boolean;
-    config: any;
-  }
 
   let currentThemeId = $state("auto");
   let smplosThemeName = $state<string | null>(null);
@@ -141,8 +141,8 @@
   // Sync functions
   async function loadSyncTargets() {
     try {
-      syncTargets = await invoke("sync_list_targets");
-    } catch (e) {
+      syncTargets = await listSyncTargets();
+    } catch {
       syncTargets = [];
     }
   }
@@ -152,14 +152,9 @@
     syncMessage = "";
     try {
       if (addSyncType === "filesystem") {
-        await invoke("sync_add_filesystem_target", { name: addSyncName, path: addSyncPath });
+        await addFilesystemTarget(addSyncName, addSyncPath);
       } else {
-        await invoke("sync_add_webdav_target", {
-          name: addSyncName,
-          url: addSyncUrl,
-          username: addSyncUsername,
-          password: addSyncPassword,
-        });
+        await addWebdavTarget(addSyncName, addSyncUrl, addSyncUsername, addSyncPassword);
       }
       showAddSync = false;
       addSyncName = "";
@@ -169,8 +164,8 @@
       addSyncPassword = "";
       await loadSyncTargets();
       syncMessage = "Target added successfully";
-    } catch (e: any) {
-      syncMessage = `Error: ${e}`;
+    } catch (e) {
+      syncMessage = `Error: ${describeError(e)}`;
     } finally {
       syncLoading = false;
     }
@@ -178,10 +173,10 @@
 
   async function removeSyncTarget(id: string) {
     try {
-      await invoke("sync_remove_target", { targetId: id });
+      await removeSyncTargetById(id);
       await loadSyncTargets();
-    } catch (e: any) {
-      syncMessage = `Error: ${e}`;
+    } catch (e) {
+      syncMessage = `Error: ${describeError(e)}`;
     }
   }
 
@@ -189,40 +184,15 @@
     syncLoading = true;
     syncMessage = "";
     try {
-      const result: any = await invoke("sync_run", { targetId });
-      const parts = [];
-      if (result.pushed.length) parts.push(`↑ ${result.pushed.length} pushed`);
-      if (result.pulled.length) parts.push(`↓ ${result.pulled.length} pulled`);
-      if (result.conflicts.length) parts.push(`⚡ ${result.conflicts.length} conflicts`);
-      if (result.deleted_remote.length) parts.push(`🗑 ${result.deleted_remote.length} deleted remote`);
-      if (result.deleted_local.length) parts.push(`🗑 ${result.deleted_local.length} deleted local`);
-      if (result.errors.length) parts.push(`❌ ${result.errors.length} errors`);
-      syncMessage = parts.length ? parts.join(", ") : "Everything in sync ✓";
-    } catch (e: any) {
-      syncMessage = `Sync failed: ${e}`;
+      syncMessage = summarizeSyncResult(await runSyncTarget(targetId));
+    } catch (e) {
+      syncMessage = `Sync failed: ${describeError(e)}`;
     } finally {
       syncLoading = false;
     }
   }
 
   // Keymap
-  function getShortcutsByCategory(): Map<string, Shortcut[]> {
-    const shortcuts = keymap_manager.getShortcuts();
-    const map = new Map<string, Shortcut[]>();
-    for (const s of shortcuts) {
-      const cat = s.category || "other";
-      if (!map.has(cat)) map.set(cat, []);
-      map.get(cat)!.push(s);
-    }
-    return map;
-  }
-
-  function formatBinding(binding: string): string {
-    return binding
-      .replace(/mod/g, "Ctrl")
-      .replace(/\+/g, " + ")
-      .replace(/ {2}/g, "  then  ");
-  }
 </script>
 
 <div class="settings-page">
