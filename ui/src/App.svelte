@@ -9,6 +9,7 @@
   import Toaster from "./components/Toaster.svelte";
   import JobActivity from "./components/JobActivity.svelte";
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
+  import { initSyncMonitor } from "./lib/sync";
   import { lazyComponent } from "./lib/lazy";
 
   // Heavy views the user may never open. Loading them on demand keeps them out
@@ -602,9 +603,18 @@
       })
       .catch(() => {});
 
+    let unlistenSync: (() => void) | undefined;
+    initSyncMonitor()
+      .then((fn) => {
+        if (disposed) fn();
+        else unlistenSync = fn;
+      })
+      .catch(() => {});
+
     return () => {
       disposed = true;
       unlisten?.();
+      unlistenSync?.();
     };
   });
 

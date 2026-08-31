@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { showToast } from "./toast.svelte";
 
 export interface SyncTarget {
   id: string;
@@ -58,4 +60,46 @@ export function summarizeSyncResult(result: SyncResult): string {
   if (result.deleted_local.length) parts.push(`🗑 ${result.deleted_local.length} deleted local`);
   if (result.errors.length) parts.push(`❌ ${result.errors.length} errors`);
   return parts.length ? parts.join(", ") : "Everything in sync ✓";
+}
+
+
+export async function initSyncMonitor(): Promise<UnlistenFn> {
+  const unlistenAvailable = await listen<{ target_id: string; target_name: string }>(
+    "sync-target-available",
+    (event) => {
+      showToast(`Sync target connected: ${event.payload.target_name}`, "info");
+    }
+  );
+
+  const unlistenCompleted = await listen<{
+    target_name: string;
+    pushed: number;
+    pulled: number;
+    conflicts: number;
+  }>("sync-completed", (event) => {
+    const { target_name, pushed, pulled, conflicts } = event.payload;
+    const parts: string[] = [];
+    if (pushed) parts.push(`↑ ${pushed} pushed`);
+    if (pulled) parts.push(`↓ ${pulled} pulled`);
+    if (conflicts) parts.push(`⚡ ${conflicts} conflicts`);
+    const summary = parts.length ? parts.join(", ") : "Everything in sync";
+    
+    showToast(
+      `Auto-sync complete (${target_name}): ${summary}`, 
+      conflicts > 0 ? "error" : "success"
+    );
+  });
+
+  const unlistenError = await listen<{ target_name: string; error: string }>(
+    "sync-error",
+    (event) => {
+      showToast(`Auto-sync failed (${event.payload.target_name}): ${event.payload.error}`, "error");
+    }
+  );
+
+  return () => {
+    unlistenAvailable();
+    unlistenCompleted();
+    unlistenError();
+  };
 }

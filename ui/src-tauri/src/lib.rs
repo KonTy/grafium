@@ -43,7 +43,7 @@ impl GraphWatcherHandle {
 }
 
 impl AppState {
-    pub fn restart_graph_watcher(&self) -> Result<(), String> {
+    pub fn restart_graph_watcher(&self, app_handle: tauri::AppHandle) -> Result<(), String> {
         if let Ok(mut guard) = self.watcher.lock() {
             if let Some(existing) = guard.take() {
                 existing.stop();
@@ -59,7 +59,7 @@ impl AppState {
             )
         };
 
-        let handle = start_graph_watcher(self.graph.clone(), pages_dir, journals_dir, self_writes)?;
+        let handle = start_graph_watcher(app_handle, self.graph.clone(), pages_dir, journals_dir, self_writes)?;
         let mut guard = self.watcher.lock().map_err(|e| e.to_string())?;
         *guard = Some(handle);
         Ok(())
@@ -130,6 +130,7 @@ fn was_recent_self_write(self_writes: &Arc<Mutex<HashMap<PathBuf, Instant>>>, pa
 }
 
 fn start_graph_watcher(
+    app_handle: tauri::AppHandle,
     graph: Arc<Mutex<Graph>>,
     pages_dir: PathBuf,
     journals_dir: PathBuf,
@@ -227,17 +228,29 @@ fn start_graph_watcher(
             // rows for files that have gone: a note deleted by a sync would
             // otherwise stay searchable and keep its backlinks and tasks
             // until the next explicit re-index.
+            let mut changed_paths = Vec::new();
             for path in pending_files.drain() {
                 if path.exists() {
                     if let Err(e) = g.index_file(&path) {
                         eprintln!("watch index file failed ({}): {}", path.display(), e);
+                    } else {
+                        changed_paths.push(path.clone());
                     }
                 } else if let Err(e) = g.deindex_file(&path) {
                     eprintln!("watch deindex file failed ({}): {}", path.display(), e);
+                } else {
+                    changed_paths.push(path.clone());
                 }
             }
 
             drop(g);
+            
+            if !changed_paths.is_empty() {
+                let _ = app_handle.emit("graph-files-changed", serde_json::json!({
+                    "paths": changed_paths
+                }));
+            }
+            
             pending_files.clear();
             last_event_at = None;
         }
@@ -385,9 +398,6 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                                     || !result.conflicts.is_empty()
                                     || !result.deleted_local.is_empty()
                                 {
-                                    if let Ok(detached_graph) = open_graph_snapshot(&snapshot) {
-                                        let _ = detached_graph.reindex_all();
-                                    }
                                     // Notify frontend to refresh
                                     let _ = app_handle.emit(
                                         "sync-completed",
@@ -1263,7 +1273,7 @@ pub fn run() {
                 graph: Arc::new(Mutex::new(graph)),
                 watcher: Mutex::new(None),
             };
-            state.restart_graph_watcher().expect("Failed to start graph watcher");
+            state.restart_graph_watcher(app.handle().clone()).expect("Failed to start graph watcher");
 
             // Start sync monitor (checks for USB/mount availability)
             let sync_graph = state.graph.clone();

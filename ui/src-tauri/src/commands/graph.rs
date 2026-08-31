@@ -269,7 +269,7 @@ pub fn open_graph(
     *graph = new_graph;
     drop(graph);
 
-    state.restart_graph_watcher()?;
+    state.restart_graph_watcher(app.clone())?;
 
     if needs_background_reindex {
         schedule_background_reindex(graph_path.clone(), db_path.clone(), metadata_dir.clone());
@@ -433,7 +433,7 @@ pub fn create_graph(
     *graph = new_graph;
     drop(graph);
 
-    state.restart_graph_watcher()?;
+    state.restart_graph_watcher(app.clone())?;
 
     // Notify Android companion app that a new graph has been created and opened
     notify_android_graph_changed(&path, &name);

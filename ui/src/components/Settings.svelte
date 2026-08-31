@@ -316,7 +316,17 @@
           {#if addSyncType === "filesystem"}
             <label class="sync-field">
               <span class="sync-field-label">Path</span>
-              <input type="text" bind:value={addSyncPath} placeholder="/media/usb/notes" />
+              <div style="display: flex; gap: 8px;">
+                <input type="text" bind:value={addSyncPath} placeholder="/media/usb/notes" style="flex: 1;" />
+                <button 
+                  class="action-btn" 
+                  onclick={async () => {
+                    const selected = await open({ directory: true } as any);
+                    if (selected && typeof selected === 'string') {
+                      addSyncPath = selected;
+                    }
+                  }}>Browse...</button>
+              </div>
             </label>
           {:else}
             <label class="sync-field">
