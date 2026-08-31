@@ -7,7 +7,6 @@ pub mod anthropic;
 pub mod local_llm;
 pub mod ollama;
 pub mod openai;
-pub mod openai_compatible;
 
 pub(super) fn canonicalize_messages(
     messages: &[ChatMessage],

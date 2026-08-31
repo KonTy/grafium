@@ -10,22 +10,32 @@ use crate::error::{CoreError, Result};
 
 /// OpenAI LLM provider.
 pub struct OpenAiLlm {
-    api_key: String,
+    base_url: String,
+    api_key: Option<String>,
     model: String,
     client: reqwest::Client,
 }
 
 impl OpenAiLlm {
-    pub fn new(api_key: &str, model: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_default();
 
         Self {
-            api_key: api_key.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
             model: model.to_string(),
             client,
+        }
+    }
+
+    fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(key) = &self.api_key {
+            req.header("Authorization", format!("Bearer {}", key))
+        } else {
+            req
         }
     }
 }
@@ -98,14 +108,13 @@ impl LlmProvider for OpenAiLlm {
         Box::pin(async move {
             let request = build_chat_request(&self.model, messages, options);
 
-            let resp = self
+            let req = self
                 .client
-                .post("https://api.openai.com/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI request failed: {}", e)))?;
+                .post(format!("{}/chat/completions", self.base_url))
+                .json(&request);
+            let resp = self.with_auth(req).send().await.map_err(|e| {
+                CoreError::Other(format!("OpenAI request failed: {}", e))
+            })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -135,12 +144,8 @@ impl LlmProvider for OpenAiLlm {
 
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            let resp = self
-                .client
-                .get("https://api.openai.com/v1/models")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .send()
-                .await;
+            let req = self.client.get(format!("{}/models", self.base_url));
+            let resp = self.with_auth(req).send().await;
             Ok(resp.map(|r| r.status().is_success()).unwrap_or(false))
         })
     }
@@ -148,30 +153,40 @@ impl LlmProvider for OpenAiLlm {
 
 /// OpenAI embedding provider.
 pub struct OpenAiEmbedder {
-    api_key: String,
+    base_url: String,
+    api_key: Option<String>,
     model: String,
     dimension: usize,
     client: reqwest::Client,
 }
 
 impl OpenAiEmbedder {
-    pub fn new(api_key: &str, model: &str, dimension: usize) -> Self {
+    pub fn new(base_url: &str, model: &str, dimension: usize, api_key: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_default();
 
         Self {
-            api_key: api_key.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
             model: model.to_string(),
             dimension,
             client,
         }
     }
 
+    fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(key) = &self.api_key {
+            req.header("Authorization", format!("Bearer {}", key))
+        } else {
+            req
+        }
+    }
+
     /// Default: text-embedding-3-small (1536 dimensions).
     pub fn default_small(api_key: &str) -> Self {
-        Self::new(api_key, "text-embedding-3-small", 1536)
+        Self::new("https://api.openai.com/v1", "text-embedding-3-small", 1536, Some(api_key.to_string()))
     }
 }
 
@@ -203,14 +218,13 @@ impl Embedder for OpenAiEmbedder {
                 input: texts.to_vec(),
             };
 
-            let resp = self
+            let req = self
                 .client
-                .post("https://api.openai.com/v1/embeddings")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI embed request failed: {}", e)))?;
+                .post(format!("{}/embeddings", self.base_url))
+                .json(&request);
+            let resp = self.with_auth(req).send().await.map_err(|e| {
+                CoreError::Other(format!("OpenAI embed request failed: {}", e))
+            })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();

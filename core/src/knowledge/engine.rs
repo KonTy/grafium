@@ -12,7 +12,6 @@ use crate::ai::embeddings::EmbeddingPipeline;
 use crate::ai::providers::anthropic::AnthropicLlm;
 use crate::ai::providers::ollama::{OllamaEmbedder, OllamaLlm};
 use crate::ai::providers::openai::{OpenAiEmbedder, OpenAiLlm};
-use crate::ai::providers::openai_compatible::{OpenAiCompatibleEmbedder, OpenAiCompatibleLlm};
 use crate::ai::references::{PageReferencesMeta, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
@@ -76,12 +75,12 @@ impl KnowledgeEngine {
                             )));
                         }
                         ProviderType::OpenAiCompatible => {
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                            self.llm = Some(Box::new(OpenAiLlm::new(
                                 &local.base_url,
                                 &local.llm_model,
                                 local.api_key.clone(),
                             )));
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                            self.embedder = Some(Box::new(OpenAiEmbedder::new(
                                 &local.base_url,
                                 &local.embedding_model,
                                 1024,
@@ -131,7 +130,11 @@ impl KnowledgeEngine {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing OpenAI API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(OpenAiLlm::new(
+                                "https://api.openai.com/v1",
+                                &cloud.llm_model,
+                                Some(key.to_string()),
+                            )));
                         }
                         ProviderType::Anthropic => {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
@@ -144,7 +147,7 @@ impl KnowledgeEngine {
                                 .llm_base_url
                                 .clone()
                                 .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                            self.llm = Some(Box::new(OpenAiLlm::new(
                                 &base_url,
                                 &cloud.llm_model,
                                 cloud.llm_api_key.clone(),
@@ -164,9 +167,10 @@ impl KnowledgeEngine {
                                 CoreError::Other("Missing OpenAI embedding API key".to_string())
                             })?;
                             self.embedder = Some(Box::new(OpenAiEmbedder::new(
-                                key,
+                                "https://api.openai.com/v1",
                                 &cloud.embedding_model,
                                 1536,
+                                Some(key.to_string()),
                             )));
                         }
                         ProviderType::OpenAiCompatible => {
@@ -175,7 +179,7 @@ impl KnowledgeEngine {
                                 .clone()
                                 .or_else(|| cloud.llm_base_url.clone())
                                 .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                            self.embedder = Some(Box::new(OpenAiEmbedder::new(
                                 &base_url,
                                 &cloud.embedding_model,
                                 1024,
@@ -198,7 +202,7 @@ impl KnowledgeEngine {
                             )));
                         }
                         ProviderType::OpenAiCompatible => {
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
+                            self.embedder = Some(Box::new(OpenAiEmbedder::new(
                                 &local.base_url,
                                 &local.embedding_model,
                                 1024,
@@ -216,7 +220,11 @@ impl KnowledgeEngine {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing OpenAI API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(OpenAiLlm::new(
+                                "https://api.openai.com/v1",
+                                &cloud.llm_model,
+                                Some(key.to_string()),
+                            )));
                         }
                         ProviderType::Anthropic => {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
@@ -229,7 +237,7 @@ impl KnowledgeEngine {
                                 .llm_base_url
                                 .clone()
                                 .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
+                            self.llm = Some(Box::new(OpenAiLlm::new(
                                 &base_url,
                                 &cloud.llm_model,
                                 cloud.llm_api_key.clone(),
