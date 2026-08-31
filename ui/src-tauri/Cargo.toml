@@ -1,6 +1,7 @@
 [package]
 name = "grafium"
 version = "0.0.105"
+license = "MIT"
 edition = "2021"
 
 [dependencies]
