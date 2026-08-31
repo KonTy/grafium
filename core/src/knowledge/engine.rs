@@ -672,6 +672,13 @@ mod tests {
         fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
             Box::pin(async move { Ok(self.state.lock().unwrap().chunks.len()) })
         }
+
+        fn load_hashes<'a>(
+            &'a self,
+            _graph_id: &'a str,
+        ) -> BoxFuture<'a, Result<std::collections::HashMap<String, String>>> {
+            Box::pin(async move { Ok(std::collections::HashMap::new()) })
+        }
     }
 
     fn test_engine(
@@ -689,6 +696,7 @@ mod tests {
             pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
             reference_engine: ReferenceEngine::new(config.references.clone()),
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
+            hash_loaded_graphs: tokio::sync::Mutex::new(std::collections::HashSet::new()),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         })
     }
