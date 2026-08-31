@@ -476,14 +476,47 @@ impl VectorStore for SqliteVectorStore {
     }
 
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
+        let conn = self.conn.clone();
         Box::pin(async move {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
-            let count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM vectors", [], |row| row.get(0))?;
-            Ok(count as usize)
+            tokio::task::spawn_blocking(move || {
+                let conn = conn
+                    .lock()
+                    .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+                let mut stmt = conn.prepare_cached("SELECT COUNT(*) FROM vectors")?;
+                let count: usize = stmt.query_row([], |row| row.get(0))?;
+                Ok(count)
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("Count task panicked: {}", e)))?
+        })
+    }
+
+    fn load_hashes<'a>(
+        &'a self,
+        graph_id: &'a str,
+    ) -> BoxFuture<'a, Result<std::collections::HashMap<String, String>>> {
+        let conn = self.conn.clone();
+        let graph_id = graph_id.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let conn = conn
+                    .lock()
+                    .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+                let mut stmt = conn.prepare_cached(
+                    "SELECT chunk_id, json_extract(metadata, '$.content_hash') FROM vectors WHERE graph_id = ?1"
+                )?;
+                let mut rows = stmt.query(rusqlite::params![graph_id])?;
+                let mut hashes = std::collections::HashMap::new();
+                while let Some(row) = rows.next()? {
+                    let chunk_id: String = row.get(0)?;
+                    if let Ok(Some(hash)) = row.get::<_, Option<String>>(1) {
+                        hashes.insert(chunk_id, hash);
+                    }
+                }
+                Ok(hashes)
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("Load hashes task panicked: {}", e)))?
         })
     }
 }

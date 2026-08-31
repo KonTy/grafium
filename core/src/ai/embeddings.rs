@@ -218,6 +218,10 @@ impl EmbeddingPipeline {
         format!("{:x}", hasher.finalize())[..16].to_string()
     }
 
+    pub fn preload_hashes(&mut self, hashes: HashMap<String, String>) {
+        self.hash_cache.extend(hashes);
+    }
+
     /// Invalidate cache for a specific page (forces re-embedding on next run).
     pub fn invalidate_page(&mut self, page_id: &str) {
         self.hash_cache

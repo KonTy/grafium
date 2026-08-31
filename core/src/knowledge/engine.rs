@@ -28,6 +28,7 @@ pub struct KnowledgeEngine {
     pipeline: RwLock<EmbeddingPipeline>,
     reference_engine: ReferenceEngine,
     registry: RwLock<GraphRegistry>,
+    hash_loaded_graphs: tokio::sync::Mutex<std::collections::HashSet<String>>,
     data_dir: PathBuf,
 }
 
@@ -49,6 +50,7 @@ impl KnowledgeEngine {
             pipeline: RwLock::new(pipeline),
             reference_engine,
             registry: RwLock::new(registry),
+            hash_loaded_graphs: tokio::sync::Mutex::new(std::collections::HashSet::new()),
             data_dir: data_dir.to_path_buf(),
         };
 
@@ -269,6 +271,7 @@ impl KnowledgeEngine {
         self.vector_store = None;
         self.pipeline = RwLock::new(EmbeddingPipeline::new(config.embedding.clone()));
         self.reference_engine = ReferenceEngine::new(config.references.clone());
+        self.hash_loaded_graphs = tokio::sync::Mutex::new(std::collections::HashSet::new());
 
         if config.enabled {
             self.initialize_providers()?;
@@ -319,6 +322,15 @@ impl KnowledgeEngine {
             .vector_store
             .as_ref()
             .ok_or_else(|| CoreError::Other("Vector store not initialized".to_string()))?;
+
+        let mut loaded_graphs = self.hash_loaded_graphs.lock().await;
+        if !loaded_graphs.contains(graph_id) {
+            let hashes = store.load_hashes(graph_id).await?;
+            let mut pipeline = self.pipeline.write().await;
+            pipeline.preload_hashes(hashes);
+            loaded_graphs.insert(graph_id.to_string());
+        }
+        drop(loaded_graphs);
 
         let update_plan = {
             let pipeline = self.pipeline.read().await;

@@ -652,6 +652,13 @@ mod tests {
         fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
             Box::pin(async move { Ok(0) })
         }
+
+        fn load_hashes<'a>(
+            &'a self,
+            _graph_id: &'a str,
+        ) -> BoxFuture<'a, Result<std::collections::HashMap<String, String>>> {
+            Box::pin(async move { Ok(std::collections::HashMap::new()) })
+        }
     }
 
     fn embedding_key(embedding: &[f32]) -> String {

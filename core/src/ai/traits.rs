@@ -147,4 +147,10 @@ pub trait VectorStore: Send + Sync {
 
     /// Total number of stored vectors.
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>>;
+
+    /// Load all chunk hashes for a graph to pre-warm dirty-checking cache.
+    fn load_hashes<'a>(
+        &'a self,
+        graph_id: &'a str,
+    ) -> BoxFuture<'a, Result<std::collections::HashMap<String, String>>>;
 }
