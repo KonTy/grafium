@@ -1290,10 +1290,11 @@ pub fn run() {
                 };
                 let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config).ok();
                 commands::knowledge::KnowledgeState {
-                    engine: Arc::new(tokio::sync::RwLock::new(engine)),
+                    engine: Arc::new(tokio::sync::RwLock::new(engine.map(Arc::new))),
                 }
             };
             app.manage(knowledge_state);
+            app.manage(commands::jobs::JobsState::new());
 
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
             // WebKitGTK intercepts these keys internally before JS sees them,
@@ -1477,6 +1478,9 @@ pub fn run() {
             commands::assets::delete_assets,
             commands::knowledge::ai_get_config,
             commands::knowledge::ai_set_config,
+            commands::jobs::jobs_list,
+            commands::jobs::jobs_cancel,
+            commands::jobs::jobs_clear_finished,
             commands::knowledge::ai_health_check,
             commands::knowledge::ai_index_page,
             commands::knowledge::ai_index_all_pages,

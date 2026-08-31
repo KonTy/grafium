@@ -242,6 +242,32 @@ fn build_sampler(options: &CompletionOptions) -> LlamaSampler {
     }
 }
 
+/// Threads to hand llama.cpp for inference.
+///
+/// Deliberately *not* every core. Grafium is an interactive editor: if
+/// inference saturates all of them the WebView renderer has nothing left to
+/// draw with and typing visibly stutters, which is far worse than a slightly
+/// slower answer. We keep two cores in reserve so the UI stays responsive, and
+/// honour `GRAFIUM_LLM_THREADS` for anyone who would rather trade smoothness
+/// for throughput.
+fn inference_thread_count() -> i32 {
+    const RESERVED_FOR_UI: usize = 2;
+
+    if let Some(override_threads) = std::env::var("GRAFIUM_LLM_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        return override_threads as i32;
+    }
+
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    cores.saturating_sub(RESERVED_FOR_UI).max(1) as i32
+}
+
 /// The single tokenize → batch → decode → sample loop every completion
 /// (chat-formatted or, in the future, raw) goes through — this is the
 /// manual generation loop `llama-cpp-2` requires (it has no high-level
@@ -253,9 +279,7 @@ fn generate(
     prompt: &str,
     options: &CompletionOptions,
 ) -> Result<String> {
-    let n_threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
+    let n_threads = inference_thread_count();
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
         .with_n_threads(n_threads)
@@ -391,5 +415,32 @@ mod config_tests {
             "expected default models_dir ({}) in error, got: {err}",
             default_dir.display()
         );
+    }
+
+    #[test]
+    fn inference_leaves_cores_free_for_the_ui() {
+        // The whole point: never hand llama.cpp every core, or the WebView
+        // has nothing left to render with and typing stutters.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let threads = inference_thread_count();
+
+        assert!(threads >= 1, "must always use at least one thread");
+        if cores > 2 {
+            assert!(
+                (threads as usize) < cores,
+                "expected headroom for the UI: {threads} threads on {cores} cores"
+            );
+        }
+    }
+
+    #[test]
+    fn inference_thread_count_never_reports_zero_on_small_machines() {
+        // saturating_sub + max(1) has to survive 1- and 2-core boxes.
+        for cores in [1usize, 2, 3] {
+            let computed = cores.saturating_sub(2).max(1);
+            assert!(computed >= 1, "{cores} cores produced {computed} threads");
+        }
     }
 }

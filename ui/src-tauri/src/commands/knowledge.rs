@@ -3,7 +3,6 @@
 use grafium_core::ai::config::{
     AiConfig, AiMode, CloudConfig, LocalConfig, LocalLlmSettings, ProviderType,
 };
-use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::knowledge::engine::HealthStatus;
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
@@ -17,8 +16,37 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
+///
+/// The engine lives behind an `Arc` *inside* the lock so callers can clone a
+/// handle out and release the lock immediately. Holding a read guard for the
+/// duration of a long AI call is what used to freeze the app: `tokio`'s
+/// `RwLock` is write-preferring, so a single queued writer (saving AI
+/// settings) blocks every subsequent reader until the long reader finishes.
 pub struct KnowledgeState {
-    pub engine: Arc<RwLock<Option<KnowledgeEngine>>>,
+    pub engine: Arc<RwLock<Option<Arc<KnowledgeEngine>>>>,
+}
+
+impl KnowledgeState {
+    /// Clone a handle to the engine, holding the lock only long enough to copy
+    /// an `Arc`. Never hold the guard across an `.await` that does real work.
+    async fn handle(&self) -> Result<Arc<KnowledgeEngine>, String> {
+        self.engine
+            .read()
+            .await
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| "Knowledge engine not initialized".to_string())
+    }
+
+    /// As [`KnowledgeState::handle`], but rejects an engine whose providers
+    /// aren't configured, so callers fail fast with an actionable message.
+    async fn ready_handle(&self) -> Result<Arc<KnowledgeEngine>, String> {
+        let engine = self.handle().await?;
+        if !engine.is_ready() {
+            return Err("AI engine not ready — check your AI settings".to_string());
+        }
+        Ok(engine)
+    }
 }
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
@@ -38,22 +66,22 @@ impl PageBatchCursor {
         }
     }
 
-    fn next_batch<T, E>(
-        &mut self,
-        fetch: impl FnOnce(i64, i64) -> Result<Vec<T>, E>,
-    ) -> Result<Option<Vec<T>>, E> {
+    /// Advance the cursor over a batch the caller already fetched.
+    ///
+    /// Split out from [`PageBatchCursor::next_batch`] because the indexing job
+    /// fetches through `spawn_blocking`, which can't be expressed as the
+    /// synchronous `fetch` closure.
+    fn accept_batch<T>(&mut self, batch: Vec<T>) -> Option<Vec<T>> {
         if self.finished {
-            return Ok(None);
+            return None;
         }
-
-        let batch = fetch(self.batch_size, self.offset)?;
         if batch.is_empty() {
             self.finished = true;
-            return Ok(None);
+            return None;
         }
 
         self.offset += batch.len() as i64;
-        Ok(Some(batch))
+        Some(batch)
     }
 }
 
@@ -87,8 +115,8 @@ pub struct AiConfigPayload {
 
 #[tauri::command]
 pub async fn ai_get_config(state: State<'_, KnowledgeState>) -> Result<serde_json::Value, String> {
-    let guard = state.engine.read().await;
-    if let Some(engine) = guard.as_ref() {
+    let engine = state.engine.read().await.as_ref().map(Arc::clone);
+    if let Some(engine) = engine {
         serde_json::to_value(engine.config()).map_err(|e| e.to_string())
     } else {
         Ok(serde_json::to_value(AiConfig::default()).unwrap())
@@ -201,14 +229,14 @@ pub async fn ai_set_config(
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-    // Reconfigure the engine.
+    // Reconfigure by swapping in a freshly built engine rather than mutating
+    // the shared one. Any job still running keeps the engine it started with,
+    // so changing the model mid-index can't swap providers underneath it. The
+    // graph registry is persisted on every write, so a new engine reloads it.
+    let rebuilt = KnowledgeEngine::new(&config_dir, config).map_err(|e| e.to_string())?;
     let mut guard = state.engine.write().await;
-    if let Some(engine) = guard.as_mut() {
-        engine.reconfigure(config).map_err(|e| e.to_string())?;
-    } else {
-        let engine = KnowledgeEngine::new(&config_dir, config).map_err(|e| e.to_string())?;
-        *guard = Some(engine);
-    }
+    *guard = Some(Arc::new(rebuilt));
+    drop(guard);
 
     Ok(())
 }
@@ -217,8 +245,10 @@ pub async fn ai_set_config(
 
 #[tauri::command]
 pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthStatus, String> {
-    let guard = state.engine.read().await;
-    if let Some(engine) = guard.as_ref() {
+    // Health checks hit the provider over the network; cloning the handle
+    // first means a slow or unreachable provider can't hold the engine lock.
+    let engine = state.engine.read().await.as_ref().map(Arc::clone);
+    if let Some(engine) = engine {
         engine.health_check().await.map_err(|e| e.to_string())
     } else {
         Ok(HealthStatus {
@@ -240,14 +270,7 @@ pub async fn ai_index_page(
     app_state: State<'_, crate::AppState>,
     page_id: String,
 ) -> Result<usize, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
-
-    if !engine.is_ready() {
-        return Err("AI engine not ready — check configuration".to_string());
-    }
+    let engine = state.ready_handle().await?;
 
     let (page, blocks, graph_id) = {
         let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
@@ -269,53 +292,137 @@ pub async fn ai_index_page(
         .map_err(|e| e.to_string())
 }
 
+/// Start a full-graph reindex as a background job.
+///
+/// Returns a job id immediately rather than the final chunk count. Indexing a
+/// large graph takes minutes; making the UI await it meant the work belonged
+/// to whichever settings panel was open, and closing that panel lost all
+/// visibility into it. Progress and completion arrive on `job://update`.
 #[tauri::command]
 pub async fn ai_index_all_pages(
     app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
-) -> Result<usize, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
-
-    if !engine.is_ready() {
-        return Err("AI engine not ready — check configuration".to_string());
-    }
-
+    jobs: State<'_, crate::commands::jobs::JobsState>,
+) -> Result<String, String> {
+    let engine = state.ready_handle().await?;
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
-    let graph_id = snapshot.root_dir.to_string_lossy().to_string();
-    let graph = crate::open_graph_snapshot(&snapshot)?;
-    let mut cursor = PageBatchCursor::new(AI_INDEX_BATCH_SIZE);
-    let mut total = 0;
 
-    while let Some(pages) = cursor.next_batch(|limit, offset| {
-        graph
-            .db
-            .list_pages_window(limit, offset, false)
-            .map_err(|e| e.to_string())
-    })? {
-        let mut pages_and_blocks = Vec::with_capacity(pages.len());
-        for page in pages {
-            let blocks = graph
-                .db
-                .list_blocks_for_page(&page.id)
-                .map_err(|e| e.to_string())?;
-            pages_and_blocks.push((page, blocks));
+    let job = jobs
+        .registry
+        .start(app.clone(), "ai_index_all", "Indexing graph for AI search", true);
+    let job_id = job.id().to_string();
+
+    tokio::spawn(async move {
+        match index_all_pages_job(&job, engine, snapshot).await {
+            Ok(Outcome::Finished { chunks, pages }) => {
+                job.succeeded(
+                    format!("Indexed {chunks} chunks across {pages} pages"),
+                    None,
+                );
+            }
+            Ok(Outcome::Cancelled) => job.cancelled(),
+            Err(e) => job.failed(e),
+        }
+    });
+
+    Ok(job_id)
+}
+
+enum Outcome {
+    Finished { chunks: usize, pages: usize },
+    Cancelled,
+}
+
+/// The actual indexing loop, off the command path.
+///
+/// SQLite access here is synchronous, so every database touch goes through
+/// `spawn_blocking` — running it inline would park a tokio worker thread for
+/// the whole query and starve unrelated IPC commands.
+async fn index_all_pages_job(
+    job: &crate::commands::jobs::JobHandle,
+    engine: Arc<KnowledgeEngine>,
+    snapshot: crate::GraphRuntimeSnapshot,
+) -> Result<Outcome, String> {
+    let graph = Arc::new(
+        tokio::task::spawn_blocking({
+            let snapshot = snapshot.clone();
+            move || crate::open_graph_snapshot(&snapshot)
+        })
+        .await
+        .map_err(|e| e.to_string())??,
+    );
+    let graph_id = snapshot.root_dir.to_string_lossy().to_string();
+
+    let total_pages = {
+        let graph = Arc::clone(&graph);
+        tokio::task::spawn_blocking(move || graph.db.count_pages())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())? as usize
+    };
+
+    job.progress(0, total_pages, format!("Indexing 0 of {total_pages} pages"));
+
+    let mut cursor = PageBatchCursor::new(AI_INDEX_BATCH_SIZE);
+    let mut chunks = 0usize;
+    let mut done = 0usize;
+    let mut failures = 0usize;
+
+    loop {
+        if job.is_cancelled() {
+            return Ok(Outcome::Cancelled);
         }
 
-        for (page, blocks) in &pages_and_blocks {
-            match engine.index_page(page, blocks, &graph_id).await {
-                Ok(count) => total += count,
+        let (limit, offset) = (cursor.batch_size, cursor.offset);
+        let batch = {
+            let graph = Arc::clone(&graph);
+            tokio::task::spawn_blocking(move || graph.db.list_pages_window(limit, offset, false))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?
+        };
+        let Some(pages) = cursor.accept_batch(batch) else {
+            break;
+        };
+
+        for page in pages {
+            if job.is_cancelled() {
+                return Ok(Outcome::Cancelled);
+            }
+
+            let blocks = {
+                let graph = Arc::clone(&graph);
+                let page_id = page.id.clone();
+                tokio::task::spawn_blocking(move || graph.db.list_blocks_for_page(&page_id))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?
+            };
+
+            match engine.index_page(&page, &blocks, &graph_id).await {
+                Ok(count) => chunks += count,
                 Err(e) => {
+                    // One unindexable page must not abort the whole run.
+                    failures += 1;
                     eprintln!("Failed to index page '{}': {}", page.title, e);
                 }
             }
+
+            done += 1;
+            let label = if failures > 0 {
+                format!("Indexing {done} of {total_pages} pages · {failures} skipped")
+            } else {
+                format!("Indexing {done} of {total_pages} pages")
+            };
+            job.progress(done, total_pages, label);
         }
     }
 
-    Ok(total)
+    Ok(Outcome::Finished {
+        chunks,
+        pages: done,
+    })
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────
@@ -327,14 +434,7 @@ pub async fn ai_search(
     top_k: Option<usize>,
     graph_id: Option<String>,
 ) -> Result<Vec<SearchResult>, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
-
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
-    }
+    let engine = state.ready_handle().await?;
 
     engine
         .search(&query, top_k.unwrap_or(10), graph_id.as_deref())
@@ -344,20 +444,21 @@ pub async fn ai_search(
 
 // ─── References ──────────────────────────────────────────────────────────────
 
+/// Generate AI references for a page as a background job.
+///
+/// Returns a job id immediately. The old version made the reference panel own
+/// the request, so navigating away mid-generation threw the result away with
+/// no indication anything had happened. The job survives the panel and the
+/// completion notification links straight back to the page.
 #[tauri::command]
 pub async fn ai_generate_references(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
+    jobs: State<'_, crate::commands::jobs::JobsState>,
     page_id: String,
-) -> Result<PageReferencesMeta, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
-
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
-    }
+) -> Result<String, String> {
+    let engine = state.ready_handle().await?;
 
     let (page_title, blocks_data, graph_id) = {
         let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
@@ -377,10 +478,39 @@ pub async fn ai_generate_references(
         (page.title, blocks_data, graph_id)
     };
 
-    engine
-        .generate_references(&page_id, &page_title, &blocks_data, &graph_id)
-        .await
-        .map_err(|e| e.to_string())
+    let job = jobs.registry.start(
+        app.clone(),
+        "ai_references",
+        format!("Finding references for “{page_title}”"),
+        false,
+    );
+    let job_id = job.id().to_string();
+
+    tokio::spawn(async move {
+        match engine
+            .generate_references(&page_id, &page_title, &blocks_data, &graph_id)
+            .await
+        {
+            Ok(meta) => {
+                let count = meta.references.len();
+                let summary = if count == 1 {
+                    format!("Found 1 reference for “{page_title}”")
+                } else {
+                    format!("Found {count} references for “{page_title}”")
+                };
+                job.succeeded(
+                    summary,
+                    Some(crate::commands::jobs::JobLink {
+                        page_id,
+                        label: page_title,
+                    }),
+                );
+            }
+            Err(e) => job.failed(e.to_string()),
+        }
+    });
+
+    Ok(job_id)
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
@@ -391,14 +521,7 @@ pub async fn ai_ask(
     question: String,
     graph_id: Option<String>,
 ) -> Result<String, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
-
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
-    }
+    let engine = state.ready_handle().await?;
 
     engine
         .ask(&question, graph_id.as_deref())
@@ -414,6 +537,14 @@ pub struct AskStreamChunk {
     pub error: Option<String>,
 }
 
+/// Answer a question and deliver it over the `ai://chat_stream` channel.
+///
+/// The provider trait exposes only `complete()`, so the answer necessarily
+/// arrives whole. This previously dribbled it out 24 characters at a time with
+/// a 12 ms sleep between chunks — a typewriter effect faked *after* the answer
+/// was already known, which added over a second of pure invented latency to a
+/// long reply. The answer is now emitted as soon as it exists; any reveal
+/// animation belongs in the UI, where it costs nothing.
 #[tauri::command]
 pub async fn ai_ask_stream(
     state: State<'_, KnowledgeState>,
@@ -422,60 +553,32 @@ pub async fn ai_ask_stream(
     graph_id: Option<String>,
     request_id: String,
 ) -> Result<(), String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+    let engine = state.ready_handle().await?;
 
-    if !engine.is_ready() {
-        return Err("AI engine not ready".to_string());
-    }
-
-    let answer = engine
-        .ask(&question, graph_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Stream by small chunks to give responsive UI updates across all providers.
-    const CHUNK_SIZE: usize = 24;
-    if answer.is_empty() {
-        app.emit(
-            "ai://chat_stream",
-            AskStreamChunk {
-                request_id,
-                delta: String::new(),
-                done: true,
-                error: None,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    let mut buf = String::new();
-    for ch in answer.chars() {
-        buf.push(ch);
-        if buf.chars().count() >= CHUNK_SIZE {
-            app.emit(
+    let answer = match engine.ask(&question, graph_id.as_deref()).await {
+        Ok(answer) => answer,
+        Err(e) => {
+            // Report the failure on the same channel so a listening chat view
+            // resolves instead of waiting forever on a reply that never comes.
+            let _ = app.emit(
                 "ai://chat_stream",
                 AskStreamChunk {
-                    request_id: request_id.clone(),
-                    delta: std::mem::take(&mut buf),
-                    done: false,
-                    error: None,
+                    request_id,
+                    delta: String::new(),
+                    done: true,
+                    error: Some(e.to_string()),
                 },
-            )
-            .map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+            );
+            return Err(e.to_string());
         }
-    }
+    };
 
-    if !buf.is_empty() {
+    if !answer.is_empty() {
         app.emit(
             "ai://chat_stream",
             AskStreamChunk {
                 request_id: request_id.clone(),
-                delta: buf,
+                delta: answer,
                 done: false,
                 error: None,
             },
@@ -503,10 +606,7 @@ pub async fn ai_ask_stream(
 pub async fn ai_list_registered_graphs(
     state: State<'_, KnowledgeState>,
 ) -> Result<Vec<RegisteredGraph>, String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+    let engine = state.handle().await?;
 
     let registry = engine.registry().await;
     Ok(registry.list().into_iter().cloned().collect())
@@ -519,10 +619,7 @@ pub async fn ai_register_graph(
     path: String,
     graph_type: String,
 ) -> Result<(), String> {
-    let guard = state.engine.read().await;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+    let engine = state.handle().await?;
 
     let gtype = match graph_type.as_str() {
         "reference" => GraphType::Reference,
@@ -545,47 +642,6 @@ pub async fn ai_register_graph(
 
     let mut registry = engine.registry_mut().await;
     registry.register(graph).map_err(|e| e.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PageBatchCursor;
-
-    #[test]
-    fn page_batch_cursor_streams_past_legacy_ten_thousand_cap() {
-        let total_pages = 10_050usize;
-        let batch_size = 128i64;
-        let mut cursor = PageBatchCursor::new(batch_size);
-        let mut requested_windows = Vec::new();
-        let mut processed = 0usize;
-
-        while let Some(batch) = cursor
-            .next_batch(|limit, offset| {
-                requested_windows.push((limit, offset));
-                let start = offset as usize;
-                if start >= total_pages {
-                    return Ok::<Vec<usize>, &'static str>(Vec::new());
-                }
-                let end = (start + limit as usize).min(total_pages);
-                Ok((start..end).collect())
-            })
-            .expect("cursor should paginate cleanly")
-        {
-            assert!(
-                batch.len() <= batch_size as usize,
-                "batch should stay memory-bounded"
-            );
-            processed += batch.len();
-        }
-
-        assert_eq!(processed, total_pages);
-        assert!(
-            requested_windows
-                .iter()
-                .any(|(_, offset)| *offset >= 10_000),
-            "cursor should continue beyond the old 10k preload cap"
-        );
-    }
 }
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -617,4 +673,61 @@ pub async fn ai_create_default_schemas(
     let mut manager =
         grafium_core::knowledge::SchemaManager::load(&graph.root_dir).map_err(|e| e.to_string())?;
     manager.create_defaults().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageBatchCursor;
+
+    #[test]
+    fn page_batch_cursor_streams_past_legacy_ten_thousand_cap() {
+        let total_pages = 10_050usize;
+        let batch_size = 128i64;
+        let mut cursor = PageBatchCursor::new(batch_size);
+        let mut requested_windows = Vec::new();
+        let mut processed = 0usize;
+
+        loop {
+            let (limit, offset) = (cursor.batch_size, cursor.offset);
+            requested_windows.push((limit, offset));
+            let start = offset as usize;
+            let fetched: Vec<usize> = if start >= total_pages {
+                Vec::new()
+            } else {
+                let end = (start + limit as usize).min(total_pages);
+                (start..end).collect()
+            };
+
+            let Some(batch) = cursor.accept_batch(fetched) else {
+                break;
+            };
+            assert!(
+                batch.len() <= batch_size as usize,
+                "batch should stay memory-bounded"
+            );
+            processed += batch.len();
+        }
+
+        assert_eq!(processed, total_pages);
+        assert!(
+            requested_windows
+                .iter()
+                .any(|(_, offset)| *offset >= 10_000),
+            "cursor should continue beyond the old 10k preload cap"
+        );
+    }
+
+    #[test]
+    fn page_batch_cursor_stays_finished_after_an_empty_batch() {
+        // Once exhausted the cursor must not resume, or a cancelled or
+        // completed index could be restarted by a late batch.
+        let mut cursor = PageBatchCursor::new(10);
+        assert!(cursor.accept_batch(vec![1, 2, 3]).is_some());
+        assert!(cursor.accept_batch(Vec::<i32>::new()).is_none());
+        assert!(
+            cursor.accept_batch(vec![4, 5]).is_none(),
+            "cursor resumed after reporting exhaustion"
+        );
+    }
+
 }
