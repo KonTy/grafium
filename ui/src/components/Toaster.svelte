@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { toasts, dismissToast } from "../lib/toast.svelte";
+  import { toasts, dismissToast, runToastAction } from "../lib/toast.svelte";
 </script>
 
 {#if toasts.length > 0}
@@ -7,6 +7,11 @@
     {#each toasts as toast (toast.id)}
       <div class="toast {toast.severity}">
         <span class="toast-message">{toast.message}</span>
+        {#if toast.action}
+          <button class="toast-action" onclick={() => runToastAction(toast)}>
+            {toast.action.label}
+          </button>
+        {/if}
         <button
           class="toast-dismiss"
           onclick={() => dismissToast(toast.id)}
@@ -48,8 +53,29 @@
     border-left-color: var(--error);
   }
 
-  .toast.info {
+  .toast.info,
+  /* No themed success colour exists, and inventing a green would clash with
+     several of the 17 themes. The accent is already the "this is fine" hue. */
+  .toast.success {
     border-left-color: var(--accent);
+  }
+
+  .toast-action {
+    flex-shrink: 0;
+    align-self: center;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+
+  .toast-action:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
   }
 
   .toast-message {

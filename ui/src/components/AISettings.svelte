@@ -10,13 +10,18 @@
     type HealthStatus,
   } from "../lib/knowledge";
   import { mediaGetConfig, mediaSetConfig, type MediaConfigPayload } from "../lib/api";
+  import { jobs, isTerminal, cancelJob } from "../lib/jobs.svelte";
 
   let config = $state<AiConfig | null>(null);
   let health = $state<HealthStatus | null>(null);
   let isLoading = $state(false);
   let isSaving = $state(false);
   let isIndexing = $state(false);
-  let indexCount = $state<number | null>(null);
+  // Summary of the most recent finished index, so the panel still reports the
+  // outcome when reopened after the job completed elsewhere.
+  let lastIndexSummary = $state<string | null>(null);
+  let indexJobId = $state<string | null>(null);
+  let indexProgress = $state<string | null>(null);
   let message = $state("");
   let messageType = $state<"success" | "error">("success");
 
@@ -157,17 +162,50 @@
   }
 
   async function indexAll() {
+    if (isIndexing) return;
     isIndexing = true;
-    indexCount = null;
+    lastIndexSummary = null;
     try {
-      indexCount = await aiIndexAllPages();
-      showMessage(`Indexed ${indexCount} chunks`, "success");
-      health = await aiHealthCheck();
+      // Queues a background job and returns immediately. Indexing a large
+      // graph takes minutes; the user is free to close this panel and keep
+      // working, and gets a notification when it lands.
+      indexJobId = await aiIndexAllPages();
+      showMessage(
+        "Indexing started. You can keep working — you'll be notified when it finishes.",
+        "success"
+      );
     } catch (e: any) {
-      showMessage("Indexing failed: " + e, "error");
-    } finally {
       isIndexing = false;
+      showMessage("Indexing failed to start: " + e, "error");
     }
+  }
+
+  // Mirror the job's real state so the button and progress reflect work that
+  // outlives this panel, including a run started before it was opened.
+  $effect(() => {
+    const job = indexJobId
+      ? jobs.find((j) => j.id === indexJobId)
+      : jobs.find((j) => j.kind === "ai_index_all" && j.status === "running");
+    if (!job) return;
+
+    indexJobId = job.id;
+    isIndexing = job.status === "running";
+    indexProgress = job.status === "running" ? job.message : null;
+
+    if (isTerminal(job.status)) {
+      indexJobId = null;
+      lastIndexSummary = job.status === "succeeded" ? job.message : null;
+      if (job.status === "failed") {
+        showMessage("Indexing failed: " + (job.error ?? "unknown error"), "error");
+      }
+      aiHealthCheck()
+        .then((h) => (health = h))
+        .catch(() => {});
+    }
+  });
+
+  async function stopIndexing() {
+    if (indexJobId) await cancelJob(indexJobId);
   }
 
   async function loadMediaConfig() {
@@ -399,15 +437,20 @@
             ? "No search embedder configured — pick Ollama or vLLM/OpenAI-compatible as the local provider (or a cloud provider) to enable this."
             : undefined}
         >
-          {isIndexing ? "Indexing..." : "Index All Pages"}
+          {isIndexing ? "Indexing…" : "Index All Pages"}
         </button>
+        {#if isIndexing}
+          <button class="action-btn" onclick={stopIndexing}>Stop</button>
+        {/if}
         <button class="action-btn" onclick={createSchemas}>
           Create Default Schemas
         </button>
       </div>
 
-      {#if indexCount !== null}
-        <div class="index-result">Indexed {indexCount} chunks into vector store.</div>
+      {#if indexProgress}
+        <div class="index-result">{indexProgress}</div>
+      {:else if lastIndexSummary}
+        <div class="index-result">{lastIndexSummary}</div>
       {/if}
     {/if}
 

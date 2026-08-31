@@ -444,6 +444,15 @@ pub async fn ai_search(
 
 // ─── References ──────────────────────────────────────────────────────────────
 
+/// Channel carrying finished reference payloads.
+pub const REFERENCES_EVENT: &str = "ai://references";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReferencesReady {
+    pub page_id: String,
+    pub meta: grafium_core::ai::references::PageReferencesMeta,
+}
+
 /// Generate AI references for a page as a background job.
 ///
 /// Returns a job id immediately. The old version made the reference panel own
@@ -493,6 +502,17 @@ pub async fn ai_generate_references(
         {
             Ok(meta) => {
                 let count = meta.references.len();
+                // References are computed, not persisted, so the payload has
+                // to reach the UI on its own channel. Any mounted reference
+                // panel for this page picks it up, whether or not it was the
+                // thing that started the run.
+                let _ = app.emit(
+                    REFERENCES_EVENT,
+                    ReferencesReady {
+                        page_id: page_id.clone(),
+                        meta,
+                    },
+                );
                 let summary = if count == 1 {
                     format!("Found 1 reference for “{page_title}”")
                 } else {

@@ -1,6 +1,6 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -159,7 +159,11 @@ export function aiIndexPage(pageId: string): Promise<number> {
   return invoke("ai_index_page", { pageId });
 }
 
-export function aiIndexAllPages(): Promise<number> {
+/**
+ * Start a full reindex. Resolves with a job id as soon as the work is
+ * *queued*, not when it finishes — track progress via the jobs store.
+ */
+export function aiIndexAllPages(): Promise<string> {
   return invoke("ai_index_all_pages");
 }
 
@@ -175,8 +179,29 @@ export function aiSearch(
 
 // ─── References ──────────────────────────────────────────────────────────────
 
-export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta> {
+/**
+ * Start reference generation for a page. Resolves with a job id; the finished
+ * references arrive via {@link onReferencesGenerated}, so navigating away no
+ * longer discards the work.
+ */
+export function aiGenerateReferences(pageId: string): Promise<string> {
   return invoke("ai_generate_references", { pageId });
+}
+
+/**
+ * Subscribe to finished reference payloads.
+ *
+ * References are computed rather than stored, so they arrive on this channel
+ * instead of as a command return value. The handler receives results for every
+ * page, so callers must filter to the one they care about.
+ */
+export function onReferencesGenerated(
+  handler: (pageId: string, meta: PageReferencesMeta) => void
+): Promise<UnlistenFn> {
+  return listen<{ page_id: string; meta: PageReferencesMeta }>(
+    "ai://references",
+    (event) => handler(event.payload.page_id, event.payload.meta)
+  );
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
   import Toaster from "./components/Toaster.svelte";
+  import JobActivity from "./components/JobActivity.svelte";
+  import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
   import { lazyComponent } from "./lib/lazy";
 
   // Heavy views the user may never open. Loading them on demand keeps them out
@@ -585,6 +587,26 @@
     const direction: 1 | -1 = e.deltaY < 0 ? 1 : -1;
     adjustUiZoom(direction);
   }
+
+  // Background AI jobs outlive the panels that start them, so the subscription
+  // lives here: a completion notification must reach the user wherever they
+  // are, with a way to open whatever the job produced.
+  $effect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+
+    initJobs((job) => notifyJobFinished(job, (pageId) => handleNavigate({ id: pageId })))
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
 
   $effect(() => {
     const detachUndoRedo = attachAppUndoRedoListeners();
@@ -1341,6 +1363,7 @@
 {/if}
 
 
+<JobActivity />
 <Toaster />
 
 <style>
