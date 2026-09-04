@@ -45,6 +45,13 @@ pub enum ModelKind {
     /// `ai::providers::local_embedder::LocalEmbedder`, distinct from a
     /// general chat/completion LLM even though both ship as `.gguf` files.
     Embedding,
+    /// A cross-encoder reranker (e.g. `bge-reranker-v2-m3`). Superficially
+    /// looks like an embedding model (shares the `bge-` family prefix) but
+    /// produces relevance *scores* for (query, document) pairs, NOT the
+    /// sentence embedding vectors [`Embedding`] models produce. Feeding a
+    /// reranker into [`LocalEmbedder`] silently yields garbage vectors, so
+    /// it gets its own kind and is excluded from embedding auto-resolution.
+    Reranker,
     /// Didn't match any recognized naming convention.
     Unknown,
 }
@@ -99,6 +106,14 @@ const EMBEDDING_MARKERS: &[&str] = &[
 /// whisper context`.
 pub fn classify(file_name: &str) -> ModelKind {
     let lower = file_name.to_lowercase();
+    // Rerankers must be checked BEFORE the embedding markers: they share the
+    // `bge-` family prefix (e.g. `bge-reranker-v2-m3-Q8_0.gguf`) but are
+    // cross-encoders, not sentence-embedding models. Classifying one as
+    // `Embedding` would let the auto-picker feed it into `LocalEmbedder` and
+    // silently produce garbage vectors.
+    if lower.contains("rerank") {
+        return ModelKind::Reranker;
+    }
     if EMBEDDING_MARKERS.iter().any(|m| lower.contains(m)) {
         return ModelKind::Embedding;
     }
@@ -282,6 +297,11 @@ fn model_not_found_hint(models_dir: &Path, kind: ModelKind) -> String {
              Hugging Face) and either place it in that directory or import it from Settings.",
             models_dir.display()
         ),
+        ModelKind::Reranker => format!(
+            "No reranker model found in {}. Download a GGUF reranker (e.g. \
+             bge-reranker-v2-m3) and either place it in that directory or import it from Settings.",
+            models_dir.display()
+        ),
         ModelKind::Unknown => format!("No matching model found in {}.", models_dir.display()),
     }
 }
@@ -337,6 +357,53 @@ mod tests {
         assert_eq!(
             classify("bge-base-en-v1.5-q4_k_m.gguf"),
             ModelKind::Embedding
+        );
+    }
+
+    #[test]
+    fn classify_recognizes_rerankers_as_their_own_kind() {
+        // Rerankers share the `bge-` family prefix with embedding models but
+        // are cross-encoders: feeding one into `LocalEmbedder` produces
+        // garbage vectors. They must be classified distinctly and excluded
+        // from embedding auto-resolution.
+        assert_eq!(
+            classify("bge-reranker-v2-m3-Q8_0.gguf"),
+            ModelKind::Reranker
+        );
+        assert_eq!(
+            classify("bge-reranker-large.Q4_K_M.gguf"),
+            ModelKind::Reranker
+        );
+        assert_eq!(classify("jina-reranker-v2-base.gguf"), ModelKind::Reranker);
+    }
+
+    #[test]
+    fn resolve_model_does_not_auto_pick_a_reranker_for_embeddings() {
+        // Regression: with only a reranker on disk, embedding auto-resolution
+        // must fail loudly rather than silently hand the reranker to
+        // `LocalEmbedder`.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bge-reranker-v2-m3-Q8_0.gguf"),
+            b"fake reranker bytes",
+        )
+        .unwrap();
+        let resolved = resolve_model(None, dir.path(), ModelKind::Embedding);
+        assert!(
+            resolved.is_err(),
+            "a reranker must not be auto-resolved as an embedding model"
+        );
+
+        // But a real embedding model alongside it still resolves.
+        fs::write(
+            dir.path().join("nomic-embed-text-v1.5.f16.gguf"),
+            b"fake embed bytes",
+        )
+        .unwrap();
+        let resolved = resolve_model(None, dir.path(), ModelKind::Embedding).unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|n| n.to_str()),
+            Some("nomic-embed-text-v1.5.f16.gguf")
         );
     }
 
