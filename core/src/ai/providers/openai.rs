@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::canonicalize_messages;
+use super::{canonicalize_messages, read_limited_response};
 use crate::ai::traits::{
     BoxFuture, ChatMessage, CompletionOptions, Embedder, LlmProvider, MessageRole,
 };
@@ -112,23 +112,25 @@ impl LlmProvider for OpenAiLlm {
                 .client
                 .post(format!("{}/chat/completions", self.base_url))
                 .json(&request);
-            let resp = self.with_auth(req).send().await.map_err(|e| {
-                CoreError::Other(format!("OpenAI request failed: {}", e))
-            })?;
+            let resp = self
+                .with_auth(req)
+                .send()
+                .await
+                .map_err(|e| CoreError::Other(format!("OpenAI request failed: {}", e)))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+                let body = String::from_utf8_lossy(&read_limited_response(resp, "OpenAI").await?)
+                    .into_owned();
                 return Err(CoreError::Other(format!(
                     "OpenAI returned {}: {}",
                     status, body
                 )));
             }
 
-            let response: OpenAiChatResponse = resp
-                .json()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI response parse error: {}", e)))?;
+            let body = read_limited_response(resp, "OpenAI").await?;
+            let response: OpenAiChatResponse = serde_json::from_slice(&body)
+                .map_err(|e| CoreError::Other(format!("OpenAI response parse error: {e}")))?;
 
             response
                 .choices
@@ -186,7 +188,12 @@ impl OpenAiEmbedder {
 
     /// Default: text-embedding-3-small (1536 dimensions).
     pub fn default_small(api_key: &str) -> Self {
-        Self::new("https://api.openai.com/v1", "text-embedding-3-small", 1536, Some(api_key.to_string()))
+        Self::new(
+            "https://api.openai.com/v1",
+            "text-embedding-3-small",
+            1536,
+            Some(api_key.to_string()),
+        )
     }
 }
 
@@ -222,23 +229,26 @@ impl Embedder for OpenAiEmbedder {
                 .client
                 .post(format!("{}/embeddings", self.base_url))
                 .json(&request);
-            let resp = self.with_auth(req).send().await.map_err(|e| {
-                CoreError::Other(format!("OpenAI embed request failed: {}", e))
-            })?;
+            let resp = self
+                .with_auth(req)
+                .send()
+                .await
+                .map_err(|e| CoreError::Other(format!("OpenAI embed request failed: {}", e)))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+                let body =
+                    String::from_utf8_lossy(&read_limited_response(resp, "OpenAI embed").await?)
+                        .into_owned();
                 return Err(CoreError::Other(format!(
                     "OpenAI embed returned {}: {}",
                     status, body
                 )));
             }
 
-            let response: OpenAiEmbedResponse = resp
-                .json()
-                .await
-                .map_err(|e| CoreError::Other(format!("OpenAI embed parse error: {}", e)))?;
+            let body = read_limited_response(resp, "OpenAI embed").await?;
+            let response: OpenAiEmbedResponse = serde_json::from_slice(&body)
+                .map_err(|e| CoreError::Other(format!("OpenAI embed parse error: {e}")))?;
 
             Ok(response.data.into_iter().map(|d| d.embedding).collect())
         })

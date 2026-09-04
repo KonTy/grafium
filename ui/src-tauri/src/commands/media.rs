@@ -3,12 +3,21 @@ use grafium_core::media::{fetch_captions, fetch_metadata, transcript_to_markdown
 use grafium_core::models::Page;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
 use tauri::{Manager, State};
 
 #[cfg(not(target_os = "android"))]
 use grafium_core::media::{Transcript, TranscriptSource};
 #[cfg(not(target_os = "android"))]
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(not(target_os = "android"))]
+static MEDIA_IMPORT_SLOT: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+static MEDIA_WORK_CLEANED: OnceLock<()> = OnceLock::new();
+#[cfg(not(target_os = "android"))]
+const STALE_MEDIA_WORK_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -30,7 +39,56 @@ fn media_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| e.to_string())?
         .join("media");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "android"))]
+    MEDIA_WORK_CLEANED.get_or_init(|| {
+        if let Err(error) = cleanup_stale_media_work(&dir) {
+            eprintln!("[media] Failed to clean stale import files: {error}");
+        }
+    });
     Ok(dir)
+}
+
+#[cfg(not(target_os = "android"))]
+fn cleanup_stale_media_work(media_dir: &std::path::Path) -> Result<(), String> {
+    let work_dir = media_dir.join("work");
+    if !work_dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&work_dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!("[media] Cannot inspect stale work entry: {error}");
+                continue;
+            }
+        };
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!(
+                    "[media] Cannot inspect stale work directory {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE_MEDIA_WORK_AGE);
+        if !metadata.is_dir() || !old_enough || path.parent() != Some(work_dir.as_path()) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            eprintln!(
+                "[media] Cannot remove stale work directory {}: {error}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_media_config(app: &tauri::AppHandle) -> Result<MediaConfig, String> {
@@ -50,9 +108,7 @@ pub async fn media_get_config(app: tauri::AppHandle) -> Result<MediaConfig, Stri
     load_media_config(&app)
 }
 
-/// Persists media/transcription settings. Takes effect on the *next*
-/// import — a Whisper model already loaded and cached in this process
-/// keeps running with whatever settings it was loaded with.
+/// Persists media/transcription settings. Takes effect on the next import.
 #[tauri::command]
 pub async fn media_set_config(
     app: tauri::AppHandle,
@@ -80,48 +136,15 @@ pub async fn media_set_config(
 
 // ─── Transcription ───────────────────────────────────────────────────────────
 
-/// Loads (and caches, process-wide) a `WhisperTranscriber` for the resolved
-/// model path + language pair. Loading a whisper.cpp model is expensive
-/// (reads a multi-hundred-MB file, allocates the context), so this avoids
-/// re-loading it on every single video import — the cache key is the
-/// *resolved* model path plus language, so it naturally reloads if either
-/// changes (e.g. the user picks a different model in Settings) without
-/// needing an explicit invalidation call.
+/// Resolves the selected Whisper model. Native model loading happens only in
+/// the disposable worker process started by `transcribe`.
 #[cfg(not(target_os = "android"))]
-fn cached_transcriber(
+fn build_transcriber(
     config: &MediaConfig,
     data_dir: &std::path::Path,
-) -> Result<Arc<grafium_core::media::WhisperTranscriber>, String> {
-    use grafium_core::model_library::{self, ModelKind};
-
-    let models_dir = config
-        .models_dir
-        .clone()
-        .unwrap_or_else(|| model_library::default_models_dir(data_dir));
-    let resolved_path = config
-        .whisper
-        .model_ref
-        .resolve(&models_dir, ModelKind::Whisper)
-        .map_err(|e| e.to_string())?;
-    let cache_key = (resolved_path, config.whisper.language.clone());
-
-    static CACHE: OnceLock<Mutex<Option<((PathBuf, Option<String>), Arc<grafium_core::media::WhisperTranscriber>)>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().map_err(|e| e.to_string())?;
-
-    if let Some((key, transcriber)) = guard.as_ref() {
-        if *key == cache_key {
-            return Ok(transcriber.clone());
-        }
-    }
-
-    let transcriber = Arc::new(
-        grafium_core::media::WhisperTranscriber::from_config(config, data_dir)
-            .map_err(|e| e.to_string())?,
-    );
-    *guard = Some((cache_key, transcriber.clone()));
-    Ok(transcriber)
+) -> Result<grafium_core::media::WhisperTranscriber, String> {
+    grafium_core::media::WhisperTranscriber::from_config(config, data_dir)
+        .map_err(|e| e.to_string())
 }
 
 /// Fetches a transcript for `url`: captions first (cheap, no transcription
@@ -149,8 +172,8 @@ fn fetch_transcript_blocking(
             });
     }
 
-    let transcriber = cached_transcriber(media_config, data_dir)?;
-    grafium_core::media::fetch_transcript(url, workdir, lang, transcriber.as_ref())
+    let transcriber = build_transcriber(media_config, data_dir)?;
+    grafium_core::media::fetch_transcript(url, workdir, lang, &transcriber)
         .map_err(|e| e.to_string())
 }
 
@@ -161,7 +184,13 @@ fn fetch_transcript_blocking(
     lang: &str,
     _media_config: &MediaConfig,
     _data_dir: &std::path::Path,
-) -> Result<(grafium_core::media::Transcript, grafium_core::media::TranscriptSource), String> {
+) -> Result<
+    (
+        grafium_core::media::Transcript,
+        grafium_core::media::TranscriptSource,
+    ),
+    String,
+> {
     fetch_captions(url, workdir, lang)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
@@ -187,14 +216,20 @@ pub async fn media_import_video(
     lang: Option<String>,
 ) -> Result<Page, String> {
     let lang = lang.unwrap_or_else(|| "en".to_string());
-    let workdir = std::env::temp_dir();
     let media_config = load_media_config(&app)?;
     let data_dir = media_data_dir(&app)?;
+    let workdir = data_dir.join("work").join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&workdir).map_err(|e| e.to_string())?;
 
     let url_for_blocking = url.clone();
     let lang_for_blocking = lang.clone();
     let workdir_for_blocking = workdir.clone();
-    let (metadata, transcript_result) = tauri::async_runtime::spawn_blocking(move || {
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(not(target_os = "android"))]
+        let _import_slot = MEDIA_IMPORT_SLOT
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "The media import worker lock is poisoned".to_string())?;
         let metadata = fetch_metadata(&url_for_blocking).unwrap_or_default();
         let transcript_result = fetch_transcript_blocking(
             &url_for_blocking,
@@ -203,10 +238,11 @@ pub async fn media_import_video(
             &media_config,
             &data_dir,
         );
-        (metadata, transcript_result)
+        Ok::<_, String>((metadata, transcript_result))
     })
-    .await
-    .map_err(|e| format!("Import task failed: {}", e))?;
+    .await;
+    let _ = std::fs::remove_dir_all(&workdir);
+    let (metadata, transcript_result) = task.map_err(|e| format!("Import task failed: {e}"))??;
 
     let (transcript, source) = transcript_result?;
 

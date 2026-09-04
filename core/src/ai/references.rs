@@ -16,6 +16,10 @@ use crate::ai::traits::{
 };
 use crate::error::{CoreError, Result};
 
+const MAX_REFERENCE_INPUT_BYTES: usize = 512 * 1024;
+const MAX_REFERENCE_BLOCKS: usize = 512;
+const MAX_CONCEPTS_PER_BLOCK: usize = 16;
+
 /// A generated reference for a specific location in a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneratedReference {
@@ -81,6 +85,25 @@ impl ReferenceEngine {
         embedder: &dyn Embedder,
         store: &dyn VectorStore,
     ) -> Result<PageReferencesMeta> {
+        if blocks.len() > MAX_REFERENCE_BLOCKS {
+            return Err(CoreError::Other(format!(
+                "Reference generation is limited to {MAX_REFERENCE_BLOCKS} blocks per page"
+            )));
+        }
+        let input_bytes = blocks
+            .iter()
+            .try_fold(0usize, |total, (_, content)| {
+                total.checked_add(content.len())
+            })
+            .ok_or_else(|| CoreError::Other("Reference input size overflowed".to_string()))?;
+        if input_bytes > MAX_REFERENCE_INPUT_BYTES {
+            return Err(CoreError::Other(format!(
+                "Reference input is {:.1} MiB; the safety limit is {:.1} MiB",
+                input_bytes as f64 / (1024.0 * 1024.0),
+                MAX_REFERENCE_INPUT_BYTES as f64 / (1024.0 * 1024.0)
+            )));
+        }
+
         let mut all_refs: Vec<GeneratedReference> = Vec::new();
         let mut ref_counter = 1;
         let eligible_blocks = blocks
@@ -446,6 +469,7 @@ fn parse_concepts_for_content(
 ) -> Vec<ConceptExtraction> {
     parsed
         .into_iter()
+        .take(MAX_CONCEPTS_PER_BLOCK)
         .filter_map(|concept| {
             let offset = original_content.find(&concept.text)?;
             Some(ConceptExtraction {

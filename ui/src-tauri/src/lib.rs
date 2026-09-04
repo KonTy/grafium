@@ -59,7 +59,13 @@ impl AppState {
             )
         };
 
-        let handle = start_graph_watcher(app_handle, self.graph.clone(), pages_dir, journals_dir, self_writes)?;
+        let handle = start_graph_watcher(
+            app_handle,
+            self.graph.clone(),
+            pages_dir,
+            journals_dir,
+            self_writes,
+        )?;
         let mut guard = self.watcher.lock().map_err(|e| e.to_string())?;
         *guard = Some(handle);
         Ok(())
@@ -244,13 +250,16 @@ fn start_graph_watcher(
             }
 
             drop(g);
-            
+
             if !changed_paths.is_empty() {
-                let _ = app_handle.emit("graph-files-changed", serde_json::json!({
-                    "paths": changed_paths
-                }));
+                let _ = app_handle.emit(
+                    "graph-files-changed",
+                    serde_json::json!({
+                        "paths": changed_paths
+                    }),
+                );
             }
-            
+
             pending_files.clear();
             last_event_at = None;
         }
@@ -1290,7 +1299,7 @@ pub fn run() {
             let knowledge_state = {
                 let data_dir = app_dir.join("knowledge");
                 let config_path = data_dir.join("ai_config.json");
-                let ai_config = if config_path.exists() {
+                let mut ai_config = if config_path.exists() {
                     std::fs::read_to_string(&config_path)
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok())
@@ -1298,7 +1307,14 @@ pub fn run() {
                 } else {
                     grafium_core::ai::config::AiConfig::default()
                 };
-                let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config).ok();
+                ai_config.sanitize_collection_limits();
+                let engine = match grafium_core::KnowledgeEngine::new(&data_dir, ai_config) {
+                    Ok(engine) => Some(engine),
+                    Err(error) => {
+                        eprintln!("[ai] Knowledge engine initialization failed: {error}");
+                        None
+                    }
+                };
                 commands::knowledge::KnowledgeState {
                     engine: Arc::new(tokio::sync::RwLock::new(engine.map(Arc::new))),
                 }
@@ -1507,6 +1523,13 @@ pub fn run() {
             commands::media::media_get_config,
             commands::media::media_set_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            #[cfg(not(target_os = "android"))]
+            if let tauri::RunEvent::Exit = event {
+                grafium_core::ai::worker::shutdown_pool();
+            }
+            let _ = event;
+        });
 }

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::error::{CoreError, Result};
 use crate::model_library::LocalModelRef;
 
 /// Top-level AI configuration.
@@ -32,6 +33,59 @@ impl Default for AiConfig {
             embedding: EmbeddingConfig::default(),
             references: ReferenceConfig::default(),
         }
+    }
+}
+
+impl AiConfig {
+    /// Clamp legacy or hand-edited collection limits before initialization.
+    /// Model/context limits remain strict because silently accepting those can
+    /// hand unsafe allocations to native runtimes.
+    pub fn sanitize_collection_limits(&mut self) {
+        self.embedding.chunk_max_tokens = self.embedding.chunk_max_tokens.clamp(1, 4_096);
+        self.embedding.chunk_overlap_tokens = self
+            .embedding
+            .chunk_overlap_tokens
+            .min(self.embedding.chunk_max_tokens.saturating_sub(1));
+        self.embedding.batch_size = self.embedding.batch_size.clamp(1, 64);
+        self.references.max_refs_per_paragraph =
+            self.references.max_refs_per_paragraph.clamp(1, 50);
+        self.references.min_similarity_score = self.references.min_similarity_score.clamp(0.0, 1.0);
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let embedding = &self.embedding;
+        if !(1..=4_096).contains(&embedding.chunk_max_tokens) {
+            return Err(CoreError::Other(
+                "Embedding chunk size must be between 1 and 4096 tokens".to_string(),
+            ));
+        }
+        if embedding.chunk_overlap_tokens >= embedding.chunk_max_tokens {
+            return Err(CoreError::Other(
+                "Embedding overlap must be smaller than the chunk size".to_string(),
+            ));
+        }
+        if !(1..=64).contains(&embedding.batch_size) {
+            return Err(CoreError::Other(
+                "Embedding batch size must be between 1 and 64".to_string(),
+            ));
+        }
+        if !(1..=50).contains(&self.references.max_refs_per_paragraph) {
+            return Err(CoreError::Other(
+                "References per paragraph must be between 1 and 50".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.references.min_similarity_score) {
+            return Err(CoreError::Other(
+                "Reference similarity score must be between 0 and 1".to_string(),
+            ));
+        }
+        if let (AiMode::Local, Some(local)) = (&self.mode, &self.local) {
+            if local.provider == ProviderType::HuggingFace {
+                crate::ai::resources::safe_context_size(local.local_llm.context_size)?;
+                crate::ai::resources::safe_gpu_layers(local.local_llm.gpu_layers)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -125,12 +179,13 @@ pub struct LocalLlmSettings {
     /// auto-pick). Flattened so the on-disk JSON stays flat.
     #[serde(flatten)]
     pub model_ref: LocalModelRef,
-    /// Context window size in tokens. `None` uses the model's own trained
-    /// context length (see `n_ctx_train` on the loaded model).
+    /// Context window size in tokens. `None` uses Grafium's safe 4096-token
+    /// default rather than an arbitrarily large model-trained context.
     pub context_size: Option<u32>,
     /// Number of transformer layers to offload to the GPU when built with
     /// a GPU feature (`llm-local-vulkan`); ignored on CPU-only builds.
-    /// `None` offloads every layer — the common "just use the GPU" case.
+    /// `None` stays CPU-only. GPU offload requires an explicit layer count and
+    /// the `GRAFIUM_ALLOW_GPU_OFFLOAD=1` safety opt-in.
     pub gpu_layers: Option<u32>,
 }
 
@@ -239,5 +294,32 @@ mod tests {
         }"#;
         let parsed: LocalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.models_dir, None);
+    }
+
+    #[test]
+    fn sanitize_collection_limits_repairs_legacy_unsafe_values() {
+        let mut config = AiConfig::default();
+        config.embedding.chunk_max_tokens = usize::MAX;
+        config.embedding.chunk_overlap_tokens = usize::MAX;
+        config.embedding.batch_size = usize::MAX;
+        config.references.max_refs_per_paragraph = usize::MAX;
+        config.references.min_similarity_score = f32::INFINITY;
+
+        config.sanitize_collection_limits();
+
+        assert_eq!(config.embedding.chunk_max_tokens, 4_096);
+        assert_eq!(config.embedding.chunk_overlap_tokens, 4_095);
+        assert_eq!(config.embedding.batch_size, 64);
+        assert_eq!(config.references.max_refs_per_paragraph, 50);
+        assert_eq!(config.references.min_similarity_score, 1.0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_embedding_batch_size() {
+        let mut config = AiConfig::default();
+        config.embedding.batch_size = 0;
+
+        assert!(config.validate().is_err());
     }
 }

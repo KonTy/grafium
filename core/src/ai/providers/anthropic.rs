@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::read_limited_response;
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 
@@ -110,17 +111,18 @@ impl LlmProvider for AnthropicLlm {
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+                let body =
+                    String::from_utf8_lossy(&read_limited_response(resp, "Anthropic").await?)
+                        .into_owned();
                 return Err(CoreError::Other(format!(
                     "Anthropic returned {}: {}",
                     status, body
                 )));
             }
 
-            let response: AnthropicResponse = resp
-                .json()
-                .await
-                .map_err(|e| CoreError::Other(format!("Anthropic response parse error: {}", e)))?;
+            let body = read_limited_response(resp, "Anthropic").await?;
+            let response: AnthropicResponse = serde_json::from_slice(&body)
+                .map_err(|e| CoreError::Other(format!("Anthropic response parse error: {e}")))?;
 
             response
                 .content

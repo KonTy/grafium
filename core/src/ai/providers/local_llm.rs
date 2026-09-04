@@ -1,13 +1,11 @@
-//! Embedded local LLM inference via llama.cpp (through the `llama-cpp-2`
+//! Isolated local LLM inference via llama.cpp (through the `llama-cpp-2`
 //! bindings) — the LLM-side counterpart to `media::transcribe`'s
 //! `WhisperTranscriber`. Both:
 //!   * resolve a model file through the shared `model_library` instead of
 //!     requiring an exact path (`from_settings`/`from_config` mean the same
 //!     thing in both modules — see `media::transcribe` for the sibling this
 //!     one is deliberately shaped to match),
-//!   * silence their native library's verbose stderr logging once per
-//!     process (whisper.cpp there, llama.cpp here) so a raw-mode terminal
-//!     UI is never corrupted,
+//!   * execute native code in disposable resource-limited subprocesses,
 //!   * and expose themselves through this crate's existing trait
 //!     abstractions (`Transcriber` there, `LlmProvider` here) rather than a
 //!     bespoke call site — so summarization code depends on "an
@@ -18,8 +16,9 @@
 //! via Vulkan (no CUDA toolkit required — same rationale as `media-vulkan`).
 
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -30,32 +29,17 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
 use crate::ai::config::LocalLlmSettings;
+use crate::ai::resources::{self, ModelWorkload};
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
 
-/// Offload every transformer layer to the GPU — the llama.cpp convention
-/// for "as many as exist" (the upstream `simple` example uses the same
-/// sentinel). A no-op unless built with a GPU feature (`llm-local-vulkan`).
-const OFFLOAD_ALL_LAYERS: u32 = 1_000_000;
-
-/// Context window used when neither the model's own trained context length
-/// nor an explicit `context_size` setting is usable.
-const DEFAULT_CTX_SIZE: u32 = 4096;
-
-/// Runs a GGUF model fully in-process via llama.cpp. Stateless per call
-/// beyond the loaded model, so one instance can be reused across many
-/// `complete()` calls (avoids re-loading the model each time — same
-/// reasoning as `WhisperTranscriber`).
-///
-/// `backend`/`model` are wrapped in `Arc` (not owned directly) purely so
-/// `complete()` can move cheap handles into a `tokio::task::spawn_blocking`
-/// closure — llama.cpp inference is synchronous CPU/GPU-bound work and must
-/// never run directly on the async executor.
+/// Resolves and validates a GGUF model, then runs each completion in a
+/// disposable resource-limited Grafium worker process.
 pub struct LocalLlm {
-    backend: Arc<LlamaBackend>,
-    model: Arc<LlamaModel>,
-    ctx_size: NonZeroU32,
+    model_path: PathBuf,
+    context_size: u32,
+    gpu_layers: u32,
     name: String,
 }
 
@@ -71,38 +55,21 @@ impl LocalLlm {
     /// `gpu_layers` controls how many transformer layers to offload to the
     /// GPU (only meaningful when built with `llm-local-vulkan` — otherwise
     /// there's no GPU backend to offload to, so this is a harmless no-op).
-    /// `None` for either means "use a sensible default" (the model's
-    /// trained context length, and "offload everything", respectively).
+    /// `None` uses Grafium's conservative defaults: 4096 context tokens and
+    /// CPU-only inference. GPU offload requires an explicit safety opt-in.
     pub fn load(
         model_path: &Path,
         context_size: Option<u32>,
         gpu_layers: Option<u32>,
     ) -> Result<Self> {
-        // llama.cpp/GGML log verbosely to stderr by default, which would
-        // corrupt a raw-mode terminal (e.g. the TUI) — same concern and
-        // same fix as whisper.cpp in `media::transcribe::WhisperTranscriber`.
-        static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
-        INSTALL_LOGGING.call_once(|| {
-            send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-        });
-
-        let backend = BACKEND
-            .get_or_init(|| {
-                Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend"))
-            })
-            .clone();
-
-        let model_params =
-            LlamaModelParams::default().with_n_gpu_layers(gpu_layers.unwrap_or(OFFLOAD_ALL_LAYERS));
-
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
-            .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
-
-        let ctx_size = context_size
-            .filter(|&n| n > 0)
-            .or_else(|| Some(model.n_ctx_train()).filter(|&n| n > 0))
-            .and_then(NonZeroU32::new)
-            .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
+        let context_size = resources::safe_context_size(context_size)?;
+        let gpu_layers = resources::safe_gpu_layers(gpu_layers)?;
+        resources::validate_model_load(
+            model_path,
+            ModelWorkload::Llm {
+                context_tokens: context_size,
+            },
+        )?;
 
         let name = model_path
             .file_name()
@@ -111,9 +78,9 @@ impl LocalLlm {
             .to_string();
 
         Ok(Self {
-            backend,
-            model: Arc::new(model),
-            ctx_size,
+            model_path: model_path.to_path_buf(),
+            context_size,
+            gpu_layers,
             name,
         })
     }
@@ -154,19 +121,41 @@ impl LlmProvider for LocalLlm {
         messages: &'a [ChatMessage],
         options: &'a CompletionOptions,
     ) -> BoxFuture<'a, Result<String>> {
-        let model = self.model.clone();
-        let backend = self.backend.clone();
-        let ctx_size = self.ctx_size;
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
         let messages = messages.to_vec();
         let options = options.clone();
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options)?;
-                generate(&model, &backend, ctx_size, &prompt, &options)
+                let prompt_bytes = messages.iter().fold(
+                    options.system_prompt.as_ref().map_or(0, String::len),
+                    |total, message| total.saturating_add(message.content.len()),
+                );
+                resources::validate_prompt_bytes(prompt_bytes)?;
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::Llm {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                        messages,
+                        options,
+                    },
+                    Duration::from_secs(30 * 60),
+                )? {
+                    crate::ai::worker::WorkerOutput::Llm(output) => Ok(output),
+                    crate::ai::worker::WorkerOutput::Ready => Err(CoreError::Other(
+                        "native AI worker returned a health result for an LLM request".to_string(),
+                    )),
+                    #[cfg(feature = "media")]
+                    crate::ai::worker::WorkerOutput::Whisper(_) => Err(CoreError::Other(
+                        "native AI worker returned a transcription for an LLM request".to_string(),
+                    )),
+                }
             })
             .await
-            .map_err(|e| CoreError::Other(format!("LLM inference task panicked: {e}")))?
+            .map_err(|e| CoreError::Other(format!("LLM worker task panicked: {e}")))?
         })
     }
 
@@ -175,11 +164,158 @@ impl LlmProvider for LocalLlm {
     }
 
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
-        // The model is loaded fully in-process at construction time — if
-        // `LocalLlm::load`/`from_config` succeeded, it's ready by definition
-        // (no network endpoint to probe, unlike Ollama/OpenAI-compatible).
-        Box::pin(async move { Ok(true) })
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::ValidateLlm {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                    },
+                    Duration::from_secs(10 * 60),
+                )? {
+                    crate::ai::worker::WorkerOutput::Ready => Ok(true),
+                    _ => Err(CoreError::Other(
+                        "native AI worker returned output while validating a model".to_string(),
+                    )),
+                }
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("LLM health worker task panicked: {e}")))?
+        })
     }
+}
+
+pub(crate) struct LlmSlot {
+    model_path: PathBuf,
+    context_size: u32,
+    gpu_layers: u32,
+    backend: Arc<LlamaBackend>,
+    model: LlamaModel,
+    model_size: u64,
+}
+
+impl LlmSlot {
+    fn matches(&self, model_path: &Path, context_size: u32, gpu_layers: u32) -> bool {
+        self.model_path == model_path
+            && self.context_size == context_size
+            && self.gpu_layers == gpu_layers
+    }
+}
+
+fn install_llm_logging() {
+    static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
+    INSTALL_LOGGING.call_once(|| {
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+    });
+}
+
+fn ensure_slot(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+) -> Result<()> {
+    if slot
+        .as_ref()
+        .is_some_and(|cached| cached.matches(model_path, context_size, gpu_layers))
+    {
+        return Ok(());
+    }
+    // Drop any previously cached model first so its native memory is released
+    // before a potentially larger replacement is loaded.
+    *slot = None;
+    install_llm_logging();
+    let (backend, model) = load_native_model(model_path, gpu_layers)?;
+    let model_size = std::fs::metadata(model_path)
+        .map_err(|e| CoreError::Other(format!("Cannot inspect LLM model: {e}")))?
+        .len();
+    *slot = Some(LlmSlot {
+        model_path: model_path.to_path_buf(),
+        context_size,
+        gpu_layers,
+        backend,
+        model,
+        model_size,
+    });
+    Ok(())
+}
+
+pub(crate) fn validate_in_process(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+) -> Result<()> {
+    ensure_slot(slot, model_path, context_size, gpu_layers)?;
+    let slot = slot
+        .as_ref()
+        .expect("slot populated by ensure_slot for validation");
+    let ctx_size = NonZeroU32::new(context_size)
+        .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
+    resources::validate_inference_headroom(
+        "local LLM validation",
+        resources::estimate_llm_context_bytes(slot.model_size, ctx_size.get()),
+    )?;
+    let params = LlamaContextParams::default()
+        .with_n_ctx(Some(ctx_size))
+        .with_n_threads(1)
+        .with_n_threads_batch(1);
+    slot.model
+        .new_context(&slot.backend, params)
+        .map_err(|e| CoreError::Other(format!("failed to validate llama context: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn complete_in_process(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> Result<String> {
+    ensure_slot(slot, model_path, context_size, gpu_layers)?;
+    let slot = slot
+        .as_ref()
+        .expect("slot populated by ensure_slot for completion");
+    let ctx_size = NonZeroU32::new(context_size)
+        .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
+    let prompt = build_chat_prompt(&slot.model, messages, options)?;
+    generate(
+        &slot.model,
+        &slot.backend,
+        ctx_size,
+        slot.model_size,
+        &prompt,
+        options,
+    )
+}
+
+fn load_native_model(
+    model_path: &Path,
+    gpu_layers: u32,
+) -> Result<(Arc<LlamaBackend>, LlamaModel)> {
+    let backend = if let Some(backend) = BACKEND.get() {
+        Arc::clone(backend)
+    } else {
+        let initialized = Arc::new(LlamaBackend::init().map_err(|e| {
+            CoreError::Other(format!("failed to initialize the llama.cpp backend: {e}"))
+        })?);
+        let _ = BACKEND.set(Arc::clone(&initialized));
+        BACKEND.get().map(Arc::clone).unwrap_or(initialized)
+    };
+    // Disable mmap so the worker's virtual-memory ceiling tracks real model
+    // allocations instead of large file mappings.
+    let model_params = LlamaModelParams::default()
+        .with_n_gpu_layers(gpu_layers)
+        .with_use_mmap(false);
+    let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+        .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
+    Ok((backend, model))
 }
 
 /// Formats a conversation (`options.system_prompt` + `messages`) using the
@@ -242,32 +378,6 @@ fn build_sampler(options: &CompletionOptions) -> LlamaSampler {
     }
 }
 
-/// Threads to hand llama.cpp for inference.
-///
-/// Deliberately *not* every core. Grafium is an interactive editor: if
-/// inference saturates all of them the WebView renderer has nothing left to
-/// draw with and typing visibly stutters, which is far worse than a slightly
-/// slower answer. We keep two cores in reserve so the UI stays responsive, and
-/// honour `GRAFIUM_LLM_THREADS` for anyone who would rather trade smoothness
-/// for throughput.
-fn inference_thread_count() -> i32 {
-    const RESERVED_FOR_UI: usize = 2;
-
-    if let Some(override_threads) = std::env::var("GRAFIUM_LLM_THREADS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-    {
-        return override_threads as i32;
-    }
-
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
-    cores.saturating_sub(RESERVED_FOR_UI).max(1) as i32
-}
-
 /// The single tokenize → batch → decode → sample loop every completion
 /// (chat-formatted or, in the future, raw) goes through — this is the
 /// manual generation loop `llama-cpp-2` requires (it has no high-level
@@ -276,10 +386,16 @@ fn generate(
     model: &LlamaModel,
     backend: &LlamaBackend,
     ctx_size: NonZeroU32,
+    model_size: u64,
     prompt: &str,
     options: &CompletionOptions,
 ) -> Result<String> {
-    let n_threads = inference_thread_count();
+    resources::validate_prompt_size(prompt)?;
+    resources::validate_inference_headroom(
+        "local LLM inference",
+        resources::estimate_llm_context_bytes(model_size, ctx_size.get()),
+    )?;
+    let n_threads = resources::inference_thread_count();
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
         .with_n_threads(n_threads)
@@ -301,7 +417,7 @@ fn generate(
             tokens.len()
         )));
     }
-    let max_new_tokens = options.max_tokens.unwrap_or(1024) as i32;
+    let max_new_tokens = resources::safe_generated_tokens(options.max_tokens)? as i32;
 
     let mut batch = LlamaBatch::new(tokens.len().max(512) + 1, 1);
     let last_index = tokens.len() as i32 - 1;
@@ -381,7 +497,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let message = err.to_string();
         assert!(
@@ -407,7 +524,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let default_dir = data_dir.path().join("models");
         assert!(
@@ -424,7 +542,7 @@ mod config_tests {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let threads = inference_thread_count();
+        let threads = resources::inference_thread_count();
 
         assert!(threads >= 1, "must always use at least one thread");
         if cores > 2 {

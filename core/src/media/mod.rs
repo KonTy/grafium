@@ -77,8 +77,8 @@ pub fn fetch_transcript(
     }
     let source = MediaSource::parse(url);
     let wav_path = ingest::fetch_audio(&source, workdir)?;
-    let transcript = transcriber.transcribe(&wav_path)?;
+    let transcript = transcriber.transcribe(&wav_path);
     let _ = std::fs::remove_file(&wav_path);
+    let transcript = transcript?;
     Ok((transcript, TranscriptSource::Whisper))
 }
-

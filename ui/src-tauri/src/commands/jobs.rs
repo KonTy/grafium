@@ -24,6 +24,7 @@ pub const JOB_EVENT: &str = "job://update";
 /// Bounded on purpose — an unbounded registry in a long-lived desktop session
 /// is a slow memory leak.
 const MAX_RETAINED_JOBS: usize = 50;
+const MAX_RUNNING_JOBS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,7 +98,7 @@ impl JobRegistry {
         kind: impl Into<String>,
         title: impl Into<String>,
         cancellable: bool,
-    ) -> JobHandle {
+    ) -> Result<JobHandle, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let job = Job {
@@ -115,7 +116,24 @@ impl JobRegistry {
         };
 
         {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.lock().map_err(|e| e.to_string())?;
+            let running = entries
+                .iter()
+                .filter(|entry| entry.job.status == JobStatus::Running)
+                .count();
+            if running >= MAX_RUNNING_JOBS {
+                return Err(format!(
+                    "Grafium is already running {running} background AI jobs. \
+                     Wait for one to finish or cancel it before starting another."
+                ));
+            }
+            if job.kind == "ai_index_all"
+                && entries.iter().any(|entry| {
+                    entry.job.status == JobStatus::Running && entry.job.kind == "ai_index_all"
+                })
+            {
+                return Err("A full AI index is already running".to_string());
+            }
             entries.push(JobEntry {
                 job: job.clone(),
                 cancel: cancel.clone(),
@@ -125,18 +143,18 @@ impl JobRegistry {
 
         let _ = app.emit(JOB_EVENT, &job);
 
-        JobHandle {
+        Ok(JobHandle {
             id,
             app,
             registry: Arc::clone(self),
             cancel,
-        }
+        })
     }
 
     pub fn list(&self) -> Vec<Job> {
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .map(|e| e.job.clone())
             .collect()
@@ -144,7 +162,10 @@ impl JobRegistry {
 
     /// Ask a job to stop. Cooperative: the worker decides when to notice.
     pub fn request_cancel(&self, id: &str) -> bool {
-        let entries = self.entries.lock().unwrap();
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match entries.iter().find(|e| e.job.id == id) {
             Some(entry) if entry.job.status == JobStatus::Running => {
                 entry.cancel.store(true, Ordering::SeqCst);
@@ -158,12 +179,15 @@ impl JobRegistry {
     pub fn clear_finished(&self) {
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|e| !e.job.status.is_terminal());
     }
 
     fn mutate(&self, id: &str, f: impl FnOnce(&mut Job)) -> Option<Job> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let entry = entries.iter_mut().find(|e| e.job.id == id)?;
         // A job that already reported a terminal status must never be revived;
         // a late progress tick from a worker that hasn't noticed cancellation
@@ -220,7 +244,6 @@ impl JobHandle {
             job.message = Some(message);
         });
     }
-
 
     pub fn succeeded(self, message: impl Into<String>, link: Option<JobLink>) {
         let message = message.into();

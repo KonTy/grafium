@@ -36,6 +36,7 @@ impl KnowledgeEngine {
     /// Create a new Knowledge Engine.
     /// `data_dir` is the app's data directory where vector store and registry live.
     pub fn new(data_dir: &Path, config: AiConfig) -> Result<Self> {
+        config.validate()?;
         let registry_path = data_dir.join("graph_registry.json");
         let registry = GraphRegistry::load(&registry_path)?;
 
@@ -265,6 +266,7 @@ impl KnowledgeEngine {
 
     /// Reconfigure the engine with new settings.
     pub fn reconfigure(&mut self, config: AiConfig) -> Result<()> {
+        config.validate()?;
         self.config = config.clone();
         self.llm = None;
         self.embedder = None;
@@ -392,7 +394,9 @@ impl KnowledgeEngine {
             return Ok(vec![]);
         }
 
-        store.search(&embeddings[0], top_k, graph_id).await
+        store
+            .search(&embeddings[0], top_k.clamp(1, 50), graph_id)
+            .await
     }
 
     /// Generate references for a page using AI.

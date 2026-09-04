@@ -11,7 +11,10 @@ pub mod config;
 pub mod embeddings;
 pub mod providers;
 pub mod references;
+pub mod resources;
 pub mod traits;
+#[cfg(any(feature = "llm-local", feature = "media"))]
+pub mod worker;
 
 pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;

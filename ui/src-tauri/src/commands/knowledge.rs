@@ -50,6 +50,21 @@ impl KnowledgeState {
 }
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
+const MAX_AI_QUESTION_BYTES: usize = 64 * 1024;
+const MAX_SEARCH_RESULTS: usize = 50;
+
+fn validate_question(question: &str) -> Result<(), String> {
+    if question.trim().is_empty() {
+        return Err("AI question cannot be empty".to_string());
+    }
+    if question.len() > MAX_AI_QUESTION_BYTES {
+        return Err(format!(
+            "AI question is too large ({} bytes; limit is {MAX_AI_QUESTION_BYTES})",
+            question.len()
+        ));
+    }
+    Ok(())
+}
 
 struct PageBatchCursor {
     batch_size: i64,
@@ -119,7 +134,7 @@ pub async fn ai_get_config(state: State<'_, KnowledgeState>) -> Result<serde_jso
     if let Some(engine) = engine {
         serde_json::to_value(engine.config()).map_err(|e| e.to_string())
     } else {
-        Ok(serde_json::to_value(AiConfig::default()).unwrap())
+        serde_json::to_value(AiConfig::default()).map_err(|e| e.to_string())
     }
 }
 
@@ -218,22 +233,28 @@ pub async fn ai_set_config(
         ..AiConfig::default()
     };
 
-    // Save config to disk.
     let config_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("knowledge");
+    // Reconfigure by swapping in a freshly built engine rather than mutating
+    // the shared one. Any job still running keeps the engine it started with,
+    // so changing the model mid-index can't swap providers underneath it. The
+    // graph registry is persisted on every write, so a new engine reloads it.
+    let rebuild_dir = config_dir.clone();
+    let rebuild_config = config.clone();
+    let rebuilt = tokio::task::spawn_blocking(move || {
+        KnowledgeEngine::new(&rebuild_dir, rebuild_config).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("AI configuration task failed: {e}"))??;
+
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("ai_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-    // Reconfigure by swapping in a freshly built engine rather than mutating
-    // the shared one. Any job still running keeps the engine it started with,
-    // so changing the model mid-index can't swap providers underneath it. The
-    // graph registry is persisted on every write, so a new engine reloads it.
-    let rebuilt = KnowledgeEngine::new(&config_dir, config).map_err(|e| e.to_string())?;
     let mut guard = state.engine.write().await;
     *guard = Some(Arc::new(rebuilt));
     drop(guard);
@@ -308,9 +329,12 @@ pub async fn ai_index_all_pages(
     let engine = state.ready_handle().await?;
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
 
-    let job = jobs
-        .registry
-        .start(app.clone(), "ai_index_all", "Indexing graph for AI search", true);
+    let job = jobs.registry.start(
+        app.clone(),
+        "ai_index_all",
+        "Indexing graph for AI search",
+        true,
+    )?;
     let job_id = job.id().to_string();
 
     tokio::spawn(async move {
@@ -436,8 +460,13 @@ pub async fn ai_search(
 ) -> Result<Vec<SearchResult>, String> {
     let engine = state.ready_handle().await?;
 
+    validate_question(&query)?;
     engine
-        .search(&query, top_k.unwrap_or(10), graph_id.as_deref())
+        .search(
+            &query,
+            top_k.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS),
+            graph_id.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -492,7 +521,7 @@ pub async fn ai_generate_references(
         "ai_references",
         format!("Finding references for “{page_title}”"),
         false,
-    );
+    )?;
     let job_id = job.id().to_string();
 
     tokio::spawn(async move {
@@ -541,6 +570,7 @@ pub async fn ai_ask(
     question: String,
     graph_id: Option<String>,
 ) -> Result<String, String> {
+    validate_question(&question)?;
     let engine = state.ready_handle().await?;
 
     engine
@@ -573,6 +603,7 @@ pub async fn ai_ask_stream(
     graph_id: Option<String>,
     request_id: String,
 ) -> Result<(), String> {
+    validate_question(&question)?;
     let engine = state.ready_handle().await?;
 
     let answer = match engine.ask(&question, graph_id.as_deref()).await {
@@ -749,5 +780,4 @@ mod tests {
             "cursor resumed after reporting exhaustion"
         );
     }
-
 }
