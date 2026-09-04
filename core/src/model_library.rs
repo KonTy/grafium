@@ -66,16 +66,10 @@ pub fn default_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models")
 }
 
-/// Naming fragments whisper.cpp model releases always include somewhere in
-/// the file name (`ggml-base.en.bin`, `ggml-large-v3.bin`,
-/// `whisper-large-v3-q5_0.gguf`, ...).
-const WHISPER_SIZE_NAMES: &[&str] = &["tiny", "base", "small", "medium", "large-v"];
-
 /// Naming fragments the common local embedding model families always
-/// include somewhere in the file name. Checked *before* the whisper
-/// heuristic below since several of these families reuse whisper's generic
-/// size words (e.g. `bge-base-en-v1.5.gguf`, `gte-small.gguf`) — without
-/// this ordering those would be misclassified as whisper checkpoints.
+/// include somewhere in the file name. Checked before the whisper heuristic
+/// below since several of these families reuse whisper's generic size words
+/// (e.g. `bge-base-en-v1.5.gguf`, `gte-small.gguf`).
 const EMBEDDING_MARKERS: &[&str] = &[
     "embed",
     "bge-",
@@ -94,16 +88,25 @@ const EMBEDDING_MARKERS: &[&str] = &[
 /// Classifies a file name by the naming conventions its ecosystem uses:
 /// embedding models mention "embed" or one of a handful of well-known
 /// embedding family prefixes; whisper.cpp checkpoints are `ggml-*` or
-/// otherwise mention "whisper" or a whisper size name; llama.cpp
-/// quantizations are `*.gguf` (or the older `*.bin`) without those markers.
+/// otherwise explicitly mention "whisper"; llama.cpp quantizations are
+/// `*.gguf` (or the older `*.bin`) without those markers.
+///
+/// We intentionally do NOT use bare Whisper size words ("small", "base",
+/// "medium", ...) as classification signals — LLM naming widely reuses
+/// them (e.g. `Mistral-Small-3.2-24B`, `Qwen3-Small`, `phi-small`) and
+/// misclassifying an LLM as Whisper causes the auto-picker to feed a
+/// multi-GB LLM file into whisper.cpp and produce `Failed to create a new
+/// whisper context`.
 pub fn classify(file_name: &str) -> ModelKind {
     let lower = file_name.to_lowercase();
     if EMBEDDING_MARKERS.iter().any(|m| lower.contains(m)) {
         return ModelKind::Embedding;
     }
-    let looks_like_whisper = lower.starts_with("ggml-")
-        || lower.contains("whisper")
-        || WHISPER_SIZE_NAMES.iter().any(|s| lower.contains(s));
+    // Whisper checkpoints come from ggerganov's naming: `ggml-<size>.bin`
+    // or `ggml-<size>-q*.bin`. The upstream `whisper.cpp` repo distributes
+    // exactly this shape. Third-party quantizations always include the
+    // literal word "whisper".
+    let looks_like_whisper = lower.starts_with("ggml-") || lower.contains("whisper");
     if looks_like_whisper {
         ModelKind::Whisper
     } else if lower.ends_with(".gguf") || lower.ends_with(".bin") {
@@ -292,6 +295,7 @@ mod tests {
         assert_eq!(classify("ggml-base.en.bin"), ModelKind::Whisper);
         assert_eq!(classify("ggml-medium.bin"), ModelKind::Whisper);
         assert_eq!(classify("ggml-large-v3.bin"), ModelKind::Whisper);
+        assert_eq!(classify("ggml-large-v3-turbo.bin"), ModelKind::Whisper);
         assert_eq!(classify("whisper-large-v3-q5_0.gguf"), ModelKind::Whisper);
         assert_eq!(
             classify("llama-3.1-8b-instruct.Q4_K_M.gguf"),
@@ -299,6 +303,20 @@ mod tests {
         );
         assert_eq!(classify("qwen2.5-14b-instruct-q4_k_m.gguf"), ModelKind::Llm);
         assert_eq!(classify("notes.txt"), ModelKind::Unknown);
+    }
+
+    #[test]
+    fn classify_does_not_treat_llm_size_words_as_whisper() {
+        // Real-world LLM names include Whisper's generic size words
+        // ("small", "medium") as marketing labels. Misclassifying them
+        // sends a multi-GB LLM into whisper.cpp and fails with
+        // "Failed to create a new whisper context".
+        assert_eq!(
+            classify("Mistral-Small-3.2-24B-Instruct-2506-Heretic-v1.2-2.i1-Q4_K_M.gguf"),
+            ModelKind::Llm
+        );
+        assert_eq!(classify("phi-medium-4k-Q4_K_M.gguf"), ModelKind::Llm);
+        assert_eq!(classify("Qwen3-Small-Instruct-Q4.gguf"), ModelKind::Llm);
     }
 
     #[test]

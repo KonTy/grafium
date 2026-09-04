@@ -344,6 +344,20 @@ export function registerDefaultShortcuts(actions: {
       category: "navigation",
       description: "Go forward",
     },
+
+    // ─── Familiar aliases (VS Code / Obsidian / Cursor muscle memory) ─────────
+    {
+      binding: "mod+b",
+      action: actions.toggleSidebar,
+      category: "toggle",
+      description: "Toggle left sidebar",
+    },
+    {
+      binding: "mod+shift+a",
+      action: actions.toggleRightSidebar,
+      category: "toggle",
+      description: "Toggle Knowledge Panel",
+    },
   ];
 
   keymap_manager.register(shortcuts);

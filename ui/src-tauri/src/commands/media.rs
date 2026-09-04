@@ -104,6 +104,13 @@ fn cached_transcriber(
         .model_ref
         .resolve(&models_dir, ModelKind::Whisper)
         .map_err(|e| e.to_string())?;
+    tracing::info!(
+        models_dir = %models_dir.display(),
+        configured_model = ?config.whisper.model_ref.model,
+        language = ?config.whisper.language,
+        resolved = %resolved_path.display(),
+        "resolved whisper model"
+    );
     let cache_key = (resolved_path, config.whisper.language.clone());
 
     static CACHE: OnceLock<Mutex<Option<((PathBuf, Option<String>), Arc<grafium_core::media::WhisperTranscriber>)>>> =

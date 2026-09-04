@@ -26,7 +26,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # either. Desktop targets get both so the app is genuinely zero-setup —
 # no external server process for users to start themselves.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-grafium_core = { path = "../../core", package = "grafium-core", features = ["media-vulkan", "llm-local-vulkan"] }
+# Vulkan for the LLM (llama.cpp, dynamically linked) — but keep whisper.cpp on
+# CPU. whisper-rs statically links its own copy of GGML + libggml-vulkan; when
+# llm-local-vulkan is also enabled, both compete to register a Vulkan backend
+# into GGML's global registry and Whisper loses (`Failed to create a new
+# whisper context`). CPU is plenty for typical Whisper models.
+grafium_core = { path = "../../core", package = "grafium-core", features = ["media", "llm-local-vulkan"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"
