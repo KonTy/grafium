@@ -233,6 +233,169 @@ pub fn journal_title_to_ms(title: &str) -> Option<i64> {
     Some(Utc.from_utc_datetime(&dt).timestamp_millis())
 }
 
+/// Detected temporal shape of a query. `is_temporal` is the umbrella signal
+/// (any "when"-style question or date reference); the finer flags steer
+/// ranking.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TemporalIntent {
+    /// The query is asking about *when* something happened / a time window.
+    pub is_temporal: bool,
+    /// Bias toward the most recent matches ("lately", "last time", "this week").
+    pub wants_recency: bool,
+    /// Bias toward the earliest matches ("first time", "originally").
+    pub wants_earliest: bool,
+    /// An explicit epoch-ms range `[start, end]` (e.g. "in 2025").
+    pub explicit_range: Option<(i64, i64)>,
+}
+
+const RECENCY_PHRASES: &[&str] = &[
+    "recently",
+    "lately",
+    "these days",
+    "nowadays",
+    "this week",
+    "last week",
+    "this month",
+    "last month",
+    "this year",
+    "past week",
+    "past month",
+    "past few",
+    "past couple",
+    "last time",
+    "how long ago",
+    "yesterday",
+    "today",
+];
+
+const EARLIEST_PHRASES: &[&str] = &[
+    "first time",
+    "for the first time",
+    "when did i first",
+    "when was the first",
+    "earliest",
+    "originally",
+    "very first",
+];
+
+const TEMPORAL_TRIGGERS: &[&str] = &[
+    "when did",
+    "when was",
+    "when have",
+    "when i ",
+    "what day",
+    "what date",
+    "how long ago",
+    "how many days",
+    "what year",
+    "which year",
+];
+
+/// Detect temporal intent from a natural-language query using cheap pattern
+/// matching (no LLM). Pure and deterministic.
+pub fn detect_temporal_intent(query: &str) -> TemporalIntent {
+    let q = query.to_lowercase();
+
+    let wants_recency = RECENCY_PHRASES.iter().any(|p| q.contains(p));
+    let wants_earliest = EARLIEST_PHRASES.iter().any(|p| q.contains(p));
+    let explicit_range = parse_year_range(&q);
+    let triggered = TEMPORAL_TRIGGERS.iter().any(|p| q.contains(p));
+
+    let is_temporal = wants_recency || wants_earliest || explicit_range.is_some() || triggered;
+
+    TemporalIntent {
+        is_temporal,
+        wants_recency,
+        wants_earliest,
+        explicit_range,
+    }
+}
+
+/// Find a standalone 4-digit year (1900–2099) in the query and return the
+/// epoch-ms range covering that whole calendar year.
+fn parse_year_range(q: &str) -> Option<(i64, i64)> {
+    let mut year: Option<i32> = None;
+    for token in q.split(|c: char| !c.is_ascii_digit()) {
+        if token.len() == 4 {
+            if let Ok(y) = token.parse::<i32>() {
+                if (1900..=2099).contains(&y) {
+                    year = Some(y);
+                    break;
+                }
+            }
+        }
+    }
+    let y = year?;
+    let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
+    let end = NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
+    Some((
+        Utc.from_utc_datetime(&start).timestamp_millis(),
+        Utc.from_utc_datetime(&end).timestamp_millis(),
+    ))
+}
+
+/// Re-order hits for a temporal query: prefer hits inside an explicit range,
+/// then bias journal (dated) pages, then sort by date (newest-first for
+/// recency, oldest-first for earliest), keeping the original fused order as a
+/// stable tiebreak. A no-op when `intent.is_temporal` is false.
+pub fn order_hits_temporally(
+    hits: Vec<RetrievedHit>,
+    intent: &TemporalIntent,
+) -> Vec<RetrievedHit> {
+    if !intent.is_temporal {
+        return hits;
+    }
+
+    let mut indexed: Vec<(usize, RetrievedHit)> = hits.into_iter().enumerate().collect();
+
+    indexed.sort_by(|(ai, a), (bi, b)| {
+        let a_in = in_range(a.date_ms, intent.explicit_range);
+        let b_in = in_range(b.date_ms, intent.explicit_range);
+        // 0 = in range (or no range), 1 = out of range → in-range first.
+        let a_range = if a_in { 0 } else { 1 };
+        let b_range = if b_in { 0 } else { 1 };
+        a_range
+            .cmp(&b_range)
+            .then_with(|| journal_rank(a).cmp(&journal_rank(b)))
+            .then_with(|| date_cmp(a.date_ms, b.date_ms, intent))
+            .then_with(|| ai.cmp(bi))
+    });
+
+    indexed.into_iter().map(|(_, hit)| hit).collect()
+}
+
+fn journal_rank(hit: &RetrievedHit) -> u8 {
+    if hit.is_journal {
+        0
+    } else {
+        1
+    }
+}
+
+fn in_range(date_ms: Option<i64>, range: Option<(i64, i64)>) -> bool {
+    match (date_ms, range) {
+        (Some(d), Some((lo, hi))) => d >= lo && d <= hi,
+        (None, Some(_)) => false,
+        (_, None) => true,
+    }
+}
+
+fn date_cmp(a: Option<i64>, b: Option<i64>, intent: &TemporalIntent) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            if intent.wants_earliest && !intent.wants_recency {
+                a.cmp(&b) // oldest first
+            } else {
+                b.cmp(&a) // newest first (default temporal bias)
+            }
+        }
+        (Some(_), None) => Ordering::Less, // dated before undated
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 /// Format an epoch-ms timestamp as an ISO `YYYY-MM-DD` date (UTC), for
 /// embedding into prompt context lines.
 pub fn format_date_ms(ms: i64) -> String {
@@ -366,7 +529,7 @@ mod tests {
         };
         let mut h1 = hit("a", "first primary");
         h1.children = vec![shared.clone()];
-        let mut h2 = hit("shared", "the shared detail");
+        let h2 = hit("shared", "the shared detail");
         // h2's primary IS the shared block from h1 → should be skipped.
         let entries = assemble_within_budget(&[h1, h2], 100_000);
         assert_eq!(entries.len(), 1, "the duplicate primary hit is dropped");
@@ -380,5 +543,134 @@ mod tests {
         let entries = assemble_within_budget(&[hit("a", &huge)], 10);
         assert_eq!(entries.len(), 1);
         assert!(estimate_tokens(&entries[0].text) <= 12);
+    }
+
+    fn dated_hit(id: &str, date_ms: Option<i64>, is_journal: bool) -> RetrievedHit {
+        let mut h = hit(id, "content");
+        h.date_ms = date_ms;
+        h.is_journal = is_journal;
+        h
+    }
+
+    #[test]
+    fn detect_temporal_intent_flags_recency_phrases() {
+        for q in [
+            "what have I been reading about lately",
+            "when was the last time I was upset",
+            "what did I do this week",
+            "how long ago did I start running",
+        ] {
+            let intent = detect_temporal_intent(q);
+            assert!(intent.is_temporal, "should be temporal: {q}");
+            assert!(intent.wants_recency, "should want recency: {q}");
+        }
+    }
+
+    #[test]
+    fn detect_temporal_intent_flags_earliest_phrases() {
+        let intent = detect_temporal_intent("when did I first visit Paris");
+        assert!(intent.is_temporal);
+        assert!(intent.wants_earliest);
+    }
+
+    #[test]
+    fn detect_temporal_intent_flags_generic_when_questions() {
+        let intent = detect_temporal_intent("when did I paint my room");
+        assert!(intent.is_temporal);
+        assert!(!intent.wants_recency);
+        assert!(!intent.wants_earliest);
+        assert!(intent.explicit_range.is_none());
+    }
+
+    #[test]
+    fn detect_temporal_intent_parses_explicit_year() {
+        let intent = detect_temporal_intent("what was I working on in 2025");
+        assert!(intent.is_temporal);
+        let (lo, hi) = intent.explicit_range.expect("year range");
+        assert_eq!(lo, journal_title_to_ms("2025-01-01").unwrap());
+        assert!(hi > lo);
+        // hi should be inside 2025.
+        assert!(hi < journal_title_to_ms("2026-01-01").unwrap());
+    }
+
+    #[test]
+    fn detect_temporal_intent_is_negative_for_plain_questions() {
+        for q in [
+            "summarize what I know about rust",
+            "explain how photosynthesis works",
+            "what is the capital of France",
+        ] {
+            let intent = detect_temporal_intent(q);
+            assert!(!intent.is_temporal, "should not be temporal: {q}");
+        }
+    }
+
+    #[test]
+    fn order_hits_temporally_is_noop_when_not_temporal() {
+        let hits = vec![
+            dated_hit("a", Some(1), false),
+            dated_hit("b", Some(9), false),
+        ];
+        let intent = TemporalIntent::default();
+        let ordered = order_hits_temporally(hits, &intent);
+        assert_eq!(ordered[0].block_id, "a");
+        assert_eq!(ordered[1].block_id, "b");
+    }
+
+    #[test]
+    fn order_hits_temporally_puts_journals_first_then_newest() {
+        let hits = vec![
+            dated_hit("old-journal", Some(1_000), true),
+            dated_hit("plain", Some(9_000), false),
+            dated_hit("new-journal", Some(5_000), true),
+        ];
+        let intent = TemporalIntent {
+            is_temporal: true,
+            wants_recency: true,
+            ..Default::default()
+        };
+        let ordered = order_hits_temporally(hits, &intent);
+        // Journals first, and among journals newest-first.
+        assert_eq!(ordered[0].block_id, "new-journal");
+        assert_eq!(ordered[1].block_id, "old-journal");
+        assert_eq!(ordered[2].block_id, "plain");
+    }
+
+    #[test]
+    fn order_hits_temporally_earliest_sorts_oldest_first() {
+        let hits = vec![
+            dated_hit("new", Some(9_000), true),
+            dated_hit("old", Some(1_000), true),
+        ];
+        let intent = TemporalIntent {
+            is_temporal: true,
+            wants_earliest: true,
+            ..Default::default()
+        };
+        let ordered = order_hits_temporally(hits, &intent);
+        assert_eq!(ordered[0].block_id, "old");
+        assert_eq!(ordered[1].block_id, "new");
+    }
+
+    #[test]
+    fn order_hits_temporally_prefers_hits_inside_explicit_range() {
+        let in_2025 = journal_title_to_ms("2025-06-15").unwrap();
+        let in_2024 = journal_title_to_ms("2024-06-15").unwrap();
+        let range = (
+            journal_title_to_ms("2025-01-01").unwrap(),
+            journal_title_to_ms("2025-12-31").unwrap(),
+        );
+        let hits = vec![
+            dated_hit("outside", Some(in_2024), true),
+            dated_hit("inside", Some(in_2025), true),
+        ];
+        let intent = TemporalIntent {
+            is_temporal: true,
+            explicit_range: Some(range),
+            ..Default::default()
+        };
+        let ordered = order_hits_temporally(hits, &intent);
+        assert_eq!(ordered[0].block_id, "inside");
+        assert_eq!(ordered[1].block_id, "outside");
     }
 }

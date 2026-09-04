@@ -505,14 +505,28 @@ impl KnowledgeEngine {
 
         let fused = retrieval::reciprocal_rank_fusion(&rankings, retrieval::RRF_K);
 
-        let top_ids: Vec<String> = fused.iter().take(top_k).map(|f| f.id.clone()).collect();
+        // Temporal queries ("when did I…", "lately", "in 2025") need date-aware
+        // reordering. Hydrate a wider slice so the reorder has candidates to
+        // pull forward, then truncate back to `top_k`.
+        let intent = retrieval::detect_temporal_intent(query);
+        let hydrate_count = if intent.is_temporal {
+            fused.len().min(fetch)
+        } else {
+            top_k
+        };
+
+        let top_ids: Vec<String> = fused
+            .iter()
+            .take(hydrate_count)
+            .map(|f| f.id.clone())
+            .collect();
         let metas = db.get_blocks_with_page_meta(&top_ids)?;
         let score_by_id: std::collections::HashMap<&str, f64> =
             fused.iter().map(|f| (f.id.as_str(), f.score)).collect();
         let meta_by_id: std::collections::HashMap<&str, &crate::db::BlockPageMeta> =
             metas.iter().map(|m| (m.block_id.as_str(), m)).collect();
 
-        let hits = top_ids
+        let mut hits: Vec<RetrievedHit> = top_ids
             .iter()
             .filter_map(|id| {
                 let meta = meta_by_id.get(id.as_str())?;
@@ -530,6 +544,11 @@ impl KnowledgeEngine {
                 })
             })
             .collect();
+
+        if intent.is_temporal {
+            hits = retrieval::order_hits_temporally(hits, &intent);
+            hits.truncate(top_k);
+        }
 
         Ok(hits)
     }
