@@ -13,6 +13,7 @@
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
+  import { CALLOUT_KINDS, CALLOUT_META, calloutInsert } from "../lib/callouts";
   import DatePicker from "./DatePicker.svelte";
 
   interface Props {
@@ -221,6 +222,18 @@
       detail: "Set priority C (low)",
       apply: "[#C] ",
     },
+    // Callout / admonition inserters (Logseq-style `#+BEGIN_… / #+END_…`).
+    // Placed after the task/priority entries so TODO/DONE muscle-memory is
+    // unaffected. The cursor lands on the blank body line.
+    ...CALLOUT_KINDS.map((kind) => {
+      const { text, cursorOffset } = calloutInsert(kind);
+      return {
+        label: `/callout ${kind}`,
+        detail: `Insert a ${CALLOUT_META[kind].title} callout`,
+        apply: text,
+        cursorOffset,
+      };
+    }),
   ];
 
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {

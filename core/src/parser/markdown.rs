@@ -16,6 +16,13 @@ static FLASHCARD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#flashcard"
 static FLASHCARD_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*::\s*").unwrap());
 static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{query\s+(.+?)\}\}").unwrap());
 
+static ADMONITION_BEGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^#\+BEGIN_(TIP|NOTE|IMPORTANT|CAUTION|PINNED|WARNING)$").unwrap()
+});
+static ADMONITION_END_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^#\+END_(TIP|NOTE|IMPORTANT|CAUTION|PINNED|WARNING)$").unwrap()
+});
+
 /// Remove inline-code spans (text between backticks) so that separators like
 /// `::` inside code samples are not treated as flashcard/property syntax.
 fn strip_inline_code(s: &str) -> String {
@@ -196,6 +203,10 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let mut block_id: Option<String> = None;
     let mut consumed = 1;
     let mut inside_code_fence = raw_content.trim_start().starts_with("```");
+    // A Logseq-style admonition (`#+BEGIN_TIP` … `#+END_TIP`) is kept as a
+    // single block: consume every line up to and including the matching
+    // `#+END_…`, without splitting on inner blank lines.
+    let mut inside_admonition = ADMONITION_BEGIN_RE.is_match(raw_content.trim());
 
     // If the bullet content itself is just "id:: <uuid>" (roundtrip corruption fix),
     // treat it as the block's id with empty content
@@ -249,6 +260,20 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
                 inside_code_fence = false;
             }
             consumed += 1;
+            continue;
+        }
+
+        // While inside an admonition, keep consuming every line (including
+        // blank lines) until the matching `#+END_…`, so the whole callout
+        // body stays in one block.
+        if inside_admonition {
+            let continuation = strip_continuation(next_line, indent_level + 1);
+            full_content.push('\n');
+            full_content.push_str(continuation);
+            consumed += 1;
+            if ADMONITION_END_RE.is_match(continuation.trim()) {
+                inside_admonition = false;
+            }
             continue;
         }
 
@@ -497,5 +522,56 @@ mod tests {
             "```mermaid\nsequenceDiagram\nparticipant U as User\nparticipant S as Server\n```"
         );
         assert_eq!(parsed.blocks[1].content, "next");
+    }
+
+    #[test]
+    fn test_admonition_stays_single_block() {
+        let content = "- #+BEGIN_TIP\n  This is a helpful tip.\n  #+END_TIP";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].children.len(), 0);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "#+BEGIN_TIP\nThis is a helpful tip.\n#+END_TIP"
+        );
+    }
+
+    #[test]
+    fn test_admonition_keeps_inner_blank_lines_in_same_block() {
+        let content =
+            "- #+BEGIN_NOTE\n  first line\n  \n  second line\n  #+END_NOTE\n- After the callout";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "#+BEGIN_NOTE\nfirst line\n\nsecond line\n#+END_NOTE"
+        );
+        assert_eq!(parsed.blocks[1].content, "After the callout");
+    }
+
+    #[test]
+    fn test_admonition_empty_body_and_id_roundtrip_shape() {
+        // Mirrors what the serializer writes for a freshly-inserted callout:
+        // an empty body line plus the block id property line after `#+END_`.
+        let content = "- #+BEGIN_WARNING\n  \n  #+END_WARNING\n  id:: cb-1";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].id, Some("cb-1".to_string()));
+        assert_eq!(parsed.blocks[0].content, "#+BEGIN_WARNING\n\n#+END_WARNING");
+    }
+
+    #[test]
+    fn test_admonition_is_case_insensitive() {
+        let content = "- #+begin_important\n  Body text\n  #+end_important";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "#+begin_important\nBody text\n#+end_important"
+        );
     }
 }

@@ -227,3 +227,53 @@ body {
   background: color-mix(in srgb, var(--accent) 55%, transparent);
   box-shadow: 0 0 6px var(--accent);
 }
+
+/* ── Admonition / callout blocks ────────────────────────────────────────── */
+/* Rendered from `#+BEGIN_TIP` … `#+END_TIP` block content. Each kind has an
+   accent color used for the 4-px left border and a subtle tinted background. */
+.callout {
+  --callout-accent: var(--accent);
+  border-left: 4px solid var(--callout-accent);
+  background: color-mix(in srgb, var(--callout-accent) 10%, var(--bg-secondary));
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 4px 0;
+}
+
+.callout-title {
+  font-weight: 600;
+  color: color-mix(in srgb, var(--callout-accent) 70%, var(--text-primary));
+  margin-bottom: 4px;
+}
+
+.callout-body > :first-child {
+  margin-top: 0;
+}
+
+.callout-body > :last-child {
+  margin-bottom: 0;
+}
+
+.callout-tip {
+  --callout-accent: #a6e3a1;
+}
+
+.callout-note {
+  --callout-accent: #89b4fa;
+}
+
+.callout-important {
+  --callout-accent: #f38ba8;
+}
+
+.callout-caution {
+  --callout-accent: #fab387;
+}
+
+.callout-pinned {
+  --callout-accent: #cba6f7;
+}
+
+.callout-warning {
+  --callout-accent: #f9e2af;
+}

@@ -1,6 +1,7 @@
 import { marked } from "marked";
 import katex from "katex";
 import { invoke } from "@tauri-apps/api/core";
+import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 
 // Custom renderer for code blocks with line numbers.
 // Each line number is emitted as a CSS counter (::before) on its own
@@ -173,6 +174,40 @@ export function renderBlock(content: string): string {
   const cached = getCached(content);
   if (cached !== undefined) return cached;
 
+  // A whole-block admonition (`#+BEGIN_TIP` … `#+END_TIP`) renders as a
+  // styled callout wrapping the (recursively rendered) body.
+  const callout = renderCalloutBlock(content);
+  const html = callout !== null ? callout : renderMarkdownContent(content);
+
+  setCache(content, html);
+  return html;
+}
+
+const CALLOUT_BLOCK_RE = new RegExp(
+  `^\\s*#\\+BEGIN_(${CALLOUT_KINDS.join("|")})\\s*\\n([\\s\\S]*?)\\n?#\\+END_(${CALLOUT_KINDS.join("|")})\\s*$`,
+  "i"
+);
+
+function renderCalloutBlock(content: string): string | null {
+  const match = content.match(CALLOUT_BLOCK_RE);
+  if (!match) return null;
+  const beginKind = match[1].toLowerCase();
+  const endKind = match[3].toLowerCase();
+  if (beginKind !== endKind) return null;
+  const kind = beginKind as CalloutKind;
+  const meta = CALLOUT_META[kind];
+  const body = match[2];
+  const bodyHtml = body.trim() ? renderMarkdownContent(body) : "";
+  return (
+    `<div class="callout callout-${kind}">` +
+    `<div class="callout-title">${meta.icon} ${escapeHtml(meta.title)}</div>` +
+    `<div class="callout-body">${bodyHtml}</div>` +
+    `</div>`
+  );
+}
+
+/** Render arbitrary markdown/outliner content (links, tags, math, tasks). */
+function renderMarkdownContent(content: string): string {
   let processed = renderMathOutsideCodeFences(content);
 
   // Unescape outline-style backslash escapes before brackets (e.g. \] → ])
@@ -230,7 +265,6 @@ export function renderBlock(content: string): string {
     html = trimmed.slice(3, -4);
   }
 
-  setCache(content, html);
   return html;
 }
 
