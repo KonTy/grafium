@@ -1191,6 +1191,17 @@
   .block-shell {
     padding-bottom: 2px;
     box-sizing: border-box;
+    /*
+     * Scope layout and style invalidation to the individual block.
+     *
+     * WebKitGTK can't use the DMABUF renderer on NVIDIA + Wayland (it aborts
+     * with "Error 71 (Protocol error)"), so frames are rasterized on the CPU
+     * and repaint cost scales with the invalidated area. Without containment,
+     * editing one block lets WebKit treat the whole block list as dirty.
+     * `paint` is deliberately omitted: it would clip CodeMirror's completion
+     * tooltips, which render inside the block's own DOM subtree.
+     */
+    contain: layout style;
   }
 
   .virtual-spacer {
