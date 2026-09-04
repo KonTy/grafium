@@ -299,7 +299,7 @@ impl EmbeddingPipeline {
         for batch in chunks.chunks(batch_size) {
             let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
 
-            let embeddings = embedder.embed(&texts).await?;
+            let embeddings = embedder.embed_documents(&texts).await?;
 
             let chunk_embeddings: Vec<ChunkEmbedding> = batch
                 .iter()

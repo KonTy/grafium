@@ -100,6 +100,17 @@ pub trait LlmProvider: Send + Sync {
     /// Check if the provider is available (connection test).
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
 
+    /// The model's context window in tokens, if the provider can report it.
+    ///
+    /// Used by the knowledge engine to size the retrieved-context budget so
+    /// the assembled prompt cannot overflow the model's window (embedded
+    /// llama.cpp hard-errors when the prompt token count reaches `n_ctx`).
+    /// Remote providers that don't expose this cheaply return `None`, and
+    /// callers fall back to a conservative default.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
     /// Same as `complete`, but reports incremental output through `on_token`
     /// as it's produced, for callers that want to show the model "thinking"
     /// live instead of a silent wait. Still returns the full text at the
@@ -130,6 +141,37 @@ pub trait Embedder: Send + Sync {
     /// Generate embeddings for a batch of texts.
     /// Returns one vector per input text.
     fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>>;
+
+    /// Embed a batch of *documents* (the indexed side of retrieval).
+    ///
+    /// Asymmetric embedding models (e.g. Nomic's `search_document:` /
+    /// `search_query:` convention, or E5's `passage:` / `query:`) need the
+    /// document and query sides prefixed differently or retrieval quality
+    /// drops materially. The default delegates to [`embed`] for models that
+    /// don't distinguish the two; providers that do should override both this
+    /// and [`embed_query`].
+    fn embed_documents<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        self.embed(texts)
+    }
+
+    /// Embed a single search *query* (the lookup side of retrieval). See
+    /// [`embed_documents`] for why query and document sides differ.
+    fn embed_query<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            let texts = [text.to_string()];
+            let mut out = self.embed_queries(&texts).await?;
+            out.pop().ok_or_else(|| {
+                crate::error::CoreError::Other("embedder returned no vector for query".into())
+            })
+        })
+    }
+
+    /// Embed a batch of search *queries* (the lookup side of retrieval).
+    /// Same asymmetry rationale as [`embed_documents`]; the default delegates
+    /// to [`embed`].
+    fn embed_queries<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        self.embed(texts)
+    }
 
     /// Embedding dimension (needed for vector store initialization).
     fn dimension(&self) -> usize;

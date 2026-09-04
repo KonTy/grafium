@@ -202,7 +202,7 @@ impl ReferenceEngine {
                 query_texts.len(),
                 if query_texts.len() == 1 { "" } else { "s" }
             ));
-            embedder.embed(&query_texts).await?
+            embedder.embed_queries(&query_texts).await?
         };
         if embeddings.len() != query_texts.len() {
             return Err(CoreError::Other(format!(

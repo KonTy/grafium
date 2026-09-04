@@ -467,14 +467,9 @@ impl KnowledgeEngine {
             .as_ref()
             .ok_or_else(|| CoreError::Other("Vector store not initialized".to_string()))?;
 
-        let query_texts = vec![query.to_string()];
-        let embeddings = embedder.embed(&query_texts).await?;
+        let query_vec = embedder.embed_query(query).await?;
 
-        if embeddings.is_empty() {
-            return Ok(vec![]);
-        }
-
-        store.search(&embeddings[0], top_k, graph_id).await
+        store.search(&query_vec, top_k, graph_id).await
     }
 
     /// Hybrid retrieval: fuse dense (vector) and sparse (BM25/FTS) rankings

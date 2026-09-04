@@ -118,19 +118,31 @@ impl LocalEmbedder {
 
 impl Embedder for LocalEmbedder {
     fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
-        let model = self.model.clone();
-        let backend = self.backend.clone();
-        let ctx_size = self.ctx_size;
-        let texts = texts.to_vec();
+        self.embed_prefixed(texts.to_vec(), "")
+    }
 
+    /// Documents (the indexed side) get this model family's document prefix.
+    fn embed_documents<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        let prefix = prefixes_for(&self.name).document;
+        self.embed_prefixed(texts.to_vec(), prefix)
+    }
+
+    /// A search query gets this model family's (asymmetric) query prefix.
+    fn embed_query<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
+        let prefix = prefixes_for(&self.name).query;
+        let texts = vec![text.to_string()];
+        let fut = self.embed_prefixed(texts, prefix);
         Box::pin(async move {
-            if texts.is_empty() {
-                return Ok(vec![]);
-            }
-            tokio::task::spawn_blocking(move || embed_all(&model, &backend, ctx_size, &texts))
-                .await
-                .map_err(|e| CoreError::Other(format!("embedding task panicked: {e}")))?
+            let mut out = fut.await?;
+            out.pop()
+                .ok_or_else(|| CoreError::Other("embedder returned no vector for query".into()))
         })
+    }
+
+    /// A batch of search queries all get this model family's query prefix.
+    fn embed_queries<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        let prefix = prefixes_for(&self.name).query;
+        self.embed_prefixed(texts.to_vec(), prefix)
     }
 
     fn dimension(&self) -> usize {
@@ -139,6 +151,70 @@ impl Embedder for LocalEmbedder {
 
     fn model_name(&self) -> &str {
         &self.name
+    }
+}
+
+impl LocalEmbedder {
+    /// Shared body for [`embed`], [`embed_documents`] and [`embed_query`]:
+    /// applies `prefix` (possibly empty) to every input, then runs the
+    /// blocking llama.cpp embedding loop off the async runtime.
+    fn embed_prefixed(
+        &self,
+        texts: Vec<String>,
+        prefix: &str,
+    ) -> BoxFuture<'_, Result<Vec<Vec<f32>>>> {
+        let model = self.model.clone();
+        let backend = self.backend.clone();
+        let ctx_size = self.ctx_size;
+        let prefix = prefix.to_string();
+
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(vec![]);
+            }
+            let prepared: Vec<String> = if prefix.is_empty() {
+                texts
+            } else {
+                texts.into_iter().map(|t| format!("{prefix}{t}")).collect()
+            };
+            tokio::task::spawn_blocking(move || embed_all(&model, &backend, ctx_size, &prepared))
+                .await
+                .map_err(|e| CoreError::Other(format!("embedding task panicked: {e}")))?
+        })
+    }
+}
+
+/// Asymmetric query/document prefixes some embedding families require.
+/// Matched by substring against the lowercased model file name. Kept as a
+/// small table so new families can be added without touching the embed path.
+///
+/// Only families whose published usage clearly mandates prefixes are listed;
+/// everything else gets no prefix (applying the wrong instruction to a model
+/// that doesn't expect it hurts more than helps, e.g. bge-m3 needs none).
+struct EmbeddingPrefixes {
+    query: &'static str,
+    document: &'static str,
+}
+
+fn prefixes_for(model_name: &str) -> EmbeddingPrefixes {
+    let lower = model_name.to_lowercase();
+    if lower.contains("nomic") {
+        // https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
+        EmbeddingPrefixes {
+            query: "search_query: ",
+            document: "search_document: ",
+        }
+    } else if lower.contains("e5-") || lower.contains("e5_") || lower.contains("multilingual-e5") {
+        // intfloat E5 family
+        EmbeddingPrefixes {
+            query: "query: ",
+            document: "passage: ",
+        }
+    } else {
+        EmbeddingPrefixes {
+            query: "",
+            document: "",
+        }
     }
 }
 
@@ -245,5 +321,22 @@ mod config_tests {
             "expected error to name the configured models_dir ({}), got: {message}",
             custom_models_dir.path().display()
         );
+    }
+
+    #[test]
+    fn prefixes_for_applies_asymmetric_nomic_and_e5_conventions() {
+        let nomic = prefixes_for("nomic-embed-text-v1.5.f16.gguf");
+        assert_eq!(nomic.query, "search_query: ");
+        assert_eq!(nomic.document, "search_document: ");
+
+        let e5 = prefixes_for("multilingual-e5-large.Q4_K_M.gguf");
+        assert_eq!(e5.query, "query: ");
+        assert_eq!(e5.document, "passage: ");
+
+        // Families without a mandated convention get no prefix — applying the
+        // wrong instruction hurts more than helps.
+        let bge = prefixes_for("bge-m3-Q8_0.gguf");
+        assert_eq!(bge.query, "");
+        assert_eq!(bge.document, "");
     }
 }
