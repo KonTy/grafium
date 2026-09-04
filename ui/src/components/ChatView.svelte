@@ -26,7 +26,7 @@
   let chatScroll: HTMLDivElement | null = null;
   let inputEl: HTMLTextAreaElement | null = null;
   let checkingConnection = $state(true);
-  let chatbotConnected = $state(false);
+  let chatConnected = $state(false);
 
   onMount(() => {
     keepInputFocusedSoon(true);
@@ -34,7 +34,7 @@
   });
 
   $effect(() => {
-    if (!checkingConnection && chatbotConnected && !isStreaming) {
+    if (!checkingConnection && chatConnected && !isStreaming) {
       keepInputFocusedSoon(true);
     }
   });
@@ -43,9 +43,9 @@
     checkingConnection = true;
     try {
       const status = await aiHealthCheck();
-      chatbotConnected = status.enabled && status.llm_available;
+      chatConnected = status.enabled && status.llm_available;
     } catch {
-      chatbotConnected = false;
+      chatConnected = false;
     } finally {
       checkingConnection = false;
     }
@@ -62,7 +62,7 @@
   }
 
   function onInputBlur() {
-    if (isStreaming || (!checkingConnection && !chatbotConnected)) return;
+    if (isStreaming || (!checkingConnection && !chatConnected)) return;
     keepInputFocusedSoon(false);
   }
 
@@ -71,12 +71,12 @@
     if (!trimmed || isStreaming) return;
 
     if (checkingConnection) {
-      error = "Checking chatbot connection. Please wait a moment.";
+      error = "Checking Chat connection. Please wait a moment.";
       return;
     }
 
-    if (!chatbotConnected) {
-      error = "Before you talk to chatbot, first you need to connect to it in Settings.";
+    if (!chatConnected) {
+      error = "Before you use Chat, first you need to connect to it in Settings.";
       return;
     }
 
@@ -130,15 +130,15 @@
 
 <div class="chat-view">
   <header class="chat-header">
-    <h2>Chatbot</h2>
+    <h2>Chat</h2>
     <p>Streaming local/cloud assistant for graph analysis</p>
   </header>
 
   {#if checkingConnection}
-    <div class="chat-status">Checking chatbot connection...</div>
-  {:else if !chatbotConnected}
+    <div class="chat-status">Checking Chat connection...</div>
+  {:else if !chatConnected}
     <div class="chat-warning">
-      <p>Before you talk to chatbot, first you need to connect to it.</p>
+      <p>Before you use Chat, first you need to connect to it.</p>
       <button class="settings-link" onclick={() => onOpenSettings()}>Open Settings</button>
     </div>
   {/if}
@@ -164,9 +164,9 @@
       rows="3"
       onkeydown={onInputKeydown}
       onblur={onInputBlur}
-      disabled={isStreaming || (!checkingConnection && !chatbotConnected)}
+      disabled={isStreaming || (!checkingConnection && !chatConnected)}
     ></textarea>
-    <button onclick={() => void send()} disabled={isStreaming || !question.trim() || checkingConnection || !chatbotConnected}>
+    <button onclick={() => void send()} disabled={isStreaming || !question.trim() || checkingConnection || !chatConnected}>
       {isStreaming ? "Streaming..." : "Send"}
     </button>
   </div>

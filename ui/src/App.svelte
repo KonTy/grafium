@@ -7,7 +7,7 @@
   import GraphView from "./components/GraphView.svelte";
   import Statistics from "./components/Statistics.svelte";
   import FlashcardReview from "./components/FlashcardReview.svelte";
-  import ChatbotView from "./components/ChatbotView.svelte";
+  import ChatView from "./components/ChatView.svelte";
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
@@ -1121,7 +1121,7 @@
     {:else if currentView === "flashcards"}
       <FlashcardReview onNavigate={handleNavigate} />
     {:else if currentView === "chat"}
-      <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
+      <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
       <Settings />
     {:else if currentView === "journal"}
@@ -1241,7 +1241,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
-          <span>Chatbot</span>
+          <span>Chat</span>
         </button>
         <button class="more-menu-item" onclick={handleMobileOpenGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
