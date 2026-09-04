@@ -852,21 +852,37 @@
         }
       }
 
-      const parts: string[] = [];
-      if (summary.title_answer) parts.push(`**${summary.title_answer}**`);
-      for (const topic of summary.topics) {
-        parts.push(`### ${topic.topic}\n\n${topic.summary}`);
-      }
-      const content = parts.join("\n\n");
-
       const lastBlock = selected[selected.length - 1];
       const siblings = blocks.filter((b) => b.parent_id === lastBlock.parent_id);
       const siblingIdx = siblings.findIndex((b) => b.id === lastBlock.id);
       const newOrder = siblingIdx + 1;
 
-      const newBlock = await createBlock(page.id, lastBlock.parent_id, newOrder, content);
+      // Build a block tree, not one block of flat text. Grafium is an
+      // outliner: a heading only "owns" the prose beneath it when that prose
+      // is its child, so emitting headings and paragraphs as siblings leaves
+      // every topic structurally disconnected from its own summary.
+      const rootContent = summary.title_answer
+        ? `**${summary.title_answer}**`
+        : "**Summary**";
+      const rootBlock = await createBlock(page.id, lastBlock.parent_id, newOrder, rootContent);
+      const created: Block[] = [rootBlock];
+
+      for (const [index, topic] of summary.topics.entries()) {
+        const heading = await createBlock(
+          page.id,
+          rootBlock.id,
+          index,
+          `### ${topic.topic.trim()}`,
+        );
+        created.push(heading);
+        const body = topic.summary.trim();
+        if (body) {
+          created.push(await createBlock(page.id, heading.id, 0, body));
+        }
+      }
+
       const insertAt = blocks.findIndex((b) => b.id === lastBlock.id);
-      blocks = [...blocks.slice(0, insertAt + 1), newBlock, ...blocks.slice(insertAt + 1)];
+      blocks = [...blocks.slice(0, insertAt + 1), ...created, ...blocks.slice(insertAt + 1)];
       selectedBlockIds = new Set();
     } catch (e) {
       analyzeSelectionError = e instanceof Error ? e.message : String(e);

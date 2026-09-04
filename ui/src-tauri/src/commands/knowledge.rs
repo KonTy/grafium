@@ -543,23 +543,10 @@ pub fn ai_insert_page_summary(
 ) -> Result<(), String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
 
-    let mut summary_text = String::new();
-    if let Some(answer) = title_answer {
-        if !answer.trim().is_empty() {
-            summary_text.push_str(answer.trim());
-            summary_text.push_str("\n\n");
-        }
-    }
-    // One heading + paragraph per topic, same shape as the media-import
-    // transcript notes, so a multi-subject "Research this page" summary
-    // (e.g. a long podcast transcript) keeps every topic distinguishable.
+    // Collect every topic's tags up front so the in-place wiki-linking pass
+    // below sees them regardless of how the blocks get nested.
     let mut all_tags: Vec<grafium_core::parser::TagTerm> = Vec::new();
-    for (i, topic) in topics.iter().enumerate() {
-        if i > 0 {
-            summary_text.push_str("\n\n");
-        }
-        summary_text.push_str(&format!("### {}\n\n", topic.topic.trim()));
-        summary_text.push_str(topic.summary.trim());
+    for topic in &topics {
         for tag in &topic.tags {
             if !all_tags
                 .iter()
@@ -570,9 +557,42 @@ pub fn ai_insert_page_summary(
         }
     }
 
-    graph
-        .insert_block_at_top(&page_id, &summary_text)
+    // Build a real block tree rather than one block holding headings and
+    // prose as flat text. Grafium is an outliner: a heading only "owns" the
+    // paragraphs beneath it when they are its children, so a flat summary
+    // leaves every topic heading structurally unrelated to its own body —
+    // backlinks, block refs, and collapsing all treat them as unconnected
+    // siblings.
+    let root = graph
+        .insert_block_at_top(&page_id, title_answer.as_deref().unwrap_or("Summary").trim())
         .map_err(|e| e.to_string())?;
+
+    for (index, topic) in topics.iter().enumerate() {
+        let heading = graph
+            .create_block(
+                &page_id,
+                Some(&root.id),
+                index as i32,
+                &format!("### {}", topic.topic.trim()),
+                grafium_core::models::BlockType::Text,
+                serde_json::json!({}),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let body = topic.summary.trim();
+        if !body.is_empty() {
+            graph
+                .create_block(
+                    &page_id,
+                    Some(&heading.id),
+                    0,
+                    body,
+                    grafium_core::models::BlockType::Text,
+                    serde_json::json!({}),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     if !all_tags.is_empty() {
         let blocks = graph
