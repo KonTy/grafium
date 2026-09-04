@@ -694,46 +694,42 @@ impl KnowledgeEngine {
     /// configured — the Embedded (llama.cpp) local provider is chat-only,
     /// so requiring semantic search here would make "Ask" completely
     /// unusable for it even though the LLM itself works fine.
-    pub async fn ask(&self, question: &str, graph_id: Option<&str>) -> Result<String> {
+    pub async fn ask(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+    ) -> Result<AskResponse> {
         let llm = self
             .llm
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        // Search for relevant context, if semantic search is available.
-        let results = if self.embedder.is_some() {
-            self.search(question, 10, graph_id).await?
-        } else {
-            Vec::new()
-        };
+        // Hybrid retrieval degrades gracefully: works with an empty vector
+        // index (pure BM25) and even with no embedder at all.
+        let entries = self
+            .retrieve_context(db, question, ASK_TOP_K, ASK_CONTEXT_BUDGET_TOKENS, graph_id)
+            .await
+            .unwrap_or_default();
 
-        if results.is_empty() {
-            // No context found, answer directly.
-            let messages = vec![crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::User,
-                content: question.to_string(),
-            }];
-            return llm
-                .complete(&messages, &crate::ai::traits::CompletionOptions::default())
-                .await;
-        }
-
-        // Build RAG prompt with context.
-        let context: String = results
+        let sources: Vec<Source> = entries
             .iter()
-            .enumerate()
-            .map(|(i, r)| format!("[{}] From \"{}\":\n{}\n", i + 1, r.page_title, r.content))
+            .map(|e| Source {
+                index: e.index,
+                page_id: e.page_id.clone(),
+                page_title: e.page_title.clone(),
+                block_id: e.block_id.clone(),
+                date: e.date_ms.map(retrieval::format_date_ms),
+            })
             .collect();
+
+        let context_block = build_context_block(&entries);
+        let system_prompt = build_system_prompt(&context_block, !entries.is_empty());
 
         let messages = vec![
             crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::System,
-                content: format!(
-                    "You are a knowledge assistant. Answer based on the following context from the user's notes. \
-                     Cite sources using [N] notation. If the context doesn't contain enough information, say so.\n\n\
-                     Context:\n{}",
-                    context
-                ),
+                content: system_prompt,
             },
             crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::User,
@@ -741,8 +737,11 @@ impl KnowledgeEngine {
             },
         ];
 
-        llm.complete(&messages, &crate::ai::traits::CompletionOptions::default())
-            .await
+        let answer = llm
+            .complete(&messages, &crate::ai::traits::CompletionOptions::default())
+            .await?;
+
+        Ok(AskResponse { answer, sources })
     }
 
     /// Get the graph registry (read access).
@@ -770,6 +769,81 @@ pub struct HealthStatus {
     pub vector_store_available: bool,
     pub vector_count: usize,
     pub mode: AiMode,
+}
+
+/// How many hits `ask` retrieves before context assembly.
+const ASK_TOP_K: usize = 10;
+/// Approximate token budget for the whole assembled context block.
+const ASK_CONTEXT_BUDGET_TOKENS: usize = 6000;
+
+/// A structured citation returned alongside an answer so the UI can render
+/// which notes were used and navigate to them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Source {
+    /// The `[N]` citation marker used in the context and answer.
+    pub index: usize,
+    pub page_id: String,
+    pub page_title: String,
+    pub block_id: String,
+    /// ISO `YYYY-MM-DD` date when known (journal date or block created_at).
+    pub date: Option<String>,
+}
+
+/// A blended answer plus the structured sources that informed it.
+#[derive(Debug, Clone)]
+pub struct AskResponse {
+    pub answer: String,
+    pub sources: Vec<Source>,
+}
+
+/// Render assembled context entries into numbered, dated prompt lines, e.g.
+/// `[3] 2026-03-14 (journal) — Kirsten's project ...`. Empty when there is no
+/// context.
+fn build_context_block(entries: &[ContextEntry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        let date = e
+            .date_ms
+            .map(retrieval::format_date_ms)
+            .unwrap_or_else(|| "undated".to_string());
+        let kind = if e.is_journal { " (journal)" } else { "" };
+        out.push_str(&format!(
+            "[{}] {}{} — from \"{}\":\n{}\n\n",
+            e.index, date, kind, e.page_title, e.text
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// Build the blended system prompt. It supports three regimes without ever
+/// forcing "answer only from context" (which would break general questions)
+/// and without letting the model pass off general knowledge as the user's
+/// notes.
+fn build_system_prompt(context_block: &str, has_context: bool) -> String {
+    let base = "You are Grafium's assistant. You help the user with BOTH questions about their \
+personal knowledge graph (their notes) AND general questions using your own knowledge.\n\n\
+Rules:\n\
+- When the retrieved notes below are relevant, answer from them and cite each claim with its \
+[N] marker. The notes are the user's own writing and journal entries.\n\
+- For \"when\" / temporal questions, state the explicit date(s) from the cited notes. Journal \
+entries are dated; use those dates. If you cannot find a date, say so plainly.\n\
+- If the notes do not contain the answer, you may answer from your own general knowledge — but \
+say clearly that this is general knowledge and not from their notes.\n\
+- If an answer blends both, keep them separate: cite the notes with [N], and label the general \
+part as general knowledge.\n\
+- Never invent citations or dates, and never present general knowledge as if it came from their \
+notes. If you don't know, say you don't know.";
+
+    if has_context {
+        format!(
+            "{base}\n\nRetrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+        )
+    } else {
+        format!(
+            "{base}\n\nNo relevant notes were retrieved from the user's graph for this question, \
+so answer from your general knowledge and make clear it is not from their notes."
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1126,5 +1200,53 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn context_block_renders_dated_cited_lines() {
+        let entries = vec![
+            ContextEntry {
+                index: 1,
+                block_id: "b1".to_string(),
+                page_id: "p1".to_string(),
+                page_title: "2026-03-14".to_string(),
+                date_ms: retrieval::journal_title_to_ms("2026-03-14"),
+                is_journal: true,
+                text: "felt upset about the deadline".to_string(),
+            },
+            ContextEntry {
+                index: 2,
+                block_id: "b2".to_string(),
+                page_id: "p2".to_string(),
+                page_title: "Rust".to_string(),
+                date_ms: None,
+                is_journal: false,
+                text: "ownership and borrowing".to_string(),
+            },
+        ];
+        let block = build_context_block(&entries);
+        assert!(block.contains("[1] 2026-03-14 (journal) — from \"2026-03-14\":"));
+        assert!(block.contains("felt upset about the deadline"));
+        assert!(block.contains("[2] undated — from \"Rust\":"));
+        assert!(!block.contains("(journal) — from \"Rust\""));
+    }
+
+    #[test]
+    fn context_block_is_empty_without_entries() {
+        assert!(build_context_block(&[]).is_empty());
+    }
+
+    #[test]
+    fn system_prompt_supports_blended_answering() {
+        let with_ctx = build_system_prompt("[1] 2026-03-14 — from \"x\":\nhi", true);
+        // Must not force "only answer from context".
+        assert!(!with_ctx.to_lowercase().contains("only answer from"));
+        assert!(with_ctx.contains("Retrieved notes"));
+        assert!(with_ctx.contains("general knowledge"));
+        assert!(with_ctx.contains("[1] 2026-03-14"));
+
+        let no_ctx = build_system_prompt("", false);
+        assert!(no_ctx.contains("No relevant notes"));
+        assert!(no_ctx.contains("general knowledge"));
     }
 }

@@ -61,6 +61,26 @@ export interface StreamChunk {
   error?: string | null;
 }
 
+// A structured citation returned alongside a Chat answer, so the UI can render
+// clickable source chips and navigate to the originating page/block.
+export interface ChatSource {
+  index: number;
+  page_id: string;
+  page_title: string;
+  block_id: string;
+  date?: string | null;
+}
+
+export interface SourcesPayload {
+  request_id: string;
+  sources: ChatSource[];
+}
+
+export interface AskResult {
+  answer: string;
+  sources: ChatSource[];
+}
+
 export interface HealthStatus {
   enabled: boolean;
   llm_available: boolean;
@@ -267,7 +287,7 @@ export function aiInsertPageSummary(
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
-export function aiAsk(question: string, graphId?: string): Promise<string> {
+export function aiAsk(question: string, graphId?: string): Promise<AskResult> {
   return invoke("ai_ask", { question, graphId });
 }
 
@@ -277,12 +297,13 @@ export async function aiAskStream(
     onChunk: (delta: string) => void;
     onDone: () => void;
     onError?: (message: string) => void;
+    onSources?: (sources: ChatSource[]) => void;
   },
   graphId?: string
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  const unlisten = await listen<StreamChunk>("ai://chat_stream", (event) => {
+  const unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
     const payload = event.payload;
     if (!payload || payload.request_id !== requestId) return;
 
@@ -300,12 +321,19 @@ export async function aiAskStream(
     }
   });
 
+  const unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
+    const payload = event.payload;
+    if (!payload || payload.request_id !== requestId) return;
+    handlers.onSources?.(payload.sources ?? []);
+  });
+
   try {
     await invoke("ai_ask_stream", { question, graphId, requestId });
   } catch (e: any) {
     handlers.onError?.(String(e));
   } finally {
-    unlisten();
+    unlistenStream();
+    unlistenSources();
   }
 }
 

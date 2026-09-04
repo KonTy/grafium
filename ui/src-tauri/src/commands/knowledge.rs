@@ -6,7 +6,7 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::HealthStatus;
+use grafium_core::knowledge::engine::{HealthStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
@@ -519,10 +519,7 @@ pub async fn ai_research_web(
 /// caller wrap terms identically instead of re-implementing matching
 /// logic per call site.
 #[tauri::command(rename_all = "camelCase")]
-pub fn text_wrap_known_terms(
-    content: String,
-    terms: Vec<grafium_core::parser::TagTerm>,
-) -> String {
+pub fn text_wrap_known_terms(content: String, terms: Vec<grafium_core::parser::TagTerm>) -> String {
     grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
 }
 
@@ -564,7 +561,10 @@ pub fn ai_insert_page_summary(
     // backlinks, block refs, and collapsing all treat them as unconnected
     // siblings.
     let root = graph
-        .insert_block_at_top(&page_id, title_answer.as_deref().unwrap_or("Summary").trim())
+        .insert_block_at_top(
+            &page_id,
+            title_answer.as_deref().unwrap_or("Summary").trim(),
+        )
         .map_err(|e| e.to_string())?;
 
     for (index, topic) in topics.iter().enumerate() {
@@ -615,12 +615,44 @@ pub fn ai_insert_page_summary(
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
+/// A structured citation surfaced to the UI so it can render source chips
+/// and navigate to the originating page/block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceDto {
+    pub index: usize,
+    pub page_id: String,
+    pub page_title: String,
+    pub block_id: String,
+    pub date: Option<String>,
+}
+
+impl From<Source> for SourceDto {
+    fn from(s: Source) -> Self {
+        SourceDto {
+            index: s.index,
+            page_id: s.page_id,
+            page_title: s.page_title,
+            block_id: s.block_id,
+            date: s.date,
+        }
+    }
+}
+
+/// Answer plus structured sources returned by `ai_ask`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskResult {
+    pub answer: String,
+    pub sources: Vec<SourceDto>,
+}
+
 #[tauri::command]
 pub async fn ai_ask(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
-) -> Result<String, String> {
+) -> Result<AskResult, String> {
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -634,10 +666,20 @@ pub async fn ai_ask(
         );
     }
 
-    engine
-        .ask(&question, graph_id.as_deref())
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let resolved_graph_id =
+        graph_id.unwrap_or_else(|| snapshot.root_dir.to_string_lossy().to_string());
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    let response = engine
+        .ask(&graph.db, &question, Some(resolved_graph_id.as_str()))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(AskResult {
+        answer: response.answer,
+        sources: response.sources.into_iter().map(SourceDto::from).collect(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -648,10 +690,21 @@ pub struct AskStreamChunk {
     pub error: Option<String>,
 }
 
+/// Emitted once per request on `ai://chat_sources`, carrying the structured
+/// citations for the answer. Kept as a separate event so the existing
+/// `AskStreamChunk` shape on `ai://chat_stream` is unchanged and backward
+/// compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskSourcesPayload {
+    pub request_id: String,
+    pub sources: Vec<SourceDto>,
+}
+
 #[tauri::command]
 pub async fn ai_ask_stream(
     state: State<'_, KnowledgeState>,
     app: tauri::AppHandle,
+    app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
     request_id: String,
@@ -669,10 +722,27 @@ pub async fn ai_ask_stream(
         );
     }
 
-    let answer = engine
-        .ask(&question, graph_id.as_deref())
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let resolved_graph_id =
+        graph_id.unwrap_or_else(|| snapshot.root_dir.to_string_lossy().to_string());
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    let response = engine
+        .ask(&graph.db, &question, Some(resolved_graph_id.as_str()))
         .await
         .map_err(|e| e.to_string())?;
+    let answer = response.answer;
+
+    // Emit structured sources first so the UI can render chips as soon as the
+    // answer starts streaming. Separate event → backward compatible.
+    app.emit(
+        "ai://chat_sources",
+        AskSourcesPayload {
+            request_id: request_id.clone(),
+            sources: response.sources.into_iter().map(SourceDto::from).collect(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     // Stream by small chunks to give responsive UI updates across all providers.
     const CHUNK_SIZE: usize = 24;
