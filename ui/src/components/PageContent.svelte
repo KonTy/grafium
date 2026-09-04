@@ -4,6 +4,7 @@
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
+  import { planIndentSelection } from "../lib/blockIndent";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
@@ -718,8 +719,29 @@
     }
   }
 
-  function handleBulletClick(blockId: string, event: MouseEvent) {
-    if (event.shiftKey && selectedBlockIds.size > 0) {
+  /**
+   * Indent or outdent the whole multi-block selection together, preserving
+   * relative structure. No-ops silently for units that can't move (e.g. the
+   * first child of the document on indent). Selection is preserved.
+   */
+  async function handleIndentSelection(direction: "in" | "out") {
+    if (selectedBlockIds.size === 0) return;
+    const plan = planIndentSelection(blocks, selectedBlockIds, direction);
+    if (plan.moves.length === 0) return; // nothing movable — silent no-op
+
+    const keep = new Set(selectedBlockIds);
+    try {
+      for (const move of plan.moves) {
+        await moveBlock(move.id, move.newParentId, move.newOrderIndex);
+      }
+      blocks = plan.blocks;
+      selectedBlockIds = keep;
+    } catch (e) {
+      console.error("Failed to indent/outdent selection:", e);
+    }
+  }
+
+  function handleBulletClick(blockId: string, event: MouseEvent) {    if (event.shiftKey && selectedBlockIds.size > 0) {
       // Range select from last selected to this block
       const lastSelected = [...selectedBlockIds].pop()!;
       const startIdx = blocks.findIndex((b) => b.id === lastSelected);
@@ -849,7 +871,20 @@
 
   function handleKeydownForSelection(e: KeyboardEvent) {
     if (selectedBlockIds.size === 0) return;
-    if (e.key === "Backspace" || e.key === "Delete") {
+    if (e.key === "Tab") {
+      // Only act when no text input / CodeMirror editor holds focus, so the
+      // in-editor Tab indent keeps working when a block is being edited.
+      const active = document.activeElement as HTMLElement | null;
+      const inEditor =
+        !!active &&
+        (active.isContentEditable ||
+          active.tagName === "INPUT" ||
+          active.tagName === "TEXTAREA" ||
+          !!active.closest(".cm-editor"));
+      if (inEditor) return;
+      e.preventDefault();
+      void handleIndentSelection(e.shiftKey ? "out" : "in");
+    } else if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       handleDeleteSelected();
     } else if (e.key === "Escape") {

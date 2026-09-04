@@ -246,3 +246,126 @@ fn test_hierarchy_create_page_via_api_creates_parents() {
     assert!(grandparent.is_some());
     assert_eq!(grandparent.unwrap().title.to_lowercase(), "parent");
 }
+
+// ─── Multi-block indent / outdent (block move) ───────────────────────────────
+
+use grafium_core::models::{Block, BlockType};
+
+fn text_block(graph: &Graph, page_id: &str, parent: Option<&str>, order: i32, body: &str) -> Block {
+    graph
+        .create_block(
+            page_id,
+            parent,
+            order,
+            body,
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap()
+}
+
+/// Return (id, parent_id, order_index) triples in tree order for a page.
+fn tree_shape(graph: &Graph, page_id: &str) -> Vec<(String, Option<String>, i32)> {
+    graph
+        .db
+        .list_blocks_for_page(page_id)
+        .unwrap()
+        .into_iter()
+        .map(|b| (b.id, b.parent_id, b.order_index))
+        .collect()
+}
+
+/// A freshly-created page seeds a single empty `- ` bullet; drop it so tests
+/// control the whole block tree.
+fn clear_seed_blocks(graph: &Graph, page_id: &str) {
+    for b in graph.db.list_blocks_for_page(page_id).unwrap() {
+        graph.delete_block(&b.id).unwrap();
+    }
+}
+
+#[test]
+fn test_multiblock_indent_parents_contiguous_selection_under_predecessor() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-in", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, None, 1, "b");
+    let c = text_block(&graph, &page.id, None, 2, "c");
+    let d = text_block(&graph, &page.id, None, 3, "d");
+
+    // Simulate planIndentSelection([b,c,d], "in"): all become children of a.
+    graph.move_block(&b.id, Some(&a.id), 0).unwrap();
+    graph.move_block(&c.id, Some(&a.id), 1).unwrap();
+    graph.move_block(&d.id, Some(&a.id), 2).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), Some(a.id.clone()), 0),
+            (c.id.clone(), Some(a.id.clone()), 1),
+            (d.id.clone(), Some(a.id.clone()), 2),
+        ]
+    );
+}
+
+#[test]
+fn test_multiblock_outdent_moves_group_to_grandparent_after_parent() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-out", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    // a -> {b, c, d}
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, Some(&a.id), 0, "b");
+    let c = text_block(&graph, &page.id, Some(&a.id), 1, "c");
+    let d = text_block(&graph, &page.id, Some(&a.id), 2, "d");
+
+    // Simulate planIndentSelection([b,c,d], "out"): all become roots after a.
+    graph.move_block(&b.id, None, 1).unwrap();
+    graph.move_block(&c.id, None, 2).unwrap();
+    graph.move_block(&d.id, None, 3).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), None, 1),
+            (c.id.clone(), None, 2),
+            (d.id.clone(), None, 3),
+        ]
+    );
+}
+
+#[test]
+fn test_multiblock_indent_non_contiguous_runs_reparent_independently() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-noncontig", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    // a, b(sel), c, d(sel), e(sel)  -> b under a; d,e under c
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, None, 1, "b");
+    let c = text_block(&graph, &page.id, None, 2, "c");
+    let d = text_block(&graph, &page.id, None, 3, "d");
+    let e = text_block(&graph, &page.id, None, 4, "e");
+
+    graph.move_block(&b.id, Some(&a.id), 0).unwrap();
+    graph.move_block(&d.id, Some(&c.id), 0).unwrap();
+    graph.move_block(&e.id, Some(&c.id), 1).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), Some(a.id.clone()), 0),
+            (c.id.clone(), None, 2),
+            (d.id.clone(), Some(c.id.clone()), 0),
+            (e.id.clone(), Some(c.id.clone()), 1),
+        ]
+    );
+}
