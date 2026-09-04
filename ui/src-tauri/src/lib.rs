@@ -1508,6 +1508,7 @@ pub fn run() {
             commands::media::media_import_video,
             commands::media::media_get_config,
             commands::media::media_set_config,
+            commands::ui_log,
             commands::model_library::list_local_models,
         ])
         .run(tauri::generate_context!())

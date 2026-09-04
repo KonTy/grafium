@@ -98,6 +98,12 @@ export function planIndentSelection(
   }
 
   const newParent = new Map<string, string | null>();
+  // Lists that receive blocks. Only these need renumbering: a list that merely
+  // *lost* entries keeps the relative order of everything left behind, so
+  // rewriting it would emit a pointless move for every remaining sibling.
+  // Renumbering the whole page (the original behaviour) turned a 4-block indent
+  // into 40+ backend writes whenever stored order_index values were sparse.
+  const insertedInto = new Set<string | null>();
 
   const removeFrom = (parentId: string | null, ids: string[]) => {
     const list = working.get(parentId) ?? [];
@@ -118,6 +124,7 @@ export function planIndentSelection(
       const predList = working.get(predecessor) ?? [];
       predList.push(...unit.ids);
       working.set(predecessor, predList);
+      insertedInto.add(predecessor);
       for (const id of unit.ids) newParent.set(id, predecessor);
     }
   } else {
@@ -138,6 +145,7 @@ export function planIndentSelection(
       const insertAt = pIdx >= 0 ? pIdx + 1 : gList.length;
       gList.splice(insertAt, 0, ...ids);
       working.set(grandparent, gList);
+      insertedInto.add(grandparent);
       for (const id of ids) newParent.set(id, grandparent);
     }
   }
@@ -147,13 +155,17 @@ export function planIndentSelection(
   const moves: IndentMove[] = [];
   const visit = (parentId: string | null) => {
     const kids = working.get(parentId) ?? [];
+    const renumber = insertedInto.has(parentId);
     kids.forEach((id, index) => {
       const orig = blockById.get(id)!;
       const np = newParent.has(id) ? newParent.get(id)! : orig.parent_id;
-      const updated: Block = { ...orig, parent_id: np, order_index: index };
+      // Lists that only lost entries keep their stored order_index, so a group
+      // indent writes just the blocks it genuinely rearranged.
+      const orderIndex = renumber ? index : orig.order_index;
+      const updated: Block = { ...orig, parent_id: np, order_index: orderIndex };
       outBlocks.push(updated);
-      if (orig.parent_id !== np || orig.order_index !== index) {
-        moves.push({ id, newParentId: np, newOrderIndex: index });
+      if (orig.parent_id !== np || orig.order_index !== orderIndex) {
+        moves.push({ id, newParentId: np, newOrderIndex: orderIndex });
       }
       visit(id);
     });

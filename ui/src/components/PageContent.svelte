@@ -741,7 +741,8 @@
     }
   }
 
-  function handleBulletClick(blockId: string, event: MouseEvent) {    if (event.shiftKey && selectedBlockIds.size > 0) {
+  function handleBulletClick(blockId: string, event: MouseEvent) {
+    if (event.shiftKey && selectedBlockIds.size > 0) {
       // Range select from last selected to this block
       const lastSelected = [...selectedBlockIds].pop()!;
       const startIdx = blocks.findIndex((b) => b.id === lastSelected);
@@ -876,9 +877,79 @@
     }
   }
 
+  /**
+   * Resolves the block a DOM node lives in, via the `data-block-id` marker on
+   * each rendered block shell.
+   */
+  function blockIdFromNode(node: Node | null): string | null {
+    if (!node) return null;
+    const el = node instanceof Element ? node : node.parentElement;
+    const shell = el?.closest?.("[data-block-id]") as HTMLElement | null;
+    return shell?.dataset?.blockId ?? null;
+  }
+
+  /**
+   * Promotes a native text selection that spans multiple blocks into a
+   * block-level selection, the way Logseq does.
+   *
+   * Dragging across block boundaries is the primary way users select several
+   * blocks, but a DOM range carries no block semantics, so structural commands
+   * (Tab/Shift+Tab to indent, Backspace to delete, Analyze Selection) had
+   * nothing to act on and Tab fell through to native focus traversal — which
+   * looked like "selecting blocks then pressing Tab just clears them".
+   *
+   * A drag inside a single block is left alone so partial-text selection (copy,
+   * Analyze Selection on a phrase) keeps working.
+   */
+  function promoteTextSelectionToBlocks() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+
+    const startId = blockIdFromNode(sel.anchorNode);
+    const endId = blockIdFromNode(sel.focusNode);
+    if (!startId || !endId || startId === endId) return;
+
+    const startIdx = blocks.findIndex((b) => b.id === startId);
+    const endIdx = blocks.findIndex((b) => b.id === endId);
+    // Both ends must belong to *this* PageContent instance; the journal renders
+    // one instance per day, so a cross-day drag simply isn't a block selection.
+    if (startIdx === -1 || endIdx === -1) return;
+
+    const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+    const next = new Set<string>();
+    for (let i = from; i <= to; i++) {
+      next.add(blocks[i].id);
+    }
+
+    selectedBlockIds = next;
+    focusedBlockId = null;
+    sel.removeAllRanges();
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
+    }
+  }
+
+  function handleSelectionMouseUp() {
+    // Defer so the browser has committed the final range for this drag.
+    setTimeout(promoteTextSelectionToBlocks, 0);
+  }
+
+  /**
+   * True for both Tab and Shift+Tab.
+   *
+   * WebKitGTK reports Shift+Tab as the X11 `ISO_Left_Tab` keysym rather than
+   * `Tab`, so matching only `e.key === "Tab"` silently loses every outdent.
+   * `e.code` is layout-independent and stays `"Tab"` for both, with the key
+   * names kept as a fallback for engines that don't populate `code`.
+   */
+  function isTabKey(e: KeyboardEvent): boolean {
+    return e.code === "Tab" || e.key === "Tab" || e.key === "ISO_Left_Tab";
+  }
+
   function handleKeydownForSelection(e: KeyboardEvent) {
     if (selectedBlockIds.size === 0) return;
-    if (e.key === "Tab") {
+    if (isTabKey(e)) {
       // Selection presence is the intent signal — no need to consult
       // document.activeElement. Multi-block Tab always takes precedence over
       // in-editor Tab (a stale editor focus from the last click would otherwise
@@ -905,7 +976,7 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydownForSelection} />
+<svelte:window onkeydown={handleKeydownForSelection} onmouseup={handleSelectionMouseUp} />
 
 <div class="page-content" class:compact>
   <h1 class="page-title">{page.title}</h1>

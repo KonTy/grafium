@@ -151,3 +151,42 @@ describe("planIndentSelection", () => {
     expect(plan.moves).toEqual([]);
   });
 });
+
+describe("planIndentSelection — persistence scope", () => {
+  // Regression: the planner used to renumber every block in the page, so any
+  // page whose stored order_index values weren't already dense (the normal
+  // case) emitted a move for essentially every block — a 4-block indent
+  // produced 40+ backend writes and felt sluggish.
+  const sparse = (): Block[] => [
+    mk("a", null, 0),
+    mk("b", null, 10),
+    mk("c", null, 20),
+    mk("d", null, 30),
+    mk("e", null, 40),
+  ];
+
+  it("only writes blocks in lists the move actually touched", () => {
+    const plan = planIndentSelection(sparse(), new Set(["c"]), "in");
+    expect(plan.moves.map((m) => m.id).sort()).toEqual(["c"]);
+  });
+
+  it("leaves untouched siblings on their original order_index", () => {
+    const plan = planIndentSelection(sparse(), new Set(["c"]), "in");
+    const e = plan.blocks.find((b) => b.id === "e")!;
+    expect(e.order_index).toBe(40);
+  });
+
+  it("does not renumber a sibling list that never changed", () => {
+    const blocks: Block[] = [
+      mk("p1", null, 0),
+      mk("p1c1", "p1", 5),
+      mk("p1c2", "p1", 15),
+      mk("p2", null, 10),
+      mk("p2c1", "p2", 7),
+      mk("p2c2", "p2", 21),
+    ];
+    const plan = planIndentSelection(blocks, new Set(["p2c2"]), "in");
+    // p1's children were never involved, so they must not be rewritten.
+    expect(plan.moves.some((m) => m.id.startsWith("p1c"))).toBe(false);
+  });
+});
