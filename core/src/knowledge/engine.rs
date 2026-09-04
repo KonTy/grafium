@@ -724,9 +724,12 @@ impl KnowledgeEngine {
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
         // Hybrid retrieval degrades gracefully: works with an empty vector
-        // index (pure BM25) and even with no embedder at all.
+        // index (pure BM25) and even with no embedder at all. The context
+        // budget is sized to the model's own window so the assembled prompt
+        // can't overflow it (embedded llama.cpp hard-errors on overflow).
+        let budget = ask_context_budget(llm.context_window());
         let entries = self
-            .retrieve_context(db, question, ASK_TOP_K, ASK_CONTEXT_BUDGET_TOKENS, graph_id)
+            .retrieve_context(db, question, ASK_TOP_K, budget, graph_id)
             .await
             .unwrap_or_default();
 
@@ -756,7 +759,14 @@ impl KnowledgeEngine {
         ];
 
         let answer = llm
-            .complete(&messages, &crate::ai::traits::CompletionOptions::default())
+            .complete(
+                &messages,
+                &crate::ai::traits::CompletionOptions {
+                    // Cap output so prompt + generation stays within n_ctx.
+                    max_tokens: Some(ASK_RESERVED_OUTPUT_TOKENS as u32),
+                    ..Default::default()
+                },
+            )
             .await?;
 
         Ok(AskResponse { answer, sources })
@@ -806,8 +816,35 @@ pub struct IndexStatus {
 
 /// How many hits `ask` retrieves before context assembly.
 const ASK_TOP_K: usize = 10;
-/// Approximate token budget for the whole assembled context block.
-const ASK_CONTEXT_BUDGET_TOKENS: usize = 6000;
+/// Tokens reserved for the model's answer. Also used as the `ask`
+/// completion's `max_tokens`, so prompt + output can never exceed `n_ctx`.
+const ASK_RESERVED_OUTPUT_TOKENS: usize = 1024;
+/// Tokens reserved for the fixed prompt scaffolding (system-prompt template,
+/// the user's question, chat-template control tokens, and per-line
+/// formatting) that sits outside the retrieved-context budget. Generous on
+/// purpose — `estimate_tokens` (chars/4) under-counts real tokenization.
+const ASK_PROMPT_OVERHEAD_TOKENS: usize = 1024;
+/// Floor for the retrieved-context budget so a tiny window still gets *some*
+/// context rather than none.
+const ASK_MIN_CONTEXT_BUDGET_TOKENS: usize = 512;
+/// Retrieved-context budget used when the LLM can't report its context
+/// window (most remote providers). Deliberately conservative — the embedded
+/// llama.cpp default window is only 4096 and it hard-errors on overflow.
+const ASK_DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 2048;
+
+/// Model-aware retrieved-context budget: `n_ctx − prompt_overhead −
+/// reserved_output`, floored, or a conservative default when the window is
+/// unknown. Keeps the assembled prompt from overflowing the model's context
+/// window (embedded llama.cpp hard-errors once prompt tokens reach `n_ctx`).
+fn ask_context_budget(context_window: Option<usize>) -> usize {
+    match context_window {
+        Some(n_ctx) => n_ctx
+            .saturating_sub(ASK_PROMPT_OVERHEAD_TOKENS)
+            .saturating_sub(ASK_RESERVED_OUTPUT_TOKENS)
+            .max(ASK_MIN_CONTEXT_BUDGET_TOKENS),
+        None => ASK_DEFAULT_CONTEXT_BUDGET_TOKENS,
+    }
+}
 
 /// A structured citation returned alongside an answer so the UI can render
 /// which notes were used and navigate to them.
@@ -1315,5 +1352,35 @@ mod tests {
         let no_ctx = build_system_prompt("", false);
         assert!(no_ctx.contains("No relevant notes"));
         assert!(no_ctx.contains("general knowledge"));
+    }
+
+    #[test]
+    fn ask_context_budget_is_model_aware_and_never_overflows() {
+        // Embedded llama.cpp default window (4096): budget must leave room for
+        // prompt overhead + reserved output, and stay well under 6000.
+        let b4096 = ask_context_budget(Some(4096));
+        assert_eq!(
+            b4096,
+            4096 - ASK_PROMPT_OVERHEAD_TOKENS - ASK_RESERVED_OUTPUT_TOKENS
+        );
+        assert!(
+            b4096 + ASK_PROMPT_OVERHEAD_TOKENS + ASK_RESERVED_OUTPUT_TOKENS <= 4096,
+            "prompt + output must fit the window"
+        );
+        assert!(
+            b4096 < 6000,
+            "must not use the old unconditional 6000 budget"
+        );
+
+        // Larger window scales the budget up.
+        assert!(ask_context_budget(Some(8192)) > b4096);
+
+        // Unknown window (most remote providers) falls back conservatively,
+        // never the old 6000.
+        assert_eq!(ask_context_budget(None), ASK_DEFAULT_CONTEXT_BUDGET_TOKENS);
+        assert!(ask_context_budget(None) <= 2048);
+
+        // A tiny window still yields the floor rather than zero.
+        assert_eq!(ask_context_budget(Some(256)), ASK_MIN_CONTEXT_BUDGET_TOKENS);
     }
 }

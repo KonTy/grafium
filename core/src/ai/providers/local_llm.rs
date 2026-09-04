@@ -263,8 +263,7 @@ impl LocalLlm {
         // Instead, when the caller hasn't pinned an explicit `gpu_layers`,
         // proactively estimate whether the model can plausibly fit in free
         // VRAM at all and decide up front, so we only ever allocate once.
-        let requested_gpu_layers =
-            gpu_layers.unwrap_or_else(|| default_gpu_layers_for(model_path));
+        let requested_gpu_layers = gpu_layers.unwrap_or_else(|| default_gpu_layers_for(model_path));
 
         if requested_gpu_layers == 0 {
             check_cpu_ram_budget(model_path)?;
@@ -414,6 +413,10 @@ impl LlmProvider for LocalLlm {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        Some(self.ctx_size.get() as usize)
     }
 
     fn complete_stream<'a>(
@@ -650,7 +653,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let message = err.to_string();
         assert!(
@@ -676,7 +680,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let default_dir = data_dir.path().join("models");
         assert!(
@@ -726,4 +731,3 @@ mod config_tests {
         assert_eq!(find_fallback_llm_model(dir.path(), &only_model), None);
     }
 }
-
