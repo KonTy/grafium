@@ -17,29 +17,9 @@ use crate::ai::references::{PageReferencesMeta, PageSummary, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
 use crate::knowledge::registry::GraphRegistry;
+use crate::knowledge::retrieval::{self, ContextEntry, RetrievedHit};
 use crate::knowledge::vector_store::SqliteVectorStore;
 use crate::models::{Block, Page};
-
-/// A fused retrieval hit: a primary block plus the page/date metadata and
-/// expansion context needed to build a dated, cited prompt.
-#[derive(Debug, Clone)]
-pub struct RetrievedHit {
-    pub block_id: String,
-    pub page_id: String,
-    pub page_title: String,
-    pub content: String,
-    /// Best-known date for the hit, in epoch-ms. For journal pages this is
-    /// parsed from the page title; otherwise it falls back to the block's
-    /// `created_at`.
-    pub date_ms: Option<i64>,
-    pub is_journal: bool,
-    /// Fused RRF score.
-    pub score: f64,
-    /// Ancestor blocks (outermost first) for small-to-big context.
-    pub parents: Vec<crate::knowledge::retrieval::ContextItem>,
-    /// Immediate children for small-to-big detail.
-    pub children: Vec<crate::knowledge::retrieval::ContextItem>,
-}
 
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
 pub struct KnowledgeEngine {
@@ -523,10 +503,7 @@ impl KnowledgeEngine {
             return Ok(Vec::new());
         }
 
-        let fused = crate::knowledge::retrieval::reciprocal_rank_fusion(
-            &rankings,
-            crate::knowledge::retrieval::RRF_K,
-        );
+        let fused = retrieval::reciprocal_rank_fusion(&rankings, retrieval::RRF_K);
 
         let top_ids: Vec<String> = fused.iter().take(top_k).map(|f| f.id.clone()).collect();
         let metas = db.get_blocks_with_page_meta(&top_ids)?;
@@ -561,11 +538,53 @@ impl KnowledgeEngine {
     /// and its title parses as a date, otherwise the block's `created_at`.
     fn resolve_hit_date(meta: &crate::db::BlockPageMeta) -> Option<i64> {
         if meta.is_journal {
-            if let Some(ms) = crate::knowledge::retrieval::journal_title_to_ms(&meta.page_title) {
+            if let Some(ms) = retrieval::journal_title_to_ms(&meta.page_title) {
                 return Some(ms);
             }
         }
         Some(meta.created_at)
+    }
+
+    /// Fill each hit's `parents` (ancestor chain, outermost first) and
+    /// `children` (immediate children) from the DB, for small-to-big
+    /// context expansion. Best-effort per hit — a failed lookup just leaves
+    /// that hit's expansion empty rather than failing the whole query.
+    pub fn expand_hits(&self, db: &crate::db::Database, hits: &mut [RetrievedHit]) {
+        for hit in hits.iter_mut() {
+            if let Ok(parents) = db.get_ancestor_chain(&hit.block_id) {
+                hit.parents = parents
+                    .into_iter()
+                    .map(|b| retrieval::ContextItem {
+                        block_id: b.id,
+                        content: b.content,
+                    })
+                    .collect();
+            }
+            if let Ok(children) = db.list_child_blocks(&hit.block_id) {
+                hit.children = children
+                    .into_iter()
+                    .map(|b| retrieval::ContextItem {
+                        block_id: b.id,
+                        content: b.content,
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    /// Retrieve (hybrid), expand (small-to-big), and assemble a dated, cited
+    /// context block bounded by `budget_tokens`.
+    pub async fn retrieve_context(
+        &self,
+        db: &crate::db::Database,
+        query: &str,
+        top_k: usize,
+        budget_tokens: usize,
+        graph_id: Option<&str>,
+    ) -> Result<Vec<ContextEntry>> {
+        let mut hits = self.hybrid_search(db, query, top_k, graph_id).await?;
+        self.expand_hits(db, &mut hits);
+        Ok(retrieval::assemble_within_budget(&hits, budget_tokens))
     }
 
     /// Generate references for a page using AI.

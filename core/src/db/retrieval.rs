@@ -123,3 +123,74 @@ fn load_block(conn: &Connection, block_id: &str) -> Result<Option<Block>> {
         .ok();
     Ok(block)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Result;
+
+    #[test]
+    fn ancestor_chain_is_outermost_first() -> Result<()> {
+        let db = Database::in_memory()?;
+        let page = db.create_page("Tree", false)?;
+        let gp = db.create_block(
+            &page.id,
+            None,
+            0,
+            "grandparent",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let parent = db.create_block(
+            &page.id,
+            Some(&gp.id),
+            0,
+            "parent",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child = db.create_block(
+            &page.id,
+            Some(&parent.id),
+            0,
+            "child",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let chain = db.get_ancestor_chain(&child.id)?;
+        let contents: Vec<&str> = chain.iter().map(|b| b.content.as_str()).collect();
+        assert_eq!(contents, vec!["grandparent", "parent"]);
+
+        // Root block has no ancestors.
+        assert!(db.get_ancestor_chain(&gp.id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn block_meta_join_carries_page_and_journal_flag() -> Result<()> {
+        let db = Database::in_memory()?;
+        let journal = db.create_page("2026-01-02", true)?;
+        let b = db.create_block(
+            &journal.id,
+            None,
+            0,
+            "a journal note",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let metas = db.get_blocks_with_page_meta(&[b.id.clone()])?;
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].page_title, "2026-01-02");
+        assert!(metas[0].is_journal);
+        assert_eq!(metas[0].content, "a journal note");
+
+        // Missing IDs are simply omitted, not an error.
+        assert!(db
+            .get_blocks_with_page_meta(&["nope".to_string()])?
+            .is_empty());
+        assert!(db.get_blocks_with_page_meta(&[])?.is_empty());
+        Ok(())
+    }
+}
