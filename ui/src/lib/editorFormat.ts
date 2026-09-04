@@ -36,22 +36,38 @@ export function toggleWrapText(
   }
 
   const selected = doc.slice(from, to);
+  const mchar = marker.charAt(0);
 
-  // Already wrapped inside the selection → unwrap.
+  // Already wrapped inside the selection → unwrap, but only when the marker
+  // run is EXACTLY `marker` long. Otherwise selecting `**bold**` for an italic
+  // toggle would strip one `*` per side and corrupt the bold into `*bold*`.
   if (
     selected.length >= 2 * mlen &&
     selected.startsWith(marker) &&
-    selected.endsWith(marker)
+    selected.endsWith(marker) &&
+    // the char just inside each run must not extend the marker run
+    selected.charAt(mlen) !== mchar &&
+    selected.charAt(selected.length - mlen - 1) !== mchar &&
+    // the chars just outside the selection must not extend the run either
+    doc.charAt(from - 1) !== mchar &&
+    doc.charAt(to) !== mchar
   ) {
     const inner = selected.slice(mlen, selected.length - mlen);
     const newDoc = doc.slice(0, from) + inner + doc.slice(to);
     return { doc: newDoc, selStart: from, selEnd: from + inner.length };
   }
 
-  // Markers sit just outside the selection → unwrap them.
+  // Markers sit just outside the selection → unwrap them, again only when the
+  // surrounding run is exactly `marker` long (so italic doesn't unwrap bold).
   const before = doc.slice(Math.max(0, from - mlen), from);
   const after = doc.slice(to, to + mlen);
-  if (before === marker && after === marker) {
+  if (
+    from >= mlen &&
+    before === marker &&
+    after === marker &&
+    doc.charAt(from - mlen - 1) !== mchar &&
+    doc.charAt(to + mlen) !== mchar
+  ) {
     const newDoc = doc.slice(0, from - mlen) + selected + doc.slice(to + mlen);
     return { doc: newDoc, selStart: from - mlen, selEnd: to - mlen };
   }

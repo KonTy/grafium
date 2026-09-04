@@ -63,4 +63,42 @@ describe("toggleWrapText", () => {
     expect(unwrapped.doc).toBe("abc");
     expect(unwrapped.doc.slice(unwrapped.selStart, unwrapped.selEnd)).toBe("abc");
   });
+
+  // Regression: italic toggle must not tear apart surrounding bold markers.
+  it("italic toggle on inner text of bold does not destroy the bold", () => {
+    // "hello **world**", select just "world" (8..13)
+    const r = toggleWrapText("hello **world**", 8, 13, "*");
+    // Must become bold+italic, never "hello *world*".
+    expect(r.doc).toBe("hello ***world***");
+    expect(r.doc).not.toBe("hello *world*");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("world");
+  });
+
+  it("italic toggle on a selected **bold** span wraps instead of stripping a star", () => {
+    // select "**world**" (6..15)
+    const r = toggleWrapText("hello **world**", 6, 15, "*");
+    expect(r.doc).toBe("hello ***world***");
+    expect(r.doc).not.toBe("hello *world*");
+  });
+
+  it("bold toggle on a selected *italic* span never destroys the italic", () => {
+    // "hello *world*", select "*world*" (6..13)
+    const r = toggleWrapText("hello *world*", 6, 13, "**");
+    expect(r.doc).toBe("hello ***world***");
+    expect(r.doc).not.toBe("hello world");
+  });
+
+  it("italic toggle still unwraps a genuine single-star italic", () => {
+    // "hello *world*", select just "world" (7..12)
+    const r = toggleWrapText("hello *world*", 7, 12, "*");
+    expect(r.doc).toBe("hello world");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("world");
+  });
+
+  it("italic toggle unwraps a fully-selected single-star italic span", () => {
+    // select "*world*" (6..13)
+    const r = toggleWrapText("hello *world*", 6, 13, "*");
+    expect(r.doc).toBe("hello world");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("world");
+  });
 });
