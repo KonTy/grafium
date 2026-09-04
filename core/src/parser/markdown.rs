@@ -204,9 +204,15 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let mut consumed = 1;
     let mut inside_code_fence = raw_content.trim_start().starts_with("```");
     // A Logseq-style admonition (`#+BEGIN_TIP` … `#+END_TIP`) is kept as a
-    // single block: consume every line up to and including the matching
-    // `#+END_…`, without splitting on inner blank lines.
-    let mut inside_admonition = ADMONITION_BEGIN_RE.is_match(raw_content.trim());
+    // single block: consume the body up to and including the matching
+    // `#+END_<same kind>`, without splitting on inner blank lines. We capture
+    // the opening kind so a mismatched or unclosed `#+END_…` can never close
+    // the callout, and we stop before sibling bullets / property lines so an
+    // unclosed BEGIN cannot swallow the rest of the page or drop block ids.
+    let admonition_kind: Option<String> = ADMONITION_BEGIN_RE
+        .captures(raw_content.trim())
+        .map(|cap| cap[1].to_ascii_uppercase());
+    let mut inside_admonition = admonition_kind.is_some();
 
     // If the bullet content itself is just "id:: <uuid>" (roundtrip corruption fix),
     // treat it as the block's id with empty content
@@ -263,18 +269,37 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
             continue;
         }
 
-        // While inside an admonition, keep consuming every line (including
-        // blank lines) until the matching `#+END_…`, so the whole callout
-        // body stays in one block.
+        // While inside an admonition, keep consuming the callout body
+        // (including blank lines) until the matching `#+END_<kind>`. Guard
+        // against structure-destroying inputs: stop at a sibling/shallower
+        // bullet, and never swallow property (`id:: …`) lines as body.
         if inside_admonition {
-            let continuation = strip_continuation(next_line, indent_level + 1);
-            full_content.push('\n');
-            full_content.push_str(continuation);
-            consumed += 1;
-            if ADMONITION_END_RE.is_match(continuation.trim()) {
-                inside_admonition = false;
+            // A bullet at the same or shallower indent is a sibling (or an
+            // ancestor's sibling): the BEGIN is effectively unclosed, so leave
+            // it as-is and let the outer parsing handle the bullet.
+            if next_indent <= indent_level && next_trimmed.starts_with("- ") {
+                break;
             }
-            continue;
+            // Property lines belong to this block's metadata, not the body.
+            // Defer to the property handling below.
+            if next_indent > indent_level
+                && !next_trimmed.starts_with("- ")
+                && is_property_line(next_trimmed)
+            {
+                inside_admonition = false;
+            } else {
+                let continuation = strip_continuation(next_line, indent_level + 1);
+                full_content.push('\n');
+                full_content.push_str(continuation);
+                consumed += 1;
+                // Only the matching end kind closes the callout.
+                if let Some(cap) = ADMONITION_END_RE.captures(continuation.trim()) {
+                    if Some(cap[1].to_ascii_uppercase()) == admonition_kind {
+                        inside_admonition = false;
+                    }
+                }
+                continue;
+            }
         }
 
         // Property lines for this block (indented, key:: value)
@@ -573,5 +598,73 @@ mod tests {
             parsed.blocks[0].content,
             "#+begin_important\nBody text\n#+end_important"
         );
+    }
+
+    #[test]
+    fn test_admonition_unclosed_does_not_eat_siblings() {
+        // An unclosed BEGIN must not swallow the following sibling bullet or
+        // drop its block id.
+        let content = "- #+BEGIN_TIP\n  body\n- Sibling\n  id:: sib-1";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(parsed.blocks[0].content, "#+BEGIN_TIP\nbody");
+        assert_eq!(parsed.blocks[1].content, "Sibling");
+        assert_eq!(parsed.blocks[1].id, Some("sib-1".to_string()));
+    }
+
+    #[test]
+    fn test_admonition_mismatched_end_does_not_close() {
+        // `#+END_NOTE` must not close a `#+BEGIN_TIP`; only the matching kind does.
+        let content =
+            "- #+BEGIN_TIP\n  body\n  #+END_NOTE\n  more\n  #+END_TIP\n- next\n  id:: n-1";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "#+BEGIN_TIP\nbody\n#+END_NOTE\nmore\n#+END_TIP"
+        );
+        assert_eq!(parsed.blocks[1].content, "next");
+        assert_eq!(parsed.blocks[1].id, Some("n-1".to_string()));
+    }
+
+    #[test]
+    fn test_admonition_nested_inner_end_closes_inner_only() {
+        // A nested BEGIN/END of a different kind stays part of the body; only
+        // the outer matching END closes the callout.
+        let content = "- #+BEGIN_TIP\n  #+BEGIN_NOTE\n  inner\n  #+END_NOTE\n  #+END_TIP";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(
+            parsed.blocks[0].content,
+            "#+BEGIN_TIP\n#+BEGIN_NOTE\ninner\n#+END_NOTE\n#+END_TIP"
+        );
+    }
+
+    #[test]
+    fn test_admonition_shallower_bullet_does_not_merge() {
+        // A BEGIN immediately followed by a same-indent sibling bullet must not
+        // merge the sibling into the callout body.
+        let content = "- #+BEGIN_TIP\n- sibling\n  id:: s-1";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(parsed.blocks[0].content, "#+BEGIN_TIP");
+        assert_eq!(parsed.blocks[1].content, "sibling");
+        assert_eq!(parsed.blocks[1].id, Some("s-1".to_string()));
+    }
+
+    #[test]
+    fn test_admonition_unclosed_keeps_id_as_metadata() {
+        // An unclosed BEGIN followed by an `id::` line must attach the id as
+        // block metadata rather than consuming it as body text.
+        let content = "- #+BEGIN_TIP\n  body\n  id:: c-9";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].content, "#+BEGIN_TIP\nbody");
+        assert_eq!(parsed.blocks[0].id, Some("c-9".to_string()));
     }
 }
