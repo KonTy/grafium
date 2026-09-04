@@ -14,6 +14,7 @@
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import { FORMATTING_SLASH_COMMANDS } from "../lib/slashCommands";
+  import { toggleWrapText } from "../lib/editorFormat";
   import DatePicker from "./DatePicker.svelte";
 
   interface Props {
@@ -228,6 +229,21 @@
     // offset (e.g. callouts drop the cursor on the blank body line).
     ...FORMATTING_SLASH_COMMANDS,
   ];
+
+  // Toggle markdown emphasis markers (`*`, `**`, `~~`) around the current
+  // selection via the pure toggleWrapText helper, then replace the doc.
+  function applyToggleWrap(view: EditorView, marker: string): boolean {
+    const { from, to } = view.state.selection.main;
+    const r = toggleWrapText(view.state.doc.toString(), from, to, marker);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: r.doc },
+      selection:
+        r.selStart === r.selEnd
+          ? EditorSelection.cursor(r.selStart)
+          : EditorSelection.range(r.selStart, r.selEnd),
+    });
+    return true;
+  }
 
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {
     // Match a `/` optionally followed by word chars at the current position
@@ -618,6 +634,21 @@
                 void stopEditing();
                 return true;
               },
+            },
+            // Selection-formatting shortcuts. Note: Ctrl+B and Ctrl+Shift+A are
+            // deliberately NOT bound here — they belong to window-level sidebar
+            // toggles.
+            {
+              key: "Mod-i",
+              run: (view) => applyToggleWrap(view, "*"),
+            },
+            {
+              key: "Mod-Shift-b",
+              run: (view) => applyToggleWrap(view, "**"),
+            },
+            {
+              key: "Mod-Shift-k",
+              run: (view) => applyToggleWrap(view, "~~"),
             },
             ...defaultKeymap,
             ...historyKeymap,
