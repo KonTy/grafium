@@ -6,7 +6,7 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::{HealthStatus, Source};
+use grafium_core::knowledge::engine::{HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
@@ -268,6 +268,27 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
 }
 
 // ─── Indexing ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn ai_index_status(
+    app: tauri::AppHandle,
+    state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
+) -> Result<IndexStatus, String> {
+    let guard = state.engine.read().await;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let graph_id = snapshot.root_dir.to_string_lossy().to_string();
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    engine
+        .index_status(&graph.db, &graph_id)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub async fn ai_index_page(

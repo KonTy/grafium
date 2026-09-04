@@ -171,4 +171,7 @@ pub trait VectorStore: Send + Sync {
 
     /// Total number of stored vectors.
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>>;
+
+    /// Number of stored vectors belonging to a specific graph.
+    fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>>;
 }

@@ -380,6 +380,29 @@ impl KnowledgeEngine {
         })
     }
 
+    /// Report indexing status for a graph so the UI can show the empty-index
+    /// banner and post-index confirmation. `total_blocks` is the number of
+    /// blocks in the graph's own DB; `indexed_chunks` is how many vectors are
+    /// stored for this graph.
+    pub async fn index_status(
+        &self,
+        db: &crate::db::Database,
+        graph_id: &str,
+    ) -> Result<IndexStatus> {
+        let indexed_chunks = if let Some(store) = &self.vector_store {
+            store.count_for_graph(graph_id).await.unwrap_or(0)
+        } else {
+            0
+        };
+        let total_blocks = db.count_blocks().unwrap_or(0);
+        Ok(IndexStatus {
+            indexed_chunks,
+            total_blocks,
+            embedder_ready: self.embedder.is_some() && self.vector_store.is_some(),
+            llm_ready: self.is_llm_ready(),
+        })
+    }
+
     /// Index a single page — embed its blocks and store vectors.
     pub async fn index_page(&self, page: &Page, blocks: &[Block], graph_id: &str) -> Result<usize> {
         let embedder = self
@@ -771,6 +794,21 @@ pub struct HealthStatus {
     pub mode: AiMode,
 }
 
+/// Indexing coverage for a graph, for the Chat empty-index banner and
+/// post-index confirmation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexStatus {
+    /// Vectors stored for this graph.
+    pub indexed_chunks: usize,
+    /// Total blocks in the graph's DB.
+    pub total_blocks: usize,
+    /// Whether an embedder + vector store are available (semantic indexing
+    /// possible).
+    pub embedder_ready: bool,
+    /// Whether the LLM is ready for chat.
+    pub llm_ready: bool,
+}
+
 /// How many hits `ask` retrieves before context assembly.
 const ASK_TOP_K: usize = 10;
 /// Approximate token budget for the whole assembled context block.
@@ -1014,6 +1052,17 @@ mod tests {
         fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
             Box::pin(async move { Ok(self.state.lock().unwrap().chunks.len()) })
         }
+
+        fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>> {
+            Box::pin(async move {
+                let state = self.state.lock().unwrap();
+                Ok(state
+                    .chunks
+                    .values()
+                    .filter(|c| c.graph_id == graph_id)
+                    .count())
+            })
+        }
     }
 
     fn test_engine(
@@ -1198,6 +1247,29 @@ mod tests {
             crate::knowledge::retrieval::format_date_ms(hit.date_ms.unwrap()),
             "2026-03-14"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_status_reports_empty_index_but_counts_blocks() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let mut config = AiConfig::default();
+        config.enabled = false;
+        let engine = KnowledgeEngine::new(Path::new(env!("CARGO_MANIFEST_DIR")), config)?;
+
+        let db = Database::in_memory()?;
+        let page = db.create_page("Notes", false)?;
+        db.create_block(&page.id, None, 0, "one", BlockType::Text, json!({}))?;
+        db.create_block(&page.id, None, 1, "two", BlockType::Text, json!({}))?;
+
+        let status = engine.index_status(&db, "graph-x").await?;
+        assert_eq!(status.total_blocks, 2);
+        assert_eq!(status.indexed_chunks, 0, "vector index is empty");
+        assert!(!status.embedder_ready);
+        assert!(!status.llm_ready);
 
         Ok(())
     }

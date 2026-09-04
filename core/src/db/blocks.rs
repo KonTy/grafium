@@ -147,6 +147,14 @@ impl Database {
         })
     }
 
+    /// Total number of blocks in the graph. Used by the index-status command
+    /// to show indexing coverage.
+    pub fn count_blocks(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     pub fn get_block(&self, id: &str) -> Result<Block> {
         let conn = self.conn()?;
         let block = conn.query_row(

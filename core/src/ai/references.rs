@@ -353,8 +353,7 @@ impl ReferenceEngine {
 
         if blocks.len() == 1 {
             return Ok(vec![
-                self.extract_concepts(blocks[0].1, llm, on_progress)
-                    .await?,
+                self.extract_concepts(blocks[0].1, llm, on_progress).await?,
             ]);
         }
 
@@ -978,6 +977,10 @@ mod tests {
         }
 
         fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>> {
+            Box::pin(async move { Ok(0) })
+        }
+
+        fn count_for_graph<'a>(&'a self, _graph_id: &'a str) -> BoxFuture<'a, Result<usize>> {
             Box::pin(async move { Ok(0) })
         }
     }

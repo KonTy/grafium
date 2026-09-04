@@ -219,6 +219,17 @@ export function aiHealthCheck(): Promise<HealthStatus> {
 
 // ─── Indexing ────────────────────────────────────────────────────────────────
 
+export interface IndexStatus {
+  indexed_chunks: number;
+  total_blocks: number;
+  embedder_ready: boolean;
+  llm_ready: boolean;
+}
+
+export function aiIndexStatus(): Promise<IndexStatus> {
+  return invoke("ai_index_status");
+}
+
 export function aiIndexPage(pageId: string): Promise<number> {
   return invoke("ai_index_page", { pageId });
 }

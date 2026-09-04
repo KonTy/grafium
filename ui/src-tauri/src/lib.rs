@@ -1492,6 +1492,7 @@ pub fn run() {
             commands::knowledge::ai_health_check,
             commands::knowledge::ai_index_page,
             commands::knowledge::ai_index_all_pages,
+            commands::knowledge::ai_index_status,
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_summarize_selection,

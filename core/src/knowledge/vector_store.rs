@@ -486,6 +486,21 @@ impl VectorStore for SqliteVectorStore {
             Ok(count as usize)
         })
     }
+
+    fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>> {
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM vectors WHERE graph_id = ?1",
+                [graph_id],
+                |row| row.get(0),
+            )?;
+            Ok(count as usize)
+        })
+    }
 }
 
 /// Internal row representation.
