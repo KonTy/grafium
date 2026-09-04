@@ -81,6 +81,24 @@ export interface AskResult {
   sources: ChatSource[];
 }
 
+// Compact label for a source chip, e.g. "[3] 2026-03-14 · Journal" or
+// "[1] Rust". Pure so it can be unit-tested and reused.
+export function formatSourceLabel(source: ChatSource): string {
+  const parts = [`[${source.index}]`];
+  if (source.date) parts.push(source.date);
+  parts.push(source.page_title);
+  return parts.join(" · ");
+}
+
+// Whether the Chat empty-index banner should be shown: the status has loaded
+// and there are zero indexed chunks. A null status (not yet loaded / errored)
+// keeps the banner hidden.
+export function shouldShowIndexBanner(
+  indexedChunks: number | null
+): boolean {
+  return indexedChunks === 0;
+}
+
 export interface HealthStatus {
   enabled: boolean;
   llm_available: boolean;

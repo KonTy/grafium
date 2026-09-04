@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { aiAskStream, aiHealthCheck } from "../lib/knowledge";
+  import {
+    aiAskStream,
+    aiHealthCheck,
+    aiIndexStatus,
+    aiIndexAllPages,
+    formatSourceLabel,
+    shouldShowIndexBanner,
+    type ChatSource,
+  } from "../lib/knowledge";
 
   interface Props {
     onOpenSettings?: () => void;
@@ -11,13 +19,14 @@
   type ChatMessage = {
     role: "user" | "assistant";
     content: string;
+    sources?: ChatSource[];
   };
 
   let messages = $state<ChatMessage[]>([
     {
       role: "assistant",
       content:
-        "Ask me anything about your graph. I can analyze topics and suggest hidden connections based on semantic similarity.",
+        "Ask me anything — about your graph or in general. For questions about your notes I'll cite the pages I used; for everything else I'll answer from general knowledge and say so.",
     },
   ]);
   let question = $state("");
@@ -28,9 +37,20 @@
   let checkingConnection = $state(true);
   let chatConnected = $state(false);
 
+  // Index coverage — drives the empty-index banner.
+  let indexedChunks = $state<number | null>(null);
+  let totalBlocks = $state(0);
+  let embedderReady = $state(false);
+  let isIndexing = $state(false);
+  let indexError = $state<string | null>(null);
+  let indexJustFinished = $state(false);
+
+  let indexEmpty = $derived(shouldShowIndexBanner(indexedChunks));
+
   onMount(() => {
     keepInputFocusedSoon(true);
     void refreshConnectionState();
+    void refreshIndexStatus();
   });
 
   $effect(() => {
@@ -49,6 +69,46 @@
     } finally {
       checkingConnection = false;
     }
+  }
+
+  async function refreshIndexStatus() {
+    try {
+      const status = await aiIndexStatus();
+      indexedChunks = status.indexed_chunks;
+      totalBlocks = status.total_blocks;
+      embedderReady = status.embedder_ready;
+    } catch {
+      // Leave indexedChunks null so the banner stays hidden on error.
+    }
+  }
+
+  async function startIndexing() {
+    if (isIndexing) return;
+    indexError = null;
+    indexJustFinished = false;
+    isIndexing = true;
+    try {
+      await aiIndexAllPages();
+      await refreshIndexStatus();
+      indexJustFinished = true;
+    } catch (e: any) {
+      indexError = String(e);
+    } finally {
+      isIndexing = false;
+    }
+  }
+
+  function openSource(source: ChatSource) {
+    window.dispatchEvent(
+      new CustomEvent("navigate-page", {
+        detail: {
+          pageName: source.page_title,
+          sourceBlockId: source.block_id,
+          sourcePageTitle: source.page_title,
+          targetBlockId: source.block_id,
+        },
+      })
+    );
   }
 
   function focusInput(select = false) {
@@ -98,6 +158,12 @@
           });
           void scrollToBottom();
         },
+        onSources: (sources) => {
+          messages = messages.map((m, i) => {
+            if (i !== assistantIndex) return m;
+            return { ...m, sources };
+          });
+        },
         onDone: () => {
           isStreaming = false;
           keepInputFocusedSoon(false);
@@ -143,11 +209,51 @@
     </div>
   {/if}
 
+  {#if indexEmpty && !indexJustFinished}
+    <div class="index-banner">
+      <div class="index-banner-text">
+        <strong>Your notes aren't indexed yet</strong>
+        <span>
+          Chat can only use general knowledge and text search until you build the
+          semantic index{totalBlocks > 0 ? ` (${totalBlocks} blocks)` : ""}.
+        </span>
+        {#if indexError}<span class="index-error">{indexError}</span>{/if}
+      </div>
+      <button
+        class="index-button"
+        onclick={() => void startIndexing()}
+        disabled={isIndexing || !embedderReady}
+        title={embedderReady ? "" : "Configure an embedding model in Settings first"}
+      >
+        {isIndexing ? "Indexing…" : "Index my notes"}
+      </button>
+    </div>
+  {:else if indexJustFinished}
+    <div class="index-done">
+      Indexed {indexedChunks} chunk{indexedChunks === 1 ? "" : "s"} — semantic search is on.
+    </div>
+  {/if}
+
   <div class="chat-log" bind:this={chatScroll}>
     {#each messages as m}
       <div class="msg" class:user={m.role === "user"}>
         <div class="msg-role">{m.role === "user" ? "You" : "Grafium AI"}</div>
         <div class="msg-content">{m.content || (isStreaming ? "..." : "")}</div>
+        {#if m.role === "assistant" && m.sources && m.sources.length > 0}
+          <div class="msg-sources">
+            {#each m.sources as source}
+              <button
+                class="source-chip"
+                onclick={() => openSource(source)}
+                title={`Open ${formatSourceLabel(source)}`}
+              >
+                <span class="source-index">[{source.index}]</span>
+                <span class="source-title">{source.page_title}</span>
+                {#if source.date}<span class="source-date">{source.date}</span>{/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -260,6 +366,102 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.45;
+  }
+
+  .msg-sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .source-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    max-width: 100%;
+  }
+
+  .source-chip:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .source-index {
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .source-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+  }
+
+  .source-date {
+    color: var(--text-muted);
+  }
+
+  .index-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-secondary));
+    padding: 10px 12px;
+  }
+
+  .index-banner-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .index-banner-text strong {
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .index-error {
+    color: #f87171;
+  }
+
+  .index-button {
+    flex-shrink: 0;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .index-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .index-done {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .chat-error {
