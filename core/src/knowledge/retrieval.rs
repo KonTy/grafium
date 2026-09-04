@@ -311,33 +311,64 @@ pub fn detect_temporal_intent(query: &str) -> TemporalIntent {
     }
 }
 
-/// Find a standalone 4-digit year (1900–2099) in the query and return the
-/// epoch-ms range covering that whole calendar year.
+/// Words that, immediately before a 4-digit year, signal it's being used as
+/// a *date* ("in 2025", "during 2019", "back in 2021", "notes from 2020")
+/// rather than as part of a product/topic name ("rust 2021 edition",
+/// "Windows 2000"). Requiring a cue keeps bare version/model numbers from
+/// hijacking a query into a journal-biased temporal search.
+const YEAR_CUE_WORDS: &[&str] = &[
+    "in", "during", "since", "before", "after", "around", "until", "from", "back", "by", "of",
+    "on", "year", "dated",
+];
+
+/// Find a 4-digit year (1900–2099) that is *adjacent to a temporal cue* in
+/// the query and return the epoch-ms range covering that whole calendar
+/// year. A bare year with no cue (e.g. "rust 2021 edition") is intentionally
+/// ignored so it doesn't trigger date-biased ranking.
 fn parse_year_range(q: &str) -> Option<(i64, i64)> {
-    let mut year: Option<i32> = None;
-    for token in q.split(|c: char| !c.is_ascii_digit()) {
-        if token.len() == 4 {
-            if let Ok(y) = token.parse::<i32>() {
-                if (1900..=2099).contains(&y) {
-                    year = Some(y);
-                    break;
-                }
-            }
+    let tokens: Vec<&str> = q.split_whitespace().collect();
+    for (i, raw) in tokens.iter().enumerate() {
+        let cleaned: &str = raw.trim_matches(|c: char| !c.is_ascii_digit());
+        if cleaned.len() != 4 {
+            continue;
+        }
+        let Ok(y) = cleaned.parse::<i32>() else {
+            continue;
+        };
+        if !(1900..=2099).contains(&y) {
+            continue;
+        }
+        let prev_is_cue = i > 0 && {
+            let prev = tokens[i - 1]
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            YEAR_CUE_WORDS.contains(&prev.as_str())
+        };
+        if prev_is_cue {
+            let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
+            let end = NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
+            return Some((
+                Utc.from_utc_datetime(&start).timestamp_millis(),
+                Utc.from_utc_datetime(&end).timestamp_millis(),
+            ));
         }
     }
-    let y = year?;
-    let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
-    let end = NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
-    Some((
-        Utc.from_utc_datetime(&start).timestamp_millis(),
-        Utc.from_utc_datetime(&end).timestamp_millis(),
-    ))
+    None
 }
 
-/// Re-order hits for a temporal query: prefer hits inside an explicit range,
-/// then bias journal (dated) pages, then sort by date (newest-first for
-/// recency, oldest-first for earliest), keeping the original fused order as a
-/// stable tiebreak. A no-op when `intent.is_temporal` is false.
+/// Re-order hits for a temporal query without ever *dropping* a
+/// higher-relevance hit merely because it isn't a journal.
+///
+/// The previous implementation partitioned journals ahead of everything
+/// else, so a fused rank-#1 non-journal hit (e.g. "painted the bedroom" on a
+/// `home/renovation` page) could be pushed past `top_k` by ≥`top_k` journal
+/// decoys and silently lost. Instead we compute a *soft* temporal relevance
+/// score — the fused RRF score, mildly boosted for dated journal pages and
+/// for hits inside an explicit year range — and sort by that, using date as
+/// a secondary ordering among comparably-relevant hits. Relevance stays the
+/// dominant signal; the journal boost is a nudge, not a partition.
+///
+/// A no-op when `intent.is_temporal` is false.
 pub fn order_hits_temporally(
     hits: Vec<RetrievedHit>,
     intent: &TemporalIntent,
@@ -349,14 +380,10 @@ pub fn order_hits_temporally(
     let mut indexed: Vec<(usize, RetrievedHit)> = hits.into_iter().enumerate().collect();
 
     indexed.sort_by(|(ai, a), (bi, b)| {
-        let a_in = in_range(a.date_ms, intent.explicit_range);
-        let b_in = in_range(b.date_ms, intent.explicit_range);
-        // 0 = in range (or no range), 1 = out of range → in-range first.
-        let a_range = if a_in { 0 } else { 1 };
-        let b_range = if b_in { 0 } else { 1 };
-        a_range
-            .cmp(&b_range)
-            .then_with(|| journal_rank(a).cmp(&journal_rank(b)))
+        let sa = temporal_relevance(a, intent);
+        let sb = temporal_relevance(b, intent);
+        sb.partial_cmp(&sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| date_cmp(a.date_ms, b.date_ms, intent))
             .then_with(|| ai.cmp(bi))
     });
@@ -364,12 +391,83 @@ pub fn order_hits_temporally(
     indexed.into_iter().map(|(_, hit)| hit).collect()
 }
 
-fn journal_rank(hit: &RetrievedHit) -> u8 {
-    if hit.is_journal {
-        0
-    } else {
-        1
+/// Multiplicative nudge applied to a dated journal hit's relevance for a
+/// temporal query. Deliberately small so it can't overturn a substantially
+/// higher-RRF non-journal hit.
+const JOURNAL_TEMPORAL_BOOST: f64 = 0.25;
+/// Strong boost for a hit whose date falls inside an explicit year range
+/// ("in 2025") — an explicit range is a deliberate, high-confidence filter.
+const RANGE_MATCH_BOOST: f64 = 1.0;
+/// Demotion for a dated hit that falls *outside* an explicit range.
+const RANGE_MISS_PENALTY: f64 = 0.5;
+
+/// Soft temporal relevance: fused score, boosted for dated journals and
+/// in-range hits, demoted for dated out-of-range hits.
+fn temporal_relevance(hit: &RetrievedHit, intent: &TemporalIntent) -> f64 {
+    let mut s = hit.score;
+    if hit.is_journal && hit.date_ms.is_some() {
+        s *= 1.0 + JOURNAL_TEMPORAL_BOOST;
     }
+    if let Some(range) = intent.explicit_range {
+        if in_range(hit.date_ms, Some(range)) {
+            s *= 1.0 + RANGE_MATCH_BOOST;
+        } else if hit.date_ms.is_some() {
+            s *= 1.0 - RANGE_MISS_PENALTY;
+        }
+    }
+    s
+}
+
+/// Truncate `ordered` to `top_k` while guaranteeing every id in `protected`
+/// survives if it was present at all. Used to reserve slots for the
+/// highest-RRF hits and for dense-only (semantic synonym) candidates, so
+/// fusion's overlap bias can't evict them. Preserves the relevance ordering
+/// of the kept set; rescued items land at the positions of the lowest-ranked
+/// non-protected hits they displace.
+pub fn finalize_hits(
+    ordered: Vec<RetrievedHit>,
+    top_k: usize,
+    protected: &std::collections::HashSet<String>,
+) -> Vec<RetrievedHit> {
+    if ordered.len() <= top_k {
+        return ordered;
+    }
+
+    let mut slots: Vec<Option<RetrievedHit>> = ordered.into_iter().map(Some).collect();
+    let mut keep: Vec<usize> = (0..top_k).collect();
+
+    let is_protected = |i: usize, slots: &[Option<RetrievedHit>]| {
+        slots[i]
+            .as_ref()
+            .map(|h| protected.contains(&h.block_id))
+            .unwrap_or(false)
+    };
+
+    for r in top_k..slots.len() {
+        if !is_protected(r, &slots) {
+            continue;
+        }
+        let rid = match slots[r].as_ref() {
+            Some(h) => h.block_id.clone(),
+            None => continue,
+        };
+        // Already kept (shouldn't normally happen with unique ids).
+        if keep.iter().any(|&i| {
+            slots[i]
+                .as_ref()
+                .map(|h| h.block_id == rid)
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+        // Evict the lowest-ranked non-protected member currently kept.
+        if let Some(pos) = keep.iter().rposition(|&i| !is_protected(i, &slots)) {
+            keep[pos] = r;
+        }
+    }
+
+    keep.sort_unstable();
+    keep.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 fn in_range(date_ms: Option<i64>, range: Option<(i64, i64)>) -> bool {
@@ -672,5 +770,79 @@ mod tests {
         let ordered = order_hits_temporally(hits, &intent);
         assert_eq!(ordered[0].block_id, "inside");
         assert_eq!(ordered[1].block_id, "outside");
+    }
+
+    #[test]
+    fn parse_year_range_requires_a_temporal_cue() {
+        // Bare version/model numbers must NOT trigger a date filter.
+        assert!(!detect_temporal_intent("rust 2021 edition notes").is_temporal);
+        assert!(!detect_temporal_intent("thoughts on Windows 2000").is_temporal);
+        assert!(detect_temporal_intent("rust 2021 edition")
+            .explicit_range
+            .is_none());
+
+        // A year adjacent to a temporal cue does.
+        let in_2025 = detect_temporal_intent("what did I do in 2025");
+        assert!(in_2025.is_temporal);
+        assert!(in_2025.explicit_range.is_some());
+        assert!(detect_temporal_intent("notes from 2019")
+            .explicit_range
+            .is_some());
+    }
+
+    #[test]
+    fn order_hits_temporally_boosts_journals_but_never_drops_a_stronger_hit() {
+        // Regression for CRITICAL 2: a higher-RRF non-journal hit must not be
+        // partitioned behind journals. The journal boost is a soft nudge, so
+        // a clearly stronger non-journal stays on top.
+        let mut journal_old = dated_hit("j-old", Some(1_000), true);
+        journal_old.score = 0.02;
+        let mut journal_new = dated_hit("j-new", Some(9_000), true);
+        journal_new.score = 0.02;
+        let mut answer = dated_hit("answer", Some(5_000), false);
+        answer.score = 0.05; // rank-#1 fused, but not a journal
+
+        let intent = TemporalIntent {
+            is_temporal: true,
+            ..Default::default()
+        };
+        let ordered = order_hits_temporally(vec![journal_old, journal_new, answer], &intent);
+        assert_eq!(
+            ordered[0].block_id, "answer",
+            "a stronger non-journal hit must not be dropped behind journals"
+        );
+    }
+
+    #[test]
+    fn finalize_hits_reserves_protected_ids_from_the_tail() {
+        let mut hits = Vec::new();
+        for i in 0..5 {
+            let mut h = hit(&i.to_string(), "c");
+            h.score = (5 - i) as f64; // 0 strongest .. 4 weakest
+            hits.push(h);
+        }
+        // Protect a weak tail id ("4"): it must survive truncation to top_k=3,
+        // evicting the weakest non-protected kept id ("2").
+        let protected: std::collections::HashSet<String> = ["4".to_string()].into_iter().collect();
+        let out = finalize_hits(hits, 3, &protected);
+        let ids: Vec<&str> = out.iter().map(|h| h.block_id.as_str()).collect();
+        assert!(ids.contains(&"4"), "protected id must survive: {ids:?}");
+        assert!(
+            ids.contains(&"0") && ids.contains(&"1"),
+            "top hits kept: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"2"),
+            "weakest non-protected evicted: {ids:?}"
+        );
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn finalize_hits_is_noop_when_within_top_k() {
+        let hits = vec![hit("a", "c"), hit("b", "c")];
+        let protected = std::collections::HashSet::new();
+        let out = finalize_hits(hits, 5, &protected);
+        assert_eq!(out.len(), 2);
     }
 }

@@ -490,8 +490,11 @@ impl KnowledgeEngine {
         top_k: usize,
         graph_id: Option<&str>,
     ) -> Result<Vec<RetrievedHit>> {
-        // Over-fetch each arm so fusion has room to reorder.
-        let fetch = (top_k * 3).max(top_k);
+        // Over-fetch each arm generously so fusion has a deep pool to work
+        // with and semantic-only synonym matches aren't crowded out by
+        // two-arm overlaps. Trivial cost at graph scale (a few thousand
+        // blocks); the win is recall for queries like "upset" → "frustrated".
+        let fetch = HYBRID_CANDIDATE_POOL.max(top_k);
 
         // Dense arm — best-effort. An empty index or a transient embedder
         // failure must not sink the whole query.
@@ -512,6 +515,17 @@ impl KnowledgeEngine {
             Err(_) => Vec::new(),
         };
 
+        // Reserve slots for the top dense-only candidates (in the vector
+        // ranking but not the FTS ranking) so a semantic synonym match that
+        // only one arm found survives fusion's overlap bias.
+        let fts_set: std::collections::HashSet<&str> = fts_ids.iter().map(|s| s.as_str()).collect();
+        let mut protected: std::collections::HashSet<String> = vector_ids
+            .iter()
+            .filter(|id| !fts_set.contains(id.as_str()))
+            .take(DENSE_ONLY_RESERVED)
+            .cloned()
+            .collect();
+
         let mut rankings: Vec<Vec<String>> = Vec::new();
         if !vector_ids.is_empty() {
             rankings.push(vector_ids);
@@ -525,15 +539,17 @@ impl KnowledgeEngine {
 
         let fused = retrieval::reciprocal_rank_fusion(&rankings, retrieval::RRF_K);
 
-        // Temporal queries ("when did I…", "lately", "in 2025") need date-aware
-        // reordering. Hydrate a wider slice so the reorder has candidates to
-        // pull forward, then truncate back to `top_k`.
+        // Also protect the very top fused hits so a rank-#1 non-journal can
+        // never be dropped by temporal reordering + truncation.
+        for f in fused.iter().take(TOP_RRF_RESERVED) {
+            protected.insert(f.id.clone());
+        }
+
+        // Hydrate the whole candidate pool so ordering + reservation have
+        // material beyond `top_k` to work with; expansion happens later on
+        // just the final hits.
         let intent = retrieval::detect_temporal_intent(query);
-        let hydrate_count = if intent.is_temporal {
-            fused.len().min(fetch)
-        } else {
-            top_k
-        };
+        let hydrate_count = fused.len().min(fetch);
 
         let top_ids: Vec<String> = fused
             .iter()
@@ -546,7 +562,7 @@ impl KnowledgeEngine {
         let meta_by_id: std::collections::HashMap<&str, &crate::db::BlockPageMeta> =
             metas.iter().map(|m| (m.block_id.as_str(), m)).collect();
 
-        let mut hits: Vec<RetrievedHit> = top_ids
+        let hits: Vec<RetrievedHit> = top_ids
             .iter()
             .filter_map(|id| {
                 let meta = meta_by_id.get(id.as_str())?;
@@ -565,10 +581,15 @@ impl KnowledgeEngine {
             })
             .collect();
 
-        if intent.is_temporal {
-            hits = retrieval::order_hits_temporally(hits, &intent);
-            hits.truncate(top_k);
-        }
+        // Establish relevance ordering (temporal reorder is a soft boost, not
+        // a partition), then truncate to top_k while guaranteeing reserved
+        // (top-RRF and dense-only) hits survive.
+        let ordered = if intent.is_temporal {
+            retrieval::order_hits_temporally(hits, &intent)
+        } else {
+            hits
+        };
+        let hits = retrieval::finalize_hits(ordered, top_k, &protected);
 
         Ok(hits)
     }
@@ -818,6 +839,17 @@ pub struct IndexStatus {
 
 /// How many hits `ask` retrieves before context assembly.
 const ASK_TOP_K: usize = 10;
+/// Candidate pool fetched per retrieval arm before fusion. Deep enough that
+/// semantic-only synonym matches aren't crowded out by two-arm overlaps;
+/// trivial cost at graph scale.
+const HYBRID_CANDIDATE_POOL: usize = 80;
+/// Reserved final-result slots for top dense-only (semantic synonym)
+/// candidates that only the vector arm found, so fusion's overlap bias can't
+/// evict them.
+const DENSE_ONLY_RESERVED: usize = 3;
+/// Reserved final-result slots for the very top fused (RRF) hits, so a
+/// rank-#1 non-journal is never dropped by temporal reordering + truncation.
+const TOP_RRF_RESERVED: usize = 3;
 /// Tokens reserved for the model's answer. Also used as the `ask`
 /// completion's `max_tokens`, so prompt + output can never exceed `n_ctx`.
 const ASK_RESERVED_OUTPUT_TOKENS: usize = 1024;
