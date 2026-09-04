@@ -762,9 +762,16 @@
       }
       selectedBlockIds = newSelection;
     }
-    // Clear any active editor focus
+    // Clear any active editor focus AND actively blur the DOM so subsequent
+    // keydowns (Tab, etc.) reach the window handler instead of a stale
+    // CodeMirror editor that our `focusedBlockId` reset alone doesn't
+    // physically defocus.
     if (focusedBlockId) {
       focusedBlockId = null;
+    }
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
     }
   }
 
@@ -872,16 +879,10 @@
   function handleKeydownForSelection(e: KeyboardEvent) {
     if (selectedBlockIds.size === 0) return;
     if (e.key === "Tab") {
-      // Only act when no text input / CodeMirror editor holds focus, so the
-      // in-editor Tab indent keeps working when a block is being edited.
-      const active = document.activeElement as HTMLElement | null;
-      const inEditor =
-        !!active &&
-        (active.isContentEditable ||
-          active.tagName === "INPUT" ||
-          active.tagName === "TEXTAREA" ||
-          !!active.closest(".cm-editor"));
-      if (inEditor) return;
+      // Selection presence is the intent signal — no need to consult
+      // document.activeElement. Multi-block Tab always takes precedence over
+      // in-editor Tab (a stale editor focus from the last click would otherwise
+      // let the browser move focus and clear the selection).
       e.preventDefault();
       void handleIndentSelection(e.shiftKey ? "out" : "in");
     } else if (e.key === "Backspace" || e.key === "Delete") {
