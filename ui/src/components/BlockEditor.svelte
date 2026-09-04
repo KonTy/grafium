@@ -13,7 +13,7 @@
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
-  import { FORMATTING_SLASH_COMMANDS } from "../lib/slashCommands";
+  import { FORMATTING_SLASH_COMMANDS, ANGLE_TEMPLATE_COMMANDS } from "../lib/slashCommands";
   import { toggleWrapText } from "../lib/editorFormat";
   import DatePicker from "./DatePicker.svelte";
 
@@ -280,6 +280,30 @@
     };
   }
 
+  // `<`-triggered template menu: a Logseq-style path to the same callout
+  // inserters (`< tip`, `< note`, …). Pure text insertion with a cursor offset.
+  function angleCompletionSource(context: CompletionContext): CompletionResult | null {
+    const match = context.matchBefore(/<[^\s]*/);
+    if (!match) return null;
+
+    return {
+      from: match.from,
+      filter: false,
+      options: ANGLE_TEMPLATE_COMMANDS.map((cmd) => ({
+        label: cmd.label,
+        detail: cmd.detail,
+        apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
+          view.dispatch({
+            changes: { from, to, insert: cmd.apply },
+            selection: EditorSelection.cursor(
+              from + (cmd.cursorOffset ?? cmd.apply.length)
+            ),
+          });
+        },
+      })),
+    };
+  }
+
   // Detect if the block is entirely a code fence
   function detectCodeBlock(content: string): { lang: string; code: string } | null {
     const trimmed = content.trim();
@@ -509,7 +533,7 @@
           markdown(),
           history(),
           autocompletion({
-            override: [slashCompletionSource],
+            override: [slashCompletionSource, angleCompletionSource],
             activateOnTyping: false,
             closeOnBlur: false,
           }),
@@ -538,6 +562,22 @@
                 const { from, to } = view.state.selection.main;
                 view.dispatch({
                   changes: { from, to, insert: "/" },
+                  selection: EditorSelection.cursor(from + 1),
+                });
+                startCompletion(view);
+                return true;
+              },
+            },
+            {
+              key: "Shift-,",
+              run: (view) => {
+                // `<` opens the angle-bracket template menu (callouts).
+                if (isInsideCodeFence(view)) {
+                  return false;
+                }
+                const { from, to } = view.state.selection.main;
+                view.dispatch({
+                  changes: { from, to, insert: "<" },
                   selection: EditorSelection.cursor(from + 1),
                 });
                 startCompletion(view);
