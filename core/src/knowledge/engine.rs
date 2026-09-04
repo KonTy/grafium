@@ -504,8 +504,10 @@ impl KnowledgeEngine {
             Vec::new()
         };
 
-        // Sparse arm — best-effort BM25 over the graph's FTS index.
-        let fts_ids: Vec<String> = match db.search_fts(query, fetch as i64) {
+        // Sparse arm — best-effort BM25 over the graph's FTS index, using the
+        // chat-query path (stopword-stripped, OR-joined) so a full question
+        // retrieves results instead of ANDing every word and matching nothing.
+        let fts_ids: Vec<String> = match db.search_fts_chat(query, fetch as i64) {
             Ok(blocks) => blocks.into_iter().map(|b| b.id).collect(),
             Err(_) => Vec::new(),
         };
