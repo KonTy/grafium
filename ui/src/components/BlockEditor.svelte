@@ -13,7 +13,7 @@
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
-  import { FORMATTING_SLASH_COMMANDS, ANGLE_TEMPLATE_COMMANDS } from "../lib/slashCommands";
+  import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
   import { toggleWrapText } from "../lib/editorFormat";
   import DatePicker from "./DatePicker.svelte";
 
@@ -282,14 +282,20 @@
 
   // `<`-triggered template menu: a Logseq-style path to the same callout
   // inserters (`< tip`, `< note`, …). Pure text insertion with a cursor offset.
+  // Guarded so it only opens at a block/line start or after whitespace, and
+  // only while the typed text is a prefix of a callout kind — otherwise a
+  // comparison like `2 < 3` or an inline `<foo>` would hijack Enter/Escape.
   function angleCompletionSource(context: CompletionContext): CompletionResult | null {
-    const match = context.matchBefore(/<[^\s]*/);
-    if (!match) return null;
+    const head = context.state.selection.main.head;
+    const line = context.state.doc.lineAt(head);
+    const beforeCursor = line.text.slice(0, head - line.from);
+    const menu = angleTemplateMenu(beforeCursor);
+    if (!menu) return null;
 
     return {
-      from: match.from,
+      from: line.from + menu.from,
       filter: false,
-      options: ANGLE_TEMPLATE_COMMANDS.map((cmd) => ({
+      options: menu.options.map((cmd) => ({
         label: cmd.label,
         detail: cmd.detail,
         apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
@@ -569,22 +575,6 @@
               },
             },
             {
-              key: "Shift-,",
-              run: (view) => {
-                // `<` opens the angle-bracket template menu (callouts).
-                if (isInsideCodeFence(view)) {
-                  return false;
-                }
-                const { from, to } = view.state.selection.main;
-                view.dispatch({
-                  changes: { from, to, insert: "<" },
-                  selection: EditorSelection.cursor(from + 1),
-                });
-                startCompletion(view);
-                return true;
-              },
-            },
-            {
               key: "Mod-z",
               run: (view) => undo(view),
             },
@@ -745,7 +735,12 @@
             const line = update.state.doc.lineAt(sel.head);
             const beforeCursor = line.text.slice(0, sel.head - line.from);
             const slashToken = beforeCursor.match(/(?:^|\s)\/[^\s]*$/);
-            if (!slashToken) return;
+            // Open the callout template menu when a guarded `<` token is typed,
+            // mirroring the slash trigger. `angleTemplateMenu` returns null for
+            // mid-word `<`, comparisons, or non-matching text so ordinary typing
+            // is never hijacked.
+            const angleOpen = angleTemplateMenu(beforeCursor) !== null;
+            if (!slashToken && !angleOpen) return;
 
             const status = completionStatus(update.state);
             if (status === null) {

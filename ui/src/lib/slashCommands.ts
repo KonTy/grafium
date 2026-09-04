@@ -53,3 +53,30 @@ export const ANGLE_TEMPLATE_COMMANDS: SlashCommand[] = CALLOUT_KINDS.map((kind) 
     cursorOffset,
   };
 });
+
+/**
+ * Decide whether the `<` template menu should open for the given line text
+ * before the cursor, and which entries to show.
+ *
+ * Guards (mirroring the slash guard) so the menu never hijacks ordinary text:
+ *  - the `<` must be at the start of the line or immediately after whitespace
+ *    (never right after a word character, e.g. `a<b`);
+ *  - the text typed after `<` must be a prefix of a known callout kind, so
+ *    `<foo>` or a comparison like `2 < 3` (once a space follows) shows nothing.
+ *
+ * Returns the matching entries plus the `from` offset (relative to the start of
+ * `beforeCursor`) where the `<` begins, or `null` when the menu must not open.
+ */
+export function angleTemplateMenu(
+  beforeCursor: string
+): { from: number; options: SlashCommand[] } | null {
+  const m = beforeCursor.match(/(?:^|\s)(<[^\s]*)$/);
+  if (!m) return null;
+  const token = m[1];
+  const typed = token.slice(1).toLowerCase();
+  const options = ANGLE_TEMPLATE_COMMANDS.filter((cmd) =>
+    cmd.label.slice(2).startsWith(typed)
+  );
+  if (options.length === 0) return null;
+  return { from: beforeCursor.length - token.length, options };
+}
