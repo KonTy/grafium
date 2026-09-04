@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod registry;
+pub mod retrieval;
 pub mod schemas;
 pub mod vector_store;
 

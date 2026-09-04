@@ -8,6 +8,7 @@ mod links;
 mod pages;
 mod properties;
 mod raw_query;
+mod retrieval;
 mod schema;
 mod tasks;
 
@@ -15,6 +16,8 @@ use crate::error::Result;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
+
+pub use retrieval::BlockPageMeta;
 
 struct FunctionCustomizer;
 

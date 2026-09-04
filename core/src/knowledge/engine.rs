@@ -20,6 +20,27 @@ use crate::knowledge::registry::GraphRegistry;
 use crate::knowledge::vector_store::SqliteVectorStore;
 use crate::models::{Block, Page};
 
+/// A fused retrieval hit: a primary block plus the page/date metadata and
+/// expansion context needed to build a dated, cited prompt.
+#[derive(Debug, Clone)]
+pub struct RetrievedHit {
+    pub block_id: String,
+    pub page_id: String,
+    pub page_title: String,
+    pub content: String,
+    /// Best-known date for the hit, in epoch-ms. For journal pages this is
+    /// parsed from the page title; otherwise it falls back to the block's
+    /// `created_at`.
+    pub date_ms: Option<i64>,
+    pub is_journal: bool,
+    /// Fused RRF score.
+    pub score: f64,
+    /// Ancestor blocks (outermost first) for small-to-big context.
+    pub parents: Vec<crate::knowledge::retrieval::ContextItem>,
+    /// Immediate children for small-to-big detail.
+    pub children: Vec<crate::knowledge::retrieval::ContextItem>,
+}
+
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
 pub struct KnowledgeEngine {
     config: AiConfig,
@@ -451,6 +472,100 @@ impl KnowledgeEngine {
         }
 
         store.search(&embeddings[0], top_k, graph_id).await
+    }
+
+    /// Hybrid retrieval: fuse dense (vector) and sparse (BM25/FTS) rankings
+    /// with Reciprocal Rank Fusion, then hydrate the top block IDs with
+    /// page/date metadata from `db`.
+    ///
+    /// Degrades gracefully:
+    /// - no embedder / empty or unavailable vector index → pure BM25,
+    /// - FTS unavailable → pure vector,
+    /// - both unavailable → empty result (never an error).
+    ///
+    /// `db` is the graph's own SQLite database, so FTS is inherently scoped
+    /// to that graph; `graph_id` only filters the (shared) vector store.
+    pub async fn hybrid_search(
+        &self,
+        db: &crate::db::Database,
+        query: &str,
+        top_k: usize,
+        graph_id: Option<&str>,
+    ) -> Result<Vec<RetrievedHit>> {
+        // Over-fetch each arm so fusion has room to reorder.
+        let fetch = (top_k * 3).max(top_k);
+
+        // Dense arm — best-effort. An empty index or a transient embedder
+        // failure must not sink the whole query.
+        let vector_ids: Vec<String> = if self.embedder.is_some() && self.vector_store.is_some() {
+            match self.search(query, fetch, graph_id).await {
+                Ok(results) => results.into_iter().filter_map(|r| r.block_id).collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Sparse arm — best-effort BM25 over the graph's FTS index.
+        let fts_ids: Vec<String> = match db.search_fts(query, fetch as i64) {
+            Ok(blocks) => blocks.into_iter().map(|b| b.id).collect(),
+            Err(_) => Vec::new(),
+        };
+
+        let mut rankings: Vec<Vec<String>> = Vec::new();
+        if !vector_ids.is_empty() {
+            rankings.push(vector_ids);
+        }
+        if !fts_ids.is_empty() {
+            rankings.push(fts_ids);
+        }
+        if rankings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fused = crate::knowledge::retrieval::reciprocal_rank_fusion(
+            &rankings,
+            crate::knowledge::retrieval::RRF_K,
+        );
+
+        let top_ids: Vec<String> = fused.iter().take(top_k).map(|f| f.id.clone()).collect();
+        let metas = db.get_blocks_with_page_meta(&top_ids)?;
+        let score_by_id: std::collections::HashMap<&str, f64> =
+            fused.iter().map(|f| (f.id.as_str(), f.score)).collect();
+        let meta_by_id: std::collections::HashMap<&str, &crate::db::BlockPageMeta> =
+            metas.iter().map(|m| (m.block_id.as_str(), m)).collect();
+
+        let hits = top_ids
+            .iter()
+            .filter_map(|id| {
+                let meta = meta_by_id.get(id.as_str())?;
+                let date_ms = Self::resolve_hit_date(meta);
+                Some(RetrievedHit {
+                    block_id: meta.block_id.clone(),
+                    page_id: meta.page_id.clone(),
+                    page_title: meta.page_title.clone(),
+                    content: meta.content.clone(),
+                    date_ms,
+                    is_journal: meta.is_journal,
+                    score: score_by_id.get(id.as_str()).copied().unwrap_or(0.0),
+                    parents: Vec::new(),
+                    children: Vec::new(),
+                })
+            })
+            .collect();
+
+        Ok(hits)
+    }
+
+    /// Best-known date for a hit: journal-title date if the page is a journal
+    /// and its title parses as a date, otherwise the block's `created_at`.
+    fn resolve_hit_date(meta: &crate::db::BlockPageMeta) -> Option<i64> {
+        if meta.is_journal {
+            if let Some(ms) = crate::knowledge::retrieval::journal_title_to_ms(&meta.page_title) {
+                return Some(ms);
+            }
+        }
+        Some(meta.created_at)
     }
 
     /// Generate references for a page using AI.
@@ -923,6 +1038,54 @@ mod tests {
 
         assert!(before > 1, "expected initial config to split the block");
         assert_eq!(after, 1, "expected reconfigured pipeline to stop splitting");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_degrades_to_bm25_when_vector_index_empty() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        // A disabled engine has no embedder / no vector store — exactly the
+        // real-world "index never built" situation.
+        let mut config = AiConfig::default();
+        config.enabled = false;
+        let engine = KnowledgeEngine::new(Path::new(env!("CARGO_MANIFEST_DIR")), config)?;
+        assert!(engine.embedder.is_none() && engine.vector_store.is_none());
+
+        let db = Database::in_memory()?;
+        let journal = db.create_page("2026-03-14", true)?;
+        db.create_block(
+            &journal.id,
+            None,
+            0,
+            "Felt really upset about the deadline slipping again",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let other = db.create_page("Recipes", false)?;
+        db.create_block(
+            &other.id,
+            None,
+            0,
+            "Pasta with garlic and olive oil",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let hits = engine
+            .hybrid_search(&db, "upset deadline", 10, None)
+            .await?;
+        assert_eq!(hits.len(), 1, "BM25 should still find the journal block");
+        let hit = &hits[0];
+        assert!(hit.content.contains("upset"));
+        assert!(hit.is_journal);
+        // Journal date is derived from the page title, not created_at.
+        assert_eq!(
+            crate::knowledge::retrieval::format_date_ms(hit.date_ms.unwrap()),
+            "2026-03-14"
+        );
 
         Ok(())
     }
