@@ -1460,6 +1460,7 @@ pub fn run() {
                     .ok();
                 commands::knowledge::KnowledgeState {
                     engine: Arc::new(tokio::sync::RwLock::new(engine)),
+                    cancels: Default::default(),
                 }
             };
             // Keep the vector index fresh automatically as the graph changes.
@@ -1664,6 +1665,7 @@ pub fn run() {
             commands::knowledge::ai_insert_page_summary,
             commands::knowledge::ai_ask,
             commands::knowledge::ai_ask_stream,
+            commands::knowledge::ai_cancel_stream,
             commands::knowledge::ai_list_registered_graphs,
             commands::knowledge::ai_register_graph,
             commands::knowledge::ai_list_schemas,

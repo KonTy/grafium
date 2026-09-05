@@ -57,6 +57,7 @@ export interface AiConfigPayload {
 export interface StreamChunk {
   request_id: string;
   delta: string;
+  thinking?: boolean;
   done: boolean;
   error?: string | null;
 }
@@ -335,10 +336,13 @@ export async function aiAskStream(
     onDone: () => void;
     onError?: (message: string) => void;
     onSources?: (sources: ChatSource[]) => void;
+    onThinking?: (thinking: boolean) => void;
+    onStart?: (requestId: string) => void;
   },
   graphId?: string
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  handlers.onStart?.(requestId);
 
   const unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
     const payload = event.payload;
@@ -348,6 +352,10 @@ export async function aiAskStream(
       handlers.onError?.(payload.error);
       return;
     }
+
+    // A thinking flag with no delta means the model is reasoning inside a
+    // <think> block — surface it as a distinct state, never as answer text.
+    handlers.onThinking?.(payload.thinking === true);
 
     if (payload.delta) {
       handlers.onChunk(payload.delta);
@@ -372,6 +380,12 @@ export async function aiAskStream(
     unlistenStream();
     unlistenSources();
   }
+}
+
+// Cancel an in-flight streamed answer. The local generation loop checks the
+// flag and stops, returning what it has so far; a no-op if already finished.
+export function aiCancelStream(requestId: string): Promise<void> {
+  return invoke("ai_cancel_stream", { requestId });
 }
 
 // ─── Graph Registry ──────────────────────────────────────────────────────────

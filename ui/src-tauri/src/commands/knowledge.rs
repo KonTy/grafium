@@ -6,20 +6,27 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::{HealthStatus, IndexStatus, Source};
+use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
 pub struct KnowledgeState {
     pub engine: Arc<RwLock<Option<KnowledgeEngine>>>,
+    /// Per-request cancellation flags for in-flight streamed answers, so
+    /// `ai_cancel_stream` can abort a slow local generation. Keyed by the
+    /// UI-supplied `request_id`; entries are inserted when a stream starts and
+    /// removed when it ends.
+    pub cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
@@ -734,6 +741,10 @@ pub async fn ai_ask(
 pub struct AskStreamChunk {
     pub request_id: String,
     pub delta: String,
+    /// True while the model is reasoning inside a `<think>` block, so the UI
+    /// can show a distinct "Thinking…" state instead of appending answer text.
+    /// Reasoning is never forwarded as `delta`.
+    pub thinking: bool,
     pub done: bool,
     pub error: Option<String>,
 }
@@ -775,63 +786,72 @@ pub async fn ai_ask_stream(
         graph_id.unwrap_or_else(|| snapshot.root_dir.to_string_lossy().to_string());
     let graph = crate::open_graph_snapshot(&snapshot)?;
 
-    let response = engine
-        .ask(&graph.db, &question, Some(resolved_graph_id.as_str()))
-        .await
-        .map_err(|e| e.to_string())?;
-    let answer = response.answer;
+    // Register a cancellation flag so `ai_cancel_stream` can stop a slow local
+    // generation instead of leaving the user staring at a frozen pane.
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut map) = state.cancels.lock() {
+        map.insert(request_id.clone(), cancel.clone());
+    }
 
-    // Emit structured sources first so the UI can render chips as soon as the
-    // answer starts streaming. Separate event → backward compatible.
+    // Forward real token deltas as they're produced. A `thinking` flag lets
+    // the UI show a "Thinking…" state while a reasoning model reasons, without
+    // ever showing the raw chain-of-thought.
+    let app_for_events = app.clone();
+    let rid = request_id.clone();
+    let mut on_event = move |ev: AskStreamEvent<'_>| {
+        let (delta, thinking) = match ev {
+            AskStreamEvent::Delta(d) => (d.to_string(), false),
+            AskStreamEvent::Thinking => (String::new(), true),
+        };
+        let _ = app_for_events.emit(
+            "ai://chat_stream",
+            AskStreamChunk {
+                request_id: rid.clone(),
+                delta,
+                thinking,
+                done: false,
+                error: None,
+            },
+        );
+    };
+
+    let outcome = engine
+        .ask_stream(
+            &graph.db,
+            &question,
+            Some(resolved_graph_id.as_str()),
+            Some(cancel),
+            &mut on_event,
+        )
+        .await;
+
+    // Deregister the cancel flag regardless of outcome.
+    if let Ok(mut map) = state.cancels.lock() {
+        map.remove(&request_id);
+    }
+
+    let outcome = outcome.map_err(|e| e.to_string())?;
+
+    // Emit the structured citations now that the answer is complete.
     app.emit(
         "ai://chat_sources",
         AskSourcesPayload {
             request_id: request_id.clone(),
-            sources: response.sources.into_iter().map(SourceDto::from).collect(),
+            sources: outcome.sources.into_iter().map(SourceDto::from).collect(),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    // Stream by small chunks to give responsive UI updates across all providers.
-    const CHUNK_SIZE: usize = 24;
-    if answer.is_empty() {
-        app.emit(
-            "ai://chat_stream",
-            AskStreamChunk {
-                request_id,
-                delta: String::new(),
-                done: true,
-                error: None,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    let mut buf = String::new();
-    for ch in answer.chars() {
-        buf.push(ch);
-        if buf.chars().count() >= CHUNK_SIZE {
-            app.emit(
-                "ai://chat_stream",
-                AskStreamChunk {
-                    request_id: request_id.clone(),
-                    delta: std::mem::take(&mut buf),
-                    done: false,
-                    error: None,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
-        }
-    }
-
-    if !buf.is_empty() {
+    // If the model produced only reasoning (budget exhausted with no answer),
+    // show the explanatory message in place of an answer rather than an empty
+    // pane or raw chain-of-thought.
+    if let Some(message) = outcome.trailing_message {
         app.emit(
             "ai://chat_stream",
             AskStreamChunk {
                 request_id: request_id.clone(),
-                delta: buf,
+                delta: message,
+                thinking: false,
                 done: false,
                 error: None,
             },
@@ -844,12 +864,29 @@ pub async fn ai_ask_stream(
         AskStreamChunk {
             request_id,
             delta: String::new(),
+            thinking: false,
             done: true,
             error: None,
         },
     )
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Cancel an in-flight streamed answer started by `ai_ask_stream`. Flips the
+/// request's cancellation flag; the local generation loop checks it and stops,
+/// returning what it has so far. A no-op if the request already finished.
+#[tauri::command]
+pub async fn ai_cancel_stream(
+    state: State<'_, KnowledgeState>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Ok(map) = state.cancels.lock() {
+        if let Some(flag) = map.get(&request_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
     Ok(())
 }
 

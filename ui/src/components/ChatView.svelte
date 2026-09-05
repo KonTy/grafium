@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import {
     aiAskStream,
+    aiCancelStream,
     aiHealthCheck,
     aiIndexStatus,
     aiIndexAllPages,
@@ -32,6 +33,11 @@
   ]);
   let question = $state("");
   let isStreaming = $state(false);
+  let isThinking = $state(false);
+  let elapsedMs = $state(0);
+  let currentRequestId: string | null = null;
+  let streamTimer: ReturnType<typeof setInterval> | null = null;
+  let streamStartedAt = 0;
   let error = $state<string | null>(null);
   let chatScroll: HTMLDivElement | null = null;
   let inputEl: HTMLTextAreaElement | null = null;
@@ -63,6 +69,7 @@
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
+      if (streamTimer) clearInterval(streamTimer);
     };
   });
 
@@ -167,6 +174,8 @@
     messages = [...messages, { role: "user", content: trimmed }, { role: "assistant", content: "" }];
     question = "";
     isStreaming = true;
+    isThinking = false;
+    startStreamTimer();
     await scrollToBottom();
 
     let assistantIndex = messages.length - 1;
@@ -174,7 +183,15 @@
     await aiAskStream(
       trimmed,
       {
+        onStart: (requestId) => {
+          currentRequestId = requestId;
+        },
+        onThinking: (thinking) => {
+          isThinking = thinking;
+        },
         onChunk: (delta) => {
+          // First real answer text ends the "thinking" state.
+          isThinking = false;
           messages = messages.map((m, i) => {
             if (i !== assistantIndex) return m;
             return { ...m, content: m.content + delta };
@@ -188,17 +205,47 @@
           });
         },
         onDone: () => {
-          isStreaming = false;
-          keepInputFocusedSoon(false);
+          endStream();
           void scrollToBottom();
         },
         onError: (msg) => {
           error = msg;
-          isStreaming = false;
-          keepInputFocusedSoon(false);
+          endStream();
         },
       }
     );
+  }
+
+  function startStreamTimer() {
+    streamStartedAt = Date.now();
+    elapsedMs = 0;
+    if (streamTimer) clearInterval(streamTimer);
+    streamTimer = setInterval(() => {
+      elapsedMs = Date.now() - streamStartedAt;
+    }, 250);
+  }
+
+  function endStream() {
+    isStreaming = false;
+    isThinking = false;
+    currentRequestId = null;
+    if (streamTimer) {
+      clearInterval(streamTimer);
+      streamTimer = null;
+    }
+    keepInputFocusedSoon(false);
+  }
+
+  function stopStream() {
+    if (currentRequestId) {
+      void aiCancelStream(currentRequestId);
+    }
+  }
+
+  function formatElapsed(ms: number): string {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
   }
 
   function onInputKeydown(e: KeyboardEvent) {
@@ -282,7 +329,7 @@
     {#each messages as m}
       <div class="msg" class:user={m.role === "user"}>
         <div class="msg-role">{m.role === "user" ? "You" : "Grafium AI"}</div>
-        <div class="msg-content">{m.content || (isStreaming ? "..." : "")}</div>
+        <div class="msg-content">{m.content || (isStreaming ? (isThinking ? "" : "…") : "")}</div>
         {#if m.role === "assistant" && m.sources && m.sources.length > 0}
           <div class="msg-sources">
             {#each m.sources as source}
@@ -304,6 +351,18 @@
 
   {#if error}
     <div class="chat-error">{error}</div>
+  {/if}
+
+  {#if isStreaming}
+    <div class="chat-status" role="status" aria-live="polite">
+      <span class="chat-status-dot" class:thinking={isThinking}></span>
+      <span class="chat-status-label">
+        {isThinking ? "Thinking" : "Generating"}… {formatElapsed(elapsedMs)}
+      </span>
+      <button class="chat-stop" onclick={() => stopStream()} title="Stop generating">
+        Stop
+      </button>
+    </div>
   {/if}
 
   <div class="chat-input-row">
@@ -518,6 +577,58 @@
   .chat-error {
     color: #f87171;
     font-size: 12px;
+  }
+
+  .chat-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 2px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .chat-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    opacity: 0.6;
+    animation: chat-pulse 1.2s ease-in-out infinite;
+  }
+
+  .chat-status-dot.thinking {
+    background: #a78bfa;
+    opacity: 0.9;
+  }
+
+  @keyframes chat-pulse {
+    0%,
+    100% {
+      opacity: 0.3;
+    }
+    50% {
+      opacity: 0.9;
+    }
+  }
+
+  .chat-status-label {
+    flex: 1;
+  }
+
+  .chat-stop {
+    padding: 3px 12px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  .chat-stop:hover {
+    border-color: #f87171;
+    color: #f87171;
   }
 
   .chat-input-row {

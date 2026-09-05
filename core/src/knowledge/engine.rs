@@ -1128,13 +1128,9 @@ const ASK_DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 2048;
 /// reserved_output`, floored, or a conservative default when the window is
 /// unknown. Keeps the assembled prompt from overflowing the model's context
 /// window (embedded llama.cpp hard-errors once prompt tokens reach `n_ctx`).
-fn ask_context_budget(context_window: Option<usize>) -> usize {
-    ask_context_budget_with(context_window, ASK_RESERVED_OUTPUT_TOKENS)
-}
-
-/// As [`ask_context_budget`], but with an explicit reserved-output size so a
-/// reasoning model (which needs a larger output allowance) still leaves the
-/// retrieved context small enough that prompt + output fit inside `n_ctx`.
+/// The explicit `reserved_output` lets a reasoning model (which needs a larger
+/// output allowance) still leave the retrieved context small enough that
+/// prompt + output fit inside `n_ctx`.
 fn ask_context_budget_with(context_window: Option<usize>, reserved_output: usize) -> usize {
     match context_window {
         Some(n_ctx) => n_ctx
@@ -2434,7 +2430,7 @@ mod tests {
     fn ask_context_budget_is_model_aware_and_never_overflows() {
         // Embedded llama.cpp default window (4096): budget must leave room for
         // prompt overhead + reserved output, and stay well under 6000.
-        let b4096 = ask_context_budget(Some(4096));
+        let b4096 = ask_context_budget_with(Some(4096), ASK_RESERVED_OUTPUT_TOKENS);
         assert_eq!(
             b4096,
             4096 - ASK_PROMPT_OVERHEAD_TOKENS - ASK_RESERVED_OUTPUT_TOKENS
@@ -2449,15 +2445,21 @@ mod tests {
         );
 
         // Larger window scales the budget up.
-        assert!(ask_context_budget(Some(8192)) > b4096);
+        assert!(ask_context_budget_with(Some(8192), ASK_RESERVED_OUTPUT_TOKENS) > b4096);
 
         // Unknown window (most remote providers) falls back conservatively,
         // never the old 6000.
-        assert_eq!(ask_context_budget(None), ASK_DEFAULT_CONTEXT_BUDGET_TOKENS);
-        assert!(ask_context_budget(None) <= 2048);
+        assert_eq!(
+            ask_context_budget_with(None, ASK_RESERVED_OUTPUT_TOKENS),
+            ASK_DEFAULT_CONTEXT_BUDGET_TOKENS
+        );
+        assert!(ask_context_budget_with(None, ASK_RESERVED_OUTPUT_TOKENS) <= 2048);
 
         // A tiny window still yields the floor rather than zero.
-        assert_eq!(ask_context_budget(Some(256)), ASK_MIN_CONTEXT_BUDGET_TOKENS);
+        assert_eq!(
+            ask_context_budget_with(Some(256), ASK_RESERVED_OUTPUT_TOKENS),
+            ASK_MIN_CONTEXT_BUDGET_TOKENS
+        );
     }
 
     #[test]
