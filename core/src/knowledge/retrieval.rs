@@ -438,9 +438,17 @@ pub fn order_hits_temporally(
 
     let mut indexed: Vec<(usize, RetrievedHit)> = hits.into_iter().enumerate().collect();
 
+    // Scale the journal nudge to the candidate set's actual score spread, so
+    // it's worth roughly one or two rank positions rather than a flat constant
+    // that would reshuffle a wide swath of the tail. RRF scores are bunched
+    // together (adjacent ranks differ by ~1-2%), so a fixed additive/relative
+    // boost acts like a partition; an additive nudge of a small multiple of the
+    // mean adjacent gap keeps it soft.
+    let journal_boost = journal_boost_for(indexed.iter().map(|(_, h)| h.score));
+
     indexed.sort_by(|(ai, a), (bi, b)| {
-        let sa = temporal_relevance(a, intent);
-        let sb = temporal_relevance(b, intent);
+        let sa = temporal_relevance(a, intent, journal_boost);
+        let sb = temporal_relevance(b, intent, journal_boost);
         sb.partial_cmp(&sa)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| date_cmp(a.date_ms, b.date_ms, intent))
@@ -450,22 +458,55 @@ pub fn order_hits_temporally(
     indexed.into_iter().map(|(_, hit)| hit).collect()
 }
 
-/// Multiplicative nudge applied to a dated journal hit's relevance for a
-/// temporal query. Deliberately small so it can't overturn a substantially
-/// higher-RRF non-journal hit.
-const JOURNAL_TEMPORAL_BOOST: f64 = 0.25;
+/// Journal nudge measured in rank positions: an additive boost worth this many
+/// mean adjacent-gaps. Small on purpose — a journal moves up a position or two,
+/// never leapfrogs a substantially higher-RRF non-journal hit.
+const JOURNAL_BOOST_RANKS: f64 = 1.5;
 /// Strong boost for a hit whose date falls inside an explicit year range
-/// ("in 2025") — an explicit range is a deliberate, high-confidence filter.
+/// ("in 2025") — an explicit range is a deliberate, high-confidence filter,
+/// so unlike the soft journal nudge it may dominate ordering.
 const RANGE_MATCH_BOOST: f64 = 1.0;
 /// Demotion for a dated hit that falls *outside* an explicit range.
 const RANGE_MISS_PENALTY: f64 = 0.5;
+/// Negligible nudge used only to break exact score ties toward journals when
+/// the candidate set has no score spread at all (e.g. pure BM25 fallbacks).
+/// Far below any real RRF score, so it never overturns a genuine difference.
+const TIE_BREAK_NUDGE: f64 = 1e-9;
 
-/// Soft temporal relevance: fused score, boosted for dated journals and
-/// in-range hits, demoted for dated out-of-range hits.
-fn temporal_relevance(hit: &RetrievedHit, intent: &TemporalIntent) -> f64 {
+/// Additive journal nudge for a candidate set: `JOURNAL_BOOST_RANKS` times the
+/// mean gap between adjacent scores. Falls back to a negligible epsilon when
+/// every score is identical (no RRF signal to scale against), which still
+/// breaks ties toward journals without overturning any real score difference.
+fn journal_boost_for(scores: impl Iterator<Item = f64>) -> f64 {
+    let scores: Vec<f64> = scores.collect();
+    let n = scores.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let (min, max) = scores
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &s| {
+            (lo.min(s), hi.max(s))
+        });
+    let unit = if max > min {
+        (max - min) / (n as f64 - 1.0)
+    } else {
+        // All scores equal: nudge by a negligible fixed amount (orders of
+        // magnitude below any real RRF score) so journals still win exact
+        // ties, without inventing a spread that isn't there.
+        TIE_BREAK_NUDGE
+    };
+    JOURNAL_BOOST_RANKS * unit
+}
+
+/// Soft temporal relevance: fused score, nudged (additively, scaled to the
+/// candidate spread) for dated journals, and — for an explicit range only —
+/// strongly boosted in-range / demoted out-of-range, since a named year is a
+/// deliberate user filter.
+fn temporal_relevance(hit: &RetrievedHit, intent: &TemporalIntent, journal_boost: f64) -> f64 {
     let mut s = hit.score;
     if hit.is_journal && hit.date_ms.is_some() {
-        s *= 1.0 + JOURNAL_TEMPORAL_BOOST;
+        s += journal_boost;
     }
     if let Some(range) = intent.explicit_range {
         if in_range(hit.date_ms, Some(range)) {
@@ -797,7 +838,9 @@ mod tests {
     }
 
     #[test]
-    fn order_hits_temporally_puts_journals_first_then_newest() {
+    fn order_hits_temporally_breaks_score_ties_toward_newest_journals() {
+        // Equal fused scores (e.g. a pure-BM25 fallback with no spread): the
+        // tie breaks toward journals, and among journals toward the newest.
         let hits = vec![
             dated_hit("old-journal", Some(1_000), true),
             dated_hit("plain", Some(9_000), false),
@@ -874,14 +917,16 @@ mod tests {
     #[test]
     fn order_hits_temporally_boosts_journals_but_never_drops_a_stronger_hit() {
         // Regression for CRITICAL 2: a higher-RRF non-journal hit must not be
-        // partitioned behind journals. The journal boost is a soft nudge, so
-        // a clearly stronger non-journal stays on top.
+        // partitioned behind journals. Scores are realistic RRF values: the
+        // answer appears rank-1 in BOTH arms (2/61), the journals only rank-2
+        // in one arm (1/62). The soft, spread-scaled nudge cannot overturn a
+        // genuinely stronger two-arm hit.
         let mut journal_old = dated_hit("j-old", Some(1_000), true);
-        journal_old.score = 0.02;
+        journal_old.score = 1.0 / 62.0;
         let mut journal_new = dated_hit("j-new", Some(9_000), true);
-        journal_new.score = 0.02;
+        journal_new.score = 1.0 / 62.0;
         let mut answer = dated_hit("answer", Some(5_000), false);
-        answer.score = 0.05; // rank-#1 fused, but not a journal
+        answer.score = 2.0 / 61.0; // rank-#1 in both arms, but not a journal
 
         let intent = TemporalIntent {
             is_temporal: true,
@@ -891,6 +936,46 @@ mod tests {
         assert_eq!(
             ordered[0].block_id, "answer",
             "a stronger non-journal hit must not be dropped behind journals"
+        );
+    }
+
+    #[test]
+    fn journal_nudge_moves_at_most_a_rank_or_two_not_the_whole_tail() {
+        // Reviewer's LOW: a flat boost reshuffles ranks 4-16 wholesale against
+        // realistic RRF spacing. With adjacent single-arm RRF scores
+        // (1/61..1/66), a journal sitting at rank 5 must climb only a position
+        // or two — never to the top past clearly higher-ranked non-journals.
+        let mk = |id: &str, rank: usize, journal: bool| {
+            let mut h = dated_hit(id, Some(5_000), journal);
+            h.score = 1.0 / (60.0 + rank as f64);
+            h
+        };
+        let hits = vec![
+            mk("n1", 1, false),
+            mk("n2", 2, false),
+            mk("n3", 3, false),
+            mk("n4", 4, false),
+            mk("j5", 5, true), // the only journal, mid-pack
+            mk("n6", 6, false),
+        ];
+        let intent = TemporalIntent {
+            is_temporal: true,
+            ..Default::default()
+        };
+        let ordered = order_hits_temporally(hits, &intent);
+        let pos = |id: &str| ordered.iter().position(|h| h.block_id == id).unwrap();
+
+        // The journal climbs, but stays behind the clearly higher-RRF hits and
+        // only overtakes its near neighbours — a nudge, not a partition.
+        assert!(pos("j5") < 4, "journal should climb from rank 5");
+        assert!(
+            pos("n1") < pos("j5") && pos("n2") < pos("j5") && pos("n3") < pos("j5"),
+            "journal must NOT leapfrog substantially higher-ranked non-journals; got {:?}",
+            ordered.iter().map(|h| &h.block_id).collect::<Vec<_>>()
+        );
+        assert!(
+            pos("j5") < pos("n4"),
+            "journal should overtake its immediate lower neighbour"
         );
     }
 
