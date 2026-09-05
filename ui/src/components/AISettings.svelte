@@ -226,8 +226,14 @@
     isIndexing = true;
     indexCount = null;
     try {
-      indexCount = await aiIndexAllPages();
-      showMessage(`Indexed ${indexCount} chunks`, "success");
+      const result = await aiIndexAllPages();
+      indexCount = result.indexed_chunks;
+      const failed =
+        result.pages_failed > 0 ? `, ${result.pages_failed} page(s) failed` : "";
+      showMessage(
+        `Indexed ${result.indexed_chunks} chunks from ${result.pages_processed} page(s)${failed}`,
+        result.pages_failed > 0 ? "error" : "success"
+      );
       health = await aiHealthCheck();
     } catch (e: any) {
       showMessage("Indexing failed: " + e, "error");

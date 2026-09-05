@@ -403,6 +403,28 @@ impl KnowledgeEngine {
         })
     }
 
+    /// Rebuild the in-memory hash cache from vectors already stored for a
+    /// graph, so a fresh process doesn't re-embed unchanged content on the
+    /// next reindex. No-op once the cache is populated, or when there's no
+    /// vector store. Best-effort — a failure just means some content may be
+    /// needlessly re-embedded, never a wrong result.
+    pub async fn restore_hash_cache(&self, graph_id: &str) -> Result<()> {
+        let store = match self.vector_store.as_ref() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        if !self.pipeline.read().await.hash_cache_is_empty() {
+            return Ok(());
+        }
+        let pairs = store.list_content_hashes(graph_id).await?;
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut pipeline = self.pipeline.write().await;
+        pipeline.preload_hashes(pairs);
+        Ok(())
+    }
+
     /// Index a single page — embed its blocks and store vectors.
     pub async fn index_page(&self, page: &Page, blocks: &[Block], graph_id: &str) -> Result<usize> {
         let embedder = self

@@ -325,12 +325,22 @@ pub async fn ai_index_page(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexAllResult {
+    /// Chunks embedded/updated across all pages.
+    pub indexed_chunks: usize,
+    /// Pages successfully processed (indexed or already up to date).
+    pub pages_processed: usize,
+    /// Pages that failed to index (errors were logged, not fatal).
+    pub pages_failed: usize,
+}
+
 #[tauri::command]
 pub async fn ai_index_all_pages(
     app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
-) -> Result<usize, String> {
+) -> Result<IndexAllResult, String> {
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -343,8 +353,17 @@ pub async fn ai_index_all_pages(
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
     let graph_id = snapshot.root_dir.to_string_lossy().to_string();
     let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    // Recover the hash cache from already-stored vectors so a restart doesn't
+    // needlessly re-embed unchanged content.
+    if let Err(e) = engine.restore_hash_cache(&graph_id).await {
+        eprintln!("Failed to restore embedding hash cache: {e}");
+    }
+
     let mut cursor = PageBatchCursor::new(AI_INDEX_BATCH_SIZE);
-    let mut total = 0;
+    let mut indexed_chunks = 0;
+    let mut pages_processed = 0;
+    let mut pages_failed = 0;
 
     while let Some(pages) = cursor.next_batch(|limit, offset| {
         graph
@@ -363,15 +382,23 @@ pub async fn ai_index_all_pages(
 
         for (page, blocks) in &pages_and_blocks {
             match engine.index_page(page, blocks, &graph_id).await {
-                Ok(count) => total += count,
+                Ok(count) => {
+                    indexed_chunks += count;
+                    pages_processed += 1;
+                }
                 Err(e) => {
+                    pages_failed += 1;
                     eprintln!("Failed to index page '{}': {}", page.title, e);
                 }
             }
         }
     }
 
-    Ok(total)
+    Ok(IndexAllResult {
+        indexed_chunks,
+        pages_processed,
+        pages_failed,
+    })
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────

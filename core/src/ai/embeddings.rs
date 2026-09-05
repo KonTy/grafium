@@ -273,6 +273,21 @@ impl EmbeddingPipeline {
         }
     }
 
+    /// Whether the hash cache is empty — used to decide if it needs restoring
+    /// from the vector store after a fresh process start.
+    pub fn hash_cache_is_empty(&self) -> bool {
+        self.hash_cache.is_empty()
+    }
+
+    /// Seed the hash cache from `(chunk_id, content_hash)` pairs recovered from
+    /// the vector store, so a restart doesn't re-embed content whose vectors
+    /// already exist. Existing (fresher) entries are never overwritten.
+    pub fn preload_hashes(&mut self, pairs: Vec<(String, String)>) {
+        for (chunk_id, hash) in pairs {
+            self.hash_cache.entry(chunk_id).or_insert(hash);
+        }
+    }
+
     /// Remove stale chunk IDs from the hash cache.
     pub fn remove_chunks(&mut self, chunk_ids: &[String]) {
         for chunk_id in chunk_ids {
@@ -562,5 +577,33 @@ mod tests {
     fn extract_hashtags_finds_nested_and_dedups_order() {
         let tags = extract_hashtags("a #foo and #bar/baz plus not#atag end #foo");
         assert_eq!(tags, vec!["#foo", "#bar/baz", "#foo"]);
+    }
+
+    #[test]
+    fn preload_hashes_seeds_cache_and_avoids_reembedding() {
+        let mut pipeline = pipeline();
+        assert!(pipeline.hash_cache_is_empty());
+
+        let page = page("P");
+        let blocks = vec![block("root", None, "some content to embed for indexing")];
+        let chunks = pipeline.chunk_page(&page, &blocks);
+        let expected_hash = chunks[0].content_hash.clone();
+        let chunk_id = chunks[0].chunk_id.clone();
+
+        // Simulate a fresh process: cache restored from stored vector metadata.
+        pipeline.preload_hashes(vec![(chunk_id, expected_hash)]);
+        assert!(!pipeline.hash_cache_is_empty());
+
+        // Nothing dirty because the restored hash matches the current content.
+        let diff = pipeline.diff_page_chunks(&page.id, pipeline.chunk_page(&page, &blocks));
+        assert!(diff.dirty_chunks.is_empty());
+
+        // preload never overwrites an existing (fresher) entry.
+        pipeline.preload_hashes(vec![(
+            pipeline.chunk_page(&page, &blocks)[0].chunk_id.clone(),
+            "STALE".to_string(),
+        )]);
+        let diff = pipeline.diff_page_chunks(&page.id, pipeline.chunk_page(&page, &blocks));
+        assert!(diff.dirty_chunks.is_empty());
     }
 }

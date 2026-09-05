@@ -252,7 +252,13 @@ export function aiIndexPage(pageId: string): Promise<number> {
   return invoke("ai_index_page", { pageId });
 }
 
-export function aiIndexAllPages(): Promise<number> {
+export interface IndexAllResult {
+  indexed_chunks: number;
+  pages_processed: number;
+  pages_failed: number;
+}
+
+export function aiIndexAllPages(): Promise<IndexAllResult> {
   return invoke("ai_index_all_pages");
 }
 

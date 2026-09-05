@@ -216,4 +216,16 @@ pub trait VectorStore: Send + Sync {
 
     /// Number of stored vectors belonging to a specific graph.
     fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>>;
+
+    /// List `(chunk_id, content_hash)` for every stored chunk in a graph, so a
+    /// fresh process can rebuild its in-memory hash cache from vectors that
+    /// already exist on disk and avoid needlessly re-embedding unchanged
+    /// content after a restart. Default: empty (no restore available).
+    fn list_content_hashes<'a>(
+        &'a self,
+        graph_id: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, String)>>> {
+        let _ = graph_id;
+        Box::pin(async move { Ok(Vec::new()) })
+    }
 }

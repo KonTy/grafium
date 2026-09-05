@@ -44,6 +44,8 @@
   let isIndexing = $state(false);
   let indexError = $state<string | null>(null);
   let indexJustFinished = $state(false);
+  let indexResult = $state<{ processed: number; failed: number } | null>(null);
+  let statusError = $state<string | null>(null);
 
   let indexEmpty = $derived(shouldShowIndexBanner(indexedChunks));
 
@@ -77,8 +79,12 @@
       indexedChunks = status.indexed_chunks;
       totalBlocks = status.total_blocks;
       embedderReady = status.embedder_ready;
-    } catch {
-      // Leave indexedChunks null so the banner stays hidden on error.
+      statusError = null;
+    } catch (e: any) {
+      // Surface the failure instead of silently hiding the banner — a status
+      // error is itself actionable (e.g. no embedder configured).
+      statusError = String(e);
+      indexedChunks = null;
     }
   }
 
@@ -86,9 +92,14 @@
     if (isIndexing) return;
     indexError = null;
     indexJustFinished = false;
+    indexResult = null;
     isIndexing = true;
     try {
-      await aiIndexAllPages();
+      const result = await aiIndexAllPages();
+      indexResult = {
+        processed: result.pages_processed,
+        failed: result.pages_failed,
+      };
       await refreshIndexStatus();
       indexJustFinished = true;
     } catch (e: any) {
@@ -209,7 +220,17 @@
     </div>
   {/if}
 
-  {#if indexEmpty && !indexJustFinished}
+  {#if statusError}
+    <div class="index-banner">
+      <div class="index-banner-text">
+        <strong>Couldn't check your index status</strong>
+        <span class="index-error">{statusError}</span>
+      </div>
+      <button class="index-button" onclick={() => onOpenSettings()}>
+        Open Settings
+      </button>
+    </div>
+  {:else if indexEmpty && !indexJustFinished}
     <div class="index-banner">
       <div class="index-banner-text">
         <strong>Your notes aren't indexed yet</strong>
@@ -219,18 +240,25 @@
         </span>
         {#if indexError}<span class="index-error">{indexError}</span>{/if}
       </div>
-      <button
-        class="index-button"
-        onclick={() => void startIndexing()}
-        disabled={isIndexing || !embedderReady}
-        title={embedderReady ? "" : "Configure an embedding model in Settings first"}
-      >
-        {isIndexing ? "Indexing…" : "Index my notes"}
-      </button>
+      {#if embedderReady}
+        <button
+          class="index-button"
+          onclick={() => void startIndexing()}
+          disabled={isIndexing}
+        >
+          {isIndexing ? "Indexing…" : "Index my notes"}
+        </button>
+      {:else}
+        <button class="index-button" onclick={() => onOpenSettings()}>
+          Configure embedding model
+        </button>
+      {/if}
     </div>
   {:else if indexJustFinished}
     <div class="index-done">
-      Indexed {indexedChunks} chunk{indexedChunks === 1 ? "" : "s"} — semantic search is on.
+      Indexed {indexedChunks} chunk{indexedChunks === 1 ? "" : "s"}{indexResult
+        ? ` from ${indexResult.processed} page${indexResult.processed === 1 ? "" : "s"}${indexResult.failed > 0 ? `, ${indexResult.failed} failed` : ""}`
+        : ""} — semantic search is on.
     </div>
   {/if}
 
