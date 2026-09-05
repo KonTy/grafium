@@ -18,7 +18,15 @@ export type StreamPhase =
   | "thinking"
   | "generating"
   | "searching_web"
-  | "reading_sources";
+  | "reading_sources"
+  // Deep-research ("Research" checkbox) phases. Unlike the linear chat phases
+  // above, these form a *cycle*: plan → search → read → assess → refine →
+  // (search again) → … → synthesize. They're driven explicitly by the research
+  // backend, which is why the monotonic guard below doesn't apply to them.
+  | "planning"
+  | "assessing"
+  | "refining"
+  | "synthesizing";
 
 export type StatusKind =
   | "idle"
@@ -28,10 +36,10 @@ export type StatusKind =
   | "error"
   | "cancelled";
 
-// Monotonic ordering of phases: the displayed phase only advances, so a late /
-// out-of-order lower-ranked phase event (e.g. a stray `retrieving` after tokens
-// have started) can't rewind the UI to "Searching". It still counts as
-// liveness — see `reduce`.
+// Monotonic ordering of the *linear* chat phases: the displayed phase only
+// advances, so a late / out-of-order lower-ranked phase event (e.g. a stray
+// `retrieving` after tokens have started) can't rewind the UI to "Searching".
+// It still counts as liveness — see `reduce`.
 //
 // The two web-research phases rank *above* `generating` on purpose: in the
 // two-part answer the notes arm streams tokens (→ `generating`) first, and only
@@ -39,15 +47,45 @@ export type StatusKind =
 // "Generating" into "Searching the web" without the monotonic guard rejecting
 // it as a regression. When the web summary itself starts streaming, a token
 // `delta` forces the phase back to `generating` directly (see `reduce`).
+//
+// The deep-research phases (planning/assessing/refining/synthesizing) also sit
+// here so any stray transition from a linear phase resolves sensibly, but among
+// *themselves* they are cyclic and bypass this guard entirely — see
+// `CYCLIC_PHASES` and `reduce`.
 const PHASE_RANK: Record<StreamPhase, number> = {
   retrieving: 0,
   loading_model: 1,
   processing_prompt: 2,
   thinking: 3,
   generating: 4,
-  searching_web: 5,
-  reading_sources: 6,
+  planning: 5,
+  searching_web: 6,
+  reading_sources: 7,
+  assessing: 8,
+  refining: 9,
+  synthesizing: 10,
 };
+
+// Phases the deep-research workflow drives explicitly and legitimately revisits
+// (refine loops back to searching). Transitions *among* these accept the new
+// phase directly instead of applying the monotonic guard, so round 2's
+// "Searching the web" isn't rejected as a regression from "Refining". A token
+// `delta` still overrides them (the strongest evidence), exactly as it does for
+// the chat web summary. `searching_web`/`reading_sources` are shared with the
+// two-part chat answer, but there they only ever move forward, so nothing about
+// that flow changes.
+const CYCLIC_PHASES: ReadonlySet<StreamPhase> = new Set<StreamPhase>([
+  "planning",
+  "searching_web",
+  "reading_sources",
+  "assessing",
+  "refining",
+  "synthesizing",
+]);
+
+function isCyclicPhase(phase: StreamPhase | null): boolean {
+  return phase !== null && CYCLIC_PHASES.has(phase);
+}
 
 // No token for this long *while generating* means generation stalled (tokens
 // were flowing and stopped) — stop animating and say so.
@@ -118,12 +156,21 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
     case "phase": {
       // Ignore phase chatter once we've reached a terminal state.
       if (isTerminal(s.kind)) return s;
-      const nextRank = PHASE_RANK[e.phase];
-      const curRank = s.phase === null ? -1 : PHASE_RANK[s.phase];
-      // Advance the displayed phase monotonically, but always treat the event
-      // as liveness evidence (bump lastEventAt) even when it's a duplicate or
-      // out-of-order regression.
-      const phase = nextRank >= curRank ? e.phase : s.phase;
+      let phase: StreamPhase;
+      if (isCyclicPhase(e.phase) && (s.phase === null || isCyclicPhase(s.phase))) {
+        // A research-workflow transition among cyclic phases: accept it as-is so
+        // the label can move backward (refine → search) on a legitimate new
+        // round. Coming *into* the cycle from a linear phase still goes through
+        // the monotonic branch below.
+        phase = e.phase;
+      } else {
+        const nextRank = PHASE_RANK[e.phase];
+        const curRank = s.phase === null ? -1 : PHASE_RANK[s.phase];
+        // Advance the displayed phase monotonically, but always treat the event
+        // as liveness evidence (bump lastEventAt) even when it's a duplicate or
+        // out-of-order regression.
+        phase = nextRank >= curRank ? e.phase : s.phase;
+      }
       return { ...s, kind: "active", phase, lastEventAt: e.at };
     }
 
@@ -180,10 +227,13 @@ export function isStalled(s: StreamState, now: number): boolean {
     // Tokens were flowing and stopped.
     return now - s.lastEventAt > STALL_TIMEOUT_MS;
   }
-  if (s.phase === "searching_web" || s.phase === "reading_sources") {
-    // The web arm reports progress continuously; judge it on liveness (gap
-    // since the last note/phase), not the pre-token hard cap, since a thorough
-    // research pass legitimately outlives it.
+  if (isCyclicPhase(s.phase)) {
+    // The web/research arm reports progress continuously (notes for each query
+    // issued and each source read), and every page fetch has its own network
+    // timeout, so judge these on liveness (gap since the last note/phase) rather
+    // than the pre-token hard cap — a thorough multi-round pass legitimately
+    // outlives it. Bounded so a wedged search or dead network can't animate
+    // forever.
     return now - s.lastEventAt > WEB_STALL_TIMEOUT_MS;
   }
   // Pre-token phases may legitimately be quiet, but not indefinitely.
@@ -198,6 +248,12 @@ const PHASE_LABEL: Record<StreamPhase, string> = {
   generating: "Generating",
   searching_web: "Searching the web",
   reading_sources: "Reading sources",
+  // Deep-research phases. Kept student-plain and free of the trailing "…" —
+  // `statusDisplay` appends the ellipsis and elapsed time.
+  planning: "Planning searches",
+  assessing: "Assessing what's missing",
+  refining: "Refining the search",
+  synthesizing: "Writing the summary",
 };
 
 export function formatElapsed(ms: number): string {

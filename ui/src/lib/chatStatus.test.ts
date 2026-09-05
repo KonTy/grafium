@@ -271,3 +271,80 @@ describe("chatStatus web research", () => {
     expect(after.lastEventAt).toBe(200);
   });
 });
+
+describe("chatStatus deep research phases", () => {
+  it("labels every deep-research phase in plain, student-facing language", () => {
+    const label = (phase: StreamState["phase"]) =>
+      statusDisplay({ ...initialState(0), kind: "active", phase } as StreamState, 1_000).label;
+    expect(label("planning")).toMatch(/Planning searches/i);
+    expect(label("searching_web")).toMatch(/Searching the web/i);
+    expect(label("reading_sources")).toMatch(/Reading sources/i);
+    expect(label("assessing")).toMatch(/Assessing what's missing/i);
+    expect(label("refining")).toMatch(/Refining the search/i);
+    expect(label("synthesizing")).toMatch(/Writing the summary/i);
+  });
+
+  it("walks the full pipeline forward: plan → search → read → assess → refine", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "planning", at: 10 },
+      { type: "phase", phase: "searching_web", at: 100 },
+      { type: "phase", phase: "reading_sources", at: 300 },
+      { type: "phase", phase: "assessing", at: 800 },
+      { type: "phase", phase: "refining", at: 900 },
+    ]);
+    expect(s.phase).toBe("refining");
+    expect(s.lastEventAt).toBe(900);
+  });
+
+  it("lets a new round loop backward from refining to searching (cyclic phases)", () => {
+    // This is the crux: the workflow revisits searching after refining, and the
+    // monotonic guard must NOT freeze the label on "Refining".
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "refining", at: 900 },
+      { type: "phase", phase: "searching_web", at: 1_000 },
+      { type: "phase", phase: "reading_sources", at: 1_200 },
+    ]);
+    expect(s.phase).toBe("reading_sources");
+    expect(statusDisplay(s, 1_300).label).toMatch(/Reading sources/i);
+  });
+
+  it("keeps the synthesizing label until the summary actually starts streaming", () => {
+    const before = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "synthesizing", at: 1_000 },
+    ]);
+    expect(before.phase).toBe("synthesizing");
+    expect(statusDisplay(before, 1_100).label).toMatch(/Writing the summary/i);
+    // Once real tokens arrive, a delta is the strongest evidence and flips it to
+    // generating — consistent with the chat web summary.
+    const streaming = reduce(before, { type: "delta", chars: 12, at: 1_500 });
+    expect(streaming.phase).toBe("generating");
+  });
+
+  it("does not treat a long research run as stalled while notes keep arriving", () => {
+    let s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "planning", at: 500 },
+      { type: "phase", phase: "assessing", at: 3_000 },
+    ]);
+    // Assessing is a pre-token phase; without the cyclic-phase liveness rule it
+    // would trip the 120s hard cap. Notes every 20s must keep it alive.
+    for (let t = 20_000; t < HARD_CAP_MS + 40_000; t += 20_000) {
+      s = reduce(s, { type: "note", at: t });
+      expect(isStalled(s, t + 1)).toBe(false);
+    }
+    expect(statusDisplay(s, HARD_CAP_MS + 40_001).kind).toBe("active");
+  });
+
+  it("flags a research stall only after the liveness window elapses with no evidence", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "refining", at: 1_000 },
+      { type: "note", at: 5_000 },
+    ]);
+    expect(isStalled(s, 5_000 + WEB_STALL_TIMEOUT_MS - 1)).toBe(false);
+    expect(isStalled(s, 5_000 + WEB_STALL_TIMEOUT_MS + 1)).toBe(true);
+  });
+});
