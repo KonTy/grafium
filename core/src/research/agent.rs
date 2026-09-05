@@ -736,6 +736,7 @@ mod tests {
                 url: "url".to_string(),
                 title: "title".to_string(),
                 snippet: "snippet".to_string(),
+                url_prefix: None,
             }),
         }
     }

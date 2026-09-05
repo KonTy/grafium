@@ -50,6 +50,7 @@ use crate::error::{CoreError, Result};
 use crate::research::config::{
     EngineKind, HtmlSelectors, JsonPaths, ResearchConfig, SearchEngineDef,
 };
+use crate::research::EngineCategory;
 use crate::scraping::browser::BrowserDriver;
 use crate::scraping::search::SearchResult;
 
@@ -136,7 +137,13 @@ pub async fn search_one(
             } else {
                 resource.url.as_str()
             };
-            parse_html(&body, selectors, base, limit)
+            parse_html(
+                &body,
+                selectors,
+                base,
+                limit,
+                engine.category == EngineCategory::Academic,
+            )
         }
     }
 }
@@ -202,6 +209,7 @@ pub fn parse_html(
     selectors: &HtmlSelectors,
     base_url: &str,
     limit: usize,
+    site_native: bool,
 ) -> Result<Vec<SearchResult>> {
     let document = Html::parse_document(html);
     let result_sel = compile_selector(&selectors.result)?;
@@ -209,7 +217,12 @@ pub fn parse_html(
     let title_sel = compile_selector(&selectors.title)?;
     let snippet_sel = compile_selector(&selectors.snippet)?;
 
-    let engine_host = host_of(base_url);
+    // A meta-search engine linking to itself is navigation chrome, never a
+    // result, so those are dropped. A site-native search is the opposite case:
+    // every PubMed hit *is* on pubmed.ncbi.nlm.nih.gov, and applying the same
+    // rule there silently discarded all ten results and looked like a broken
+    // selector.
+    let engine_host = if site_native { None } else { host_of(base_url) };
 
     let mut results = Vec::new();
     for container in document.select(&result_sel) {
@@ -275,11 +288,24 @@ pub fn parse_json(bytes: &[u8], paths: &JsonPaths, limit: usize) -> Result<Vec<S
         if results.len() >= limit {
             break;
         }
-        let Some(url) = resolve_string(item, &paths.url) else {
+        let Some(raw_url) = resolve_string(item, &paths.url) else {
             continue; // no citable/fetchable URL — drop it
         };
-        let title = resolve_string(item, &paths.title).unwrap_or_else(|| url.clone());
-        let snippet = resolve_snippet(item, &paths.snippet).unwrap_or_default();
+        let url = match paths.url_prefix.as_deref() {
+            Some(prefix) => join_prefix(prefix, &raw_url),
+            None => raw_url,
+        };
+        // Several APIs return their own search highlighting inline — Crossref
+        // wraps titles in `<i>`, Google Patents in `<b>` — which reached the UI
+        // as literal markup. Titles and snippets are plain text everywhere they
+        // are displayed, so the tags come out here.
+        let title = resolve_string(item, &paths.title)
+            .map(|t| strip_markup(&t))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| url.clone());
+        let snippet = resolve_snippet(item, &paths.snippet)
+            .map(|s| strip_markup(&s))
+            .unwrap_or_default();
         results.push(SearchResult {
             title,
             url,
@@ -287,6 +313,40 @@ pub fn parse_json(bytes: &[u8], paths: &JsonPaths, limit: usize) -> Result<Vec<S
         });
     }
     Ok(results)
+}
+
+/// Joins a configured prefix to a relative identifier without doubling or
+/// dropping the separating slash.
+fn join_prefix(prefix: &str, rest: &str) -> String {
+    format!(
+        "{}/{}",
+        prefix.trim_end_matches('/'),
+        rest.trim_start_matches('/')
+    )
+}
+
+/// Removes inline markup and decodes the handful of entities search APIs emit
+/// around highlighted terms.
+fn strip_markup(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&hellip;", "…")
+        .replace("&nbsp;", " ");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ── HTML helpers ─────────────────────────────────────────────────────────────
@@ -495,7 +555,14 @@ mod tests {
           <div class="result"><a href="https://engine.test/tools">Internal</a><p>x</p></div>
         </body></html>
         "#;
-        let out = parse_html(html, &html_selectors(), "https://engine.test/search", 10).unwrap();
+        let out = parse_html(
+            html,
+            &html_selectors(),
+            "https://engine.test/search",
+            10,
+            false,
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].url, "https://real.test/a");
         assert_eq!(out[0].title, "First");
@@ -536,6 +603,7 @@ mod tests {
             &html_selectors(),
             "https://html.duckduckgo.com/html/",
             10,
+            false,
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -565,6 +633,7 @@ mod tests {
             &selectors,
             "http://export.arxiv.org/api/query?search_query=all:things",
             10,
+            true,
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -582,7 +651,7 @@ mod tests {
           <div class="result"><a href="https://c.test">C</a></div>
         </body></html>
         "#;
-        let out = parse_html(html, &html_selectors(), "https://engine.test/", 2).unwrap();
+        let out = parse_html(html, &html_selectors(), "https://engine.test/", 2, false).unwrap();
         assert_eq!(out.len(), 2);
     }
 
@@ -600,6 +669,7 @@ mod tests {
             url: "URL".to_string(),
             title: "title".to_string(),
             snippet: "abstract".to_string(),
+            url_prefix: None,
         };
         let out = parse_json(body, &paths, 10).unwrap();
         assert_eq!(out.len(), 2);
@@ -628,6 +698,7 @@ mod tests {
             url: "bibjson.link.url".to_string(),
             title: "bibjson.title".to_string(),
             snippet: "bibjson.abstract".to_string(),
+            url_prefix: None,
         };
         let out = parse_json(body, &paths, 10).unwrap();
         assert_eq!(out.len(), 1);
@@ -649,6 +720,7 @@ mod tests {
             url: "doi".to_string(),
             title: "title".to_string(),
             snippet: "abstract_inverted_index".to_string(),
+            url_prefix: None,
         };
         let out = parse_json(body, &paths, 10).unwrap();
         assert_eq!(out.len(), 1);
@@ -662,6 +734,7 @@ mod tests {
             url: "doi".to_string(),
             title: "title".to_string(),
             snippet: "abstract".to_string(),
+            url_prefix: None,
         };
         // Item with a null doi is skipped (no citable URL).
         let body = br#"{ "results": [ { "doi": null, "title": "No link" } ] }"#;
@@ -686,6 +759,7 @@ mod tests {
                 url: "url".to_string(),
                 title: "title".to_string(),
                 snippet: "snippet".to_string(),
+                url_prefix: None,
             }),
         }
     }

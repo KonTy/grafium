@@ -117,7 +117,13 @@ mod tests {
             .expect("brave is a built-in engine")
             .selectors
             .expect("brave is an HTML engine with selectors");
-        engines::parse_html(html, &selectors, "https://search.brave.com/search", limit)
+        engines::parse_html(
+            html,
+            &selectors,
+            "https://search.brave.com/search",
+            limit,
+            false,
+        )
     }
 
     #[test]

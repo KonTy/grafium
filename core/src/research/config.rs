@@ -91,6 +91,14 @@ pub struct JsonPaths {
     pub title: String,
     /// Path to an item's snippet/abstract field, relative to one item.
     pub snippet: String,
+    /// Prepended to the value at `url` when the API returns a relative
+    /// identifier rather than a link.
+    ///
+    /// Google Patents yields `"patent/US1234567B2/en"` and Open Library yields
+    /// `"/works/OL123W"` — citable only once joined to their host. Kept
+    /// optional so every existing engine definition keeps deserializing.
+    #[serde(default)]
+    pub url_prefix: Option<String>,
 }
 
 /// A single search source. `kind` decides how results are obtained.
@@ -323,7 +331,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
             name: "Mojeek".to_string(),
             kind: EngineKind::Html,
             url_template: "https://www.mojeek.com/search?q={query}".to_string(),
-            enabled: true,
+            enabled: false,
             builtin: true,
             category: EngineCategory::Web,
             selectors: Some(HtmlSelectors {
@@ -339,7 +347,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
             name: "Startpage".to_string(),
             kind: EngineKind::Html,
             url_template: "https://www.startpage.com/sp/search?query={query}".to_string(),
-            enabled: true,
+            enabled: false,
             builtin: true,
             category: EngineCategory::Web,
             selectors: Some(HtmlSelectors {
@@ -370,6 +378,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
                 // OpenAlex ships no plain abstract — only an inverted index,
                 // which the JSON resolver reconstructs into text.
                 snippet: "abstract_inverted_index".to_string(),
+                url_prefix: None,
             }),
         },
         SearchEngineDef {
@@ -386,6 +395,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
                 url: "URL".to_string(),
                 title: "title".to_string(),
                 snippet: "abstract".to_string(),
+                url_prefix: None,
             }),
         },
         SearchEngineDef {
@@ -428,6 +438,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
                 url: "fullTextUrlList.fullTextUrl.url".to_string(),
                 title: "title".to_string(),
                 snippet: "abstractText".to_string(),
+                url_prefix: None,
             }),
         },
         SearchEngineDef {
@@ -437,7 +448,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
             url_template:
                 "https://api.semanticscholar.org/graph/v1/paper/search?query={query}&fields=title,abstract,url,year&limit=10"
                     .to_string(),
-            enabled: true,
+            enabled: false,
             builtin: true,
             category: EngineCategory::Academic,
             selectors: None,
@@ -446,6 +457,7 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
                 url: "url".to_string(),
                 title: "title".to_string(),
                 snippet: "abstract".to_string(),
+                url_prefix: None,
             }),
         },
         SearchEngineDef {
@@ -462,6 +474,66 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
                 url: "bibjson.link.url".to_string(),
                 title: "bibjson.title".to_string(),
                 snippet: "bibjson.abstract".to_string(),
+                url_prefix: None,
+            }),
+        },
+        // PubMed is scraped rather than driven through NCBI's E-utilities
+        // because that API needs two round trips — `esearch` returns bare IDs,
+        // then `esummary` turns them into records — and every engine here is
+        // one request by construction. The public results page carries stable,
+        // semantic class names and is the same data.
+        SearchEngineDef {
+            id: "pubmed".to_string(),
+            name: "PubMed (NIH)".to_string(),
+            kind: EngineKind::Html,
+            url_template: "https://pubmed.ncbi.nlm.nih.gov/?term={query}".to_string(),
+            enabled: true,
+            builtin: true,
+            category: EngineCategory::Academic,
+            selectors: Some(HtmlSelectors {
+                result: "article.full-docsum".to_string(),
+                link: "a.docsum-title".to_string(),
+                title: "a.docsum-title".to_string(),
+                snippet: ".docsum-snippet, .full-view-snippet".to_string(),
+            }),
+            json_paths: None,
+        },
+        // Google Patents rather than a single patent office: it indexes USPTO,
+        // EPO, WIPO, CNIPA and others together, and its search endpoint needs
+        // no key. The official USPTO APIs now require registration, which would
+        // make this useless out of the box.
+        SearchEngineDef {
+            id: "googlepatents".to_string(),
+            name: "Patents (Google Patents)".to_string(),
+            kind: EngineKind::Json,
+            url_template: "https://patents.google.com/xhr/query?url=q%3D{query}".to_string(),
+            enabled: true,
+            builtin: true,
+            category: EngineCategory::Academic,
+            selectors: None,
+            json_paths: Some(JsonPaths {
+                results: "results.cluster.result".to_string(),
+                url: "id".to_string(),
+                title: "patent.title".to_string(),
+                snippet: "patent.snippet".to_string(),
+                url_prefix: Some("https://patents.google.com".to_string()),
+            }),
+        },
+        SearchEngineDef {
+            id: "openlibrary".to_string(),
+            name: "Open Library".to_string(),
+            kind: EngineKind::Json,
+            url_template: "https://openlibrary.org/search.json?q={query}&limit=10".to_string(),
+            enabled: true,
+            builtin: true,
+            category: EngineCategory::Academic,
+            selectors: None,
+            json_paths: Some(JsonPaths {
+                results: "docs".to_string(),
+                url: "key".to_string(),
+                title: "title".to_string(),
+                snippet: "first_sentence".to_string(),
+                url_prefix: Some("https://openlibrary.org".to_string()),
             }),
         },
     ]
@@ -529,9 +601,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_ships_all_builtin_engines_enabled() {
+    fn default_config_ships_every_builtin_engine() {
         let config = ResearchConfig::default();
-        // The contract's full built-in set.
         for id in [
             "brave",
             "duckduckgo",
@@ -543,6 +614,9 @@ mod tests {
             "europepmc",
             "semanticscholar",
             "doaj",
+            "pubmed",
+            "googlepatents",
+            "openlibrary",
         ] {
             let engine = config
                 .engines
@@ -550,6 +624,40 @@ mod tests {
                 .find(|e| e.id == id)
                 .unwrap_or_else(|| panic!("missing built-in engine {id}"));
             assert!(engine.builtin, "{id} must be marked built-in");
+        }
+    }
+
+    /// Engines that actively refuse automated access ship **off**.
+    ///
+    /// Verified against the live services: Mojeek and Startpage answer a
+    /// scripted request with a CAPTCHA/verification page, and Semantic Scholar
+    /// returns HTTP 429 to anonymous callers. Leaving them on meant a research
+    /// run always carried three engines that could only ever contribute
+    /// nothing, and — worse — made "no results" look like a Grafium bug.
+    /// Getting past them would mean defeating an access control, which is not
+    /// something this ships.
+    #[test]
+    fn engines_that_block_automation_ship_disabled() {
+        let config = ResearchConfig::default();
+        for id in ["mojeek", "startpage", "semanticscholar"] {
+            let engine = config.engines.iter().find(|e| e.id == id).unwrap();
+            assert!(!engine.enabled, "{id} must ship disabled");
+            assert!(
+                engine.builtin,
+                "{id} stays a built-in so it can be re-enabled"
+            );
+        }
+        // Everything else ships ready to use.
+        for id in [
+            "openalex",
+            "crossref",
+            "arxiv",
+            "europepmc",
+            "doaj",
+            "pubmed",
+            "googlepatents",
+        ] {
+            let engine = config.engines.iter().find(|e| e.id == id).unwrap();
             assert!(engine.enabled, "{id} ships enabled");
         }
     }
