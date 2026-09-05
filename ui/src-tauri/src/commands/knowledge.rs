@@ -6,12 +6,11 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::{
-    AskPhase, AskStreamEvent, HealthStatus, IndexStatus, Source,
-};
+use grafium_core::ai::web_research::Citation;
+use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
-use grafium_core::knowledge::KnowledgeEngine;
+use grafium_core::knowledge::{detect_research_intent, KnowledgeEngine};
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -760,13 +759,40 @@ pub struct AskStreamChunk {
     pub request_id: String,
     pub delta: String,
     /// The current answering phase (`retrieving`, `processing_prompt`,
-    /// `thinking`, `generating`), when this chunk reports a phase transition.
-    /// `None` for a pure text delta or the terminal `done` event. Drives the
-    /// UI's evidence-based status indicator; reasoning is never sent as
-    /// `delta`, only reflected as the `thinking` phase.
+    /// `thinking`, `generating`, and — in the two-part web-research flow —
+    /// `searching_web`, `reading_sources`), when this chunk reports a phase
+    /// transition. `None` for a pure text delta or the terminal `done` event.
+    /// Drives the UI's evidence-based status indicator; reasoning is never sent
+    /// as `delta`, only reflected as the `thinking` phase.
     pub phase: Option<String>,
+    /// A transient human-readable progress note for the current phase — e.g.
+    /// "Reading source 2/5: …" during a web-research pass. Shown verbatim under
+    /// the status label and then discarded; never appended to the answer text.
+    #[serde(default)]
+    pub note: Option<String>,
     pub done: bool,
     pub error: Option<String>,
+}
+
+/// A web source cited by the "From the web" research section, surfaced to the
+/// UI so it can render clickable external-link chips distinct from the graph
+/// page chips in [`SourceDto`]. `number` matches the inline `[n]` marker in the
+/// streamed summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSourceDto {
+    pub number: usize,
+    pub title: String,
+    pub url: String,
+}
+
+impl From<Citation> for WebSourceDto {
+    fn from(c: Citation) -> Self {
+        WebSourceDto {
+            number: c.number,
+            title: c.title,
+            url: c.url,
+        }
+    }
 }
 
 /// Emitted once per request on `ai://chat_sources`, carrying the structured
@@ -777,6 +803,11 @@ pub struct AskStreamChunk {
 pub struct AskSourcesPayload {
     pub request_id: String,
     pub sources: Vec<SourceDto>,
+    /// Web sources for the "From the web" section — empty for an ordinary
+    /// graph-only answer, so existing consumers are unaffected. Rendered as
+    /// clickable external links, distinct from the graph `sources` chips.
+    #[serde(default)]
+    pub web_sources: Vec<WebSourceDto>,
 }
 
 #[tauri::command]
@@ -813,15 +844,28 @@ pub async fn ai_ask_stream(
         map.insert(request_id.clone(), cancel.clone());
     }
 
+    // A research trigger ("… search the web") turns Chat into a two-part
+    // answer: the notes-grounded reply plus a live internet research pass. We
+    // strip the trigger phrase (via the core detector) so neither retrieval nor
+    // the web queries are polluted by "search the web", then route to the
+    // two-part path. An LLM is required for both arms — already checked above.
+    let research = detect_research_intent(&question);
+    let effective_question = research
+        .as_ref()
+        .map(|r| r.cleaned_question.clone())
+        .unwrap_or_else(|| question.clone());
+
     // Forward real token deltas and phase transitions as they happen. Phase
     // events let the UI show *what* the model is doing (and prove it's alive);
-    // reasoning is surfaced only as the `thinking` phase, never as `delta`.
+    // reasoning is surfaced only as the `thinking` phase, never as `delta`. In
+    // the research flow, `Note` carries the per-source progress line.
     let app_for_events = app.clone();
     let rid = request_id.clone();
     let mut on_event = move |ev: AskStreamEvent<'_>| {
-        let (delta, phase) = match ev {
-            AskStreamEvent::Delta(d) => (d.to_string(), None),
-            AskStreamEvent::Phase(p) => (String::new(), Some(p.as_str().to_string())),
+        let (delta, phase, note) = match ev {
+            AskStreamEvent::Delta(d) => (d.to_string(), None, None),
+            AskStreamEvent::Phase(p) => (String::new(), Some(p.as_str().to_string()), None),
+            AskStreamEvent::Note(n) => (String::new(), None, Some(n.to_string())),
         };
         let _ = app_for_events.emit(
             "ai://chat_stream",
@@ -829,21 +873,34 @@ pub async fn ai_ask_stream(
                 request_id: rid.clone(),
                 delta,
                 phase,
+                note,
                 done: false,
                 error: None,
             },
         );
     };
 
-    let outcome = engine
-        .ask_stream(
-            &graph.db,
-            &question,
-            Some(resolved_graph_id.as_str()),
-            Some(cancel),
-            &mut on_event,
-        )
-        .await;
+    let outcome = if research.is_some() {
+        engine
+            .ask_stream_with_web(
+                &graph.db,
+                &effective_question,
+                Some(resolved_graph_id.as_str()),
+                Some(cancel),
+                &mut on_event,
+            )
+            .await
+    } else {
+        engine
+            .ask_stream(
+                &graph.db,
+                &effective_question,
+                Some(resolved_graph_id.as_str()),
+                Some(cancel),
+                &mut on_event,
+            )
+            .await
+    };
 
     // Deregister the cancel flag regardless of outcome.
     if let Ok(mut map) = state.cancels.lock() {
@@ -852,12 +909,18 @@ pub async fn ai_ask_stream(
 
     let outcome = outcome.map_err(|e| e.to_string())?;
 
-    // Emit the structured citations now that the answer is complete.
+    // Emit the structured citations now that the answer is complete — graph
+    // page chips and, for a research answer, the clickable web sources.
     app.emit(
         "ai://chat_sources",
         AskSourcesPayload {
             request_id: request_id.clone(),
             sources: outcome.sources.into_iter().map(SourceDto::from).collect(),
+            web_sources: outcome
+                .web_citations
+                .into_iter()
+                .map(WebSourceDto::from)
+                .collect(),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -872,6 +935,7 @@ pub async fn ai_ask_stream(
                 request_id: request_id.clone(),
                 delta: message,
                 phase: None,
+                note: None,
                 done: false,
                 error: None,
             },
@@ -885,6 +949,7 @@ pub async fn ai_ask_stream(
             request_id,
             delta: String::new(),
             phase: None,
+            note: None,
             done: true,
             error: None,
         },
