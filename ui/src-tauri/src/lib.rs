@@ -428,6 +428,160 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
     });
 }
 
+/// Debounce window: a page must be quiescent (no further edits) for this long
+/// after its last edit before it's reindexed, so typing never triggers
+/// embedding and rapid edits coalesce into a single reindex.
+const REINDEX_DEBOUNCE_MS: i64 = 15_000;
+/// How often the drainer wakes to look for quiesced pages.
+const REINDEX_CYCLE: Duration = Duration::from_secs(5);
+/// Gentle startup delay so we don't hammer the embedder the instant the app
+/// opens while the user is trying to read something.
+const REINDEX_STARTUP_DELAY: Duration = Duration::from_secs(20);
+/// Cap pages reindexed per cycle so a crash-recovered backlog drains gradually
+/// rather than saturating the embedder worker in one burst.
+const REINDEX_MAX_PER_CYCLE: i64 = 8;
+
+/// Background drainer that keeps the vector (semantic) index fresh as the user
+/// writes, edits, imports, deletes, and moves blocks — no manual "Index my
+/// notes" click after the first one.
+///
+/// Design:
+/// - Work is discovered from the persisted `pending_reindex` table (marked at
+///   the `Graph` write choke points), so edits made while the app was closed
+///   are still picked up on the next launch (crash-safe).
+/// - Per-page debounce + coalescing: a page is only processed once it's been
+///   quiet for [`REINDEX_DEBOUNCE_MS`]; repeated edits keep bumping its
+///   `marked_at`, collapsing N edits into one reindex.
+/// - Page-level granularity: an ancestor edit changes descendants' breadcrumbs,
+///   so the whole page is re-chunked — but the content-hash diff means only
+///   genuinely-changed chunks are re-embedded.
+/// - Degrades to a silent no-op when AI isn't fully configured (no embedder /
+///   engine not ready): never an error toast, never a retry storm.
+/// - Deletions: a pending id that no longer resolves to a page is treated as a
+///   removal and its vectors are purged, so Chat never cites a deleted page.
+fn start_reindex_drainer(
+    app_handle: tauri::AppHandle,
+    graph: Arc<Mutex<Graph>>,
+    engine: Arc<tokio::sync::RwLock<Option<grafium_core::KnowledgeEngine>>>,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REINDEX_STARTUP_DELAY).await;
+
+        loop {
+            tokio::time::sleep(REINDEX_CYCLE).await;
+
+            // No-op unless AI is fully ready. Pending rows wait harmlessly
+            // until an embedder is configured, then get picked up.
+            let ready = {
+                let guard = engine.read().await;
+                guard.as_ref().map(|e| e.can_index()).unwrap_or(false)
+            };
+            if !ready {
+                continue;
+            }
+
+            // Snapshot the due set + graph id under the sync lock, then drop it
+            // before any await — holding a std Mutex across .await is unsound.
+            let snapshot = {
+                let g = match graph.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let graph_id = g.root_dir.to_string_lossy().to_string();
+                match g
+                    .db
+                    .list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE)
+                {
+                    Ok(due) => Some((graph_id, due)),
+                    Err(e) => {
+                        eprintln!("reindex drainer: could not list pending pages: {e}");
+                        None
+                    }
+                }
+            };
+            let (graph_id, due) = match snapshot {
+                Some((graph_id, due)) if !due.is_empty() => (graph_id, due),
+                _ => continue,
+            };
+
+            // Restore the hash cache once so a fresh process re-embeds only
+            // genuinely-changed chunks, not whole pages, after a restart.
+            {
+                let guard = engine.read().await;
+                if let Some(e) = guard.as_ref() {
+                    if let Err(err) = e.restore_hash_cache(&graph_id).await {
+                        eprintln!("reindex drainer: hash cache restore failed: {err}");
+                    }
+                }
+            }
+
+            let mut changed = false;
+            for (page_id, marked_at) in due {
+                // Load the page + its blocks under the sync lock, then drop it.
+                // A page that no longer exists is a deletion → purge vectors.
+                enum Work {
+                    Reindex(grafium_core::models::Page, Vec<grafium_core::models::Block>),
+                    Remove,
+                    Skip,
+                }
+                let work = {
+                    let g = match graph.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    match g.db.get_page_by_id(&page_id) {
+                        Ok(page) => match g.db.list_blocks_for_page(&page_id) {
+                            Ok(blocks) => Work::Reindex(page, blocks),
+                            Err(e) => {
+                                eprintln!(
+                                    "reindex drainer: list blocks failed for '{page_id}': {e}"
+                                );
+                                Work::Skip
+                            }
+                        },
+                        Err(_) => Work::Remove,
+                    }
+                };
+
+                let result = {
+                    let guard = engine.read().await;
+                    let e = match guard.as_ref() {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    match &work {
+                        Work::Reindex(page, blocks) => {
+                            e.index_page(page, blocks, &graph_id).await.map(|_| ())
+                        }
+                        Work::Remove => e.remove_page(&graph_id, &page_id).await,
+                        Work::Skip => continue,
+                    }
+                };
+
+                match result {
+                    Ok(()) => {
+                        // Clear only if no newer edit bumped marked_at while we
+                        // were embedding; otherwise leave it for the next cycle.
+                        if let Ok(g) = graph.lock() {
+                            let _ = g.db.clear_pending_reindex(&page_id, marked_at);
+                        }
+                        changed = true;
+                    }
+                    Err(e) => {
+                        // Leave the row pending; the next cycle retries. Silent.
+                        eprintln!("reindex drainer: reindex of '{page_id}' failed: {e}");
+                    }
+                }
+            }
+
+            if changed {
+                // Nudge the UI to refresh its coverage / "N pages pending".
+                let _ = app_handle.emit("ai-index-updated", ());
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::snapshot_then;
@@ -1280,6 +1434,9 @@ pub fn run() {
             let sync_app_handle = app.handle().clone();
             start_sync_monitor(sync_app_handle, sync_graph);
 
+            // Keep a handle for the auto-reindex drainer before the state is moved.
+            let drainer_graph = state.graph.clone();
+
             // Start smplos theme watcher
             let theme_app_handle = app.handle().clone();
             start_smplos_theme_watcher(theme_app_handle);
@@ -1305,6 +1462,12 @@ pub fn run() {
                     engine: Arc::new(tokio::sync::RwLock::new(engine)),
                 }
             };
+            // Keep the vector index fresh automatically as the graph changes.
+            start_reindex_drainer(
+                app.handle().clone(),
+                drainer_graph,
+                knowledge_state.engine.clone(),
+            );
             app.manage(knowledge_state);
 
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
