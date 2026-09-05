@@ -517,7 +517,12 @@ mod tests {
     impl BrowserDriver for StubBrowser {
         fn fetch<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<FetchedResource>> {
             Box::pin(async move {
-                let bytes = if url.starts_with("https://search.brave.com/") {
+                // Both engines the search layer may consult — it falls back
+                // to DuckDuckGo when Brave rate-limits — are served the same
+                // canned results page.
+                let bytes = if url.starts_with("https://search.brave.com/")
+                    || url.starts_with("https://html.duckduckgo.com/")
+                {
                     self.search_html.clone().into_bytes()
                 } else {
                     self.pages

@@ -55,6 +55,29 @@ struct Scan {
 /// reasoning while tracking nesting depth. Handles multiple and nested
 /// blocks, and stray or unterminated tags, without panicking. Operates on
 /// `&str` byte offsets found via `find`, so it is UTF-8 safe.
+/// Whether text appearing before the first `<think>` is a tokenizer artifact
+/// rather than the start of an answer.
+///
+/// Some converted GGUFs emit a stray token ahead of the reasoning block — one
+/// abliterated Qwen3 build reliably opens with the Chinese fragment "起来" —
+/// which was shown to the user as the first words of the reply.
+///
+/// Length alone can't separate that from a genuine short answer that precedes
+/// reasoning, so the test is whether the fragment contains any ASCII letters
+/// or digits. Prompts and answers here are English, so a short run with no
+/// Latin characters at all is an artifact, while "Partial answer" is plainly
+/// real text and is kept.
+fn is_stray_preamble(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= STRAY_PREAMBLE_MAX_BYTES
+        && !trimmed.chars().any(|c| c.is_ascii_alphanumeric())
+}
+
+/// Upper bound on a fragment considered a stray emission. Observed leaks are a
+/// handful of bytes; anything longer is treated as content whatever its script.
+const STRAY_PREAMBLE_MAX_BYTES: usize = 24;
+
 fn scan(raw: &str) -> Scan {
     let mut answer = String::new();
     let mut depth: usize = 0;
@@ -73,7 +96,9 @@ fn scan(raw: &str) -> Scan {
 
         if let Some(o) = next_open.filter(|_| open_first) {
             if depth == 0 {
-                answer.push_str(&rest[..o]);
+                if saw_open || !is_stray_preamble(&rest[..o]) {
+                    answer.push_str(&rest[..o]);
+                }
             }
             depth += 1;
             saw_open = true;
@@ -245,6 +270,31 @@ mod tests {
         assert_eq!(
             strip_think_blocks("<think>one</think> mid <think>two</think>end"),
             ThinkStripResult::Answer("mid end".to_string())
+        );
+    }
+
+    /// Regression: an abliterated Qwen3 build opens every reply with a stray
+    /// Chinese fragment before its reasoning block, which reached the UI as
+    /// the first words of the answer.
+    #[test]
+    fn a_stray_non_latin_fragment_before_reasoning_is_dropped() {
+        assert_eq!(
+            strip_think_blocks("起来<think>reasoning</think>The real answer."),
+            ThinkStripResult::Answer("The real answer.".to_string())
+        );
+        assert_eq!(
+            strip_think_blocks("起来  <think></think>  Answer here"),
+            ThinkStripResult::Answer("Answer here".to_string())
+        );
+    }
+
+    /// …but a genuine answer that precedes reasoning must survive, which is
+    /// why the test is script-based rather than length-based.
+    #[test]
+    fn real_text_before_reasoning_is_kept() {
+        assert_eq!(
+            strip_think_blocks("Partial answer<think>reasoning</think>"),
+            ThinkStripResult::Answer("Partial answer".to_string())
         );
     }
 

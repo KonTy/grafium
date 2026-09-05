@@ -468,7 +468,13 @@ pub fn detect_research_intent(question: &str) -> Option<ResearchIntent> {
         .or_else(|| match_embedded(&low, &norm))?;
 
     let cleaned = clean_fragment(&cleaned);
-    let needs_context = cleaned.is_empty() || is_contentless_referent(&cleaned);
+    // A residue only counts as a topic if something survives stripping
+    // referents and filler. Checking for bare pronouns alone was not enough:
+    // "look on the internet" leaves the verb "look", which is not a pronoun,
+    // so it was accepted and the web was searched for the word "look" —
+    // returning a dictionary definition instead of the subject under
+    // discussion.
+    let needs_context = !crate::knowledge::conversation::is_self_contained(&cleaned);
     Some(ResearchIntent {
         cleaned_question: cleaned,
         needs_conversation_context: needs_context,

@@ -20,7 +20,10 @@ fn main() {
             general
         );
         if let Some(r) = research {
-            println!("{:>16}cleaned: {:?}", "", r.cleaned_question);
+            println!(
+                "{:>16}cleaned: {:?}  needs_context={}",
+                "", r.cleaned_question, r.needs_conversation_context
+            );
         }
     }
 }
