@@ -18,6 +18,7 @@
     type ChatTurn,
     type WebSource,
   } from "../lib/knowledge";
+  import { researchDeep, researchCancel, type ResearchStreamHandlers } from "../lib/research";
   import {
     initialState,
     reduce,
@@ -52,7 +53,30 @@
   let messages = $state<ChatMessage[]>([greeting]);
   let question = $state("");
   let currentRequestId: string | null = null;
+  // Whether the live run is a deep-research run, so Stop targets research_cancel
+  // instead of the ordinary chat cancel. Non-reactive: only read inside stopStream.
+  let currentRunIsResearch = false;
   let error = $state<string | null>(null);
+
+  // Research toggle: forces the full multi-round workflow for the next send,
+  // bypassing the intent classifier. Persisted across restarts via localStorage,
+  // the same UI-preference mechanism App.svelte uses (zoom, sidebar width).
+  const RESEARCH_PREF_KEY = "grafium.chat.research";
+  function loadResearchPref(): boolean {
+    try {
+      return localStorage.getItem(RESEARCH_PREF_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+  let researchMode = $state(loadResearchPref());
+  function saveResearchPref() {
+    try {
+      localStorage.setItem(RESEARCH_PREF_KEY, researchMode ? "1" : "0");
+    } catch {
+      // A blocked/full localStorage just means the toggle stays session-only.
+    }
+  }
 
   // Streaming status is a pure reducer over the *real* backend events
   // (phase transitions, token deltas, done/error) plus a wall clock — never a
@@ -360,13 +384,22 @@
 
     let assistantIndex = messages.length - 1;
 
-    await aiAskStream(
-      trimmed,
-      {
-        onStart: (requestId) => {
+    // Research mode forces the multi-round workflow, which is always web-backed,
+    // so light the badge immediately rather than waiting for the first web phase.
+    const forceResearch = researchMode;
+    if (forceResearch) {
+      messages = messages.map((m, i) =>
+        i === assistantIndex ? { ...m, webResearch: true } : m
+      );
+    }
+    // Remember which backend owns this run so Stop cancels the right one.
+    currentRunIsResearch = forceResearch;
+
+    const handlers: ResearchStreamHandlers = {
+        onStart: (requestId: string) => {
           currentRequestId = requestId;
         },
-        onPhase: (phase) => {
+        onPhase: (phase: string) => {
           dispatch({ type: "phase", phase: phase as StreamPhase, at: Date.now() });
           // Entering a web phase means this answer engaged research — light up
           // the badge even before the citations land.
@@ -426,10 +459,16 @@
           dispatch({ type: "error", at: Date.now(), message: msg });
           keepInputFocusedSoon(false);
         },
-      },
-      undefined,
-      priorTurns
-    );
+    };
+
+    if (forceResearch) {
+      // Single-shot by contract: research_deep takes no history, so priorTurns
+      // is intentionally omitted. A missing backend command rejects the invoke,
+      // which surfaces through onError rather than crashing the pane.
+      await researchDeep(trimmed, handlers);
+    } else {
+      await aiAskStream(trimmed, handlers, undefined, priorTurns);
+    }
   }
 
   let copiedIndex = $state<number | null>(null);
@@ -507,7 +546,12 @@
 
   function stopStream() {
     if (currentRequestId) {
-      void aiCancelStream(currentRequestId);
+      // Research and ordinary chat cancel through different backend commands.
+      if (currentRunIsResearch) {
+        void researchCancel(currentRequestId);
+      } else {
+        void aiCancelStream(currentRequestId);
+      }
     }
     // Reflect the user's intent immediately; any partial answer already
     // streamed stays in the bubble. A trailing backend `done` is ignored once
@@ -735,6 +779,19 @@
     <button onclick={() => void send()} disabled={isStreaming || !question.trim() || checkingConnection || !chatConnected}>
       {isStreaming ? "Streaming..." : "Send"}
     </button>
+  </div>
+
+  <div class="research-toggle-row">
+    <label class="research-toggle">
+      <input
+        type="checkbox"
+        bind:checked={researchMode}
+        onchange={saveResearchPref}
+        disabled={isStreaming}
+      />
+      <span class="research-toggle-label">Research</span>
+      <span class="research-toggle-hint">— searches the web, takes longer</span>
+    </label>
   </div>
 </div>
 
@@ -1289,6 +1346,42 @@
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 10px;
+  }
+
+  .research-toggle-row {
+    display: flex;
+    align-items: center;
+    margin-top: -4px;
+  }
+
+  /* Native checkbox + text label: keyboard-reachable and state is conveyed by
+     the check mark and the label, not colour alone. Cyan accent mirrors the
+     "Web research" badge these runs produce. */
+  .research-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .research-toggle input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--accent-cyan);
+    cursor: pointer;
+  }
+
+  .research-toggle input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .research-toggle-hint {
+    color: var(--text-muted);
   }
 
   textarea {
