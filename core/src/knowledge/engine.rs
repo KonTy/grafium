@@ -1201,10 +1201,7 @@ impl KnowledgeEngine {
             // A cancelled web arm is a deliberate Stop, not a failure — stay
             // silent rather than scaring the user with an error they caused.
             Err(_) if cancel_requested(&cancel) => {}
-            Err(e) => on_event(AskStreamEvent::Delta(&format!(
-                "I couldn't complete the web research just now ({e}). Your notes answer above is \
-                 unaffected — you can try again."
-            ))),
+            Err(e) => on_event(AskStreamEvent::Delta(&describe_web_failure(&e.to_string()))),
         }
 
         Ok(AskStreamOutcome {
@@ -1860,6 +1857,29 @@ says \"note saved …; event date unknown\" is not an event date — don't treat
 sentence and stop — do not guess.\n\n\
 The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
     )
+}
+
+/// Turns a web-research failure into something the user can act on.
+///
+/// A raw error was being shown verbatim, so a routine throttle appeared as a
+/// wall of URL and HTTP status. Rate limiting in particular is both the most
+/// common failure and the most recoverable — a research run fires several
+/// queries back to back, which is the exact burst engines throttle — so it is
+/// worth saying plainly that waiting will fix it, rather than implying
+/// something is broken.
+fn describe_web_failure(error: &str) -> String {
+    let rate_limited = error.contains("429") || error.to_lowercase().contains("too many requests");
+    if rate_limited {
+        "I couldn't search the web just now — the search engine is rate-limiting requests \
+         (too many searches in a short time). This usually clears within a minute or two; \
+         your notes answer above is unaffected."
+            .to_string()
+    } else {
+        format!(
+            "I couldn't complete the web research just now ({error}). Your notes answer above is \
+             unaffected — you can try again."
+        )
+    }
 }
 
 /// Render a completed [`crate::ai::web_research::WebResearchResult`] into the
@@ -3284,6 +3304,12 @@ mod tests {
         assert!(answer.contains("supports strength training"));
         assert!(answer.contains("## From the web"));
         assert!(answer.contains("couldn't complete the web research"));
+        // A throttle is the most common and most recoverable failure, so it
+        // must read as "wait a moment", not as a raw HTTP error.
+        let throttled = describe_web_failure("returned HTTP 429 Too Many Requests");
+        assert!(throttled.contains("rate-limiting"));
+        assert!(throttled.contains("clears within a minute"));
+        assert!(!throttled.contains("429"));
         assert_eq!(outcome.sources.len(), 1);
         assert!(outcome.web_citations.is_empty());
         Ok(())

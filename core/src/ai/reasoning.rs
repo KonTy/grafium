@@ -67,6 +67,23 @@ struct Scan {
 /// or digits. Prompts and answers here are English, so a short run with no
 /// Latin characters at all is an artifact, while "Partial answer" is plainly
 /// real text and is kept.
+/// Removes a stray opening fragment from `raw`, if present.
+fn strip_leading_stray(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    // The fragment ends at the first ASCII character, which is where real
+    // content (or a `<think>` tag) begins.
+    let end = trimmed
+        .char_indices()
+        .find(|(_, c)| c.is_ascii())
+        .map(|(i, _)| i)
+        .unwrap_or(trimmed.len());
+    if end > 0 && is_stray_preamble(&trimmed[..end]) {
+        trimmed[end..].trim_start()
+    } else {
+        raw
+    }
+}
+
 fn is_stray_preamble(text: &str) -> bool {
     let trimmed = text.trim();
     !trimmed.is_empty()
@@ -82,7 +99,12 @@ fn scan(raw: &str) -> Scan {
     let mut answer = String::new();
     let mut depth: usize = 0;
     let mut saw_open = false;
-    let mut rest = raw;
+    // Drop a stray opening fragment before anything else. Doing it here rather
+    // than only where a `<think>` is found is what makes it work while
+    // streaming: the fragment is the very first token, so at that moment no
+    // tag has arrived yet and there is nothing to recognise it by — it was
+    // emitted to the UI immediately and could not be taken back.
+    let mut rest = strip_leading_stray(raw);
 
     loop {
         let next_open = rest.find(OPEN_TAG);
@@ -276,6 +298,42 @@ mod tests {
     /// Regression: an abliterated Qwen3 build opens every reply with a stray
     /// Chinese fragment before its reasoning block, which reached the UI as
     /// the first words of the answer.
+    /// The streaming path is where this actually bit: the fragment is the
+    /// very first token, so no `<think>` has arrived yet to recognise it by,
+    /// and it went straight to the UI where it could not be retracted.
+    #[test]
+    fn a_stray_fragment_is_never_streamed_to_the_ui() {
+        let mut filter = ThinkStreamFilter::new();
+        let mut shown = String::new();
+        for piece in [
+            "起来",
+            "<think>",
+            "reasoning",
+            "</think>",
+            "The real",
+            " answer.",
+        ] {
+            if let StreamStep::Answer(delta) = filter.push(piece) {
+                shown.push_str(&delta);
+            }
+        }
+        assert!(
+            !shown.contains('起'),
+            "stray fragment reached the UI: {shown:?}"
+        );
+        assert_eq!(shown.trim(), "The real answer.");
+    }
+
+    /// Also covers the case where the model emits the fragment and then answers
+    /// directly, with no reasoning block at all.
+    #[test]
+    fn a_stray_fragment_is_dropped_even_without_a_think_block() {
+        assert_eq!(
+            strip_think_blocks("起来 The whole answer."),
+            ThinkStripResult::Answer("The whole answer.".to_string())
+        );
+    }
+
     #[test]
     fn a_stray_non_latin_fragment_before_reasoning_is_dropped() {
         assert_eq!(

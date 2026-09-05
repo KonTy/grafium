@@ -38,26 +38,47 @@ pub async fn web_search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    // Brave rate-limits (HTTP 429) after a burst of queries, and one research
-    // run issues several in quick succession — so the *first* engine failing
-    // is an expected operating condition, not an error to surface. Falling
-    // back to a second scrapeable engine keeps research working instead of
-    // telling the user to "try again" when the answer was one request away.
-    let brave = brave_search(browser, query, limit).await;
-    match &brave {
-        Ok(results) if !results.is_empty() => return brave,
-        _ => {}
+    // Rate limiting is an expected operating condition here, not an error:
+    // a single research run issues several queries back to back, which is
+    // exactly the burst pattern engines throttle. Reporting "try again" when
+    // the answer was one short pause away is the wrong behaviour, so this
+    // retries with a backoff and then tries a second engine.
+    let mut last_err = None;
+    for attempt in 0..SEARCH_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(retry_delay(attempt)).await;
+        }
+        match brave_search(browser, query, limit).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            // An empty result set is a real answer ("nothing found"), not a
+            // transient failure, so don't burn retries on it — but do let the
+            // other engine have a go before accepting it.
+            Ok(_) => break,
+            Err(err) => last_err = Some(err),
+        }
     }
+
     match duckduckgo_search(browser, query, limit).await {
         Ok(results) if !results.is_empty() => Ok(results),
         // Prefer reporting the primary engine's failure: it's the more
         // informative one, and the fallback failing too usually means the
         // network is down rather than anything specific to DuckDuckGo.
-        fallback => match brave {
-            Err(err) => Err(err),
-            Ok(_) => fallback,
+        fallback => match last_err {
+            Some(err) => Err(err),
+            None => fallback,
         },
     }
+}
+
+/// Attempts against the primary engine before falling back.
+const SEARCH_ATTEMPTS: u32 = 3;
+
+/// Exponential backoff between attempts. Kept short because a person is
+/// waiting on the answer: a research run reads several sources anyway, so a
+/// couple of seconds recovering from a throttle is invisible next to that,
+/// while a minute of backoff would not be.
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(600 * (1 << (attempt - 1)) as u64)
 }
 
 async fn brave_search(

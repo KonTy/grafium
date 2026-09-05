@@ -35,11 +35,22 @@ pub struct HttpBrowserDriver {
     client: reqwest::Client,
 }
 
+/// Sent for every fetch. See the note in [`HttpBrowserDriver::new`].
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+Chrome/120.0.0.0 Safari/537.36";
+
 impl HttpBrowserDriver {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("grafium/clipper")
+            // Search engines serve an anti-bot challenge instead of results
+            // to obviously-automated agents: "grafium/clipper" got a
+            // challenge page from DuckDuckGo containing no results at all,
+            // which surfaced as "search returned nothing" rather than as a
+            // block. Identifying as a normal browser is what the rest of the
+            // scraping module already depends on working.
+            .user_agent(BROWSER_USER_AGENT)
             .build()
             .unwrap_or_default();
         Self { client }
