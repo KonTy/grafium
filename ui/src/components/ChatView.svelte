@@ -15,6 +15,7 @@
     shouldShowIndexBanner,
     type AcceleratorStatus,
     type ChatSource,
+    type ChatTurn,
     type WebSource,
   } from "../lib/knowledge";
   import {
@@ -42,13 +43,13 @@
     webResearch?: boolean;
   };
 
-  let messages = $state<ChatMessage[]>([
-    {
-      role: "assistant",
-      content:
-        "Ask me anything — about your graph or in general. For questions about your notes I'll cite the pages I used; for everything else I'll answer from general knowledge and say so.",
-    },
-  ]);
+  const greeting: ChatMessage = {
+    role: "assistant",
+    content:
+      "Ask me anything — about your graph or in general. For questions about your notes I'll cite the pages I used; for everything else I'll answer from general knowledge and say so.",
+  };
+
+  let messages = $state<ChatMessage[]>([greeting]);
   let question = $state("");
   let currentRequestId: string | null = null;
   let error = $state<string | null>(null);
@@ -311,6 +312,12 @@
     }
 
     error = null;
+    // Snapshot the thread *before* appending this turn: the backend receives
+    // the conversation so far plus the new question separately.
+    const priorTurns: ChatTurn[] = messages
+      .slice(1)
+      .filter((m) => m.content.trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.content }));
     messages = [...messages, { role: "user", content: trimmed }, { role: "assistant", content: "" }];
     question = "";
     webNote = "";
@@ -386,8 +393,22 @@
           dispatch({ type: "error", at: Date.now(), message: msg });
           keepInputFocusedSoon(false);
         },
-      }
+      },
+      undefined,
+      priorTurns
     );
+  }
+
+  // Starts a fresh thread. Chat otherwise remembers everything for the life
+  // of the conversation, so there has to be an explicit way to drop context
+  // that is no longer wanted.
+  function newChat() {
+    if (isStreaming) return;
+    messages = [greeting];
+    error = null;
+    webNote = "";
+    question = "";
+    keepInputFocusedSoon(true);
   }
 
   function dispatch(e: StreamEvent) {
@@ -437,8 +458,18 @@
 
 <div class="chat-view">
   <header class="chat-header">
-    <h2>Chat</h2>
-    <p>Streaming local/cloud assistant for graph analysis</p>
+    <div class="chat-header-text">
+      <h2>Chat</h2>
+      <p>Streaming local/cloud assistant for graph analysis</p>
+    </div>
+    <button
+      class="new-chat-btn"
+      onclick={newChat}
+      disabled={isStreaming || messages.length <= 1}
+      title="Start a new conversation (clears what Chat remembers)"
+    >
+      New chat
+    </button>
   </header>
 
   {#if checkingConnection}
@@ -631,6 +662,36 @@
     padding: 18px;
     gap: 12px;
     background: var(--bg-primary);
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  /* Chat remembers the whole thread until told otherwise, so there has to be
+     a visible way to start over. */
+  .new-chat-btn {
+    flex: none;
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 6px;
+    background: var(--bg-secondary, #1a1a1a);
+    color: var(--text-secondary, #aaa);
+    cursor: pointer;
+  }
+
+  .new-chat-btn:hover:not(:disabled) {
+    color: var(--text-primary, #eee);
+    border-color: var(--text-muted, #777);
+  }
+
+  .new-chat-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .chat-header h2 {

@@ -385,6 +385,12 @@ export function aiAsk(question: string, graphId?: string): Promise<AskResult> {
   return invoke("ai_ask", { question, graphId });
 }
 
+/** One prior message in the Chat transcript, as the backend expects it. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export async function aiAskStream(
   question: string,
   handlers: {
@@ -397,7 +403,10 @@ export async function aiAskStream(
     onNote?: (note: string) => void;
     onStart?: (requestId: string) => void;
   },
-  graphId?: string
+  graphId?: string,
+  /** Prior turns, oldest first. Sent whole — the backend decides how much to
+   *  replay verbatim and compacts the rest. */
+  history?: ChatTurn[]
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   handlers.onStart?.(requestId);
@@ -443,7 +452,7 @@ export async function aiAskStream(
   });
 
   try {
-    await invoke("ai_ask_stream", { question, graphId, requestId });
+    await invoke("ai_ask_stream", { question, graphId, requestId, history: history ?? [] });
   } catch (e: any) {
     handlers.onError?.(String(e));
   } finally {

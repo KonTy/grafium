@@ -41,7 +41,19 @@ pub struct ResearchIntent {
     /// The question with the trigger phrase (and any dangling separators the
     /// trigger left behind) stripped, e.g. `"does creatine cause cancer"` from
     /// `"does creatine cause cancer — research on the internet"`.
+    ///
+    /// May be empty or a bare referent when the user's message was *only* an
+    /// instruction ("look it up on the internet") — see
+    /// [`Self::needs_conversation_context`].
     pub cleaned_question: String,
+    /// The request carries no topic of its own, so the caller must resolve it
+    /// against the conversation before searching.
+    ///
+    /// "look it up on the internet" is unambiguously a research request, but
+    /// what to research lives in the previous turn. Refusing outright (the
+    /// earlier behaviour) made the feature look broken for exactly the
+    /// phrasing people reach for mid-conversation.
+    pub needs_conversation_context: bool,
 }
 
 /// Self-contained trigger phrases: each reads as a complete "go look this up
@@ -407,24 +419,23 @@ pub fn detect_research_intent(question: &str) -> Option<ResearchIntent> {
         .or_else(|| match_wraparound(&low, &norm))?;
 
     let cleaned = clean_fragment(&cleaned);
-    if cleaned.is_empty() || is_contentless_referent(&cleaned) {
-        return None;
-    }
+    let needs_context = cleaned.is_empty() || is_contentless_referent(&cleaned);
     Some(ResearchIntent {
         cleaned_question: cleaned,
+        needs_conversation_context: needs_context,
     })
 }
 
 /// Whether the cleaned question is nothing but a back-reference with no
 /// subject of its own ("this", "that", "it").
 ///
-/// "can you research this on the internet" cleaned down to the single word
-/// `"this"`, which would then have been handed to the search planner as the
-/// literal query — searching the web for the word "this". Chat has no
-/// conversation memory to resolve the referent against, so the honest
-/// behaviour is to decline the research branch and let the question fall
-/// through to a normal answer rather than run a meaningless search.
-fn is_contentless_referent(cleaned: &str) -> bool {
+/// "can you research this on the internet" cleans down to the single word
+/// `"this"`, which must never reach the search planner as a literal query.
+/// Detection deliberately still fires for these — the request *is* a research
+/// request — and it's the caller's job to resolve the referent against the
+/// conversation (see [`crate::knowledge::conversation::resolve_followup`]) and
+/// to decline only when there's nothing to resolve it to.
+pub fn is_contentless_referent(cleaned: &str) -> bool {
     const REFERENTS: &[&str] = &["this", "that", "it", "these", "those", "them", "the same"];
     let low: String = cleaned
         .trim_matches(|c: char| !c.is_alphanumeric())
@@ -544,12 +555,23 @@ fn match_leading(low: &str, norm: &str) -> Option<String> {
             // trigger can't be the prefix of a longer word ("google" must not
             // fire on "googley").
             match low[after..].chars().next() {
-                None => continue, // trigger with no question after it → not a request
+                // The whole message is the instruction ("look it up on the
+                // internet"). That's still a research request; the topic comes
+                // from the conversation, which the caller resolves.
+                None => return Some(String::new()),
                 Some(c) if c.is_alphanumeric() => continue,
                 _ => {}
             }
             if let Some(q) = strip_leading_boundary(&norm[after..]) {
                 return Some(q);
+            }
+            // Trailing punctuation only ("search the web?") — same case.
+            if norm[after..]
+                .trim()
+                .chars()
+                .all(|c| SEPARATOR_CHARS.contains(&c))
+            {
+                return Some(String::new());
             }
         }
     }
@@ -991,11 +1013,18 @@ mod tests {
     }
 
     #[test]
-    fn bare_trigger_with_no_question_does_not_fire() {
-        // Nothing to research → not a request.
-        assert_eq!(cleaned("search the web"), None);
-        assert_eq!(cleaned("research on the internet"), None);
-        assert_eq!(cleaned("google it"), None);
+    fn bare_trigger_fires_but_needs_conversation_context() {
+        // Mid-conversation these are perfectly normal requests — the topic is
+        // in the previous turn, so they must fire and be flagged as needing
+        // context rather than be rejected outright.
+        for input in ["search the web", "research on the internet", "google it"] {
+            let intent =
+                detect_research_intent(input).unwrap_or_else(|| panic!("should fire: {input:?}"));
+            assert!(
+                intent.needs_conversation_context,
+                "{input:?} carries no topic of its own"
+            );
+        }
     }
 
     #[test]
@@ -1080,13 +1109,25 @@ mod tests {
         }
     }
 
-    /// Cleaning "can you research this on the internet" left the single word
-    /// "this", which would have been sent to the search planner verbatim.
+    /// A back-referencing request is still a research request — "can you
+    /// research this on the internet" must fire — but the residue is a bare
+    /// referent that the caller has to resolve against the conversation before
+    /// it can be searched for.
     #[test]
-    fn a_bare_back_reference_is_not_treated_as_a_research_query() {
-        assert_eq!(cleaned("can you research this on the internet"), None);
-        assert_eq!(cleaned("research it on the web"), None);
-        assert_eq!(cleaned("google that"), None);
+    fn a_bare_back_reference_fires_but_is_flagged_contentless() {
+        for input in [
+            "can you research this on the internet",
+            "research it on the web",
+            "look it up on the internet",
+        ] {
+            let intent = detect_research_intent(input)
+                .unwrap_or_else(|| panic!("should fire for {input:?}"));
+            assert!(
+                intent.needs_conversation_context,
+                "{input:?} cleaned to {:?}, which should need conversation context",
+                intent.cleaned_question
+            );
+        }
     }
 
     #[test]
@@ -1112,11 +1153,27 @@ mod tests {
     }
 
     #[test]
-    fn cleaned_question_is_never_empty_when_some() {
-        // A trigger that would clean down to nothing yields None, never
-        // Some("").
-        assert_eq!(cleaned("— research on the internet"), None);
-        assert_eq!(cleaned(": : : search the web"), None);
+    fn an_empty_cleaned_question_is_always_flagged() {
+        // The invariant the caller relies on: an empty residue is never handed
+        // on as a search query without being marked as needing context first.
+        for input in [
+            "search the web",
+            "research on the internet",
+            "look it up on the internet",
+            "google it",
+            "— research on the internet",
+            ": : : search the web",
+            "does creatine cause cancer, search the web",
+        ] {
+            if let Some(intent) = detect_research_intent(input) {
+                if intent.cleaned_question.trim().is_empty() {
+                    assert!(
+                        intent.needs_conversation_context,
+                        "{input:?} produced an empty query without flagging it"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

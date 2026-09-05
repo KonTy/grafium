@@ -16,6 +16,7 @@ use crate::ai::providers::openai_compatible::{OpenAiCompatibleEmbedder, OpenAiCo
 use crate::ai::references::{PageReferencesMeta, PageSummary, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
+use crate::knowledge::conversation::{self, ChatTurn};
 use crate::knowledge::registry::GraphRegistry;
 use crate::knowledge::research_intent;
 use crate::knowledge::retrieval::{self, ContextEntry, RetrievedHit};
@@ -930,7 +931,7 @@ impl KnowledgeEngine {
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
         let request = self
-            .build_ask_request(db, llm.as_ref(), question, graph_id)
+            .build_ask_request(db, llm.as_ref(), question, graph_id, &[])
             .await?;
 
         let raw = llm
@@ -970,6 +971,7 @@ impl KnowledgeEngine {
         db: &crate::db::Database,
         question: &str,
         graph_id: Option<&str>,
+        history: &[ChatTurn],
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
         on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
     ) -> Result<AskStreamOutcome> {
@@ -983,7 +985,7 @@ impl KnowledgeEngine {
         on_event(AskStreamEvent::Phase(AskPhase::Retrieving));
 
         let request = self
-            .build_ask_request(db, llm.as_ref(), question, graph_id)
+            .build_ask_request(db, llm.as_ref(), question, graph_id, history)
             .await?;
 
         let options = crate::ai::traits::CompletionOptions {
@@ -1212,6 +1214,7 @@ impl KnowledgeEngine {
         llm: &dyn LlmProvider,
         question: &str,
         graph_id: Option<&str>,
+        history: &[ChatTurn],
     ) -> Result<AskRequest> {
         // Reasoning models need more room: they spend tokens thinking *before*
         // answering, so reserve a larger output budget (which also shrinks the
@@ -1224,8 +1227,13 @@ impl KnowledgeEngine {
         };
         let budget = ask_context_budget_with(llm.context_window(), reserved_output);
 
+        // Retrieval can't resolve "it"/"that", so a follow-up is searched
+        // under the topic it refers back to rather than under its own
+        // (contentless) words.
+        let retrieval_query = conversation::resolve_followup(question, history);
+
         let mut hits = self
-            .hybrid_search(db, question, ASK_TOP_K, graph_id)
+            .hybrid_search(db, &retrieval_query, ASK_TOP_K, graph_id)
             .await
             .unwrap_or_default();
 
@@ -1261,16 +1269,36 @@ impl KnowledgeEngine {
             );
         }
 
-        let messages = vec![
-            crate::ai::traits::ChatMessage {
+        // Replay the conversation so the model can resolve references itself
+        // when it writes the answer — the rewrite above only fixes retrieval.
+        // The thread is never truncated outright: turns too old to replay
+        // verbatim are folded into a recap so a long conversation keeps its
+        // continuity instead of silently forgetting its own beginning.
+        let mut messages = vec![crate::ai::traits::ChatMessage {
+            role: crate::ai::traits::MessageRole::System,
+            content: system_prompt,
+        }];
+        let fitted = conversation::fit_history(history, conversation::history_budget(budget));
+        if fitted.needs_compaction() {
+            messages.push(crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::System,
-                content: system_prompt,
-            },
-            crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::User,
-                content: question.to_string(),
-            },
-        ];
+                content: conversation::render_compaction(fitted.to_compact),
+            });
+        }
+        for turn in fitted.verbatim {
+            messages.push(crate::ai::traits::ChatMessage {
+                role: if turn.is_user() {
+                    crate::ai::traits::MessageRole::User
+                } else {
+                    crate::ai::traits::MessageRole::Assistant
+                },
+                content: turn.content.clone(),
+            });
+        }
+        messages.push(crate::ai::traits::ChatMessage {
+            role: crate::ai::traits::MessageRole::User,
+            content: question.to_string(),
+        });
 
         Ok(AskRequest {
             messages,

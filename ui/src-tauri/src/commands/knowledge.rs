@@ -10,6 +10,7 @@ use grafium_core::ai::web_research::Citation;
 use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
+use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::{detect_research_intent, KnowledgeEngine};
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
@@ -818,7 +819,9 @@ pub async fn ai_ask_stream(
     question: String,
     graph_id: Option<String>,
     request_id: String,
+    history: Option<Vec<ChatTurn>>,
 ) -> Result<(), String> {
+    let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -849,11 +852,19 @@ pub async fn ai_ask_stream(
     // strip the trigger phrase (via the core detector) so neither retrieval nor
     // the web queries are polluted by "search the web", then route to the
     // two-part path. An LLM is required for both arms — already checked above.
-    let research = detect_research_intent(&question);
-    let effective_question = research
-        .as_ref()
-        .map(|r| r.cleaned_question.clone())
-        .unwrap_or_else(|| question.clone());
+    // A research trigger may carry no topic of its own ("look it up on the
+    // internet") — mid-conversation that's the normal way to ask, so the topic
+    // is taken from the turn it refers back to rather than refusing.
+    let research = detect_research_intent(&question).and_then(|intent| {
+        if !intent.needs_conversation_context {
+            return Some(intent.cleaned_question);
+        }
+        let resolved = conversation::resolve_followup(&intent.cleaned_question, &history);
+        // With nothing to resolve against, searching for "it" would be worse
+        // than not searching at all.
+        conversation::is_self_contained(&resolved).then_some(resolved)
+    });
+    let effective_question = research.clone().unwrap_or_else(|| question.clone());
 
     // Forward real token deltas and phase transitions as they happen. Phase
     // events let the UI show *what* the model is doing (and prove it's alive);
@@ -896,6 +907,7 @@ pub async fn ai_ask_stream(
                 &graph.db,
                 &effective_question,
                 Some(resolved_graph_id.as_str()),
+                &history,
                 Some(cancel),
                 &mut on_event,
             )

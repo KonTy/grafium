@@ -2,6 +2,7 @@
 //!
 //! This is the "knowledge OS" layer that sits above individual graphs.
 
+pub mod conversation;
 pub mod engine;
 pub mod registry;
 pub mod research_intent;
