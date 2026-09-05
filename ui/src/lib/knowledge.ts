@@ -240,6 +240,8 @@ export function aiHealthCheck(): Promise<HealthStatus> {
 export interface IndexStatus {
   indexed_chunks: number;
   total_blocks: number;
+  /** Pages edited since their last index, awaiting a background reindex. */
+  pending_pages: number;
   embedder_ready: boolean;
   llm_ready: boolean;
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import {
     aiAskStream,
     aiHealthCheck,
@@ -40,6 +41,7 @@
   // Index coverage — drives the empty-index banner.
   let indexedChunks = $state<number | null>(null);
   let totalBlocks = $state(0);
+  let pendingPages = $state(0);
   let embedderReady = $state(false);
   let isIndexing = $state(false);
   let indexError = $state<string | null>(null);
@@ -53,6 +55,15 @@
     keepInputFocusedSoon(true);
     void refreshConnectionState();
     void refreshIndexStatus();
+    // The background auto-reindex drainer emits this after it refreshes any
+    // pages, so the coverage / "N pages pending" indicator stays current
+    // without polling.
+    const unlistenPromise = listen("ai-index-updated", () => {
+      void refreshIndexStatus();
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
   });
 
   $effect(() => {
@@ -78,6 +89,7 @@
       const status = await aiIndexStatus();
       indexedChunks = status.indexed_chunks;
       totalBlocks = status.total_blocks;
+      pendingPages = status.pending_pages;
       embedderReady = status.embedder_ready;
       statusError = null;
     } catch (e: any) {
@@ -259,6 +271,10 @@
       Indexed {indexedChunks} chunk{indexedChunks === 1 ? "" : "s"}{indexResult
         ? ` from ${indexResult.processed} page${indexResult.processed === 1 ? "" : "s"}${indexResult.failed > 0 ? `, ${indexResult.failed} failed` : ""}`
         : ""} — semantic search is on.
+    </div>
+  {:else if pendingPages > 0}
+    <div class="index-pending" title="Recently edited pages are being re-indexed in the background.">
+      {pendingPages} page{pendingPages === 1 ? "" : "s"} updating in the background…
     </div>
   {/if}
 
@@ -490,6 +506,13 @@
     padding: 8px 12px;
     font-size: 12px;
     color: var(--text-secondary);
+  }
+
+  .index-pending {
+    padding: 2px 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.7;
   }
 
   .chat-error {
