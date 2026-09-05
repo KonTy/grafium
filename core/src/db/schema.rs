@@ -233,6 +233,18 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_pp_key_value ON page_properties(key, value);
         CREATE INDEX IF NOT EXISTS idx_pp_page ON page_properties(page_id);
+
+        -- Pages whose vector (semantic) index may be stale relative to their
+        -- current block content, so auto-indexing can reindex them without a
+        -- manual click. One row per page (edits coalesce); `marked_at` drives
+        -- the per-page debounce and, being persisted, survives a crash/restart
+        -- so pending edits still get reindexed on next launch.
+        CREATE TABLE IF NOT EXISTS pending_reindex (
+            page_id TEXT PRIMARY KEY,
+            marked_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pending_reindex_marked ON pending_reindex(marked_at);
     ")?;
     Ok(())
 }

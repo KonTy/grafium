@@ -520,18 +520,40 @@ impl Graph {
                 }
                 self.index_directory_recursive(&path)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                self.index_file(&path)?;
+                // Bulk rebuild: index without marking pending — a full
+                // reindex_all regenerates the whole DB, so flagging every page
+                // as "stale" here would be noise, not a real vector change.
+                self.index_file_impl(&path)?;
             }
         }
         Ok(())
     }
 
     /// Index a single .md file into the database.
+    ///
+    /// This is the choke point for content arriving *from disk* — the file
+    /// watcher (external editors / USB sync), imports, and page creation all
+    /// funnel through here — so it also marks the affected page for a vector
+    /// reindex. The bulk `reindex_all` path deliberately calls
+    /// [`Self::index_file_impl`] directly instead, so rebuilding the whole
+    /// graph DB doesn't flood the pending set (and mislabel every page as
+    /// "stale") when the vectors themselves haven't changed.
     pub fn index_file(&self, path: &Path) -> Result<()> {
+        if let Some(page_id) = self.index_file_impl(path)? {
+            self.mark_page_dirty(&page_id);
+        }
+        Ok(())
+    }
+
+    /// Index a single .md file into the database, returning the id of the page
+    /// it touched (or `None` when the on-disk bytes were unchanged and nothing
+    /// was re-parsed). Does *not* mark the page for reindex — see
+    /// [`Self::index_file`].
+    fn index_file_impl(&self, path: &Path) -> Result<Option<String>> {
         let content = fs::read_to_string(path)?;
         let content_hash = Self::content_hash(&content);
         if self.indexed_content_matches(path, &content_hash) {
-            return Ok(());
+            return Ok(None);
         }
 
         let filename = path
@@ -584,7 +606,7 @@ impl Graph {
         tx.commit()?;
         self.remember_indexed_content_hash(path, content_hash);
 
-        Ok(())
+        Ok(Some(page.id))
     }
 
     fn apply_parsed_blocks_in_connection(
@@ -1199,6 +1221,12 @@ impl Graph {
         self.db.delete_page(page_id)?;
         self.forget_indexed_content(&full_path);
 
+        // Flag for the drainer to purge this page's vectors. The page no
+        // longer exists in the DB, so the drainer treats a pending id it can't
+        // load as a removal and deletes the stored vectors — otherwise a
+        // deleted page would keep surfacing phantom citations in Chat.
+        self.mark_page_dirty(page_id);
+
         Ok(())
     }
 
@@ -1411,6 +1439,10 @@ impl Graph {
         patched.push_str(&fragment);
         patched.push_str(&current_content[byte_range.end..]);
         self.persist_page_content(&file_path, &patched)?;
+        // The full-rewrite branches above mark via `write_page_to_disk`; this
+        // incremental single-block patch writes straight to disk, so mark the
+        // page dirty here too or a fast-path edit would slip past auto-index.
+        self.mark_page_dirty(&page.id);
 
         Ok(PageWriteStrategy::IncrementalPatch)
     }
@@ -1420,7 +1452,23 @@ impl Graph {
         let file_path = self.resolve_page_file_path(page)?;
         let blocks = self.db.list_blocks_for_page(&page.id)?;
         let content = parser::serialize_page(&page.properties, &blocks);
-        self.persist_page_content(&file_path, &content)
+        self.persist_page_content(&file_path, &content)?;
+        // Choke point for in-app content edits (create/update/delete/move/
+        // reorder blocks, task and flashcard mutations all rewrite the page
+        // through here): flag the page so its vectors get refreshed.
+        self.mark_page_dirty(&page.id);
+        Ok(())
+    }
+
+    /// Flag a page for an eventual vector-index refresh. Best-effort: a
+    /// failure to record the dirty flag must never fail the user's edit, and
+    /// carries no cost beyond a slightly-stale semantic index until the next
+    /// full reindex. Cheap enough to call on every write; the background
+    /// drainer debounces and coalesces before doing any embedding work.
+    fn mark_page_dirty(&self, page_id: &str) {
+        if let Err(e) = self.db.mark_page_pending_reindex(page_id) {
+            eprintln!("Warning: could not mark page '{page_id}' for reindex: {e}");
+        }
     }
 }
 
@@ -1482,6 +1530,144 @@ mod tests {
         let conn = graph.db.conn()?;
         let count = conn.query_row(sql, params![param], |row| row.get(0))?;
         Ok(count)
+    }
+
+    fn pending_page_ids(graph: &Graph) -> Result<Vec<String>> {
+        let conn = graph.db.conn()?;
+        let mut stmt = conn.prepare("SELECT page_id FROM pending_reindex ORDER BY page_id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    fn clear_pending(graph: &Graph) -> Result<()> {
+        let conn = graph.db.conn()?;
+        conn.execute("DELETE FROM pending_reindex", [])?;
+        Ok(())
+    }
+
+    #[test]
+    fn editing_a_block_marks_only_its_page_dirty() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page_a = graph.create_page("Alpha", false)?;
+        let page_b = graph.create_page("Beta", false)?;
+        // Page creation itself marks pending; start from a clean slate to
+        // isolate the edit under test.
+        clear_pending(&graph)?;
+
+        graph.create_block(
+            &page_a.id,
+            None,
+            0,
+            "a new thought",
+            BlockType::Text,
+            json_obj(),
+        )?;
+
+        assert_eq!(pending_page_ids(&graph)?, vec![page_a.id.clone()]);
+        assert!(!pending_page_ids(&graph)?.contains(&page_b.id));
+        Ok(())
+    }
+
+    #[test]
+    fn rapid_edits_to_one_page_coalesce_into_a_single_pending_row() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Journal", false)?;
+        let block = graph.create_block(&page.id, None, 0, "first", BlockType::Text, json_obj())?;
+        clear_pending(&graph)?;
+
+        for i in 0..5 {
+            graph.update_block(&block.id, &format!("edit number {i}"), None)?;
+        }
+
+        // Five edits, one pending job for the page — the drainer will reindex
+        // it once, after the debounce window.
+        assert_eq!(graph.db.count_pending_reindex()?, 1);
+        assert_eq!(pending_page_ids(&graph)?, vec![page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_page_marks_it_pending_so_the_drainer_purges_vectors() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Ephemeral", false)?;
+        clear_pending(&graph)?;
+
+        graph.delete_page(&page.id)?;
+
+        // The page is gone from the DB but flagged pending: the drainer sees an
+        // id it can't resolve and purges its vectors instead of reindexing.
+        assert!(graph.db.get_page_by_id(&page.id).is_err());
+        assert_eq!(pending_page_ids(&graph)?, vec![page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn reindex_all_does_not_flood_the_pending_set() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("bulk.md");
+        fs::write(
+            &file_path,
+            "- one long enough bullet\n- two long enough bullet\n",
+        )?;
+
+        // The individual (external-edit) index_file path DOES mark pending.
+        graph.index_file(&file_path)?;
+        assert!(!pending_page_ids(&graph)?.is_empty());
+
+        // A full rebuild must not flag every page as stale — it regenerates the
+        // whole DB and resets the dirty set.
+        graph.reindex_all()?;
+        assert_eq!(graph.db.count_pending_reindex()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_reindex_survives_a_restart() -> Result<()> {
+        let temp = tempdir()?;
+        let page_id = {
+            let graph = Graph::open(temp.path())?;
+            let page = graph.create_page("Persisted", false)?;
+            assert!(graph.db.count_pending_reindex()? >= 1);
+            page.id
+        };
+
+        // Reopen the same on-disk graph — a simulated restart. Pending edits
+        // must still be there so they get reindexed on next launch.
+        let graph = Graph::open(temp.path())?;
+        assert!(pending_page_ids(&graph)?.contains(&page_id));
+        Ok(())
+    }
+
+    #[test]
+    fn list_pending_reindex_due_respects_the_debounce_and_clear_guard() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Debounced", false)?;
+        clear_pending(&graph)?;
+        graph.db.mark_page_pending_reindex(&page.id)?;
+
+        // Just marked → not yet due under a 15s debounce, but due at 0.
+        assert!(graph.db.list_pending_reindex_due(15_000, 10)?.is_empty());
+        let due = graph.db.list_pending_reindex_due(0, 10)?;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, page.id);
+
+        // Clearing with a stale marked_at (a newer edit landed) is a no-op…
+        assert!(!graph.db.clear_pending_reindex(&page.id, due[0].1 - 1)?);
+        // …but clearing with the exact marked_at removes the row.
+        assert!(graph.db.clear_pending_reindex(&page.id, due[0].1)?);
+        assert_eq!(graph.db.count_pending_reindex()?, 0);
+        Ok(())
+    }
+
+    fn json_obj() -> serde_json::Value {
+        serde_json::json!({})
     }
 
     #[test]
@@ -1586,7 +1772,8 @@ mod tests {
 
         let page = graph.create_page_with_content("Journal Page", false, "- Existing note\n")?;
 
-        let updated = graph.append_content_to_page(&page.id, "- Imported line one\n- Imported line two\n")?;
+        let updated =
+            graph.append_content_to_page(&page.id, "- Imported line one\n- Imported line two\n")?;
         assert_eq!(updated.id, page.id);
 
         let blocks = graph.db.list_blocks_for_page(&page.id)?;
@@ -1826,7 +2013,10 @@ mod tests {
 
         // Nested child's relative position/parent is untouched.
         let child = blocks.iter().find(|b| b.id == nested_child.id).unwrap();
-        assert_eq!(child.parent_id.as_deref(), Some(second_existing.id.as_str()));
+        assert_eq!(
+            child.parent_id.as_deref(),
+            Some(second_existing.id.as_str())
+        );
         assert_eq!(child.order_index, 0);
 
         Ok(())

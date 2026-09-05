@@ -210,8 +210,71 @@ impl Database {
             DELETE FROM page_properties;
             DELETE FROM blocks;
             DELETE FROM pages;
+            DELETE FROM pending_reindex;
         ",
         )?;
         Ok(())
+    }
+
+    /// Mark a page as needing a vector-index refresh. Coalesces repeated
+    /// edits: `marked_at` is bumped to now, so N rapid edits collapse to one
+    /// pending row and the per-page debounce window restarts on every edit.
+    /// Best-effort by convention — callers on the write hot path ignore the
+    /// result so a marking failure never fails the user's save.
+    pub fn mark_page_pending_reindex(&self, page_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO pending_reindex (page_id, marked_at) VALUES (?1, ?2)
+             ON CONFLICT(page_id) DO UPDATE SET marked_at = ?2",
+            params![page_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Pages that have been quiescent for at least `debounce_ms` (i.e. not
+    /// edited again since), oldest first, each with its `marked_at` so the
+    /// caller can clear the row only if it hasn't been re-marked by a newer
+    /// edit meanwhile. Bounded by `limit` to keep a startup backlog drain
+    /// gentle rather than embedding everything at once.
+    pub fn list_pending_reindex_due(
+        &self,
+        debounce_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp_millis() - debounce_ms;
+        let mut stmt = conn.prepare(
+            "SELECT page_id, marked_at FROM pending_reindex
+             WHERE marked_at <= ?1 ORDER BY marked_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Clear a page's pending row, but only if it hasn't been re-marked since
+    /// `marked_at`. If an edit landed while the page was being reindexed, its
+    /// `marked_at` will have advanced and the row is left pending for the next
+    /// drain cycle rather than being lost. Returns whether a row was cleared.
+    pub fn clear_pending_reindex(&self, page_id: &str, marked_at: i64) -> Result<bool> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "DELETE FROM pending_reindex WHERE page_id = ?1 AND marked_at = ?2",
+            params![page_id, marked_at],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Number of pages currently awaiting a vector-index refresh, for the
+    /// Chat "N pages pending" staleness indicator.
+    pub fn count_pending_reindex(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pending_reindex", [], |row| row.get(0))?;
+        Ok(count as usize)
     }
 }

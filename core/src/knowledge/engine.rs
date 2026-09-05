@@ -358,6 +358,14 @@ impl KnowledgeEngine {
             && self.vector_store.is_some()
     }
 
+    /// Check if the engine can index/embed content — requires an embedder and
+    /// a vector store, but deliberately *not* an LLM. Auto-indexing and manual
+    /// "Index my notes" only need to embed, so a user who configured an
+    /// embedder but no chat model still gets a fresh index.
+    pub fn can_index(&self) -> bool {
+        self.config.enabled && self.embedder.is_some() && self.vector_store.is_some()
+    }
+
     /// Check if the engine is ready for LLM-only operations (chat/"Ask") —
     /// deliberately does *not* require an embedder, unlike [`Self::is_ready`],
     /// since [`Self::ask`] degrades gracefully to a non-RAG direct answer
@@ -405,9 +413,11 @@ impl KnowledgeEngine {
             0
         };
         let total_blocks = db.count_blocks().unwrap_or(0);
+        let pending_pages = db.count_pending_reindex().unwrap_or(0);
         Ok(IndexStatus {
             indexed_chunks,
             total_blocks,
+            pending_pages,
             embedder_ready: self.embedder.is_some() && self.vector_store.is_some(),
             llm_ready: self.is_llm_ready(),
         })
@@ -481,6 +491,19 @@ impl KnowledgeEngine {
         pipeline.remove_chunks(&update_plan.removed_chunk_ids);
 
         Ok(count)
+    }
+
+    /// Remove a page's vectors from the index — used when a page is deleted so
+    /// stale vectors don't surface phantom citations in Chat. Deletion needs no
+    /// embedder (nothing to embed), so this works even in degraded states as
+    /// long as a vector store is present; a missing store is a silent no-op.
+    /// Also drops the page's chunk hashes so a later re-create re-embeds it.
+    pub async fn remove_page(&self, graph_id: &str, page_id: &str) -> Result<()> {
+        if let Some(store) = &self.vector_store {
+            store.delete_by_page(graph_id, page_id).await?;
+        }
+        self.pipeline.write().await.invalidate_page(page_id);
+        Ok(())
     }
 
     /// Semantic search across all (or specific) graphs.
@@ -915,6 +938,10 @@ pub struct IndexStatus {
     pub indexed_chunks: usize,
     /// Total blocks in the graph's DB.
     pub total_blocks: usize,
+    /// Pages edited since their last index that are awaiting a background
+    /// vector refresh — lets Chat show "N pages pending" instead of implying
+    /// the index is perfectly current.
+    pub pending_pages: usize,
     /// Whether an embedder + vector store are available (semantic indexing
     /// possible).
     pub embedder_ready: bool,
@@ -1361,6 +1388,37 @@ mod tests {
         }
     }
 
+    fn block_with(id: &str, content: &str) -> Block {
+        Block {
+            id: id.to_string(),
+            page_id: "page-1".to_string(),
+            parent_id: None,
+            order_index: 0,
+            content: content.to_string(),
+            block_type: crate::models::BlockType::Text,
+            properties: json!({}),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn test_engine_without_providers() -> Result<KnowledgeEngine> {
+        let config = AiConfig::default();
+        let registry_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
+        Ok(KnowledgeEngine {
+            config: config.clone(),
+            llm: None,
+            embedder: None,
+            vector_store: None,
+            pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
+            reference_engine: ReferenceEngine::new(config.references.clone()),
+            registry: RwLock::new(GraphRegistry::load(&registry_path)?),
+            data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            models_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        })
+    }
+
     fn mk_hit(id: &str) -> RetrievedHit {
         RetrievedHit {
             block_id: id.to_string(),
@@ -1433,6 +1491,98 @@ mod tests {
         assert_eq!(retry_snapshot.stored_chunks, 1);
         assert_eq!(embedder_state.lock().unwrap().calls, 2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn one_char_edit_reembeds_only_the_changed_chunk() -> Result<()> {
+        // Auto-index unit-of-work is the whole page, but the content-hash diff
+        // must keep the actual embedding cost proportional to the edit: a
+        // one-character change to a single leaf block re-embeds exactly one
+        // chunk, not the whole page.
+        let (mock_embedder, embedder_state) = MockEmbedder::new(4);
+        let store = Arc::new(MockVectorStore::new(false));
+        let engine = test_engine(Box::new(mock_embedder), store.clone())?;
+        let page = test_page();
+        let mut blocks = vec![
+            block_with("b1", "The first block has enough content to index."),
+            block_with("b2", "The second block also has plenty of content here."),
+            block_with("b3", "A third block, likewise long enough to be embedded."),
+        ];
+
+        assert_eq!(engine.index_page(&page, &blocks, "graph-1").await?, 3);
+        assert_eq!(embedder_state.lock().unwrap().calls, 1);
+
+        blocks[1].content.push('!');
+        assert_eq!(
+            engine.index_page(&page, &blocks, "graph-1").await?,
+            1,
+            "only the edited block's chunk should be re-embedded"
+        );
+        assert_eq!(store.snapshot().stored_chunks, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removing_a_block_deletes_its_vector_on_reindex() -> Result<()> {
+        let (mock_embedder, _) = MockEmbedder::new(4);
+        let store = Arc::new(MockVectorStore::new(false));
+        let engine = test_engine(Box::new(mock_embedder), store.clone())?;
+        let page = test_page();
+        let blocks = vec![
+            block_with("b1", "The first block has enough content to index."),
+            block_with("b2", "The second block also has plenty of content here."),
+        ];
+        assert_eq!(engine.index_page(&page, &blocks, "graph-1").await?, 2);
+        assert_eq!(store.snapshot().stored_chunks, 2);
+
+        // b2 deleted from the page → its stored vector must go away.
+        let remaining = vec![blocks[0].clone()];
+        engine.index_page(&page, &remaining, "graph-1").await?;
+        let snap = store.snapshot();
+        assert_eq!(snap.stored_chunks, 1);
+        assert!(snap.delete_chunks_calls >= 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_page_deletes_all_of_its_vectors() -> Result<()> {
+        let (mock_embedder, _) = MockEmbedder::new(4);
+        let store = Arc::new(MockVectorStore::new(false));
+        let engine = test_engine(Box::new(mock_embedder), store.clone())?;
+        let page = test_page();
+        let blocks = vec![
+            block_with("b1", "The first block has enough content to index."),
+            block_with("b2", "The second block also has plenty of content here."),
+        ];
+        engine.index_page(&page, &blocks, "graph-1").await?;
+        assert_eq!(store.snapshot().stored_chunks, 2);
+
+        engine.remove_page("graph-1", &page.id).await?;
+        let snap = store.snapshot();
+        assert_eq!(snap.delete_by_page_calls, 1);
+        assert_eq!(snap.stored_chunks, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_index_is_a_silent_noop_without_an_embedder() -> Result<()> {
+        // The drainer gates on can_index(); with no providers it must stay
+        // idle, and the engine's removal path must be a no-op (not an error) so
+        // a delete while AI is disabled never surfaces a toast or a retry storm.
+        let engine = test_engine_without_providers()?;
+        assert!(!engine.is_ready());
+        assert!(!engine.can_index());
+
+        engine.remove_page("graph-1", "page-1").await?;
+
+        // Reindex without an embedder fails cleanly (drainer logs + leaves it
+        // pending), never panics.
+        let page = test_page();
+        let blocks = vec![test_block(
+            "This block content is long enough to be indexed.",
+        )];
+        assert!(engine.index_page(&page, &blocks, "graph-1").await.is_err());
         Ok(())
     }
 
