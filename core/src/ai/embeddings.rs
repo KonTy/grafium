@@ -74,6 +74,14 @@ pub struct EmbeddingPipeline {
     config: EmbeddingConfig,
     /// Cache of content hashes to avoid re-embedding unchanged content.
     hash_cache: HashMap<String, String>,
+    /// Identifier for the embedding *scheme* — i.e. anything that changes the
+    /// stored vector but isn't part of the hashed chunk text, chiefly the
+    /// asymmetric document prefix a model family applies (`search_document: `
+    /// for nomic, `passage: ` for e5, `` for none). Mixed into every content
+    /// hash so a prefix/model-family change invalidates previously-embedded
+    /// chunks and forces a rewrite, instead of leaving prefixed queries to run
+    /// against unprefixed documents (which is worse than no prefixes at all).
+    embedding_scheme: String,
 }
 
 impl EmbeddingPipeline {
@@ -84,12 +92,24 @@ impl EmbeddingPipeline {
     const PREFIX_MAX_CHARS: usize = 300;
     /// Cycle/runaway guard for ancestor walks.
     const MAX_ANCESTOR_DEPTH: usize = 32;
+    /// Version tag for the hash *format* itself (breadcrumb composition +
+    /// scheme mixing). Bumping it invalidates every cached hash on purpose,
+    /// e.g. if the composed-text layout ever changes.
+    const HASH_FORMAT_VERSION: &'static str = "v2";
 
     pub fn new(config: EmbeddingConfig) -> Self {
         Self {
             config,
             hash_cache: HashMap::new(),
+            embedding_scheme: String::new(),
         }
+    }
+
+    /// Set the embedding scheme identifier (the model family's document
+    /// prefix). Changing it means previously-stored hashes no longer match,
+    /// so the affected chunks are re-embedded on the next index run.
+    pub fn set_embedding_scheme(&mut self, scheme: impl Into<String>) {
+        self.embedding_scheme = scheme.into();
     }
 
     /// Chunk a page's blocks into embeddable text segments.
@@ -122,7 +142,7 @@ impl EmbeddingPipeline {
             // If block is small enough, use as-is.
             if content.len() <= self.config.chunk_max_tokens * 4 {
                 let embedded = Self::compose_embedded_text(&prefix, content);
-                let hash = Self::hash_content(&embedded);
+                let hash = self.hash_content(&embedded);
                 chunks.push(TextChunk {
                     chunk_id: format!("{}:{}", page.id, block.id),
                     page_id: page.id.clone(),
@@ -136,7 +156,7 @@ impl EmbeddingPipeline {
                 let sub_chunks = self.split_block(content);
                 for (i, sub_content) in sub_chunks.into_iter().enumerate() {
                     let embedded = Self::compose_embedded_text(&prefix, &sub_content);
-                    let sub_hash = Self::hash_content(&embedded);
+                    let sub_hash = self.hash_content(&embedded);
                     chunks.push(TextChunk {
                         chunk_id: format!("{}:{}:{}", page.id, block.id, i),
                         page_id: page.id.clone(),
@@ -371,8 +391,16 @@ impl EmbeddingPipeline {
         chunks
     }
 
-    fn hash_content(content: &str) -> String {
+    fn hash_content(&self, content: &str) -> String {
         let mut hasher = Sha256::new();
+        // Mix the hash-format version and embedding scheme (document prefix)
+        // into the digest. Use a unit separator so scheme and content can't be
+        // confused for one another. A scheme change therefore changes the hash
+        // and marks the chunk dirty, forcing re-embedding under the new prefix.
+        hasher.update(Self::HASH_FORMAT_VERSION.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(self.embedding_scheme.as_bytes());
+        hasher.update([0x1f]);
         hasher.update(content.as_bytes());
         format!("{:x}", hasher.finalize())[..16].to_string()
     }
@@ -522,6 +550,41 @@ mod tests {
             hash_before, hash_after,
             "moving a block under a new parent must invalidate its embedding"
         );
+    }
+
+    #[test]
+    fn changing_prefix_scheme_invalidates_previously_clean_chunks() {
+        let page = page("Notes");
+        let blocks = vec![block("root", None, "some content worth embedding here")];
+
+        // Index once under the default (no-prefix) scheme and mark clean.
+        let mut pipeline = pipeline();
+        let chunks_v1 = pipeline.chunk_page(&page, &blocks);
+        pipeline.mark_chunks_clean(&chunks_v1);
+        assert!(
+            pipeline
+                .diff_page_chunks(&page.id, pipeline.chunk_page(&page, &blocks))
+                .dirty_chunks
+                .is_empty(),
+            "unchanged content under the same scheme stays clean"
+        );
+
+        // Switch to a model family with a document prefix (e.g. nomic). The
+        // same text must now be considered dirty so it gets re-embedded with
+        // the prefix, instead of leaving unprefixed vectors matched against
+        // prefixed queries.
+        pipeline.set_embedding_scheme("search_document: ");
+        let diff = pipeline.diff_page_chunks(&page.id, pipeline.chunk_page(&page, &blocks));
+        assert_eq!(
+            diff.dirty_chunks.len(),
+            1,
+            "a prefix-scheme change must mark the chunk dirty for re-embedding"
+        );
+
+        // And the hash genuinely differs between schemes.
+        let hash_none = chunks_v1[0].content_hash.clone();
+        let hash_prefixed = pipeline.chunk_page(&page, &blocks)[0].content_hash.clone();
+        assert_ne!(hash_none, hash_prefixed);
     }
 
     #[test]

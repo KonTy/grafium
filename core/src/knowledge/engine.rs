@@ -316,6 +316,16 @@ impl KnowledgeEngine {
             .unwrap_or_else(|| self.data_dir.join("vectors.db"));
         self.vector_store = Some(Arc::new(SqliteVectorStore::open(&vs_path)?));
 
+        // Tell the chunk pipeline which embedding scheme (document prefix) is
+        // active, so content hashes change when the prefix scheme changes and
+        // stale, differently-prefixed vectors get re-embedded on reindex.
+        let scheme = self
+            .embedder
+            .as_ref()
+            .map(|e| e.embedding_scheme_id())
+            .unwrap_or_default();
+        self.pipeline.get_mut().set_embedding_scheme(scheme);
+
         Ok(())
     }
 

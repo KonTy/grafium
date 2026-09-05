@@ -152,6 +152,15 @@ impl Embedder for LocalEmbedder {
     fn model_name(&self) -> &str {
         &self.name
     }
+
+    /// The document prefix identifies this model family's embedding scheme:
+    /// nomic → `search_document: `, e5 → `passage: `, others → empty. Folding
+    /// it into the content hash makes a family/prefix change re-embed stale,
+    /// unprefixed documents instead of leaving them mismatched with prefixed
+    /// queries.
+    fn embedding_scheme_id(&self) -> String {
+        prefixes_for(&self.name).document.to_string()
+    }
 }
 
 impl LocalEmbedder {

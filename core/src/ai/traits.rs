@@ -178,6 +178,17 @@ pub trait Embedder: Send + Sync {
 
     /// Model name for logging.
     fn model_name(&self) -> &str;
+
+    /// Stable identifier for anything that affects the *stored vector* but is
+    /// not part of the hashed chunk text — chiefly the asymmetric document
+    /// prefix this model family applies. It is folded into the content hash so
+    /// that changing the prefix scheme (or switching to a family with a
+    /// different one) invalidates previously-embedded chunks and forces a
+    /// rewrite, rather than silently running prefixed queries against
+    /// unprefixed documents. Default: empty (no prefix).
+    fn embedding_scheme_id(&self) -> String {
+        String::new()
+    }
 }
 
 /// Vector store trait — abstracts over LanceDB, Qdrant, SQLite-vec, etc.
