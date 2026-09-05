@@ -1026,12 +1026,179 @@ impl KnowledgeEngine {
             crate::ai::reasoning::ThinkStripResult::Answer(answer) => Ok(AskStreamOutcome {
                 sources: build_sources(&request.entries, &answer),
                 trailing_message: None,
+                web_citations: Vec::new(),
             }),
             crate::ai::reasoning::ThinkStripResult::ReasoningOnly => Ok(AskStreamOutcome {
                 sources: Vec::new(),
                 trailing_message: Some(crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()),
+                web_citations: Vec::new(),
             }),
         }
+    }
+
+    /// Two-part "research on the web" answer: streams the ordinary
+    /// notes-grounded answer under a `## From your notes` header, then runs a
+    /// live [`crate::ai::web_research`] pass and streams its cited summary
+    /// under `## From the web`. Used when
+    /// [`crate::knowledge::detect_research_intent`] fires on the user's
+    /// question — the deliberate, explicit gesture that authorises actually
+    /// leaving the graph and hitting the internet.
+    ///
+    /// The two arms are isolated so a weakness in one never eats the other: if
+    /// the notes arm finds nothing relevant it *says so* (rather than
+    /// fabricating from general knowledge) and the web arm still runs; if the
+    /// web arm fails — offline, blocked, no results — the notes answer above it
+    /// still stands and a calm one-line note explains the web part didn't
+    /// finish. `cancel` is honoured in *both* arms (the local generation and
+    /// the web fetches), so a single Stop halts the whole run.
+    pub async fn ask_stream_with_web(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<AskStreamOutcome> {
+        let browser = crate::scraping::HttpBrowserDriver::new();
+        self.ask_stream_with_web_using(db, question, graph_id, &browser, cancel, on_event)
+            .await
+    }
+
+    /// [`Self::ask_stream_with_web`] with an injected browser, so tests can
+    /// drive the web arm from canned search results and pages instead of the
+    /// live network. Production callers use the public wrapper above, which
+    /// supplies the real [`crate::scraping::HttpBrowserDriver`].
+    pub async fn ask_stream_with_web_using(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        browser: &dyn crate::scraping::browser::BrowserDriver,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<AskStreamOutcome> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        // ── Part 1: From your notes ─────────────────────────────────────────
+        // The header is answer text, streamed first so the reader immediately
+        // sees the two-part structure forming.
+        on_event(AskStreamEvent::Delta("## From your notes\n\n"));
+        on_event(AskStreamEvent::Phase(AskPhase::Retrieving));
+
+        let notes_request = self
+            .build_notes_only_request(db, llm.as_ref(), question, graph_id)
+            .await?;
+
+        let mut notes_sources = Vec::new();
+        match notes_request {
+            // Gate rejected everything: be honest about the empty result rather
+            // than letting the model paper over it with general knowledge —
+            // that's what Part 2 is for.
+            None => on_event(AskStreamEvent::Delta(
+                "I couldn't find anything about this in your notes.",
+            )),
+            Some(request) => {
+                on_event(AskStreamEvent::Phase(AskPhase::ProcessingPrompt));
+                let options = crate::ai::traits::CompletionOptions {
+                    max_tokens: Some(request.output_tokens as u32),
+                    cancel: cancel.clone(),
+                    ..Default::default()
+                };
+                let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
+                let mut phase = AskPhase::ProcessingPrompt;
+                {
+                    let mut on_token = |piece: &str| match filter.push(piece) {
+                        crate::ai::reasoning::StreamStep::Answer(delta) => {
+                            if phase != AskPhase::Generating {
+                                phase = AskPhase::Generating;
+                                on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                            }
+                            on_event(AskStreamEvent::Delta(&delta));
+                        }
+                        crate::ai::reasoning::StreamStep::Thinking => {
+                            if phase != AskPhase::Thinking {
+                                phase = AskPhase::Thinking;
+                                on_event(AskStreamEvent::Phase(AskPhase::Thinking));
+                            }
+                        }
+                        crate::ai::reasoning::StreamStep::Idle => {}
+                    };
+                    llm.complete_stream(&request.messages, &options, &mut on_token)
+                        .await?;
+                }
+                match filter.finish() {
+                    crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
+                        notes_sources = build_sources(&request.entries, &answer);
+                    }
+                    // Reasoning models can burn their whole budget thinking; show
+                    // the standard placeholder instead of a blank notes section.
+                    crate::ai::reasoning::ThinkStripResult::ReasoningOnly => on_event(
+                        AskStreamEvent::Delta(crate::ai::reasoning::REASONING_ONLY_MESSAGE),
+                    ),
+                }
+            }
+        }
+
+        // A Stop during the notes arm means the user doesn't want the web pass
+        // either — return what we have without starting it.
+        if cancel_requested(&cancel) {
+            return Ok(AskStreamOutcome {
+                sources: notes_sources,
+                trailing_message: None,
+                web_citations: Vec::new(),
+            });
+        }
+
+        // ── Part 2: From the web ────────────────────────────────────────────
+        on_event(AskStreamEvent::Delta("\n\n## From the web\n\n"));
+        on_event(AskStreamEvent::Phase(AskPhase::SearchingWeb));
+
+        let mut web_citations = Vec::new();
+        let research = {
+            // Translate the research engine's textual progress into UI signals:
+            // the first "Reading source …" line flips the phase to
+            // ReadingSources, and every line is forwarded verbatim as a Note so
+            // the status label can show "Reading source 2/5: …".
+            let mut announced_reading = false;
+            let mut on_progress = |msg: &str| {
+                if !announced_reading && msg.starts_with("Reading source") {
+                    announced_reading = true;
+                    on_event(AskStreamEvent::Phase(AskPhase::ReadingSources));
+                }
+                on_event(AskStreamEvent::Note(msg));
+            };
+            let engine = crate::ai::web_research::WebResearchEngine::new(llm.as_ref(), browser);
+            // The cleaned question is both the "title" (what to answer) and the
+            // seed text (what to search around) here — a Chat question has no
+            // separate page body to draw on.
+            engine
+                .research_cancellable(question, question, cancel.as_deref(), &mut on_progress)
+                .await
+        };
+
+        match research {
+            Ok(result) => {
+                on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                on_event(AskStreamEvent::Delta(&render_web_section(&result)));
+                web_citations = result.citations;
+            }
+            // A cancelled web arm is a deliberate Stop, not a failure — stay
+            // silent rather than scaring the user with an error they caused.
+            Err(_) if cancel_requested(&cancel) => {}
+            Err(e) => on_event(AskStreamEvent::Delta(&format!(
+                "I couldn't complete the web research just now ({e}). Your notes answer above is \
+                 unaffected — you can try again."
+            ))),
+        }
+
+        Ok(AskStreamOutcome {
+            sources: notes_sources,
+            trailing_message: None,
+            web_citations,
+        })
     }
 
     /// Shared planning for [`Self::ask`] and [`Self::ask_stream`]: hybrid
@@ -1107,6 +1274,63 @@ impl KnowledgeEngine {
             entries,
             output_tokens: reserved_output,
         })
+    }
+
+    /// Planning for the "From your notes" arm of the two-part research flow:
+    /// the same hybrid retrieval and gating as [`Self::build_ask_request`], but
+    /// it returns `Ok(None)` when the relevance gate rejected everything,
+    /// instead of falling back to a general-knowledge answer. That difference
+    /// is the whole point of the split — Part 1 must speak *only* to what the
+    /// user's own notes contain (and honestly admit when that's nothing),
+    /// because here it is Part 2's live web pass, not the model's training
+    /// data, that covers the outside world.
+    async fn build_notes_only_request(
+        &self,
+        db: &crate::db::Database,
+        llm: &dyn LlmProvider,
+        question: &str,
+        graph_id: Option<&str>,
+    ) -> Result<Option<AskRequest>> {
+        let reserved_output = if llm.supports_thinking() {
+            ASK_THINKING_OUTPUT_TOKENS
+        } else {
+            ASK_RESERVED_OUTPUT_TOKENS
+        };
+        let budget = ask_context_budget_with(llm.context_window(), reserved_output);
+
+        let mut hits = self
+            .hybrid_search(db, question, ASK_TOP_K, graph_id)
+            .await
+            .unwrap_or_default();
+
+        // General mode == nothing relevant survived the gate. Signal "no notes"
+        // to the caller rather than assembling an empty, general-knowledge
+        // prompt.
+        if choose_answer_mode(&hits) == AnswerMode::General {
+            return Ok(None);
+        }
+
+        self.expand_hits(db, &mut hits);
+        let entries = retrieval::assemble_within_budget(&hits, budget);
+        let context_block = build_context_block(&entries);
+        let system_prompt = build_notes_only_system_prompt(&context_block);
+
+        let messages = vec![
+            crate::ai::traits::ChatMessage {
+                role: crate::ai::traits::MessageRole::System,
+                content: system_prompt,
+            },
+            crate::ai::traits::ChatMessage {
+                role: crate::ai::traits::MessageRole::User,
+                content: question.to_string(),
+            },
+        ];
+
+        Ok(Some(AskRequest {
+            messages,
+            entries,
+            output_tokens: reserved_output,
+        }))
     }
 
     /// Get the graph registry (read access).
@@ -1440,6 +1664,14 @@ pub enum AskPhase {
     Thinking,
     /// Real answer tokens are streaming.
     Generating,
+    /// A live web-research pass is running its planned searches — only in the
+    /// two-part "research on the web" flow ([`KnowledgeEngine::ask_stream_with_web`]).
+    /// Distinct from `Retrieving`, which is the *local* notes search; this one
+    /// is hitting the open internet.
+    SearchingWeb,
+    /// The web-research pass has chosen its sources and is fetching and reading
+    /// them (the slowest part of a research run, gated by network latency).
+    ReadingSources,
 }
 
 impl AskPhase {
@@ -1450,6 +1682,8 @@ impl AskPhase {
             AskPhase::ProcessingPrompt => "processing_prompt",
             AskPhase::Thinking => "thinking",
             AskPhase::Generating => "generating",
+            AskPhase::SearchingWeb => "searching_web",
+            AskPhase::ReadingSources => "reading_sources",
         }
     }
 }
@@ -1463,6 +1697,13 @@ pub enum AskStreamEvent<'a> {
     Phase(AskPhase),
     /// A chunk of answer text to append in the UI.
     Delta(&'a str),
+    /// A human-readable progress note for the *current* phase — e.g.
+    /// "Reading source 2/5: …" during a web-research pass. Unlike `Phase` (a
+    /// coarse, machine-readable state) a `Note` carries transient detail the UI
+    /// can show verbatim under the status label and then discard. It is never
+    /// part of the answer text, so dropping it loses nothing but the live
+    /// play-by-play.
+    Note(&'a str),
 }
 
 /// Result of a streamed answer once generation finishes.
@@ -1472,6 +1713,10 @@ pub struct AskStreamOutcome {
     /// A message to display *in place of* an answer when the model produced
     /// only reasoning and never answered — `None` for a normal answer.
     pub trailing_message: Option<String>,
+    /// Web sources cited by the "From the web" section, when the two-part
+    /// research flow ran ([`KnowledgeEngine::ask_stream_with_web`]). Empty for
+    /// an ordinary graph-only answer, so existing callers are unaffected.
+    pub web_citations: Vec<crate::ai::web_research::Citation>,
 }
 
 /// Build the cited-sources list for an answer: only entries whose `[N]` marker
@@ -1523,6 +1768,73 @@ fn build_context_block(entries: &[ContextEntry]) -> String {
         ));
     }
     out.trim_end().to_string()
+}
+
+/// Whether a cancellation flag (if any) has been tripped. Mirrors the check
+/// the web-research engine makes internally, so the two-part flow can decide
+/// between arms whether the user has asked to stop.
+fn cancel_requested(cancel: &Option<Arc<std::sync::atomic::AtomicBool>>) -> bool {
+    cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// System prompt for the "From your notes" arm of the two-part research flow.
+/// Unlike [`build_system_prompt`]'s Blend/General regimes — which are allowed
+/// to reach for general knowledge — this one forbids it outright: Part 1
+/// answers *only* from the retrieved notes and admits when they don't cover the
+/// question, because the companion "From the web" section is what supplies
+/// outside information in this flow. Keeping the two strictly separate is what
+/// makes the split honest rather than two overlapping general answers.
+fn build_notes_only_system_prompt(context_block: &str) -> String {
+    format!(
+        "You are Grafium's assistant answering STRICTLY from the user's own notes below — their \
+personal writing and journal entries. Use ONLY these notes; do NOT add anything from your general \
+knowledge in this section (a separate web-research section handles outside information). Cite each \
+claim with its [N] marker.\n\
+- For \"when\" / temporal questions, use only explicit dates from the cited notes. A line that \
+says \"note saved …; event date unknown\" is not an event date — don't treat it as one.\n\
+- Never invent citations or dates. If these notes don't contain the answer, say so plainly in one \
+sentence and stop — do not guess.\n\n\
+The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+    )
+}
+
+/// Render a completed [`crate::ai::web_research::WebResearchResult`] into the
+/// Markdown body of the "From the web" section: the direct answer (when the
+/// research posed one) followed by each cited topic paragraph, whose inline
+/// `[n]` markers point at the numbered web sources the UI renders as clickable
+/// chips. Returns a short honest line when the run produced no prose at all, so
+/// the section is never left blank under its header.
+fn render_web_section(result: &crate::ai::web_research::WebResearchResult) -> String {
+    let mut out = String::new();
+    if let Some(answer) = result.title_answer.as_deref() {
+        let answer = answer.trim();
+        if !answer.is_empty() {
+            out.push_str(answer);
+            out.push_str("\n\n");
+        }
+    }
+    for topic in &result.topics {
+        let summary = topic.summary.trim();
+        if summary.is_empty() {
+            continue;
+        }
+        let heading = topic.topic.trim();
+        if !heading.is_empty() {
+            out.push_str("**");
+            out.push_str(heading);
+            out.push_str("**\n\n");
+        }
+        out.push_str(summary);
+        out.push_str("\n\n");
+    }
+    let out = out.trim_end().to_string();
+    if out.is_empty() {
+        "I searched the web but couldn't extract a useful summary from the sources.".to_string()
+    } else {
+        out
+    }
 }
 
 /// Build the system prompt for a single chosen `AnswerMode`. Each regime is a
@@ -2588,5 +2900,305 @@ mod tests {
             thinking + ASK_PROMPT_OVERHEAD_TOKENS + ASK_THINKING_OUTPUT_TOKENS <= 4096,
             "prompt + (thinking) output must still fit the window"
         );
+    }
+
+    // ── Two-part "research on the web" flow ─────────────────────────────────
+
+    /// A queue-backed `LlmProvider`: returns the next canned response for each
+    /// `complete` call regardless of the prompt, so a single queue can serve
+    /// the notes arm (1 call) and then the web arm's plan/pick/synthesize (3
+    /// calls) across one `ask_stream_with_web` run.
+    struct QueueLlm {
+        responses: Mutex<std::collections::VecDeque<String>>,
+    }
+
+    impl QueueLlm {
+        fn new(responses: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(String::from).collect()),
+            }
+        }
+    }
+
+    impl LlmProvider for QueueLlm {
+        fn complete<'a>(
+            &'a self,
+            _messages: &'a [crate::ai::traits::ChatMessage],
+            _options: &'a crate::ai::traits::CompletionOptions,
+        ) -> BoxFuture<'a, Result<String>> {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn name(&self) -> &str {
+            "queue"
+        }
+
+        fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async move { Ok(true) })
+        }
+    }
+
+    /// A browser that serves canned Brave results HTML for any `search.brave.com`
+    /// URL and a canned page for each mapped URL — enough to drive the web arm
+    /// entirely offline.
+    struct CannedBrowser {
+        search_html: String,
+        pages: HashMap<String, String>,
+    }
+
+    impl crate::scraping::browser::BrowserDriver for CannedBrowser {
+        fn fetch<'a>(
+            &'a self,
+            url: &'a str,
+        ) -> BoxFuture<'a, Result<crate::scraping::browser::FetchedResource>> {
+            Box::pin(async move {
+                let bytes = if url.starts_with("https://search.brave.com/") {
+                    self.search_html.clone().into_bytes()
+                } else {
+                    self.pages
+                        .get(url)
+                        .cloned()
+                        .ok_or_else(|| CoreError::Other(format!("no canned page for {url}")))?
+                        .into_bytes()
+                };
+                Ok(crate::scraping::browser::FetchedResource {
+                    url: url.to_string(),
+                    content_type: Some("text/html".to_string()),
+                    bytes,
+                })
+            })
+        }
+    }
+
+    fn test_engine_with_llm(llm: Box<dyn LlmProvider>) -> Result<KnowledgeEngine> {
+        let config = AiConfig::default();
+        let registry_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
+        Ok(KnowledgeEngine {
+            config: config.clone(),
+            llm: Some(llm),
+            embedder: None,
+            vector_store: None,
+            pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
+            reference_engine: ReferenceEngine::new(config.references.clone()),
+            registry: RwLock::new(GraphRegistry::load(&registry_path)?),
+            data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            models_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        })
+    }
+
+    fn two_result_search_html() -> String {
+        r#"<html><body>
+        <div class="snippet" data-type="web"><a href="https://a.example/x"><div class="title">Study A</div></a><div class="generic-snippet"><div class="content">snip a</div></div></div>
+        <div class="snippet" data-type="web"><a href="https://b.example/y"><div class="title">Study B</div></a><div class="generic-snippet"><div class="content">snip b</div></div></div>
+        </body></html>"#
+            .to_string()
+    }
+
+    fn stub_page_html(title: &str, body: &str) -> String {
+        format!("<html><head><title>{title}</title></head><body><p>{body}</p></body></html>")
+    }
+
+    #[tokio::test]
+    async fn ask_stream_with_web_assembles_both_parts() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let db = Database::in_memory()?;
+        let page = db.create_page("Creatine notes", false)?;
+        db.create_block(
+            &page.id,
+            None,
+            0,
+            "Creatine is one of the most studied supplements for strength.",
+            BlockType::Text,
+            json!({}),
+        )?;
+
+        // notes answer, then web plan / pick / synthesize.
+        let llm = QueueLlm::new([
+            "Your notes say creatine is among the most studied supplements for strength [1].",
+            r#"{"queries": ["does creatine cause cancer"]}"#,
+            r#"{"picks": [0, 1]}"#,
+            r#"{"title_answer": "There is no strong evidence that creatine causes cancer.", "topics": [{"topic": "Creatine and cancer risk", "summary": "Reviews report no causal link[1]; long-term data remain limited[2].", "tags": []}]}"#,
+        ]);
+        let engine = test_engine_with_llm(Box::new(llm))?;
+
+        let browser = CannedBrowser {
+            search_html: two_result_search_html(),
+            pages: HashMap::from([
+                (
+                    "https://a.example/x".to_string(),
+                    stub_page_html("Study A", "No causal link found."),
+                ),
+                (
+                    "https://b.example/y".to_string(),
+                    stub_page_html("Study B", "More research is ongoing."),
+                ),
+            ]),
+        };
+
+        let mut answer = String::new();
+        let mut phases = Vec::new();
+        let mut notes = Vec::new();
+        let outcome = engine
+            .ask_stream_with_web_using(
+                &db,
+                "does creatine cause cancer",
+                None,
+                &browser,
+                None,
+                &mut |ev| match ev {
+                    AskStreamEvent::Delta(d) => answer.push_str(d),
+                    AskStreamEvent::Phase(p) => phases.push(p.as_str()),
+                    AskStreamEvent::Note(n) => notes.push(n.to_string()),
+                },
+            )
+            .await?;
+
+        // Both section headers, in order, each with its content.
+        let notes_idx = answer.find("## From your notes").expect("notes header");
+        let web_idx = answer.find("## From the web").expect("web header");
+        assert!(notes_idx < web_idx, "notes section must come first");
+        assert!(answer.contains("most studied supplements")); // notes arm answer
+        assert!(answer.contains("no strong evidence that creatine causes cancer")); // web answer
+        assert!(answer.contains("Creatine and cancer risk")); // web topic heading
+
+        // New phases surfaced for the UI, and per-source progress notes.
+        assert!(phases.contains(&"searching_web"));
+        assert!(phases.contains(&"reading_sources"));
+        assert!(notes.iter().any(|n| n.starts_with("Reading source")));
+
+        // Graph + web sources both plumbed through the outcome.
+        assert_eq!(outcome.sources.len(), 1, "notes citation [1]");
+        assert_eq!(outcome.sources[0].page_title, "Creatine notes");
+        assert_eq!(outcome.web_citations.len(), 2, "two web sources read");
+        assert_eq!(outcome.web_citations[0].url, "https://a.example/x");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_stream_with_web_says_when_notes_have_nothing_but_still_researches() -> Result<()> {
+        use crate::db::Database;
+
+        // Empty graph → the notes arm must find nothing.
+        let db = Database::in_memory()?;
+        let llm = QueueLlm::new([
+            r#"{"queries": ["capital of atlantis"]}"#,
+            r#"{"picks": [0]}"#,
+            r#"{"title_answer": "Atlantis is a mythical island with no real capital.", "topics": []}"#,
+        ]);
+        let engine = test_engine_with_llm(Box::new(llm))?;
+        let browser = CannedBrowser {
+            search_html: r#"<html><body><div class="snippet" data-type="web"><a href="https://m.example/a"><div class="title">Myth</div></a><div class="generic-snippet"><div class="content">s</div></div></div></body></html>"#.to_string(),
+            pages: HashMap::from([(
+                "https://m.example/a".to_string(),
+                stub_page_html("Myth", "Atlantis is a legend from Plato."),
+            )]),
+        };
+
+        let mut answer = String::new();
+        let outcome = engine
+            .ask_stream_with_web_using(
+                &db,
+                "capital of atlantis",
+                None,
+                &browser,
+                None,
+                &mut |ev| {
+                    if let AskStreamEvent::Delta(d) = ev {
+                        answer.push_str(d);
+                    }
+                },
+            )
+            .await?;
+
+        assert!(answer.contains("couldn't find anything about this in your notes"));
+        assert!(answer.contains("## From the web"));
+        assert!(answer.contains("mythical island")); // web arm still ran
+        assert!(outcome.sources.is_empty());
+        assert_eq!(outcome.web_citations.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_stream_with_web_survives_a_failed_web_arm() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let db = Database::in_memory()?;
+        let page = db.create_page("Creatine notes", false)?;
+        db.create_block(
+            &page.id,
+            None,
+            0,
+            "Creatine supports strength training.",
+            BlockType::Text,
+            json!({}),
+        )?;
+        // Notes answer present; web search returns nothing parseable → web arm errors.
+        let llm = QueueLlm::new([
+            "Creatine supports strength training [1].",
+            r#"{"queries": ["creatine cancer"]}"#,
+        ]);
+        let engine = test_engine_with_llm(Box::new(llm))?;
+        let browser = CannedBrowser {
+            search_html: "<html><body>no results at all</body></html>".to_string(),
+            pages: HashMap::new(),
+        };
+
+        let mut answer = String::new();
+        let outcome = engine
+            .ask_stream_with_web_using(&db, "creatine cancer", None, &browser, None, &mut |ev| {
+                if let AskStreamEvent::Delta(d) = ev {
+                    answer.push_str(d);
+                }
+            })
+            .await?;
+
+        // Notes answer intact; web failure shown as a calm note, not a crash.
+        assert!(answer.contains("supports strength training"));
+        assert!(answer.contains("## From the web"));
+        assert!(answer.contains("couldn't complete the web research"));
+        assert_eq!(outcome.sources.len(), 1);
+        assert!(outcome.web_citations.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn render_web_section_includes_answer_and_topics_and_is_never_blank() {
+        use crate::ai::web_research::{Citation, ResearchTopic, WebResearchResult};
+
+        let full = WebResearchResult {
+            title_answer: Some("Short direct answer.".to_string()),
+            topics: vec![ResearchTopic {
+                topic: "A topic".to_string(),
+                summary: "Body with a marker[1].".to_string(),
+                tags: vec![],
+            }],
+            citations: vec![Citation {
+                number: 1,
+                title: "S".to_string(),
+                url: "https://s.example".to_string(),
+            }],
+        };
+        let md = render_web_section(&full);
+        assert!(md.contains("Short direct answer."));
+        assert!(md.contains("**A topic**"));
+        assert!(md.contains("Body with a marker[1]."));
+
+        // Even a totally empty result yields a non-blank line under the header.
+        let empty = WebResearchResult {
+            title_answer: None,
+            topics: vec![],
+            citations: vec![],
+        };
+        assert!(!render_web_section(&empty).trim().is_empty());
     }
 }
