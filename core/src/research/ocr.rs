@@ -81,6 +81,20 @@ pub fn ocr_available() -> bool {
 /// caller anyway. Rendering the whole of a 200-page scan would be a large,
 /// pointless cost.
 pub fn ocr_pdf(pdf_bytes: &[u8], max_pages: usize) -> Result<Option<String>> {
+    ocr_pdf_cancellable(pdf_bytes, max_pages, None)
+}
+
+/// [`ocr_pdf`] that abandons the run when `cancel` is raised.
+///
+/// Recognition is seconds per page, so a Stop pressed during OCR would
+/// otherwise wait out every remaining page before anything noticed. The flag is
+/// polled between pages — the finest granularity available without killing a
+/// child mid-recognition, and enough to make Stop feel immediate.
+pub fn ocr_pdf_cancellable(
+    pdf_bytes: &[u8],
+    max_pages: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Option<String>> {
     // The availability pre-check is what makes "tesseract absent" a no-op
     // rather than an error: we never spawn anything if we can't complete.
     if !ocr_available() {
@@ -122,6 +136,12 @@ pub fn ocr_pdf(pdf_bytes: &[u8], max_pages: usize) -> Result<Option<String>> {
 
     let mut text = String::new();
     for page in pages {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            // Return what was recognized so far rather than an error: the
+            // caller treats `None`/short text as "unreadable source" and moves
+            // on, which is the right outcome for a deliberate stop.
+            break;
+        }
         // `tesseract <image> stdout` prints recognized text to stdout; we take
         // whatever each page yields and concatenate. A single unreadable page
         // shouldn't discard the others, so a per-page failure is skipped.

@@ -247,12 +247,10 @@ pub struct LocalLlm {
     accel: crate::ai::traits::AcceleratorStatus,
 }
 
-/// The process-wide llama.cpp backend. llama.cpp only wants to be
-/// initialized once; every `LocalLlm` instance shares the same handle
-/// rather than each `load()` call re-initializing it — see
-/// `llama_shared::shared_backend`, also used by `LocalEmbedder` so both can
-/// be in use in the same process at once.
-
+// The process-wide llama.cpp backend. llama.cpp only wants to be initialized
+// once; every `LocalLlm` instance shares the same handle rather than each
+// `load()` call re-initializing it — see `llama_shared::shared_backend`, also
+// used by `LocalEmbedder` so both can be in use in the same process at once.
 impl LocalLlm {
     /// Loads a GGUF model from `model_path`.
     ///

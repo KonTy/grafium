@@ -162,26 +162,68 @@ pub async fn search_all(
     query: &str,
     limit: usize,
     cancel: Option<&AtomicBool>,
-) -> Vec<SearchResult> {
-    let mut merged = Vec::new();
+) -> SearchSweep {
+    let mut sweep = SearchSweep::default();
     let mut seen = HashSet::new();
     for engine in config.engines.iter().filter(|e| e.enabled) {
         if crate::ai::web_research::is_cancelled(cancel) {
             break;
         }
+        sweep.attempted += 1;
         match search_one(browser, engine, query, limit).await {
             Ok(results) => {
                 for result in results {
                     if seen.insert(result.url.clone()) {
-                        merged.push(result);
+                        sweep.results.push(result);
                     }
                 }
             }
-            // The whole point: a single engine failing is expected, not fatal.
-            Err(_) => continue,
+            // A single engine failing is expected, not fatal — but it is also
+            // not the same thing as that engine finding nothing, and
+            // collapsing the two is how "the search engine is throttling us"
+            // kept reaching users as "no results found". The run still
+            // continues; the reason is just no longer thrown away.
+            Err(err) => {
+                tracing::warn!(engine = %engine.id, error = %err, "search engine failed");
+                sweep.failures.push((engine.name.clone(), err.to_string()));
+            }
         }
     }
-    merged
+    sweep
+}
+
+/// The outcome of querying every enabled engine once.
+///
+/// Carries *why* engines produced nothing alongside what they found, so a
+/// caller can tell "nobody indexes this topic" from "every engine we have is
+/// currently refusing us" — which want opposite responses: refine the query
+/// versus tell the user to wait.
+#[derive(Debug, Default)]
+pub struct SearchSweep {
+    pub results: Vec<SearchResult>,
+    /// `(engine name, error)` for each engine that failed outright.
+    pub failures: Vec<(String, String)>,
+    /// How many enabled engines were actually tried (cancellation can cut the
+    /// sweep short).
+    pub attempted: usize,
+}
+
+impl SearchSweep {
+    /// True when every engine tried failed — nothing was searched successfully,
+    /// so an empty result set says nothing about the topic.
+    pub fn all_engines_failed(&self) -> bool {
+        self.attempted > 0 && self.failures.len() == self.attempted
+    }
+
+    /// A short, human-readable reason for an empty sweep.
+    pub fn failure_summary(&self) -> String {
+        let names: Vec<&str> = self
+            .failures
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        format!("every search engine failed ({})", names.join(", "))
+    }
 }
 
 /// Parse a rendered results page (or an Atom/XML feed) into [`SearchResult`]s
@@ -405,17 +447,41 @@ fn resolve_url(raw: &str, base_url: &str) -> Option<String> {
     base.join(raw).ok().map(|u| u.to_string())
 }
 
-/// If `url` is a search-engine redirector wrapping the real destination in a
-/// query parameter, return that destination. Best-effort and conservative: it
-/// only unwraps when a known wrapper key (`uddg`/`url`/`u`/`q`) holds a value
-/// that is itself an http(s) URL, so an ordinary result URL that merely has a
-/// `?q=` search parameter is left alone.
+/// Hosts known to wrap a result's real destination in a query parameter, with
+/// the parameter each one uses.
+///
+/// Matched on host rather than on the parameter name alone. Keying off the
+/// name was an open redirect in disguise: *any* result whose query string
+/// happened to carry `url=`/`q=` pointing at an http(s) value was silently
+/// replaced by that inner value, so both the page we fetched and the URL we
+/// cited became attacker-chosen. Search results are attacker-influenced by
+/// definition — anyone who can rank a page can choose its query string — so
+/// the unwrapping has to be restricted to redirectors we actually use.
+const REDIRECTOR_HOSTS: &[(&str, &[&str])] = &[
+    ("duckduckgo.com", &["uddg"]),
+    ("html.duckduckgo.com", &["uddg"]),
+    ("lite.duckduckgo.com", &["uddg"]),
+    ("www.startpage.com", &["url", "u"]),
+    ("startpage.com", &["url", "u"]),
+    ("www.mojeek.com", &["url"]),
+    ("out.mojeek.com", &["url"]),
+];
+
+/// If `url` is one of the [`REDIRECTOR_HOSTS`] wrapping the real destination in
+/// a query parameter, return that destination.
 fn unwrap_redirect(url: &str) -> Option<String> {
-    const WRAPPER_PARAMS: [&str; 4] = ["uddg", "url", "u", "q"];
     let parsed = Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let params = REDIRECTOR_HOSTS
+        .iter()
+        .find(|(h, _)| *h == host)
+        .map(|(_, params)| *params)?;
+
     for (key, value) in parsed.query_pairs() {
-        if WRAPPER_PARAMS.contains(&key.as_ref()) {
+        if params.contains(&key.as_ref()) {
             let value = value.into_owned();
+            // Only http(s): a redirector parameter is as attacker-controlled as
+            // any other, so `javascript:`/`file:` must not survive it.
             if value.starts_with("http://") || value.starts_with("https://") {
                 return Some(value);
             }
@@ -796,13 +862,42 @@ mod tests {
             engines: vec![dead, live],
             ..Default::default()
         };
-        let results = search_all(&browser, &config, "q", 10, None).await;
+        let sweep = search_all(&browser, &config, "q", 10, None).await;
 
         // The dead engine contributed nothing but didn't kill the run; the live
         // engine's duplicate URL was collapsed.
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].url, "https://a.test");
-        assert_eq!(results[1].url, "https://b.test");
+        assert_eq!(sweep.results.len(), 2);
+        assert_eq!(sweep.results[0].url, "https://a.test");
+        assert_eq!(sweep.results[1].url, "https://b.test");
+        // …and the failure is reported rather than silently dropped, so an
+        // empty sweep can be told apart from a throttled one.
+        assert_eq!(sweep.attempted, 2);
+        assert_eq!(sweep.failures.len(), 1);
+        assert!(!sweep.all_engines_failed());
+    }
+
+    /// When nothing succeeded, an empty result set says nothing about the
+    /// topic — the caller has to be able to see that and say so.
+    #[tokio::test]
+    async fn a_sweep_where_every_engine_failed_is_distinguishable_from_no_hits() {
+        // No page is served, so every engine's fetch errors.
+        let browser = MockBrowserDriver {
+            pages: HashMap::new(),
+        };
+        let config = ResearchConfig {
+            engines: vec![
+                json_engine("d1", "https://d1.test/s?q={query}"),
+                json_engine("d2", "https://d2.test/s?q={query}"),
+            ],
+            ..Default::default()
+        };
+        let sweep = search_all(&browser, &config, "q", 10, None).await;
+
+        assert!(sweep.results.is_empty());
+        assert!(sweep.all_engines_failed());
+        assert!(sweep
+            .failure_summary()
+            .contains("every search engine failed"));
     }
 
     #[tokio::test]

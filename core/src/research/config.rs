@@ -225,7 +225,9 @@ impl ResearchConfig {
         let path = Self::config_path(data_dir);
         if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
-            let config: ResearchConfig = serde_json::from_str(&raw)?;
+            let mut config: ResearchConfig = serde_json::from_str(&raw)?;
+            config.merge_new_builtins();
+            config.clamp_limits();
             Ok(config)
         } else {
             let config = Self::default();
@@ -234,13 +236,64 @@ impl ResearchConfig {
         }
     }
 
+    /// Adds built-in engines the saved config predates, leaving every existing
+    /// entry — and the user's enable/disable choices — untouched.
+    ///
+    /// Without this, a config is frozen at the version that first wrote it: the
+    /// PubMed, patent and book engines added later would never appear for
+    /// anyone who had already opened Settings once, and the only symptom would
+    /// be an engine list that quietly lacks them.
+    fn merge_new_builtins(&mut self) {
+        for builtin in builtin_engines() {
+            if !self.engines.iter().any(|e| e.id == builtin.id) {
+                self.engines.push(builtin);
+            }
+        }
+    }
+
+    /// Bounds the numeric knobs.
+    ///
+    /// The UI clamps these, but the config is a plain JSON file a user can edit
+    /// and `research_set_config` persists whatever it is handed — so the values
+    /// actually driving the loop have to be bounded where they are consumed,
+    /// not only where they are typed. Each round searches every enabled engine
+    /// for every planned query, so an absurd `max_rounds` is not just slow, it
+    /// is a self-inflicted denial of service against the search engines.
+    fn clamp_limits(&mut self) {
+        self.max_rounds = self.max_rounds.clamp(1, MAX_ROUNDS_CEILING);
+        self.max_sources = self.max_sources.clamp(1, MAX_SOURCES_CEILING);
+        self.results_per_query = self
+            .results_per_query
+            .clamp(1, MAX_RESULTS_PER_QUERY_CEILING);
+    }
+
     /// Persist the config to `<data_dir>/research_config.json`, creating the
     /// directory if needed.
+    /// Writes the config atomically: a full temp file, then a rename over the
+    /// target.
+    ///
+    /// A plain truncate-and-write turns any interruption — a crash, a power
+    /// cut, or a save racing a run that is reading the file — into a truncated
+    /// JSON document. Loading deliberately hard-errors rather than silently
+    /// resetting someone's tuned engines, so a half-written file would break
+    /// every subsequent research run until it was deleted by hand. Rename
+    /// within one directory is atomic, so a reader sees either the old config
+    /// or the new one and never a partial one.
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::config_path(data_dir);
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
+
+        let tmp = path.with_extension("json.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            // Flush to disk before the rename, so a crash immediately after
+            // can't leave the rename visible while the contents aren't.
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 }
@@ -539,6 +592,11 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
     ]
 }
 
+/// Upper bounds applied on load — see [`ResearchConfig::clamp_limits`].
+pub const MAX_ROUNDS_CEILING: usize = 10;
+pub const MAX_SOURCES_CEILING: usize = 50;
+pub const MAX_RESULTS_PER_QUERY_CEILING: usize = 25;
+
 // ── Default prompts ─────────────────────────────────────────────────────────
 //
 // Each is the system prompt for its step and states the JSON shape the loop
@@ -625,6 +683,79 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing built-in engine {id}"));
             assert!(engine.builtin, "{id} must be marked built-in");
         }
+    }
+
+    /// A config written before an engine existed must still gain it.
+    ///
+    /// Otherwise the saved file freezes the engine list at whatever version
+    /// first wrote it, and engines added later are invisible to every existing
+    /// user with no error to explain why.
+    #[test]
+    fn loading_an_older_config_gains_engines_added_since() {
+        let dir = tempfile::tempdir().unwrap();
+        // A config from before PubMed/patents/books existed, with a deliberate
+        // user choice recorded (Brave turned off).
+        let mut old = ResearchConfig::default();
+        old.engines
+            .retain(|e| !matches!(e.id.as_str(), "pubmed" | "googlepatents" | "openlibrary"));
+        for engine in old.engines.iter_mut() {
+            if engine.id == "brave" {
+                engine.enabled = false;
+            }
+        }
+        old.save(dir.path()).unwrap();
+
+        let loaded = ResearchConfig::load_or_create(dir.path()).unwrap();
+        for id in ["pubmed", "googlepatents", "openlibrary"] {
+            assert!(
+                loaded.engines.iter().any(|e| e.id == id),
+                "{id} should have been merged in"
+            );
+        }
+        // …without resurrecting a preference the user had already expressed.
+        let brave = loaded.engines.iter().find(|e| e.id == "brave").unwrap();
+        assert!(
+            !brave.enabled,
+            "an existing engine's setting must be preserved"
+        );
+    }
+
+    /// The config is a plain JSON file, and `research_set_config` persists what
+    /// it is handed, so the values driving the loop are bounded where they are
+    /// consumed rather than only where they are typed.
+    #[test]
+    fn absurd_limits_in_a_hand_edited_config_are_clamped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let wild = ResearchConfig {
+            max_rounds: 10_000,
+            max_sources: 100_000,
+            results_per_query: 5_000,
+            ..Default::default()
+        };
+        wild.save(dir.path()).unwrap();
+
+        let loaded = ResearchConfig::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.max_rounds, MAX_ROUNDS_CEILING);
+        assert_eq!(loaded.max_sources, MAX_SOURCES_CEILING);
+        assert_eq!(loaded.results_per_query, MAX_RESULTS_PER_QUERY_CEILING);
+    }
+
+    /// Zero would mean a run that searches nothing and returns nothing.
+    #[test]
+    fn zeroed_limits_are_raised_to_a_working_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        let zeroed = ResearchConfig {
+            max_rounds: 0,
+            max_sources: 0,
+            results_per_query: 0,
+            ..Default::default()
+        };
+        zeroed.save(dir.path()).unwrap();
+
+        let loaded = ResearchConfig::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.max_rounds, 1);
+        assert_eq!(loaded.max_sources, 1);
+        assert_eq!(loaded.results_per_query, 1);
     }
 
     /// Engines that actively refuse automated access ship **off**.

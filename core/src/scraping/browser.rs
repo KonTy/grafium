@@ -35,6 +35,14 @@ pub struct HttpBrowserDriver {
     client: reqwest::Client,
 }
 
+/// Largest response body this will read.
+///
+/// Generous enough for a book-length PDF while still bounding what a single
+/// hostile or merely careless server can make the process allocate. Exceeding
+/// it is a clean error, which the research loop already treats as "this source
+/// didn't work" and moves past.
+const MAX_FETCH_BYTES: usize = 25 * 1024 * 1024;
+
 /// Sent for every fetch. See the note in [`HttpBrowserDriver::new`].
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -87,11 +95,37 @@ impl BrowserDriver for HttpBrowserDriver {
                 )));
             }
 
-            let bytes = response
-                .bytes()
+            // Refuse an oversized body before reading it where the server is
+            // honest about the size, and stop mid-stream where it isn't.
+            // Research fetches whatever a search engine ranked, so the size of
+            // a response is decided by someone else entirely; reading it whole
+            // meant one large PDF could exhaust memory, and the extractors
+            // (html5ever, pdf_extract) then get handed the whole thing again.
+            if let Some(len) = response.content_length() {
+                if len > MAX_FETCH_BYTES as u64 {
+                    return Err(CoreError::Other(format!(
+                        "fetch {url} aborted: {} MiB exceeds the {} MiB limit",
+                        len / (1024 * 1024),
+                        MAX_FETCH_BYTES / (1024 * 1024)
+                    )));
+                }
+            }
+
+            let mut stream = response;
+            let mut bytes: Vec<u8> = Vec::new();
+            while let Some(chunk) = stream
+                .chunk()
                 .await
                 .map_err(|e| CoreError::Other(format!("reading body of {url} failed: {e}")))?
-                .to_vec();
+            {
+                if bytes.len() + chunk.len() > MAX_FETCH_BYTES {
+                    return Err(CoreError::Other(format!(
+                        "fetch {url} aborted: body exceeds the {} MiB limit",
+                        MAX_FETCH_BYTES / (1024 * 1024)
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
 
             Ok(FetchedResource {
                 url: final_url,

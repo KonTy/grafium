@@ -89,6 +89,13 @@ const ASSESS_EXCERPT_CHARS: usize = 1200;
 /// Per-source excerpt length shown to the synthesis step — the biggest budget,
 /// since this is where claims are actually written and cited.
 const SYNTH_EXCERPT_CHARS: usize = 2800;
+
+/// Most of a source's text kept in memory once read.
+///
+/// Sized comfortably above [`SYNTH_EXCERPT_CHARS`] — the largest amount any
+/// prompt ever uses — so clipping here can never change an answer, while
+/// bounding what a run holds regardless of how large the fetched documents are.
+const STORED_EXCERPT_CHARS: usize = SYNTH_EXCERPT_CHARS * 4;
 /// Question length passed to the query-planning/refining steps; questions are
 /// normally short, this just guards against a pathologically long paste.
 const QUESTION_CHARS: usize = 2000;
@@ -237,7 +244,7 @@ impl<'a> DeepResearchEngine<'a> {
                 if is_cancelled(cancel_ref) {
                     return Err(cancelled_error());
                 }
-                let results = engines::search_all(
+                let sweep = engines::search_all(
                     self.browser,
                     self.config,
                     query,
@@ -245,7 +252,19 @@ impl<'a> DeepResearchEngine<'a> {
                     cancel_ref,
                 )
                 .await;
-                for result in results {
+                // Tell the user *why* a search came back empty. An engine
+                // refusing us and an engine finding nothing are opposite
+                // problems — one wants patience, the other a better query —
+                // and reporting both as "no results" is precisely how a
+                // throttled run used to look like a broken feature.
+                if sweep.all_engines_failed() {
+                    let summary = sweep.failure_summary();
+                    progress(ResearchProgress::Note(&summary));
+                }
+                for (name, err) in &sweep.failures {
+                    tracing::debug!(engine = %name, error = %err, "engine failed during sweep");
+                }
+                for result in sweep.results {
                     // Dedup within the round and against everything already
                     // fetched in previous rounds — never re-rank a source we've
                     // read, never list the same URL twice.
@@ -295,7 +314,7 @@ impl<'a> DeepResearchEngine<'a> {
                     );
                     progress(ResearchProgress::Note(&note));
 
-                    match self.read_source(candidate).await {
+                    match self.read_source(candidate, cancel.clone()).await {
                         Some(text) => {
                             let number = citations.len() + 1;
                             citations.push(Citation {
@@ -413,7 +432,11 @@ impl<'a> DeepResearchEngine<'a> {
     /// document, or an empty/scanned PDF that OCR couldn't (or wasn't allowed
     /// to) recover. The loop treats every `None` the same: record it as skipped
     /// and move on, so no single bad source can end the run.
-    async fn read_source(&self, candidate: &SearchResult) -> Option<String> {
+    async fn read_source(
+        &self,
+        candidate: &SearchResult,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<String> {
         let resource = self.browser.fetch(&candidate.url).await.ok()?;
         let text = match extract::extract(&resource) {
             Ok(content) if !content.text.trim().is_empty() => content.text,
@@ -424,17 +447,37 @@ impl<'a> DeepResearchEngine<'a> {
                 if self.config.ocr_enabled && extract::is_pdf(&resource) {
                     // OCR degrades gracefully: `Ok(None)` when tesseract isn't
                     // installed, `Err` only on an unexpected tooling failure —
-                    // both mean "unreadable", handled by the `?`/`ok()` below.
-                    crate::research::ocr::ocr_pdf(&resource.bytes, OCR_MAX_PAGES)
-                        .ok()
-                        .flatten()?
+                    // both mean "unreadable", handled by the `ok()`/`?` below.
+                    //
+                    // Run on the blocking pool: rasterizing and recognizing
+                    // several pages is seconds of synchronous child-process
+                    // work, and doing it inline parks an async worker for the
+                    // duration — which on a small runtime can stall every other
+                    // task, including the ones that would notice a Stop.
+                    let bytes = resource.bytes.clone();
+                    let ocr_cancel = cancel.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::research::ocr::ocr_pdf_cancellable(
+                            &bytes,
+                            OCR_MAX_PAGES,
+                            ocr_cancel.as_deref(),
+                        )
+                    })
+                    .await
+                    .ok()?
+                    .ok()
+                    .flatten()?
                 } else {
                     return None;
                 }
             }
         };
         let text = text.trim();
-        (!text.is_empty()).then(|| text.to_string())
+        // Clip at read time, not only when a prompt is built. A source can be a
+        // whole book-length PDF, and holding every one of them in full for the
+        // life of the run costs megabytes to no purpose: nothing downstream
+        // ever reads past the synthesis excerpt.
+        (!text.is_empty()).then(|| truncate(text, STORED_EXCERPT_CHARS).to_string())
     }
 
     async fn plan_queries(
@@ -666,6 +709,9 @@ impl<'a> DeepResearchEngine<'a> {
 /// Parse a `{"queries": [...]}` object into a cleaned, de-duplicated,
 /// non-empty query list. Shared by planning and refining, and tolerant of the
 /// `<think>` blocks a reasoning model emits before its JSON.
+/// Most search queries a single round may run, however many the model returns.
+const MAX_QUERIES_PER_ROUND: usize = 4;
+
 fn parse_queries(raw: &str) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct QueriesJson {
@@ -685,6 +731,11 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty())
         .filter(|q| seen.insert(q.to_lowercase()))
+        // The prompt asks for a handful, but prompts are user-editable and the
+        // model is free to ignore it — and every extra query costs one fetch
+        // per enabled engine, per round. The ceiling belongs where the queries
+        // are consumed, not in the wording of a prompt someone can rewrite.
+        .take(MAX_QUERIES_PER_ROUND)
         .collect())
 }
 
