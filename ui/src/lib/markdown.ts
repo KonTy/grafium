@@ -183,6 +183,61 @@ export function renderBlock(content: string): string {
   return html;
 }
 
+/** URL schemes that must never survive in a rendered link's `href`. */
+const UNSAFE_URL_SCHEME_RE = /^\s*(?:javascript|data|vbscript):/i;
+
+/**
+ * Escape only tag-*start* `<` (one immediately followed by a letter, `!`, `?`
+ * or `/`) so raw HTML can't form, while leaving a `<` used as a less-than /
+ * math operator and markdown `>` blockquotes intact. Fenced and inline code
+ * are skipped — `marked`'s renderers already escape their contents, so a
+ * literal `<script>` written inside backticks stays safe and verbatim.
+ */
+function escapeRawHtmlOutsideCode(content: string): string {
+  const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
+  const escapeTags = (s: string) => s.replace(/<(?=[a-zA-Z!/?])/g, "&lt;");
+  let out = "";
+  let last = 0;
+  for (const match of content.matchAll(codeRe)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    out += escapeTags(content.slice(last, start));
+    out += match[0];
+    last = end;
+  }
+  out += escapeTags(content.slice(last));
+  return out;
+}
+
+/** Neutralize dangerous URL schemes in rendered `<a href>` attributes. */
+function stripUnsafeHrefs(html: string): string {
+  return html.replace(
+    /(<a\b[^>]*?\shref=")([^"]*)(")/gi,
+    (whole, pre: string, url: string, post: string) =>
+      UNSAFE_URL_SCHEME_RE.test(url) ? `${pre}#${post}` : whole
+  );
+}
+
+/**
+ * Render UNTRUSTED markdown (an LLM chat answer) to HTML safe for `{@html}`.
+ *
+ * Same pipeline as {@link renderBlock} — GFM, code fences with line numbers,
+ * KaTeX, and the `[[page link]]` / `#tag` / `((block ref))` transforms — but
+ * first neutralizes raw HTML in the source (so a model can't emit
+ * `<script>` / `<img onerror=…>` / `<iframe>` etc.) and strips dangerous URL
+ * schemes (`javascript:`, `data:`, `vbscript:`) from any markdown link.
+ *
+ * `marked` is deliberately NOT configured to sanitize (note content is the
+ * user's own and may legitimately contain raw HTML), so anything a model
+ * produced MUST go through this rather than `renderBlock` directly. KaTeX
+ * output is safe here because `trust` defaults to false, disabling `\href`
+ * and friends.
+ */
+export function renderAssistantMarkdown(content: string): string {
+  const neutralized = escapeRawHtmlOutsideCode(content);
+  return stripUnsafeHrefs(renderBlock(neutralized));
+}
+
 const CALLOUT_BLOCK_RE = new RegExp(
   `^\\s*#\\+BEGIN_(${CALLOUT_KINDS.join("|")})\\s*\\n([\\s\\S]*?)\\n?#\\+END_(${CALLOUT_KINDS.join("|")})\\s*$`,
   "i"

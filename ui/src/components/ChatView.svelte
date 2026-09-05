@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { open as openExternal } from "@tauri-apps/plugin-shell";
+  import { renderAssistantMarkdown } from "../lib/markdown";
   import {
     aiAskStream,
     aiCancelStream,
@@ -109,9 +111,17 @@
     const unlistenPromise = listen("ai-index-updated", () => {
       void refreshIndexStatus();
     });
+
+    // Delegated click handling for links inside rendered assistant markdown.
+    // Attached programmatically (rather than an inline handler on the div) so
+    // a container-level listener doesn't trip the a11y lints meant for
+    // interactive elements.
+    chatScroll?.addEventListener("click", handleRenderedClick);
+
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
       mq.removeEventListener("change", onMotionChange);
+      chatScroll?.removeEventListener("click", handleRenderedClick);
       stopClock();
     };
   });
@@ -206,6 +216,48 @@
         },
       })
     );
+  }
+
+  // Delegated handler for links inside rendered assistant markdown. Mirrors
+  // PageContent/BlockEditor: `[[page]]`/`#tag` anchors (emitted by
+  // `renderAssistantMarkdown` as `<a class="page-link" data-page>` /
+  // `<a class="tag" data-tag>`) dispatch the existing `navigate-page` event;
+  // external `http(s)` links open in the system browser via the shell plugin
+  // instead of navigating the webview away from the app. Everything else is
+  // swallowed (preventDefault) so an unexpected/blocked scheme can't navigate.
+  function handleRenderedClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement).closest("a");
+    if (!anchor) return;
+
+    if (anchor.classList.contains("page-link")) {
+      e.preventDefault();
+      const pageName = anchor.dataset.page;
+      if (pageName) {
+        window.dispatchEvent(
+          new CustomEvent("navigate-page", { detail: { pageName } })
+        );
+      }
+      return;
+    }
+
+    if (anchor.classList.contains("tag")) {
+      e.preventDefault();
+      const tag = anchor.dataset.tag;
+      if (tag) {
+        window.dispatchEvent(
+          new CustomEvent("navigate-page", { detail: { pageName: tag } })
+        );
+      }
+      return;
+    }
+
+    // Any other anchor is an ordinary markdown link. Never let it navigate
+    // the webview; open real web links externally.
+    e.preventDefault();
+    const href = anchor.getAttribute("href") ?? "";
+    if (/^https?:\/\//i.test(href)) {
+      openExternal(href).catch(() => {});
+    }
   }
 
   function focusInput(select = false) {
@@ -426,13 +478,24 @@
 
   <div class="chat-log" bind:this={chatScroll}>
     {#each messages as m, i}
+      {@const streamingThis =
+        isStreaming && m.role === "assistant" && i === messages.length - 1}
       <div class="msg" class:user={m.role === "user"}>
         <div class="msg-role">{m.role === "user" ? "You" : "Grafium AI"}</div>
-        <div class="msg-content">{m.content}{#if isStreaming && m.role === "assistant" && i === messages.length - 1}<span
-              class="type-cursor"
-              class:animate={status.animate}
-              aria-hidden="true"
-            ></span>{/if}</div>
+        {#if m.role === "assistant" && !streamingThis}
+          <!-- Completed assistant answers render as markdown (bold, lists,
+               code, KaTeX, clickable [[links]]/#tags). User input and the
+               in-flight streaming bubble stay plain text — rendering partial
+               markdown per token would reparse on every delta and could show
+               broken half-syntax. -->
+          <div class="msg-content markdown">{@html renderAssistantMarkdown(m.content)}</div>
+        {:else}
+          <div class="msg-content">{m.content}{#if streamingThis}<span
+                class="type-cursor"
+                class:animate={status.animate}
+                aria-hidden="true"
+              ></span>{/if}</div>
+        {/if}
         {#if m.role === "assistant" && m.sources && m.sources.length > 0}
           <div class="msg-sources">
             {#each m.sources as source}
@@ -577,6 +640,126 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.45;
+  }
+
+  /* Rendered assistant markdown: block layout instead of pre-wrap, plus the
+     same link/code/list styling page content uses (scoped via :global since
+     the HTML is injected with {@html}). */
+  .msg-content.markdown {
+    white-space: normal;
+  }
+
+  .msg-content.markdown :global(p) {
+    margin: 0 0 8px;
+  }
+
+  .msg-content.markdown :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .msg-content.markdown :global(ul),
+  .msg-content.markdown :global(ol) {
+    margin: 4px 0 8px;
+    padding-left: 22px;
+  }
+
+  .msg-content.markdown :global(li) {
+    margin: 2px 0;
+  }
+
+  .msg-content.markdown :global(h1),
+  .msg-content.markdown :global(h2),
+  .msg-content.markdown :global(h3),
+  .msg-content.markdown :global(h4) {
+    margin: 12px 0 6px;
+    line-height: 1.3;
+  }
+
+  .msg-content.markdown :global(blockquote) {
+    margin: 6px 0;
+    padding-left: 12px;
+    border-left: 3px solid var(--border);
+    color: var(--text-secondary);
+  }
+
+  .msg-content.markdown :global(code) {
+    background: var(--bg-code);
+    padding: 1px 4px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.9em;
+  }
+
+  .msg-content.markdown :global(.code-block-wrapper) {
+    position: relative;
+    background: var(--bg-code);
+    border-radius: 6px;
+    margin: 6px 0;
+    overflow: hidden;
+  }
+
+  .msg-content.markdown :global(.code-lang) {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .msg-content.markdown :global(.code-block-pre) {
+    margin: 0;
+    padding: 10px 12px;
+    background: none;
+    overflow-x: auto;
+    counter-reset: codeline;
+  }
+
+  .msg-content.markdown :global(.code-block-pre code) {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .msg-content.markdown :global(.code-line) {
+    display: block;
+    counter-increment: codeline;
+  }
+
+  .msg-content.markdown :global(.code-line)::before {
+    content: counter(codeline);
+    display: inline-block;
+    width: 2em;
+    margin-right: 1em;
+    text-align: right;
+    color: var(--text-muted);
+    user-select: none;
+  }
+
+  .msg-content.markdown :global(.page-link),
+  .msg-content.markdown :global(a) {
+    color: var(--text-link);
+    cursor: pointer;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+
+  .msg-content.markdown :global(.page-link:hover),
+  .msg-content.markdown :global(a:hover) {
+    color: var(--text-link-hover);
+    border-bottom-color: var(--text-link-hover);
+  }
+
+  .msg-content.markdown :global(.tag) {
+    color: var(--accent-secondary);
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .msg-content.markdown :global(img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
   }
 
   .msg-sources {
