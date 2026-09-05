@@ -30,6 +30,10 @@ use llama_cpp_2::sampling::LlamaSampler;
 
 use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
 use crate::ai::config::LocalLlmSettings;
+use crate::ai::gpu_fit::{
+    self, detect_free_vram_bytes, detect_free_vram_bytes_best, vram_safety_margin_bytes,
+    VRAM_SAFETY_MARGIN_MAX_BYTES, VRAM_SAFETY_MARGIN_MIN_BYTES,
+};
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
@@ -48,44 +52,6 @@ const DEFAULT_CTX_SIZE: u32 = 4096;
 /// than this can still opt in explicitly via `context_size` in Settings.
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
-/// Lower/upper bounds for the VRAM safety margin (see
-/// [`vram_safety_margin_bytes`]).
-const VRAM_SAFETY_MARGIN_MIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
-const VRAM_SAFETY_MARGIN_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
-
-/// Headroom to subtract from detected free VRAM before deciding whether a
-/// model fits, scaled with model size instead of a fixed constant.
-///
-/// The margin exists for the KV cache/context buffers (which aren't part of
-/// the model file's on-disk size) and for other GPU consumers (compositor,
-/// browser, a second app). A *fixed* 1.5 GiB — the previous value — is a bad
-/// fit at both ends: it's wastefully large for a tiny 1 GB model (demanding
-/// 2.5 GB free for something that needs ~1 GB) yet arguably too small for a
-/// 30 GB model whose KV cache alone can exceed 1.5 GiB. Scaling at ~20% of
-/// the model size, clamped to a sane [512 MiB, 2 GiB] band, tracks the KV
-/// cache's rough growth without ballooning.
-///
-/// Tradeoff to keep in mind if tuning: too *small* a margin risks a GPU OOM
-/// at generation time (KV cache grows with context length, which this can't
-/// see up front); too *large* needlessly pins capable models to CPU — the
-/// exact silent-slowdown bug this whole path exists to avoid. The band above
-/// was chosen conservatively; prefer raising the floor over the ceiling if a
-/// real GPU-OOM is observed.
-fn vram_safety_margin_bytes(model_size_bytes: u64) -> u64 {
-    (model_size_bytes / 5).clamp(VRAM_SAFETY_MARGIN_MIN_BYTES, VRAM_SAFETY_MARGIN_MAX_BYTES)
-}
-
-/// Number of times [`detect_free_vram_bytes_best`] samples free VRAM before
-/// giving up, and the pause between samples. A *single* reading at load time
-/// used to permanently pin the whole session to CPU whenever VRAM happened to
-/// be transiently busy (the embedding model mid-index, a previous instance
-/// still shutting down, a browser/game) — a silent 5–10× slowdown cached for
-/// the model's entire life. Sampling a few times and taking the *best* (max)
-/// free reading absorbs a brief dip so a transient consumer can't strand
-/// inference on the CPU.
-const VRAM_PROBE_ATTEMPTS: u32 = 3;
-const VRAM_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-
 /// Outcome of the GPU-offload decision, carried alongside the chosen
 /// `gpu_layers` so the load path can report *why* it landed on CPU vs GPU
 /// (surfaced to the UI via [`crate::ai::traits::AcceleratorStatus`]).
@@ -95,14 +61,15 @@ struct GpuDecision {
     model_size_bytes: Option<u64>,
 }
 
-/// Pure decision: given the model's on-disk size and the best observed free
-/// VRAM, does full offload fit (returns [`OFFLOAD_ALL_LAYERS`]) or not
-/// (returns `0` = CPU-only)? Split out from I/O so it can be unit-tested.
+/// Adapts the shared [`gpu_fit`] verdict onto llama.cpp's `n_gpu_layers`
+/// knob. The fit arithmetic itself deliberately lives in `gpu_fit` so that
+/// Settings' model picker warns using the *same* rule this loader applies —
+/// see that module's docs for why they must not diverge.
 fn gpu_layers_for_vram(model_size_bytes: u64, free_vram_bytes: u64) -> u32 {
-    if model_size_bytes + vram_safety_margin_bytes(model_size_bytes) > free_vram_bytes {
-        0
-    } else {
+    if gpu_fit::fits_in_vram(model_size_bytes, free_vram_bytes) {
         OFFLOAD_ALL_LAYERS
+    } else {
+        0
     }
 }
 
@@ -155,42 +122,6 @@ fn decide_gpu_layers(model_path: &Path) -> GpuDecision {
         free_vram_bytes,
         model_size_bytes,
     }
-}
-
-/// Free VRAM in bytes on the first NVIDIA GPU reported by `nvidia-smi`, or
-/// `None` if the tool isn't installed / no GPU is reported / its output
-/// can't be parsed.
-fn detect_free_vram_bytes() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let first_line = text.lines().next()?.trim();
-    let free_mib: u64 = first_line.parse().ok()?;
-    Some(free_mib * 1024 * 1024)
-}
-
-/// Samples [`detect_free_vram_bytes`] up to [`VRAM_PROBE_ATTEMPTS`] times and
-/// returns the *maximum* free reading seen, so a transient VRAM dip at the
-/// instant of load can't pin the session to CPU. Returns `None` only if no
-/// probe ever succeeded (no `nvidia-smi` / unparsable). The probe is cheap
-/// and bounded, so it always samples the full budget rather than stopping
-/// early on the first good reading.
-fn detect_free_vram_bytes_best() -> Option<u64> {
-    let mut best: Option<u64> = None;
-    for attempt in 0..VRAM_PROBE_ATTEMPTS {
-        if let Some(free) = detect_free_vram_bytes() {
-            best = Some(best.map_or(free, |b| b.max(free)));
-        }
-        if attempt + 1 < VRAM_PROBE_ATTEMPTS {
-            std::thread::sleep(VRAM_PROBE_INTERVAL);
-        }
-    }
-    best
 }
 
 /// Multiplier applied to a GGUF file's on-disk size to estimate the *host

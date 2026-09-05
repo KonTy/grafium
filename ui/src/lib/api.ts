@@ -434,6 +434,11 @@ export interface LocalModelInfo {
   file_name: string;
   size_bytes: number;
   kind: "llm" | "whisper" | "embedding" | "reranker" | "unknown";
+  /** How this model is expected to perform on the current GPU. Only
+   *  meaningful for `kind: "llm"`; other kinds always report `"unknown"`. */
+  gpu_fit: "fits" | "tight" | "cpu_only" | "unknown";
+  /** Plain-English rationale for `gpu_fit`, safe to render verbatim. */
+  gpu_fit_detail: string;
 }
 
 export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {
