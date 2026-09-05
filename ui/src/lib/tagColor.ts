@@ -41,12 +41,15 @@ const encoder =
 /**
  * Normalize a raw tag token to the key we hash: strip a leading `#`, lower-case
  * for case-insensitive identity, trim whitespace, and keep only the first
- * hierarchy segment (split on `/` or `\`, matching the backend tag parser). So
- * `#Work/Urgent`, `work/later` and `WORK` all normalize to `work`.
+ * hierarchy segment (split on `/` or `\`, matching the backend tag parser, which
+ * canonicalizes `\` to `/`). Empty segments are skipped, so a leading separator
+ * (`#/foo`, `#\foo`) still hashes from `foo` rather than collapsing every
+ * such tag onto the empty-key hue. So `#Work/Urgent`, `work\later`, `/work` and
+ * `WORK` all normalize to `work`.
  */
 export function tagHashKey(tag: string): string {
   const trimmed = tag.trim().replace(/^#+/, "");
-  const firstSegment = trimmed.split(/[\\/]/)[0];
+  const firstSegment = trimmed.split(/[\\/]/).filter(Boolean)[0] ?? "";
   return firstSegment.toLowerCase();
 }
 

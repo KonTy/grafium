@@ -72,6 +72,29 @@ renderer.image = function ({ href, title, text }: { href: string; title?: string
   return `<img class="fc-img" loading="lazy" src="${src}" alt="${alt}"${titleAttr}>`;
 };
 
+// Render links so external `http(s)` destinations are distinct from internal
+// navigation *without relying on colour*: they leave the app, so they get the
+// `.external-link` class, the accent-cyan token AND a persistent outbound-arrow
+// marker (↗). The arrow is the affordance that survives colour-vision
+// deficiency / greyscale, where cyan can converge with other link hues (guarded
+// by themeContrast.test.ts). Internal `[[page]]` / `#tag` / `((ref))` anchors
+// are separate inline tokens and never reach this renderer.
+renderer.link = function (
+  this: any,
+  { href, title, tokens }: { href: string; title?: string | null; tokens: unknown[] }
+): string {
+  const text = this.parser.parseInline(tokens);
+  const url = !href || UNSAFE_URL_SCHEME_RE.test(href) ? "#" : href;
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  if (/^https?:\/\//i.test(url)) {
+    return (
+      `<a class="external-link" style="color:var(--accent-cyan)" href="${escapeHtml(url)}"${titleAttr}>` +
+      `${text}<span class="external-link-icon" aria-hidden="true">↗</span></a>`
+    );
+  }
+  return `<a href="${escapeHtml(url)}"${titleAttr}>${text}</a>`;
+};
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
@@ -80,12 +103,91 @@ function escapeHtml(str: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// Canonicalize tag / page hierarchy separators the way the backend does
+// (core/src/parser/links.rs `normalize_title`: `\` → `/`). The navigation
+// target, the displayed text and the colour hash must all use the same
+// canonical form, otherwise a tag like `#test\child` would hash/display one way
+// but click through to (and could create) a different `test\child` page.
+function normalizeHierarchy(name: string): string {
+  return name.replace(/\\/g, "/");
+}
+
 // Configure marked for block rendering
 marked.use({
   breaks: true,
   gfm: true,
   renderer,
 });
+
+// `[[page links]]`, `#tags` and `((block refs))` are implemented as proper
+// marked *inline tokenizers* rather than a pre-parse regex over the raw source.
+// This is what keeps them from corrupting valid Markdown: custom inline
+// extensions run at each cursor position BEFORE the built-in tokenizers, so
+//   * the built-in `link` tokenizer still consumes `[text](url)` wholesale —
+//     a `#fragment` inside a link destination is never seen as a tag;
+//   * fenced (``` and ~~~), indented and inline (single/multi-backtick) code is
+//     tokenized by the block/codespan tokenizers and never inline-lexed, so
+//     `#tag`-like syntax written inside any code form survives verbatim.
+// Colour still flows entirely through the theme token system (no raw hex):
+// `#tags` get a deterministic per-name hue via tagColor.ts; `((block refs))`
+// use --accent-purple so they read as a distinct link type from `[[page links]]`
+// (which keep --text-link).
+const pageLinkExtension = {
+  name: "pageLink",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.indexOf("[[");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const m = /^\[\[([^\]\n]+)\]\]/.exec(src);
+    if (!m) return undefined;
+    return { type: "pageLink", raw: m[0], name: m[1] };
+  },
+  renderer(token: { name: string }) {
+    const target = escapeHtml(normalizeHierarchy(token.name));
+    return `<a class="page-link" data-page="${target}">${target}</a>`;
+  },
+};
+
+const tagExtension = {
+  name: "tag",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.search(/#[a-zA-Z0-9_/\\-]/);
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const m = /^#([a-zA-Z0-9_/\\-]+)/.exec(src);
+    if (!m) return undefined;
+    return { type: "tag", raw: m[0], name: m[1] };
+  },
+  renderer(token: { name: string }) {
+    const norm = normalizeHierarchy(token.name);
+    const safe = escapeHtml(norm);
+    return `<a class="tag" data-tag="${safe}" style="color:${tagColorVar(norm)}">#${safe}</a>`;
+  },
+};
+
+const blockRefExtension = {
+  name: "blockRef",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.indexOf("((");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const m = /^\(\(([^)\n]+)\)\)/.exec(src);
+    if (!m) return undefined;
+    return { type: "blockRef", raw: m[0], ref: m[1] };
+  },
+  renderer(token: { ref: string }) {
+    const ref = escapeHtml(token.ref);
+    return `<span class="block-ref" data-ref="${ref}" style="color:var(--accent-purple)">((${ref}))</span>`;
+  },
+};
+
+marked.use({ extensions: [pageLinkExtension, tagExtension, blockRefExtension] });
 
 // Simple LRU cache to avoid re-parsing unchanged blocks
 const cache = new Map<string, string>();
@@ -145,29 +247,6 @@ function renderMathOutsideCodeFences(markdown: string): string {
 }
 
 /**
- * Apply an inline transform only to text OUTSIDE fenced code blocks and inline
- * code spans, so that syntax like `#tag`, `[[link]]` or `((ref))` written
- * inside backticks is preserved verbatim (and not turned into HTML that marked
- * then escapes and shows as literal text).
- */
-function transformOutsideCode(markdown: string, fn: (segment: string) => string): string {
-  const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
-  let out = "";
-  let last = 0;
-
-  for (const match of markdown.matchAll(codeRe)) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    out += fn(markdown.slice(last, start));
-    out += match[0];
-    last = end;
-  }
-
-  out += fn(markdown.slice(last));
-  return out;
-}
-
-/**
  * Render a block's markdown content to HTML.
  * Handles [[page links]], #tags, ((block refs)), checkboxes, etc.
  */
@@ -216,21 +295,6 @@ function stripUnsafeHrefs(html: string): string {
     /(<a\b[^>]*?\shref=")([^"]*)(")/gi,
     (whole, pre: string, url: string, post: string) =>
       UNSAFE_URL_SCHEME_RE.test(url) ? `${pre}#${post}` : whole
-  );
-}
-
-/**
- * Mark external `http(s)` links (produced by marked from `[text](url)`) so they
- * read as visually distinct from internal navigation — they leave the app. They
- * get a `.external-link` class and an accent-cyan colour token, setting them
- * apart from `[[page links]]` (--text-link), `#tags` (hashed accent) and
- * `((block refs))` (--accent-purple). Internal `[[…]]`/`#…` anchors are emitted
- * without an `href`, so this only ever touches real web links.
- */
-function markExternalLinks(html: string): string {
-  return html.replace(
-    /<a\s+href="(https?:\/\/[^"]+)"/gi,
-    '<a class="external-link" style="color:var(--accent-cyan)" href="$1"'
   );
 }
 
@@ -285,32 +349,10 @@ function renderMarkdownContent(content: string): string {
   // so that standard markdown links like [text](url) render correctly.
   processed = processed.replace(/\\([[\]])/g, "$1");
 
-  // Transform [[page links]], #tags and ((block refs)) — but only outside code
-  // spans/fences so `#tag`-style examples inside backticks stay verbatim.
-  //
-  // Colour flows entirely through the theme token system (no raw hex):
-  //   * #tags get a deterministic, per-name hue (var(--accent-<hue>) chosen by
-  //     hashing the tag — see tagColor.ts) so a tag is always the same colour
-  //     and hierarchical tags share their parent's hue. The tag pattern matches
-  //     the backend parser (allowing `/` and `\` for hierarchy).
-  //   * ((block refs)) use --accent-purple so they read as a distinct link type
-  //     from [[page links]] (which keep --text-link).
-  processed = transformOutsideCode(processed, (segment) => {
-    return segment
-      .replace(
-        /\[\[([^\]]+)\]\]/g,
-        '<a class="page-link" data-page="$1">$1</a>'
-      )
-      .replace(
-        /#([a-zA-Z0-9_/\\-]+)/g,
-        (_m, name: string) =>
-          `<a class="tag" data-tag="${name}" style="color:${tagColorVar(name)}">#${name}</a>`
-      )
-      .replace(
-        /\(\(([^)]+)\)\)/g,
-        '<span class="block-ref" data-ref="$1" style="color:var(--accent-purple)">(($1))</span>'
-      );
-  });
+  // NOTE: [[page links]], #tags and ((block refs)) are NOT transformed here.
+  // They are registered as marked inline tokenizers (see pageLinkExtension /
+  // tagExtension / blockRefExtension above) so they only ever apply to real
+  // text tokens — never to link destinations or any code form.
 
   // Handle task markers
   processed = processed.replace(/^TODO\s+/i, '<span class="task-marker todo">TODO</span> ');
@@ -336,9 +378,9 @@ function renderMarkdownContent(content: string): string {
     '<span class="task-date deadline" title="Deadline">⏰ $1</span>'
   );
 
-  // Use full marked.parse for complete markdown support
+  // Use full marked.parse for complete markdown support. Inline tokenizers
+  // handle [[page]] / #tag / ((ref)); renderer.link handles external links.
   let html = marked.parse(processed) as string;
-  html = markExternalLinks(html);
 
   // Strip wrapping <p>...</p> for single-paragraph content to avoid extra spacing
   const trimmed = html.trim();

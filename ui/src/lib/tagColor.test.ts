@@ -25,6 +25,20 @@ describe("tagHashKey", () => {
     expect(tagHashKey("#")).toBe("");
     expect(tagHashKey("")).toBe("");
   });
+
+  it("skips leading empty segments so a leading separator still hashes the family", () => {
+    expect(tagHashKey("/work")).toBe("work");
+    expect(tagHashKey("#/work")).toBe("work");
+    expect(tagHashKey("\\work")).toBe("work");
+    expect(tagHashKey("#/work/urgent")).toBe("work");
+  });
+
+  it("normalizes separator-only tags to the empty key", () => {
+    expect(tagHashKey("/")).toBe("");
+    expect(tagHashKey("#/")).toBe("");
+    expect(tagHashKey("//")).toBe("");
+    expect(tagHashKey("#\\/")).toBe("");
+  });
 });
 
 describe("fnv1a", () => {
@@ -74,6 +88,15 @@ describe("tagHue", () => {
     expect(tagHue("work/later")).toBe(parent);
     expect(tagHue("#work/2024/q1")).toBe(parent);
     expect(tagHue("work\\archived")).toBe(parent);
+  });
+
+  it("does not collapse leading-separator tags onto the empty-key hue", () => {
+    // A leading `/` used to make every such tag hash the empty parent key and
+    // share one colour. Now the first non-empty segment decides the hue.
+    expect(tagHue("#/work")).toBe(tagHue("work"));
+    expect(tagHue("/home")).toBe(tagHue("home"));
+    const leading = ["/work", "/home", "/health", "/finance", "/reading", "/music"];
+    expect(new Set(leading.map(tagHue)).size).toBeGreaterThan(1);
   });
 
   it("distinguishes different families (not all one colour)", () => {

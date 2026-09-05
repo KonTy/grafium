@@ -52,3 +52,59 @@ describe("markdown tag colouring", () => {
     expect(html).toContain(`style="color:${tagColorVar("concept")}"`);
   });
 });
+
+describe("markdown structure safety (issue #2 — no corruption)", () => {
+  it("does not turn a link-destination #fragment into a tag", () => {
+    const html = renderBlock("[docs](https://example.com/#section)");
+    // The whole thing stays one external link, fragment preserved in href…
+    expect(html).toContain('class="external-link"');
+    expect(html).toContain('href="https://example.com/#section"');
+    // …with no spurious tag and no leftover literal markdown.
+    expect(html).not.toContain('class="tag"');
+    expect(html).not.toContain("](https");
+  });
+
+  it("leaves #tags / [[links]] / ((refs)) inside ``` fenced code verbatim", () => {
+    const html = renderBlock("```\n#work and [[Page]] and ((ref))\n```");
+    expect(html).not.toContain('class="tag"');
+    expect(html).not.toContain('class="page-link"');
+    expect(html).not.toContain('class="block-ref"');
+    expect(html).toContain("code-block-wrapper");
+  });
+
+  it("leaves #tags inside ~~~ fenced code verbatim", () => {
+    const html = renderBlock("~~~\n#work\n~~~");
+    expect(html).not.toContain('class="tag"');
+    expect(html).toContain("code-block-wrapper");
+  });
+
+  it("leaves #tags inside an indented code block verbatim", () => {
+    const html = renderBlock("    #work is indented code\n");
+    expect(html).not.toContain('class="tag"');
+  });
+
+  it("leaves #tags inside single- and double-backtick spans verbatim", () => {
+    const single = renderBlock("use `#work` inline");
+    expect(single).not.toContain('class="tag"');
+    expect(single).toContain("<code>#work</code>");
+    const dbl = renderBlock("use ``#work`` inline");
+    expect(dbl).not.toContain('class="tag"');
+  });
+
+  it("still colours a real #tag written right after a code span", () => {
+    const html = renderBlock("`code` then #work");
+    expect(html).toContain('data-tag="work"');
+  });
+});
+
+describe("tag hierarchy canonicalization (issue #3)", () => {
+  it("canonicalizes a backslash tag's nav target and hue to `/`", () => {
+    const html = renderBlock("#test\\child done");
+    // data-tag matches the backend's canonical `test/child` page, so a click
+    // navigates to (and never creates) the right page.
+    expect(html).toContain('data-tag="test/child"');
+    expect(html).not.toContain("test\\child");
+    // Colour is shared with the `#test` family.
+    expect(html).toContain(`color:${tagColorVar("test")}`);
+  });
+});

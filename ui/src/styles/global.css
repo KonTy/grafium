@@ -295,3 +295,16 @@ body {
 .callout-warning {
   --callout-accent: var(--accent-yellow);
 }
+
+/* External-link affordance: a persistent outbound-arrow marker (emitted by the
+   markdown renderer next to http(s) links). This is a *non-colour* cue, so an
+   external link is identifiable without relying on its accent-cyan colour —
+   important under colour-vision deficiency and where link underlines are
+   stripped (e.g. Chat). It inherits the link's colour and is hidden from AT. */
+.external-link-icon {
+  font-size: 0.8em;
+  margin-inline-start: 0.15em;
+  vertical-align: baseline;
+  text-decoration: none;
+  line-height: 1;
+}
