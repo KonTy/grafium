@@ -10,6 +10,7 @@
 pub mod config;
 pub mod embeddings;
 pub mod providers;
+pub mod reasoning;
 pub mod references;
 pub mod traits;
 pub mod web_research;
