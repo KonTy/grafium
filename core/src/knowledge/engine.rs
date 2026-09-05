@@ -1096,64 +1096,11 @@ impl KnowledgeEngine {
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
         // ── Part 1: From your notes ─────────────────────────────────────────
-        // The header is answer text, streamed first so the reader immediately
-        // sees the two-part structure forming.
-        on_event(AskStreamEvent::Delta("## From your notes\n\n"));
-        on_event(AskStreamEvent::Phase(AskPhase::Retrieving));
-
-        let notes_request = self
-            .build_notes_only_request(db, llm.as_ref(), question, graph_id)
+        // Shared with the Deep Research flow so both produce a byte-identical
+        // notes section (see [`Self::stream_notes_arm`]).
+        let notes_sources = self
+            .stream_notes_arm(db, llm.as_ref(), question, graph_id, &cancel, on_event)
             .await?;
-
-        let mut notes_sources = Vec::new();
-        match notes_request {
-            // Gate rejected everything: be honest about the empty result rather
-            // than letting the model paper over it with general knowledge —
-            // that's what Part 2 is for.
-            None => on_event(AskStreamEvent::Delta(
-                "I couldn't find anything about this in your notes.",
-            )),
-            Some(request) => {
-                on_event(AskStreamEvent::Phase(AskPhase::ProcessingPrompt));
-                let options = crate::ai::traits::CompletionOptions {
-                    max_tokens: Some(request.output_tokens as u32),
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
-                let mut phase = AskPhase::ProcessingPrompt;
-                {
-                    let mut on_token = |piece: &str| match filter.push(piece) {
-                        crate::ai::reasoning::StreamStep::Answer(delta) => {
-                            if phase != AskPhase::Generating {
-                                phase = AskPhase::Generating;
-                                on_event(AskStreamEvent::Phase(AskPhase::Generating));
-                            }
-                            on_event(AskStreamEvent::Delta(&delta));
-                        }
-                        crate::ai::reasoning::StreamStep::Thinking => {
-                            if phase != AskPhase::Thinking {
-                                phase = AskPhase::Thinking;
-                                on_event(AskStreamEvent::Phase(AskPhase::Thinking));
-                            }
-                        }
-                        crate::ai::reasoning::StreamStep::Idle => {}
-                    };
-                    llm.complete_stream(&request.messages, &options, &mut on_token)
-                        .await?;
-                }
-                match filter.finish() {
-                    crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
-                        notes_sources = build_sources(&request.entries, &answer);
-                    }
-                    // Reasoning models can burn their whole budget thinking; show
-                    // the standard placeholder instead of a blank notes section.
-                    crate::ai::reasoning::ThinkStripResult::ReasoningOnly => on_event(
-                        AskStreamEvent::Delta(crate::ai::reasoning::REASONING_ONLY_MESSAGE),
-                    ),
-                }
-            }
-        }
 
         // A Stop during the notes arm means the user doesn't want the web pass
         // either — return what we have without starting it.
@@ -1211,8 +1158,188 @@ impl KnowledgeEngine {
         })
     }
 
-    /// Shared planning for [`Self::ask`] and [`Self::ask_stream`]: hybrid
-    /// retrieval, relevance gating, mode selection, context budgeting and
+    /// Stream the shared "From your notes" arm (Part 1 of the two-part flows):
+    /// emit the header, run gated hybrid retrieval, stream the notes-only answer
+    /// with `<think>` filtering, and return the sources the model cited.
+    ///
+    /// Extracted so [`Self::ask_stream_with_web_using`] and
+    /// [`Self::ask_stream_with_deep_research_using`] produce an identical notes
+    /// section — the only thing that differs between "research on the web" and
+    /// "deep research" is the Part 2 engine, and duplicating ~60 lines of
+    /// streaming/`<think>`-handling to say that would be a maintenance trap.
+    async fn stream_notes_arm(
+        &self,
+        db: &crate::db::Database,
+        llm: &dyn LlmProvider,
+        question: &str,
+        graph_id: Option<&str>,
+        cancel: &Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<Vec<Source>> {
+        // The header is answer text, streamed first so the reader immediately
+        // sees the two-part structure forming.
+        on_event(AskStreamEvent::Delta("## From your notes\n\n"));
+        on_event(AskStreamEvent::Phase(AskPhase::Retrieving));
+
+        let notes_request = self
+            .build_notes_only_request(db, llm, question, graph_id)
+            .await?;
+
+        let mut notes_sources = Vec::new();
+        match notes_request {
+            // Gate rejected everything: be honest about the empty result rather
+            // than letting the model paper over it with general knowledge —
+            // that's what Part 2 is for.
+            None => on_event(AskStreamEvent::Delta(
+                "I couldn't find anything about this in your notes.",
+            )),
+            Some(request) => {
+                on_event(AskStreamEvent::Phase(AskPhase::ProcessingPrompt));
+                let options = crate::ai::traits::CompletionOptions {
+                    max_tokens: Some(request.output_tokens as u32),
+                    cancel: cancel.clone(),
+                    ..Default::default()
+                };
+                let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
+                let mut phase = AskPhase::ProcessingPrompt;
+                {
+                    let mut on_token = |piece: &str| match filter.push(piece) {
+                        crate::ai::reasoning::StreamStep::Answer(delta) => {
+                            if phase != AskPhase::Generating {
+                                phase = AskPhase::Generating;
+                                on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                            }
+                            on_event(AskStreamEvent::Delta(&delta));
+                        }
+                        crate::ai::reasoning::StreamStep::Thinking => {
+                            if phase != AskPhase::Thinking {
+                                phase = AskPhase::Thinking;
+                                on_event(AskStreamEvent::Phase(AskPhase::Thinking));
+                            }
+                        }
+                        crate::ai::reasoning::StreamStep::Idle => {}
+                    };
+                    llm.complete_stream(&request.messages, &options, &mut on_token)
+                        .await?;
+                }
+                match filter.finish() {
+                    crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
+                        notes_sources = build_sources(&request.entries, &answer);
+                    }
+                    // Reasoning models can burn their whole budget thinking; show
+                    // the standard placeholder instead of a blank notes section.
+                    crate::ai::reasoning::ThinkStripResult::ReasoningOnly => on_event(
+                        AskStreamEvent::Delta(crate::ai::reasoning::REASONING_ONLY_MESSAGE),
+                    ),
+                }
+            }
+        }
+        Ok(notes_sources)
+    }
+
+    /// The two-part "notes + Deep Research" answer: the same "From your notes"
+    /// section as [`Self::ask_stream_with_web`], followed by a "From the web"
+    /// section produced by the multi-round [`crate::research::DeepResearchEngine`]
+    /// instead of the single-round web-research pass.
+    ///
+    /// It intentionally shares the notes arm, the `AskStreamOutcome` shape, and
+    /// the `render_web_section`/`describe_web_failure` rendering with the
+    /// single-round flow, so the UI renders a Deep Research answer with no new
+    /// rendering path. The one real difference — the multi-round loop — is
+    /// confined to Part 2, and its finer-grained phases (planning, assessing,
+    /// refining, synthesizing) are surfaced through the extra [`AskPhase`]
+    /// variants.
+    pub async fn ask_stream_with_deep_research(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        config: &crate::research::ResearchConfig,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<AskStreamOutcome> {
+        let browser = crate::scraping::HttpBrowserDriver::new();
+        self.ask_stream_with_deep_research_using(
+            db, question, graph_id, config, &browser, cancel, on_event,
+        )
+        .await
+    }
+
+    /// [`Self::ask_stream_with_deep_research`] with an injected browser, so tests
+    /// can drive the Deep Research arm from canned engine responses and pages
+    /// instead of the live network.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ask_stream_with_deep_research_using(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        config: &crate::research::ResearchConfig,
+        browser: &dyn crate::scraping::browser::BrowserDriver,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<AskStreamOutcome> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        // ── Part 1: From your notes (shared) ────────────────────────────────
+        let notes_sources = self
+            .stream_notes_arm(db, llm.as_ref(), question, graph_id, &cancel, on_event)
+            .await?;
+
+        // A Stop during the notes arm means the user doesn't want the web pass
+        // either — return what we have without starting it.
+        if cancel_requested(&cancel) {
+            return Ok(AskStreamOutcome {
+                sources: notes_sources,
+                trailing_message: None,
+                web_citations: Vec::new(),
+            });
+        }
+
+        // ── Part 2: From the web (multi-round Deep Research) ─────────────────
+        on_event(AskStreamEvent::Delta("\n\n## From the web\n\n"));
+
+        let mut web_citations = Vec::new();
+        let research = {
+            // The agent emits structured phase/note progress; map its phases
+            // onto the ask flow's phases and forward its notes verbatim so the
+            // status label shows the live per-source / per-round play-by-play.
+            let mut on_progress = |progress: crate::research::ResearchProgress| match progress {
+                crate::research::ResearchProgress::Phase(phase) => {
+                    on_event(AskStreamEvent::Phase(map_research_phase(phase)));
+                }
+                crate::research::ResearchProgress::Note(note) => {
+                    on_event(AskStreamEvent::Note(note));
+                }
+            };
+            let engine = crate::research::DeepResearchEngine::new(llm.as_ref(), browser, config);
+            engine
+                .research_cancellable(question, cancel.clone(), &mut on_progress)
+                .await
+        };
+
+        match research {
+            Ok(result) => {
+                // Rendering the finished result is the answer-text phase, same
+                // as the single-round flow.
+                on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                on_event(AskStreamEvent::Delta(&render_web_section(&result)));
+                web_citations = result.citations;
+            }
+            // A cancelled arm is a deliberate Stop, not a failure — stay silent.
+            Err(_) if cancel_requested(&cancel) => {}
+            Err(e) => on_event(AskStreamEvent::Delta(&describe_web_failure(&e.to_string()))),
+        }
+
+        Ok(AskStreamOutcome {
+            sources: notes_sources,
+            trailing_message: None,
+            web_citations,
+        })
+    }
     /// prompt assembly — kept in one place so the blocking and streaming paths
     /// can never drift apart.
     async fn build_ask_request(
@@ -1731,6 +1858,18 @@ pub enum AskPhase {
     /// The web-research pass has chosen its sources and is fetching and reading
     /// them (the slowest part of a research run, gated by network latency).
     ReadingSources,
+    /// Deep Research is planning its search queries from the question (the
+    /// opening LLM step of the multi-round agentic loop,
+    /// [`KnowledgeEngine::ask_stream_with_deep_research`]).
+    Planning,
+    /// Deep Research is judging whether the sources gathered so far are enough
+    /// to answer the question — the step that decides whether to loop again.
+    Assessing,
+    /// Deep Research found the material insufficient and is proposing better
+    /// queries to fill the gap before searching again.
+    Refining,
+    /// Deep Research has enough and is writing the final cited answer.
+    Synthesizing,
 }
 
 impl AskPhase {
@@ -1743,6 +1882,10 @@ impl AskPhase {
             AskPhase::Generating => "generating",
             AskPhase::SearchingWeb => "searching_web",
             AskPhase::ReadingSources => "reading_sources",
+            AskPhase::Planning => "planning",
+            AskPhase::Assessing => "assessing",
+            AskPhase::Refining => "refining",
+            AskPhase::Synthesizing => "synthesizing",
         }
     }
 }
@@ -1867,6 +2010,22 @@ The user's notes (each prefixed with its [N] citation marker and date):\n\n{cont
 /// queries back to back, which is the exact burst engines throttle — so it is
 /// worth saying plainly that waiting will fix it, rather than implying
 /// something is broken.
+/// Map a [`crate::research::ResearchPhase`] onto the ask flow's [`AskPhase`] so
+/// a Deep Research run drives the same status label as an ordinary answer. The
+/// three loop-specific phases (assessing, refining, and the planning step) have
+/// dedicated `AskPhase` variants; search and read reuse the existing web-flow
+/// phases so the two flows look identical when they overlap.
+fn map_research_phase(phase: crate::research::ResearchPhase) -> AskPhase {
+    match phase {
+        crate::research::ResearchPhase::Planning => AskPhase::Planning,
+        crate::research::ResearchPhase::Searching => AskPhase::SearchingWeb,
+        crate::research::ResearchPhase::Reading => AskPhase::ReadingSources,
+        crate::research::ResearchPhase::Assessing => AskPhase::Assessing,
+        crate::research::ResearchPhase::Refining => AskPhase::Refining,
+        crate::research::ResearchPhase::Synthesizing => AskPhase::Synthesizing,
+    }
+}
+
 fn describe_web_failure(error: &str) -> String {
     let rate_limited = error.contains("429") || error.to_lowercase().contains("too many requests");
     if rate_limited {
@@ -3316,8 +3475,7 @@ mod tests {
     }
 
     #[test]
-    fn render_web_section_includes_answer_and_topics_and_is_never_blank() {
-        use crate::ai::web_research::{Citation, ResearchTopic, WebResearchResult};
+    fn render_web_section_includes_answer_and_topics_and_is_never_blank() {        use crate::ai::web_research::{Citation, ResearchTopic, WebResearchResult};
 
         let full = WebResearchResult {
             title_answer: Some("Short direct answer.".to_string()),
