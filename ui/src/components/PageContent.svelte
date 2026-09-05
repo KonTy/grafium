@@ -3,6 +3,8 @@
   import { SvelteMap } from "svelte/reactivity";
   import { tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
+  import CollectionMembers from "./CollectionMembers.svelte";
+  import PageMenu from "./PageMenu.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
@@ -21,6 +23,13 @@
   import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
   import { aiSummarizeSelection, wrapKnownTermsInText, type TagTerm } from "../lib/knowledge";
+  import {
+    collectionMembersFromBlocks,
+    getCollectionKind,
+    listCollections,
+    setPageCollection,
+    withMissingCommandFallback,
+  } from "../lib/pageTree";
   import { listen } from "@tauri-apps/api/event";
 
   interface Props {
@@ -74,6 +83,11 @@
   let backlinksRenderLimit = $state(BACKLINKS_PAGE_SIZE);
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
+  let collectionKind: string | null = $state(null);
+  let collectionMemberCount: number | undefined = $state(undefined);
+  let collectionStatus: "page" | "collection" | "loading" | "unavailable" | "error" = $state("loading");
+  let collectionBusy = $state(false);
+  let collectionRequest = 0;
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
   let collapsedIds: Set<string> = $state(new Set());
@@ -91,6 +105,7 @@
 
   const blockRenderState = $derived.by(() => buildBlockRenderState(blocks, collapsedIds));
   const visibleBlocks = $derived(blockRenderState.visibleBlocks);
+  const collectionMembers = $derived(collectionMembersFromBlocks(blocks));
   const virtualWindow = $derived.by(() => {
     const anchorIndex = windowAnchorBlockId
       ? blockRenderState.visibleIndexById.get(windowAnchorBlockId) ?? null
@@ -165,6 +180,7 @@
       if (!detail || detail.pageId !== pageId) return;
       void listBlocks(page.id).then((updated) => {
         blocks = updated;
+        refreshCollectionAfterMutation();
       });
     };
 
@@ -264,6 +280,7 @@
     if (page?.id) {
       setUndoCallback(page.id, (_action: UndoAction) => {
         void loadBlocks(currentPageLoad());
+        refreshCollectionAfterMutation();
       });
       return () => {
         removeUndoCallback(page.id);
@@ -282,6 +299,81 @@
       void loadHierarchy(request);
     }
   });
+
+  $effect(() => {
+    const pageId = page?.id;
+    if (!pageId || compact) {
+      collectionKind = null;
+      collectionMemberCount = undefined;
+      collectionStatus = "page";
+      return;
+    }
+    collectionKind = getCollectionKind(page.properties);
+    collectionMemberCount = undefined;
+    void loadCollection(pageId);
+  });
+
+  $effect(() => {
+    const pageId = page.id;
+    if (compact) return;
+    const refreshCollection = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId?: string }>).detail;
+      if (!detail?.pageId || detail.pageId === pageId) void loadCollection(pageId);
+    };
+    window.addEventListener("page-collection-refresh", refreshCollection);
+    return () => window.removeEventListener("page-collection-refresh", refreshCollection);
+  });
+
+  async function loadCollection(pageId: string) {
+    const request = ++collectionRequest;
+    collectionStatus = "loading";
+    try {
+      const result = await withMissingCommandFallback(
+        () => listCollections(),
+        [],
+      );
+      if (request !== collectionRequest || page.id !== pageId) return;
+      if (!result.available) {
+        collectionStatus = "unavailable";
+        return;
+      }
+      const summary = result.value.find((collection) => collection.id === pageId);
+      collectionKind = summary?.kind ?? null;
+      collectionMemberCount = summary?.member_count ?? 0;
+      collectionStatus = summary ? "collection" : "page";
+    } catch (error) {
+      if (request !== collectionRequest || page.id !== pageId) return;
+      collectionStatus = "error";
+      console.warn("[collection] Failed to load page collection:", error);
+    }
+  }
+
+  function refreshCollectionAfterMutation() {
+    if (!compact && collectionKind && collectionStatus !== "unavailable") {
+      void loadCollection(page.id);
+    }
+  }
+
+  async function updateCollection(kind: string | null) {
+    if (collectionBusy || collectionStatus === "loading" || collectionStatus === "unavailable") {
+      return;
+    }
+    collectionBusy = true;
+    try {
+      await setPageCollection(page.id, kind);
+      await loadCollection(page.id);
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    } catch (error) {
+      collectionStatus = "error";
+      console.warn("[collection] Failed to update page kind:", error);
+    } finally {
+      collectionBusy = false;
+    }
+  }
+
+  function navigateToCollectionMember(title: string) {
+    window.dispatchEvent(new CustomEvent("navigate-page", { detail: title }));
+  }
 
   async function loadBlocks(request: PageLoadRequest = currentPageLoad()) {
     try {
@@ -471,6 +563,9 @@
 
   function handleBlur(blockId: string) {
     focusedBlockId = null;
+    if (collectionStatus === "collection") {
+      void loadCollection(page.id);
+    }
     // Don't auto-delete if we're navigating to another block
     if (navigatingBlock) {
       navigatingBlock = false;
@@ -514,6 +609,7 @@
         const newBlock = await createBlock(page.id, parentId, insertOrder, "");
         const idx = blocks.findIndex((b) => b.id === blockId);
         blocks = [...blocks.slice(0, idx), newBlock, ...blocks.slice(idx)];
+        refreshCollectionAfterMutation();
 
         requestAnimationFrame(() => {
           focusedBlockId = newBlock.id;
@@ -545,6 +641,7 @@
       // Insert after current block in the array
       const idx = blocks.findIndex((b) => b.id === blockId);
       blocks = [...blocks.slice(0, idx + 1), newBlock, ...blocks.slice(idx + 1)];
+      refreshCollectionAfterMutation();
       // Focus the new block
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
@@ -594,6 +691,7 @@
       }
       // Insert all new blocks after the current block
       blocks = [...blocks.slice(0, idx + 1), ...newBlocks, ...blocks.slice(idx + 1)];
+      refreshCollectionAfterMutation();
       // Focus the last new block
       const lastNew = newBlocks[newBlocks.length - 1];
       requestAnimationFrame(() => {
@@ -614,6 +712,7 @@
       const lastOrder = blocks.length > 0 ? blocks[blocks.length - 1].order_index + 1 : 0;
       const newBlock = await createBlock(page.id, null, lastOrder, "");
       blocks = [...blocks, newBlock];
+      refreshCollectionAfterMutation();
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
         const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
@@ -640,6 +739,7 @@
     await deleteBlock(blockId);
     const idx = blocks.findIndex((b) => b.id === blockId);
     blocks = blocks.filter((b) => b.id !== blockId);
+    refreshCollectionAfterMutation();
     // Focus previous block
     const prevIdx = Math.max(0, idx - 1);
     if (blocks[prevIdx]) {
@@ -679,6 +779,7 @@
     if (typeof currentContent === "string" && currentContent !== block.content) {
       await persistBlockContentIfChanged(block, currentContent, (id, value) => updateBlock(id, value));
       blocks = [...blocks];
+      refreshCollectionAfterMutation();
     }
 
     console.log("[telemetry] indent start", JSON.stringify({
@@ -707,6 +808,7 @@
         block.parent_id = prevSibling.id;
         block.order_index = childCount;
         blocks = [...blocks];
+        refreshCollectionAfterMutation();
         console.log("[telemetry] indent in done", JSON.stringify({
           blockId: block.id,
           newParentId: block.parent_id,
@@ -760,6 +862,7 @@
       }
       blocks = plan.blocks;
       selectedBlockIds = keep;
+      refreshCollectionAfterMutation();
     } catch (e) {
       console.error("Failed to indent/outdent selection:", e);
     }
@@ -821,6 +924,7 @@
       blocks = remaining;
     }
     selectedBlockIds = new Set();
+    refreshCollectionAfterMutation();
   }
 
   let analyzingSelection = $state(false);
@@ -908,6 +1012,7 @@
       const insertAt = blocks.findIndex((b) => b.id === lastBlock.id);
       blocks = [...blocks.slice(0, insertAt + 1), ...created, ...blocks.slice(insertAt + 1)];
       selectedBlockIds = new Set();
+      refreshCollectionAfterMutation();
     } catch (e) {
       analyzeSelectionError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -1019,10 +1124,29 @@
 <svelte:window onkeydown={handleKeydownForSelection} onmouseup={handleSelectionMouseUp} />
 
 <div class="page-content" class:compact>
-  <h1 class="page-title">{page.title}</h1>
+  <div class="page-heading">
+    <h1 class="page-title">{page.title}</h1>
+    {#if !compact}
+      <PageMenu
+        {collectionStatus}
+        {collectionKind}
+        busy={collectionBusy}
+        onSetCollection={updateCollection}
+      />
+    {/if}
+  </div>
+
+  {#if !compact && collectionKind}
+    <CollectionMembers
+      kind={collectionKind}
+      members={collectionMembers}
+      memberCount={collectionMemberCount}
+      onNavigate={navigateToCollectionMember}
+    />
+  {/if}
 
   {#if loadError}
-    <div class="load-error" style="color: #f38ba8; background: #1e1e2e; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-family: monospace; font-size: 13px; white-space: pre-wrap;">
+    <div class="load-error">
       Error: {loadError}
     </div>
   {/if}
@@ -1170,8 +1294,18 @@
   .page-title {
     font-size: 32px;
     font-weight: 700;
-    margin-bottom: 8px;
+    margin: 0;
     color: var(--text-primary);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .page-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
   }
 
   /* Highlights are injected into rendered block HTML, so the selector has to
@@ -1193,6 +1327,17 @@
     flex-direction: column;
   }
 
+  .load-error {
+    margin-bottom: 16px;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-family: monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+
   .selection-toolbar {
     position: sticky;
     top: 0;
@@ -1200,8 +1345,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--bg-tertiary, #252535);
-    border: 1px solid var(--accent-color, #7c3aed);
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
     border-radius: 8px;
     padding: 8px 10px;
     margin-bottom: 8px;
@@ -1209,7 +1354,7 @@
 
   .selection-count {
     font-size: 12px;
-    color: var(--text-secondary, #aaa);
+    color: var(--text-secondary);
     margin-right: 4px;
   }
 
@@ -1218,13 +1363,13 @@
     padding: 4px 10px;
     border-radius: 6px;
     border: 1px solid var(--border);
-    background: var(--bg-secondary, #1a1a24);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     cursor: pointer;
   }
 
   .selection-toolbar-btn:hover:not(:disabled) {
-    border-color: var(--accent-color, #7c3aed);
+    border-color: var(--accent);
   }
 
   .selection-toolbar-btn:disabled {
@@ -1233,12 +1378,12 @@
   }
 
   .selection-toolbar-btn.danger {
-    color: var(--error-color, #e57373);
+    color: var(--danger);
   }
 
   .selection-toolbar-error {
     font-size: 12px;
-    color: var(--error-color, #e57373);
+    color: var(--danger);
     margin-bottom: 8px;
   }
 
@@ -1274,6 +1419,9 @@
 
   .compact .page-title {
     font-size: 16px;
+  }
+
+  .compact .page-heading {
     margin-bottom: 4px;
   }
 
@@ -1432,7 +1580,7 @@
     width: 100%;
     margin-top: 8px;
     padding: 8px 12px;
-    border: 1px solid var(--border-color, #444);
+    border: 1px solid var(--border);
     border-radius: 4px;
     background: none;
     color: var(--text-muted);
