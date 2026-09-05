@@ -114,6 +114,72 @@ const TRIGGER_PHRASES: &[&str] = &[
 /// end in "online" ("watch the video online", "is this available online")
 /// don't trip it. Bare "search"/"look" are excluded on purpose — "search my
 /// emails online" shouldn't leave the graph.
+/// Verbs that, when pointed at a web target, form a "go and look this up"
+/// imperative: "look on the internet what is X", "browse the web for X".
+///
+/// Kept separate from [`WRAP_VERBS`] because these lead the sentence rather
+/// than wrapping it, and the set is broader — a leading imperative is far less
+/// ambiguous than a trailing one, so it can afford verbs like "look" and
+/// "find" that would be unsafe at the end of a sentence.
+const IMPERATIVE_VERBS: &[&str] = &[
+    "look up",
+    "look",
+    "search for",
+    "search",
+    "find out",
+    "find",
+    "check",
+    "browse",
+    "research",
+    "google",
+    "read up",
+    "read",
+    "learn",
+    "use",
+    "query",
+    "consult",
+    "scan",
+];
+
+/// Filler that may sit between the verb and the web target: "look **up on**
+/// the internet", "search **for** the web".
+const IMPERATIVE_CONNECTORS: &[&str] = &[
+    "up", "for", "at", "on", "in", "into", "through", "over", "across", "around", "to", "the",
+];
+
+/// What may follow the web target and still leave a real question behind:
+/// either a connector ("browse the web **for** X") or a question opener
+/// ("look on the internet **what** is X").
+///
+/// Requiring one of these is what keeps the rule from firing on ordinary
+/// sentences that merely contain a verb next to a web word — "look at the
+/// internet history page" leaves "history page", which is neither, so it
+/// stays a normal question.
+const POST_TARGET_CONNECTORS: &[&str] = &[
+    "for",
+    "about",
+    "and",
+    "to",
+    "regarding",
+    "concerning",
+    "on",
+    "if",
+    "whether",
+];
+
+/// Bare web nouns, usable as the object of an imperative verb ("check **the
+/// internet**", "browse **the web**"). [`WEB_TARGETS`] holds the
+/// prepositional forms instead ("on the internet"), which is what a trailing
+/// or wrap-around match needs.
+const WEB_NOUNS: &[&str] = &[
+    "the internet",
+    "the web",
+    "the net",
+    "internet",
+    "web",
+    "online",
+];
+
 const WRAP_VERBS: &[&str] = &[
     "find out about",
     "read up on",
@@ -121,9 +187,13 @@ const WRAP_VERBS: &[&str] = &[
     "learn about",
     "search for",
     "google for",
+    "find out",
     "look up",
     "research",
+    "browse",
     "google",
+    "check",
+    "find",
 ];
 
 /// Web-target tails for the wrap-around shape. Only forms that explicitly say
@@ -332,6 +402,7 @@ pub fn detect_research_intent(question: &str) -> Option<ResearchIntent> {
     let low: String = norm.chars().map(|c| c.to_ascii_lowercase()).collect();
 
     let cleaned = match_leading(&low, &norm)
+        .or_else(|| match_leading_imperative(&low, &norm))
         .or_else(|| match_trailing(&low, &norm))
         .or_else(|| match_wraparound(&low, &norm))?;
 
@@ -359,6 +430,104 @@ fn is_contentless_referent(cleaned: &str) -> bool {
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_ascii_lowercase();
     REFERENTS.contains(&low.as_str())
+}
+
+/// Match a leading "go look this up" imperative built compositionally from a
+/// verb and a web target, rather than from an enumerated phrase.
+///
+/// The original design listed trigger phrases literally, which turned out to
+/// be unusable in practice: "look on the internet what is scientology?" — a
+/// completely ordinary way to ask — matched nothing, because only "look this
+/// up on the internet" had been enumerated. Chasing that with more literals is
+/// endless, so this recognises the *shape* instead:
+///
+/// ```text
+/// [polite] <verb> [connector…] <web-noun> [post-connector | question-opener] <question>
+/// ```
+///
+/// The requirement that a connector or question opener follow the web noun is
+/// what keeps it conservative: "look at the internet history page" leaves
+/// "history page", which is neither, so it doesn't fire.
+fn match_leading_imperative(low: &str, norm: &str) -> Option<String> {
+    for &offset in &leading_start_offsets(low) {
+        let low_rest = &low[offset..];
+        let Some(verb) = longest_prefix_match(low_rest, IMPERATIVE_VERBS) else {
+            continue;
+        };
+        let mut cursor = verb.len();
+
+        // Consume any connectors sitting between the verb and the web noun,
+        // bounded so a long run of prepositions can't wander into the question.
+        for _ in 0..3 {
+            let rest = low_rest[cursor..].trim_start();
+            let consumed = low_rest.len() - rest.len() - cursor;
+            match longest_prefix_match(rest, IMPERATIVE_CONNECTORS) {
+                // Only skip a connector if a web noun still follows it,
+                // otherwise "look for scientology" would eat "for".
+                Some(conn) if word_boundary_at(rest, conn.len()) => {
+                    let after = rest[conn.len()..].trim_start();
+                    if longest_prefix_match(after, WEB_NOUNS).is_some()
+                        || longest_prefix_match(after, IMPERATIVE_CONNECTORS).is_some()
+                    {
+                        cursor += consumed + conn.len();
+                        continue;
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        let rest = low_rest[cursor..].trim_start();
+        let Some(noun) = longest_prefix_match(rest, WEB_NOUNS) else {
+            continue;
+        };
+        if !word_boundary_at(rest, noun.len()) {
+            continue;
+        }
+        let after_noun = rest[noun.len()..].trim_start();
+        if after_noun.is_empty() {
+            continue;
+        }
+
+        // The question must be introduced by a connector or read as a question
+        // in its own right; anything else is an ordinary sentence.
+        let question_start = match longest_prefix_match(after_noun, POST_TARGET_CONNECTORS) {
+            Some(conn) if word_boundary_at(after_noun, conn.len()) => {
+                after_noun[conn.len()..].trim_start()
+            }
+            _ if starts_with_question_opener(after_noun) => after_noun,
+            _ => continue,
+        };
+        if question_start.is_empty() {
+            continue;
+        }
+
+        // Map the offset back onto the original-cased string. ASCII
+        // lowercasing is byte-preserving, so the arithmetic is exact.
+        let consumed = low.len() - question_start.len();
+        return Some(norm[consumed..].to_string());
+    }
+    None
+}
+
+/// Longest phrase in `options` that prefixes `s`, so "look up" wins over
+/// "look" and "the internet" over "internet".
+fn longest_prefix_match<'a>(s: &str, options: &[&'a str]) -> Option<&'a str> {
+    options
+        .iter()
+        .filter(|opt| s.starts_with(*opt))
+        .max_by_key(|opt| opt.len())
+        .copied()
+}
+
+/// Whether position `at` in `s` ends a whole word, so "web" doesn't match
+/// inside "webinar".
+fn word_boundary_at(s: &str, at: usize) -> bool {
+    match s[at..].chars().next() {
+        None => true,
+        Some(c) => !c.is_alphanumeric(),
+    }
 }
 
 /// Match a trigger at the very start: `[polite] <trigger> <sep/connector>
@@ -859,6 +1028,56 @@ mod tests {
             cleaned("what is the best protein powder search online").as_deref(),
             Some("what is the best protein powder")
         );
+    }
+
+    /// The literal-phrase design missed the most natural way to ask, which is
+    /// why the feature appeared not to work at all: "look on the internet what
+    /// is scientology?" enumerated nothing. These are all composed from a verb
+    /// plus a web target rather than listed individually.
+    #[test]
+    fn leading_imperatives_fire_compositionally() {
+        for (input, want) in [
+            (
+                "look on the internet what is scientology?",
+                "what is scientology?",
+            ),
+            ("look on the web what is scientology", "what is scientology"),
+            (
+                "look up on the internet what is scientology",
+                "what is scientology",
+            ),
+            ("check the internet for scientology", "scientology"),
+            ("look online for scientology", "scientology"),
+            ("browse the web for scientology", "scientology"),
+            (
+                "use the internet to tell me about scientology",
+                "tell me about scientology",
+            ),
+            ("find scientology on the internet", "scientology"),
+        ] {
+            assert_eq!(
+                cleaned(input).as_deref(),
+                Some(want),
+                "should fire for {input:?}"
+            );
+        }
+    }
+
+    /// A verb next to a web word is not automatically a command. Each of
+    /// these leaves something that is neither a connector nor a question, or
+    /// aims the verb at the user's own notes.
+    #[test]
+    fn verb_near_a_web_word_alone_does_not_fire() {
+        for input in [
+            "look at the internet history page",
+            "what are my notes about the internet",
+            "find my notes about scientology",
+            "search my journal for scientology",
+            "when did I last use the web browser",
+            "check my notes on the internet of things",
+        ] {
+            assert_eq!(cleaned(input), None, "should not fire for {input:?}");
+        }
     }
 
     /// Cleaning "can you research this on the internet" left the single word
