@@ -362,7 +362,7 @@ fn strip_leading_boundary(rest: &str) -> Option<String> {
 /// so a question *about* searching ("how do I search the web") is left alone.
 fn match_trailing(low: &str, norm: &str) -> Option<String> {
     // Ignore trailing sentence punctuation on the whole input ("… google it?").
-    let low_t = low.trim_end_matches(|c| c == ' ' || c == '?' || c == '.' || c == '!');
+    let low_t = low.trim_end_matches([' ', '?', '.', '!']);
     for phrase in sorted_phrases() {
         if !low_t.ends_with(phrase) {
             continue;
@@ -423,7 +423,7 @@ fn strip_trailing_boundary(prefix: &str) -> Option<String> {
 /// explicit web tail), so it needs no extra boundary rule beyond both ends
 /// being present with a non-empty middle.
 fn match_wraparound(low: &str, norm: &str) -> Option<String> {
-    let low_t = low.trim_end_matches(|c| c == ' ' || c == '?' || c == '.' || c == '!');
+    let low_t = low.trim_end_matches([' ', '?', '.', '!']);
     for &offset in &leading_start_offsets(low) {
         // Recompute the trimmed end relative to the (possibly polite-skipped)
         // start so target matching lines up with `low_t`.
@@ -508,7 +508,7 @@ fn strip_trailing_word<'a>(s: &'a str, words: &[&str]) -> (&'a str, bool) {
 /// Whether `s`'s first word is one of the [`QUESTION_OPENERS`].
 fn starts_with_question_opener(s: &str) -> bool {
     let first = s
-        .split(|c: char| c == ' ' || c == '\'')
+        .split([' ', '\''])
         .next()
         .unwrap_or("")
         .trim_matches(|c: char| !c.is_alphanumeric())
