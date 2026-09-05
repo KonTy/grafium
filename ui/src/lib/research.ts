@@ -8,8 +8,9 @@
 // yet — callers get a thrown error to catch, and Settings falls back to
 // `DEFAULT_RESEARCH_CONFIG` so the page still renders.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { StreamChunk, SourcesPayload, ChatSource, WebSource } from "./knowledge";
+import { isResearchCancellation } from "./knowledge";
 
 // ─── Payload casing (the single flip point) ──────────────────────────────────
 //
@@ -203,39 +204,48 @@ export async function researchDeep(
 ): Promise<void> {
   handlers.onStart?.(requestId);
 
-  const unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
-    const payload = event.payload;
-    if (!payload || payload.request_id !== requestId) return;
-
-    if (payload.error) {
-      handlers.onError?.(payload.error);
-      return;
-    }
-    // planning / searching_web / reading_sources / assessing / refining /
-    // synthesizing — drives the status indicator, never answer text.
-    if (payload.phase) handlers.onPhase?.(payload.phase);
-    // "Reading source 2 of 6: <title>" — display-only progress detail.
-    if (payload.note) handlers.onNote?.(payload.note);
-    if (payload.delta) handlers.onChunk(payload.delta);
-    if (payload.done) handlers.onDone();
-  });
-
-  const unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
-    const payload = event.payload;
-    if (!payload || payload.request_id !== requestId) return;
-    handlers.onSources?.(payload.sources ?? []);
-    if (payload.web_sources && payload.web_sources.length > 0) {
-      handlers.onWebSources?.(payload.web_sources);
-    }
-  });
-
+  // Acquire both listeners inside the guarded block with nullable handles.
+  // Previously the two listen() calls ran before the try, so a rejection from
+  // the first left Chat stuck "active" with onError never called, and a
+  // rejection from the second leaked the first subscription. Now any setup
+  // failure routes through onError and whatever was acquired is always removed.
+  let unlistenStream: UnlistenFn | null = null;
+  let unlistenSources: UnlistenFn | null = null;
   try {
+    unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+
+      if (payload.error) {
+        handlers.onError?.(payload.error);
+        return;
+      }
+      // planning / searching_web / reading_sources / assessing / refining /
+      // synthesizing — drives the status indicator, never answer text.
+      if (payload.phase) handlers.onPhase?.(payload.phase);
+      // "Reading source 2 of 6: <title>" — display-only progress detail.
+      if (payload.note) handlers.onNote?.(payload.note);
+      if (payload.delta) handlers.onChunk(payload.delta);
+      if (payload.done) handlers.onDone();
+    });
+
+    unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+      handlers.onSources?.(payload.sources ?? []);
+      if (payload.web_sources && payload.web_sources.length > 0) {
+        handlers.onWebSources?.(payload.web_sources);
+      }
+    });
+
     await invoke("research_deep", { question, requestId, graphId });
   } catch (e: any) {
-    handlers.onError?.(String(e));
+    // A user Stop rejects the invoke with the canonical cancellation message;
+    // that's a normal end to the run, not a failure to surface.
+    if (!isResearchCancellation(String(e))) handlers.onError?.(String(e));
   } finally {
-    unlistenStream();
-    unlistenSources();
+    unlistenStream?.();
+    unlistenSources?.();
   }
 }
 

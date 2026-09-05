@@ -1,6 +1,6 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -411,53 +411,62 @@ export async function aiAskStream(
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   handlers.onStart?.(requestId);
 
-  const unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
-    const payload = event.payload;
-    if (!payload || payload.request_id !== requestId) return;
-
-    if (payload.error) {
-      handlers.onError?.(payload.error);
-      return;
-    }
-
-    // A phase transition (retrieving / processing_prompt / thinking /
-    // generating / searching_web / reading_sources) carries no answer text — it
-    // drives the status indicator.
-    if (payload.phase) {
-      handlers.onPhase?.(payload.phase);
-    }
-
-    // A progress note (e.g. "Reading source 2/5: …") is display-only detail for
-    // the current phase; it is never appended to the answer.
-    if (payload.note) {
-      handlers.onNote?.(payload.note);
-    }
-
-    if (payload.delta) {
-      handlers.onChunk(payload.delta);
-    }
-
-    if (payload.done) {
-      handlers.onDone();
-    }
-  });
-
-  const unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
-    const payload = event.payload;
-    if (!payload || payload.request_id !== requestId) return;
-    handlers.onSources?.(payload.sources ?? []);
-    if (payload.web_sources && payload.web_sources.length > 0) {
-      handlers.onWebSources?.(payload.web_sources);
-    }
-  });
-
+  // Acquire both listeners inside the guarded block with nullable handles.
+  // Previously the two listen() calls ran before the try, so a rejection from
+  // the first left Chat stuck "active" with onError never called, and a
+  // rejection from the second leaked the first subscription. Now any setup
+  // failure routes through onError and whatever was acquired is always removed.
+  let unlistenStream: UnlistenFn | null = null;
+  let unlistenSources: UnlistenFn | null = null;
   try {
+    unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+
+      if (payload.error) {
+        handlers.onError?.(payload.error);
+        return;
+      }
+
+      // A phase transition (retrieving / processing_prompt / thinking /
+      // generating / searching_web / reading_sources) carries no answer text — it
+      // drives the status indicator.
+      if (payload.phase) {
+        handlers.onPhase?.(payload.phase);
+      }
+
+      // A progress note (e.g. "Reading source 2/5: …") is display-only detail for
+      // the current phase; it is never appended to the answer.
+      if (payload.note) {
+        handlers.onNote?.(payload.note);
+      }
+
+      if (payload.delta) {
+        handlers.onChunk(payload.delta);
+      }
+
+      if (payload.done) {
+        handlers.onDone();
+      }
+    });
+
+    unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+      handlers.onSources?.(payload.sources ?? []);
+      if (payload.web_sources && payload.web_sources.length > 0) {
+        handlers.onWebSources?.(payload.web_sources);
+      }
+    });
+
     await invoke("ai_ask_stream", { question, graphId, requestId, history: history ?? [] });
   } catch (e: any) {
-    handlers.onError?.(String(e));
+    // A user Stop cancels the run; when that surfaces as the canonical
+    // cancellation rejection it's a normal end, not an error to report.
+    if (!isResearchCancellation(String(e))) handlers.onError?.(String(e));
   } finally {
-    unlistenStream();
-    unlistenSources();
+    unlistenStream?.();
+    unlistenSources?.();
   }
 }
 
@@ -465,6 +474,16 @@ export async function aiAskStream(
 // flag and stops, returning what it has so far; a no-op if already finished.
 export function aiCancelStream(requestId: string): Promise<void> {
   return invoke("ai_cancel_stream", { requestId });
+}
+
+// The backend rejects a cancelled web-research run with this exact message
+// (core/src/ai/web_research.rs RESEARCH_CANCELLED). Stopping a run is a normal,
+// expected end — not a failure to surface — so both stream wrappers use this to
+// tell a genuine error apart from the user pressing Stop.
+export const RESEARCH_CANCELLED_MESSAGE = "Web research was cancelled.";
+
+export function isResearchCancellation(message: string): boolean {
+  return message.includes(RESEARCH_CANCELLED_MESSAGE);
 }
 
 // ─── Graph Registry ──────────────────────────────────────────────────────────
