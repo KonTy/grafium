@@ -17,6 +17,7 @@ use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 
+pub(crate) use blocks::chat_salient_terms;
 pub use retrieval::BlockPageMeta;
 
 struct FunctionCustomizer;

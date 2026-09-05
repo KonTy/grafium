@@ -195,6 +195,25 @@ const CHAT_MAX_TERMS: usize = 6;
 /// (e.g. it was pure filler), in which case the sparse arm contributes
 /// nothing rather than matching noise.
 pub(crate) fn build_fts_chat_query(query: &str) -> String {
+    chat_salient_terms(query)
+        .into_iter()
+        .map(|tok| {
+            let escaped = tok.replace('"', "\"\"");
+            format!("\"{escaped}\"*")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// Extracts the salient *content* terms from a natural-language chat question:
+/// the 2–6 non-stopword, non-filler tokens that actually carry meaning. This
+/// is the shared basis for both the sparse (BM25) retrieval arm
+/// ([`build_fts_chat_query`]) and the relevance gate — a retrieved block is
+/// only lexical *evidence* if it matches one of these, not merely a filler
+/// word like "work"/"how"/"explain" (all of which are stopwords here).
+///
+/// Returns an empty vec when the question is pure filler.
+pub(crate) fn chat_salient_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter_map(|tok| {
@@ -219,13 +238,6 @@ pub(crate) fn build_fts_chat_query(query: &str) -> String {
     }
 
     terms
-        .into_iter()
-        .map(|tok| {
-            let escaped = tok.replace('"', "\"\"");
-            format!("\"{escaped}\"*")
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ")
 }
 
 fn flatten_blocks_in_tree_order(

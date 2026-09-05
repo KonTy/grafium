@@ -627,6 +627,11 @@ impl KnowledgeEngine {
         let meta_by_id: std::collections::HashMap<&str, &crate::db::BlockPageMeta> =
             metas.iter().map(|m| (m.block_id.as_str(), m)).collect();
 
+        // Salient content terms drive both the sparse arm (above) and the
+        // lexical branch of the relevance gate (below), so a BM25 hit counts
+        // as evidence only when it shares a real content word with the query.
+        let salient_terms = crate::db::chat_salient_terms(query);
+
         let hits: Vec<RetrievedHit> = top_ids
             .iter()
             .filter_map(|id| {
@@ -649,14 +654,32 @@ impl KnowledgeEngine {
                     children: Vec::new(),
                 })
             })
-            // Relevance gate (HIGH 5): drop dense nearest-neighbours that are
-            // only weakly similar. A lexical (BM25) hit is inherently on-topic
-            // and always passes; a dense-only hit must clear the similarity
-            // floor. This is what keeps a general question ("explain mutexes")
-            // from dragging irrelevant notes into the prompt once the index is
-            // populated — while an empty index (BM25-only) is unaffected since
-            // every hit is lexical.
-            .filter(|h| passes_relevance_gate(h))
+            // Calibration hook (opt-in): the similarity floor is an unvalidated
+            // guess per embedding model. `GRAFIUM_LOG_COSINES=1` prints the
+            // observed cosine + gate outcome for every candidate so the floor
+            // can be tuned against real data later without guessing.
+            .inspect(|h| {
+                if std::env::var_os("GRAFIUM_LOG_COSINES").is_some() {
+                    eprintln!(
+                        "cosine-log: pass={} lexical={} cosine={:?} title={:?} :: {}",
+                        passes_relevance_gate(h, &salient_terms),
+                        h.lexical,
+                        h.cosine,
+                        h.page_title,
+                        h.content.chars().take(80).collect::<String>(),
+                    );
+                }
+            })
+            // Relevance gate (HIGH 5): drop candidates that aren't genuine
+            // evidence — dense nearest-neighbours below the similarity floor,
+            // and lexical hits whose only overlap with the query is filler
+            // (BM25 matches "work"/"how"/"explain" happily). A lexical hit must
+            // share a salient content term. This is what keeps a general
+            // question ("explain how mutexes work") from dragging irrelevant
+            // notes into the prompt once the index is populated, while the
+            // empty-index BM25-only path is unaffected (those hits match a
+            // salient term by construction).
+            .filter(|h| passes_relevance_gate(h, &salient_terms))
             .collect();
 
         // Establish relevance ordering (temporal reorder is a soft boost, not
@@ -995,21 +1018,61 @@ fn ask_context_budget(context_window: Option<usize>) -> usize {
 /// Minimum cosine similarity for a *dense-only* hit to be considered relevant
 /// enough to enter the prompt. Below this, a nearest-neighbour is just the
 /// closest of an irrelevant bunch and would only contaminate a general answer
-/// (HIGH 5). Lexical (BM25) hits bypass this — a term match is inherently
-/// on-topic — which also preserves the empty-index BM25-only path.
+/// (HIGH 5).
+///
+/// NOTE: this is still an unvalidated guess for any given embedding model —
+/// on a real run, clearly-irrelevant dense matches from `nomic-embed` were
+/// observed scoring high enough to appear. Set `GRAFIUM_LOG_COSINES=1` to log
+/// observed cosines (see [`KnowledgeEngine::hybrid_search`]) so this floor can
+/// be calibrated against real data rather than guessed.
 const ASK_SIMILARITY_FLOOR: f32 = 0.25;
 /// Cosine at/above which a dense hit is treated as strong evidence, enough to
 /// answer purely from notes rather than a cautious blend.
 const ASK_STRONG_SIMILARITY: f32 = 0.6;
 
-/// Relevance gate for a single hit: keep lexical (term-match) hits always;
-/// keep dense hits only when they clear the similarity floor. Hits with no
-/// cosine at all (pure BM25 / empty index) are lexical and pass.
-fn passes_relevance_gate(hit: &RetrievedHit) -> bool {
+/// Relevance gate for a single hit. A hit is admissible evidence only if it is
+/// genuinely on-topic:
+///
+/// - A **dense** hit must clear the cosine similarity floor.
+/// - A **lexical** (BM25) hit must match at least one *salient* query term —
+///   a non-stopword content word. This is the crucial fix for HIGH 5: BM25
+///   happily matches common filler ("work", "how", "explain"), so a bare
+///   `hit.lexical` is NOT evidence. Requiring a salient-term overlap means a
+///   general question like "explain how mutexes work" — whose only salient
+///   term is "mutexes" — retrieves nothing from a graph that never mentions
+///   mutexes, instead of dragging in whatever shared a filler word.
+///
+/// The empty-index BM25-only path is preserved: those hits are still lexical
+/// and still pass as long as they match a salient term (they do, because the
+/// sparse arm is itself built from the salient terms).
+fn passes_relevance_gate(hit: &RetrievedHit, salient_terms: &[String]) -> bool {
     if hit.lexical {
-        return true;
+        return content_matches_salient_term(&hit.content, salient_terms);
     }
     matches!(hit.cosine, Some(c) if c >= ASK_SIMILARITY_FLOOR)
+}
+
+/// True if `content` contains at least one of the `salient_terms`, matched
+/// prefix-first to approximate the FTS `porter`/prefix (`*`) tokenizer (so
+/// "painted" satisfies the salient term "paint"). An empty salient set never
+/// matches — a question with no content terms has no lexical evidence.
+fn content_matches_salient_term(content: &str, salient_terms: &[String]) -> bool {
+    if salient_terms.is_empty() {
+        return false;
+    }
+    let lower = content.to_lowercase();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|tok| !tok.is_empty())
+        .any(|tok| {
+            salient_terms.iter().any(|term| {
+                // Prefix match in either direction covers light stemming:
+                // note "painted" vs query "paint", note "run" vs query
+                // "running". Guard the reverse direction against trivially
+                // short tokens so a two-letter word can't match everything.
+                tok.starts_with(term.as_str()) || (term.starts_with(tok) && tok.len() >= 3)
+            })
+        })
 }
 
 /// Prompt regime chosen *outside* the model, so a small local model follows a
@@ -1864,6 +1927,79 @@ mod tests {
         Ok(())
     }
 
+    /// Real-data-shaped regression for the relevance gate (HIGH 5, re-audit):
+    /// the user's real graph is study/PACER notes + GRE vocabulary, none of
+    /// which mention concurrency. A general question ("explain how mutexes
+    /// work") must retrieve *nothing* even though the notes are full of common
+    /// words BM25 could latch onto ("work", "read", "store", "concept") — the
+    /// exact case that leaked 8 irrelevant hits on the live graph. A salient
+    /// question must still retrieve its note, proving the gate isn't just
+    /// rejecting everything.
+    #[tokio::test]
+    async fn general_question_over_a_study_graph_retrieves_no_context() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let graph_id = "study-graph";
+        let store = Arc::new(SqliteVectorStore::in_memory()?);
+        let engine = test_engine(Box::new(ConceptEmbedder::new()), store)?;
+        let db = Database::in_memory()?;
+
+        // A study/PACER page, deliberately dense with generic words that BM25
+        // would match against filler in a question ("work", "read", "store").
+        let pacer = db.create_page("PACER - Tag What You Read", false)?;
+        for line in [
+            "Digest by: store it under its concept and link the pages",
+            "Map it: create or link a concept page for what you read",
+            "rehearse needs active-recall practice to make the work stick",
+            "inbox: captured, not yet digested",
+        ] {
+            db.create_block(&pacer.id, None, 0, line, BlockType::Text, json!({}))?;
+        }
+        // A GRE vocabulary page — the salient-question positive control.
+        let vocab = db.create_page("GRE Vocab", false)?;
+        db.create_block(
+            &vocab.id,
+            None,
+            0,
+            "fresco (wall painting): a mural done on fresh plaster",
+            BlockType::Text,
+            json!({}),
+        )?;
+
+        for page in [&pacer, &vocab] {
+            let blocks = db.list_blocks_for_page(&page.id)?;
+            engine.index_page(page, &blocks, graph_id).await?;
+        }
+
+        // The reported failure: a general concurrency question against a graph
+        // that never mentions concurrency must yield zero context + General,
+        // NOT a pile of study notes that merely share the word "work".
+        let mutex_hits = engine
+            .hybrid_search(&db, "explain how mutexes work", 10, Some(graph_id))
+            .await?;
+        assert!(
+            mutex_hits.is_empty(),
+            "study notes must not leak into a general concurrency question; got {:?}",
+            mutex_hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        assert_eq!(choose_answer_mode(&mutex_hits), AnswerMode::General);
+
+        // Positive control: a salient question still retrieves its note, so the
+        // gate isn't simply suppressing everything.
+        let fresco_hits = engine
+            .hybrid_search(&db, "what is a fresco", 10, Some(graph_id))
+            .await?;
+        assert!(
+            fresco_hits.iter().any(|h| h.content.contains("fresco")),
+            "a salient vocab question must still retrieve its note; got {:?}",
+            fresco_hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        assert_ne!(choose_answer_mode(&fresco_hits), AnswerMode::General);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn index_status_reports_empty_index_but_counts_blocks() -> Result<()> {
         use crate::db::Database;
@@ -1955,21 +2091,47 @@ mod tests {
     }
 
     #[test]
-    fn relevance_gate_keeps_lexical_and_drops_weak_dense() {
-        let mut lexical = mk_hit("a");
-        lexical.lexical = true;
-        lexical.cosine = None;
-        assert!(passes_relevance_gate(&lexical));
+    fn relevance_gate_requires_salient_overlap_for_lexical_and_a_floor_for_dense() {
+        // A lexical hit whose content shares a *salient* term with the query
+        // is real evidence and passes.
+        let mut salient_match = mk_hit("a");
+        salient_match.lexical = true;
+        salient_match.cosine = None;
+        salient_match.content = "painted the bedroom today".to_string();
+        assert!(passes_relevance_gate(
+            &salient_match,
+            &["paint".to_string(), "room".to_string()]
+        ));
 
-        let mut strong = mk_hit("b");
+        // A lexical hit that only overlaps on filler must be REJECTED — this is
+        // the HIGH 5 fix. "explain how mutexes work" reduces to the salient
+        // term "mutexes"; a note about unrelated work must not count just
+        // because BM25 matched a common word.
+        let mut filler_only = mk_hit("b");
+        filler_only.lexical = true;
+        filler_only.cosine = None;
+        filler_only.content = "digest what you read and store the concept".to_string();
+        assert!(!passes_relevance_gate(
+            &filler_only,
+            &["mutexes".to_string()]
+        ));
+
+        // A lexical hit with no salient terms at all (pure-filler question) is
+        // not evidence either.
+        let mut no_salient = mk_hit("c");
+        no_salient.lexical = true;
+        assert!(!passes_relevance_gate(&no_salient, &[]));
+
+        // Dense hits are gated purely on the similarity floor.
+        let mut strong = mk_hit("d");
         strong.lexical = false;
         strong.cosine = Some(0.7);
-        assert!(passes_relevance_gate(&strong));
+        assert!(passes_relevance_gate(&strong, &[]));
 
-        let mut weak = mk_hit("c");
+        let mut weak = mk_hit("e");
         weak.lexical = false;
         weak.cosine = Some(0.1);
-        assert!(!passes_relevance_gate(&weak));
+        assert!(!passes_relevance_gate(&weak, &[]));
     }
 
     #[test]
