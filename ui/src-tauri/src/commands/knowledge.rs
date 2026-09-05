@@ -6,7 +6,9 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
+use grafium_core::knowledge::engine::{
+    AskPhase, AskStreamEvent, HealthStatus, IndexStatus, Source,
+};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
@@ -741,10 +743,12 @@ pub async fn ai_ask(
 pub struct AskStreamChunk {
     pub request_id: String,
     pub delta: String,
-    /// True while the model is reasoning inside a `<think>` block, so the UI
-    /// can show a distinct "Thinking…" state instead of appending answer text.
-    /// Reasoning is never forwarded as `delta`.
-    pub thinking: bool,
+    /// The current answering phase (`retrieving`, `processing_prompt`,
+    /// `thinking`, `generating`), when this chunk reports a phase transition.
+    /// `None` for a pure text delta or the terminal `done` event. Drives the
+    /// UI's evidence-based status indicator; reasoning is never sent as
+    /// `delta`, only reflected as the `thinking` phase.
+    pub phase: Option<String>,
     pub done: bool,
     pub error: Option<String>,
 }
@@ -793,22 +797,22 @@ pub async fn ai_ask_stream(
         map.insert(request_id.clone(), cancel.clone());
     }
 
-    // Forward real token deltas as they're produced. A `thinking` flag lets
-    // the UI show a "Thinking…" state while a reasoning model reasons, without
-    // ever showing the raw chain-of-thought.
+    // Forward real token deltas and phase transitions as they happen. Phase
+    // events let the UI show *what* the model is doing (and prove it's alive);
+    // reasoning is surfaced only as the `thinking` phase, never as `delta`.
     let app_for_events = app.clone();
     let rid = request_id.clone();
     let mut on_event = move |ev: AskStreamEvent<'_>| {
-        let (delta, thinking) = match ev {
-            AskStreamEvent::Delta(d) => (d.to_string(), false),
-            AskStreamEvent::Thinking => (String::new(), true),
+        let (delta, phase) = match ev {
+            AskStreamEvent::Delta(d) => (d.to_string(), None),
+            AskStreamEvent::Phase(p) => (String::new(), Some(p.as_str().to_string())),
         };
         let _ = app_for_events.emit(
             "ai://chat_stream",
             AskStreamChunk {
                 request_id: rid.clone(),
                 delta,
-                thinking,
+                phase,
                 done: false,
                 error: None,
             },
@@ -851,7 +855,7 @@ pub async fn ai_ask_stream(
             AskStreamChunk {
                 request_id: request_id.clone(),
                 delta: message,
-                thinking: false,
+                phase: None,
                 done: false,
                 error: None,
             },
@@ -864,7 +868,7 @@ pub async fn ai_ask_stream(
         AskStreamChunk {
             request_id,
             delta: String::new(),
-            thinking: false,
+            phase: None,
             done: true,
             error: None,
         },

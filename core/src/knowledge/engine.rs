@@ -930,6 +930,10 @@ impl KnowledgeEngine {
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
+        // Retrieval runs first; announce it so the UI shows "Searching your
+        // notes…" instead of a blank pause. This is fast, but it's honest.
+        on_event(AskStreamEvent::Phase(AskPhase::Retrieving));
+
         let request = self
             .build_ask_request(db, llm.as_ref(), question, graph_id)
             .await?;
@@ -940,14 +944,30 @@ impl KnowledgeEngine {
             ..Default::default()
         };
 
+        // The prompt is built and about to be handed to the model. Until the
+        // first token arrives the model is processing the prompt — the slow,
+        // previously-silent phase — so label it explicitly.
+        on_event(AskStreamEvent::Phase(AskPhase::ProcessingPrompt));
+
         let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
+        // Track the last phase we announced so token-level updates only emit a
+        // Phase event on a real transition (into Thinking, into Generating),
+        // not once per token.
+        let mut phase = AskPhase::ProcessingPrompt;
         {
             let mut on_token = |piece: &str| match filter.push(piece) {
                 crate::ai::reasoning::StreamStep::Answer(delta) => {
+                    if phase != AskPhase::Generating {
+                        phase = AskPhase::Generating;
+                        on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                    }
                     on_event(AskStreamEvent::Delta(&delta));
                 }
                 crate::ai::reasoning::StreamStep::Thinking => {
-                    on_event(AskStreamEvent::Thinking);
+                    if phase != AskPhase::Thinking {
+                        phase = AskPhase::Thinking;
+                        on_event(AskStreamEvent::Phase(AskPhase::Thinking));
+                    }
                 }
                 crate::ai::reasoning::StreamStep::Idle => {}
             };
@@ -1349,14 +1369,48 @@ struct AskRequest {
     output_tokens: usize,
 }
 
+/// A coarse phase of answering a question, emitted so the UI can show *what*
+/// the model is doing right now (and, crucially, whether it's genuinely
+/// working) instead of an undifferentiated spinner. Every phase is driven by a
+/// real backend transition — never a timer — so a stalled or failed generation
+/// stops reporting progress rather than lying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskPhase {
+    /// Hybrid retrieval (BM25 + vector) is running. Fast (~250ms).
+    Retrieving,
+    /// The prompt has been assembled and handed to the model; it's processing
+    /// the prompt (tokenize + eval) but hasn't emitted any output yet. This is
+    /// the phase that grows slow with a large retrieved context and, without a
+    /// label, is indistinguishable from a hang.
+    ProcessingPrompt,
+    /// The model is reasoning inside a `<think>` block — no answer text will
+    /// appear yet, and the raw chain-of-thought is never forwarded.
+    Thinking,
+    /// Real answer tokens are streaming.
+    Generating,
+}
+
+impl AskPhase {
+    /// Stable lowercase identifier for the UI/event wire format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AskPhase::Retrieving => "retrieving",
+            AskPhase::ProcessingPrompt => "processing_prompt",
+            AskPhase::Thinking => "thinking",
+            AskPhase::Generating => "generating",
+        }
+    }
+}
+
 /// An event emitted while streaming an answer via
 /// [`KnowledgeEngine::ask_stream`].
 pub enum AskStreamEvent<'a> {
+    /// The answering phase changed — the UI should update its status label.
+    /// Emitted only on genuine transitions (deduplicated), so its arrival is
+    /// itself evidence the backend is alive.
+    Phase(AskPhase),
     /// A chunk of answer text to append in the UI.
     Delta(&'a str),
-    /// The model is currently reasoning inside a `<think>` block — the UI
-    /// should show a distinct "Thinking…" state rather than answer text.
-    Thinking,
 }
 
 /// Result of a streamed answer once generation finishes.
