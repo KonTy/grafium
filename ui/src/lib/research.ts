@@ -283,23 +283,27 @@ export const RESEARCH_PROMPT_STEPS: PromptStepMeta[] = [
 
 // ─── Defaults (UI fallback + Reset) ──────────────────────────────────────────
 
-// The core's `ResearchConfig::default()` is authoritative. These mirror the
-// contract's defaults so (a) the Settings page still renders if
-// `research_get_config` isn't registered yet, and (b) per-field "Reset to
-// default" is instant and offline. Built-in engine selectors/paths here are
-// best-effort placeholders — the backend supplies the real ones the moment its
-// command exists, and the Test button reveals any that are off.
+// The core's `ResearchConfig::default()` is authoritative, and each step's
+// model output is parsed there with `serde_json::from_str` into a specific
+// shape (`{"queries":[…]}`, `{"picks":[…]}`, the assessment/synthesis objects —
+// see `core/src/research/config.rs`). A prompt that asks for plain lines/prose
+// would make the backend fail to parse and silently break a research run, so a
+// per-field "Reset to default" must restore the *exact* backend default, not an
+// approximation. These therefore mirror the Rust `default_*` prompts
+// byte-for-byte; `researchPromptsDrift.test.ts` reads that file and fails the
+// build if the two ever diverge. Keep them offline (no IPC) so the reset works
+// even when the backend command isn't registered yet.
 export const DEFAULT_RESEARCH_PROMPTS: ResearchPrompts = {
   plan_queries:
-    "You are planning web research for a student's question. Given the QUESTION, produce a short list (3–5) of focused, diverse web search queries that together would gather the evidence needed to answer it well. Return one query per line, with no numbering and no commentary.",
+    `You are a research assistant planning how to investigate a question on the web. Given the user's question, produce up to 4 focused, diverse search-engine queries that together would surface authoritative sources answering it. Prefer specific, well-formed queries over broad ones; where the topic is scholarly, include an academic phrasing. Do not answer the question yourself. Reply with ONLY a JSON object of the form {"queries": ["...", "..."]} — no other text, no markdown fences.`,
   select_sources:
-    "You are triaging search results. Given the QUESTION and a numbered list of RESULTS (title, url, snippet), choose the ones most worth reading in full. Prefer primary, authoritative, and recent sources; skip duplicates and low-quality pages. Return the chosen result numbers, best first.",
+    `You are choosing which search results are worth reading in full to answer a research question. You are given the question and a numbered list of candidate results (title, URL, snippet). Pick the most relevant, credible, and diverse results — avoid near-duplicates and low-quality sources. Reply with ONLY a JSON object of the form {"picks": [<indices>]} listing the indices to read, most useful first — no other text, no markdown fences.`,
   assess_sufficiency:
-    "You are checking whether the evidence gathered so far is enough to answer the QUESTION thoroughly and accurately. Weigh coverage, agreement between sources, and obvious gaps. Reply with SUFFICIENT or INSUFFICIENT on the first line, then one sentence naming what, if anything, is still missing.",
+    `You are judging whether the material gathered so far is enough to write a well-supported, cited answer to a research question. You are given the question and excerpts from the sources read so far. Be honest: if key claims are unsupported, sources conflict without resolution, or an important angle is missing, it is NOT sufficient yet. Reply with ONLY a JSON object of the form {"sufficient": true|false, "missing": "one sentence naming what is still needed (empty if sufficient)"} — no other text, no markdown fences.`,
   refine_queries:
-    "The evidence so far is not sufficient. Given the QUESTION and a summary of what has been found and what is missing, propose 2–4 new, sharper web search queries that target the remaining gaps. Return one query per line, with no numbering and no commentary.",
+    `You are improving a web-research run that does not yet have enough to answer the question. You are given the question, the titles already gathered, and a note on what is still missing. Produce up to 4 NEW search-engine queries targeting the gap — do not repeat the earlier queries, and get more specific or approach from a different angle. Reply with ONLY a JSON object of the form {"queries": ["...", "..."]} — no other text, no markdown fences.`,
   synthesize:
-    "You are writing the final answer for a student from the sources that were read. Answer the QUESTION directly and completely in clear prose. Support each claim with an inline [n] citation pointing at the numbered SOURCES, and never state facts the sources don't support.",
+    `You are a careful research assistant writing the final answer from real, numbered web sources. Use ONLY the numbered sources provided — do not add outside knowledge and do not invent facts. Identify every distinct topic worth reporting. Return a JSON object with:\n- "title_answer": if the question can be answered directly, one sentence answering it with an inline [n] citation; otherwise null.\n- "topics": an array of objects, each with "topic" (a short label), "summary" (a 2-5 sentence paragraph where EVERY factual claim ends with an inline citation like "[1]" or "[2][4]"; if sources disagree, say so), and "tags" (1-4 key-term objects {"term": "..."}).\nReturn ONLY the JSON object, no other text, no markdown fences.`,
 };
 
 function html(id: string, name: string, url_template: string, selectors: HtmlSelectors): SearchEngineDef {
