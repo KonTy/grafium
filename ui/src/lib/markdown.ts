@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 import katex from "katex";
 import { invoke } from "@tauri-apps/api/core";
@@ -315,7 +316,68 @@ function stripUnsafeHrefs(html: string): string {
  */
 export function renderAssistantMarkdown(content: string): string {
   const neutralized = escapeRawHtmlOutsideCode(content);
-  return stripUnsafeHrefs(renderBlock(neutralized));
+  return sanitizeAssistantHtml(stripUnsafeHrefs(renderBlock(neutralized)));
+}
+
+/**
+ * Allowlist-sanitize rendered assistant HTML immediately before `{@html}`.
+ *
+ * The source-level pass above is a useful first line, but it cannot be the
+ * only one: it decides what is "inside a code span" with a regex, while
+ * `marked` decides with a real parser, and any disagreement between the two
+ * turns text the escaper believed it had neutralized into live markup.
+ * Mismatched backtick runs were one such disagreement. Escaping the *input*
+ * also does nothing about markup this module itself builds — an image URL was
+ * interpolated straight into a `src` attribute, so
+ * `![x](https://h/x"onerror="alert(1))` closed the attribute and executed.
+ *
+ * Sanitizing the *output* removes that whole class: whatever the pipeline
+ * produced, only known-safe elements and attributes survive. This matters more
+ * than usual here because the content is a local model's output, which now
+ * routinely quotes text fetched from arbitrary websites — so the untrusted
+ * input is genuinely attacker-controlled, and the app's CSP is not set.
+ */
+function sanitizeAssistantHtml(html: string): string {
+  // Rendering happens in the webview, where a DOM always exists. Guarding
+  // keeps this importable from a plain Node context (tooling, SSR-style
+  // tests) without silently shipping unsanitized HTML: with no DOM to parse
+  // with, the safe answer is to escape everything rather than pass it through.
+  if (typeof window === "undefined" || !window.document) {
+    return escapeHtml(html);
+  }
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: [
+      "p", "br", "hr", "div", "span",
+      "strong", "em", "b", "i", "u", "s", "del", "ins", "mark", "small", "sub", "sup",
+      "h1", "h2", "h3", "h4", "h5", "h6",
+      "ul", "ol", "li",
+      "blockquote", "pre", "code",
+      "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+      "a", "img",
+      // KaTeX renders to these; dropping them would break every formula.
+      "math", "semantics", "annotation", "mrow", "mi", "mn", "mo", "ms", "mtext",
+      "mspace", "msup", "msub", "msubsup", "mfrac", "msqrt", "mroot", "mstyle",
+      "munder", "mover", "munderover", "mtable", "mtr", "mtd", "mpadded",
+      "mphantom", "menclose", "mglyph", "svg", "path", "line",
+    ],
+    ALLOWED_ATTR: [
+      "class", "style", "href", "src", "alt", "title", "loading",
+      "colspan", "rowspan", "start", "type",
+      // Data attributes the click delegation in ChatView reads.
+      "data-page-link", "data-tag", "data-block-ref",
+      // KaTeX/MathML presentation attributes.
+      "xmlns", "display", "encoding", "mathvariant", "stretchy", "viewBox",
+      "width", "height", "d", "x1", "x2", "y1", "y2", "fill", "stroke",
+      "aria-hidden",
+    ],
+    // Only these URL schemes may appear in href/src. `data:` is excluded even
+    // for images: a data URL is a script-delivery vector in enough contexts
+    // that allowing it here buys nothing an http(s) image doesn't.
+    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#|\/)/i,
+    // Belt and braces: no event handlers survive regardless of the allowlist.
+    FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onanimationend"],
+    FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button"],
+  });
 }
 
 const CALLOUT_BLOCK_RE = new RegExp(

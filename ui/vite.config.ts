@@ -21,7 +21,11 @@ export default defineConfig({
     sourcemap: true,
   },
   test: {
-    environment: "node",
+    // The assistant-markdown sanitizer parses HTML with a real DOM, so the
+    // tests that prove it blocks injection need one too — running them under
+    // a bare Node environment would exercise the escape-everything fallback
+    // instead of the sanitizer, and prove nothing about the shipped path.
+    environment: "jsdom",
     include: ["src/**/*.test.ts"],
   },
 });
