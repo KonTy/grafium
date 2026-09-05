@@ -1225,7 +1225,7 @@
   }
 
   .index-error {
-    color: #f87171;
+    color: var(--accent-red);
   }
 
   /* CPU-fallback warning — same layout as the index banner, but an amber
@@ -1236,9 +1236,9 @@
     justify-content: space-between;
     gap: 12px;
     margin-top: 8px;
-    border: 1px solid #d9a441;
+    border: 1px solid var(--accent-yellow);
     border-radius: 10px;
-    background: color-mix(in srgb, #d9a441 10%, var(--bg-secondary));
+    background: color-mix(in srgb, var(--accent-yellow) 10%, var(--bg-secondary));
     padding: 10px 12px;
   }
 
@@ -1276,7 +1276,7 @@
   }
 
   .chat-error {
-    color: #f87171;
+    color: var(--accent-red);
     font-size: 12px;
   }
 
@@ -1290,7 +1290,7 @@
   }
 
   .chat-status.stalled {
-    color: #fbbf24;
+    color: var(--accent-yellow);
   }
 
   .chat-status-dot {
@@ -1309,12 +1309,12 @@
   }
 
   .chat-status-dot.thinking {
-    background: #a78bfa;
+    background: var(--accent-purple);
     opacity: 0.9;
   }
 
   .chat-status-dot.stalled {
-    background: #fbbf24;
+    background: var(--accent-yellow);
     opacity: 0.9;
     animation: none;
   }
@@ -1378,8 +1378,8 @@
   }
 
   .chat-stop:hover {
-    border-color: #f87171;
-    color: #f87171;
+    border-color: var(--accent-red);
+    color: var(--accent-red);
   }
 
   .chat-input-row {
