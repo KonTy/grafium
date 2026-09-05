@@ -13,6 +13,7 @@
     clampResearchNumbers,
     validateEngineDraft,
     engineFromDraft,
+    isCommandNotRegistered,
     DEFAULT_RESEARCH_PROMPTS,
     RESEARCH_PROMPT_STEPS,
     RESEARCH_LIMITS,
@@ -34,6 +35,11 @@
   // built-in defaults so the page isn't blank, but saving/testing would fail, so
   // those are disabled and a banner explains why.
   let backendAvailable = $state(true);
+  // Set when the command *is* registered but the load itself failed (e.g. an
+  // unreadable/corrupt research_config.json). Unlike a missing command this must
+  // NOT disable Save — otherwise a bad file is an in-app dead end with no way to
+  // overwrite it — so it drives its own banner and leaves Save enabled.
+  let loadError = $state<string | null>(null);
 
   let message = $state("");
   let messageType = $state<"success" | "error">("success");
@@ -74,16 +80,28 @@
     void loadConfig();
   });
 
-  async function loadConfig() {
+  async function loadConfig(): Promise<boolean> {
     isLoading = true;
     try {
       config = await researchGetConfig();
       backendAvailable = true;
-    } catch {
-      // Backend command not registered yet — fall back to the contract defaults
-      // so the page is usable and the shape is visible.
+      loadError = null;
+      return true;
+    } catch (e: any) {
+      // Two very different failures reach here. Tell them apart so a real load
+      // error stays fixable instead of masquerading as "backend unavailable".
       config = defaultResearchConfig();
-      backendAvailable = false;
+      if (isCommandNotRegistered(String(e))) {
+        // Command not registered yet — degrade to defaults, disable Save/Test.
+        backendAvailable = false;
+        loadError = null;
+      } else {
+        // The command ran and failed (e.g. a corrupt research_config.json).
+        // Keep Save enabled so the user can overwrite the unreadable file.
+        backendAvailable = true;
+        loadError = String(e);
+      }
+      return false;
     } finally {
       isLoading = false;
     }
@@ -94,6 +112,9 @@
     isSaving = true;
     try {
       await researchSetConfig(clampResearchNumbers($state.snapshot(config)));
+      // A successful save overwrites whatever bad file blocked the load, so the
+      // error state no longer applies.
+      loadError = null;
       showMessage("Research settings saved.", "success");
     } catch (e: any) {
       showMessage("Failed to save: " + e, "error");
@@ -103,9 +124,15 @@
   }
 
   async function revert() {
-    await loadConfig();
+    const ok = await loadConfig();
     testResults = {};
-    showMessage("Reverted to saved settings.", "success");
+    // Only claim success once the reload actually succeeded; otherwise the
+    // banner from loadConfig() already explains what went wrong.
+    if (ok) {
+      showMessage("Reverted to saved settings.", "success");
+    } else {
+      showMessage("Couldn't reload saved settings.", "error");
+    }
   }
 
   async function testEngine(engine: SearchEngineDef) {
@@ -184,6 +211,12 @@
         The research backend isn't available in this build yet, so these are the
         built-in defaults. You can look around, but saving and testing are
         disabled until it's wired up.
+      </div>
+    {:else if loadError}
+      <div class="message error" role="alert">
+        Couldn't read your saved research settings ({loadError}). Showing the
+        built-in defaults below — <strong>Save</strong> to overwrite the
+        unreadable file with these values.
       </div>
     {/if}
 

@@ -6,6 +6,7 @@ import {
   clampResearchNumbers,
   validateEngineDraft,
   engineFromDraft,
+  isCommandNotRegistered,
   RESEARCH_PROMPT_STEPS,
   DEFAULT_ENGINES,
   type EngineDraft,
@@ -228,6 +229,23 @@ describe("validateEngineDraft", () => {
   it("flags a missing kind", () => {
     const errs = validateEngineDraft({ id: "x", name: "X", url_template: "https://x?q={query}" });
     expect(errs.some((e) => /kind/i.test(e))).toBe(true);
+  });
+});
+
+describe("isCommandNotRegistered", () => {
+  it("recognises Tauri's unregistered / denied command rejections", () => {
+    expect(isCommandNotRegistered("Command research_get_config not found")).toBe(true);
+    expect(isCommandNotRegistered("research_get_config not allowed. Command not found")).toBe(true);
+    expect(isCommandNotRegistered("Unknown command: research_get_config")).toBe(true);
+  });
+
+  it("treats a genuine load failure as a real error (Save must stay enabled)", () => {
+    // A corrupt/unreadable research_config.json surfaces a serde/IO message —
+    // it must NOT be mistaken for a missing command, or the bad file becomes a
+    // dead end with no way to overwrite it.
+    expect(isCommandNotRegistered("expected value at line 1 column 1")).toBe(false);
+    expect(isCommandNotRegistered("Permission denied (os error 13)")).toBe(false);
+    expect(isCommandNotRegistered("missing field `engines` at line 4 column 2")).toBe(false);
   });
 });
 

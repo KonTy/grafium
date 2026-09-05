@@ -162,6 +162,25 @@ export async function researchResetPrompts(): Promise<ResearchConfig> {
 }
 
 /**
+ * True when an IPC rejection means the command simply isn't registered in this
+ * build (Tauri answers "Command <name> not found", or a capability-denied one
+ * with "not allowed"), as opposed to the command running and failing — e.g. a
+ * corrupt/unreadable `research_config.json` surfacing a serde/IO message. The
+ * distinction matters in Settings: a missing command means degrade-to-defaults
+ * with Save disabled, but a real load error must keep Save *enabled* so the
+ * user can overwrite the bad file instead of hitting a dead end.
+ */
+export function isCommandNotRegistered(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    (m.includes("command") && m.includes("not found")) ||
+    m.includes("not allowed") ||
+    m.includes("not registered") ||
+    m.includes("unknown command")
+  );
+}
+
+/**
  * Runs a single engine against `query` so a student can tell "my selector is
  * wrong" (0 results / parse error) from "that engine is blocking me" (network
  * error). Rejects with the backend's error string on failure.
