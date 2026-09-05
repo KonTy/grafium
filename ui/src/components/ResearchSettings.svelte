@@ -60,7 +60,7 @@
       url_template: "",
       category: "Web",
       selectors: { result: "", link: "", title: "", snippet: "" },
-      json_paths: { results: "", url: "", title: "", snippet: "" },
+      json_paths: { results: "", url: "", title: "", snippet: "", url_prefix: "" },
     };
   }
   let draft = $state<EngineDraft>(emptyDraft());
@@ -362,7 +362,13 @@
                 <input id="add-eng-path-snippet" type="text" class="field-input" bind:value={draft.json_paths.snippet} placeholder="abstract" />
               </div>
             </div>
-            <p class="field-hint">Dotted paths into the JSON response, e.g. <code>message.items</code> then <code>title.0</code>.</p>
+            <div class="field-row">
+              <div class="field-group">
+                <label class="field-label" for="add-eng-path-url-prefix">URL prefix (optional)</label>
+                <input id="add-eng-path-url-prefix" type="text" class="field-input" bind:value={draft.json_paths.url_prefix} placeholder="https://openlibrary.org" />
+              </div>
+            </div>
+            <p class="field-hint">Dotted paths into the JSON response, e.g. <code>message.items</code> then <code>title.0</code>. Set <strong>URL prefix</strong> only when the API returns relative URLs like <code>/works/OL123W</code> — it's prepended so each citation is an absolute, openable link.</p>
           {/if}
 
           {#if draftErrors.length > 0}

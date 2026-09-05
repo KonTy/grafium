@@ -87,6 +87,15 @@ export interface JsonPaths {
   url: string;
   title: string;
   snippet: string;
+  /**
+   * Absolute prefix prepended to each item's `url` when the API returns a
+   * relative identifier rather than a link (Google Patents → "patent/US…",
+   * Open Library → "/works/OL123W"). Without it those citations are relative,
+   * and `openWebSource()` rejects anything that isn't http(s). Null/omitted for
+   * APIs that already return absolute URLs, which keeps existing engine
+   * definitions serializing unchanged.
+   */
+  url_prefix?: string | null;
 }
 
 export interface SearchEngineDef {
@@ -483,6 +492,12 @@ export function validateEngineDraft(draft: EngineDraft, existingIds: string[] = 
     if (!(p.results ?? "").trim()) errors.push("JSON engines need a results (array) path.");
     if (!(p.url ?? "").trim()) errors.push("JSON engines need a url path.");
     if (!(p.title ?? "").trim()) errors.push("JSON engines need a title path.");
+    // A prefix only earns its keep by turning a relative identifier into a
+    // citable link, so a non-http value would still fail openWebSource().
+    const prefix = (p.url_prefix ?? "").trim();
+    if (prefix && !/^https?:\/\//i.test(prefix)) {
+      errors.push("The URL prefix must be an absolute http(s):// URL (it's prepended to relative result URLs).");
+    }
   } else {
     errors.push("Choose an engine kind (HTML or JSON).");
   }
@@ -519,6 +534,9 @@ export function engineFromDraft(draft: EngineDraft): SearchEngineDef {
       url: (p.url ?? "").trim(),
       title: (p.title ?? "").trim(),
       snippet: (p.snippet ?? "").trim(),
+      // Empty → null so the backend's Option<String> stays None and engines
+      // that need no prefix serialize exactly as before.
+      url_prefix: (p.url_prefix ?? "").trim() || null,
     };
   }
   return base;

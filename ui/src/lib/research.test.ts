@@ -200,6 +200,26 @@ describe("validateEngineDraft", () => {
     expect(errs).toContain("JSON engines need a results (array) path.");
   });
 
+  it("rejects a non-http url_prefix but accepts an absolute one", () => {
+    const base = {
+      id: "j",
+      name: "J",
+      kind: "Json" as const,
+      url_template: "https://x?q={query}",
+    };
+    const bad = validateEngineDraft({
+      ...base,
+      json_paths: { results: "d", url: "u", title: "t", url_prefix: "example.org" },
+    });
+    expect(bad.some((e) => /url prefix/i.test(e))).toBe(true);
+
+    const good = validateEngineDraft({
+      ...base,
+      json_paths: { results: "d", url: "u", title: "t", url_prefix: "https://example.org" },
+    });
+    expect(good).toEqual([]);
+  });
+
   it("does not demand JSON paths for an HTML engine (conditional fields)", () => {
     // A complete HTML draft with no json_paths at all must still pass.
     expect(validateEngineDraft({ ...goodHtml, json_paths: undefined })).toEqual([]);
@@ -238,6 +258,29 @@ describe("engineFromDraft", () => {
       json_paths: { results: "data", url: "u", title: "t", snippet: "s" },
     });
     expect(eng.selectors).toBeNull();
-    expect(eng.json_paths).toEqual({ results: "data", url: "u", title: "t", snippet: "s" });
+    expect(eng.json_paths).toEqual({ results: "data", url: "u", title: "t", snippet: "s", url_prefix: null });
+  });
+
+  it("serializes a trimmed url_prefix and nulls a blank one", () => {
+    const withPrefix = engineFromDraft({
+      id: "ol",
+      name: "Open Library",
+      kind: "Json",
+      url_template: "https://openlibrary.org/search.json?q={query}",
+      json_paths: { results: "docs", url: "key", title: "title", snippet: "", url_prefix: "  https://openlibrary.org  " },
+    });
+    // Relative-URL APIs are only citable once the prefix is applied, so it has
+    // to survive serialization (trimmed) rather than being dropped.
+    expect(withPrefix.json_paths?.url_prefix).toBe("https://openlibrary.org");
+
+    const noPrefix = engineFromDraft({
+      id: "api",
+      name: "API",
+      kind: "Json",
+      url_template: "https://api.example.com?q={query}",
+      json_paths: { results: "d", url: "u", title: "t", snippet: "s", url_prefix: "   " },
+    });
+    // Blank must become null so the backend's Option<String> stays None.
+    expect(noPrefix.json_paths?.url_prefix).toBeNull();
   });
 });
