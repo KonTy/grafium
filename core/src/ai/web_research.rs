@@ -33,6 +33,24 @@ use crate::scraping::browser::BrowserDriver;
 use crate::scraping::extract;
 use crate::scraping::search::{web_search, SearchResult as WebSearchResult};
 
+/// Error message returned when a research run is stopped via its cancellation
+/// flag. Callers that own the flag can compare against this (or just re-check
+/// the flag) to tell a deliberate Stop apart from a genuine failure, so a
+/// cancelled run doesn't surface an alarming "research failed" note the user
+/// never asked to see.
+pub const RESEARCH_CANCELLED: &str = "Web research was cancelled.";
+
+/// Whether a (borrowed) cancellation flag has been tripped. `None` means "no
+/// flag supplied" and so is never cancelled — the uncancellable callers.
+fn is_cancelled(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The canonical cancellation error (see [`RESEARCH_CANCELLED`]).
+fn cancelled_error() -> CoreError {
+    CoreError::Other(RESEARCH_CANCELLED.to_string())
+}
+
 /// A single web source cited by the research summary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Citation {
@@ -122,10 +140,38 @@ impl<'a> WebResearchEngine<'a> {
     /// `progress` so a caller can show a live "what am I doing" status
     /// (planning queries, searching, reading source N/M, synthesizing)
     /// instead of a silent multi-second-to-minute wait.
+    ///
+    /// This is the uncancellable convenience form; long-running callers that
+    /// need a Stop button should use [`Self::research_cancellable`].
     pub async fn research(
         &self,
         title: &str,
         seed_text: &str,
+        progress: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<WebResearchResult> {
+        self.research_cancellable(title, seed_text, None, progress)
+            .await
+    }
+
+    /// [`Self::research`] with cooperative cancellation. `cancel` (if given) is
+    /// polled between the expensive network steps — before each search query
+    /// and before reading each source — so a user who hits Stop actually
+    /// interrupts a slow run instead of waiting out every remaining fetch. On
+    /// cancellation the run returns [`RESEARCH_CANCELLED`] as an error rather
+    /// than a partial (and therefore misleading, half-cited) summary; the
+    /// caller decides how to present that — typically by staying silent, since
+    /// the user asked to stop.
+    ///
+    /// The flag is only checked at these boundaries, never mid-fetch: an
+    /// individual `web_search`/`fetch` is already bounded by the browser's
+    /// 30-second timeout, so the coarse-grained checks keep the worst-case
+    /// "time to actually stop" to one in-flight request without threading a
+    /// cancellation token through the whole scraping stack.
+    pub async fn research_cancellable(
+        &self,
+        title: &str,
+        seed_text: &str,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
         progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<WebResearchResult> {
         progress("Planning search queries...");
@@ -140,6 +186,9 @@ impl<'a> WebResearchEngine<'a> {
         let mut candidates: Vec<WebSearchResult> = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
         for query in &queries {
+            if is_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
             let results = web_search(self.browser, query, self.config.results_per_query).await?;
             for result in results {
                 if seen_urls.insert(result.url.clone()) {
@@ -164,6 +213,9 @@ impl<'a> WebResearchEngine<'a> {
         let mut citations = Vec::new();
         let mut source_excerpts = Vec::new();
         for (i, candidate) in picked.iter().enumerate() {
+            if is_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
             progress(&format!(
                 "Reading source {}/{}: {}",
                 i + 1,
@@ -194,6 +246,9 @@ impl<'a> WebResearchEngine<'a> {
             ));
         }
 
+        if is_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
         progress("Synthesizing cited summary...");
         let (title_answer, topics) = self.synthesize(title, seed_text, &source_excerpts).await?;
 
@@ -586,5 +641,82 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("No search results"));
+    }
+
+    /// A `StubBrowser` variant that trips a cancellation flag the moment it
+    /// serves the search-results page, and records every URL it is asked to
+    /// fetch — so a test can prove a run stops *after* searching but *before*
+    /// reading any source.
+    struct CancelOnSearchBrowser {
+        search_html: String,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        fetched: Mutex<Vec<String>>,
+    }
+
+    impl BrowserDriver for CancelOnSearchBrowser {
+        fn fetch<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<FetchedResource>> {
+            Box::pin(async move {
+                self.fetched.lock().unwrap().push(url.to_string());
+                if url.starts_with("https://search.brave.com/") {
+                    // Simulate the user hitting Stop while results come back.
+                    self.cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(FetchedResource {
+                        url: url.to_string(),
+                        content_type: Some("text/html".to_string()),
+                        bytes: self.search_html.clone().into_bytes(),
+                    })
+                } else {
+                    Err(CoreError::Other(format!(
+                        "should not fetch {url} after cancel"
+                    )))
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_first_search_returns_cancelled() {
+        let browser = StubBrowser {
+            search_html: search_html_with_two_results(),
+            pages: HashMap::new(),
+        };
+        let llm = StubLlm::new([r#"{"queries": ["q"]}"#]);
+        let engine = WebResearchEngine::new(&llm, &browser);
+
+        // Flag already tripped before the run begins → stop at the first
+        // between-search checkpoint, before any network fetch.
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let err = engine
+            .research_cancellable("Title", "seed", Some(&cancel), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), RESEARCH_CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_search_and_reading_stops_before_any_fetch() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let browser = CancelOnSearchBrowser {
+            search_html: search_html_with_two_results(),
+            cancel: cancel.clone(),
+            fetched: Mutex::new(Vec::new()),
+        };
+        // The LLM plans a query and picks sources, but the run must stop before
+        // synthesize is ever reached — no synth response is queued, so reaching
+        // it would surface a *different* error than RESEARCH_CANCELLED.
+        let llm = StubLlm::new([r#"{"queries": ["q"]}"#, r#"{"picks": [0, 1]}"#]);
+        let engine = WebResearchEngine::new(&llm, &browser);
+
+        let err = engine
+            .research_cancellable("Title", "seed", Some(&cancel), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), RESEARCH_CANCELLED);
+
+        // Only the search page was fetched; no source article was read.
+        let fetched = browser.fetched.lock().unwrap();
+        assert_eq!(fetched.len(), 1, "should stop before reading any source");
+        assert!(fetched[0].starts_with("https://search.brave.com/"));
     }
 }
