@@ -88,11 +88,14 @@ async fn main() {
         );
     }
 
-    let questions = [
-        "when was the last time I was upset",
-        "when did I paint my room",
-        "explain how mutexes work",
-    ];
+    let questions: Vec<String> = std::env::var("CHAT_E2E_QUERIES")
+        .map(|v| v.split('|').map(str::to_string).collect())
+        .unwrap_or_else(|_| vec![
+            "when was the last time I was upset".to_string(),
+            "when did I paint my room".to_string(),
+            "explain how mutexes work".to_string(),
+        ]);
+    let questions: Vec<&str> = questions.iter().map(String::as_str).collect();
 
     for q in questions {
         println!("\n=== {q} ===");

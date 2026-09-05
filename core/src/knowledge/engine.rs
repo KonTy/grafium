@@ -632,6 +632,31 @@ impl KnowledgeEngine {
         // as evidence only when it shares a real content word with the query.
         let salient_terms = crate::db::chat_salient_terms(query);
 
+        // Adaptive dense-relevance discriminator: judge the dense arm from the
+        // spread of ALL its candidate cosines, not a fixed absolute floor. When
+        // the answer isn't in the graph every candidate bunches at the model's
+        // baseline similarity and the arm carries no signal, so its hits are
+        // gated out en masse. Computed once over the whole candidate pool.
+        let dense_cosines: Vec<f32> = cosine_by_id.values().copied().collect();
+        let dense_has_signal = dense_arm_has_signal(&dense_cosines);
+
+        if std::env::var_os("GRAFIUM_LOG_COSINES").is_some() {
+            let mut sorted = dense_cosines.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let top = sorted.first().copied().unwrap_or(0.0);
+            let median = if sorted.is_empty() {
+                0.0
+            } else {
+                sorted[sorted.len() / 2]
+            };
+            eprintln!(
+                "cosine-log: query={query:?} candidates={} top={top:.3} median~={median:.3} \
+                 margin={:.3} dense_has_signal={dense_has_signal}",
+                sorted.len(),
+                top - median,
+            );
+        }
+
         let hits: Vec<RetrievedHit> = top_ids
             .iter()
             .filter_map(|id| {
@@ -654,15 +679,15 @@ impl KnowledgeEngine {
                     children: Vec::new(),
                 })
             })
-            // Calibration hook (opt-in): the similarity floor is an unvalidated
-            // guess per embedding model. `GRAFIUM_LOG_COSINES=1` prints the
+            // Calibration hook (opt-in): `GRAFIUM_LOG_COSINES=1` prints the
             // observed cosine + gate outcome for every candidate so the floor
-            // can be tuned against real data later without guessing.
+            // and margin can be tuned against real data (see the summary line
+            // logged above, and ASK_DENSE_RELATIVE_MARGIN's calibration table).
             .inspect(|h| {
                 if std::env::var_os("GRAFIUM_LOG_COSINES").is_some() {
                     eprintln!(
-                        "cosine-log: pass={} lexical={} cosine={:?} title={:?} :: {}",
-                        passes_relevance_gate(h, &salient_terms),
+                        "cosine-log:   pass={} lexical={} cosine={:?} title={:?} :: {}",
+                        passes_relevance_gate(h, &salient_terms, dense_has_signal),
                         h.lexical,
                         h.cosine,
                         h.page_title,
@@ -670,16 +695,16 @@ impl KnowledgeEngine {
                     );
                 }
             })
-            // Relevance gate (HIGH 5): drop candidates that aren't genuine
-            // evidence — dense nearest-neighbours below the similarity floor,
-            // and lexical hits whose only overlap with the query is filler
-            // (BM25 matches "work"/"how"/"explain" happily). A lexical hit must
-            // share a salient content term. This is what keeps a general
-            // question ("explain how mutexes work") from dragging irrelevant
-            // notes into the prompt once the index is populated, while the
-            // empty-index BM25-only path is unaffected (those hits match a
-            // salient term by construction).
-            .filter(|h| passes_relevance_gate(h, &salient_terms))
+            // Relevance gate (HIGH 5 + re-audit): drop candidates that aren't
+            // genuine evidence. A dense hit must clear the absolute floor AND
+            // belong to a dense arm that carries signal (top cosine stands clear
+            // of the candidate median); a lexical hit must share a salient
+            // content term (BM25 matches "work"/"how"/"explain" happily). This
+            // keeps a general question ("explain how mutexes work") from
+            // dragging irrelevant notes into the prompt once the index is
+            // populated, while the empty-index BM25-only path is unaffected
+            // (those hits match a salient term by construction).
+            .filter(|h| passes_relevance_gate(h, &salient_terms, dense_has_signal))
             .collect();
 
         // Establish relevance ordering (temporal reorder is a soft boost, not
@@ -1020,36 +1045,97 @@ fn ask_context_budget(context_window: Option<usize>) -> usize {
 /// closest of an irrelevant bunch and would only contaminate a general answer
 /// (HIGH 5).
 ///
-/// NOTE: this is still an unvalidated guess for any given embedding model —
-/// on a real run, clearly-irrelevant dense matches from `nomic-embed` were
-/// observed scoring high enough to appear. Set `GRAFIUM_LOG_COSINES=1` to log
-/// observed cosines (see [`KnowledgeEngine::hybrid_search`]) so this floor can
-/// be calibrated against real data rather than guessed.
+/// This is retained purely as an absolute *sanity backstop* — clearing it is
+/// necessary but NOT sufficient. The primary discriminator is the relative
+/// margin below, because every embedding model has a different baseline
+/// similarity and the user can switch models freely, so no fixed absolute
+/// floor is correct across models. Set `GRAFIUM_LOG_COSINES=1` to log observed
+/// cosines (see [`KnowledgeEngine::hybrid_search`]) for re-calibration.
 const ASK_SIMILARITY_FLOOR: f32 = 0.25;
 /// Cosine at/above which a dense hit is treated as strong evidence, enough to
 /// answer purely from notes rather than a cautious blend.
 const ASK_STRONG_SIMILARITY: f32 = 0.6;
 
+/// Primary dense-relevance discriminator: how far the best candidate cosine
+/// must stand above the candidate *median* for the dense arm to be considered
+/// to carry real signal. When a query's answer is genuinely present, the top
+/// hit stands well clear of the pack; when it isn't, every candidate bunches
+/// at the model's baseline similarity and the margin collapses. Measuring the
+/// spread relative to the model's own distribution makes this model-agnostic
+/// where a fixed absolute floor is brittle.
+///
+/// Calibrated 2026-09 against the user's real 8,288-chunk index with
+/// **Qwen3-Embedding-0.6B** (via `GRAFIUM_LOG_COSINES`):
+///
+/// | query                        | top   | ~median | margin | verdict |
+/// |------------------------------|-------|---------|--------|---------|
+/// | what is a fresco             | 0.777 | ~0.51   | 0.27   | signal  |
+/// | what does meticulous mean    | 0.791 | ~0.56   | 0.23   | signal  |
+/// | explain how mutexes work     | 0.421 | ~0.40   | 0.02   | noise   |
+///
+/// 0.10 sits an order of magnitude below observed real signal (0.23–0.27) and
+/// well above pure noise (0.02). Re-derive when the embedding model changes:
+///   `GRAFIUM_LOG_COSINES=1 CHAT_E2E_QUERIES="q1|q2" cargo run -p grafium-core \
+///     --release --features llm-local --example chat_e2e -- <graph> <data>`
+const ASK_DENSE_RELATIVE_MARGIN: f32 = 0.10;
+
+/// Decide whether the dense arm carries real signal for this query, from the
+/// distribution of *all* its candidate cosines. Returns true only when the
+/// best candidate both clears the absolute sanity floor and stands at least
+/// [`ASK_DENSE_RELATIVE_MARGIN`] above the candidate median. On a query whose
+/// answer isn't in the graph, the candidates bunch at the model's baseline,
+/// the margin collapses, and this returns false → the dense arm contributes no
+/// evidence and the answer falls back to general knowledge.
+///
+/// Degenerate cases are handled without panicking or dividing by zero: an
+/// empty candidate set is "no signal"; a single candidate (or an all-identical
+/// pack) has a zero margin and is likewise treated as no signal, since nothing
+/// stands out from the pack.
+fn dense_arm_has_signal(cosines: &[f32]) -> bool {
+    let mut sorted: Vec<f32> = cosines.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(&top) = sorted.last() else {
+        return false;
+    };
+    if top < ASK_SIMILARITY_FLOOR {
+        return false;
+    }
+    let n = sorted.len();
+    let median = if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    };
+    top - median >= ASK_DENSE_RELATIVE_MARGIN
+}
+
 /// Relevance gate for a single hit. A hit is admissible evidence only if it is
 /// genuinely on-topic:
 ///
-/// - A **dense** hit must clear the cosine similarity floor.
+/// - A **dense** hit must clear the cosine similarity floor *and* the dense arm
+///   as a whole must carry signal (`dense_has_signal`, computed once per query
+///   from the candidate distribution). This is what keeps a general question
+///   whose answer isn't in the graph — where every candidate clusters at the
+///   model's baseline similarity — from admitting the least-irrelevant note.
 /// - A **lexical** (BM25) hit must match at least one *salient* query term —
-///   a non-stopword content word. This is the crucial fix for HIGH 5: BM25
-///   happily matches common filler ("work", "how", "explain"), so a bare
-///   `hit.lexical` is NOT evidence. Requiring a salient-term overlap means a
-///   general question like "explain how mutexes work" — whose only salient
-///   term is "mutexes" — retrieves nothing from a graph that never mentions
-///   mutexes, instead of dragging in whatever shared a filler word.
+///   a non-stopword content word. This is the fix for HIGH 5: BM25 happily
+///   matches common filler ("work", "how", "explain"), so a bare `hit.lexical`
+///   is NOT evidence. Requiring a salient-term overlap means a general
+///   question like "explain how mutexes work" — whose only salient term is
+///   "mutexes" — retrieves nothing from a graph that never mentions mutexes.
 ///
 /// The empty-index BM25-only path is preserved: those hits are still lexical
 /// and still pass as long as they match a salient term (they do, because the
 /// sparse arm is itself built from the salient terms).
-fn passes_relevance_gate(hit: &RetrievedHit, salient_terms: &[String]) -> bool {
+fn passes_relevance_gate(
+    hit: &RetrievedHit,
+    salient_terms: &[String],
+    dense_has_signal: bool,
+) -> bool {
     if hit.lexical {
         return content_matches_salient_term(&hit.content, salient_terms);
     }
-    matches!(hit.cosine, Some(c) if c >= ASK_SIMILARITY_FLOOR)
+    dense_has_signal && matches!(hit.cosine, Some(c) if c >= ASK_SIMILARITY_FLOOR)
 }
 
 /// True if `content` contains at least one of the `salient_terms`, matched
@@ -2093,14 +2179,15 @@ mod tests {
     #[test]
     fn relevance_gate_requires_salient_overlap_for_lexical_and_a_floor_for_dense() {
         // A lexical hit whose content shares a *salient* term with the query
-        // is real evidence and passes.
+        // is real evidence and passes — regardless of the dense arm.
         let mut salient_match = mk_hit("a");
         salient_match.lexical = true;
         salient_match.cosine = None;
         salient_match.content = "painted the bedroom today".to_string();
         assert!(passes_relevance_gate(
             &salient_match,
-            &["paint".to_string(), "room".to_string()]
+            &["paint".to_string(), "room".to_string()],
+            false,
         ));
 
         // A lexical hit that only overlaps on filler must be REJECTED — this is
@@ -2113,25 +2200,57 @@ mod tests {
         filler_only.content = "digest what you read and store the concept".to_string();
         assert!(!passes_relevance_gate(
             &filler_only,
-            &["mutexes".to_string()]
+            &["mutexes".to_string()],
+            true,
         ));
 
         // A lexical hit with no salient terms at all (pure-filler question) is
         // not evidence either.
         let mut no_salient = mk_hit("c");
         no_salient.lexical = true;
-        assert!(!passes_relevance_gate(&no_salient, &[]));
+        assert!(!passes_relevance_gate(&no_salient, &[], true));
 
-        // Dense hits are gated purely on the similarity floor.
+        // A dense hit passes only when it clears the floor AND the dense arm
+        // carries signal.
         let mut strong = mk_hit("d");
         strong.lexical = false;
         strong.cosine = Some(0.7);
-        assert!(passes_relevance_gate(&strong, &[]));
+        assert!(passes_relevance_gate(&strong, &[], true));
+        // Same strong cosine, but the arm as a whole has no signal (everything
+        // bunched at the model's baseline) → dropped.
+        assert!(!passes_relevance_gate(&strong, &[], false));
 
         let mut weak = mk_hit("e");
         weak.lexical = false;
         weak.cosine = Some(0.1);
-        assert!(!passes_relevance_gate(&weak, &[]));
+        assert!(!passes_relevance_gate(&weak, &[], true));
+    }
+
+    #[test]
+    fn dense_arm_signal_uses_relative_margin_not_absolute_floor() {
+        // Real signal (measured shape): top 0.78 well clear of a ~0.51 median.
+        let signal = vec![0.78, 0.61, 0.55, 0.53, 0.51, 0.49, 0.47, 0.45];
+        assert!(dense_arm_has_signal(&signal));
+
+        // Pure noise (measured shape): a tight cluster at the model's baseline,
+        // top 0.42 barely above a ~0.40 median → gated out even though 0.42 is
+        // far above the absolute 0.25 floor. This is the mutexes case.
+        let noise = vec![0.42, 0.42, 0.41, 0.41, 0.40, 0.40, 0.40, 0.39];
+        assert!(!dense_arm_has_signal(&noise));
+
+        // Degenerate cases must not panic or divide by zero.
+        assert!(!dense_arm_has_signal(&[]));
+        // Single candidate: no pack to stand clear of → no signal.
+        assert!(!dense_arm_has_signal(&[0.9]));
+        // All-identical scores: zero margin → no signal, even if high.
+        assert!(!dense_arm_has_signal(&[0.8, 0.8, 0.8, 0.8]));
+        // A genuinely high top over a low pack passes even with few points.
+        assert!(dense_arm_has_signal(&[0.9, 0.3]));
+        // A high top over a high pack (below the margin) does not.
+        assert!(!dense_arm_has_signal(&[0.9, 0.85]));
+        // Top below the absolute sanity backstop is never signal, whatever the
+        // spread.
+        assert!(!dense_arm_has_signal(&[0.20, 0.01, 0.01]));
     }
 
     #[test]
