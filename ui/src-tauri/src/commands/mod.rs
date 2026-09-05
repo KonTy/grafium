@@ -14,6 +14,7 @@ pub mod research;
 pub mod sync;
 pub mod tasks;
 pub mod theme;
+pub mod trees;
 
 /// Bridges frontend diagnostics into the process log, so a WebKitGTK build's
 /// `console.log` (which never reaches stdout) can still be captured when
