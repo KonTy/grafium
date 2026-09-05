@@ -781,7 +781,7 @@
   </div>
 
   {#if error}
-    <div class="chat-error">{error}</div>
+    <div class="chat-error" role="alert">{error}</div>
   {/if}
 
   {#if isStreaming}
@@ -792,7 +792,9 @@
         class:thinking={status.phase === "thinking"}
         class:stalled={status.kind === "stalled"}
       ></span>
-      <span class="chat-status-label">{status.label}</span>
+      <span class="chat-status-label">
+        {status.announce}{#if status.meta}<span class="chat-status-meta" aria-hidden="true">&nbsp;{status.meta}</span>{/if}
+      </span>
       {#if webNote && status.kind !== "stalled"}
         <span class="chat-status-note" title={webNote}>{webNote}</span>
       {/if}

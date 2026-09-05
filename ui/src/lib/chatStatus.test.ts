@@ -183,6 +183,47 @@ describe("chatStatus display", () => {
     expect(d.label).toMatch(/Generating/);
     expect(d.label).toMatch(/3s/);
   });
+
+  it("keeps announce stable while the label ticks (live region must not re-announce)", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "delta", chars: 4, at: 1_000 },
+    ]);
+    const a = statusDisplay(s, 3_000);
+    const b = statusDisplay(s, 9_000);
+    // The visible label changes with elapsed time…
+    expect(a.label).not.toBe(b.label);
+    // …but the text the polite live region announces (`announce`) must not, or a
+    // screen reader speaks over the user every second. The ticking part is in
+    // `meta`, which the template marks aria-hidden.
+    expect(a.announce).toBe("Generating…");
+    expect(b.announce).toBe("Generating…");
+    expect(a.meta).not.toBe(b.meta);
+    // The visible label is still exactly announce + " " + meta.
+    expect(a.label).toBe(`${a.announce} ${a.meta}`);
+  });
+
+  it("puts terminal/error text in announce with no ticking meta", () => {
+    const err = statusDisplay(
+      fold([
+        { type: "start", at: 0 },
+        { type: "error", at: 100, message: "boom" },
+      ]),
+      5_000
+    );
+    expect(err.announce).toBe("boom");
+    expect(err.meta).toBe("");
+
+    const stopped = statusDisplay(
+      fold([
+        { type: "start", at: 0 },
+        { type: "cancel", at: 100 },
+      ]),
+      5_000
+    );
+    expect(stopped.announce).toBe("Stopped.");
+    expect(stopped.meta).toBe("");
+  });
 });
 
 describe("chatStatus web research", () => {

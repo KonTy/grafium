@@ -265,8 +265,18 @@ export function formatElapsed(ms: number): string {
 export interface StatusDisplay {
   kind: StatusKind;
   phase: StreamPhase | null;
-  /** Human-facing status text (already includes elapsed time where relevant). */
+  /** Human-facing status text (already includes elapsed time where relevant).
+   *  Drives the *visible* label only — never the live region, which uses the
+   *  split `announce` / `meta` below. */
   label: string;
+  /** The stable part of `label`: the phase or terminal/error text with no
+   *  ticking elapsed time or throughput. This is what the polite live region
+   *  announces, so a screen reader speaks a phase change once instead of every
+   *  second (the old ticking `label` re-announced constantly). */
+  announce: string;
+  /** The volatile part of `label`: elapsed time and tokens/sec. Shown visually
+   *  but hidden from assistive tech (aria-hidden) so it never re-announces. */
+  meta: string;
   /** Whether to run the "working" animation. False for terminal/stalled states
    *  and whenever the user prefers reduced motion. */
   animate: boolean;
@@ -287,28 +297,34 @@ export function statusDisplay(
   const base = { phase: s.phase, elapsedMs };
 
   if (s.kind === "idle") {
-    return { ...base, kind: "idle", label: "", animate: false, showStop: false };
+    return { ...base, kind: "idle", label: "", announce: "", meta: "", animate: false, showStop: false };
   }
   if (s.kind === "error") {
+    const label = s.errorMessage ?? "Something went wrong.";
     return {
       ...base,
       kind: "error",
-      label: s.errorMessage ?? "Something went wrong.",
+      label,
+      announce: label,
+      meta: "",
       animate: false,
       showStop: false,
     };
   }
   if (s.kind === "cancelled") {
-    return { ...base, kind: "cancelled", label: "Stopped.", animate: false, showStop: false };
+    return { ...base, kind: "cancelled", label: "Stopped.", announce: "Stopped.", meta: "", animate: false, showStop: false };
   }
   if (s.kind === "done") {
     // Finished, but the model never emitted a token and left no message — say
     // so plainly rather than silently ending on an empty bubble.
     const empty = s.firstTokenAt === null;
+    const label = empty ? "The model returned no answer." : "";
     return {
       ...base,
       kind: "done",
-      label: empty ? "The model returned no answer." : "",
+      label,
+      announce: label,
+      meta: "",
       animate: false,
       showStop: false,
     };
@@ -316,23 +332,31 @@ export function statusDisplay(
 
   // Active.
   if (isStalled(s, now)) {
+    const label = "No response from the model yet — it may be loading or overloaded.";
     return {
       ...base,
       kind: "stalled",
-      label: "No response from the model yet — it may be loading or overloaded.",
+      label,
+      announce: label,
+      meta: "",
       animate: false,
       showStop: true,
     };
   }
 
-  let label = `${s.phase ? PHASE_LABEL[s.phase] : "Working"}… ${formatElapsed(elapsedMs)}`;
+  // Split the phase (stable) from the elapsed/throughput (ticks every second):
+  // `label` stays the full visible string, but `announce`/`meta` let the live
+  // region speak only the stable phase and keep the timer out of assistive tech.
+  const announce = `${s.phase ? PHASE_LABEL[s.phase] : "Working"}…`;
+  let meta = formatElapsed(elapsedMs);
   if (s.phase === "generating" && s.firstTokenAt !== null) {
     const secs = (now - s.firstTokenAt) / 1000;
     if (secs >= 1 && s.tokens > 0) {
-      label += ` · ${Math.round(s.tokens / secs)} tok/s`;
+      meta += ` · ${Math.round(s.tokens / secs)} tok/s`;
     } else {
-      label += ` · ${s.tokens} tok`;
+      meta += ` · ${s.tokens} tok`;
     }
   }
-  return { ...base, kind: "active", label, animate: !reducedMotion, showStop: true };
+  const label = `${announce} ${meta}`;
+  return { ...base, kind: "active", label, announce, meta, animate: !reducedMotion, showStop: true };
 }
