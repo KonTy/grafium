@@ -227,6 +227,9 @@ pub struct LocalLlm {
     model: Arc<LlamaModel>,
     ctx_size: NonZeroU32,
     name: String,
+    /// Whether the model's baked-in chat template marks it as a reasoning
+    /// ("thinking") model — detected once at load from the template text.
+    supports_thinking: bool,
 }
 
 /// The process-wide llama.cpp backend. llama.cpp only wants to be
@@ -324,11 +327,27 @@ impl LocalLlm {
             .unwrap_or("local-llm")
             .to_string();
 
+        // Reasoning models (Qwen3, DeepSeek-R1, ...) advertise themselves in
+        // their chat template — Qwen3's references `enable_thinking` and both
+        // families emit `<think>` control markers. Detecting it here (once,
+        // from the template text) lets the engine request non-thinking mode
+        // and budget output tokens for a model that reasons before answering.
+        let supports_thinking = model
+            .chat_template(None)
+            .ok()
+            .and_then(|t| t.to_string().ok())
+            .map(|tmpl| {
+                let lower = tmpl.to_lowercase();
+                lower.contains("enable_thinking") || lower.contains("<think>")
+            })
+            .unwrap_or(false);
+
         Ok(Self {
             backend,
             model: Arc::new(model),
             ctx_size,
             name,
+            supports_thinking,
         })
     }
 
@@ -400,10 +419,11 @@ impl LlmProvider for LocalLlm {
         let ctx_size = self.ctx_size;
         let messages = messages.to_vec();
         let options = options.clone();
+        let disable_thinking = self.supports_thinking;
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options)?;
+                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
                 generate(&model, &backend, ctx_size, &prompt, &options, None)
             })
             .await
@@ -419,6 +439,10 @@ impl LlmProvider for LocalLlm {
         Some(self.ctx_size.get() as usize)
     }
 
+    fn supports_thinking(&self) -> bool {
+        self.supports_thinking
+    }
+
     fn complete_stream<'a>(
         &'a self,
         messages: &'a [ChatMessage],
@@ -430,6 +454,7 @@ impl LlmProvider for LocalLlm {
         let ctx_size = self.ctx_size;
         let messages = messages.to_vec();
         let options = options.clone();
+        let disable_thinking = self.supports_thinking;
 
         Box::pin(async move {
             // `generate()` runs on a blocking thread (llama.cpp is
@@ -440,7 +465,7 @@ impl LlmProvider for LocalLlm {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
             let generation = tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options)?;
+                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
                 generate(&model, &backend, ctx_size, &prompt, &options, Some(&tx))
             });
 
@@ -473,18 +498,30 @@ fn build_chat_prompt(
     model: &LlamaModel,
     messages: &[ChatMessage],
     options: &CompletionOptions,
+    disable_thinking: bool,
 ) -> Result<String> {
     let mut chat = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &options.system_prompt {
         chat.push(new_chat_message("system", system)?);
     }
-    for message in messages {
+    // For reasoning models, append the `/no_think` soft switch to the final
+    // user turn. Qwen3 (and compatible templates) honour this directive to
+    // skip the <think> reasoning pass — cheaper and more reliable than hoping
+    // the model answers before exhausting its budget. `<think>` stripping in
+    // the engine remains as a backstop for models that ignore the directive.
+    let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
+    for (i, message) in messages.iter().enumerate() {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
         };
-        chat.push(new_chat_message(role, &message.content)?);
+        let content = if disable_thinking && Some(i) == last_user {
+            format!("{}\n\n/no_think", message.content)
+        } else {
+            message.content.clone()
+        };
+        chat.push(new_chat_message(role, &content)?);
     }
 
     let template = match model.chat_template(None) {
@@ -588,6 +625,18 @@ fn generate(
     let stop_at_token = n_cur + max_new_tokens;
 
     while n_cur < stop_at_token && n_cur < n_ctx {
+        // Cooperative cancellation: the UI can flip this flag (via
+        // `CompletionOptions.cancel`) to abort a slow local generation
+        // instead of leaving the user staring at a frozen pane. Return what
+        // we have so far rather than erroring.
+        if options
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            break;
+        }
+
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 

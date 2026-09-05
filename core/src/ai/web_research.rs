@@ -195,9 +195,7 @@ impl<'a> WebResearchEngine<'a> {
         }
 
         progress("Synthesizing cited summary...");
-        let (title_answer, topics) = self
-            .synthesize(title, seed_text, &source_excerpts)
-            .await?;
+        let (title_answer, topics) = self.synthesize(title, seed_text, &source_excerpts).await?;
 
         Ok(WebResearchResult {
             title_answer,
@@ -233,6 +231,7 @@ impl<'a> WebResearchEngine<'a> {
                     .to_string(),
             ),
             stop: None,
+            cancel: None,
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
@@ -260,9 +259,8 @@ impl<'a> WebResearchEngine<'a> {
             picks: Vec<usize>,
         }
 
-        let mut prompt = format!(
-            "Title: {title}\n\nCandidate search results (index: title — url — snippet):\n"
-        );
+        let mut prompt =
+            format!("Title: {title}\n\nCandidate search results (index: title — url — snippet):\n");
         for (i, candidate) in candidates.iter().enumerate() {
             prompt.push_str(&format!(
                 "{i}: {} — {} — {}\n",
@@ -290,6 +288,7 @@ impl<'a> WebResearchEngine<'a> {
                     .to_string(),
             ),
             stop: None,
+            cancel: None,
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
@@ -350,13 +349,17 @@ impl<'a> WebResearchEngine<'a> {
             temperature: Some(0.3),
             system_prompt: Some(RESEARCH_SYNTHESIS_PROMPT.to_string()),
             stop: None,
+            cancel: None,
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
         let trimmed = raw.trim();
         let json_str = extract_json_object(trimmed)?;
         let parsed: SynthesisJson = serde_json::from_str(json_str).map_err(|error| {
-            concept_parse_error(&format!("invalid research synthesis JSON: {error}"), trimmed)
+            concept_parse_error(
+                &format!("invalid research synthesis JSON: {error}"),
+                trimmed,
+            )
         })?;
 
         let topics = parsed
@@ -508,7 +511,10 @@ mod tests {
                 ),
                 (
                     "https://b.example/article".to_string(),
-                    page_html("Source B", "<p>Effects on insulin resistance are modest.</p>"),
+                    page_html(
+                        "Source B",
+                        "<p>Effects on insulin resistance are modest.</p>",
+                    ),
                 ),
             ]),
         };

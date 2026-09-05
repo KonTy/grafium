@@ -17,6 +17,14 @@ pub struct CompletionOptions {
     pub system_prompt: Option<String>,
     /// Stop sequences.
     pub stop: Option<Vec<String>>,
+    /// Cooperative cancellation flag. When set to `true` mid-generation, a
+    /// provider that supports it (currently the local llama.cpp provider)
+    /// stops the token loop and returns what it has so far, so a slow local
+    /// generation can be aborted from the UI. Skipped for (de)serialization —
+    /// it's a live in-process handle, never part of persisted config — and
+    /// ignored by remote providers, which return in one shot anyway.
+    #[serde(skip)]
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for CompletionOptions {
@@ -26,6 +34,7 @@ impl Default for CompletionOptions {
             temperature: Some(0.3),
             system_prompt: None,
             stop: None,
+            cancel: None,
         }
     }
 }
@@ -109,6 +118,16 @@ pub trait LlmProvider: Send + Sync {
     /// callers fall back to a conservative default.
     fn context_window(&self) -> Option<usize> {
         None
+    }
+
+    /// Whether this provider's model is a "reasoning" model that emits a
+    /// `<think>…</think>` chain-of-thought before answering. Callers use this
+    /// to request non-thinking mode where possible and to size the output
+    /// token budget so the model still has room to answer *after* it thinks.
+    /// Defaults to `false`; only the local llama.cpp provider inspects the
+    /// model's chat template to detect it.
+    fn supports_thinking(&self) -> bool {
+        false
     }
 
     /// Same as `complete`, but reports incremental output through `on_token`
