@@ -127,7 +127,7 @@ fn dangling_tag_prefix_len(s: &str) -> usize {
     for tag in [OPEN_TAG, CLOSE_TAG] {
         let max_k = (tag.len() - 1).min(s.len());
         for k in 1..=max_k {
-            if s.as_bytes().ends_with(tag[..k].as_bytes()) {
+            if s.as_bytes().ends_with(&tag.as_bytes()[..k]) {
                 best = best.max(k);
             }
         }
