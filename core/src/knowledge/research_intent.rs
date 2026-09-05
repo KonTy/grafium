@@ -527,21 +527,40 @@ fn match_embedded(low: &str, norm: &str) -> Option<String> {
             continue;
         }
         let before = &low[..at];
-        // A search verb must introduce the reference, otherwise this is just a
-        // sentence that mentions the internet.
-        if !IMPERATIVE_VERBS
-            .iter()
-            .any(|verb| contains_word(before, verb))
-        {
+        if LOCAL_OBJECTS.iter().any(|obj| before.contains(obj)) {
             continue;
         }
-        if LOCAL_OBJECTS.iter().any(|obj| before.contains(obj)) {
+
+        let after_target = low[at + target.len()..].trim_start();
+        // "the internet of things", "the web of trust" — the web word is part
+        // of a compound noun, not a place to go looking. Lifting it out would
+        // also mangle the question into "what are my thoughts of trust".
+        if after_target.starts_with("of ") {
+            continue;
+        }
+        // "I read a paper on the internet yesterday" recounts something the
+        // user did; it belongs to their journal, not to a web search.
+        if low.starts_with("i ") {
             continue;
         }
 
         // Splice the sentence back together without the web reference.
         let head = norm[..at].trim_end();
         let tail = norm[at + target.len()..].trim_start();
+
+        // A lone word before the reference is the instruction verb — including
+        // when it's misspelled, which is exactly why this no longer requires
+        // the verb to be one we recognise. Requiring a known verb meant
+        // "eatch on the internet what is …" silently did nothing, and chasing
+        // typos with a longer verb list is not a strategy. Dropping the word
+        // keeps it out of the search query.
+        let head = if head.split_whitespace().count() == 1
+            && !starts_with_question_opener(&head.to_ascii_lowercase())
+        {
+            ""
+        } else {
+            head
+        };
         let joined = match (head.is_empty(), tail.is_empty()) {
             (true, true) => String::new(),
             (true, false) => tail.to_string(),
@@ -1263,6 +1282,86 @@ mod tests {
         assert!(cleaned("find the latest paper in the internet").is_some());
     }
 
+    /// Requiring the instruction verb to be one we recognise meant a typo
+    /// silently disabled the whole feature — "eatch on the internet what is …"
+    /// did nothing. An explicit "on the internet" is intent enough on its own,
+    /// and a lone unrecognised word before it is dropped rather than searched
+    /// for. Over-firing costs only latency here, since the answer is two-part
+    /// either way.
+    #[test]
+    fn a_misspelled_instruction_verb_still_triggers_research() {
+        assert_eq!(
+            cleaned("eatch on the internet what is the last publication by Michael Levin")
+                .as_deref(),
+            Some("what is the last publication by Michael Levin")
+        );
+        assert_eq!(
+            cleaned("seach on the web for creatine").as_deref(),
+            Some("for creatine")
+        );
+        // No verb at all is fine too.
+        assert_eq!(
+            cleaned("on the internet what is scientology").as_deref(),
+            Some("what is scientology")
+        );
+    }
+
+    /// Dropping the verb requirement widened the rule, so the compound-noun
+    /// and personal-recollection cases need explicit guards: without them
+    /// "what are my thoughts on the web of trust" both fired and mangled the
+    /// question into "what are my thoughts of trust".
+    #[test]
+    fn a_web_word_inside_a_compound_noun_is_not_an_instruction() {
+        for input in [
+            "what are my thoughts on the web of trust",
+            "check my notes on the internet of things",
+            "summarize my notes on the internet of things",
+        ] {
+            assert_eq!(cleaned(input), None, "should not fire for {input:?}");
+        }
+    }
+
+    #[test]
+    fn recounting_something_the_user_did_is_a_journal_question() {
+        assert_eq!(cleaned("I read a paper on the internet yesterday"), None);
+    }
+
+    /// The rule veto exists because the model and the rules fail differently:
+    /// asked "how do I search the web for academic papers", the model sees the
+    /// words "search the web" and votes to search, missing that the question
+    /// is *about* searching. Where a rule is certain, it wins.
+    #[test]
+    fn rules_veto_questions_the_model_would_misroute() {
+        assert!(rules_reject_research(
+            "how do I search the web for academic papers"
+        ));
+        assert!(rules_reject_research(
+            "explain how web search engines rank pages"
+        ));
+        assert!(rules_reject_research(
+            "check my notes on the internet of things"
+        ));
+        assert!(rules_reject_research("find my notes about scientology"));
+    }
+
+    /// The veto must stay narrow — anything it rejects never reaches the
+    /// model, so an over-broad rule silently disables the classifier.
+    #[test]
+    fn the_veto_does_not_swallow_ordinary_questions() {
+        for input in [
+            "what is the latest news about nvidia earnings",
+            "who won the world cup last year",
+            "what papers did Michael Levin publish recently",
+            "explain how mutexes work",
+            "when did I paint my room",
+        ] {
+            assert!(
+                !rules_reject_research(input),
+                "veto must not claim {input:?}"
+            );
+        }
+    }
+
     /// The embedded rule is the loosest one here, so its guards matter most:
     /// questions about how searching works, and verbs aimed at the user's own
     /// notes, must still be left alone.
@@ -1362,3 +1461,101 @@ mod tests {
         assert_eq!(intent.cleaned_question, "what is rust");
     }
 }
+
+/// Whether the rules are confident enough to *veto* a web search, so the
+/// classifier is never consulted.
+///
+/// The two systems have complementary blind spots. The model reads meaning and
+/// so survives typos and novel phrasing, but it judged "how do I search the
+/// web for academic papers" as needing a search — it sees the words "search
+/// the web" and misses that the question is *about* searching. The rules get
+/// that right by construction. So where a rule is certain, it wins; everywhere
+/// else the model decides.
+pub fn rules_reject_research(question: &str) -> bool {
+    let norm = normalize_ws(question);
+    let low: String = norm.chars().map(|c| c.to_ascii_lowercase()).collect();
+
+    // A question about how *searching itself* works, not a request to search.
+    // Both halves are required: "explain how" alone would also veto "explain
+    // how the new API works", which may well need the web, and silently
+    // vetoing is worse than a wrong classification because the model never
+    // gets a say.
+    let mentions_search = ["search", "google", "web", "internet"]
+        .iter()
+        .any(|w| contains_word(&low, w));
+    if mentions_search && MECHANISM_OPENERS.iter().any(|o| low.starts_with(o)) {
+        return true;
+    }
+    // Aimed at the user's own graph.
+    if LOCAL_OBJECTS.iter().any(|obj| low.contains(obj)) {
+        return true;
+    }
+    false
+}
+
+/// Decides, by asking the model, whether answering `question` needs current
+/// information from the open web.
+///
+/// The rule-based trigger above is deterministic, instant, and covers the case
+/// where the user *says* to search. It cannot cover the case where they simply
+/// ask something that only the web can answer ("what papers did Michael Levin
+/// publish recently"), nor survive a typo — "eatch on the internet" silently
+/// did nothing, and each patch to the phrase list was followed by another
+/// phrasing it missed. A model reading the sentence handles both.
+///
+/// This runs on the critical path, so the call is deliberately tiny: a
+/// one-word answer with a hard token cap. It is a *fallback* — the rules are
+/// tried first precisely so an explicit request costs nothing.
+///
+/// Fails closed: any error, or an unrecognised reply, means "no web search",
+/// because a wrong `false` merely answers from notes and general knowledge
+/// while a wrong `true` spends seconds fetching pages nobody asked for.
+pub async fn classify_needs_web(llm: &dyn crate::ai::traits::LlmProvider, question: &str) -> bool {
+    use crate::ai::traits::{ChatMessage, CompletionOptions, MessageRole};
+
+    let messages = vec![
+        ChatMessage {
+            role: MessageRole::System,
+            content: WEB_CLASSIFIER_PROMPT.to_string(),
+        },
+        ChatMessage {
+            role: MessageRole::User,
+            content: format!("Question: {question}\nAnswer WEB or LOCAL."),
+        },
+    ];
+    let options = CompletionOptions {
+        // Room for the empty `<think></think>` pair a reasoning model emits
+        // even under `/no_think`; a 4-token cap was consumed entirely by those
+        // tags, leaving no verdict and silently classifying everything LOCAL.
+        max_tokens: Some(24),
+        temperature: Some(0.0),
+        ..Default::default()
+    };
+
+    match llm.complete(&messages, &options).await {
+        Ok(reply) => {
+            let verdict = match crate::ai::reasoning::strip_think_blocks(&reply) {
+                crate::ai::reasoning::ThinkStripResult::Answer(a) => a,
+                // Budget spent entirely on reasoning — no verdict, so fail closed.
+                crate::ai::reasoning::ThinkStripResult::ReasoningOnly => return false,
+            };
+            verdict.trim().to_ascii_uppercase().starts_with("WEB")
+        }
+        Err(_) => false,
+    }
+}
+
+const WEB_CLASSIFIER_PROMPT: &str = "\
+You route questions for a personal notes app. Reply with exactly one word.
+
+Reply WEB when answering well needs information from the internet: current \
+events, recent news or prices, someone's latest work or publications, product \
+releases, anything time-sensitive, or when the user asks you to look \
+something up online (even if they misspell it).
+
+Reply LOCAL for everything else: questions about the user's own notes, \
+journal or past ('when did I', 'what did I write'), and general knowledge you \
+already have (explanations, definitions, maths, writing tasks, how things \
+work).
+
+Reply with only WEB or LOCAL.";

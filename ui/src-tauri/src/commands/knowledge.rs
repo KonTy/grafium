@@ -855,7 +855,7 @@ pub async fn ai_ask_stream(
     // A research trigger may carry no topic of its own ("look it up on the
     // internet") — mid-conversation that's the normal way to ask, so the topic
     // is taken from the turn it refers back to rather than refusing.
-    let research = detect_research_intent(&question).and_then(|intent| {
+    let rule_match = detect_research_intent(&question).and_then(|intent| {
         if !intent.needs_conversation_context {
             return Some(intent.cleaned_question);
         }
@@ -864,6 +864,25 @@ pub async fn ai_ask_stream(
         // than not searching at all.
         conversation::is_self_contained(&resolved).then_some(resolved)
     });
+
+    // Rules are instant and deterministic, so an explicit "search the web"
+    // costs nothing. They can't read a misspelled or merely *implied* request
+    // though ("what papers did Levin publish recently" names no web at all),
+    // and extending the phrase list was repeatedly followed by another
+    // phrasing it missed. So anything the rules neither match nor confidently
+    // reject is put to the model — about half a second, and only on questions
+    // that would otherwise have been answered without the web.
+    let research = match rule_match {
+        Some(q) => Some(q),
+        None if grafium_core::knowledge::research_intent::rules_reject_research(&question) => None,
+        None => {
+            let resolved = conversation::resolve_followup(&question, &history);
+            match engine.classify_needs_web(&resolved).await {
+                true => Some(resolved),
+                false => None,
+            }
+        }
+    };
     let effective_question = research.clone().unwrap_or_else(|| question.clone());
 
     // Forward real token deltas and phase transitions as they happen. Phase

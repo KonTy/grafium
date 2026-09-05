@@ -414,6 +414,16 @@ impl KnowledgeEngine {
         self.config.enabled && self.llm.is_some()
     }
 
+    /// Asks the model whether a question needs live information from the web.
+    /// Returns `false` when no LLM is configured, so the caller degrades to
+    /// the rule-based trigger alone rather than erroring.
+    pub async fn classify_needs_web(&self, question: &str) -> bool {
+        match self.llm.as_ref() {
+            Some(llm) => research_intent::classify_needs_web(llm.as_ref(), question).await,
+            None => false,
+        }
+    }
+
     /// GPU/CPU status of the loaded local LLM, if it reports one. Lets the
     /// command layer return fresh accelerator status after a "Retry on GPU"
     /// reload without going through a full [`Self::index_status`] (which needs
