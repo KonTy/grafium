@@ -10,6 +10,7 @@ pub mod media;
 pub mod model_library;
 pub mod pages;
 pub mod query;
+pub mod research;
 pub mod sync;
 pub mod tasks;
 pub mod theme;
