@@ -171,35 +171,72 @@ impl Database {
             // a connected neighborhood. Picking the top-N pages purely by degree
             // yields no edges when links are sparse/random, because two arbitrary
             // hubs are almost never linked to each other.
-            let seed: Option<String> = conn
-                .query_row(
-                    "SELECT to_page_id FROM links
-                     GROUP BY to_page_id ORDER BY count(*) DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            // Rank hubs by how many *distinct other pages* link to them, not by
+            // raw link count. Counting rows let a page that links to itself win
+            // outright: a tag-like page whose every block contains its own
+            // backlink scored 7513 while having zero neighbours, so the graph
+            // seeded there, found nothing to expand to, and rendered a single
+            // isolated node on a graph of 141 pages and 134 real edges.
+            let mut hubs = conn.prepare(
+                "SELECT l.to_page_id, COUNT(DISTINCT b.page_id) AS c
+                 FROM links l JOIN blocks b ON b.id = l.from_block_id
+                 WHERE b.page_id <> l.to_page_id
+                 GROUP BY l.to_page_id ORDER BY c DESC",
+            )?;
+            let ranked: Vec<String> = hubs
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            if let Some(seed) = seed {
+            if !ranked.is_empty() {
                 let mut seen: HashSet<String> = HashSet::new();
                 let mut queue: VecDeque<String> = VecDeque::new();
+                let seed = ranked[0].clone();
                 seen.insert(seed.clone());
                 node_ids.push(seed.clone());
                 queue.push_back(seed);
 
                 // Cap per-node fan-out so one hub can't consume the whole budget.
+                // `<> ?1` drops self-links: a page linking to itself is not a
+                // route to anywhere, and letting them through wastes the
+                // per-node fan-out budget on edges that can't expand the view.
                 let mut out = conn.prepare(
                     "SELECT DISTINCT l.to_page_id
                      FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE b.page_id = ?1 LIMIT 64",
+                     WHERE b.page_id = ?1 AND l.to_page_id <> ?1 LIMIT 64",
                 )?;
                 let mut inb = conn.prepare(
                     "SELECT DISTINCT b.page_id
                      FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE l.to_page_id = ?1 LIMIT 64",
+                     WHERE l.to_page_id = ?1 AND b.page_id <> ?1 LIMIT 64",
                 )?;
 
-                'bfs: while let Some(cur) = queue.pop_front() {
+                // A knowledge graph is rarely one connected component — notes
+                // cluster by topic. Exploring only the seed's component left
+                // most of the graph invisible even after the seeding fix,
+                // because the largest real cluster here is a handful of pages.
+                // So when a component is exhausted and budget remains, restart
+                // from the next-best hub not yet visited.
+                let mut next_hub = 1usize;
+                'bfs: loop {
+                    if queue.is_empty() {
+                        if node_ids.len() >= node_limit as usize {
+                            break;
+                        }
+                        let Some(next) = ranked[next_hub..]
+                            .iter()
+                            .position(|id| !seen.contains(id))
+                            .map(|offset| ranked[next_hub + offset].clone())
+                        else {
+                            break;
+                        };
+                        next_hub = ranked.iter().position(|id| *id == next).unwrap_or(next_hub) + 1;
+                        seen.insert(next.clone());
+                        node_ids.push(next.clone());
+                        queue.push_back(next);
+                    }
+                    let Some(cur) = queue.pop_front() else {
+                        break;
+                    };
                     if node_ids.len() >= node_limit as usize {
                         break;
                     }
