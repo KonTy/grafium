@@ -39,6 +39,19 @@
   --text-link-hover: #f9e2af;
   --text-link-visited: #89b4fa;
 
+  /* Semantic multi-hue accent palette (defaults = Catppuccin; every theme
+     overrides these via applyTheme). Used for hashed tag colours, block refs,
+     external links, callouts and task states. All clear WCAG AA against the
+     theme background — see themeContrast.test.ts. */
+  --accent-orange: #fab387;
+  --accent-magenta: #f5c2e7;
+  --accent-green: #a6e3a1;
+  --accent-yellow: #f9e2af;
+  --accent-blue: #89b4fa;
+  --accent-cyan: #94e2d5;
+  --accent-purple: #cba6f7;
+  --accent-red: #f38ba8;
+
   --danger: #f38ba8;
   --danger-bg: #f38ba822;
 
@@ -255,25 +268,25 @@ body {
 }
 
 .callout-tip {
-  --callout-accent: #a6e3a1;
+  --callout-accent: var(--accent-green);
 }
 
 .callout-note {
-  --callout-accent: #89b4fa;
+  --callout-accent: var(--accent-blue);
 }
 
 .callout-important {
-  --callout-accent: #f38ba8;
+  --callout-accent: var(--accent-red);
 }
 
 .callout-caution {
-  --callout-accent: #fab387;
+  --callout-accent: var(--accent-orange);
 }
 
 .callout-pinned {
-  --callout-accent: #cba6f7;
+  --callout-accent: var(--accent-purple);
 }
 
 .callout-warning {
-  --callout-accent: #f9e2af;
+  --callout-accent: var(--accent-yellow);
 }
