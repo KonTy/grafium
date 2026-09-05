@@ -2,6 +2,7 @@ import { marked } from "marked";
 import katex from "katex";
 import { invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
+import { tagColorVar } from "./tagColor";
 
 // Custom renderer for code blocks with line numbers.
 // Each line number is emitted as a CSS counter (::before) on its own
@@ -219,6 +220,21 @@ function stripUnsafeHrefs(html: string): string {
 }
 
 /**
+ * Mark external `http(s)` links (produced by marked from `[text](url)`) so they
+ * read as visually distinct from internal navigation — they leave the app. They
+ * get a `.external-link` class and an accent-cyan colour token, setting them
+ * apart from `[[page links]]` (--text-link), `#tags` (hashed accent) and
+ * `((block refs))` (--accent-purple). Internal `[[…]]`/`#…` anchors are emitted
+ * without an `href`, so this only ever touches real web links.
+ */
+function markExternalLinks(html: string): string {
+  return html.replace(
+    /<a\s+href="(https?:\/\/[^"]+)"/gi,
+    '<a class="external-link" style="color:var(--accent-cyan)" href="$1"'
+  );
+}
+
+/**
  * Render UNTRUSTED markdown (an LLM chat answer) to HTML safe for `{@html}`.
  *
  * Same pipeline as {@link renderBlock} — GFM, code fences with line numbers,
@@ -271,6 +287,14 @@ function renderMarkdownContent(content: string): string {
 
   // Transform [[page links]], #tags and ((block refs)) — but only outside code
   // spans/fences so `#tag`-style examples inside backticks stay verbatim.
+  //
+  // Colour flows entirely through the theme token system (no raw hex):
+  //   * #tags get a deterministic, per-name hue (var(--accent-<hue>) chosen by
+  //     hashing the tag — see tagColor.ts) so a tag is always the same colour
+  //     and hierarchical tags share their parent's hue. The tag pattern matches
+  //     the backend parser (allowing `/` and `\` for hierarchy).
+  //   * ((block refs)) use --accent-purple so they read as a distinct link type
+  //     from [[page links]] (which keep --text-link).
   processed = transformOutsideCode(processed, (segment) => {
     return segment
       .replace(
@@ -278,12 +302,13 @@ function renderMarkdownContent(content: string): string {
         '<a class="page-link" data-page="$1">$1</a>'
       )
       .replace(
-        /#([a-zA-Z0-9_-]+)/g,
-        '<a class="tag" data-tag="$1">#$1</a>'
+        /#([a-zA-Z0-9_/\\-]+)/g,
+        (_m, name: string) =>
+          `<a class="tag" data-tag="${name}" style="color:${tagColorVar(name)}">#${name}</a>`
       )
       .replace(
         /\(\(([^)]+)\)\)/g,
-        '<span class="block-ref" data-ref="$1">(($1))</span>'
+        '<span class="block-ref" data-ref="$1" style="color:var(--accent-purple)">(($1))</span>'
       );
   });
 
@@ -313,6 +338,7 @@ function renderMarkdownContent(content: string): string {
 
   // Use full marked.parse for complete markdown support
   let html = marked.parse(processed) as string;
+  html = markExternalLinks(html);
 
   // Strip wrapping <p>...</p> for single-paragraph content to avoid extra spacing
   const trimmed = html.trim();
