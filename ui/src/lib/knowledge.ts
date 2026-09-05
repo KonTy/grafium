@@ -239,6 +239,22 @@ export function aiHealthCheck(): Promise<HealthStatus> {
 
 // ─── Indexing ────────────────────────────────────────────────────────────────
 
+/** GPU/CPU status of the local chat model, mirrors core's `AcceleratorStatus`. */
+export interface AcceleratorStatus {
+  /** Whether this build can offload to a GPU at all. When false, CPU is expected. */
+  gpu_supported: boolean;
+  /** Whether inference is actually running on the GPU. */
+  on_gpu: boolean;
+  /** Effective GPU layers; 0 means CPU-only. */
+  gpu_layers: number;
+  /** Free VRAM observed at load time (MiB), or null if unqueryable. */
+  free_vram_mib_at_load: number | null;
+  /** Model file size (MiB). */
+  model_mib: number | null;
+  /** Whether gpu_layers was pinned explicitly in config. */
+  explicit: boolean;
+}
+
 export interface IndexStatus {
   indexed_chunks: number;
   total_blocks: number;
@@ -246,10 +262,20 @@ export interface IndexStatus {
   pending_pages: number;
   embedder_ready: boolean;
   llm_ready: boolean;
+  /** Local LLM GPU/CPU status, or null for remote providers / no LLM loaded. */
+  accelerator: AcceleratorStatus | null;
 }
 
 export function aiIndexStatus(): Promise<IndexStatus> {
   return invoke("ai_index_status");
+}
+
+/**
+ * Reload the local chat model forcing full GPU offload — Chat's "Retry on
+ * GPU" action. Returns the refreshed accelerator status (or null).
+ */
+export function aiRetryLlmOnGpu(): Promise<AcceleratorStatus | null> {
+  return invoke("ai_retry_llm_on_gpu");
 }
 
 export function aiIndexPage(pageId: string): Promise<number> {

@@ -7,8 +7,10 @@
     aiHealthCheck,
     aiIndexStatus,
     aiIndexAllPages,
+    aiRetryLlmOnGpu,
     formatSourceLabel,
     shouldShowIndexBanner,
+    type AcceleratorStatus,
     type ChatSource,
   } from "../lib/knowledge";
   import {
@@ -74,6 +76,17 @@
   let indexResult = $state<{ processed: number; failed: number } | null>(null);
   let statusError = $state<string | null>(null);
 
+  // Local-LLM GPU/CPU status — drives the "Running on CPU" warning banner.
+  let accelerator = $state<AcceleratorStatus | null>(null);
+  let retryingGpu = $state(false);
+  let retryGpuError = $state<string | null>(null);
+
+  // Only warn when the GPU is genuinely available but unused; a build with no
+  // GPU backend runs on CPU by design and must not nag.
+  let cpuFallback = $derived(
+    accelerator !== null && accelerator.gpu_supported && !accelerator.on_gpu
+  );
+
   let indexEmpty = $derived(shouldShowIndexBanner(indexedChunks));
 
   onMount(() => {
@@ -138,6 +151,7 @@
       totalBlocks = status.total_blocks;
       pendingPages = status.pending_pages;
       embedderReady = status.embedder_ready;
+      accelerator = status.accelerator;
       statusError = null;
     } catch (e: any) {
       // Surface the failure instead of silently hiding the banner — a status
@@ -165,6 +179,19 @@
       indexError = String(e);
     } finally {
       isIndexing = false;
+    }
+  }
+
+  async function retryOnGpu() {
+    if (retryingGpu) return;
+    retryGpuError = null;
+    retryingGpu = true;
+    try {
+      accelerator = await aiRetryLlmOnGpu();
+    } catch (e: any) {
+      retryGpuError = String(e);
+    } finally {
+      retryingGpu = false;
     }
   }
 
@@ -371,6 +398,29 @@
   {:else if pendingPages > 0}
     <div class="index-pending" title="Recently edited pages are being re-indexed in the background.">
       {pendingPages} page{pendingPages === 1 ? "" : "s"} updating in the background…
+    </div>
+  {/if}
+
+  {#if cpuFallback}
+    <div class="cpu-banner" role="status">
+      <div class="index-banner-text">
+        <strong>Running on CPU — responses will be slow</strong>
+        <span>
+          The GPU had only {accelerator?.free_vram_mib_at_load ?? "?"} MiB free
+          when the model loaded{accelerator?.model_mib
+            ? ` (it needs roughly ${accelerator.model_mib} MiB)`
+            : ""}. If something else was using the GPU at startup, free it and
+          retry.
+        </span>
+        {#if retryGpuError}<span class="index-error">{retryGpuError}</span>{/if}
+      </div>
+      <button
+        class="index-button"
+        onclick={() => void retryOnGpu()}
+        disabled={retryingGpu}
+      >
+        {retryingGpu ? "Retrying…" : "Retry on GPU"}
+      </button>
     </div>
   {/if}
 
@@ -597,6 +647,20 @@
 
   .index-error {
     color: #f87171;
+  }
+
+  /* CPU-fallback warning — same layout as the index banner, but an amber
+     accent so it reads as a warning rather than an action prompt. */
+  .cpu-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+    border: 1px solid #d9a441;
+    border-radius: 10px;
+    background: color-mix(in srgb, #d9a441 10%, var(--bg-secondary));
+    padding: 10px 12px;
   }
 
   .index-button {

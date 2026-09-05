@@ -299,6 +299,22 @@ pub async fn ai_index_status(
         .map_err(|e| e.to_string())
 }
 
+/// Reload the local chat model forcing full GPU offload. Backs Chat's "Retry
+/// on GPU" action for the case where the free-VRAM heuristic landed on CPU
+/// because VRAM was transiently busy at startup. Returns the refreshed
+/// accelerator status so the UI can update its banner immediately.
+#[tauri::command]
+pub async fn ai_retry_llm_on_gpu(
+    state: State<'_, KnowledgeState>,
+) -> Result<Option<grafium_core::ai::traits::AcceleratorStatus>, String> {
+    let mut guard = state.engine.write().await;
+    let engine = guard
+        .as_mut()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+    engine.retry_llm_on_gpu().map_err(|e| e.to_string())?;
+    Ok(engine.llm_accelerator_status())
+}
+
 #[tauri::command]
 pub async fn ai_index_page(
     state: State<'_, KnowledgeState>,
