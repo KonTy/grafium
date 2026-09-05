@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
   import { tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
@@ -25,11 +26,34 @@
   interface Props {
     page: Page;
     compact?: boolean;
+    /** Term to highlight on arrival, e.g. what was searched in the graph. */
+    highlight?: string;
   }
 
-  let { page, compact = false }: Props = $props();
+  let { page, compact = false, highlight = "" }: Props = $props();
 
   let blocks: Block[] = $state([]);
+
+  // Highlight after the blocks are in the DOM. Depending on `blocks` as well as
+  // `highlight` matters: navigation renders the page before its content loads,
+  // so running only on the prop would search an empty container and find
+  // nothing.
+  $effect(() => {
+    const term = highlight;
+    void blocks.length;
+    const container = blocksViewportEl;
+    if (!container) return;
+    if (!term.trim()) {
+      clearHighlights(container);
+      return;
+    }
+    // One frame's delay so `{@html}` block content has been committed.
+    const handle = requestAnimationFrame(() => {
+      const first = highlightTerm(container, term);
+      first?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(handle);
+  });
   let focusedBlockId: string | null = $state(null);
   let navigatingBlock = false;
   // Imperative handles to each BlockEditor, keyed by block id, for deterministic
@@ -1148,6 +1172,20 @@
     font-weight: 700;
     margin-bottom: 8px;
     color: var(--text-primary);
+  }
+
+  /* Highlights are injected into rendered block HTML, so the selector has to
+     be :global — and the colour comes from the theme's accent set rather than
+     a fixed yellow, which is invisible on the amber themes and illegible on
+     the light ones. */
+  .blocks-container :global(mark.search-highlight) {
+    background: color-mix(in srgb, var(--accent-yellow) 32%, transparent);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+    /* Not colour alone: an underline keeps the match findable under any
+       colour-vision deficiency and on a theme where the accent is subtle. */
+    box-shadow: inset 0 -2px 0 var(--accent-yellow);
   }
 
   .blocks-container {

@@ -4,7 +4,7 @@
   import type { TagHue } from "../lib/tagColor";
 
   interface Props {
-    onNavigate: (title: string) => void;
+    onNavigate: (title: string, highlight?: string) => void;
     currentPageId?: string;
     currentPageTitle?: string;
   }
@@ -492,10 +492,10 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     if (dragNode && !pointerMoved) {
-      onNavigate(dragNode.title);
+      onNavigate(dragNode.title, searchText.trim());
     } else if (!dragNode && !pointerMoved) {
       const hit = pickNode(sx, sy);
-      if (hit) onNavigate(hit.title);
+      if (hit) onNavigate(hit.title, searchText.trim());
     }
     dragNode = null;
     panning = false;

@@ -835,7 +835,13 @@
   let showCreateGraphDialog = $state(false);
   let newGraphName = $state("");
 
-  function handleNavigate(target: PageNavigationTarget) {
+  /// Term to highlight on the page being navigated to, set by callers that
+  /// know why the user is going there (the graph passes its active filter).
+  /// Cleared on every navigation so a stale term can't follow the user around.
+  let pendingHighlight = $state("");
+
+  function handleNavigate(target: PageNavigationTarget, highlight = "") {
+    pendingHighlight = highlight;
     if (target === "__journal__") {
       navigateToJournal();
       return;
@@ -1132,7 +1138,7 @@
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
-        <PageContent page={currentPage} />
+        <PageContent page={currentPage} highlight={pendingHighlight} />
       {/key}
     {/if}
     </main>
