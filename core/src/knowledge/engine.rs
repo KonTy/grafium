@@ -17,6 +17,7 @@ use crate::ai::references::{PageReferencesMeta, PageSummary, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
 use crate::knowledge::registry::GraphRegistry;
+use crate::knowledge::research_intent;
 use crate::knowledge::retrieval::{self, ContextEntry, RetrievedHit};
 use crate::knowledge::vector_store::SqliteVectorStore;
 use crate::models::{Block, Page};
@@ -1230,7 +1231,9 @@ impl KnowledgeEngine {
 
         // Choose the prompt regime outside the model (HIGH 5) from the gated
         // hits, so it answers a single clear instruction instead of branching.
-        let mode = choose_answer_mode(&hits);
+        // An explicit "answer from your own knowledge" in the question
+        // overrides the retrieval-derived regime.
+        let mode = choose_answer_mode_for(question, &hits);
 
         // In General mode we deliberately include no context at all — nothing
         // relevant was retrieved, so any notes would only contaminate a
@@ -1570,6 +1573,27 @@ enum AnswerMode {
     /// Only weak/partial note evidence — allow blending, kept clearly
     /// separated and labelled.
     Blend,
+}
+
+/// Decide the answering regime for a real user question, letting an explicit
+/// instruction from the user outrank the retrieval scores.
+///
+/// [`choose_answer_mode`] looks only at what was retrieved, which is right
+/// when the question is a genuine query about the graph. But it made Chat
+/// refuse a direct request: because some note matched, "based on your
+/// knowledge that you don't have in my notes" was answered under the notes
+/// regime, which instructs the model to answer from the notes and say plainly
+/// when they don't cover the question — so it replied "I do not have knowledge
+/// outside of the notes provided." The user asked for general knowledge and
+/// was told it didn't exist.
+///
+/// Retrieval confidence is a guess about intent; the words the user typed are
+/// a statement of it, so the statement wins.
+fn choose_answer_mode_for(question: &str, hits: &[RetrievedHit]) -> AnswerMode {
+    if research_intent::wants_general_knowledge(question) {
+        return AnswerMode::General;
+    }
+    choose_answer_mode(hits)
 }
 
 /// Decide the prompt regime from the gated hits. Empty → General. Any strong
@@ -2833,6 +2857,58 @@ mod tests {
         weak.lexical = false;
         weak.cosine = Some(0.3);
         assert_eq!(choose_answer_mode(&[weak]), AnswerMode::Blend);
+    }
+
+    /// Regression: Chat used to refuse a direct request for general knowledge
+    /// whenever retrieval happened to match something, replying "I do not have
+    /// knowledge outside of the notes provided". An explicit instruction from
+    /// the user must outrank the retrieval-derived regime.
+    #[test]
+    fn explicit_general_knowledge_request_overrides_strong_note_hits() {
+        let mut lexical = mk_hit("a");
+        lexical.lexical = true;
+        let hits = vec![lexical];
+        // Without the instruction, strong evidence still means Notes.
+        assert_eq!(
+            choose_answer_mode_for("when did I paint my room", &hits),
+            AnswerMode::Notes
+        );
+        // With it, general knowledge wins despite the same strong hit.
+        for question in [
+            "but based on your knowledge that you have not on notes",
+            "what does the research say, from your own knowledge?",
+            "explain TCP slow start using your knowledge, not my notes",
+            "ignore my notes and tell me about mutexes",
+            "what do you know about the Krebs cycle",
+        ] {
+            assert_eq!(
+                choose_answer_mode_for(question, &hits),
+                AnswerMode::General,
+                "should answer from general knowledge: {question:?}"
+            );
+        }
+    }
+
+    /// The override must not fire on ordinary questions, or every graph query
+    /// would silently stop citing the user's notes.
+    #[test]
+    fn ordinary_questions_do_not_trigger_the_general_knowledge_override() {
+        let mut lexical = mk_hit("a");
+        lexical.lexical = true;
+        let hits = vec![lexical];
+        for question in [
+            "when was the last time I was upset",
+            "when did I paint my room",
+            "what did I write about my knowledge management setup",
+            "summarize my notes on general relativity",
+            "what are my notes about",
+        ] {
+            assert_eq!(
+                choose_answer_mode_for(question, &hits),
+                AnswerMode::Notes,
+                "should stay grounded in notes: {question:?}"
+            );
+        }
     }
 
     #[test]

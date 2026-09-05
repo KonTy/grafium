@@ -30,10 +30,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 
 use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
 use crate::ai::config::LocalLlmSettings;
-use crate::ai::gpu_fit::{
-    self, detect_free_vram_bytes, detect_free_vram_bytes_best, vram_safety_margin_bytes,
-    VRAM_SAFETY_MARGIN_MAX_BYTES, VRAM_SAFETY_MARGIN_MIN_BYTES,
-};
+use crate::ai::gpu_fit::{self, detect_free_vram_bytes, detect_free_vram_bytes_best};
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
@@ -864,6 +861,12 @@ mod config_tests {
 #[cfg(test)]
 mod gpu_decision_tests {
     use super::*;
+    // The margin arithmetic itself now lives in `gpu_fit` (shared with the
+    // Settings model picker); these tests cover the layer-count adapter and
+    // the real-model regression cases against it.
+    use crate::ai::gpu_fit::{
+        vram_safety_margin_bytes, VRAM_SAFETY_MARGIN_MAX_BYTES, VRAM_SAFETY_MARGIN_MIN_BYTES,
+    };
 
     #[test]
     fn safety_margin_scales_with_model_and_clamps() {

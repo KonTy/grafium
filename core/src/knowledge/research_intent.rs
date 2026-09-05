@@ -256,6 +256,68 @@ const POLITE_PREFIXES: &[&str] = &[
 /// question itself is preserved by [`clean_fragment`].
 const SEPARATOR_CHARS: &[char] = &[',', ':', ';', '-', '\u{2013}', '\u{2014}', '?', '.', '!'];
 
+/// Phrases by which the user explicitly asks Chat to answer from the model's
+/// own knowledge rather than from their notes.
+///
+/// This exists because the answering regime is otherwise chosen purely from
+/// retrieval scores: if *any* note matched, Chat is told to answer from the
+/// notes and to say so plainly when they don't cover the question. That is
+/// right for "when did I paint my room", but it makes Chat refuse a direct
+/// request — asked "but based on your knowledge that you don't have in my
+/// notes", it answered "I do not have knowledge outside of the notes
+/// provided", which is both unhelpful and untrue of the model.
+///
+/// Unlike a research trigger, these need no anchoring: they are not
+/// imperatives wrapped around a question but statements about how to answer,
+/// and they read naturally mid-sentence ("what do *you* know about X, not
+/// from my notes"). The phrases are specific enough that a bare mention is
+/// unlikely — note the deliberate absence of a plain "knowledge" or "you
+/// know", which would fire on ordinary questions.
+const GENERAL_KNOWLEDGE_PHRASES: &[&str] = &[
+    "based on your knowledge",
+    "based on your own knowledge",
+    "from your knowledge",
+    "from your own knowledge",
+    "using your knowledge",
+    "using your own knowledge",
+    "your general knowledge",
+    "general knowledge",
+    "not on notes",
+    "not on my notes",
+    "not in my notes",
+    "not in the notes",
+    "not from my notes",
+    "not from the notes",
+    "outside my notes",
+    "outside of my notes",
+    "without my notes",
+    "without using my notes",
+    "without the notes",
+    "ignore my notes",
+    "ignore the notes",
+    "don't use my notes",
+    "dont use my notes",
+    "do not use my notes",
+    "what do you know about",
+];
+
+/// Whether the user explicitly asked to be answered from the model's own
+/// knowledge instead of (or in addition to) their notes.
+///
+/// When true, the caller forces the general-knowledge answering regime even
+/// though retrieval may have returned hits — an explicit instruction from the
+/// user should outrank a similarity score.
+pub fn wants_general_knowledge(question: &str) -> bool {
+    let norm = normalize_ws(question);
+    let low: String = norm.chars().map(|c| c.to_ascii_lowercase()).collect();
+    // Apostrophes vary by keyboard/autocorrect; normalise so "don't" and
+    // "don\u{2019}t" both match the same phrase.
+    let low = low.replace('\u{2019}', "'");
+    GENERAL_KNOWLEDGE_PHRASES
+        .iter()
+        .any(|phrase| low.contains(phrase))
+}
+
 /// Detect whether `question` is asking Chat to research on the web, returning
 /// the question with the trigger phrase stripped when so. Returns `None` for
 /// ordinary questions (the common case) — including ones that merely *mention*

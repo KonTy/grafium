@@ -26,12 +26,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # either. Desktop targets get both so the app is genuinely zero-setup —
 # no external server process for users to start themselves.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-# Vulkan for the LLM (llama.cpp, dynamically linked) — but keep whisper.cpp on
-# CPU. whisper-rs statically links its own copy of GGML + libggml-vulkan; when
-# llm-local-vulkan is also enabled, both compete to register a Vulkan backend
-# into GGML's global registry and Whisper loses (`Failed to create a new
-# whisper context`). CPU is plenty for typical Whisper models.
-grafium_core = { path = "../../core", package = "grafium-core", features = ["media", "llm-local-vulkan"] }
+# Vulkan for *both* llama.cpp and whisper.cpp, and they must agree.
+#
+# whisper-rs statically links its own copy of GGML into the executable, while
+# `llm-local` links llama.cpp's GGML dynamically. Both end up in one process,
+# and ELF resolution gives the executable's symbols priority — so llama.cpp
+# binds to whisper's GGML, and whichever backends *that* copy was built with
+# are the only ones either engine can reach.
+#
+# Building whisper CPU-only therefore silently pinned the LLM to the CPU as
+# well, despite `libggml-vulkan.so` being loaded: a 4B model measured 73.8
+# tok/s with Vulkan versus not finishing 160 tokens in 300s without it, with
+# VRAM flat at idle the whole time. Nothing surfaced as an error; it just felt
+# like the app had hung. Enabling Vulkan on both sides makes the winning GGML
+# GPU-capable, and both engines then offload (verified: whisper reports
+# `Vulkan0 total size = 1623.92 MB`).
+grafium_core = { path = "../../core", package = "grafium-core", features = ["media-vulkan", "llm-local-vulkan"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"
