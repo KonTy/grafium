@@ -333,16 +333,16 @@
           <div class="field-group">
             <span class="field-label" id="add-eng-kind-label">Kind</span>
             <div class="choice-row" role="group" aria-labelledby="add-eng-kind-label">
-              <button type="button" class="choice-btn" class:active={draft.kind === "Html"} onclick={() => (draft.kind = "Html" as EngineKind)}>HTML (scrape a results page)</button>
-              <button type="button" class="choice-btn" class:active={draft.kind === "Json"} onclick={() => (draft.kind = "Json" as EngineKind)}>JSON (call an API)</button>
+              <button type="button" class="choice-btn" class:active={draft.kind === "Html"} aria-pressed={draft.kind === "Html"} onclick={() => (draft.kind = "Html" as EngineKind)}>HTML (scrape a results page)</button>
+              <button type="button" class="choice-btn" class:active={draft.kind === "Json"} aria-pressed={draft.kind === "Json"} onclick={() => (draft.kind = "Json" as EngineKind)}>JSON (call an API)</button>
             </div>
           </div>
 
           <div class="field-group">
             <span class="field-label" id="add-eng-cat-label">Category</span>
             <div class="choice-row" role="group" aria-labelledby="add-eng-cat-label">
-              <button type="button" class="choice-btn" class:active={draft.category === "Web"} onclick={() => (draft.category = "Web" as EngineCategory)}>Web</button>
-              <button type="button" class="choice-btn" class:active={draft.category === "Academic"} onclick={() => (draft.category = "Academic" as EngineCategory)}>Academic</button>
+              <button type="button" class="choice-btn" class:active={draft.category === "Web"} aria-pressed={draft.category === "Web"} onclick={() => (draft.category = "Web" as EngineCategory)}>Web</button>
+              <button type="button" class="choice-btn" class:active={draft.category === "Academic"} aria-pressed={draft.category === "Academic"} onclick={() => (draft.category = "Academic" as EngineCategory)}>Academic</button>
             </div>
           </div>
 
