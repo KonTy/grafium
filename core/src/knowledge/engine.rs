@@ -497,15 +497,25 @@ impl KnowledgeEngine {
         let fetch = HYBRID_CANDIDATE_POOL.max(top_k);
 
         // Dense arm — best-effort. An empty index or a transient embedder
-        // failure must not sink the whole query.
-        let vector_ids: Vec<String> = if self.embedder.is_some() && self.vector_store.is_some() {
-            match self.search(query, fetch, graph_id).await {
-                Ok(results) => results.into_iter().filter_map(|r| r.block_id).collect(),
-                Err(_) => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
+        // failure must not sink the whole query. Keep cosine scores so the
+        // relevance gate and prompt-mode selection can use them.
+        let dense_results: Vec<SearchResult> =
+            if self.embedder.is_some() && self.vector_store.is_some() {
+                match self.search(query, fetch, graph_id).await {
+                    Ok(results) => results,
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+        let cosine_by_id: std::collections::HashMap<String, f32> = dense_results
+            .iter()
+            .filter_map(|r| r.block_id.clone().map(|id| (id, r.score)))
+            .collect();
+        let vector_ids: Vec<String> = dense_results
+            .into_iter()
+            .filter_map(|r| r.block_id)
+            .collect();
 
         // Sparse arm — best-effort BM25 over the graph's FTS index, using the
         // chat-query path (stopword-stripped, OR-joined) so a full question
@@ -518,7 +528,7 @@ impl KnowledgeEngine {
         // Reserve slots for the top dense-only candidates (in the vector
         // ranking but not the FTS ranking) so a semantic synonym match that
         // only one arm found survives fusion's overlap bias.
-        let fts_set: std::collections::HashSet<&str> = fts_ids.iter().map(|s| s.as_str()).collect();
+        let fts_set: std::collections::HashSet<String> = fts_ids.iter().cloned().collect();
         let mut protected: std::collections::HashSet<String> = vector_ids
             .iter()
             .filter(|id| !fts_set.contains(id.as_str()))
@@ -566,19 +576,32 @@ impl KnowledgeEngine {
             .iter()
             .filter_map(|id| {
                 let meta = meta_by_id.get(id.as_str())?;
-                let date_ms = Self::resolve_hit_date(meta);
+                let (date_ms, note_created_ms) = Self::resolve_hit_dates(meta);
+                let cosine = cosine_by_id.get(id.as_str()).copied();
+                let lexical = fts_set.contains(id.as_str());
                 Some(RetrievedHit {
                     block_id: meta.block_id.clone(),
                     page_id: meta.page_id.clone(),
                     page_title: meta.page_title.clone(),
                     content: meta.content.clone(),
                     date_ms,
+                    note_created_ms,
                     is_journal: meta.is_journal,
                     score: score_by_id.get(id.as_str()).copied().unwrap_or(0.0),
+                    cosine,
+                    lexical,
                     parents: Vec::new(),
                     children: Vec::new(),
                 })
             })
+            // Relevance gate (HIGH 5): drop dense nearest-neighbours that are
+            // only weakly similar. A lexical (BM25) hit is inherently on-topic
+            // and always passes; a dense-only hit must clear the similarity
+            // floor. This is what keeps a general question ("explain mutexes")
+            // from dragging irrelevant notes into the prompt once the index is
+            // populated — while an empty index (BM25-only) is unaffected since
+            // every hit is lexical.
+            .filter(|h| passes_relevance_gate(h))
             .collect();
 
         // Establish relevance ordering (temporal reorder is a soft boost, not
@@ -594,15 +617,24 @@ impl KnowledgeEngine {
         Ok(hits)
     }
 
-    /// Best-known date for a hit: journal-title date if the page is a journal
-    /// and its title parses as a date, otherwise the block's `created_at`.
-    fn resolve_hit_date(meta: &crate::db::BlockPageMeta) -> Option<i64> {
+    /// Resolve a hit's defensible *event* date and its "note saved"
+    /// timestamp, kept separate so a note's creation/import time is never
+    /// presented as when the described event actually happened (HIGH 4).
+    ///
+    /// - Journal page → the journal date is the event date.
+    /// - Otherwise → an explicit ISO date written in the block's own text is
+    ///   the event date, if present.
+    /// - The block's `created_at` is always returned as `note_created`, used
+    ///   only as a "note saved" hint, never for event ordering.
+    fn resolve_hit_dates(meta: &crate::db::BlockPageMeta) -> (Option<i64>, Option<i64>) {
+        let note_created = Some(meta.created_at);
         if meta.is_journal {
             if let Some(ms) = retrieval::journal_title_to_ms(&meta.page_title) {
-                return Some(ms);
+                return (Some(ms), note_created);
             }
         }
-        Some(meta.created_at)
+        let event = retrieval::extract_content_date(&meta.content);
+        (event, note_created)
     }
 
     /// Fill each hit's `parents` (ancestor chain, outermost first) and
@@ -751,24 +783,27 @@ impl KnowledgeEngine {
         // budget is sized to the model's own window so the assembled prompt
         // can't overflow it (embedded llama.cpp hard-errors on overflow).
         let budget = ask_context_budget(llm.context_window());
-        let entries = self
-            .retrieve_context(db, question, ASK_TOP_K, budget, graph_id)
+        let mut hits = self
+            .hybrid_search(db, question, ASK_TOP_K, graph_id)
             .await
             .unwrap_or_default();
 
-        let sources: Vec<Source> = entries
-            .iter()
-            .map(|e| Source {
-                index: e.index,
-                page_id: e.page_id.clone(),
-                page_title: e.page_title.clone(),
-                block_id: e.block_id.clone(),
-                date: e.date_ms.map(retrieval::format_date_ms),
-            })
-            .collect();
+        // Choose the prompt regime outside the model (HIGH 5) from the gated
+        // hits, so it answers a single clear instruction instead of branching.
+        let mode = choose_answer_mode(&hits);
+
+        // In General mode we deliberately include no context at all — nothing
+        // relevant was retrieved, so any notes would only contaminate a
+        // general answer.
+        let entries = if mode == AnswerMode::General {
+            Vec::new()
+        } else {
+            self.expand_hits(db, &mut hits);
+            retrieval::assemble_within_budget(&hits, budget)
+        };
 
         let context_block = build_context_block(&entries);
-        let system_prompt = build_system_prompt(&context_block, !entries.is_empty());
+        let system_prompt = build_system_prompt(&context_block, mode);
 
         let messages = vec![
             crate::ai::traits::ChatMessage {
@@ -791,6 +826,24 @@ impl KnowledgeEngine {
                 },
             )
             .await?;
+
+        // Show only sources the model actually cited (HIGH 5), not everything
+        // retrieved. General answers carry no sources.
+        let cited = parse_cited_indices(&answer);
+        let sources: Vec<Source> = entries
+            .iter()
+            .filter(|e| cited.contains(&e.index))
+            .map(|e| Source {
+                index: e.index,
+                page_id: e.page_id.clone(),
+                page_title: e.page_title.clone(),
+                block_id: e.block_id.clone(),
+                // Only a defensible *event* date is surfaced to the UI chip; a
+                // note's saved/imported timestamp is never presented as when
+                // the event happened (HIGH 4).
+                date: e.date_ms.map(retrieval::format_date_ms),
+            })
+            .collect();
 
         Ok(AskResponse { answer, sources })
     }
@@ -880,6 +933,84 @@ fn ask_context_budget(context_window: Option<usize>) -> usize {
     }
 }
 
+/// Minimum cosine similarity for a *dense-only* hit to be considered relevant
+/// enough to enter the prompt. Below this, a nearest-neighbour is just the
+/// closest of an irrelevant bunch and would only contaminate a general answer
+/// (HIGH 5). Lexical (BM25) hits bypass this — a term match is inherently
+/// on-topic — which also preserves the empty-index BM25-only path.
+const ASK_SIMILARITY_FLOOR: f32 = 0.25;
+/// Cosine at/above which a dense hit is treated as strong evidence, enough to
+/// answer purely from notes rather than a cautious blend.
+const ASK_STRONG_SIMILARITY: f32 = 0.6;
+
+/// Relevance gate for a single hit: keep lexical (term-match) hits always;
+/// keep dense hits only when they clear the similarity floor. Hits with no
+/// cosine at all (pure BM25 / empty index) are lexical and pass.
+fn passes_relevance_gate(hit: &RetrievedHit) -> bool {
+    if hit.lexical {
+        return true;
+    }
+    matches!(hit.cosine, Some(c) if c >= ASK_SIMILARITY_FLOOR)
+}
+
+/// Prompt regime chosen *outside* the model, so a small local model follows a
+/// single unambiguous instruction instead of branching through a conditional
+/// tree it tends to blur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerMode {
+    /// No relevant notes — answer purely from general knowledge.
+    General,
+    /// Strong note evidence — answer from the notes and cite them.
+    Notes,
+    /// Only weak/partial note evidence — allow blending, kept clearly
+    /// separated and labelled.
+    Blend,
+}
+
+/// Decide the prompt regime from the gated hits. Empty → General. Any strong
+/// hit (a term match or a high-cosine semantic match) → Notes. Otherwise only
+/// weak semantic matches survived the gate → Blend.
+fn choose_answer_mode(hits: &[RetrievedHit]) -> AnswerMode {
+    if hits.is_empty() {
+        return AnswerMode::General;
+    }
+    let strong = hits
+        .iter()
+        .any(|h| h.lexical || matches!(h.cosine, Some(c) if c >= ASK_STRONG_SIMILARITY));
+    if strong {
+        AnswerMode::Notes
+    } else {
+        AnswerMode::Blend
+    }
+}
+
+/// Parse the set of `[N]` citation markers the model actually used, so the UI
+/// shows only sources that informed the answer rather than everything
+/// retrieved (HIGH 5). Pure manual scan — no regex dependency.
+fn parse_cited_indices(answer: &str) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    let bytes = answer.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'[' {
+            let mut j = i + 1;
+            while j < n && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < n && bytes[j] == b']' {
+                if let Ok(num) = answer[i + 1..j].parse::<usize>() {
+                    out.insert(num);
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// A structured citation returned alongside an answer so the UI can render
 /// which notes were used and navigate to them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -900,53 +1031,74 @@ pub struct AskResponse {
     pub sources: Vec<Source>,
 }
 
-/// Render assembled context entries into numbered, dated prompt lines, e.g.
-/// `[3] 2026-03-14 (journal) — Kirsten's project ...`. Empty when there is no
-/// context.
+/// Render assembled context entries into numbered, dated prompt lines. The
+/// date label distinguishes a defensible *event* date (a journal date or an
+/// explicit date written in the note) from a mere "note saved" timestamp, so
+/// the model never reports an import time as when something happened (HIGH 4):
+/// - journal event date → `[N] 2026-03-14 (journal) — from "Title":`
+/// - explicit in-note date → `[N] 2026-03-14 (dated in note) — from "Title":`
+/// - only a saved timestamp → `[N] note saved 2026-03-14; event date unknown — from "Title":`
+/// - nothing → `[N] undated — from "Title":`
 fn build_context_block(entries: &[ContextEntry]) -> String {
     let mut out = String::new();
     for e in entries {
-        let date = e
-            .date_ms
-            .map(retrieval::format_date_ms)
-            .unwrap_or_else(|| "undated".to_string());
-        let kind = if e.is_journal { " (journal)" } else { "" };
+        let label = match (e.date_ms, e.note_created_ms) {
+            (Some(ms), _) if e.is_journal => {
+                format!("{} (journal)", retrieval::format_date_ms(ms))
+            }
+            (Some(ms), _) => format!("{} (dated in note)", retrieval::format_date_ms(ms)),
+            (None, Some(created)) => format!(
+                "note saved {}; event date unknown",
+                retrieval::format_date_ms(created)
+            ),
+            (None, None) => "undated".to_string(),
+        };
         out.push_str(&format!(
-            "[{}] {}{} — from \"{}\":\n{}\n\n",
-            e.index, date, kind, e.page_title, e.text
+            "[{}] {} — from \"{}\":\n{}\n\n",
+            e.index, label, e.page_title, e.text
         ));
     }
     out.trim_end().to_string()
 }
 
-/// Build the blended system prompt. It supports three regimes without ever
-/// forcing "answer only from context" (which would break general questions)
-/// and without letting the model pass off general knowledge as the user's
-/// notes.
-fn build_system_prompt(context_block: &str, has_context: bool) -> String {
+/// Build the system prompt for a single chosen `AnswerMode`. Each regime is a
+/// single unambiguous instruction (rather than a conditional tree a small
+/// local model would blur): never "answer only from context" in a way that
+/// breaks general questions, and never letting general knowledge be passed off
+/// as the user's notes.
+fn build_system_prompt(context_block: &str, mode: AnswerMode) -> String {
     let base = "You are Grafium's assistant. You help the user with BOTH questions about their \
-personal knowledge graph (their notes) AND general questions using your own knowledge.\n\n\
-Rules:\n\
-- When the retrieved notes below are relevant, answer from them and cite each claim with its \
-[N] marker. The notes are the user's own writing and journal entries.\n\
+personal knowledge graph (their notes) AND general questions using your own knowledge.";
+    match mode {
+        AnswerMode::General => format!(
+            "{base}\n\n\
+No relevant notes were retrieved from the user's graph for this question. Answer from your \
+own general knowledge, and make clear this is general knowledge and not from their notes. If \
+you don't know, say you don't know."
+        ),
+        AnswerMode::Notes => format!(
+            "{base}\n\n\
+Answer using the retrieved notes below, which are the user's own writing and journal entries. \
+Cite each claim with its [N] marker.\n\
 - For \"when\" / temporal questions, state the explicit date(s) from the cited notes. Journal \
-entries are dated; use those dates. If you cannot find a date, say so plainly.\n\
-- If the notes do not contain the answer, you may answer from your own general knowledge — but \
-say clearly that this is general knowledge and not from their notes.\n\
-- If an answer blends both, keep them separate: cite the notes with [N], and label the general \
-part as general knowledge.\n\
+entries are dated — use those dates. A line that says \"note saved …; event date unknown\" \
+means you only know when the note was saved, NOT when the event happened: say you found the \
+note but can't establish when it happened. Never present a \"note saved\" date as the event date.\n\
+- Never invent citations or dates. If the notes don't contain the answer, say so plainly.\n\n\
+Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+        ),
+        AnswerMode::Blend => format!(
+            "{base}\n\n\
+Some possibly-related notes were retrieved, but they may only partially answer the question. \
+Use them where genuinely relevant and cite those parts with their [N] marker; answer the rest \
+from your general knowledge and clearly label which parts are general knowledge versus from \
+their notes. Keep the two separate.\n\
+- For \"when\" / temporal questions, only use explicit dates from the cited notes. A line that \
+says \"note saved …; event date unknown\" is not an event date — don't treat it as one.\n\
 - Never invent citations or dates, and never present general knowledge as if it came from their \
-notes. If you don't know, say you don't know.";
-
-    if has_context {
-        format!(
-            "{base}\n\nRetrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
-        )
-    } else {
-        format!(
-            "{base}\n\nNo relevant notes were retrieved from the user's graph for this question, \
-so answer from your general knowledge and make clear it is not from their notes."
-        )
+notes. If you don't know, say you don't know.\n\n\
+Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+        ),
     }
 }
 
@@ -1177,6 +1329,23 @@ mod tests {
         }
     }
 
+    fn mk_hit(id: &str) -> RetrievedHit {
+        RetrievedHit {
+            block_id: id.to_string(),
+            page_id: "pg".to_string(),
+            page_title: "Page".to_string(),
+            content: "content".to_string(),
+            date_ms: None,
+            note_created_ms: None,
+            is_journal: false,
+            score: 1.0,
+            cosine: None,
+            lexical: false,
+            parents: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn reindexing_unchanged_page_skips_store_mutations() -> Result<()> {
         let (mock_embedder, embedder_state) = MockEmbedder::new(4);
@@ -1349,6 +1518,7 @@ mod tests {
                 page_id: "p1".to_string(),
                 page_title: "2026-03-14".to_string(),
                 date_ms: retrieval::journal_title_to_ms("2026-03-14"),
+                note_created_ms: Some(0),
                 is_journal: true,
                 text: "felt upset about the deadline".to_string(),
             },
@@ -1358,8 +1528,21 @@ mod tests {
                 page_id: "p2".to_string(),
                 page_title: "Rust".to_string(),
                 date_ms: None,
+                note_created_ms: None,
                 is_journal: false,
                 text: "ownership and borrowing".to_string(),
+            },
+            // Non-journal with only a saved timestamp: must NOT be presented
+            // as an event date (HIGH 4).
+            ContextEntry {
+                index: 3,
+                block_id: "b3".to_string(),
+                page_id: "p3".to_string(),
+                page_title: "home/renovation".to_string(),
+                date_ms: None,
+                note_created_ms: retrieval::journal_title_to_ms("2026-01-02"),
+                is_journal: false,
+                text: "painted the bedroom".to_string(),
             },
         ];
         let block = build_context_block(&entries);
@@ -1367,6 +1550,8 @@ mod tests {
         assert!(block.contains("felt upset about the deadline"));
         assert!(block.contains("[2] undated — from \"Rust\":"));
         assert!(!block.contains("(journal) — from \"Rust\""));
+        assert!(block
+            .contains("[3] note saved 2026-01-02; event date unknown — from \"home/renovation\":"));
     }
 
     #[test]
@@ -1376,16 +1561,60 @@ mod tests {
 
     #[test]
     fn system_prompt_supports_blended_answering() {
-        let with_ctx = build_system_prompt("[1] 2026-03-14 — from \"x\":\nhi", true);
+        let notes = build_system_prompt("[1] 2026-03-14 — from \"x\":\nhi", AnswerMode::Notes);
         // Must not force "only answer from context".
-        assert!(!with_ctx.to_lowercase().contains("only answer from"));
-        assert!(with_ctx.contains("Retrieved notes"));
-        assert!(with_ctx.contains("general knowledge"));
-        assert!(with_ctx.contains("[1] 2026-03-14"));
+        assert!(!notes.to_lowercase().contains("only answer from"));
+        assert!(notes.contains("Retrieved notes"));
+        assert!(notes.contains("[1] 2026-03-14"));
 
-        let no_ctx = build_system_prompt("", false);
-        assert!(no_ctx.contains("No relevant notes"));
-        assert!(no_ctx.contains("general knowledge"));
+        let blend = build_system_prompt("[1] x", AnswerMode::Blend);
+        assert!(blend.contains("Retrieved notes"));
+        assert!(blend.contains("general knowledge"));
+
+        let general = build_system_prompt("", AnswerMode::General);
+        assert!(general.contains("No relevant notes"));
+        assert!(general.contains("general knowledge"));
+    }
+
+    #[test]
+    fn relevance_gate_keeps_lexical_and_drops_weak_dense() {
+        let mut lexical = mk_hit("a");
+        lexical.lexical = true;
+        lexical.cosine = None;
+        assert!(passes_relevance_gate(&lexical));
+
+        let mut strong = mk_hit("b");
+        strong.lexical = false;
+        strong.cosine = Some(0.7);
+        assert!(passes_relevance_gate(&strong));
+
+        let mut weak = mk_hit("c");
+        weak.lexical = false;
+        weak.cosine = Some(0.1);
+        assert!(!passes_relevance_gate(&weak));
+    }
+
+    #[test]
+    fn choose_answer_mode_reflects_evidence_strength() {
+        assert_eq!(choose_answer_mode(&[]), AnswerMode::General);
+
+        let mut lexical = mk_hit("a");
+        lexical.lexical = true;
+        assert_eq!(choose_answer_mode(&[lexical]), AnswerMode::Notes);
+
+        let mut weak = mk_hit("b");
+        weak.lexical = false;
+        weak.cosine = Some(0.3);
+        assert_eq!(choose_answer_mode(&[weak]), AnswerMode::Blend);
+    }
+
+    #[test]
+    fn parse_cited_indices_extracts_used_markers() {
+        let cited = parse_cited_indices("As [1] shows, and per [3], but not [x] or [12].");
+        assert!(cited.contains(&1));
+        assert!(cited.contains(&3));
+        assert!(cited.contains(&12));
+        assert!(!cited.contains(&2));
     }
 
     #[test]

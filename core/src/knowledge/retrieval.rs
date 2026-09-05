@@ -28,13 +28,23 @@ pub struct RetrievedHit {
     pub page_id: String,
     pub page_title: String,
     pub content: String,
-    /// Best-known date for the hit, in epoch-ms. For journal pages this is
-    /// parsed from the page title; otherwise it falls back to the block's
-    /// `created_at`.
+    /// Defensible *event* date in epoch-ms: a journal page's own date, or an
+    /// explicit ISO date found in the block's text. `None` for a plain note
+    /// with no such date — its creation timestamp is NOT an event date and is
+    /// carried separately in `note_created_ms`.
     pub date_ms: Option<i64>,
+    /// When the note/block was saved (`created_at`). Shown only as a
+    /// "note saved" hint; never used for event ordering.
+    pub note_created_ms: Option<i64>,
     pub is_journal: bool,
     /// Fused RRF score.
     pub score: f64,
+    /// Dense (vector) cosine similarity for this hit, if it came from the
+    /// vector arm. Used by the relevance gate and prompt-mode selection.
+    pub cosine: Option<f32>,
+    /// Whether this hit matched the sparse (BM25/FTS) arm — a lexical match
+    /// is inherently on-topic, so it always passes the relevance gate.
+    pub lexical: bool,
     /// Ancestor blocks (outermost first) for small-to-big context.
     pub parents: Vec<ContextItem>,
     /// Immediate children for small-to-big detail.
@@ -50,7 +60,11 @@ pub struct ContextEntry {
     pub block_id: String,
     pub page_id: String,
     pub page_title: String,
+    /// Defensible event date (journal or explicit-in-content). See
+    /// [`RetrievedHit::date_ms`].
     pub date_ms: Option<i64>,
+    /// "Note saved" timestamp, shown only when there is no event date.
+    pub note_created_ms: Option<i64>,
     pub is_journal: bool,
     pub text: String,
 }
@@ -144,6 +158,7 @@ pub fn assemble_within_budget(hits: &[RetrievedHit], budget_tokens: usize) -> Ve
             page_id: hit.page_id.clone(),
             page_title: hit.page_title.clone(),
             date_ms: hit.date_ms,
+            note_created_ms: hit.note_created_ms,
             is_journal: hit.is_journal,
             text,
         });
@@ -231,6 +246,50 @@ pub fn journal_title_to_ms(title: &str) -> Option<i64> {
     let date = parse_journal_date(title)?;
     let dt = date.and_hms_opt(0, 0, 0)?;
     Some(Utc.from_utc_datetime(&dt).timestamp_millis())
+}
+
+/// Find the first explicit ISO-style date (`YYYY-MM-DD`, `YYYY/MM/DD`, or
+/// `YYYY_MM_DD`) anywhere in a block's text and return it as epoch-ms at UTC
+/// midnight. This is a *defensible event date* — the user wrote it in the
+/// note — unlike the block's creation timestamp (when it happened to be
+/// saved/imported). Returns `None` when no such date is present.
+pub fn extract_content_date(content: &str) -> Option<i64> {
+    let bytes = content.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i + 10 <= n {
+        // Look for 4 digits, a separator, 2 digits, a separator, 2 digits.
+        let is_digit = |b: u8| b.is_ascii_digit();
+        let sep = |b: u8| b == b'-' || b == b'/' || b == b'_';
+        if is_digit(bytes[i])
+            && is_digit(bytes[i + 1])
+            && is_digit(bytes[i + 2])
+            && is_digit(bytes[i + 3])
+            && sep(bytes[i + 4])
+            && is_digit(bytes[i + 5])
+            && is_digit(bytes[i + 6])
+            && sep(bytes[i + 7])
+            && is_digit(bytes[i + 8])
+            && is_digit(bytes[i + 9])
+        {
+            // Reject if flanked by more digits (e.g. part of a longer number).
+            let left_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
+            let right_ok = i + 10 >= n || !bytes[i + 10].is_ascii_digit();
+            if left_ok && right_ok {
+                let slice = &content[i..i + 10];
+                let year: i32 = slice.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let month: u32 = slice.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let day: u32 = slice.get(8..10).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                    if let Some(dt) = date.and_hms_opt(0, 0, 0) {
+                        return Some(Utc.from_utc_datetime(&dt).timestamp_millis());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Detected temporal shape of a query. `is_temporal` is the umbrella signal
@@ -582,6 +641,25 @@ mod tests {
         assert_eq!(format_date_ms(ms), "2026-05-06");
     }
 
+    #[test]
+    fn extract_content_date_finds_explicit_dates_only() {
+        assert_eq!(
+            extract_content_date("painted the bedroom on 2026-03-01, looks great")
+                .map(format_date_ms),
+            Some("2026-03-01".to_string())
+        );
+        assert_eq!(
+            extract_content_date("trip planned for 2025/12/24").map(format_date_ms),
+            Some("2025-12-24".to_string())
+        );
+        // No date present, or a bare number that isn't a date, yields None —
+        // we must NOT invent an event date from arbitrary text.
+        assert!(extract_content_date("just some notes about paint").is_none());
+        assert!(extract_content_date("order #12345678 shipped").is_none());
+        // Digits flanking the pattern disqualify it (not a standalone date).
+        assert!(extract_content_date("v2026-03-019 build").is_none());
+    }
+
     fn hit(id: &str, content: &str) -> RetrievedHit {
         RetrievedHit {
             block_id: id.to_string(),
@@ -589,8 +667,11 @@ mod tests {
             page_title: "Page".to_string(),
             content: content.to_string(),
             date_ms: Some(0),
+            note_created_ms: None,
             is_journal: false,
             score: 1.0,
+            cosine: None,
+            lexical: true,
             parents: Vec::new(),
             children: Vec::new(),
         }
