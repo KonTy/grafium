@@ -7,6 +7,7 @@ import {
   statusDisplay,
   STALL_TIMEOUT_MS,
   HARD_CAP_MS,
+  WEB_STALL_TIMEOUT_MS,
   type StreamEvent,
   type StreamState,
 } from "./chatStatus";
@@ -181,5 +182,92 @@ describe("chatStatus display", () => {
     const d = statusDisplay(s, 3_000);
     expect(d.label).toMatch(/Generating/);
     expect(d.label).toMatch(/3s/);
+  });
+});
+
+describe("chatStatus web research", () => {
+  it("advances the label from the notes arm's Generating into Searching the web", () => {
+    // The two-part answer streams the notes reply (→ generating) and only then
+    // begins the web arm. The web phases outrank generating so the label moves
+    // forward instead of being rejected as an out-of-order regression.
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "delta", chars: 10, at: 100 }, // notes arm token → generating
+      { type: "phase", phase: "searching_web", at: 500 },
+    ]);
+    expect(s.phase).toBe("searching_web");
+    expect(statusDisplay(s, 600).label).toMatch(/Searching the web/i);
+  });
+
+  it("labels the reading_sources phase", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "delta", chars: 10, at: 100 },
+      { type: "phase", phase: "searching_web", at: 500 },
+      { type: "phase", phase: "reading_sources", at: 900 },
+    ]);
+    expect(s.phase).toBe("reading_sources");
+    expect(statusDisplay(s, 1_000).label).toMatch(/Reading sources/i);
+  });
+
+  it("lets a web-section token pull the phase back to generating", () => {
+    // Once the synthesized summary starts streaming, a real token is the
+    // strongest evidence — it overrides the higher-ranked web phases directly.
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "reading_sources", at: 500 },
+      { type: "delta", chars: 8, at: 900 },
+    ]);
+    expect(s.phase).toBe("generating");
+  });
+
+  it("counts a progress note as liveness without changing phase or tokens", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "reading_sources", at: 500 },
+      { type: "note", at: 4_000 },
+    ]);
+    expect(s.phase).toBe("reading_sources");
+    expect(s.tokens).toBe(0);
+    expect(s.chars).toBe(0);
+    expect(s.firstTokenAt).toBeNull();
+    expect(s.lastEventAt).toBe(4_000);
+  });
+
+  it("does not treat an active research pass as stalled while notes keep arriving", () => {
+    // Notes flow well past the pre-token hard cap; liveness, not the hard cap,
+    // governs the web phases, so a thorough multi-source pass keeps animating.
+    let s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "searching_web", at: 1_000 },
+      { type: "phase", phase: "reading_sources", at: 3_000 },
+    ]);
+    // A note every 20s keeps it alive far beyond HARD_CAP_MS.
+    for (let t = 20_000; t < HARD_CAP_MS + 40_000; t += 20_000) {
+      s = reduce(s, { type: "note", at: t });
+      expect(isStalled(s, t + 1)).toBe(false);
+    }
+    expect(statusDisplay(s, HARD_CAP_MS + 40_001).kind).toBe("active");
+  });
+
+  it("flags a web stall only after the liveness window elapses with no evidence", () => {
+    const s = fold([
+      { type: "start", at: 0 },
+      { type: "phase", phase: "reading_sources", at: 1_000 },
+      { type: "note", at: 5_000 },
+    ]);
+    expect(isStalled(s, 5_000 + WEB_STALL_TIMEOUT_MS - 1)).toBe(false);
+    expect(isStalled(s, 5_000 + WEB_STALL_TIMEOUT_MS + 1)).toBe(true);
+  });
+
+  it("ignores a note once the answer has terminated", () => {
+    const done = fold([
+      { type: "start", at: 0 },
+      { type: "delta", chars: 4, at: 100 },
+      { type: "done", at: 200 },
+    ]);
+    const after = reduce(done, { type: "note", at: 300 });
+    expect(after.kind).toBe("done");
+    expect(after.lastEventAt).toBe(200);
   });
 });

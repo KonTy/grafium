@@ -16,7 +16,9 @@ export type StreamPhase =
   | "loading_model"
   | "processing_prompt"
   | "thinking"
-  | "generating";
+  | "generating"
+  | "searching_web"
+  | "reading_sources";
 
 export type StatusKind =
   | "idle"
@@ -30,17 +32,33 @@ export type StatusKind =
 // out-of-order lower-ranked phase event (e.g. a stray `retrieving` after tokens
 // have started) can't rewind the UI to "Searching". It still counts as
 // liveness — see `reduce`.
+//
+// The two web-research phases rank *above* `generating` on purpose: in the
+// two-part answer the notes arm streams tokens (→ `generating`) first, and only
+// then does the web arm begin. Ranking them higher lets the label advance from
+// "Generating" into "Searching the web" without the monotonic guard rejecting
+// it as a regression. When the web summary itself starts streaming, a token
+// `delta` forces the phase back to `generating` directly (see `reduce`).
 const PHASE_RANK: Record<StreamPhase, number> = {
   retrieving: 0,
   loading_model: 1,
   processing_prompt: 2,
   thinking: 3,
   generating: 4,
+  searching_web: 5,
+  reading_sources: 6,
 };
 
 // No token for this long *while generating* means generation stalled (tokens
 // were flowing and stopped) — stop animating and say so.
 export const STALL_TIMEOUT_MS = 25_000;
+
+// Liveness window for the web-research phases. The web arm emits a steady
+// stream of progress notes (planning, searching, reading each source), and each
+// page fetch has its own ~30s network timeout, so we allow a longer gap than
+// generation before declaring it stalled — but still bound it, so a wedged
+// search or a dead network doesn't animate forever.
+export const WEB_STALL_TIMEOUT_MS = 45_000;
 
 // Absolute ceiling for the pre-token phases (retrieving / processing_prompt /
 // thinking), which can legitimately be silent for a while on a big prompt but
@@ -67,6 +85,7 @@ export type StreamEvent =
   | { type: "start"; at: number }
   | { type: "phase"; phase: StreamPhase; at: number }
   | { type: "delta"; chars: number; at: number }
+  | { type: "note"; at: number }
   | { type: "done"; at: number }
   | { type: "error"; at: number; message: string }
   | { type: "cancel"; at: number };
@@ -122,6 +141,14 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
       };
     }
 
+    case "note":
+      // A web-research progress note (source fetched, query issued) carries no
+      // answer text, but it is real backend evidence the run is alive. Bump the
+      // liveness clock without touching phase or token counts, so an active
+      // multi-source research pass isn't mistaken for a stall.
+      if (isTerminal(s.kind)) return s;
+      return { ...s, kind: "active", lastEventAt: e.at };
+
     case "done":
       if (isTerminal(s.kind)) return s;
       return { ...s, kind: "done", lastEventAt: e.at };
@@ -153,6 +180,12 @@ export function isStalled(s: StreamState, now: number): boolean {
     // Tokens were flowing and stopped.
     return now - s.lastEventAt > STALL_TIMEOUT_MS;
   }
+  if (s.phase === "searching_web" || s.phase === "reading_sources") {
+    // The web arm reports progress continuously; judge it on liveness (gap
+    // since the last note/phase), not the pre-token hard cap, since a thorough
+    // research pass legitimately outlives it.
+    return now - s.lastEventAt > WEB_STALL_TIMEOUT_MS;
+  }
   // Pre-token phases may legitimately be quiet, but not indefinitely.
   return now - s.startedAt > HARD_CAP_MS;
 }
@@ -163,6 +196,8 @@ const PHASE_LABEL: Record<StreamPhase, string> = {
   processing_prompt: "Processing context",
   thinking: "Thinking",
   generating: "Generating",
+  searching_web: "Searching the web",
+  reading_sources: "Reading sources",
 };
 
 export function formatElapsed(ms: number): string {

@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   formatSourceLabel,
+  formatWebSourceLabel,
   shouldShowIndexBanner,
   type ChatSource,
+  type WebSource,
 } from "./knowledge";
 
 function source(overrides: Partial<ChatSource> = {}): ChatSource {
@@ -30,6 +32,42 @@ describe("formatSourceLabel", () => {
 
   it("omits the date when it is null or undefined", () => {
     expect(formatSourceLabel(source({ date: undefined }))).toBe("[1] · Rust");
+  });
+});
+
+describe("formatWebSourceLabel", () => {
+  function web(overrides: Partial<WebSource> = {}): WebSource {
+    return {
+      number: 1,
+      title: "How creatine works",
+      url: "https://www.example.com/creatine",
+      ...overrides,
+    };
+  }
+
+  it("shows the citation number, the bare hostname, and the title", () => {
+    // The leading www. is stripped so the host reads cleanly.
+    expect(formatWebSourceLabel(web())).toBe(
+      "[1] example.com · How creatine works"
+    );
+  });
+
+  it("collapses to just the host when the title duplicates it", () => {
+    expect(
+      formatWebSourceLabel(web({ title: "example.com", url: "https://example.com" }))
+    ).toBe("[1] example.com");
+  });
+
+  it("collapses to just the host when the title is blank", () => {
+    expect(formatWebSourceLabel(web({ number: 4, title: "  " }))).toBe(
+      "[4] example.com"
+    );
+  });
+
+  it("falls back to the raw URL when it cannot be parsed", () => {
+    expect(
+      formatWebSourceLabel(web({ title: "", url: "not a url" }))
+    ).toBe("[1] not a url");
   });
 });
 

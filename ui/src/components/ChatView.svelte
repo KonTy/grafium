@@ -11,9 +11,11 @@
     aiIndexAllPages,
     aiRetryLlmOnGpu,
     formatSourceLabel,
+    formatWebSourceLabel,
     shouldShowIndexBanner,
     type AcceleratorStatus,
     type ChatSource,
+    type WebSource,
   } from "../lib/knowledge";
   import {
     initialState,
@@ -34,6 +36,10 @@
     role: "user" | "assistant";
     content: string;
     sources?: ChatSource[];
+    /** Web citations for a research answer's "From the web" section. */
+    webSources?: WebSource[];
+    /** True once this answer engaged web research — drives the "Web research" badge. */
+    webResearch?: boolean;
   };
 
   let messages = $state<ChatMessage[]>([
@@ -56,6 +62,12 @@
   let now = $state(0);
   let clock: ReturnType<typeof setInterval> | null = null;
   let reducedMotion = $state(false);
+
+  // Transient, human-readable detail for the current web-research step (e.g.
+  // "Reading source 2/5: example.com"). Display-only — shown under the status
+  // label while streaming and cleared when the answer finishes. Kept out of the
+  // status reducer so the well-tested liveness machine stays lean.
+  let webNote = $state("");
 
   let status = $derived(statusDisplay(streamState, now, reducedMotion));
   let isStreaming = $derived(
@@ -218,6 +230,15 @@
     );
   }
 
+  // Open a web citation in the system browser via the shell plugin — the same
+  // mechanism as external links inside rendered answers. Never navigate the
+  // webview itself away from the app.
+  function openWebSource(source: WebSource) {
+    if (/^https?:\/\//i.test(source.url)) {
+      openExternal(source.url).catch(() => {});
+    }
+  }
+
   // Delegated handler for links inside rendered assistant markdown. Mirrors
   // PageContent/BlockEditor: `[[page]]`/`#tag` anchors (emitted by
   // `renderAssistantMarkdown` as `<a class="page-link" data-page>` /
@@ -292,6 +313,7 @@
     error = null;
     messages = [...messages, { role: "user", content: trimmed }, { role: "assistant", content: "" }];
     question = "";
+    webNote = "";
     // Begin the status machine at the real send time.
     dispatch({ type: "start", at: Date.now() });
     await scrollToBottom();
@@ -306,6 +328,19 @@
         },
         onPhase: (phase) => {
           dispatch({ type: "phase", phase: phase as StreamPhase, at: Date.now() });
+          // Entering a web phase means this answer engaged research — light up
+          // the badge even before the citations land.
+          if (phase === "searching_web" || phase === "reading_sources") {
+            messages = messages.map((m, i) =>
+              i === assistantIndex ? { ...m, webResearch: true } : m
+            );
+          }
+        },
+        onNote: (note) => {
+          // Real progress evidence (keeps the liveness clock alive) plus the
+          // detail line under the status label.
+          dispatch({ type: "note", at: Date.now() });
+          webNote = note;
         },
         onChunk: (delta) => {
           dispatch({ type: "delta", chars: delta.length, at: Date.now() });
@@ -321,8 +356,15 @@
             return { ...m, sources };
           });
         },
+        onWebSources: (webSources) => {
+          messages = messages.map((m, i) => {
+            if (i !== assistantIndex) return m;
+            return { ...m, webSources, webResearch: true };
+          });
+        },
         onDone: () => {
           dispatch({ type: "done", at: Date.now() });
+          webNote = "";
           // If the model finished without emitting anything, say so plainly
           // rather than leaving an empty bubble.
           if (streamState.firstTokenAt === null) {
@@ -340,6 +382,7 @@
         },
         onError: (msg) => {
           error = msg;
+          webNote = "";
           dispatch({ type: "error", at: Date.now(), message: msg });
           keepInputFocusedSoon(false);
         },
@@ -481,7 +524,14 @@
       {@const streamingThis =
         isStreaming && m.role === "assistant" && i === messages.length - 1}
       <div class="msg" class:user={m.role === "user"}>
-        <div class="msg-role">{m.role === "user" ? "You" : "Grafium AI"}</div>
+        <div class="msg-role">
+          {m.role === "user" ? "You" : "Grafium AI"}
+          {#if m.role === "assistant" && m.webResearch}
+            <span class="research-badge" title="This answer includes live web research">
+              <span class="research-badge-dot" aria-hidden="true"></span>Web research
+            </span>
+          {/if}
+        </div>
         {#if m.role === "assistant" && !streamingThis}
           <!-- Completed assistant answers render as markdown (bold, lists,
                code, KaTeX, clickable [[links]]/#tags). User input and the
@@ -511,6 +561,24 @@
             {/each}
           </div>
         {/if}
+        {#if m.role === "assistant" && m.webSources && m.webSources.length > 0}
+          <!-- Web citations for the "From the web" section. Rendered distinctly
+               from graph chips (external-link styling + ↗) and opened in the
+               system browser, never in the webview. -->
+          <div class="msg-sources web">
+            {#each m.webSources as source}
+              <button
+                class="source-chip web-source-chip"
+                onclick={() => openWebSource(source)}
+                title={`Open ${source.url}`}
+              >
+                <span class="source-index">[{source.number}]</span>
+                <span class="source-title">{formatWebSourceLabel(source).replace(/^\[\d+\]\s*/, "")}</span>
+                <span class="source-ext" aria-hidden="true">↗</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -528,6 +596,9 @@
         class:stalled={status.kind === "stalled"}
       ></span>
       <span class="chat-status-label">{status.label}</span>
+      {#if webNote && status.kind !== "stalled"}
+        <span class="chat-status-note" title={webNote}>{webNote}</span>
+      {/if}
       {#if status.showStop}
         <button class="chat-stop" onclick={() => stopStream()} title="Stop generating">
           Stop
@@ -802,6 +873,61 @@
 
   .source-date {
     color: var(--text-muted);
+  }
+
+  /* Web-research affordances share the external-link visual language: the
+     --accent-cyan token and an outbound ↗ arrow, so a web citation reads as
+     "leaves the app" and is clearly distinct from a graph page chip. */
+  .research-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    padding: 1px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent-cyan) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
+    color: var(--accent-cyan);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+  }
+
+  .research-badge-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent-cyan);
+  }
+
+  .web-source-chip {
+    border-color: color-mix(in srgb, var(--accent-cyan) 40%, var(--border));
+    color: var(--accent-cyan);
+  }
+
+  .web-source-chip:hover {
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, var(--bg-secondary));
+  }
+
+  .web-source-chip .source-index {
+    color: color-mix(in srgb, var(--accent-cyan) 70%, var(--text-muted));
+  }
+
+  .source-ext {
+    color: var(--accent-cyan);
+    font-size: 10px;
+  }
+
+  .chat-status-note {
+    color: var(--text-muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
   }
 
   .index-banner {

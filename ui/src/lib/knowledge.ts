@@ -59,6 +59,9 @@ export interface StreamChunk {
   delta: string;
   /** Current answering phase on a transition, else null; never carries reasoning text. */
   phase?: string | null;
+  /** Transient per-phase progress note (e.g. "Reading source 2/5: …") during a
+   *  web-research pass. Display-only; never part of the answer text. */
+  note?: string | null;
   done: boolean;
   error?: string | null;
 }
@@ -73,9 +76,21 @@ export interface ChatSource {
   date?: string | null;
 }
 
+// A web source cited by the "From the web" section of a research answer. Unlike
+// a ChatSource (which points at a local page/block), this is an external URL the
+// UI renders as a clickable link opened in the system browser. `number` matches
+// the inline `[n]` marker in the streamed web summary.
+export interface WebSource {
+  number: number;
+  title: string;
+  url: string;
+}
+
 export interface SourcesPayload {
   request_id: string;
   sources: ChatSource[];
+  /** Web sources for a research answer; empty/absent for an ordinary answer. */
+  web_sources?: WebSource[];
 }
 
 export interface AskResult {
@@ -90,6 +105,20 @@ export function formatSourceLabel(source: ChatSource): string {
   if (source.date) parts.push(source.date);
   parts.push(source.page_title);
   return parts.join(" · ");
+}
+
+// Compact label for a web-source chip, e.g. "[2] example.com · How creatine
+// works". Falls back to the raw URL when it can't be parsed. Pure and reusable.
+export function formatWebSourceLabel(source: WebSource): string {
+  let host = "";
+  try {
+    host = new URL(source.url).hostname.replace(/^www\./, "");
+  } catch {
+    host = source.url;
+  }
+  const title = source.title.trim();
+  const label = title && title !== host ? `${host} · ${title}` : host;
+  return `[${source.number}] ${label}`;
 }
 
 // Whether the Chat empty-index banner should be shown: the status has loaded
@@ -363,7 +392,9 @@ export async function aiAskStream(
     onDone: () => void;
     onError?: (message: string) => void;
     onSources?: (sources: ChatSource[]) => void;
+    onWebSources?: (sources: WebSource[]) => void;
     onPhase?: (phase: string) => void;
+    onNote?: (note: string) => void;
     onStart?: (requestId: string) => void;
   },
   graphId?: string
@@ -381,9 +412,16 @@ export async function aiAskStream(
     }
 
     // A phase transition (retrieving / processing_prompt / thinking /
-    // generating) carries no answer text — it drives the status indicator.
+    // generating / searching_web / reading_sources) carries no answer text — it
+    // drives the status indicator.
     if (payload.phase) {
       handlers.onPhase?.(payload.phase);
+    }
+
+    // A progress note (e.g. "Reading source 2/5: …") is display-only detail for
+    // the current phase; it is never appended to the answer.
+    if (payload.note) {
+      handlers.onNote?.(payload.note);
     }
 
     if (payload.delta) {
@@ -399,6 +437,9 @@ export async function aiAskStream(
     const payload = event.payload;
     if (!payload || payload.request_id !== requestId) return;
     handlers.onSources?.(payload.sources ?? []);
+    if (payload.web_sources && payload.web_sources.length > 0) {
+      handlers.onWebSources?.(payload.web_sources);
+    }
   });
 
   try {
