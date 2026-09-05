@@ -47,10 +47,10 @@
   --accent-magenta: #f5c2e7;
   --accent-green: #a6e3a1;
   --accent-yellow: #f9e2af;
-  --accent-blue: #89b4fa;
+  --accent-blue: #92bafa;
   --accent-cyan: #94e2d5;
-  --accent-purple: #cba6f7;
-  --accent-red: #f38ba8;
+  --accent-purple: #cda9f7;
+  --accent-red: #f5a0b8;
 
   --danger: #f38ba8;
   --danger-bg: #f38ba822;
@@ -247,7 +247,12 @@ body {
 .callout {
   --callout-accent: var(--accent);
   border-left: 4px solid var(--callout-accent);
-  background: color-mix(in srgb, var(--callout-accent) 10%, var(--bg-secondary));
+  /* Tint the *page* background (the extreme surface each accent is tuned to
+     stay AA against), not bg-secondary: a 10% tint of bg-secondary drifts the
+     callout toward the light title and drops the title/bg contrast below AA on
+     several themes. Basing on bg-primary keeps the callout title legible on
+     every theme (worst ~4.8:1) — see themeContrast.test.ts. */
+  background: color-mix(in srgb, var(--callout-accent) 10%, var(--bg-primary));
   padding: 8px 12px;
   border-radius: 4px;
   margin: 4px 0;

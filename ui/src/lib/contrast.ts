@@ -75,3 +75,20 @@ export const WCAG_AA_NORMAL = 4.5;
 export function meetsAA(fg: string | Rgb, bg: string | Rgb): boolean {
   return contrastRatio(fg, bg) >= WCAG_AA_NORMAL;
 }
+
+/**
+ * Mix two opaque hex colours the way CSS `color-mix(in srgb, a a%, b)` does:
+ * a per-channel weighted average in gamma-encoded sRGB space. Used to reproduce
+ * the callout title/background compositions (which are built with `color-mix`)
+ * so the contrast guard measures the colours that actually render, not the raw
+ * accent tokens.
+ */
+export function mixSrgb(a: string, b: string, aWeightPct: number): string {
+  const wa = Math.max(0, Math.min(100, aWeightPct)) / 100;
+  const wb = 1 - wa;
+  const A = parseHex(a);
+  const B = parseHex(b);
+  const ch = (x: number, y: number) => Math.round(x * wa + y * wb);
+  const hex = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${hex(ch(A.r, B.r))}${hex(ch(A.g, B.g))}${hex(ch(A.b, B.b))}`;
+}

@@ -1371,7 +1371,7 @@
   }
 
   .backlink-node:hover {
-    background: var(--bg-hover);
+    background: var(--bg-secondary);
   }
 
   .backlink-bullet {

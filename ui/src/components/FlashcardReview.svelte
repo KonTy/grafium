@@ -346,7 +346,7 @@
     cursor: default;
   }
   .import-msg {
-    background: var(--bg-alt, #1a2232);
+    background: var(--bg-secondary);
     border: 1px solid var(--border, #2b3852);
     border-radius: 8px;
     padding: 10px 14px;
@@ -366,7 +366,7 @@
   }
   .import-card {
     width: min(420px, 86vw);
-    background: var(--bg-alt, #1a2232);
+    background: var(--bg-secondary);
     border: 1px solid var(--border, #2b3852);
     border-radius: 14px;
     padding: 24px 26px;
@@ -437,13 +437,13 @@
     line-height: 1.6;
   }
   code {
-    background: var(--bg-alt, #1f2937);
+    background: var(--bg-code);
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 0.85em;
   }
   .card {
-    background: var(--bg-alt, #1a2232);
+    background: var(--bg-secondary);
     border: 1px solid var(--border, #2b3852);
     border-radius: 14px;
     padding: 32px;
@@ -523,7 +523,7 @@
     padding: 14px 8px;
     border-radius: 10px;
     border: 1px solid var(--border, #2b3852);
-    background: var(--bg-alt, #1a2232);
+    background: var(--bg-secondary);
     color: var(--text, #e5e7eb);
     cursor: pointer;
   }
@@ -583,7 +583,7 @@
     padding: 16px 20px;
     border-radius: 12px;
     border: 1px solid var(--border, #2b3852);
-    background: var(--bg-alt, #1a2232);
+    background: var(--bg-secondary);
     color: var(--text, #e5e7eb);
     cursor: pointer;
     text-align: left;
@@ -599,7 +599,7 @@
   }
   .topic.mixed {
     border-color: var(--accent, #2563eb);
-    background: linear-gradient(var(--bg-alt, #1a2232), var(--bg-alt, #1a2232)) padding-box,
+    background: linear-gradient(var(--bg-secondary), var(--bg-secondary)) padding-box,
       linear-gradient(90deg, #2563eb, #38bdf8) border-box;
     border: 1px solid transparent;
   }

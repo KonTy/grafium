@@ -684,7 +684,7 @@
   }
 
   .task-item:hover {
-    background: var(--bg-hover);
+    background: var(--bg-secondary);
   }
 
   .task-check {
