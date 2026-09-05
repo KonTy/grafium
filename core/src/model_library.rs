@@ -230,11 +230,67 @@ pub fn resolve_model(
         )));
     }
 
-    scan_models_dir(models_dir)?
+    let candidates: Vec<ModelInfo> = scan_models_dir(models_dir)?
         .into_iter()
-        .find(|m| m.kind == kind)
+        .filter(|m| m.kind == kind)
+        .collect();
+
+    // Only chat models are GPU-offloaded by this path, and only they are
+    // large enough for the choice to matter; anything else keeps the simple
+    // first-match behaviour.
+    let picked = if kind == ModelKind::Llm {
+        pick_best_llm(candidates, crate::ai::gpu_fit::detect_free_vram_bytes())
+    } else {
+        candidates.into_iter().next()
+    };
+
+    picked
         .map(|m| m.path)
         .ok_or_else(|| CoreError::NotFound(model_not_found_hint(models_dir, kind)))
+}
+
+/// Chooses which chat model to auto-load when the user hasn't configured one.
+///
+/// Previously this was simply "first match in alphabetical order", which is
+/// effectively random with respect to the only property that matters. On a
+/// real 16 GB machine holding eight GGUFs it selected a 5.9 GB vision model
+/// that emits its reasoning in Chinese, and the next alphabetical candidate
+/// was a 13.6 GB model that runs on the CPU at ~1.5 tok/s. Neither is a
+/// defensible zero-config default when a 2.4 GB model on the same box does
+/// 60-74 tok/s.
+///
+/// The rule: never auto-pick a model that can't run on the GPU if one that
+/// can is available, and among the models that do fit prefer the largest,
+/// since parameter count is the best size-only proxy for answer quality.
+/// `Tight` ranks below `Fits` but above CPU-bound, so a borderline model is
+/// only chosen when nothing fits comfortably.
+///
+/// When free VRAM can't be measured, this deliberately falls back to the
+/// historical alphabetical behaviour rather than guessing — an unmeasurable
+/// GPU shouldn't silently change which model a user's machine loads.
+fn pick_best_llm(mut candidates: Vec<ModelInfo>, free_vram_bytes: Option<u64>) -> Option<ModelInfo> {
+    use crate::ai::gpu_fit::{assess_gpu_fit, GpuFit};
+
+    // No GPU reading available (non-NVIDIA, no `nvidia-smi`, unparsable
+    // output): keep the historical first-alphabetically pick. Returning
+    // `None` here instead would turn "can't measure VRAM" into "no model
+    // found", breaking auto-detect outright on those machines.
+    let Some(free) = free_vram_bytes else {
+        return candidates.into_iter().next();
+    };
+
+    // Ranks ascending so the best candidate sorts last: fit tier first, then
+    // size as the quality proxy within a tier.
+    candidates.sort_by_key(|m| {
+        let tier = match assess_gpu_fit(m.size_bytes, Some(free)) {
+            GpuFit::Fits => 3,
+            GpuFit::Tight => 2,
+            GpuFit::CpuOnly => 1,
+            GpuFit::Unknown => 0,
+        };
+        (tier, m.size_bytes)
+    });
+    candidates.pop()
 }
 
 /// A reference to a locally-managed model file, exactly as it's meant to
@@ -309,6 +365,87 @@ fn model_not_found_hint(models_dir: &Path, kind: ModelKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a candidate list from `(file_name, size_mib)` pairs.
+    fn llms(specs: &[(&str, u64)]) -> Vec<ModelInfo> {
+        specs
+            .iter()
+            .map(|(name, mib)| ModelInfo {
+                file_name: (*name).to_string(),
+                path: PathBuf::from(*name),
+                size_bytes: mib * 1024 * 1024,
+                kind: ModelKind::Llm,
+            })
+            .collect()
+    }
+
+    /// The real models directory that produced the original complaint, in
+    /// the alphabetical order `scan_models_dir` returns. The old
+    /// "first match wins" rule picked GLM (a vision model that reasons in
+    /// Chinese); the next candidates were CPU-bound multi-GB models. On a
+    /// 16 GB card the only sensible auto-pick is the 4B.
+    fn real_world_lineup() -> Vec<ModelInfo> {
+        llms(&[
+            ("GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf", 5881),
+            ("Huihui-Qwen3-14B-abliterated-v2.Q4_K_M.gguf", 8585),
+            ("Mistral-Small-3.2-24B-Instruct-2506.i1-Q4_K_M.gguf", 13670),
+            ("Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf", 17698),
+            ("Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2382),
+            ("zen-pro-qwen3-8b.gguf", 4984),
+        ])
+    }
+
+    #[test]
+    fn auto_pick_prefers_the_largest_model_that_fits_in_vram() {
+        // A 16 GB card with a couple of GB already in use by the desktop.
+        let free = Some(14_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("a model should be picked");
+        // 8585 MiB is the largest that clears the margin at this free size.
+        assert_eq!(
+            picked.file_name,
+            "Huihui-Qwen3-14B-abliterated-v2.Q4_K_M.gguf"
+        );
+    }
+
+    #[test]
+    fn auto_pick_never_prefers_a_cpu_bound_model_over_one_that_fits() {
+        // Only ~4 GB free: everything but the 4B is CPU-bound.
+        let free = Some(4_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("a model should be picked");
+        assert_eq!(picked.file_name, "Qwen3-4B-Instruct-2507-Q4_K_M.gguf");
+    }
+
+    /// Regression: the previous rule returned whatever sorted first, which on
+    /// this machine was a 5.9 GB vision model.
+    #[test]
+    fn auto_pick_is_not_merely_alphabetical() {
+        let free = Some(14_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).unwrap();
+        assert_ne!(picked.file_name, "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn auto_pick_falls_back_to_first_when_vram_is_unmeasurable() {
+        // Must not degrade to "no model found" on non-NVIDIA machines.
+        let picked = pick_best_llm(real_world_lineup(), None).expect("must still pick something");
+        assert_eq!(picked.file_name, "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn auto_pick_returns_none_only_when_there_are_no_candidates() {
+        assert!(pick_best_llm(Vec::new(), Some(14_000 * 1024 * 1024)).is_none());
+        assert!(pick_best_llm(Vec::new(), None).is_none());
+    }
+
+    /// When nothing fits, still pick *something* — the largest CPU-bound
+    /// model is a defensible last resort, and erroring out would be worse.
+    #[test]
+    fn auto_pick_still_returns_a_model_when_nothing_fits() {
+        let free = Some(1_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("must still pick something");
+        assert_eq!(picked.file_name, "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf");
+    }
+
 
     #[test]
     fn classify_recognizes_whisper_and_llm_naming_conventions() {
