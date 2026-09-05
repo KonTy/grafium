@@ -105,3 +105,29 @@ export function edgeHue(
   const b = hues.get(edge.target);
   return a && b && a === b ? a : null;
 }
+
+/**
+ * Movement, in screen pixels, past which a press counts as a drag rather than
+ * a click.
+ *
+ * Treating any movement at all as a drag made graph nodes effectively
+ * unclickable: pointers emit sub-pixel moves between press and release on
+ * nearly every real click, so the gesture was classified as a drag and
+ * navigation never fired. A few pixels of slop is what every drag
+ * implementation needs and what users expect.
+ */
+export const DRAG_THRESHOLD_PX = 4;
+
+/** Whether a press that started at (`x0`,`y0`) and is now at (`x1`,`y1`) has
+ *  travelled far enough to be a drag. */
+export function exceedsDragThreshold(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number
+): boolean {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  // Squared comparison avoids a sqrt on every pointermove.
+  return dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX;
+}

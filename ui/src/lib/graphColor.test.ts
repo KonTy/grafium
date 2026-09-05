@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assignClusterHues, edgeHue } from "./graphColor";
+import { assignClusterHues, edgeHue, exceedsDragThreshold } from "./graphColor";
 import { TAG_HUES } from "./tagColor";
 
 describe("assignClusterHues", () => {
@@ -76,5 +76,26 @@ describe("edgeHue", () => {
     expect(edgeHue(hues, { source: "a", target: "b" })).toBe(hues.get("a"));
     // A bridge belongs to neither cluster, so it has no owning hue.
     expect(edgeHue(hues, { source: "a", target: "x" })).toBeNull();
+  });
+});
+
+describe("exceedsDragThreshold", () => {
+  /// Regression: graph nodes were unclickable because any pointermove at all
+  /// marked the gesture a drag, and a real mouse jitters between press and
+  /// release on nearly every click.
+  it("treats sub-threshold jitter as a click", () => {
+    expect(exceedsDragThreshold(100, 100, 100, 100)).toBe(false);
+    expect(exceedsDragThreshold(100, 100, 101, 101)).toBe(false);
+    expect(exceedsDragThreshold(100, 100, 102, 2 + 100)).toBe(false);
+  });
+
+  it("treats real movement as a drag", () => {
+    expect(exceedsDragThreshold(100, 100, 120, 100)).toBe(true);
+    expect(exceedsDragThreshold(100, 100, 100, 140)).toBe(true);
+  });
+
+  it("is direction-agnostic", () => {
+    expect(exceedsDragThreshold(100, 100, 80, 100)).toBe(true);
+    expect(exceedsDragThreshold(100, 100, 100, 60)).toBe(true);
   });
 });

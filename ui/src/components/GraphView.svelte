@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getGraphData, type GraphData } from "../lib/api";
-  import { assignClusterHues, edgeHue } from "../lib/graphColor";
+  import { assignClusterHues, edgeHue, exceedsDragThreshold } from "../lib/graphColor";
   import type { TagHue } from "../lib/tagColor";
 
   interface Props {
@@ -79,6 +79,10 @@
   let hoverNode: SimNode | null = null;
   let panning = false;
   let pointerMoved = false;
+  /// Where the pointer went down, so a press can be classified as click or
+  /// drag by distance rather than by "did any move event arrive".
+  let pointerDownX = 0;
+  let pointerDownY = 0;
   let lastX = 0;
   let lastY = 0;
 
@@ -428,6 +432,8 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     pointerMoved = false;
+    pointerDownX = sx;
+    pointerDownY = sy;
     lastX = sx;
     lastY = sy;
     const hit = pickNode(sx, sy);
@@ -445,21 +451,33 @@
     const rect = canvasEl.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    if (dragNode) {
-      const [wx, wy] = toWorld(sx, sy);
-      dragNode.x = wx;
-      dragNode.y = wy;
-      dragNode.vx = 0;
-      dragNode.vy = 0;
+    // Treating *any* pointermove as a drag made nodes effectively unclickable:
+    // a real mouse emits a sub-pixel move between press and release almost
+    // every time, which marked the gesture as a drag and suppressed
+    // navigation. Classify by distance instead.
+    if (!pointerMoved && exceedsDragThreshold(pointerDownX, pointerDownY, sx, sy)) {
       pointerMoved = true;
-      nudge();
+    }
+
+    if (dragNode) {
+      // Hold the node still until the gesture is genuinely a drag, so a click
+      // can't nudge the graph out from under the pointer.
+      if (pointerMoved) {
+        const [wx, wy] = toWorld(sx, sy);
+        dragNode.x = wx;
+        dragNode.y = wy;
+        dragNode.vx = 0;
+        dragNode.vy = 0;
+        nudge();
+      }
     } else if (panning) {
-      offsetX += sx - lastX;
-      offsetY += sy - lastY;
+      if (pointerMoved) {
+        offsetX += sx - lastX;
+        offsetY += sy - lastY;
+        wake();
+      }
       lastX = sx;
       lastY = sy;
-      pointerMoved = true;
-      wake();
     } else {
       const prev = hoverNode;
       hoverNode = pickNode(sx, sy);
