@@ -11,6 +11,7 @@ pub mod media;
 pub mod model_library;
 pub mod models;
 pub mod parser;
+pub mod research;
 pub mod scraping;
 pub mod sync;
 

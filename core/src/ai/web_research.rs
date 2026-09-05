@@ -42,12 +42,12 @@ pub const RESEARCH_CANCELLED: &str = "Web research was cancelled.";
 
 /// Whether a (borrowed) cancellation flag has been tripped. `None` means "no
 /// flag supplied" and so is never cancelled — the uncancellable callers.
-fn is_cancelled(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
+pub(crate) fn is_cancelled(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
     cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// The canonical cancellation error (see [`RESEARCH_CANCELLED`]).
-fn cancelled_error() -> CoreError {
+pub(crate) fn cancelled_error() -> CoreError {
     CoreError::Other(RESEARCH_CANCELLED.to_string())
 }
 
@@ -452,7 +452,7 @@ Example: {"title_answer": "Yes, magnesium supplementation shows a modest benefit
 
 Return ONLY the JSON object, no other text."##;
 
-fn truncate(s: &str, max_chars: usize) -> &str {
+pub(crate) fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => &s[..byte_idx],
         None => s,
@@ -470,12 +470,12 @@ mod tests {
     /// A stub `LlmProvider` that replies with the next response in a fixed
     /// queue, regardless of the prompt — enough to unit-test the
     /// plan/pick/synthesize pipeline without a real model.
-    struct StubLlm {
+    pub(crate) struct StubLlm {
         responses: Mutex<std::collections::VecDeque<String>>,
     }
 
     impl StubLlm {
-        fn new(responses: impl IntoIterator<Item = &'static str>) -> Self {
+        pub(crate) fn new(responses: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
                 responses: Mutex::new(responses.into_iter().map(String::from).collect()),
             }
@@ -725,3 +725,9 @@ mod tests {
         assert!(fetched[0].starts_with("https://search.brave.com/"));
     }
 }
+
+/// The queue-backed stub `LlmProvider` is reused by the deep-research
+/// [`crate::research::agent`] tests, which need the same "reply with the next
+/// canned response" behaviour to drive their multi-round loop deterministically.
+#[cfg(test)]
+pub(crate) use tests::StubLlm;

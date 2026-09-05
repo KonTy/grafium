@@ -1,20 +1,33 @@
-//! Web search via Brave's search results page.
+//! Backwards-compatible `web_search`: Brave-then-DuckDuckGo, now driven by the
+//! configurable engine registry.
 //!
-//! Deliberately does NOT use Brave's (or any) paid search API. Brave's
-//! `search.brave.com` results page is server-rendered — the actual result
-//! titles/URLs/snippets are present in the plain HTML returned by a normal
-//! `GET` (verified: the JS on the page only progressively enhances it, it
-//! doesn't inject the results client-side) — so it can be fetched with the
-//! exact same [`crate::scraping::browser::BrowserDriver`] used everywhere
-//! else in this module and parsed with the same `scraper` crate
-//! [`crate::scraping::extract`] already depends on. This keeps "Web
-//! Research" free of API keys/quotas and consistent with the rest of the
-//! scraping module's "no bespoke integration" philosophy.
+//! This module predates Deep Research and still exists for its original
+//! callers (the single-round [`crate::ai::web_research`]), which just want "run
+//! a web query, get ranked results" without knowing about the user's engine
+//! configuration. Rather than keep a second, hand-rolled Brave/DuckDuckGo
+//! scraper in sync with the registry, [`web_search`] now *is* a thin shim over
+//! [`crate::scraping::engines`]: it runs the built-in Brave and DuckDuckGo
+//! [`SearchEngineDef`](crate::research::config::SearchEngineDef)s through the
+//! same generic [`engines::search_one`] every other engine uses, so their
+//! selectors and quirks live in exactly one place.
+//!
+//! Why keep the Brave-then-DuckDuckGo *shape* here at all, when Deep Research
+//! has [`engines::search_all`]? Because the two want different failure
+//! behaviour. `search_all` merges *all* enabled engines and never retries —
+//! right for the agent, which has more rounds to fall back on. `web_search`
+//! serves one-shot callers that get a single attempt, so it keeps the original
+//! logic that made web search survivable in that context: retry the primary
+//! engine through a throttle with a short backoff, then fall back to a second
+//! engine, and only surface the primary's error if both come up empty.
+//!
+//! The result type still lives here ([`SearchResult`]) because it is the shared
+//! currency of the whole scraping/research stack; the registry and every engine
+//! produce it.
 
-use scraper::{Html, Selector};
-
-use crate::error::{CoreError, Result};
+use crate::error::Result;
+use crate::research::config::builtin_web_engine;
 use crate::scraping::browser::BrowserDriver;
+use crate::scraping::engines;
 
 /// One organic web result from a search query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +51,12 @@ pub async fn web_search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
+    // The built-in Brave/DuckDuckGo definitions are the single source of truth
+    // for these engines' endpoints and selectors; we run them through the same
+    // generic executor as every other engine instead of a bespoke scraper.
+    let brave = builtin_web_engine("brave").expect("brave is a built-in engine");
+    let duckduckgo = builtin_web_engine("duckduckgo").expect("duckduckgo is a built-in engine");
+
     // Rate limiting is an expected operating condition here, not an error:
     // a single research run issues several queries back to back, which is
     // exactly the burst pattern engines throttle. Reporting "try again" when
@@ -48,7 +67,7 @@ pub async fn web_search(
         if attempt > 0 {
             tokio::time::sleep(retry_delay(attempt)).await;
         }
-        match brave_search(browser, query, limit).await {
+        match engines::search_one(browser, &brave, query, limit).await {
             Ok(results) if !results.is_empty() => return Ok(results),
             // An empty result set is a real answer ("nothing found"), not a
             // transient failure, so don't burn retries on it — but do let the
@@ -58,7 +77,7 @@ pub async fn web_search(
         }
     }
 
-    match duckduckgo_search(browser, query, limit).await {
+    match engines::search_one(browser, &duckduckgo, query, limit).await {
         Ok(results) if !results.is_empty() => Ok(results),
         // Prefer reporting the primary engine's failure: it's the more
         // informative one, and the fallback failing too usually means the
@@ -81,147 +100,25 @@ fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(600 * (1 << (attempt - 1)) as u64)
 }
 
-async fn brave_search(
-    browser: &dyn BrowserDriver,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchResult>> {
-    let url = url::Url::parse_with_params("https://search.brave.com/search", &[("q", query)])
-        .map_err(|e| CoreError::Other(format!("invalid search query: {e}")))?;
-    let resource = browser.fetch(url.as_str()).await?;
-    let body = String::from_utf8_lossy(&resource.bytes);
-    parse_brave_results(&body, limit)
-}
-
-/// DuckDuckGo's no-JavaScript endpoint, whose markup is stable and trivially
-/// parseable — the same "scrape a results page, no API key" approach as Brave.
-async fn duckduckgo_search(
-    browser: &dyn BrowserDriver,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchResult>> {
-    let url = url::Url::parse_with_params("https://html.duckduckgo.com/html/", &[("q", query)])
-        .map_err(|e| CoreError::Other(format!("invalid search query: {e}")))?;
-    let resource = browser.fetch(url.as_str()).await?;
-    let body = String::from_utf8_lossy(&resource.bytes);
-    parse_duckduckgo_results(&body, limit)
-}
-
-/// Parses DuckDuckGo's HTML endpoint. Result links are wrapped in a redirect
-/// (`//duckduckgo.com/l/?uddg=<encoded>`), so the real destination has to be
-/// pulled back out of the query string before it's usable as a citation.
-fn parse_duckduckgo_results(html: &str, limit: usize) -> Result<Vec<SearchResult>> {
-    let document = Html::parse_document(html);
-    let result_selector = Selector::parse("div.result, div.web-result").expect("valid selector");
-    let link_selector = Selector::parse("a.result__a").expect("valid selector");
-    let snippet_selector = Selector::parse("a.result__snippet").expect("valid selector");
-
-    let mut results = Vec::new();
-    for node in document.select(&result_selector) {
-        if results.len() >= limit {
-            break;
-        }
-        let Some(link) = node.select(&link_selector).next() else {
-            continue;
-        };
-        let Some(href) = link.value().attr("href") else {
-            continue;
-        };
-        let Some(url) = unwrap_ddg_redirect(href) else {
-            continue;
-        };
-        let title = link.text().collect::<String>().trim().to_string();
-        if title.is_empty() {
-            continue;
-        }
-        let snippet = node
-            .select(&snippet_selector)
-            .next()
-            .map(|n| n.text().collect::<String>().trim().to_string())
-            .unwrap_or_default();
-        results.push(SearchResult {
-            title,
-            url,
-            snippet,
-        });
-    }
-    Ok(results)
-}
-
-/// Extracts the real destination from a DuckDuckGo redirect link, or returns
-/// a plain `http(s)` href unchanged.
-fn unwrap_ddg_redirect(href: &str) -> Option<String> {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        // Still a redirect when it points back at duckduckgo.com/l/.
-        if !href.contains("duckduckgo.com/l/") {
-            return Some(href.to_string());
-        }
-    }
-    let absolute = if href.starts_with("//") {
-        format!("https:{href}")
-    } else if href.starts_with('/') {
-        format!("https://duckduckgo.com{href}")
-    } else {
-        href.to_string()
-    };
-    let parsed = url::Url::parse(&absolute).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == "uddg")
-        .map(|(_, v)| v.into_owned())
-}
-
-fn parse_brave_results(html: &str, limit: usize) -> Result<Vec<SearchResult>> {
-    let document = Html::parse_document(html);
-    let snippet_selector =
-        Selector::parse("div.snippet[data-type=\"web\"]").expect("valid selector");
-    let link_selector = Selector::parse("a[href]").expect("valid selector");
-    let title_selector = Selector::parse(".title").expect("valid selector");
-    let description_selector =
-        Selector::parse(".snippet-description, .generic-snippet .content").expect("valid selector");
-
-    let mut results = Vec::new();
-    for snippet in document.select(&snippet_selector) {
-        if results.len() >= limit {
-            break;
-        }
-
-        let Some(link) = snippet.select(&link_selector).next() else {
-            continue;
-        };
-        let Some(href) = link.value().attr("href") else {
-            continue;
-        };
-        if !href.starts_with("http") {
-            continue; // skip internal/relative Brave links (e.g. "goggles")
-        }
-
-        let title = snippet
-            .select(&title_selector)
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| href.to_string());
-
-        let snippet_text = snippet
-            .select(&description_selector)
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .unwrap_or_default();
-
-        results.push(SearchResult {
-            title,
-            url: href.to_string(),
-            snippet: snippet_text,
-        });
-    }
-
-    Ok(results)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test shim: exercises the *real* built-in Brave selectors through the
+    /// generic [`engines::parse_html`] the production path now uses, so these
+    /// long-standing regression cases keep guarding Brave parsing after the
+    /// move to the registry (a broken Brave selector or a parser regression
+    /// still fails them). The same-host-drop rule in `parse_html` is what makes
+    /// the relative `/local/goggles` link — which resolves back onto
+    /// `search.brave.com` — get skipped, reproducing the old "non-http href"
+    /// behaviour generically.
+    fn parse_brave_results(html: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let selectors = builtin_web_engine("brave")
+            .expect("brave is a built-in engine")
+            .selectors
+            .expect("brave is an HTML engine with selectors");
+        engines::parse_html(html, &selectors, "https://search.brave.com/search", limit)
+    }
 
     #[test]
     fn parses_titles_urls_and_snippets_from_brave_results_html() {
