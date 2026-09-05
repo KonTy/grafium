@@ -56,6 +56,11 @@
   // Whether the live run is a deep-research run, so Stop targets research_cancel
   // instead of the ordinary chat cancel. Non-reactive: only read inside stopStream.
   let currentRunIsResearch = false;
+  // Monotonic run generation. Every send() captures the value it started with;
+  // a callback whose generation is no longer current belongs to a run that was
+  // stopped, superseded, or unmounted, and must not touch the UI (or kill the
+  // run that replaced it). Non-reactive: only compared inside stream callbacks.
+  let runSeq = 0;
   let error = $state<string | null>(null);
 
   // Research toggle: forces the full multi-round workflow for the next send,
@@ -161,6 +166,20 @@
       mq.removeEventListener("change", onMotionChange);
       document.removeEventListener("mouseup", onDocumentPointerUp);
       chatScroll?.removeEventListener("click", handleRenderedClick);
+      // A run outlives the component's UI listeners: without this the backend
+      // keeps working and the wrapper's stream listeners + this closure stay
+      // alive until the run finishes on its own. Bump the generation so any
+      // late callback is inert at once, then cancel so the now-terminated
+      // invoke settles and the wrapper removes its listeners immediately.
+      runSeq++;
+      if (currentRequestId) {
+        if (currentRunIsResearch) {
+          void researchCancel(currentRequestId);
+        } else {
+          void aiCancelStream(currentRequestId);
+        }
+        currentRequestId = null;
+      }
       stopClock();
     };
   });
@@ -395,11 +414,18 @@
     // Remember which backend owns this run so Stop cancels the right one.
     currentRunIsResearch = forceResearch;
 
+    // This run's generation. Every callback below bails when it's no longer the
+    // current run, so a stopped/superseded run can neither mutate the transcript
+    // at its stale `assistantIndex` nor drive the shared status/error state.
+    const myRun = ++runSeq;
+
     const handlers: ResearchStreamHandlers = {
         onStart: (requestId: string) => {
+          if (myRun !== runSeq) return;
           currentRequestId = requestId;
         },
         onPhase: (phase: string) => {
+          if (myRun !== runSeq) return;
           dispatch({ type: "phase", phase: phase as StreamPhase, at: Date.now() });
           // Entering a web phase means this answer engaged research — light up
           // the badge even before the citations land.
@@ -410,12 +436,14 @@
           }
         },
         onNote: (note) => {
+          if (myRun !== runSeq) return;
           // Real progress evidence (keeps the liveness clock alive) plus the
           // detail line under the status label.
           dispatch({ type: "note", at: Date.now() });
           webNote = note;
         },
         onChunk: (delta) => {
+          if (myRun !== runSeq) return;
           dispatch({ type: "delta", chars: delta.length, at: Date.now() });
           messages = messages.map((m, i) => {
             if (i !== assistantIndex) return m;
@@ -424,18 +452,21 @@
           void scrollToBottom();
         },
         onSources: (sources) => {
+          if (myRun !== runSeq) return;
           messages = messages.map((m, i) => {
             if (i !== assistantIndex) return m;
             return { ...m, sources };
           });
         },
         onWebSources: (webSources) => {
+          if (myRun !== runSeq) return;
           messages = messages.map((m, i) => {
             if (i !== assistantIndex) return m;
             return { ...m, webSources, webResearch: true };
           });
         },
         onDone: () => {
+          if (myRun !== runSeq) return;
           dispatch({ type: "done", at: Date.now() });
           webNote = "";
           // If the model finished without emitting anything, say so plainly
@@ -454,6 +485,7 @@
           void scrollToBottom();
         },
         onError: (msg) => {
+          if (myRun !== runSeq) return;
           error = msg;
           webNote = "";
           dispatch({ type: "error", at: Date.now(), message: msg });
@@ -553,6 +585,12 @@
         void aiCancelStream(currentRequestId);
       }
     }
+    // Neutralise the stopped run before its backend rejects: bumping the
+    // generation makes every trailing callback (a late chunk, or the canonical
+    // cancellation rejection arriving as onError) bail, so it can't overwrite a
+    // run the user starts next. Clearing the id stops a second Stop re-firing.
+    runSeq++;
+    currentRequestId = null;
     // Reflect the user's intent immediately; any partial answer already
     // streamed stays in the bubble. A trailing backend `done` is ignored once
     // we're in a terminal state.
