@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import { DEFAULT_RESEARCH_PROMPTS } from "./research";
+// Import the Rust source as a raw string (typed by vite/client's `*?raw`), so
+// this stays a pure Vite/Vitest import with no Node fs/path/process types —
+// which svelte-check's app tsconfig doesn't provide.
+import configRs from "../../../core/src/research/config.rs?raw";
 
 // WHY: the backend parses every research step's model output with
 // `serde_json::from_str` (see core/src/research/config.rs), so the bundled
@@ -10,9 +12,6 @@ import { DEFAULT_RESEARCH_PROMPTS } from "./research";
 // a prompt the backend can't parse, breaking research with no error at reset
 // time. This test reads the Rust source directly and fails the build on any
 // divergence, which is the safeguard that lets us keep an offline copy at all.
-
-// Vitest runs from the `ui/` package root, so the core crate is one level up.
-const CONFIG_RS = resolve(process.cwd(), "../core/src/research/config.rs");
 
 // Turn a Rust string literal's raw bytes into its runtime value: resolve the
 // `\`+newline line-continuations (which also swallow the next line's indent)
@@ -73,7 +72,7 @@ function extractRustDefault(src: string, fnName: string): string {
 }
 
 describe("DEFAULT_RESEARCH_PROMPTS mirrors the backend", () => {
-  const src = readFileSync(CONFIG_RS, "utf8");
+  const src = configRs;
 
   const cases: Array<[keyof typeof DEFAULT_RESEARCH_PROMPTS, string]> = [
     ["plan_queries", "default_plan_queries"],
