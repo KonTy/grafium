@@ -19,6 +19,7 @@
     type WebSource,
   } from "../lib/knowledge";
   import { researchDeep, researchCancel, type ResearchStreamHandlers } from "../lib/research";
+  import { selectionIntersectsTranscript } from "../lib/transcriptSelection";
   import {
     initialState,
     reduce,
@@ -146,6 +147,7 @@
       reducedMotion = e.matches;
     };
     mq.addEventListener("change", onMotionChange);
+    document.addEventListener("mousedown", onDocumentPointerDown);
     document.addEventListener("mouseup", onDocumentPointerUp);
 
     // The background auto-reindex drainer emits this after it refreshes any
@@ -164,6 +166,7 @@
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
       mq.removeEventListener("change", onMotionChange);
+      document.removeEventListener("mousedown", onDocumentPointerDown);
       document.removeEventListener("mouseup", onDocumentPointerUp);
       chatScroll?.removeEventListener("click", handleRenderedClick);
       // A run outlives the component's UI listeners: without this the backend
@@ -342,34 +345,48 @@
    * just type into — but it must not fight the user for the caret. Reclaiming
    * focus on every blur made the transcript impossible to copy from: clicking
    * into an answer to select text blurred the input, the input immediately
-   * took focus back, and the browser collapsed the selection. So refocus is
-   * skipped whenever the user is actually working inside the transcript.
+   * took focus back, and the browser collapsed the selection. A drag can also
+   * *begin* outside .chat-log (in the padding, or on the scrollbar gutter) and
+   * only reach the transcript as it moves, so keying off a transcript-only
+   * mousedown missed those. Instead we track the pointer globally and defer any
+   * refocus until pointer-up, when the resulting selection is final.
    */
   function onInputBlur() {
     if (isStreaming || (!checkingConnection && !chatConnected)) return;
-    if (selectingTranscript) return;
+    // A drag is in flight somewhere on the page: don't decide now, or we'd
+    // collapse a selection that hasn't finished forming. Resolve at pointer-up.
+    if (pointerDown) {
+      refocusPending = true;
+      return;
+    }
     requestAnimationFrame(() => {
+      if (pointerDown) return; // a drag started in the meantime
       const selection = window.getSelection();
       if (selection && !selection.isCollapsed) return;
-      if (selectingTranscript) return;
       focusInput(false);
     });
   }
 
-  /** True while a pointer drag that began inside the transcript is in flight. */
-  let selectingTranscript = $state(false);
+  /** Whether a pointer button is currently held down anywhere on the page. */
+  let pointerDown = false;
+  /** Set when a blur happened mid-drag so pointer-up knows to reconsider focus. */
+  let refocusPending = false;
 
-  function onTranscriptPointerDown() {
-    selectingTranscript = true;
+  function onDocumentPointerDown() {
+    pointerDown = true;
   }
 
   function onDocumentPointerUp() {
-    if (!selectingTranscript) return;
-    // Release on the next frame so the blur handler above, which runs first,
-    // still sees the drag as active.
+    pointerDown = false;
+    if (!refocusPending) return;
+    refocusPending = false;
+    // Resolve on the next frame so the browser has finalised the drag's
+    // selection. Only keep the composer unfocused if the user actually landed a
+    // selection on the transcript; otherwise restore type-anywhere focus.
     requestAnimationFrame(() => {
-      const selection = window.getSelection();
-      selectingTranscript = selection ? !selection.isCollapsed : false;
+      if (pointerDown) return; // a new drag began
+      if (selectionIntersectsTranscript(window.getSelection(), chatScroll)) return;
+      focusInput(false);
     });
   }
 
@@ -707,7 +724,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="chat-log" bind:this={chatScroll} onmousedown={onTranscriptPointerDown}>
+  <div class="chat-log" bind:this={chatScroll}>
     {#each messages as m, i}
       {@const streamingThis =
         isStreaming && m.role === "assistant" && i === messages.length - 1}
