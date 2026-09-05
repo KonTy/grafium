@@ -1,7 +1,16 @@
 <script lang="ts">
   import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
+  import PageTree from "./PageTree.svelte";
   import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
+  import {
+    getPageTree,
+    listCollections,
+    setPageCollection,
+    toPageTreeView,
+    withMissingCommandFallback,
+  } from "../lib/pageTree";
+  import { SIDEBAR_TREE_STORAGE_KEY, type PageTreeViewNode } from "../lib/pageTreeState";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
   import type { Page, PageSummary, Block } from "../lib/api";
   import type { SidebarSearchResult } from "../lib/sidebarSearch";
@@ -24,13 +33,19 @@
   let searchResults: SidebarSearchResult[] = $state([]);
   let showSearch = $state(false);
   let searchInputEl: HTMLInputElement | null = $state(null);
+  let pageTree: PageTreeViewNode[] = $state([]);
+  let pageTreeAvailable: boolean | null = $state(null);
+  let pageTreeError = $state(false);
+  let pageTreeRequest = 0;
+  let pageTreePageIds = new Set<string>();
 
   // Context menu state
   interface ContextMenu {
     x: number;
     y: number;
-    page: Page;
+    page: Pick<Page, "id" | "title">;
     isFav: boolean;
+    collectionStatus: "page" | "collection" | "loading" | "unavailable" | "error";
   }
   let contextMenu: ContextMenu | null = $state(null);
 
@@ -40,9 +55,10 @@
 
   // Refresh recent pages whenever currentPage changes
   $effect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    currentPage;
+    const pageId = currentPage?.id;
+    if (!pageId) return;
     listRecentPages(10).then((p) => { recentPages = p; }).catch(() => {});
+    if (!pageTreePageIds.has(pageId)) void loadPageTree();
   });
 
   // Close context menu on any click outside
@@ -56,23 +72,121 @@
     };
   });
 
+  $effect(() => {
+    const refreshTree = () => { void loadPageTree(); };
+    window.addEventListener("page-tree-refresh", refreshTree);
+    return () => window.removeEventListener("page-tree-refresh", refreshTree);
+  });
+
   async function loadSidebar() {
+    const [favoriteResult, recentResult] = await Promise.allSettled([
+      listFavorites(),
+      listRecentPages(10),
+    ]);
+    favorites = favoriteResult.status === "fulfilled" ? favoriteResult.value : [];
+    recentPages = recentResult.status === "fulfilled" ? recentResult.value : [];
+    await loadPageTree();
+  }
+
+  async function loadPageTree() {
+    const request = ++pageTreeRequest;
+    pageTreeError = false;
     try {
-      favorites = await listFavorites();
-    } catch { favorites = []; }
-    try {
-      recentPages = await listRecentPages(10);
-    } catch { recentPages = []; }
+      const result = await withMissingCommandFallback(
+        () => getPageTree("namespace"),
+        [],
+      );
+      if (request !== pageTreeRequest) return;
+      pageTreeAvailable = result.available;
+      pageTree = result.available
+        ? toPageTreeView(result.value, "namespace")
+        : [];
+      pageTreePageIds = collectPageIds(pageTree);
+    } catch (error) {
+      if (request !== pageTreeRequest) return;
+      pageTreeAvailable = true;
+      pageTreeError = true;
+      pageTree = [];
+      pageTreePageIds = new Set();
+      console.warn("[page-tree] Failed to load sidebar tree:", error);
+    }
+  }
+
+  function collectPageIds(nodes: readonly PageTreeViewNode[]): Set<string> {
+    const ids = new Set<string>();
+    const stack = [...nodes];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.page_id) ids.add(node.page_id);
+      for (const child of node.children) stack.push(child);
+    }
+    return ids;
   }
 
   function favSet(): Set<string> {
     return new Set(favorites.map((f) => f.id));
   }
 
-  function handlePageRightClick(e: MouseEvent, page: Page) {
+  function handlePageRightClick(e: MouseEvent, page: Pick<Page, "id" | "title">) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { x: e.clientX, y: e.clientY, page, isFav: favSet().has(page.id) };
+    contextMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      page,
+      isFav: favSet().has(page.id),
+      collectionStatus: "loading",
+    };
+    void loadContextCollectionStatus(page.id);
+  }
+
+  function handleTreePageRightClick(event: MouseEvent, node: PageTreeViewNode) {
+    if (!node.page_id || !node.page_title) return;
+    handlePageRightClick(event, { id: node.page_id, title: node.page_title });
+  }
+
+  async function loadContextCollectionStatus(pageId: string) {
+    try {
+      const result = await withMissingCommandFallback(
+        () => listCollections(),
+        [],
+      );
+      if (contextMenu?.page.id !== pageId) return;
+      const collection = result.value.find((entry) => entry.id === pageId);
+      contextMenu.collectionStatus = result.available
+        ? collection ? "collection" : "page"
+        : "unavailable";
+    } catch (error) {
+      if (contextMenu?.page.id !== pageId) return;
+      contextMenu.collectionStatus = "error";
+      console.warn("[collection] Failed to load page kind:", error);
+    }
+  }
+
+  async function handleToggleCollection() {
+    if (!contextMenu) return;
+    const { page, collectionStatus } = contextMenu;
+    if (
+      collectionStatus === "loading"
+      || collectionStatus === "unavailable"
+      || collectionStatus === "error"
+    ) return;
+
+    contextMenu.collectionStatus = "loading";
+    try {
+      await setPageCollection(
+        page.id,
+        collectionStatus === "collection" ? null : "book",
+      );
+      contextMenu = null;
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+      window.dispatchEvent(new CustomEvent("page-collection-refresh", {
+        detail: { pageId: page.id },
+      }));
+    } catch (error) {
+      if (contextMenu?.page.id === page.id) contextMenu.collectionStatus = "error";
+      console.warn("[collection] Failed to update page kind:", error);
+    }
   }
 
   async function handleToggleFavorite() {
@@ -295,6 +409,32 @@
     </button>
   </nav>
 
+  {#if pageTreeAvailable !== false}
+    <div class="sidebar-section page-tree-section">
+      <div class="section-heading">
+        <h3 class="section-title">Pages</h3>
+        {#if pageTreeError}
+          <button type="button" class="tree-retry" onclick={loadPageTree}>Retry</button>
+        {/if}
+      </div>
+      {#if pageTreeAvailable === null}
+        <p class="tree-status">Loading hierarchy…</p>
+      {:else if pageTreeError}
+        <p class="tree-status">Could not load the page hierarchy.</p>
+      {:else}
+        <PageTree
+          nodes={pageTree}
+          {onNavigate}
+          selectedPageId={currentPage?.id ?? null}
+          storageKey={SIDEBAR_TREE_STORAGE_KEY}
+          ariaLabel="Page namespaces"
+          density="compact"
+          onPageContextMenu={handleTreePageRightClick}
+        />
+      {/if}
+    </div>
+  {/if}
+
   {#if favorites.length > 0}
     <div class="sidebar-section">
       <h3 class="section-title">Favorites</h3>
@@ -369,6 +509,27 @@
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
           </svg>
           Add to Favorites
+        {/if}
+      </button>
+      <button
+        class="context-menu-item"
+        disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
+        onclick={handleToggleCollection}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M2.25 3.25h4l1.25 1.5h6.25v8H2.25z" stroke-linejoin="round" />
+          <path d="M5 8h6M5 10.5h4" stroke-linecap="round" />
+        </svg>
+        {#if contextMenu.collectionStatus === "collection"}
+          Convert to Regular Page
+        {:else if contextMenu.collectionStatus === "loading"}
+          Loading Collection Status…
+        {:else if contextMenu.collectionStatus === "unavailable"}
+          Collections Unavailable
+        {:else if contextMenu.collectionStatus === "error"}
+          Collection Status Unavailable
+        {:else}
+          Mark as Book Collection
         {/if}
       </button>
     </div>
@@ -519,6 +680,17 @@
     margin-bottom: 16px;
   }
 
+  .page-tree-section {
+    padding-top: 2px;
+    border-top: 1px solid var(--border);
+  }
+
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
   .section-title {
     font-size: 11px;
     font-weight: 600;
@@ -527,6 +699,35 @@
     letter-spacing: 0.5px;
     padding: 4px 10px;
     margin-bottom: 4px;
+  }
+
+  .tree-retry {
+    margin-right: 7px;
+    padding: 3px 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .tree-retry:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .tree-retry:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .tree-status {
+    margin: 3px 10px 8px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.4;
   }
 
   .page-item {
@@ -602,7 +803,7 @@
     background: var(--bg-sidebar);
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--bg-primary) 72%, transparent);
     padding: 4px;
     min-width: 170px;
   }
@@ -625,5 +826,10 @@
   .context-menu-item:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .context-menu-item:disabled {
+    color: var(--text-muted);
+    cursor: default;
   }
 </style>

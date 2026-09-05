@@ -1,6 +1,14 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
+  import PageTree from "./PageTree.svelte";
   import { countPages, listPagesWindow, createPage, deletePage } from "../lib/api";
+  import {
+    getPageTree,
+    toPageTreeView,
+    withMissingCommandFallback,
+    type PageTreeSource,
+  } from "../lib/pageTree";
+  import { ALL_PAGES_TREE_STORAGE_KEY, type PageTreeViewNode } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -20,6 +28,13 @@
   let total = $state(0);
   let sortByTitle = $state(false); // false = Recent (updated_at), true = A-Z (title)
   let newPageTitle = $state("");
+  let viewMode = $state<"tree" | "list">("tree");
+  let treeSource = $state<PageTreeSource>("namespace");
+  let pageTree: PageTreeViewNode[] = $state([]);
+  let pageTreeAvailable: boolean | null = $state(null);
+  let pageTreeLoading = $state(false);
+  let pageTreeError = $state("");
+  let pageTreeRequest = 0;
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
   // updates as windows stream in.
@@ -43,6 +58,12 @@
 
   $effect(() => {
     void refreshCount();
+  });
+
+  $effect(() => {
+    const source = treeSource;
+    if (viewMode !== "tree") return;
+    void loadPageTree(source);
   });
 
   // Track scroll/resize of the enclosing .main-content scroller.
@@ -108,6 +129,31 @@
     }
   }
 
+  async function loadPageTree(source: PageTreeSource) {
+    const request = ++pageTreeRequest;
+    pageTreeLoading = true;
+    pageTreeError = "";
+    pageTree = [];
+    try {
+      const result = await withMissingCommandFallback(
+        () => getPageTree(source),
+        [],
+      );
+      if (request !== pageTreeRequest || source !== treeSource) return;
+      pageTreeAvailable = result.available;
+      pageTree = result.available ? toPageTreeView(result.value, source) : [];
+      if (!result.available) viewMode = "list";
+    } catch (error) {
+      if (request !== pageTreeRequest || source !== treeSource) return;
+      pageTreeAvailable = true;
+      pageTree = [];
+      pageTreeError = String(error);
+      console.warn(`[page-tree] Failed to load ${source} tree:`, error);
+    } finally {
+      if (request === pageTreeRequest) pageTreeLoading = false;
+    }
+  }
+
   function resetWindows() {
     rows.clear();
     requested.clear();
@@ -127,20 +173,28 @@
     newPageTitle = "";
     resetWindows();
     await refreshCount();
+    if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
   async function handleDeletePage(page: Page) {
     await deletePage(page.id);
     resetWindows();
     await refreshCount();
+    if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") handleCreatePage();
   }
 
-  function fmtDate(ts: number): string {
-    return new Date(ts).toLocaleDateString();
+  function fmtDate(ts: number | string): string {
+    const value = typeof ts === "number" ? ts : Number(ts);
+    if (!Number.isFinite(value) || value <= 0) return "—";
+    const milliseconds = value < 1e12 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString();
   }
 </script>
 
@@ -164,15 +218,81 @@
     <button onclick={() => onNavigate("__import_media__")} class="btn-import-media" title="Import from video/audio (URL or file)">
       Import Media
     </button>
-    <div class="sort-controls">
-      <button class="sort-btn" class:active={!sortByTitle} onclick={() => setSort(false)}>Recent</button>
-      <button class="sort-btn" class:active={sortByTitle} onclick={() => setSort(true)}>A-Z</button>
+  </div>
+
+  <div class="browser-controls">
+    <div class="control-group" role="group" aria-label="Page browser view">
+      <button
+        class="mode-btn"
+        class:active={viewMode === "tree"}
+        aria-pressed={viewMode === "tree"}
+        disabled={pageTreeAvailable === false}
+        title={pageTreeAvailable === false ? "Page trees are unavailable in this build" : undefined}
+        onclick={() => { viewMode = "tree"; }}
+      >
+        Tree
+      </button>
+      <button
+        class="mode-btn"
+        class:active={viewMode === "list"}
+        aria-pressed={viewMode === "list"}
+        onclick={() => { viewMode = "list"; }}
+      >
+        List
+      </button>
     </div>
+
+    {#if viewMode === "tree"}
+      <div class="control-group" role="group" aria-label="Tree source">
+        <button
+          class="mode-btn"
+          class:active={treeSource === "namespace"}
+          aria-pressed={treeSource === "namespace"}
+          onclick={() => { treeSource = "namespace"; }}
+        >
+          Namespace
+        </button>
+        <button
+          class="mode-btn"
+          class:active={treeSource === "tags"}
+          aria-pressed={treeSource === "tags"}
+          onclick={() => { treeSource = "tags"; }}
+        >
+          Tags
+        </button>
+      </div>
+    {:else}
+      <div class="control-group" role="group" aria-label="Page list sort">
+        <button class="mode-btn" class:active={!sortByTitle} aria-pressed={!sortByTitle} onclick={() => setSort(false)}>Recent</button>
+        <button class="mode-btn" class:active={sortByTitle} aria-pressed={sortByTitle} onclick={() => setSort(true)}>A–Z</button>
+      </div>
+    {/if}
   </div>
 
   {#if total === 0}
     <div class="empty-state">
       <p>No pages yet. Create one above!</p>
+    </div>
+  {:else if viewMode === "tree"}
+    <div class="tree-browser" aria-busy={pageTreeLoading}>
+      {#if pageTreeLoading && pageTree.length === 0}
+        <p class="tree-message">Loading {treeSource === "namespace" ? "namespace" : "tag"} tree…</p>
+      {:else if pageTreeError}
+        <div class="tree-error" role="alert">
+          <p>Could not load the {treeSource === "namespace" ? "namespace" : "tag"} tree.</p>
+          <button type="button" onclick={() => loadPageTree(treeSource)}>Try again</button>
+        </div>
+      {:else}
+        <PageTree
+          nodes={pageTree}
+          {onNavigate}
+          storageKey={`${ALL_PAGES_TREE_STORAGE_KEY}.${treeSource}`}
+          ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
+          emptyText={treeSource === "namespace"
+            ? "No page namespaces yet. Use / in a page title to build one."
+            : "No tagged pages yet."}
+        />
+      {/if}
     </div>
   {:else}
     <div class="pages-spacer" bind:this={spacerEl} style="height: {total * ROW_H}px;">
@@ -199,7 +319,7 @@
 
 <style>
   .all-pages {
-    max-width: 800px;
+    max-width: 920px;
     margin: 0 auto;
     padding: 40px 24px;
   }
@@ -229,6 +349,7 @@
     align-items: center;
     margin-bottom: 20px;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .new-page {
@@ -254,8 +375,8 @@
 
   .btn-create {
     padding: 8px 16px;
-    background: var(--accent);
-    color: white;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -264,12 +385,27 @@
   }
 
   .btn-create:hover {
-    opacity: 0.9;
+    background: var(--btn-primary-hover);
   }
 
-  .sort-controls {
+  .browser-controls {
     display: flex;
-    gap: 4px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .control-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-secondary);
   }
 
   .btn-import-media {
@@ -290,20 +426,74 @@
     border-color: var(--accent);
   }
 
-  .sort-btn {
+  .mode-btn {
     padding: 6px 12px;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 4px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
     color: var(--text-secondary);
     font-size: 12px;
     cursor: pointer;
   }
 
-  .sort-btn.active {
+  .mode-btn.active {
     background: var(--bg-active);
     color: var(--text-primary);
-    border-color: var(--accent);
+  }
+
+  .mode-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+
+  .mode-btn:focus-visible,
+  .tree-error button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .mode-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+
+  .tree-browser {
+    min-height: 160px;
+  }
+
+  .tree-message,
+  .tree-error {
+    margin: 0;
+    padding: 26px 10px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .tree-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .tree-error p {
+    margin: 0;
+  }
+
+  .tree-error button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--btn-bg);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .tree-error button:hover {
+    background: var(--btn-bg-hover);
+    color: var(--text-primary);
   }
 
   .pages-spacer {
@@ -391,5 +581,36 @@
     text-align: center;
     padding: 60px 20px;
     color: var(--text-muted);
+  }
+
+  @media (max-width: 640px) {
+    .all-pages {
+      padding: 24px 14px 88px;
+    }
+
+    .controls {
+      align-items: stretch;
+    }
+
+    .new-page {
+      min-width: 100%;
+    }
+
+    .btn-import-media {
+      flex: 1;
+    }
+
+    .browser-controls {
+      align-items: stretch;
+    }
+
+    .control-group {
+      flex: 1;
+    }
+
+    .mode-btn {
+      flex: 1;
+      padding-inline: 8px;
+    }
   }
 </style>
