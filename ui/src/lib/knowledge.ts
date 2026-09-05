@@ -57,7 +57,8 @@ export interface AiConfigPayload {
 export interface StreamChunk {
   request_id: string;
   delta: string;
-  thinking?: boolean;
+  /** Current answering phase on a transition, else null; never carries reasoning text. */
+  phase?: string | null;
   done: boolean;
   error?: string | null;
 }
@@ -336,7 +337,7 @@ export async function aiAskStream(
     onDone: () => void;
     onError?: (message: string) => void;
     onSources?: (sources: ChatSource[]) => void;
-    onThinking?: (thinking: boolean) => void;
+    onPhase?: (phase: string) => void;
     onStart?: (requestId: string) => void;
   },
   graphId?: string
@@ -353,9 +354,11 @@ export async function aiAskStream(
       return;
     }
 
-    // A thinking flag with no delta means the model is reasoning inside a
-    // <think> block — surface it as a distinct state, never as answer text.
-    handlers.onThinking?.(payload.thinking === true);
+    // A phase transition (retrieving / processing_prompt / thinking /
+    // generating) carries no answer text — it drives the status indicator.
+    if (payload.phase) {
+      handlers.onPhase?.(payload.phase);
+    }
 
     if (payload.delta) {
       handlers.onChunk(payload.delta);

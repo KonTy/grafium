@@ -11,6 +11,14 @@
     shouldShowIndexBanner,
     type ChatSource,
   } from "../lib/knowledge";
+  import {
+    initialState,
+    reduce,
+    statusDisplay,
+    type StreamState,
+    type StreamEvent,
+    type StreamPhase,
+  } from "../lib/chatStatus";
 
   interface Props {
     onOpenSettings?: () => void;
@@ -32,13 +40,24 @@
     },
   ]);
   let question = $state("");
-  let isStreaming = $state(false);
-  let isThinking = $state(false);
-  let elapsedMs = $state(0);
   let currentRequestId: string | null = null;
-  let streamTimer: ReturnType<typeof setInterval> | null = null;
-  let streamStartedAt = 0;
   let error = $state<string | null>(null);
+
+  // Streaming status is a pure reducer over the *real* backend events
+  // (phase transitions, token deltas, done/error) plus a wall clock — never a
+  // timer-driven spinner. `now` is bumped by a lightweight clock only so the
+  // elapsed time and stall detection recompute; every animated/"working" state
+  // is still gated on actual evidence in `statusDisplay`.
+  let streamState = $state<StreamState>(initialState());
+  let now = $state(0);
+  let clock: ReturnType<typeof setInterval> | null = null;
+  let reducedMotion = $state(false);
+
+  let status = $derived(statusDisplay(streamState, now, reducedMotion));
+  let isStreaming = $derived(
+    streamState.kind === "active" || streamState.kind === "stalled"
+  );
+
   let chatScroll: HTMLDivElement | null = null;
   let inputEl: HTMLTextAreaElement | null = null;
   let checkingConnection = $state(true);
@@ -61,6 +80,16 @@
     keepInputFocusedSoon(true);
     void refreshConnectionState();
     void refreshIndexStatus();
+
+    // Honour the OS "reduce motion" preference: fall back to a static label
+    // instead of animating. Kept reactive so a mid-session change applies.
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    reducedMotion = mq.matches;
+    const onMotionChange = (e: MediaQueryListEvent) => {
+      reducedMotion = e.matches;
+    };
+    mq.addEventListener("change", onMotionChange);
+
     // The background auto-reindex drainer emits this after it refreshes any
     // pages, so the coverage / "N pages pending" indicator stays current
     // without polling.
@@ -69,8 +98,19 @@
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
-      if (streamTimer) clearInterval(streamTimer);
+      mq.removeEventListener("change", onMotionChange);
+      stopClock();
     };
+  });
+
+  // Run the clock only while a stream is in flight, so `now` (and thus elapsed
+  // time + stall detection) stays live without polling when idle.
+  $effect(() => {
+    if (isStreaming) {
+      startClock();
+    } else {
+      stopClock();
+    }
   });
 
   $effect(() => {
@@ -173,9 +213,8 @@
     error = null;
     messages = [...messages, { role: "user", content: trimmed }, { role: "assistant", content: "" }];
     question = "";
-    isStreaming = true;
-    isThinking = false;
-    startStreamTimer();
+    // Begin the status machine at the real send time.
+    dispatch({ type: "start", at: Date.now() });
     await scrollToBottom();
 
     let assistantIndex = messages.length - 1;
@@ -186,12 +225,11 @@
         onStart: (requestId) => {
           currentRequestId = requestId;
         },
-        onThinking: (thinking) => {
-          isThinking = thinking;
+        onPhase: (phase) => {
+          dispatch({ type: "phase", phase: phase as StreamPhase, at: Date.now() });
         },
         onChunk: (delta) => {
-          // First real answer text ends the "thinking" state.
-          isThinking = false;
+          dispatch({ type: "delta", chars: delta.length, at: Date.now() });
           messages = messages.map((m, i) => {
             if (i !== assistantIndex) return m;
             return { ...m, content: m.content + delta };
@@ -205,50 +243,61 @@
           });
         },
         onDone: () => {
-          endStream();
+          dispatch({ type: "done", at: Date.now() });
+          // If the model finished without emitting anything, say so plainly
+          // rather than leaving an empty bubble.
+          if (streamState.firstTokenAt === null) {
+            messages = messages.map((m, i) => {
+              if (i !== assistantIndex || m.content) return m;
+              return {
+                ...m,
+                content:
+                  "The model returned no answer. Try rephrasing, or use a smaller/non-reasoning model.",
+              };
+            });
+          }
+          keepInputFocusedSoon(false);
           void scrollToBottom();
         },
         onError: (msg) => {
           error = msg;
-          endStream();
+          dispatch({ type: "error", at: Date.now(), message: msg });
+          keepInputFocusedSoon(false);
         },
       }
     );
   }
 
-  function startStreamTimer() {
-    streamStartedAt = Date.now();
-    elapsedMs = 0;
-    if (streamTimer) clearInterval(streamTimer);
-    streamTimer = setInterval(() => {
-      elapsedMs = Date.now() - streamStartedAt;
+  function dispatch(e: StreamEvent) {
+    now = e.at;
+    streamState = reduce(streamState, e);
+  }
+
+  function startClock() {
+    if (clock) return;
+    now = Date.now();
+    clock = setInterval(() => {
+      now = Date.now();
     }, 250);
   }
 
-  function endStream() {
-    isStreaming = false;
-    isThinking = false;
-    currentRequestId = null;
-    if (streamTimer) {
-      clearInterval(streamTimer);
-      streamTimer = null;
+  function stopClock() {
+    if (clock) {
+      clearInterval(clock);
+      clock = null;
     }
-    keepInputFocusedSoon(false);
   }
 
   function stopStream() {
     if (currentRequestId) {
       void aiCancelStream(currentRequestId);
     }
-  }
-
-  function formatElapsed(ms: number): string {
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return `${s}s`;
-    return `${Math.floor(s / 60)}m ${s % 60}s`;
-  }
-
-  function onInputKeydown(e: KeyboardEvent) {
+    // Reflect the user's intent immediately; any partial answer already
+    // streamed stays in the bubble. A trailing backend `done` is ignored once
+    // we're in a terminal state.
+    dispatch({ type: "cancel", at: Date.now() });
+    keepInputFocusedSoon(false);
+  }  function onInputKeydown(e: KeyboardEvent) {
     const hasModifier = e.shiftKey || e.ctrlKey || e.altKey || e.metaKey;
     if (e.key === "Enter" && !hasModifier) {
       e.preventDefault();
@@ -326,10 +375,14 @@
   {/if}
 
   <div class="chat-log" bind:this={chatScroll}>
-    {#each messages as m}
+    {#each messages as m, i}
       <div class="msg" class:user={m.role === "user"}>
         <div class="msg-role">{m.role === "user" ? "You" : "Grafium AI"}</div>
-        <div class="msg-content">{m.content || (isStreaming ? (isThinking ? "" : "…") : "")}</div>
+        <div class="msg-content">{m.content}{#if isStreaming && m.role === "assistant" && i === messages.length - 1}<span
+              class="type-cursor"
+              class:animate={status.animate}
+              aria-hidden="true"
+            ></span>{/if}</div>
         {#if m.role === "assistant" && m.sources && m.sources.length > 0}
           <div class="msg-sources">
             {#each m.sources as source}
@@ -354,14 +407,19 @@
   {/if}
 
   {#if isStreaming}
-    <div class="chat-status" role="status" aria-live="polite">
-      <span class="chat-status-dot" class:thinking={isThinking}></span>
-      <span class="chat-status-label">
-        {isThinking ? "Thinking" : "Generating"}… {formatElapsed(elapsedMs)}
-      </span>
-      <button class="chat-stop" onclick={() => stopStream()} title="Stop generating">
-        Stop
-      </button>
+    <div class="chat-status" role="status" aria-live="polite" class:stalled={status.kind === "stalled"}>
+      <span
+        class="chat-status-dot"
+        class:animate={status.animate}
+        class:thinking={status.phase === "thinking"}
+        class:stalled={status.kind === "stalled"}
+      ></span>
+      <span class="chat-status-label">{status.label}</span>
+      {#if status.showStop}
+        <button class="chat-stop" onclick={() => stopStream()} title="Stop generating">
+          Stop
+        </button>
+      {/if}
     </div>
   {/if}
 
@@ -588,18 +646,34 @@
     color: var(--text-secondary);
   }
 
+  .chat-status.stalled {
+    color: #fbbf24;
+  }
+
   .chat-status-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     background: var(--text-secondary);
     opacity: 0.6;
+    flex-shrink: 0;
+  }
+
+  /* Animation runs ONLY when the status is evidence-backed and motion is
+     allowed — never on a bare timer. A stalled/terminal dot is static. */
+  .chat-status-dot.animate {
     animation: chat-pulse 1.2s ease-in-out infinite;
   }
 
   .chat-status-dot.thinking {
     background: #a78bfa;
     opacity: 0.9;
+  }
+
+  .chat-status-dot.stalled {
+    background: #fbbf24;
+    opacity: 0.9;
+    animation: none;
   }
 
   @keyframes chat-pulse {
@@ -609,6 +683,40 @@
     }
     50% {
       opacity: 0.9;
+    }
+  }
+
+  /* A subtle "typing" cursor at the end of the streaming answer, so tokens
+     appearing feel live. Static (just visible) unless animation is warranted. */
+  .type-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 1px;
+    vertical-align: text-bottom;
+    background: var(--text-secondary);
+    opacity: 0.5;
+  }
+
+  .type-cursor.animate {
+    animation: chat-cursor-blink 1s steps(2, start) infinite;
+  }
+
+  @keyframes chat-cursor-blink {
+    0%,
+    100% {
+      opacity: 0.15;
+    }
+    50% {
+      opacity: 0.85;
+    }
+  }
+
+  /* Backstop: honour reduced-motion even if a class slips through. */
+  @media (prefers-reduced-motion: reduce) {
+    .chat-status-dot.animate,
+    .type-cursor.animate {
+      animation: none;
     }
   }
 
