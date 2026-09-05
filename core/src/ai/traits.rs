@@ -94,6 +94,32 @@ pub struct ChunkEmbedding {
 // type instead of each module declaring its own `Pin<Box<dyn Future<...>>>`.
 pub use crate::async_util::BoxFuture;
 
+/// Describes whether local inference is actually using the GPU, so the UI can
+/// warn the user when a model silently fell back to CPU (a 5–10× slowdown that
+/// otherwise presents as a hang). Only the embedded local provider reports
+/// this; remote providers return `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceleratorStatus {
+    /// Whether this build can offload to a GPU at all (compiled with a GPU
+    /// backend, e.g. `llm-local-vulkan`). When `false`, running on CPU is
+    /// expected and the UI should not warn about it.
+    pub gpu_supported: bool,
+    /// Whether inference is actually running with GPU-offloaded layers
+    /// (`gpu_supported` and a non-zero effective `gpu_layers`).
+    pub on_gpu: bool,
+    /// Effective layers requested for GPU offload. The sentinel value for
+    /// "all layers" is large (see `OFFLOAD_ALL_LAYERS`); `0` means CPU-only.
+    pub gpu_layers: u32,
+    /// Free VRAM observed at load time, in MiB — the figure that drove the
+    /// CPU/GPU decision. `None` if it couldn't be queried (no `nvidia-smi`).
+    pub free_vram_mib_at_load: Option<u64>,
+    /// The model file's on-disk size in MiB, for the "needs ~X MiB" message.
+    pub model_mib: Option<u64>,
+    /// Whether `gpu_layers` was pinned explicitly in config (so the free-VRAM
+    /// heuristic was bypassed). An explicit setting always wins.
+    pub explicit: bool,
+}
+
 /// LLM provider trait — abstracts over Ollama, OpenAI, Anthropic, etc.
 pub trait LlmProvider: Send + Sync {
     /// Generate a completion from a prompt.
@@ -152,6 +178,13 @@ pub trait LlmProvider: Send + Sync {
             on_token(&text);
             Ok(text)
         })
+    }
+
+    /// Reports whether this provider is actually using GPU acceleration, so
+    /// the UI can warn about a silent CPU fallback. Only the embedded local
+    /// provider knows this; all others return `None` (not applicable).
+    fn accelerator_status(&self) -> Option<AcceleratorStatus> {
+        None
     }
 }
 

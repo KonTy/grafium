@@ -48,11 +48,63 @@ const DEFAULT_CTX_SIZE: u32 = 4096;
 /// than this can still opt in explicitly via `context_size` in Settings.
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
-/// Safety margin subtracted from detected free VRAM before deciding whether
-/// a model fits — leaves headroom for the KV cache/context buffers (which
-/// scale with context size and aren't accounted for by the model file size
-/// alone) and for other GPU consumers (compositor, other apps).
-const VRAM_SAFETY_MARGIN_BYTES: u64 = 1536 * 1024 * 1024; // 1.5 GiB
+/// Lower/upper bounds for the VRAM safety margin (see
+/// [`vram_safety_margin_bytes`]).
+const VRAM_SAFETY_MARGIN_MIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+const VRAM_SAFETY_MARGIN_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/// Headroom to subtract from detected free VRAM before deciding whether a
+/// model fits, scaled with model size instead of a fixed constant.
+///
+/// The margin exists for the KV cache/context buffers (which aren't part of
+/// the model file's on-disk size) and for other GPU consumers (compositor,
+/// browser, a second app). A *fixed* 1.5 GiB — the previous value — is a bad
+/// fit at both ends: it's wastefully large for a tiny 1 GB model (demanding
+/// 2.5 GB free for something that needs ~1 GB) yet arguably too small for a
+/// 30 GB model whose KV cache alone can exceed 1.5 GiB. Scaling at ~20% of
+/// the model size, clamped to a sane [512 MiB, 2 GiB] band, tracks the KV
+/// cache's rough growth without ballooning.
+///
+/// Tradeoff to keep in mind if tuning: too *small* a margin risks a GPU OOM
+/// at generation time (KV cache grows with context length, which this can't
+/// see up front); too *large* needlessly pins capable models to CPU — the
+/// exact silent-slowdown bug this whole path exists to avoid. The band above
+/// was chosen conservatively; prefer raising the floor over the ceiling if a
+/// real GPU-OOM is observed.
+fn vram_safety_margin_bytes(model_size_bytes: u64) -> u64 {
+    (model_size_bytes / 5).clamp(VRAM_SAFETY_MARGIN_MIN_BYTES, VRAM_SAFETY_MARGIN_MAX_BYTES)
+}
+
+/// Number of times [`detect_free_vram_bytes_best`] samples free VRAM before
+/// giving up, and the pause between samples. A *single* reading at load time
+/// used to permanently pin the whole session to CPU whenever VRAM happened to
+/// be transiently busy (the embedding model mid-index, a previous instance
+/// still shutting down, a browser/game) — a silent 5–10× slowdown cached for
+/// the model's entire life. Sampling a few times and taking the *best* (max)
+/// free reading absorbs a brief dip so a transient consumer can't strand
+/// inference on the CPU.
+const VRAM_PROBE_ATTEMPTS: u32 = 3;
+const VRAM_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Outcome of the GPU-offload decision, carried alongside the chosen
+/// `gpu_layers` so the load path can report *why* it landed on CPU vs GPU
+/// (surfaced to the UI via [`crate::ai::traits::AcceleratorStatus`]).
+struct GpuDecision {
+    gpu_layers: u32,
+    free_vram_bytes: Option<u64>,
+    model_size_bytes: Option<u64>,
+}
+
+/// Pure decision: given the model's on-disk size and the best observed free
+/// VRAM, does full offload fit (returns [`OFFLOAD_ALL_LAYERS`]) or not
+/// (returns `0` = CPU-only)? Split out from I/O so it can be unit-tested.
+fn gpu_layers_for_vram(model_size_bytes: u64, free_vram_bytes: u64) -> u32 {
+    if model_size_bytes + vram_safety_margin_bytes(model_size_bytes) > free_vram_bytes {
+        0
+    } else {
+        OFFLOAD_ALL_LAYERS
+    }
+}
 
 /// Picks a default `n_gpu_layers` for a model the caller hasn't pinned an
 /// explicit `gpu_layers` setting for.
@@ -69,27 +121,39 @@ const VRAM_SAFETY_MARGIN_BYTES: u64 = 1536 * 1024 * 1024; // 1.5 GiB
 /// non-NVIDIA GPU, parse failure, etc.) this falls back to the previous
 /// "offload everything" default rather than guessing further — a Vulkan
 /// backend on a card we can't query is treated the same as before.
-fn default_gpu_layers_for(model_path: &Path) -> u32 {
-    let Some(free_vram_bytes) = detect_free_vram_bytes() else {
-        return OFFLOAD_ALL_LAYERS;
+fn decide_gpu_layers(model_path: &Path) -> GpuDecision {
+    let free_vram_bytes = detect_free_vram_bytes_best();
+    let model_size_bytes = std::fs::metadata(model_path).map(|m| m.len()).ok();
+
+    let gpu_layers = match (model_size_bytes, free_vram_bytes) {
+        (Some(model), Some(free)) => {
+            let layers = gpu_layers_for_vram(model, free);
+            if layers == 0 {
+                // Visible on stderr (not only `tracing::warn!`, which had no
+                // subscriber capturing it on the affected machine — the log
+                // there showed no trace of this decision at all). This is a
+                // 5–10× slowdown; the user needs to be able to see why.
+                let msg = format!(
+                    "grafium: local chat model is ~{} MiB but only ~{} MiB VRAM was free at \
+                     load — running on CPU (much slower). Free VRAM and use \"Retry on GPU\" in \
+                     Chat, or set an explicit \"GPU layers\" value in Settings.",
+                    model / (1024 * 1024),
+                    free / (1024 * 1024)
+                );
+                eprintln!("{msg}");
+                tracing::warn!("{msg}");
+            }
+            layers
+        }
+        // Can't measure one side — keep the historical "offload everything"
+        // default rather than guessing CPU.
+        _ => OFFLOAD_ALL_LAYERS,
     };
 
-    let Ok(model_size_bytes) = std::fs::metadata(model_path).map(|m| m.len()) else {
-        return OFFLOAD_ALL_LAYERS;
-    };
-
-    if model_size_bytes + VRAM_SAFETY_MARGIN_BYTES > free_vram_bytes {
-        tracing::warn!(
-            "Model {} is ~{} MiB but only ~{} MiB VRAM is free — defaulting to CPU-only \
-             (gpu_layers=0) instead of offloading everything, since it would not fit. Set an \
-             explicit \"GPU layers\" value in Settings to force partial GPU offload.",
-            model_path.display(),
-            model_size_bytes / (1024 * 1024),
-            free_vram_bytes / (1024 * 1024)
-        );
-        0
-    } else {
-        OFFLOAD_ALL_LAYERS
+    GpuDecision {
+        gpu_layers,
+        free_vram_bytes,
+        model_size_bytes,
     }
 }
 
@@ -108,6 +172,25 @@ fn detect_free_vram_bytes() -> Option<u64> {
     let first_line = text.lines().next()?.trim();
     let free_mib: u64 = first_line.parse().ok()?;
     Some(free_mib * 1024 * 1024)
+}
+
+/// Samples [`detect_free_vram_bytes`] up to [`VRAM_PROBE_ATTEMPTS`] times and
+/// returns the *maximum* free reading seen, so a transient VRAM dip at the
+/// instant of load can't pin the session to CPU. Returns `None` only if no
+/// probe ever succeeded (no `nvidia-smi` / unparsable). The probe is cheap
+/// and bounded, so it always samples the full budget rather than stopping
+/// early on the first good reading.
+fn detect_free_vram_bytes_best() -> Option<u64> {
+    let mut best: Option<u64> = None;
+    for attempt in 0..VRAM_PROBE_ATTEMPTS {
+        if let Some(free) = detect_free_vram_bytes() {
+            best = Some(best.map_or(free, |b| b.max(free)));
+        }
+        if attempt + 1 < VRAM_PROBE_ATTEMPTS {
+            std::thread::sleep(VRAM_PROBE_INTERVAL);
+        }
+    }
+    best
 }
 
 /// Multiplier applied to a GGUF file's on-disk size to estimate the *host
@@ -230,6 +313,10 @@ pub struct LocalLlm {
     /// Whether the model's baked-in chat template marks it as a reasoning
     /// ("thinking") model — detected once at load from the template text.
     supports_thinking: bool,
+    /// Whether inference actually landed on the GPU, and the VRAM figures that
+    /// drove that decision — surfaced to the UI so a silent CPU fallback is
+    /// visible instead of presenting as a hang.
+    accel: crate::ai::traits::AcceleratorStatus,
 }
 
 /// The process-wide llama.cpp backend. llama.cpp only wants to be
@@ -265,8 +352,21 @@ impl LocalLlm {
         // whole process OOM-killed by the kernel (observed in practice).
         // Instead, when the caller hasn't pinned an explicit `gpu_layers`,
         // proactively estimate whether the model can plausibly fit in free
-        // VRAM at all and decide up front, so we only ever allocate once.
-        let requested_gpu_layers = gpu_layers.unwrap_or_else(|| default_gpu_layers_for(model_path));
+        // VRAM at all and decide up front, so we only ever allocate once. An
+        // *explicit* `gpu_layers` always wins over the heuristic.
+        let explicit = gpu_layers.is_some();
+        let decision = match gpu_layers {
+            Some(layers) => GpuDecision {
+                gpu_layers: layers,
+                // Report the current free VRAM for context, but a single
+                // (non-retried) read is fine here since it doesn't drive any
+                // decision — the user pinned the value.
+                free_vram_bytes: detect_free_vram_bytes(),
+                model_size_bytes: std::fs::metadata(model_path).map(|m| m.len()).ok(),
+            },
+            None => decide_gpu_layers(model_path),
+        };
+        let requested_gpu_layers = decision.gpu_layers;
 
         if requested_gpu_layers == 0 {
             check_cpu_ram_budget(model_path)?;
@@ -342,12 +442,25 @@ impl LocalLlm {
             })
             .unwrap_or(false);
 
+        // GPU offload is only physically possible when a GPU backend was
+        // compiled in; otherwise CPU is expected and the UI must not warn.
+        let gpu_supported = cfg!(feature = "llm-local-vulkan");
+        let accel = crate::ai::traits::AcceleratorStatus {
+            gpu_supported,
+            on_gpu: gpu_supported && requested_gpu_layers > 0,
+            gpu_layers: requested_gpu_layers,
+            free_vram_mib_at_load: decision.free_vram_bytes.map(|b| b / (1024 * 1024)),
+            model_mib: decision.model_size_bytes.map(|b| b / (1024 * 1024)),
+            explicit,
+        };
+
         Ok(Self {
             backend,
             model: Arc::new(model),
             ctx_size,
             name,
             supports_thinking,
+            accel,
         })
     }
 
@@ -405,6 +518,38 @@ impl LocalLlm {
             .clone()
             .unwrap_or_else(|| model_library::default_models_dir(data_dir));
         Self::from_settings(&models_dir, &local.local_llm)
+    }
+
+    /// User-initiated "try the GPU now" reload: same resolution as
+    /// [`Self::from_config`] but forces full GPU offload, bypassing both the
+    /// free-VRAM heuristic and any configured `gpu_layers`. This is the
+    /// action behind Chat's "Retry on GPU" button — the free-VRAM heuristic
+    /// may have landed on CPU because VRAM was *transiently* busy at startup
+    /// (the embedder mid-index, a previous instance shutting down); once that
+    /// has cleared, this lets the user move inference onto the GPU without
+    /// restarting or editing Settings. A fresh single load attempt, so it
+    /// doesn't risk the double-allocation hazard `load()` warns about.
+    pub fn from_config_forcing_gpu(
+        config: &crate::ai::config::AiConfig,
+        data_dir: &Path,
+    ) -> Result<Self> {
+        let local = config
+            .local
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("No local AI provider configured".to_string()))?;
+        let models_dir = local
+            .models_dir
+            .clone()
+            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
+        let model_path = local
+            .local_llm
+            .model_ref
+            .resolve(&models_dir, ModelKind::Llm)?;
+        Self::load(
+            &model_path,
+            local.local_llm.context_size,
+            Some(OFFLOAD_ALL_LAYERS),
+        )
     }
 }
 
@@ -485,6 +630,10 @@ impl LlmProvider for LocalLlm {
         // `LocalLlm::load`/`from_config` succeeded, it's ready by definition
         // (no network endpoint to probe, unlike Ollama/OpenAI-compatible).
         Box::pin(async move { Ok(true) })
+    }
+
+    fn accelerator_status(&self) -> Option<crate::ai::traits::AcceleratorStatus> {
+        Some(self.accel.clone())
     }
 }
 
@@ -778,5 +927,66 @@ mod config_tests {
         std::fs::write(&only_model, vec![0u8; 1024]).unwrap();
 
         assert_eq!(find_fallback_llm_model(dir.path(), &only_model), None);
+    }
+}
+
+#[cfg(test)]
+mod gpu_decision_tests {
+    use super::*;
+
+    #[test]
+    fn safety_margin_scales_with_model_and_clamps() {
+        // Tiny model: 20% would be well under the floor → clamped to 512 MiB.
+        let tiny = 256 * 1024 * 1024; // 256 MiB
+        assert_eq!(vram_safety_margin_bytes(tiny), VRAM_SAFETY_MARGIN_MIN_BYTES);
+
+        // Mid model: 5 GiB → 20% = 1 GiB, inside the band → used as-is.
+        let mid = 5 * 1024 * 1024 * 1024; // 5 GiB
+        assert_eq!(vram_safety_margin_bytes(mid), 1024 * 1024 * 1024);
+
+        // Huge model: 30 GiB → 20% = 6 GiB, above the ceiling → clamped.
+        let huge = 30u64 * 1024 * 1024 * 1024;
+        assert_eq!(vram_safety_margin_bytes(huge), VRAM_SAFETY_MARGIN_MAX_BYTES);
+    }
+
+    #[test]
+    fn gpu_layers_decision_fits_and_does_not_fit() {
+        let model = 5 * 1024 * 1024 * 1024; // 5 GiB → margin 1 GiB → needs 6 GiB free
+        let needed = model + vram_safety_margin_bytes(model);
+
+        // Comfortably enough free VRAM → offload everything.
+        assert_eq!(gpu_layers_for_vram(model, needed), OFFLOAD_ALL_LAYERS);
+        assert_eq!(
+            gpu_layers_for_vram(model, needed + 1024 * 1024 * 1024),
+            OFFLOAD_ALL_LAYERS
+        );
+
+        // One byte short of the requirement → CPU-only.
+        assert_eq!(gpu_layers_for_vram(model, needed - 1), 0);
+
+        // The exact real-machine numbers from the bug report: a 4,983 MiB
+        // model with only ~5,000 MiB free (a transient dip) does not fit;
+        // with 16 GiB free it does.
+        let real_model = 4_983u64 * 1024 * 1024;
+        assert_eq!(gpu_layers_for_vram(real_model, 5_000 * 1024 * 1024), 0);
+        assert_eq!(
+            gpu_layers_for_vram(real_model, 16 * 1024 * 1024 * 1024),
+            OFFLOAD_ALL_LAYERS
+        );
+    }
+
+    #[test]
+    fn best_of_free_readings_ignores_a_transient_dip() {
+        // The whole point of sampling the *max*: a momentary dip (5 GiB)
+        // between two healthy readings (16 GiB) must not be what we decide
+        // on. Emulate the reduction the sampler performs.
+        let readings = [16u64, 5, 16].map(|g| g * 1024 * 1024 * 1024);
+        let best = readings.iter().copied().reduce(|a, b| a.max(b)).unwrap();
+        assert_eq!(best, 16 * 1024 * 1024 * 1024);
+
+        let real_model = 4_983u64 * 1024 * 1024;
+        // With the dip we'd have (wrongly) picked CPU; with the best reading
+        // we correctly offload.
+        assert_eq!(gpu_layers_for_vram(real_model, best), OFFLOAD_ALL_LAYERS);
     }
 }

@@ -345,6 +345,44 @@ impl KnowledgeEngine {
         Ok(())
     }
 
+    /// Reload the local chat model forcing full GPU offload, bypassing the
+    /// free-VRAM heuristic. Backs Chat's "Retry on GPU" action: the heuristic
+    /// may have landed on CPU because VRAM was *transiently* busy at startup
+    /// (the embedder mid-index, a previous instance shutting down); once that
+    /// clears, this moves inference onto the GPU without a restart or a
+    /// Settings edit. Only meaningful for the embedded local provider; other
+    /// provider modes return an error the UI can surface. On failure the
+    /// previous provider is left untouched (a fresh instance is only swapped
+    /// in on success), so a failed retry can't leave chat unavailable.
+    pub fn retry_llm_on_gpu(&mut self) -> Result<()> {
+        #[cfg(feature = "llm-local")]
+        {
+            if !matches!(self.config.mode, crate::ai::config::AiMode::Local)
+                || !self
+                    .config
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.provider == crate::ai::config::ProviderType::HuggingFace)
+            {
+                return Err(CoreError::Other(
+                    "Retry on GPU only applies to the embedded local chat model.".to_string(),
+                ));
+            }
+            let llm = crate::ai::providers::local_llm::LocalLlm::from_config_forcing_gpu(
+                &self.config,
+                &self.models_root,
+            )?;
+            self.llm = Some(Box::new(llm));
+            Ok(())
+        }
+        #[cfg(not(feature = "llm-local"))]
+        {
+            Err(CoreError::Other(
+                "This build has no embedded local LLM support.".to_string(),
+            ))
+        }
+    }
+
     /// Check if the engine is ready for operations that need semantic
     /// search (indexing, vector search, "research this page" references) —
     /// these fundamentally require an embedding model, so the Embedded
@@ -372,6 +410,14 @@ impl KnowledgeEngine {
     /// when no embedder is configured (e.g. the Embedded local provider).
     pub fn is_llm_ready(&self) -> bool {
         self.config.enabled && self.llm.is_some()
+    }
+
+    /// GPU/CPU status of the loaded local LLM, if it reports one. Lets the
+    /// command layer return fresh accelerator status after a "Retry on GPU"
+    /// reload without going through a full [`Self::index_status`] (which needs
+    /// a graph DB handle).
+    pub fn llm_accelerator_status(&self) -> Option<crate::ai::traits::AcceleratorStatus> {
+        self.llm.as_ref().and_then(|l| l.accelerator_status())
     }
 
     /// Health check — verify all providers are reachable.
@@ -420,6 +466,7 @@ impl KnowledgeEngine {
             pending_pages,
             embedder_ready: self.embedder.is_some() && self.vector_store.is_some(),
             llm_ready: self.is_llm_ready(),
+            accelerator: self.llm.as_ref().and_then(|l| l.accelerator_status()),
         })
     }
 
@@ -1106,6 +1153,11 @@ pub struct IndexStatus {
     pub embedder_ready: bool,
     /// Whether the LLM is ready for chat.
     pub llm_ready: bool,
+    /// GPU/CPU status of the local LLM, when it can report one (embedded
+    /// local provider only). Lets Chat warn the user when inference silently
+    /// fell back to CPU — a 5–10× slowdown that otherwise looks like a hang.
+    /// `None` for remote providers or when no LLM is loaded.
+    pub accelerator: Option<crate::ai::traits::AcceleratorStatus>,
 }
 
 /// How many hits `ask` retrieves before context assembly.
