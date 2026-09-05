@@ -1,6 +1,6 @@
 use super::Database;
 use crate::error::Result;
-use crate::models::{Block, BlockType, Link, LinkType};
+use crate::models::{Block, BlockType, Link, LinkType, Page};
 use rusqlite::{params, Connection};
 
 fn insert_link_on_conn(
@@ -91,6 +91,39 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(results)
+    }
+
+    /// The pages that are used as tags — every page some block points at with a
+    /// tag-typed link. This is the input to the tag tree: because writing
+    /// `#tech/linux` creates the `tech/linux` page and a tag link to it, "the
+    /// tags" and "the pages that are tags" are the same set, and organizing it
+    /// is the exact `/`-nesting the namespace tree already does.
+    ///
+    /// `DISTINCT` collapses the many-to-one shape of the `links` table (a page
+    /// can be tagged from dozens of blocks) down to one row per tag page.
+    pub fn list_tag_pages(&self) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT p.id, p.title, p.file_path, p.created_at, p.updated_at, p.is_journal, p.properties
+             FROM pages p
+             JOIN links l ON l.to_page_id = p.id
+             WHERE l.link_type = 'tag'
+             ORDER BY p.title ASC",
+        )?;
+        let pages = stmt
+            .query_map([], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
     }
 
     pub fn get_links_from_page(&self, page_id: &str) -> Result<Vec<Link>> {
@@ -424,5 +457,65 @@ impl Database {
         }
 
         Ok((blocks_scanned, links_inserted))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::Result;
+    use crate::models::{BlockType, LinkType};
+
+    #[test]
+    fn list_tag_pages_returns_only_tag_link_targets() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        // Pages that get referenced. `rust` and `linux` are tagged; `Notes` is
+        // only a plain page link and must not show up as a tag.
+        let rust = db.create_page("rust", false)?;
+        let linux = db.create_page("tech/linux", false)?;
+        let notes = db.create_page("Notes", false)?;
+
+        let source = db.create_page("Journal", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "#rust #tech/linux and see [[Notes]]",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        db.insert_link(&block.id, &rust.id, LinkType::Tag)?;
+        db.insert_link(&block.id, &linux.id, LinkType::Tag)?;
+        db.insert_link(&block.id, &notes.id, LinkType::Page)?;
+
+        let tags = db.list_tag_pages()?;
+        let titles: Vec<&str> = tags.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, vec!["rust", "tech/linux"]);
+        Ok(())
+    }
+
+    #[test]
+    fn list_tag_pages_deduplicates_multiply_tagged_pages() -> Result<()> {
+        let db = Database::in_memory()?;
+        let rust = db.create_page("rust", false)?;
+        let source = db.create_page("Journal", false)?;
+
+        // Two different blocks both tag `rust`; it should come back once.
+        for (i, id) in ["b0", "b1"].iter().enumerate() {
+            let block = db.create_block_with_id(
+                id,
+                &source.id,
+                None,
+                i as i32,
+                "#rust",
+                BlockType::Text,
+                serde_json::json!({}),
+            )?;
+            db.insert_link(&block.id, &rust.id, LinkType::Tag)?;
+        }
+
+        assert_eq!(db.list_tag_pages()?.len(), 1);
+        Ok(())
     }
 }

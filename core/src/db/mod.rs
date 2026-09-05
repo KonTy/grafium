@@ -1,5 +1,6 @@
 mod audio;
 mod blocks;
+mod collections;
 mod favorites;
 mod flashcards;
 mod graph_support;
