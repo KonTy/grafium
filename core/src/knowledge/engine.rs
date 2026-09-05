@@ -1508,6 +1508,202 @@ mod tests {
         Ok(())
     }
 
+    /// A deterministic, concept-based embedder for retrieval-pipeline tests.
+    ///
+    /// It maps each text to a sparse vector over a fixed set of *concepts*
+    /// (synonym clusters), so semantically-related wording — "upset" in a
+    /// query vs "frustrated"/"rough day" in a note — lands on the same
+    /// dimension and yields high cosine similarity, while unrelated topics stay
+    /// orthogonal. A tiny always-on baseline dimension avoids zero-norm
+    /// vectors. This simulates a real embedding model's semantic similarity
+    /// closely enough to exercise fusion, the relevance gate, and ordering; it
+    /// is NOT a real embedder.
+    struct ConceptEmbedder {
+        concepts: Vec<Vec<&'static str>>,
+    }
+
+    impl ConceptEmbedder {
+        fn new() -> Self {
+            Self {
+                concepts: vec![
+                    // 0: distress / "upset"
+                    vec![
+                        "upset",
+                        "frustrated",
+                        "rough",
+                        "angry",
+                        "annoyed",
+                        "mad",
+                        "cross",
+                    ],
+                    // 1: painting / decorating
+                    vec![
+                        "paint",
+                        "painted",
+                        "painting",
+                        "bedroom",
+                        "room",
+                        "wall",
+                        "renovation",
+                    ],
+                    // 2: running / exercise
+                    vec!["run", "running", "ran", "jog", "exercise"],
+                    // 3: food / cooking
+                    vec!["pasta", "dinner", "cooked", "garlic", "recipe", "food"],
+                    // 4: concurrency (present in NO fixture note on purpose)
+                    vec!["mutex", "mutexes", "thread", "lock", "concurrency"],
+                ],
+            }
+        }
+
+        fn vectorize(&self, text: &str) -> Vec<f32> {
+            let lower = text.to_lowercase();
+            let mut v = vec![0.0f32; self.concepts.len() + 1];
+            for (i, keywords) in self.concepts.iter().enumerate() {
+                if keywords.iter().any(|kw| lower.contains(kw)) {
+                    v[i] = 1.0;
+                }
+            }
+            // Baseline dimension so unrelated texts never have a zero norm.
+            *v.last_mut().unwrap() = 0.01;
+            v
+        }
+    }
+
+    impl Embedder for ConceptEmbedder {
+        fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+            Box::pin(async move { Ok(texts.iter().map(|t| self.vectorize(t)).collect()) })
+        }
+        fn dimension(&self) -> usize {
+            self.concepts.len() + 1
+        }
+        fn model_name(&self) -> &str {
+            "concept-test-embedder"
+        }
+    }
+
+    /// End-to-end retrieval verification against the reviewers' required
+    /// fixture and the user's two literal queries, plus the general-question
+    /// negative case. Uses a real SQLite FTS index and a real vector store;
+    /// only the embedder is simulated (see [`ConceptEmbedder`]).
+    #[tokio::test]
+    async fn literal_user_queries_retrieve_the_right_block() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let graph_id = "fixture-graph";
+        let store = Arc::new(SqliteVectorStore::in_memory()?);
+        let engine = test_engine(Box::new(ConceptEmbedder::new()), store)?;
+
+        let db = Database::in_memory()?;
+
+        // Journal decoy (recent, unrelated) — must not win the "upset" query.
+        let j1 = db.create_page("2026-03-20", true)?;
+        db.create_block(
+            &j1.id,
+            None,
+            0,
+            "cooked a nice pasta dinner with garlic",
+            BlockType::Text,
+            json!({}),
+        )?;
+        // The "upset" answer, phrased ONLY with a synonym — no literal "upset".
+        let j2 = db.create_page("2026-03-14", true)?;
+        db.create_block(
+            &j2.id,
+            None,
+            0,
+            "had a really rough day, felt frustrated about everything",
+            BlockType::Text,
+            json!({}),
+        )?;
+        // Older journal decoy.
+        let j3 = db.create_page("2026-02-01", true)?;
+        db.create_block(
+            &j3.id,
+            None,
+            0,
+            "went for a long run in the park this morning",
+            BlockType::Text,
+            json!({}),
+        )?;
+        // Single-mention non-journal block: the "paint" answer, on a
+        // home/renovation page (NOT a journal).
+        let reno = db.create_page("home/renovation", false)?;
+        db.create_block(
+            &reno.id,
+            None,
+            0,
+            "painted the bedroom today, finally finished it",
+            BlockType::Text,
+            json!({}),
+        )?;
+        // Unrelated general content.
+        let recipes = db.create_page("Recipes", false)?;
+        db.create_block(
+            &recipes.id,
+            None,
+            0,
+            "pasta with garlic and olive oil is a quick meal",
+            BlockType::Text,
+            json!({}),
+        )?;
+
+        // Index every page into the vector store (block ids match the DB).
+        for page in [&j1, &j2, &j3, &reno, &recipes] {
+            let blocks = db.list_blocks_for_page(&page.id)?;
+            engine.index_page(page, &blocks, graph_id).await?;
+        }
+
+        // Query 1: "when was the last time I was upset" — only the synonym
+        // block answers it, and only semantic retrieval can find it (FTS for
+        // "upset" matches nothing here).
+        let upset_hits = engine
+            .hybrid_search(
+                &db,
+                "when was the last time I was upset",
+                10,
+                Some(graph_id),
+            )
+            .await?;
+        let upset_block = db.list_blocks_for_page(&j2.id)?[0].id.clone();
+        assert!(
+            upset_hits.iter().any(|h| h.block_id == upset_block),
+            "the 'frustrated / rough day' block must be retrieved for the upset query; got {:?}",
+            upset_hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        assert_ne!(choose_answer_mode(&upset_hits), AnswerMode::General);
+
+        // Query 2: "when did I paint my room" — the single-mention
+        // non-journal block must survive even amid journal hits (no hard
+        // journal partition).
+        let paint_hits = engine
+            .hybrid_search(&db, "when did I paint my room", 10, Some(graph_id))
+            .await?;
+        let paint_block = db.list_blocks_for_page(&reno.id)?[0].id.clone();
+        assert!(
+            paint_hits.iter().any(|h| h.block_id == paint_block),
+            "the 'painted the bedroom' block must be retrieved for the paint query; got {:?}",
+            paint_hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        assert_ne!(choose_answer_mode(&paint_hits), AnswerMode::General);
+
+        // Negative case: a general question with no relevant notes must clear
+        // the relevance gate to nothing, so Chat answers from general
+        // knowledge rather than dragging in irrelevant notes.
+        let mutex_hits = engine
+            .hybrid_search(&db, "explain how mutexes work", 10, Some(graph_id))
+            .await?;
+        assert!(
+            mutex_hits.is_empty(),
+            "a general question must retrieve no context past the gate; got {:?}",
+            mutex_hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+        assert_eq!(choose_answer_mode(&mutex_hits), AnswerMode::General);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn index_status_reports_empty_index_but_counts_blocks() -> Result<()> {
         use crate::db::Database;
