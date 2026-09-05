@@ -6,6 +6,7 @@
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
   import AISettings from "./AISettings.svelte";
+  import ResearchSettings from "./ResearchSettings.svelte";
 
   interface SyncTarget {
     id: string;
@@ -384,6 +385,19 @@
     </summary>
     <div class="section-content">
       <AISettings />
+    </div>
+  </details>
+
+  <!-- Research Section -->
+  <details class="settings-section">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 18l6-6-6-6"></path>
+      </svg>
+      <span class="section-title">Research</span>
+    </summary>
+    <div class="section-content">
+      <ResearchSettings />
     </div>
   </details>
 

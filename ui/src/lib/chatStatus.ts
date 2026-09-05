@@ -156,7 +156,7 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
     case "phase": {
       // Ignore phase chatter once we've reached a terminal state.
       if (isTerminal(s.kind)) return s;
-      let phase: StreamPhase;
+      let phase: StreamPhase | null;
       if (isCyclicPhase(e.phase) && (s.phase === null || isCyclicPhase(s.phase))) {
         // A research-workflow transition among cyclic phases: accept it as-is so
         // the label can move backward (refine → search) on a legitimate new
