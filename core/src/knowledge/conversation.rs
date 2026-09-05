@@ -251,15 +251,37 @@ pub fn history_budget(context_budget_tokens: usize) -> usize {
 /// model retains the thread of a long conversation without replaying it.
 pub fn render_compaction(turns: &[ChatTurn]) -> String {
     let mut out = String::from("Earlier in this conversation:\n");
-    for turn in turns {
+    // Oldest-first would spend the whole allowance on the least relevant turns
+    // and drop the ones nearest the question, so lines are gathered newest-first
+    // and reversed at the end.
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for turn in turns.iter().rev() {
         let who = if turn.is_user() { "User" } else { "Assistant" };
         let content = turn.content.trim();
         // One line each: a recap is for continuity, not for re-reading.
-        let brief: String = content.chars().take(220).collect();
-        out.push_str(&format!("- {who}: {brief}\n"));
+        let brief: String = content.chars().take(RECAP_CHARS_PER_TURN).collect();
+        let line = format!("- {who}: {brief}\n");
+        // Without a total cap the recap grows without bound: a long thread of
+        // research answers is hundreds of turns, and 220 characters each is
+        // tens of thousands of characters prepended to every prompt.
+        if used + line.len() > MAX_RECAP_CHARS {
+            lines.push("- (earlier turns omitted)\n".to_string());
+            break;
+        }
+        used += line.len();
+        lines.push(line);
+    }
+    for line in lines.iter().rev() {
+        out.push_str(line);
     }
     out
 }
+
+/// Per-turn and total ceilings for the recap. The total is what actually
+/// matters — the per-turn clip alone still scales with conversation length.
+const RECAP_CHARS_PER_TURN: usize = 220;
+const MAX_RECAP_CHARS: usize = 4_000;
 
 #[cfg(test)]
 mod tests {
@@ -392,6 +414,35 @@ mod tests {
         let recap = render_compaction(&turns);
         assert!(recap.contains("User: what is scientology"));
         assert!(recap.contains("Assistant: It is a movement"));
+    }
+
+    /// The recap must not grow with the conversation. A long research thread
+    /// is hundreds of turns; clipping each to 220 characters still yields tens
+    /// of thousands prepended to every single prompt.
+    #[test]
+    fn the_recap_is_bounded_however_long_the_conversation_gets() {
+        let history: Vec<ChatTurn> = (0..500)
+            .map(|i| user(&format!("turn {i} {}", "words ".repeat(60))))
+            .collect();
+        let recap = render_compaction(&history);
+        assert!(
+            recap.len() <= MAX_RECAP_CHARS + 200,
+            "recap grew to {} chars",
+            recap.len()
+        );
+        assert!(recap.contains("earlier turns omitted"));
+    }
+
+    /// When it has to drop turns it must drop the *oldest*: the turns nearest
+    /// the question are the ones a reference is most likely to point at.
+    #[test]
+    fn a_truncated_recap_keeps_the_most_recent_turns() {
+        let history: Vec<ChatTurn> = (0..200)
+            .map(|i| user(&format!("turn {i} {}", "padding ".repeat(30))))
+            .collect();
+        let recap = render_compaction(&history);
+        assert!(recap.contains("turn 199"), "newest turn must survive");
+        assert!(!recap.contains("turn 0 "), "oldest turn should be dropped");
     }
 
     #[test]

@@ -1377,6 +1377,15 @@ impl KnowledgeEngine {
         // overrides the retrieval-derived regime.
         let mode = choose_answer_mode_for(question, &hits);
 
+        // The transcript and the retrieved notes share one context window, so
+        // the notes budget is reduced by whatever the transcript will occupy.
+        // Filling notes to the whole budget and *then* prepending history
+        // overspends `n_ctx` by exactly the size of the conversation — which
+        // grows silently as a thread gets longer, so it would surface as a
+        // model that inexplicably degrades the more you talk to it.
+        let history_tokens = conversation::history_budget(budget);
+        let notes_budget = budget.saturating_sub(history_tokens);
+
         // In General mode we deliberately include no context at all — nothing
         // relevant was retrieved, so any notes would only contaminate a
         // general answer.
@@ -1384,7 +1393,7 @@ impl KnowledgeEngine {
             Vec::new()
         } else {
             self.expand_hits(db, &mut hits);
-            retrieval::assemble_within_budget(&hits, budget)
+            retrieval::assemble_within_budget(&hits, notes_budget)
         };
 
         let context_block = build_context_block(&entries);
@@ -1412,7 +1421,7 @@ impl KnowledgeEngine {
             role: crate::ai::traits::MessageRole::System,
             content: system_prompt,
         }];
-        let fitted = conversation::fit_history(history, conversation::history_budget(budget));
+        let fitted = conversation::fit_history(history, history_tokens);
         if fitted.needs_compaction() {
             messages.push(crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::System,
@@ -3475,7 +3484,8 @@ mod tests {
     }
 
     #[test]
-    fn render_web_section_includes_answer_and_topics_and_is_never_blank() {        use crate::ai::web_research::{Citation, ResearchTopic, WebResearchResult};
+    fn render_web_section_includes_answer_and_topics_and_is_never_blank() {
+        use crate::ai::web_research::{Citation, ResearchTopic, WebResearchResult};
 
         let full = WebResearchResult {
             title_answer: Some("Short direct answer.".to_string()),
