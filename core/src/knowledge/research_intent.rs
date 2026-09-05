@@ -336,12 +336,29 @@ pub fn detect_research_intent(question: &str) -> Option<ResearchIntent> {
         .or_else(|| match_wraparound(&low, &norm))?;
 
     let cleaned = clean_fragment(&cleaned);
-    if cleaned.is_empty() {
+    if cleaned.is_empty() || is_contentless_referent(&cleaned) {
         return None;
     }
     Some(ResearchIntent {
         cleaned_question: cleaned,
     })
+}
+
+/// Whether the cleaned question is nothing but a back-reference with no
+/// subject of its own ("this", "that", "it").
+///
+/// "can you research this on the internet" cleaned down to the single word
+/// `"this"`, which would then have been handed to the search planner as the
+/// literal query — searching the web for the word "this". Chat has no
+/// conversation memory to resolve the referent against, so the honest
+/// behaviour is to decline the research branch and let the question fall
+/// through to a normal answer rather than run a meaningless search.
+fn is_contentless_referent(cleaned: &str) -> bool {
+    const REFERENTS: &[&str] = &["this", "that", "it", "these", "those", "them", "the same"];
+    let low: String = cleaned
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase();
+    REFERENTS.contains(&low.as_str())
 }
 
 /// Match a trigger at the very start: `[polite] <trigger> <sep/connector>
@@ -450,6 +467,35 @@ fn match_trailing(low: &str, norm: &str) -> Option<String> {
 /// Validate the boundary before a trailing trigger and return the question.
 /// Requires evidence of a real separator (punctuation or filler); a bare space
 /// alone is rejected.
+/// Words that can't meaningfully end a standalone question, used to tell a
+/// real question from a dangling fragment when deciding whether a trailing
+/// trigger separated only by a space is a command.
+///
+/// "does creatine cause cancer" ends on a content word and is clearly a whole
+/// question, so "… research on the internet" after it is an instruction.
+/// "how do I" ends on a pronoun and is obviously mid-sentence, so "… search
+/// the web" after it is part of what's being asked, not a command.
+const DANGLING_TAIL_WORDS: &[&str] = &[
+    "i", "you", "we", "they", "he", "she", "it", "to", "for", "of", "on", "in", "at", "by", "with",
+    "from", "the", "a", "an", "and", "or", "but", "do", "does", "did", "can", "could", "should",
+    "would", "will", "how", "what", "when", "where", "why", "who", "is", "are", "was", "were",
+    "my", "your", "their", "about", "into", "over", "across", "use", "using",
+];
+
+/// Whether `prefix` reads as a complete question in its own right, which is
+/// what licenses treating a space-separated trailing trigger as a command.
+fn prefix_is_standalone_question(prefix: &str) -> bool {
+    let words: Vec<&str> = prefix.split_whitespace().collect();
+    // Two words can't carry a real question plus leave a trigger unambiguous.
+    if words.len() < 3 {
+        return false;
+    }
+    let last = words[words.len() - 1]
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase();
+    !last.is_empty() && !DANGLING_TAIL_WORDS.contains(&last.as_str())
+}
+
 fn strip_trailing_boundary(prefix: &str) -> Option<String> {
     let mut p = prefix.trim_end();
     if p.is_empty() {
@@ -474,7 +520,16 @@ fn strip_trailing_boundary(prefix: &str) -> Option<String> {
         }
         break;
     }
-    if p.is_empty() || !saw_signal {
+    if p.is_empty() {
+        return None;
+    }
+    // Requiring punctuation or a filler word here was too strict to be usable:
+    // people type "does creatine cause cancer research on the internet" without
+    // a comma, and the feature simply never fired. A bare space is accepted
+    // when what precedes it is itself a complete question, which keeps the
+    // case this guard exists for ("how do I search the web") excluded, since
+    // its prefix is a dangling fragment rather than a question.
+    if !saw_signal && !prefix_is_standalone_question(p) {
         return None;
     }
     Some(p.to_string())
@@ -775,15 +830,44 @@ mod tests {
     }
 
     #[test]
-    fn trailing_trigger_needs_a_real_separator_not_a_bare_space() {
-        // A bare space before the trigger is the ambiguous "question about
-        // searching" case and must not fire…
+    fn trailing_trigger_after_a_dangling_fragment_does_not_fire() {
+        // "how do I" is a dangling fragment, so the trailing words are part
+        // of what's being asked, not a command…
         assert_eq!(cleaned("how do I search the web"), None);
+        assert_eq!(cleaned("how do I search the web for academic papers"), None);
         // …but the same words with a separating comma are a command.
         assert_eq!(
             cleaned("how do I bake bread, search the web").as_deref(),
             Some("how do I bake bread")
         );
+    }
+
+    /// Requiring punctuation before a trailing trigger made the feature
+    /// effectively unreachable — people type the request as one flat sentence.
+    /// A bare space is enough when what precedes it is a whole question.
+    #[test]
+    fn trailing_trigger_fires_after_a_complete_question_without_punctuation() {
+        assert_eq!(
+            cleaned("does creatine cause cancer research on the internet").as_deref(),
+            Some("does creatine cause cancer")
+        );
+        assert_eq!(
+            cleaned("does creatine cause cancer search the web").as_deref(),
+            Some("does creatine cause cancer")
+        );
+        assert_eq!(
+            cleaned("what is the best protein powder search online").as_deref(),
+            Some("what is the best protein powder")
+        );
+    }
+
+    /// Cleaning "can you research this on the internet" left the single word
+    /// "this", which would have been sent to the search planner verbatim.
+    #[test]
+    fn a_bare_back_reference_is_not_treated_as_a_research_query() {
+        assert_eq!(cleaned("can you research this on the internet"), None);
+        assert_eq!(cleaned("research it on the web"), None);
+        assert_eq!(cleaned("google that"), None);
     }
 
     #[test]

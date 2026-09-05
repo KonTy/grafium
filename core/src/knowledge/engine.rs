@@ -1884,7 +1884,11 @@ Cite each claim with its [N] marker.\n\
 entries are dated — use those dates. A line that says \"note saved …; event date unknown\" \
 means you only know when the note was saved, NOT when the event happened: say you found the \
 note but can't establish when it happened. Never present a \"note saved\" date as the event date.\n\
-- Never invent citations or dates. If the notes don't contain the answer, say so plainly.\n\n\
+- Never invent citations or dates.\n\
+- If these notes don't actually answer the question, say so in one short sentence, then answer \
+from your own general knowledge and label that part clearly as general knowledge rather than \
+something from their notes. Never refuse a question just because the notes don't cover it, and \
+never claim you have no knowledge outside their notes — you do.\n\n\
 Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
         ),
         AnswerMode::Blend => format!(
