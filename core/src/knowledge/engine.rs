@@ -881,11 +881,114 @@ impl KnowledgeEngine {
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        // Hybrid retrieval degrades gracefully: works with an empty vector
-        // index (pure BM25) and even with no embedder at all. The context
-        // budget is sized to the model's own window so the assembled prompt
-        // can't overflow it (embedded llama.cpp hard-errors on overflow).
-        let budget = ask_context_budget(llm.context_window());
+        let request = self
+            .build_ask_request(db, llm.as_ref(), question, graph_id)
+            .await?;
+
+        let raw = llm
+            .complete(
+                &request.messages,
+                &crate::ai::traits::CompletionOptions {
+                    // Cap output so prompt + generation stays within n_ctx.
+                    max_tokens: Some(request.output_tokens as u32),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Reasoning models wrap a chain-of-thought in <think>…</think>; strip
+        // it, and if the model only reasoned (budget exhausted with no answer)
+        // surface a clear message instead of raw chain-of-thought.
+        let answer = match crate::ai::reasoning::strip_think_blocks(&raw) {
+            crate::ai::reasoning::ThinkStripResult::Answer(a) => a,
+            crate::ai::reasoning::ThinkStripResult::ReasoningOnly => {
+                crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()
+            }
+        };
+
+        let sources = build_sources(&request.entries, &answer);
+        Ok(AskResponse { answer, sources })
+    }
+
+    /// Streaming counterpart to [`Self::ask`]: runs the same retrieval,
+    /// gating, budgeting and prompt assembly, then streams the model's answer
+    /// token-by-token through `on_event`, hiding `<think>` reasoning behind a
+    /// `Thinking` signal. `cancel` (if provided) can be flipped from the UI to
+    /// abort a slow local generation. Returns the cited sources and, when the
+    /// model produced only reasoning, a trailing message to show in place of
+    /// an answer.
+    pub async fn ask_stream(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+    ) -> Result<AskStreamOutcome> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        let request = self
+            .build_ask_request(db, llm.as_ref(), question, graph_id)
+            .await?;
+
+        let options = crate::ai::traits::CompletionOptions {
+            max_tokens: Some(request.output_tokens as u32),
+            cancel,
+            ..Default::default()
+        };
+
+        let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
+        {
+            let mut on_token = |piece: &str| match filter.push(piece) {
+                crate::ai::reasoning::StreamStep::Answer(delta) => {
+                    on_event(AskStreamEvent::Delta(&delta));
+                }
+                crate::ai::reasoning::StreamStep::Thinking => {
+                    on_event(AskStreamEvent::Thinking);
+                }
+                crate::ai::reasoning::StreamStep::Idle => {}
+            };
+            llm.complete_stream(&request.messages, &options, &mut on_token)
+                .await?;
+        }
+
+        match filter.finish() {
+            crate::ai::reasoning::ThinkStripResult::Answer(answer) => Ok(AskStreamOutcome {
+                sources: build_sources(&request.entries, &answer),
+                trailing_message: None,
+            }),
+            crate::ai::reasoning::ThinkStripResult::ReasoningOnly => Ok(AskStreamOutcome {
+                sources: Vec::new(),
+                trailing_message: Some(crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()),
+            }),
+        }
+    }
+
+    /// Shared planning for [`Self::ask`] and [`Self::ask_stream`]: hybrid
+    /// retrieval, relevance gating, mode selection, context budgeting and
+    /// prompt assembly — kept in one place so the blocking and streaming paths
+    /// can never drift apart.
+    async fn build_ask_request(
+        &self,
+        db: &crate::db::Database,
+        llm: &dyn LlmProvider,
+        question: &str,
+        graph_id: Option<&str>,
+    ) -> Result<AskRequest> {
+        // Reasoning models need more room: they spend tokens thinking *before*
+        // answering, so reserve a larger output budget (which also shrinks the
+        // retrieved-context budget symmetrically, keeping prompt + output
+        // inside n_ctx).
+        let reserved_output = if llm.supports_thinking() {
+            ASK_THINKING_OUTPUT_TOKENS
+        } else {
+            ASK_RESERVED_OUTPUT_TOKENS
+        };
+        let budget = ask_context_budget_with(llm.context_window(), reserved_output);
+
         let mut hits = self
             .hybrid_search(db, question, ASK_TOP_K, graph_id)
             .await
@@ -908,6 +1011,19 @@ impl KnowledgeEngine {
         let context_block = build_context_block(&entries);
         let system_prompt = build_system_prompt(&context_block, mode);
 
+        // Calibration hook (opt-in): `GRAFIUM_LOG_PROMPT_TOKENS=1` logs the
+        // assembled prompt's estimated token count, so an over-large RAG
+        // context (transcript pages) is measurable rather than guessed at.
+        if std::env::var_os("GRAFIUM_LOG_PROMPT_TOKENS").is_some() {
+            let est =
+                retrieval::estimate_tokens(&system_prompt) + retrieval::estimate_tokens(question);
+            eprintln!(
+                "[grafium] ask prompt ~{est} tokens — {} context entries, mode {mode:?}, \
+                 reserved_output {reserved_output}, context_budget {budget}",
+                entries.len()
+            );
+        }
+
         let messages = vec![
             crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::System,
@@ -919,36 +1035,11 @@ impl KnowledgeEngine {
             },
         ];
 
-        let answer = llm
-            .complete(
-                &messages,
-                &crate::ai::traits::CompletionOptions {
-                    // Cap output so prompt + generation stays within n_ctx.
-                    max_tokens: Some(ASK_RESERVED_OUTPUT_TOKENS as u32),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        // Show only sources the model actually cited (HIGH 5), not everything
-        // retrieved. General answers carry no sources.
-        let cited = parse_cited_indices(&answer);
-        let sources: Vec<Source> = entries
-            .iter()
-            .filter(|e| cited.contains(&e.index))
-            .map(|e| Source {
-                index: e.index,
-                page_id: e.page_id.clone(),
-                page_title: e.page_title.clone(),
-                block_id: e.block_id.clone(),
-                // Only a defensible *event* date is surfaced to the UI chip; a
-                // note's saved/imported timestamp is never presented as when
-                // the event happened (HIGH 4).
-                date: e.date_ms.map(retrieval::format_date_ms),
-            })
-            .collect();
-
-        Ok(AskResponse { answer, sources })
+        Ok(AskRequest {
+            messages,
+            entries,
+            output_tokens: reserved_output,
+        })
     }
 
     /// Get the graph registry (read access).
@@ -1013,6 +1104,13 @@ const TOP_RRF_RESERVED: usize = 3;
 /// Tokens reserved for the model's answer. Also used as the `ask`
 /// completion's `max_tokens`, so prompt + output can never exceed `n_ctx`.
 const ASK_RESERVED_OUTPUT_TOKENS: usize = 1024;
+/// Larger output reservation for reasoning ("thinking") models: they spend
+/// tokens on a `<think>` chain-of-thought *before* the answer, so a 1024-token
+/// budget can be entirely consumed reasoning (observed: an 8B Qwen3 model used
+/// its whole budget thinking and never answered). Reserving more here also
+/// shrinks the retrieved-context budget symmetrically, so prompt + output
+/// still fit inside `n_ctx`.
+const ASK_THINKING_OUTPUT_TOKENS: usize = 2048;
 /// Tokens reserved for the fixed prompt scaffolding (system-prompt template,
 /// the user's question, chat-template control tokens, and per-line
 /// formatting) that sits outside the retrieved-context budget. Generous on
@@ -1031,10 +1129,17 @@ const ASK_DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 2048;
 /// unknown. Keeps the assembled prompt from overflowing the model's context
 /// window (embedded llama.cpp hard-errors once prompt tokens reach `n_ctx`).
 fn ask_context_budget(context_window: Option<usize>) -> usize {
+    ask_context_budget_with(context_window, ASK_RESERVED_OUTPUT_TOKENS)
+}
+
+/// As [`ask_context_budget`], but with an explicit reserved-output size so a
+/// reasoning model (which needs a larger output allowance) still leaves the
+/// retrieved context small enough that prompt + output fit inside `n_ctx`.
+fn ask_context_budget_with(context_window: Option<usize>, reserved_output: usize) -> usize {
     match context_window {
         Some(n_ctx) => n_ctx
             .saturating_sub(ASK_PROMPT_OVERHEAD_TOKENS)
-            .saturating_sub(ASK_RESERVED_OUTPUT_TOKENS)
+            .saturating_sub(reserved_output)
             .max(ASK_MIN_CONTEXT_BUDGET_TOKENS),
         None => ASK_DEFAULT_CONTEXT_BUDGET_TOKENS,
     }
@@ -1237,6 +1342,55 @@ pub struct Source {
 pub struct AskResponse {
     pub answer: String,
     pub sources: Vec<Source>,
+}
+
+/// Fully-planned inputs for a single `ask`, shared by the blocking and
+/// streaming paths (see [`KnowledgeEngine::build_ask_request`]).
+struct AskRequest {
+    messages: Vec<crate::ai::traits::ChatMessage>,
+    entries: Vec<ContextEntry>,
+    /// Output-token allowance for this request (larger for reasoning models).
+    output_tokens: usize,
+}
+
+/// An event emitted while streaming an answer via
+/// [`KnowledgeEngine::ask_stream`].
+pub enum AskStreamEvent<'a> {
+    /// A chunk of answer text to append in the UI.
+    Delta(&'a str),
+    /// The model is currently reasoning inside a `<think>` block — the UI
+    /// should show a distinct "Thinking…" state rather than answer text.
+    Thinking,
+}
+
+/// Result of a streamed answer once generation finishes.
+pub struct AskStreamOutcome {
+    /// Sources the model actually cited (empty for a general answer).
+    pub sources: Vec<Source>,
+    /// A message to display *in place of* an answer when the model produced
+    /// only reasoning and never answered — `None` for a normal answer.
+    pub trailing_message: Option<String>,
+}
+
+/// Build the cited-sources list for an answer: only entries whose `[N]` marker
+/// the model actually referenced (HIGH 5). General/reasoning-only answers cite
+/// nothing and so carry no sources.
+fn build_sources(entries: &[ContextEntry], answer: &str) -> Vec<Source> {
+    let cited = parse_cited_indices(answer);
+    entries
+        .iter()
+        .filter(|e| cited.contains(&e.index))
+        .map(|e| Source {
+            index: e.index,
+            page_id: e.page_id.clone(),
+            page_title: e.page_title.clone(),
+            block_id: e.block_id.clone(),
+            // Only a defensible *event* date is surfaced to the UI chip; a
+            // note's saved/imported timestamp is never presented as when the
+            // event happened (HIGH 4).
+            date: e.date_ms.map(retrieval::format_date_ms),
+        })
+        .collect()
 }
 
 /// Render assembled context entries into numbered, dated prompt lines. The
@@ -2304,5 +2458,27 @@ mod tests {
 
         // A tiny window still yields the floor rather than zero.
         assert_eq!(ask_context_budget(Some(256)), ASK_MIN_CONTEXT_BUDGET_TOKENS);
+    }
+
+    #[test]
+    fn thinking_models_reserve_more_output_and_still_fit_the_window() {
+        // A reasoning model needs a larger output allowance (room to think
+        // *and* answer), which shrinks the context budget rather than
+        // overflowing the window.
+        let normal = ask_context_budget_with(Some(4096), ASK_RESERVED_OUTPUT_TOKENS);
+        let thinking = ask_context_budget_with(Some(4096), ASK_THINKING_OUTPUT_TOKENS);
+
+        assert!(
+            ASK_THINKING_OUTPUT_TOKENS > ASK_RESERVED_OUTPUT_TOKENS,
+            "thinking models must get a bigger output budget"
+        );
+        assert!(
+            thinking < normal,
+            "the larger output reservation must come out of the context budget"
+        );
+        assert!(
+            thinking + ASK_PROMPT_OVERHEAD_TOKENS + ASK_THINKING_OUTPUT_TOKENS <= 4096,
+            "prompt + (thinking) output must still fit the window"
+        );
     }
 }
