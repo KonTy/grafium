@@ -117,6 +117,7 @@
       reducedMotion = e.matches;
     };
     mq.addEventListener("change", onMotionChange);
+    document.addEventListener("mouseup", onDocumentPointerUp);
 
     // The background auto-reindex drainer emits this after it refreshes any
     // pages, so the coverage / "N pages pending" indicator stays current
@@ -134,6 +135,7 @@
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
       mq.removeEventListener("change", onMotionChange);
+      document.removeEventListener("mouseup", onDocumentPointerUp);
       chatScroll?.removeEventListener("click", handleRenderedClick);
       stopClock();
     };
@@ -292,9 +294,40 @@
     requestAnimationFrame(() => focusInput(select));
   }
 
+  /**
+   * Keeping the composer focused is what makes Chat feel like a prompt you can
+   * just type into — but it must not fight the user for the caret. Reclaiming
+   * focus on every blur made the transcript impossible to copy from: clicking
+   * into an answer to select text blurred the input, the input immediately
+   * took focus back, and the browser collapsed the selection. So refocus is
+   * skipped whenever the user is actually working inside the transcript.
+   */
   function onInputBlur() {
     if (isStreaming || (!checkingConnection && !chatConnected)) return;
-    keepInputFocusedSoon(false);
+    if (selectingTranscript) return;
+    requestAnimationFrame(() => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      if (selectingTranscript) return;
+      focusInput(false);
+    });
+  }
+
+  /** True while a pointer drag that began inside the transcript is in flight. */
+  let selectingTranscript = $state(false);
+
+  function onTranscriptPointerDown() {
+    selectingTranscript = true;
+  }
+
+  function onDocumentPointerUp() {
+    if (!selectingTranscript) return;
+    // Release on the next frame so the blur handler above, which runs first,
+    // still sees the drag as active.
+    requestAnimationFrame(() => {
+      const selection = window.getSelection();
+      selectingTranscript = selection ? !selection.isCollapsed : false;
+    });
   }
 
   async function send() {
@@ -591,7 +624,8 @@
     </div>
   {/if}
 
-  <div class="chat-log" bind:this={chatScroll}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="chat-log" bind:this={chatScroll} onmousedown={onTranscriptPointerDown}>
     {#each messages as m, i}
       {@const streamingThis =
         isStreaming && m.role === "assistant" && i === messages.length - 1}

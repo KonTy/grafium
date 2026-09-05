@@ -16,6 +16,11 @@ use grafium_core::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, Mess
 const MAX_TOKENS: u32 = 160;
 const PROMPT: &str = "Write a short paragraph explaining what a knowledge graph is.";
 
+/// Overridable so the same harness can probe refusal behaviour, not just speed.
+fn prompt_text_base() -> String {
+    std::env::var("BENCH_PROMPT").unwrap_or_else(|_| PROMPT.to_string())
+}
+
 /// Builds a prompt padded with `filler_tokens`-ish worth of synthetic
 /// retrieved context. Chat sends thousands of tokens of graph context, so a
 /// throughput number measured on a 12-token prompt says nothing useful about
@@ -32,7 +37,7 @@ fn padded_prompt(filler_tokens: usize) -> String {
         }
         s.push('\n');
     }
-    s.push_str(PROMPT);
+    s.push_str(&prompt_text_base());
     s
 }
 

@@ -360,6 +360,15 @@ impl LocalLlm {
         // families emit `<think>` control markers. Detecting it here (once,
         // from the template text) lets the engine request non-thinking mode
         // and budget output tokens for a model that reasons before answering.
+        //
+        // When a GGUF carries *no* template at all, assume it might reason.
+        // The two errors are not symmetric: sending `/no_think` to a model
+        // that doesn't reason costs a few harmless tokens, while failing to
+        // send it to one that does makes the model emit its raw
+        // chain-of-thought as the answer. That is exactly what happened with
+        // an abliterated Qwen3 build whose template had been stripped during
+        // conversion — every reply began mid-thought ("Okay, I need to…"),
+        // which reads as the model being broken.
         let supports_thinking = model
             .chat_template(None)
             .ok()
@@ -368,7 +377,7 @@ impl LocalLlm {
                 let lower = tmpl.to_lowercase();
                 lower.contains("enable_thinking") || lower.contains("<think>")
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         // GPU offload is only physically possible when a GPU backend was
         // compiled in; otherwise CPU is expected and the UI must not warn.
@@ -408,6 +417,14 @@ impl LocalLlm {
     /// about) because `check_cpu_ram_budget` always runs *before* any
     /// weights are actually read for a CPU-only load, so the first
     /// (failing) attempt never allocated anything to begin with.
+    /// The model's raw chat template, for diagnosing reasoning detection.
+    pub fn chat_template_for_debug(&self) -> Option<String> {
+        self.model
+            .chat_template(None)
+            .ok()
+            .and_then(|t| t.to_string().ok())
+    }
+
     pub fn from_settings(models_dir: &Path, settings: &LocalLlmSettings) -> Result<Self> {
         let model_path = settings.model_ref.resolve(models_dir, ModelKind::Llm)?;
         match Self::load(&model_path, settings.context_size, settings.gpu_layers) {
@@ -855,6 +872,44 @@ mod config_tests {
         std::fs::write(&only_model, vec![0u8; 1024]).unwrap();
 
         assert_eq!(find_fallback_llm_model(dir.path(), &only_model), None);
+    }
+}
+
+#[cfg(test)]
+mod thinking_detection_tests {
+    /// Mirrors the classifier in `load`, which can't be called without a real
+    /// GGUF on disk. Kept in lockstep with it deliberately: the asymmetry it
+    /// encodes is the whole point.
+    fn detect(template: Option<&str>) -> bool {
+        template
+            .map(|tmpl| {
+                let lower = tmpl.to_lowercase();
+                lower.contains("enable_thinking") || lower.contains("<think>")
+            })
+            .unwrap_or(true)
+    }
+
+    #[test]
+    fn a_template_advertising_reasoning_is_detected() {
+        assert!(detect(Some("{% if enable_thinking %}...")));
+        assert!(detect(Some("assistant emits <think> blocks")));
+    }
+
+    #[test]
+    fn a_plain_template_is_not_treated_as_reasoning() {
+        assert!(!detect(Some(
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )));
+    }
+
+    /// Regression: an abliterated Qwen3 build shipped with its chat template
+    /// stripped during conversion. Detection returned "not a reasoning model",
+    /// so `/no_think` was never sent and every answer arrived as raw
+    /// chain-of-thought ("Okay, I need to…"). A missing template must mean
+    /// "assume it reasons" — the directive is cheap, the leak is not.
+    #[test]
+    fn a_missing_template_assumes_reasoning() {
+        assert!(detect(None));
     }
 }
 
