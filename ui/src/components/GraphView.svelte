@@ -1,5 +1,7 @@
 <script lang="ts">
   import { getGraphData, type GraphData } from "../lib/api";
+  import { assignClusterHues, edgeHue } from "../lib/graphColor";
+  import type { TagHue } from "../lib/tagColor";
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -54,6 +56,15 @@
   let offsetY = 0;
 
   // ---- Simulation data (non-reactive, mutated in the rAF loop) ----
+  /// Cluster hue per node id — see `graphColor.ts`. Recomputed on load, not on
+  /// every frame: it depends only on topology, which doesn't change as the
+  /// layout settles.
+  let clusterHues = new Map<string, TagHue>();
+  /// Resolved `--accent-<hue>` values, read once per draw. `getComputedStyle`
+  /// is a layout-flushing call, so doing it per node would cost a reflow for
+  /// every dot on screen.
+  let huePalette = new Map<string, string>();
+
   let nodes: SimNode[] = [];
   let edges: SimEdge[] = [];
   let nodeById = new Map<string, SimNode>();
@@ -95,6 +106,10 @@
   }
 
   function buildSimulation(data: GraphData) {
+    clusterHues = assignClusterHues(
+      data.nodes.map((n) => n.id),
+      data.edges.map((e) => ({ source: e.source, target: e.target }))
+    );
     nodeById = new Map();
     const cx = width / 2;
     const cy = height / 2;
@@ -290,14 +305,29 @@
     const textColor = themeColor("--text-secondary", "#aaa");
     const q = searchText.trim().toLowerCase();
 
-    // Edges — thickness/opacity scale with tie magnitude (weight).
-    ctx.strokeStyle = edgeColor;
+    // One `getComputedStyle` per hue per frame instead of one per element.
+    huePalette = new Map();
+    const hueColor = (hue: TagHue | null): string => {
+      if (!hue) return edgeColor;
+      const cached = huePalette.get(hue);
+      if (cached) return cached;
+      const resolved = themeColor(`--accent-${hue}`, nodeColor);
+      huePalette.set(hue, resolved);
+      return resolved;
+    };
+
+    // Edges — thickness/opacity scale with tie magnitude (weight), and hue
+    // follows the cluster. An edge *between* clusters keeps the neutral border
+    // colour, which makes bridges between topics legible as the pale lines.
     for (const e of edges) {
       const [x1, y1] = toScreen(e.source.x, e.source.y);
       const [x2, y2] = toScreen(e.target.x, e.target.y);
       const rel = e.weight / maxWeight;
+      ctx.strokeStyle = hueColor(
+        edgeHue(clusterHues, { source: e.source.id, target: e.target.id })
+      );
       ctx.lineWidth = Math.max(0.4, (0.6 + rel * 3.5) * scale);
-      ctx.globalAlpha = 0.18 + rel * 0.5;
+      ctx.globalAlpha = 0.22 + rel * 0.5;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -315,15 +345,19 @@
 
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
-      if (isFocus) ctx.fillStyle = "#e0af68";
-      else if (isMatch) ctx.fillStyle = "#9ece6a";
-      else ctx.fillStyle = nodeColor;
+      // Focus and search-match keep dedicated theme accents so they stay
+      // distinguishable from whatever hue their cluster happens to hold; every
+      // other node wears its cluster's colour. These were hardcoded hex, which
+      // was unreadable on light themes.
+      if (isFocus) ctx.fillStyle = themeColor("--accent-yellow", "#e0af68");
+      else if (isMatch) ctx.fillStyle = themeColor("--accent-green", "#9ece6a");
+      else ctx.fillStyle = hueColor(clusterHues.get(node.id) ?? null);
       ctx.globalAlpha = q.length > 0 && !isMatch && !isFocus ? 0.25 : 1;
       ctx.fill();
 
       if (isHover || isFocus) {
         ctx.lineWidth = 2;
-        ctx.strokeStyle = "#fff";
+        ctx.strokeStyle = themeColor("--text-primary", "#fff");
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
