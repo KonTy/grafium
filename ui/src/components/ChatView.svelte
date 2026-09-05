@@ -399,6 +399,47 @@
     );
   }
 
+  let copiedIndex = $state<number | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Copies an answer as Markdown rather than as rendered text, because the
+   * destination is the user's own notes: headings, lists and links should
+   * survive the round trip instead of arriving as flattened prose. Sources are
+   * appended as a reference list so a pasted research answer stays verifiable
+   * once it's separated from the chat that produced it.
+   */
+  async function copyMessage(m: ChatMessage, index: number) {
+    let out = m.content.trim();
+
+    const graphRefs = (m.sources ?? []).map(
+      (s) => `- [${s.index}] ${s.page_title}${s.date ? ` (${s.date})` : ""}`,
+    );
+    const webRefs = (m.webSources ?? []).map((s) => `- [${s.number}] [${s.title}](${s.url})`);
+    if (graphRefs.length || webRefs.length) {
+      out += "\n\n**Sources**\n" + [...graphRefs, ...webRefs].join("\n");
+    }
+
+    try {
+      await navigator.clipboard.writeText(out);
+    } catch {
+      // WebKitGTK denies the async clipboard API outside a user-gesture
+      // context in some configurations; the textarea fallback always works.
+      const scratch = document.createElement("textarea");
+      scratch.value = out;
+      scratch.style.position = "fixed";
+      scratch.style.opacity = "0";
+      document.body.appendChild(scratch);
+      scratch.select();
+      document.execCommand("copy");
+      scratch.remove();
+    }
+
+    copiedIndex = index;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedIndex = null), 1500);
+  }
+
   // Starts a fresh thread. Chat otherwise remembers everything for the life
   // of the conversation, so there has to be an explicit way to drop context
   // that is no longer wanted.
@@ -561,6 +602,15 @@
             <span class="research-badge" title="This answer includes live web research">
               <span class="research-badge-dot" aria-hidden="true"></span>Web research
             </span>
+          {/if}
+          {#if m.role === "assistant" && !streamingThis && m.content.trim()}
+            <button
+              class="copy-btn"
+              onclick={() => copyMessage(m, i)}
+              title="Copy this answer as Markdown, with its sources"
+            >
+              {copiedIndex === i ? "Copied" : "Copy"}
+            </button>
           {/if}
         </div>
         {#if m.role === "assistant" && !streamingThis}
@@ -763,6 +813,9 @@
   }
 
   .msg-role {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: 11px;
     color: var(--text-muted);
     margin-bottom: 4px;
@@ -939,6 +992,31 @@
   /* Web-research affordances share the external-link visual language: the
      --accent-cyan token and an outbound ↗ arrow, so a web citation reads as
      "leaves the app" and is clearly distinct from a graph page chip. */
+  .copy-btn {
+    margin-left: auto;
+    padding: 1px 8px;
+    font-size: 10px;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-muted, #888);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  /* Revealed on hover so it doesn't clutter a long transcript, but kept
+     focusable so it's reachable without a pointer. */
+  .msg:hover .copy-btn,
+  .copy-btn:focus-visible {
+    opacity: 1;
+  }
+
+  .copy-btn:hover {
+    color: var(--text-primary, #eee);
+    border-color: var(--text-muted, #777);
+  }
+
   .research-badge {
     display: inline-flex;
     align-items: center;

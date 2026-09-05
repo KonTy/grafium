@@ -216,9 +216,57 @@ const WEB_TARGETS: &[&str] = &[
     "over the web",
     "across the internet",
     "on the internet",
+    "in the internet",
     "on the web",
+    "in the web",
     "on the net",
     "online",
+];
+
+/// Prepositional web references that can be lifted out of the middle of a
+/// sentence, leaving a coherent question behind.
+///
+/// Deliberately excludes the bare "online", which reads as part of the
+/// question far more often ("is this article available online") than as an
+/// instruction when it appears mid-sentence.
+const EMBEDDED_WEB_TARGETS: &[&str] = &[
+    "over the internet",
+    "over the web",
+    "across the internet",
+    "on the internet",
+    "in the internet",
+    "on the web",
+    "in the web",
+    "on the net",
+];
+
+/// Objects that mean the verb is aimed at the user's own graph, not the open
+/// web — "check my notes on the internet of things" is a question about
+/// notes, however much it looks like a web request.
+const LOCAL_OBJECTS: &[&str] = &[
+    "my note",
+    "my journal",
+    "my graph",
+    "my page",
+    "the notes",
+    "my entries",
+    "my writing",
+];
+
+/// Openers that mark a question *about* how searching works, rather than a
+/// request to go and search.
+const MECHANISM_OPENERS: &[&str] = &[
+    "how do",
+    "how does",
+    "how did",
+    "how can",
+    "how would",
+    "how should",
+    "explain how",
+    "what is the best way",
+    "whats the best way",
+    "why do",
+    "why does",
 ];
 
 /// Openers that mark the remainder as a genuine question/command, which is
@@ -416,7 +464,8 @@ pub fn detect_research_intent(question: &str) -> Option<ResearchIntent> {
     let cleaned = match_leading(&low, &norm)
         .or_else(|| match_leading_imperative(&low, &norm))
         .or_else(|| match_trailing(&low, &norm))
-        .or_else(|| match_wraparound(&low, &norm))?;
+        .or_else(|| match_wraparound(&low, &norm))
+        .or_else(|| match_embedded(&low, &norm))?;
 
     let cleaned = clean_fragment(&cleaned);
     let needs_context = cleaned.is_empty() || is_contentless_referent(&cleaned);
@@ -441,6 +490,83 @@ pub fn is_contentless_referent(cleaned: &str) -> bool {
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_ascii_lowercase();
     REFERENTS.contains(&low.as_str())
+}
+
+/// Match a web reference sitting in the *middle* of a request, lifting it out
+/// and leaving the rest as the question.
+///
+/// The anchored rules (leading/trailing/wrap-around) all assume the
+/// instruction brackets the question, which repeatedly failed on the way
+/// people actually write: "can you find the latest paper he published on the
+/// internet and summarize it" puts the web reference in the middle, with real
+/// question on both sides. Requiring an anchor meant no research happened and
+/// Chat answered from notes it didn't have.
+///
+/// Conservative because it's the loosest rule here: it needs a genuine search
+/// verb *before* the web reference, refuses questions about how searching
+/// works, and refuses verbs aimed at the user's own notes.
+fn match_embedded(low: &str, norm: &str) -> Option<String> {
+    if MECHANISM_OPENERS
+        .iter()
+        .any(|opener| low.starts_with(opener))
+    {
+        return None;
+    }
+
+    for target in EMBEDDED_WEB_TARGETS {
+        let Some(at) = low.find(target) else {
+            continue;
+        };
+        if !word_boundary_at(low, at + target.len()) {
+            continue;
+        }
+        let before = &low[..at];
+        // A search verb must introduce the reference, otherwise this is just a
+        // sentence that mentions the internet.
+        if !IMPERATIVE_VERBS
+            .iter()
+            .any(|verb| contains_word(before, verb))
+        {
+            continue;
+        }
+        if LOCAL_OBJECTS.iter().any(|obj| before.contains(obj)) {
+            continue;
+        }
+
+        // Splice the sentence back together without the web reference.
+        let head = norm[..at].trim_end();
+        let tail = norm[at + target.len()..].trim_start();
+        let joined = match (head.is_empty(), tail.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => tail.to_string(),
+            (false, true) => head.to_string(),
+            (false, false) => format!("{head} {tail}"),
+        };
+        let joined = clean_fragment(&joined);
+        if joined.is_empty() {
+            continue;
+        }
+        return Some(joined);
+    }
+    None
+}
+
+/// Whether `haystack` contains `needle` as a whole word.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = at == 0
+            || !haystack[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        if before_ok && word_boundary_at(haystack, at + needle.len()) {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
 }
 
 /// Match a leading "go look this up" imperative built compositionally from a
@@ -1104,6 +1230,46 @@ mod tests {
             "search my journal for scientology",
             "when did I last use the web browser",
             "check my notes on the internet of things",
+        ] {
+            assert_eq!(cleaned(input), None, "should not fire for {input:?}");
+        }
+    }
+
+    /// The anchored rules all assumed the instruction brackets the question,
+    /// which failed on the most natural way to write a research request: the
+    /// web reference lands in the middle, with real question on both sides.
+    #[test]
+    fn a_web_reference_in_mid_sentence_fires_and_is_lifted_out() {
+        for (input, want) in [
+            (
+                "can you find the latest paper he published on the internet and summarize it",
+                "can you find the latest paper he published and summarize it",
+            ),
+            (
+                "look up his latest paper on the web and explain it simply",
+                "look up his latest paper and explain it simply",
+            ),
+        ] {
+            assert_eq!(cleaned(input).as_deref(), Some(want), "for {input:?}");
+        }
+        // "in the internet" is not idiomatic English but is extremely common,
+        // and refusing it just makes the feature look broken.
+        assert!(cleaned("find the latest paper in the internet").is_some());
+    }
+
+    /// The embedded rule is the loosest one here, so its guards matter most:
+    /// questions about how searching works, and verbs aimed at the user's own
+    /// notes, must still be left alone.
+    #[test]
+    fn the_embedded_rule_keeps_its_guards() {
+        for input in [
+            "how do I search the web for academic papers",
+            "explain how web search engines rank pages",
+            "check my notes on the internet of things",
+            "summarize my notes on the internet of things",
+            "what did I write about the internet",
+            "when did I last look at the web archive",
+            "my internet search history is private",
         ] {
             assert_eq!(cleaned(input), None, "should not fire for {input:?}");
         }
