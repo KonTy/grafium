@@ -222,7 +222,7 @@
 
 <div class="statistics-view">
   <div class="stats-header">
-    <h1>Statistics</h1>
+    <h1>Tasks</h1>
   </div>
 
   {#if loading}
@@ -325,10 +325,17 @@
                 onclick={() => completeTask(task.block_id)}
               >&#9633;</div>
               <div class="task-body">
-                <span class="task-content" use:hydrateRenderedMedia={task.content}>
+                <!-- The whole line is the target: a task you can see but
+                     can't get back to is close to useless, and the page chip
+                     alone was a very small hit area. -->
+                <button
+                  class="task-content task-open"
+                  onclick={() => onNavigate?.(task.page_title)}
+                  title={`Open ${task.page_title}`}
+                >
                   <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
-                  {@html renderBlock(stripTaskMarker(task.content))}
-                </span>
+                  <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                </button>
                 <span class="task-meta">
                   <!-- svelte-ignore a11y_click_events_have_key_events -->
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -364,9 +371,13 @@
                 <div class="task-item">
                   <div class="task-check">&#10003;</div>
                   <div class="task-body">
-                    <span class="task-content" use:hydrateRenderedMedia={task.content}>
-                      {@html renderBlock(stripTaskMarker(task.content))}
-                    </span>
+                    <button
+                      class="task-content task-open"
+                      onclick={() => onNavigate?.(task.page_title)}
+                      title={`Open ${task.page_title}`}
+                    >
+                      <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                    </button>
                     <span class="task-meta">
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -713,6 +724,29 @@
     font-size: 0.9rem;
     line-height: 1.4;
     word-break: break-word;
+  }
+
+  /* A real <button> so the row is reachable and activatable by keyboard;
+     styled flat so it still reads as part of the list rather than a control. */
+  .task-open {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .task-open:hover {
+    color: var(--text-link);
+  }
+
+  .task-open:focus-visible {
+    outline: 2px solid var(--text-link);
+    outline-offset: 2px;
+    border-radius: 3px;
   }
 
   .task-content :global(.page-link) {

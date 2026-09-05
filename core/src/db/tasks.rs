@@ -198,9 +198,10 @@ impl Database {
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
             "SELECT day, SUM(cnt) as total FROM (
-                SELECT date(timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
-                FROM task_events
-                WHERE to_state = 'DONE' AND timestamp >= ?1
+                SELECT date(te.timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+                FROM task_events te
+                JOIN blocks b ON b.id = te.block_id
+                WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
                 GROUP BY day
               UNION ALL
                 SELECT date(t.updated_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
@@ -251,6 +252,14 @@ impl Database {
     }
 
     /// Get completed tasks with their completion timestamp, block content, and page title.
+    /// Completed tasks in the last `days`, newest first.
+    ///
+    /// A completion event outlives the block it refers to, so these joins are
+    /// inner rather than outer on purpose: a `task_events` row whose block has
+    /// since been deleted has no text and no page to return to, and rendering it
+    /// produced a row showing nothing but a timestamp that could not be clicked.
+    /// The daily counts apply the same filter, so the heat map never claims
+    /// completions the list is unable to show.
     pub fn get_completed_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String)>> {
         let conn = self.conn()?;
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
@@ -259,8 +268,8 @@ impl Database {
                 SELECT te.timestamp as ts, COALESCE(b.content, '') as content,
                        COALESCE(p.title, '') as title, te.block_id as block_id
                 FROM task_events te
-                LEFT JOIN blocks b ON b.id = te.block_id
-                LEFT JOIN pages p ON p.id = b.page_id
+                JOIN blocks b ON b.id = te.block_id
+                JOIN pages p ON p.id = b.page_id
                 WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
               UNION ALL
                 SELECT t.updated_at as ts, b.content, p.title, t.block_id

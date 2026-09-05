@@ -252,7 +252,7 @@
         <path d="M12 20V4"></path>
         <path d="M6 20v-6"></path>
       </svg>
-      <span>Statistics</span>
+      <span>Tasks</span>
     </button>
     <button class="nav-item" onclick={() => onNavigate("__all_pages__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

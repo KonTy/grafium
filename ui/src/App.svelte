@@ -1174,7 +1174,7 @@
           <path d="M12 20V4"></path>
           <path d="M6 20v-6"></path>
         </svg>
-        <span>Stats</span>
+        <span>Tasks</span>
       </button>
       <button class="bottom-nav-item" class:active={currentView === "all-pages"} onclick={() => handleNavigate("__all_pages__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
