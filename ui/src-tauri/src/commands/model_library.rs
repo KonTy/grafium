@@ -29,7 +29,10 @@ impl ModelInfoPayload {
     /// the probe shells out to `nvidia-smi` and deliberately samples several
     /// times — doing that once per file would turn opening Settings into a
     /// multi-second stall on a folder with a dozen models.
-    fn from_info(info: grafium_core::model_library::ModelInfo, free_vram_bytes: Option<u64>) -> Self {
+    fn from_info(
+        info: grafium_core::model_library::ModelInfo,
+        free_vram_bytes: Option<u64>,
+    ) -> Self {
         use grafium_core::ai::gpu_fit;
         // Only chat models are actually offloaded to the GPU by this path, so
         // a fit verdict on a Whisper or embedding file would be noise at best
@@ -64,7 +67,9 @@ impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
             file_name: info.file_name,
             size_bytes: info.size_bytes,
             kind: kind.to_string(),
-            gpu_fit: grafium_core::ai::gpu_fit::GpuFit::Unknown.as_str().to_string(),
+            gpu_fit: grafium_core::ai::gpu_fit::GpuFit::Unknown
+                .as_str()
+                .to_string(),
             gpu_fit_detail: String::new(),
         }
     }

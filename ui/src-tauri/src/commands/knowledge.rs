@@ -7,10 +7,10 @@ use grafium_core::ai::config::{
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::ai::web_research::Citation;
+use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
-use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::{detect_research_intent, KnowledgeEngine};
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};

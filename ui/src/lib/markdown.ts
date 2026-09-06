@@ -25,10 +25,45 @@ const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
 // Normalize a markdown asset reference to a graph-relative path (no scheme, no
 // leading ./ or ../). Used both for the custom scheme URL and for in-memory
 // hydration of media elements.
+/**
+ * Directory the current page's markdown file lives in, graph-relative and
+ * without a trailing slash (e.g. `pages/mybooks/coolbook`).
+ *
+ * Set while rendering so a *file-relative* asset reference resolves the way
+ * every other markdown tool resolves it. Module-level rather than threaded
+ * through every render call because `marked`'s renderer hooks are synchronous
+ * and give no place to pass context; rendering is likewise synchronous, so
+ * there is no interleaving to worry about.
+ */
+let assetBaseDir = "";
+
+export function setAssetBaseDir(dir: string): void {
+  assetBaseDir = dir.replace(/^\/+|\/+$/g, "");
+}
+
+/**
+ * Turn a markdown asset reference into a graph-root-relative path.
+ *
+ * Two shapes exist and they resolve differently on purpose:
+ *
+ *   - `../assets/x.png` — the historical form. It was always resolved against
+ *     the graph root regardless of how deep the page sat, so it keeps doing
+ *     exactly that; thousands of existing references depend on it.
+ *   - `assets/x.png` — a plain relative path, resolved against the page's own
+ *     directory, which is what Obsidian, VS Code and GitHub do. That is what
+ *     lets media sit beside the page that uses it and survive the folder being
+ *     copied somewhere else.
+ */
 function cleanAssetPath(href: string): string {
   const h = href.trim();
-  const rel = h.replace(/^([./]*\/)+/, "").replace(/^\.\.?\//, "");
-  return rel.replace(/^(\.\.?\/)+/, "");
+  const isLegacyRootRelative = /^([./]*\/)|^\.\.?\//.test(h);
+  const rel = h
+    .replace(/^([./]*\/)+/, "")
+    .replace(/^\.\.?\//, "")
+    .replace(/^(\.\.?\/)+/, "");
+
+  if (isLegacyRootRelative || assetBaseDir === "") return rel;
+  return `${assetBaseDir}/${rel}`;
 }
 
 // Rewrite a markdown asset reference to a URL the webview can load.
@@ -252,7 +287,12 @@ function renderMathOutsideCodeFences(markdown: string): string {
  * Handles [[page links]], #tags, ((block refs)), checkboxes, etc.
  */
 export function renderBlock(content: string): string {
-  const cached = getCached(content);
+  // The base directory is part of the output — the same block renders
+  // different asset URLs on different pages — so it has to be part of the key.
+  // Keying on content alone meant navigating to another page served the
+  // previous page's asset paths from cache.
+  const cacheKey = `${assetBaseDir}\u0000${content}`;
+  const cached = getCached(cacheKey);
   if (cached !== undefined) return cached;
 
   // A whole-block admonition (`#+BEGIN_TIP` … `#+END_TIP`) renders as a
@@ -260,7 +300,7 @@ export function renderBlock(content: string): string {
   const callout = renderCalloutBlock(content);
   const html = callout !== null ? callout : renderMarkdownContent(content);
 
-  setCache(content, html);
+  setCache(cacheKey, html);
   return html;
 }
 

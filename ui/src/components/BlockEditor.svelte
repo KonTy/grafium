@@ -774,7 +774,7 @@
                   selection: EditorSelection.cursor(from + md.length),
                 });
                 // Download images in background and update content
-                void localizeImages(md, downloadAsset).then(async (localized) => {
+                void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {
                   if (localized !== md) {
                     const doc = view.state.doc.toString();
                     const updated = doc.replace(md, localized);
@@ -808,7 +808,7 @@
                   })();
                 }
                 // Download images in all pasted blocks in background
-                void localizeImages(md, downloadAsset).then(async (localized) => {
+                void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {
                   if (localized !== md) {
                     // Re-split and update the first block
                     const localChunks = splitMarkdownIntoBlocks(localized);

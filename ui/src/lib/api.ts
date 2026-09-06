@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Page {
   id: string;
   title: string;
+  /** Graph-relative path of the page's markdown file, e.g.
+   *  `pages/mybooks/coolbook/toc.md`. `null` until the page has content,
+   *  since a page referenced by a link exists in the index before any file
+   *  is written for it. */
+  file_path?: string | null;
   is_journal: boolean;
   created_at: string;
   updated_at: string;
@@ -371,8 +376,8 @@ export function setAppTheme(themeId: string): Promise<void> {
 }
 
 // Asset management
-export function downloadAsset(url: string): Promise<string> {
-  return invoke("download_asset", { url });
+export function downloadAsset(url: string, pageId?: string): Promise<string> {
+  return invoke("download_asset", { url, pageId });
 }
 
 export function listAssets(): Promise<string[]> {

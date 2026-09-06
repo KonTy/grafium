@@ -9,7 +9,7 @@
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
-  import { renderBlock } from "../lib/markdown";
+  import { renderBlock, setAssetBaseDir } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
     applyIfCurrentPageLoad,
@@ -41,6 +41,16 @@
   }
 
   let { page, compact = false, highlight = "" }: Props = $props();
+
+  // Asset references in this page's blocks are resolved relative to the
+  // directory its markdown file lives in, so media stored beside a page (and a
+  // whole book folder copied elsewhere) keeps working. Set before any block
+  // renders; cleared to the graph root when the page has no file yet.
+  $effect(() => {
+    const filePath = page.file_path ?? "";
+    const dir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
+    setAssetBaseDir(dir);
+  });
 
   let blocks: Block[] = $state([]);
 

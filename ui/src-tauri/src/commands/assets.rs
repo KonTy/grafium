@@ -37,10 +37,32 @@ pub fn read_asset_data_url(state: State<AppState>, path: String) -> Result<Strin
 /// Download a remote image and save it to the graph's assets/ directory.
 /// Returns the relative path (e.g., "../assets/abc123.png") for use in markdown.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn download_asset(state: State<'_, AppState>, url: String) -> Result<String, String> {
-    let assets_dir = {
+pub async fn download_asset(
+    state: State<'_, AppState>,
+    url: String,
+    page_id: Option<String>,
+) -> Result<String, String> {
+    // Store new media beside the page that uses it, when we know which page
+    // that is. A book kept at `pages/mybooks/coolbook/` then carries its own
+    // images, so copying or sharing that folder takes the media with it —
+    // which a single graph-wide `assets/` pile cannot do. Falls back to the
+    // shared folder when there's no page context or the page has no file yet.
+    let (assets_dir, reference_prefix) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        graph.root_dir.join("assets")
+        let page_dir = page_id
+            .as_deref()
+            .and_then(|id| graph.db.get_page_by_id(id).ok())
+            .and_then(|page| page.file_path)
+            .and_then(|path| {
+                path.rsplit_once('/')
+                    .map(|(dir, _)| dir.to_string())
+            });
+        match page_dir {
+            // A plain relative reference, so the link also resolves correctly
+            // in any other markdown tool that opens the folder.
+            Some(dir) => (graph.root_dir.join(&dir).join("assets"), "assets".to_string()),
+            None => (graph.root_dir.join("assets"), "../assets".to_string()),
+        }
     };
 
     fs::create_dir_all(&assets_dir).map_err(|e| e.to_string())?;
@@ -81,8 +103,7 @@ pub async fn download_asset(state: State<'_, AppState>, url: String) -> Result<S
         .map_err(|e| format!("Read failed: {}", e))?;
     fs::write(&dest_path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
 
-    // Return the relative path from pages/journals to assets
-    Ok(format!("../assets/{}", filename))
+    Ok(format!("{reference_prefix}/{filename}"))
 }
 
 /// List all files in the assets/ directory.
