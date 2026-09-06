@@ -5,7 +5,7 @@
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
-  import { renderBlock, hydrateAssetMedia } from "../lib/markdown";
+  import { renderBlock, hydrateAssetMedia, assetBaseDirFor } from "../lib/markdown";
   import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
@@ -13,12 +13,17 @@
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
+  import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
+  import { toggleWrapText } from "../lib/editorFormat";
   import DatePicker from "./DatePicker.svelte";
 
   interface Props {
     block: Block;
     pageId: string;
     pageTitle?: string;
+    /** Graph-relative directory of the page's markdown file, so a page-relative
+     * asset reference (`assets/x.png`) resolves beside the page. */
+    assetBaseDir?: string;
     depth?: number;
     focused?: boolean;
     selected?: boolean;
@@ -39,6 +44,7 @@
     block,
     pageId,
     pageTitle = "",
+    assetBaseDir = "",
     depth = 0,
     focused = false,
     selected = false,
@@ -62,7 +68,22 @@
   let shiftHeld = false;
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
-  let renderedHtml = $derived(renderBlock(block.content));
+  let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
+
+  /**
+   * Base directory for one query result row.
+   *
+   * Query results are rows from arbitrary pages, so this block's own directory
+   * is the wrong answer for them — and worse than no answer, since a
+   * same-named file next to the query would render in place of the real one.
+   * The row's own `file_path` is used when the query happened to select it,
+   * and otherwise the graph root, which is where the historical `../assets/`
+   * form resolves anyway.
+   */
+  function queryRowBaseDir(row: [string, unknown][]): string {
+    const filePath = row.find(([col]) => col === "file_path")?.[1];
+    return typeof filePath === "string" ? assetBaseDirFor(filePath) : "";
+  }
   let saveError = $state<string | null>(null);
   let pendingSaveContent = $state<string | null>(null);
   let finishEditingPromise: Promise<boolean> | null = null;
@@ -221,7 +242,27 @@
       detail: "Set priority C (low)",
       apply: "[#C] ",
     },
+    // Formatting inserters (quote, headings, code) and callout admonitions.
+    // Sorted after the task/priority entries so TODO/DONE muscle-memory is
+    // unaffected. These are pure text insertions with an explicit cursor
+    // offset (e.g. callouts drop the cursor on the blank body line).
+    ...FORMATTING_SLASH_COMMANDS,
   ];
+
+  // Toggle markdown emphasis markers (`*`, `**`, `~~`) around the current
+  // selection via the pure toggleWrapText helper, then replace the doc.
+  function applyToggleWrap(view: EditorView, marker: string): boolean {
+    const { from, to } = view.state.selection.main;
+    const r = toggleWrapText(view.state.doc.toString(), from, to, marker);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: r.doc },
+      selection:
+        r.selStart === r.selEnd
+          ? EditorSelection.cursor(r.selStart)
+          : EditorSelection.range(r.selStart, r.selEnd),
+    });
+    return true;
+  }
 
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {
     // Match a `/` optionally followed by word chars at the current position
@@ -253,6 +294,36 @@
               ),
             });
           }
+        },
+      })),
+    };
+  }
+
+  // `<`-triggered template menu: a Logseq-style path to the same callout
+  // inserters (`< tip`, `< note`, …). Pure text insertion with a cursor offset.
+  // Guarded so it only opens at a block/line start or after whitespace, and
+  // only while the typed text is a prefix of a callout kind — otherwise a
+  // comparison like `2 < 3` or an inline `<foo>` would hijack Enter/Escape.
+  function angleCompletionSource(context: CompletionContext): CompletionResult | null {
+    const head = context.state.selection.main.head;
+    const line = context.state.doc.lineAt(head);
+    const beforeCursor = line.text.slice(0, head - line.from);
+    const menu = angleTemplateMenu(beforeCursor);
+    if (!menu) return null;
+
+    return {
+      from: line.from + menu.from,
+      filter: false,
+      options: menu.options.map((cmd) => ({
+        label: cmd.label,
+        detail: cmd.detail,
+        apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
+          view.dispatch({
+            changes: { from, to, insert: cmd.apply },
+            selection: EditorSelection.cursor(
+              from + (cmd.cursorOffset ?? cmd.apply.length)
+            ),
+          });
         },
       })),
     };
@@ -487,7 +558,7 @@
           markdown(),
           history(),
           autocompletion({
-            override: [slashCompletionSource],
+            override: [slashCompletionSource, angleCompletionSource],
             activateOnTyping: false,
             closeOnBlur: false,
           }),
@@ -613,6 +684,21 @@
                 return true;
               },
             },
+            // Selection-formatting shortcuts. Note: Ctrl+B and Ctrl+Shift+A are
+            // deliberately NOT bound here — they belong to window-level sidebar
+            // toggles.
+            {
+              key: "Mod-i",
+              run: (view) => applyToggleWrap(view, "*"),
+            },
+            {
+              key: "Mod-Shift-b",
+              run: (view) => applyToggleWrap(view, "**"),
+            },
+            {
+              key: "Mod-Shift-k",
+              run: (view) => applyToggleWrap(view, "~~"),
+            },
             ...defaultKeymap,
             ...historyKeymap,
             indentWithTab,
@@ -668,7 +754,12 @@
             const line = update.state.doc.lineAt(sel.head);
             const beforeCursor = line.text.slice(0, sel.head - line.from);
             const slashToken = beforeCursor.match(/(?:^|\s)\/[^\s]*$/);
-            if (!slashToken) return;
+            // Open the callout template menu when a guarded `<` token is typed,
+            // mirroring the slash trigger. `angleTemplateMenu` returns null for
+            // mid-word `<`, comparisons, or non-matching text so ordinary typing
+            // is never hijacked.
+            const angleOpen = angleTemplateMenu(beforeCursor) !== null;
+            if (!slashToken && !angleOpen) return;
 
             const status = completionStatus(update.state);
             if (status === null) {
@@ -702,7 +793,7 @@
                   selection: EditorSelection.cursor(from + md.length),
                 });
                 // Download images in background and update content
-                void localizeImages(md, downloadAsset).then(async (localized) => {
+                void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {
                   if (localized !== md) {
                     const doc = view.state.doc.toString();
                     const updated = doc.replace(md, localized);
@@ -736,7 +827,7 @@
                   })();
                 }
                 // Download images in all pasted blocks in background
-                void localizeImages(md, downloadAsset).then(async (localized) => {
+                void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {
                   if (localized !== md) {
                     // Re-split and update the first block
                     const localChunks = splitMarkdownIntoBlocks(localized);
@@ -1139,7 +1230,7 @@
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
                         <td>
                           {#if col === "content" && val}
-                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
+                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val), queryRowBaseDir(row))}</span>
                           {:else if col === "state" && val}
                             <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
                           {:else}

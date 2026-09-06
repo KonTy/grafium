@@ -38,6 +38,8 @@ fn upsert_flashcard_on_conn(
         ease_factor: 2.5,
         interval_days: 0,
         review_count: 0,
+        // Only the review query needs the owning page's directory.
+        page_file_path: None,
     })
 }
 
@@ -83,14 +85,20 @@ impl Database {
     pub fn list_flashcards_due(&self, topic: Option<&str>, limit: i64) -> Result<Vec<Flashcard>> {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
-        const COLS: &str = "id, block_id, front, back, tags, created_at, updated_at, last_reviewed_at, next_review_at, ease_factor, interval_days, review_count";
+        // The owning page is joined in so a card that refers to media stored
+        // beside its page still finds it during review, which happens away
+        // from the page itself.
+        const COLS: &str = "f.id, f.block_id, f.front, f.back, f.tags, f.created_at, f.updated_at, f.last_reviewed_at, f.next_review_at, f.ease_factor, f.interval_days, f.review_count, p.file_path";
+        const FROM: &str = "flashcards f
+                     LEFT JOIN blocks b ON b.id = f.block_id
+                     LEFT JOIN pages p ON p.id = b.page_id";
         let cards = match topic {
             // Mixed mode: all due cards across every topic.
             None => {
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT {COLS} FROM flashcards
-                     WHERE next_review_at IS NULL OR next_review_at <= ?1
-                     ORDER BY next_review_at ASC NULLS FIRST
+                    "SELECT {COLS} FROM {FROM}
+                     WHERE f.next_review_at IS NULL OR f.next_review_at <= ?1
+                     ORDER BY f.next_review_at ASC NULLS FIRST
                      LIMIT ?2"
                 ))?;
                 let v = stmt
@@ -101,9 +109,9 @@ impl Database {
             // Untagged cards (topic == "").
             Some(t) if t.is_empty() => {
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT {COLS} FROM flashcards
-                     WHERE (next_review_at IS NULL OR next_review_at <= ?1) AND tags = '[]'
-                     ORDER BY next_review_at ASC NULLS FIRST
+                    "SELECT {COLS} FROM {FROM}
+                     WHERE (f.next_review_at IS NULL OR f.next_review_at <= ?1) AND f.tags = '[]'
+                     ORDER BY f.next_review_at ASC NULLS FIRST
                      LIMIT ?2"
                 ))?;
                 let v = stmt
@@ -115,9 +123,9 @@ impl Database {
             Some(t) => {
                 let pattern = format!("%\"{}\"%", t);
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT {COLS} FROM flashcards
-                     WHERE (next_review_at IS NULL OR next_review_at <= ?1) AND tags LIKE ?2
-                     ORDER BY next_review_at ASC NULLS FIRST
+                    "SELECT {COLS} FROM {FROM}
+                     WHERE (f.next_review_at IS NULL OR f.next_review_at <= ?1) AND f.tags LIKE ?2
+                     ORDER BY f.next_review_at ASC NULLS FIRST
                      LIMIT ?3"
                 ))?;
                 let v = stmt
@@ -263,6 +271,15 @@ impl Database {
             ease_factor: row.get(9)?,
             interval_days: row.get(10)?,
             review_count: row.get(11)?,
+            // Only the review query joins the owning page; everywhere else the
+            // column is absent. A missing column is expected and means "no page
+            // context"; anything else is a real decoding failure and must not
+            // be quietly turned into None.
+            page_file_path: match row.get::<_, Option<String>>(12) {
+                Ok(value) => value,
+                Err(rusqlite::Error::InvalidColumnIndex(_)) => None,
+                Err(e) => return Err(e),
+            },
         })
     }
 }

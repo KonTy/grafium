@@ -1,11 +1,12 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
   import AISettings from "./AISettings.svelte";
+  import ResearchSettings from "./ResearchSettings.svelte";
 
   interface SyncTarget {
     id: string;
@@ -39,6 +40,37 @@
   let orphanedAssets = $state<OrphanedAsset[]>([]);
   let assetScanDone = $state(false);
   let assetDeleting = $state(false);
+
+  let backfillPreview = $state<import("../lib/api").BackfillReport | null>(null);
+  let backfillResult = $state<import("../lib/api").BackfillReport | null>(null);
+  let backfillBusy = $state(false);
+  let backfillError = $state("");
+
+  async function previewBackfill() {
+    backfillBusy = true;
+    backfillError = "";
+    backfillResult = null;
+    try {
+      backfillPreview = await backfillTaskCompletions(true);
+    } catch (e) {
+      backfillError = String(e);
+    } finally {
+      backfillBusy = false;
+    }
+  }
+
+  async function runBackfill() {
+    backfillBusy = true;
+    backfillError = "";
+    try {
+      backfillResult = await backfillTaskCompletions(false);
+      backfillPreview = null;
+    } catch (e) {
+      backfillError = String(e);
+    } finally {
+      backfillBusy = false;
+    }
+  }
 
   async function scanOrphanedAssets() {
     try {
@@ -387,6 +419,19 @@
     </div>
   </details>
 
+  <!-- Research Section -->
+  <details class="settings-section">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 18l6-6-6-6"></path>
+      </svg>
+      <span class="section-title">Research</span>
+    </summary>
+    <div class="section-content">
+      <ResearchSettings />
+    </div>
+  </details>
+
   <!-- Theme Section -->
   <details class="settings-section">
     <summary class="section-header">
@@ -472,6 +517,53 @@
       <span class="section-title">Asset Cleanup</span>
     </summary>
     <div class="section-content">
+      <!-- Completion history rescue.
+           Tasks finished before completions were written to disk have their
+           timestamp only in the database, where it does not survive a rebuild
+           or a move to another machine. This copies it into the markdown. It
+           edits notes in bulk, so it previews first and copies the graph
+           before writing. -->
+      <p class="setting-desc">
+        Tasks completed before Grafium recorded completions in your files still have
+        their timestamp in the database only, where it will not survive a rebuild or
+        a move to another machine. This writes them into the markdown.
+      </p>
+      <button class="sync-btn" onclick={previewBackfill} disabled={backfillBusy}>
+        {backfillBusy ? "Working…" : "Check what would change"}
+      </button>
+
+      {#if backfillError}
+        <p class="setting-desc" style="margin-top: 8px; color: var(--danger);">{backfillError}</p>
+      {/if}
+
+      {#if backfillPreview}
+        {#if backfillPreview.tasks_updated === 0}
+          <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">
+            Nothing to do — every completed task already records when it was finished.
+          </p>
+        {:else}
+          <p class="setting-desc" style="margin-top: 8px;">
+            {backfillPreview.tasks_updated} task{backfillPreview.tasks_updated === 1 ? "" : "s"}
+            across {backfillPreview.pages_scanned} page{backfillPreview.pages_scanned === 1 ? "" : "s"}
+            would gain a completion time. Your graph is copied first.
+          </p>
+          <button class="sync-btn" onclick={runBackfill} disabled={backfillBusy}>
+            {backfillBusy ? "Writing…" : `Back up and write ${backfillPreview.tasks_updated}`}
+          </button>
+        {/if}
+      {/if}
+
+      {#if backfillResult}
+        <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">
+          Wrote {backfillResult.tasks_updated} completion time{backfillResult.tasks_updated === 1 ? "" : "s"}.
+          {#if backfillResult.backup_path}
+            <br />Backup: <code>{backfillResult.backup_path}</code>
+          {/if}
+        </p>
+      {/if}
+
+      <hr class="setting-divider" />
+
       <p class="setting-desc">Find and remove images in assets/ that are no longer referenced by any block.</p>
       <button class="sync-btn" onclick={scanOrphanedAssets}>
         {assetScanDone ? "Re-scan" : "Scan for orphaned assets"}
@@ -488,7 +580,11 @@
           <div class="orphan-list">
             {#each orphanedAssets as asset}
               <div class="orphan-item">
-                <span class="orphan-name">{asset.filename}</span>
+                <span class="orphan-name" title={asset.filename}>
+                  {#if asset.filename.includes("/")}
+                    <span class="orphan-dir">{asset.filename.slice(0, asset.filename.lastIndexOf("/") + 1)}</span>
+                  {/if}<span class="orphan-file">{asset.filename.slice(asset.filename.lastIndexOf("/") + 1)}</span>
+                </span>
                 <span class="orphan-size">{formatBytes(asset.size)}</span>
                 <button class="orphan-delete" onclick={() => deleteSingleOrphan(asset.filename)} disabled={assetDeleting}>✕</button>
               </div>
@@ -1049,12 +1145,32 @@
     border-bottom: none;
   }
 
+  /* Media can now live beside its page, so these are paths rather than bare
+     names. Truncating the end would cut off the file name — the part that
+     actually identifies the asset — so the folder shrinks and the name does
+     not. */
   .orphan-name {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    display: flex;
+    min-width: 0;
     white-space: nowrap;
     color: var(--text-primary);
+  }
+
+  .orphan-dir {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-tertiary, var(--text-secondary));
+  }
+
+  /* Holds its ground against a long directory, but still gives way rather than
+     pushing the size and delete button out of the row when the file name
+     itself is enormous. */
+  .orphan-file {
+    flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .orphan-size {
@@ -1063,14 +1179,27 @@
     white-space: nowrap;
   }
 
+  .setting-divider {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 18px 0;
+  }
+
   .orphan-delete {
     background: none;
     border: none;
     color: var(--text-muted);
     cursor: pointer;
     padding: 2px 6px;
+    min-width: 32px;
+    min-height: 32px;
     border-radius: 4px;
     font-size: 14px;
+  }
+
+  .orphan-delete:focus-visible {
+    outline: 2px solid var(--danger, var(--accent));
+    outline-offset: 1px;
   }
 
   .orphan-delete:hover {

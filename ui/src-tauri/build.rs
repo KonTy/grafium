@@ -16,6 +16,16 @@ fn main() {
         bundle_native_libs();
     }
 
+    // The frontend is embedded into the binary by `generate_context!` at
+    // compile time, but a proc macro cannot tell Cargo what it read. Cargo
+    // also stops watching the package as soon as a build script emits any
+    // `rerun-if-changed`, which `bundle_native_libs` does — so without this,
+    // changing only frontend files rebuilt nothing and the binary silently
+    // kept serving the previous UI. That failure is invisible: the build
+    // succeeds, the app runs, and it is simply the old interface.
+    println!("cargo:rerun-if-changed=../dist");
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+
     tauri_build::build();
 }
 
@@ -53,15 +63,12 @@ fn bundle_native_libs() {
     let Ok(entries) = fs::read_dir(build_dir) else {
         return;
     };
-    let sys_crate_dirs = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("llama-cpp-sys-2-"))
-                .unwrap_or(false)
-        });
+    let sys_crate_dirs = entries.flatten().map(|e| e.path()).filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("llama-cpp-sys-2-"))
+            .unwrap_or(false)
+    });
 
     let is_windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let mut copied_any = false;

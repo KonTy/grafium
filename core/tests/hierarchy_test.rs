@@ -246,3 +246,510 @@ fn test_hierarchy_create_page_via_api_creates_parents() {
     assert!(grandparent.is_some());
     assert_eq!(grandparent.unwrap().title.to_lowercase(), "parent");
 }
+
+// ─── Multi-block indent / outdent (block move) ───────────────────────────────
+
+use grafium_core::models::{Block, BlockType};
+
+fn text_block(graph: &Graph, page_id: &str, parent: Option<&str>, order: i32, body: &str) -> Block {
+    graph
+        .create_block(
+            page_id,
+            parent,
+            order,
+            body,
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap()
+}
+
+/// Return (id, parent_id, order_index) triples in tree order for a page.
+fn tree_shape(graph: &Graph, page_id: &str) -> Vec<(String, Option<String>, i32)> {
+    graph
+        .db
+        .list_blocks_for_page(page_id)
+        .unwrap()
+        .into_iter()
+        .map(|b| (b.id, b.parent_id, b.order_index))
+        .collect()
+}
+
+/// A freshly-created page seeds a single empty `- ` bullet; drop it so tests
+/// control the whole block tree.
+fn clear_seed_blocks(graph: &Graph, page_id: &str) {
+    for b in graph.db.list_blocks_for_page(page_id).unwrap() {
+        graph.delete_block(&b.id).unwrap();
+    }
+}
+
+#[test]
+fn test_multiblock_indent_parents_contiguous_selection_under_predecessor() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-in", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, None, 1, "b");
+    let c = text_block(&graph, &page.id, None, 2, "c");
+    let d = text_block(&graph, &page.id, None, 3, "d");
+
+    // Simulate planIndentSelection([b,c,d], "in"): all become children of a.
+    graph.move_block(&b.id, Some(&a.id), 0).unwrap();
+    graph.move_block(&c.id, Some(&a.id), 1).unwrap();
+    graph.move_block(&d.id, Some(&a.id), 2).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), Some(a.id.clone()), 0),
+            (c.id.clone(), Some(a.id.clone()), 1),
+            (d.id.clone(), Some(a.id.clone()), 2),
+        ]
+    );
+}
+
+#[test]
+fn test_multiblock_outdent_moves_group_to_grandparent_after_parent() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-out", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    // a -> {b, c, d}
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, Some(&a.id), 0, "b");
+    let c = text_block(&graph, &page.id, Some(&a.id), 1, "c");
+    let d = text_block(&graph, &page.id, Some(&a.id), 2, "d");
+
+    // Simulate planIndentSelection([b,c,d], "out"): all become roots after a.
+    graph.move_block(&b.id, None, 1).unwrap();
+    graph.move_block(&c.id, None, 2).unwrap();
+    graph.move_block(&d.id, None, 3).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), None, 1),
+            (c.id.clone(), None, 2),
+            (d.id.clone(), None, 3),
+        ]
+    );
+}
+
+#[test]
+fn test_multiblock_indent_non_contiguous_runs_reparent_independently() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("indent-noncontig", false).unwrap();
+    clear_seed_blocks(&graph, &page.id);
+
+    // a, b(sel), c, d(sel), e(sel)  -> b under a; d,e under c
+    let a = text_block(&graph, &page.id, None, 0, "a");
+    let b = text_block(&graph, &page.id, None, 1, "b");
+    let c = text_block(&graph, &page.id, None, 2, "c");
+    let d = text_block(&graph, &page.id, None, 3, "d");
+    let e = text_block(&graph, &page.id, None, 4, "e");
+
+    graph.move_block(&b.id, Some(&a.id), 0).unwrap();
+    graph.move_block(&d.id, Some(&c.id), 0).unwrap();
+    graph.move_block(&e.id, Some(&c.id), 1).unwrap();
+
+    let shape = tree_shape(&graph, &page.id);
+    assert_eq!(
+        shape,
+        vec![
+            (a.id.clone(), None, 0),
+            (b.id.clone(), Some(a.id.clone()), 0),
+            (c.id.clone(), None, 2),
+            (d.id.clone(), Some(c.id.clone()), 0),
+            (e.id.clone(), Some(c.id.clone()), 1),
+        ]
+    );
+}
+
+// ─── A book link inside a journal ────────────────────────────────────────────
+
+/// Typing `[[mybooks/coolbook/toc]]` into a journal, then more journal text
+/// underneath it, must not mix the two: the words you type in the journal
+/// belong to the journal file, and the book page stays empty until you
+/// actually open it and write there.
+#[test]
+fn test_book_link_in_journal_keeps_journal_text_in_the_journal() {
+    let (tmp, graph) = open_graph();
+
+    let journal = graph.create_page("2025_01_15", true).unwrap();
+    graph
+        .create_block(
+            &journal.id,
+            None,
+            0,
+            "Starting on [[mybooks/coolbook/toc]]",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    graph
+        .create_block(
+            &journal.id,
+            None,
+            1,
+            "thought about chapter ordering today",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let toc = graph
+        .db
+        .get_page_by_title_ci("mybooks/coolbook/toc")
+        .expect("linking must create the book page");
+
+    // Linking alone must not carve out folders on disk.
+    assert!(
+        toc.file_path.is_none(),
+        "a link alone must not create a file, got {:?}",
+        toc.file_path
+    );
+    assert!(
+        !tmp.path().join("pages/mybooks").exists(),
+        "a link alone must not create the book folder"
+    );
+
+    // The journal text stayed in the journal, and none of it leaked into the book.
+    let journal_text = std::fs::read_to_string(tmp.path().join("journals/2025_01_15.md")).unwrap();
+    assert!(journal_text.contains("chapter ordering"));
+    assert!(graph.db.list_blocks_for_page(&toc.id).unwrap().is_empty());
+
+    // Writing *in* the book page is what creates the folder and the file.
+    graph
+        .create_block(
+            &toc.id,
+            None,
+            0,
+            "1. Openings",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let toc_file = tmp.path().join("pages/mybooks/coolbook/toc.md");
+    assert!(toc_file.exists(), "writing in the page creates the folder");
+    assert!(std::fs::read_to_string(&toc_file).unwrap().contains("Openings"));
+    assert!(
+        !std::fs::read_to_string(&toc_file).unwrap().contains("chapter ordering"),
+        "journal text must never land in the book file"
+    );
+}
+
+
+// ─── Task completion history ─────────────────────────────────────────────────
+
+/// Completing a task must leave a record in the markdown, not just the database.
+///
+/// This is the whole point: a completion time held only in SQLite is lost the
+/// moment the graph is re-indexed, copied to another machine, or opened against
+/// a fresh database — and "when did I finish that?" is not recoverable.
+#[test]
+fn test_completion_time_is_written_to_the_file_and_survives_reindex() {
+    let (tmp, graph) = open_graph();
+
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Write the report",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Doing)
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let path = tmp.path().join("pages/work.md");
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(on_disk.contains("DONE Write the report"), "{on_disk}");
+    assert!(on_disk.contains("CLOSED: ["), "completion time must be in the file:\n{on_disk}");
+    assert!(
+        on_disk.contains(r#"* State "DOING" from "TODO""#),
+        "the start must be recorded too, or duration is unanswerable:\n{on_disk}"
+    );
+    assert!(on_disk.contains(r#"* State "DONE" from "DOING""#), "{on_disk}");
+
+    // Re-index from disk, the way a fresh machine or a rebuilt database would.
+    graph.index_file(&path).unwrap();
+
+    let reloaded = graph.db.list_blocks_for_page(&page.id).unwrap();
+    let task_block = reloaded
+        .iter()
+        .find(|b| b.content.starts_with("DONE"))
+        .expect("the task must still be there");
+    let fields = grafium_core::parser::task::parse_fields(&task_block.content);
+    assert!(
+        fields.closed_at.is_some(),
+        "the completion time must survive a re-index: {:?}",
+        task_block.content
+    );
+}
+
+/// Re-opening a finished task clears its completion time everywhere.
+#[test]
+fn test_reopening_a_task_clears_the_completion_time() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Fix the bug",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Todo)
+        .unwrap();
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
+    assert!(!on_disk.contains("CLOSED:"), "a reopened task is not closed:\n{on_disk}");
+    assert!(
+        on_disk.contains(r#"* State "TODO" from "DONE""#),
+        "reopening is itself part of the history:\n{on_disk}"
+    );
+}
+
+/// A task nobody has touched in months must still appear.
+///
+/// The open-task query used to drop anything older than 182 days, which is
+/// backwards for a task list: the thing you have been avoiding longest is the
+/// one that most needs to be seen, and instead it vanished silently.
+#[test]
+fn test_a_long_neglected_task_is_still_listed() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Renew the domain",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    // Backdate it well past the old cutoff.
+    let ancient = chrono::Utc::now().timestamp_millis() - 400 * 24 * 60 * 60 * 1000;
+    graph.db.backdate_task_for_test(&block.id, ancient).unwrap();
+
+    let open = graph.db.get_open_tasks(182).unwrap();
+    assert!(
+        open.iter().any(|(_, content, _, _, _)| content.contains("Renew the domain")),
+        "a neglected task must not disappear from the list: {open:?}"
+    );
+}
+
+/// Completing a repeating task rolls it forward instead of closing it.
+#[test]
+fn test_a_repeating_task_reopens_on_its_next_date() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("chores", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Water the plants\nSCHEDULED: <2026-09-07 Mon .+3d>",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/chores.md")).unwrap();
+    assert!(
+        on_disk.contains("TODO Water the plants"),
+        "a repeating task comes back open, not DONE:\n{on_disk}"
+    );
+    assert!(!on_disk.contains("CLOSED:"), "and it is not closed:\n{on_disk}");
+    assert!(
+        !on_disk.contains("<2026-09-07"),
+        "its date must have moved on:\n{on_disk}"
+    );
+}
+
+// ─── Flow statistics ─────────────────────────────────────────────────────────
+
+/// The Tasks dashboard numbers, computed from real transitions.
+///
+/// These are the metrics chosen over a streak counter and a procrastination
+/// score: elapsed time rather than a score kept against the reader.
+#[test]
+fn test_flow_stats_measure_real_work() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+
+    let make = |title: &str| {
+        graph
+            .create_block(
+                &page.id,
+                None,
+                0,
+                title,
+                grafium_core::models::BlockType::Text,
+                serde_json::json!({}),
+            )
+            .unwrap()
+    };
+    use grafium_core::models::TaskState;
+
+    // Started and finished: contributes a cycle time and a wait time.
+    let a = make("TODO Ship the thing");
+    graph.update_task_state(&a.id, &TaskState::Doing).unwrap();
+    graph.update_task_state(&a.id, &TaskState::Done).unwrap();
+
+    // Finished without ever being started: no cycle time to measure.
+    let b = make("TODO Quick fix");
+    graph.update_task_state(&b.id, &TaskState::Done).unwrap();
+
+    // Still open: counts towards the open total and the oldest-open age.
+    make("TODO Someday");
+
+    let stats = graph.db.task_flow_stats(8).unwrap();
+    assert_eq!(stats.done_count, 2);
+    assert_eq!(stats.open_count, 1);
+    assert!(stats.throughput_7d > 0.0, "two completions today should register");
+    assert_eq!(stats.weekly_completions.len(), 8);
+    assert_eq!(
+        stats.weekly_completions.last().copied(),
+        Some(2),
+        "both completions land in the current week"
+    );
+    assert!(
+        stats.by_page.iter().any(|(title, n)| title == "work" && *n == 2),
+        "completions are attributed to their page: {:?}",
+        stats.by_page
+    );
+    assert!(stats.oldest_open_days.is_some());
+}
+
+/// On-time rate only counts tasks that actually had a deadline.
+#[test]
+fn test_on_time_rate_ignores_tasks_without_a_deadline() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    use grafium_core::models::TaskState;
+
+    // No deadline at all — must not drag the rate down.
+    let plain = graph
+        .create_block(&page.id, None, 0, "TODO No deadline",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&plain.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, None);
+
+    // Finished comfortably before a deadline a long way off.
+    let timely = graph
+        .create_block(&page.id, None, 1, "TODO Beat the deadline\nDEADLINE: <2099-01-01 Fri>",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&timely.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(1.0));
+
+    // And one finished long after its deadline.
+    let late = graph
+        .create_block(&page.id, None, 2, "TODO Missed it\nDEADLINE: <2000-01-01 Sat>",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&late.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(0.5));
+}
+
+// ─── Backfilling completion history ──────────────────────────────────────────
+
+/// Completions recorded before they were written to disk are moved into files.
+///
+/// This edits notes in bulk and the notes are the only copy that exists, so the
+/// behaviour that matters is: report before touching anything, never overwrite
+/// a completion the file already records, and be safe to run twice.
+#[test]
+fn test_backfill_writes_missing_completion_times() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    use grafium_core::models::TaskState;
+
+    let block = graph
+        .create_block(&page.id, None, 0, "TODO Old finished thing",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&block.id, &TaskState::Done).unwrap();
+
+    // Strip the CLOSED: line to recreate a task finished before this existed,
+    // leaving its completion event behind in the database.
+    let stripped: String = graph
+        .db
+        .get_block_by_id(&block.id)
+        .unwrap()
+        .content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("CLOSED:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    graph.update_block(&block.id, &stripped, None).unwrap();
+    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+
+    // A dry run reports without writing and without a backup.
+    let preview = graph.backfill_task_completions(true).unwrap();
+    assert_eq!(preview.tasks_updated, 1);
+    assert!(preview.backup_path.is_none(), "a dry run must not copy anything");
+    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+
+    // The real run writes the line and leaves a backup behind.
+    let done = graph.backfill_task_completions(false).unwrap();
+    assert_eq!(done.tasks_updated, 1);
+    let backup = done.backup_path.expect("a bulk edit must take a backup first");
+    assert!(std::path::Path::new(&backup).exists(), "backup missing at {backup}");
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
+    assert!(on_disk.contains("CLOSED: ["), "{on_disk}");
+
+    // Running again must be a no-op rather than a second line.
+    let again = graph.backfill_task_completions(true).unwrap();
+    assert_eq!(again.tasks_updated, 0, "already-recorded completions are left alone");
+}
+
+/// A task whose file already records its completion is never rewritten.
+#[test]
+fn test_backfill_leaves_existing_completion_times_alone() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(&page.id, None, 0, "TODO Thing",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let before = graph.db.get_block_by_id(&block.id).unwrap().content;
+    assert_eq!(graph.backfill_task_completions(true).unwrap().tasks_updated, 0);
+    graph.backfill_task_completions(false).unwrap();
+    assert_eq!(graph.db.get_block_by_id(&block.id).unwrap().content, before);
+}

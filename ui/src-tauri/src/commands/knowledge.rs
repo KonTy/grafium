@@ -6,20 +6,29 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
-use grafium_core::knowledge::engine::HealthStatus;
+use grafium_core::ai::web_research::Citation;
+use grafium_core::knowledge::conversation::{self, ChatTurn};
+use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
-use grafium_core::knowledge::KnowledgeEngine;
+use grafium_core::knowledge::{detect_research_intent, KnowledgeEngine};
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
 pub struct KnowledgeState {
     pub engine: Arc<RwLock<Option<KnowledgeEngine>>>,
+    /// Per-request cancellation flags for in-flight streamed answers, so
+    /// `ai_cancel_stream` can abort a slow local generation. Keyed by the
+    /// UI-supplied `request_id`; entries are inserted when a stream starts and
+    /// removed when it ends.
+    pub cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
@@ -270,6 +279,43 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
 // ─── Indexing ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+pub async fn ai_index_status(
+    app: tauri::AppHandle,
+    state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
+) -> Result<IndexStatus, String> {
+    let guard = state.engine.read().await;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let graph_id = snapshot.root_dir.to_string_lossy().to_string();
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    engine
+        .index_status(&graph.db, &graph_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reload the local chat model forcing full GPU offload. Backs Chat's "Retry
+/// on GPU" action for the case where the free-VRAM heuristic landed on CPU
+/// because VRAM was transiently busy at startup. Returns the refreshed
+/// accelerator status so the UI can update its banner immediately.
+#[tauri::command]
+pub async fn ai_retry_llm_on_gpu(
+    state: State<'_, KnowledgeState>,
+) -> Result<Option<grafium_core::ai::traits::AcceleratorStatus>, String> {
+    let mut guard = state.engine.write().await;
+    let engine = guard
+        .as_mut()
+        .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
+    engine.retry_llm_on_gpu().map_err(|e| e.to_string())?;
+    Ok(engine.llm_accelerator_status())
+}
+
+#[tauri::command]
 pub async fn ai_index_page(
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
@@ -304,12 +350,22 @@ pub async fn ai_index_page(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexAllResult {
+    /// Chunks embedded/updated across all pages.
+    pub indexed_chunks: usize,
+    /// Pages successfully processed (indexed or already up to date).
+    pub pages_processed: usize,
+    /// Pages that failed to index (errors were logged, not fatal).
+    pub pages_failed: usize,
+}
+
 #[tauri::command]
 pub async fn ai_index_all_pages(
     app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
-) -> Result<usize, String> {
+) -> Result<IndexAllResult, String> {
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -322,8 +378,17 @@ pub async fn ai_index_all_pages(
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
     let graph_id = snapshot.root_dir.to_string_lossy().to_string();
     let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    // Recover the hash cache from already-stored vectors so a restart doesn't
+    // needlessly re-embed unchanged content.
+    if let Err(e) = engine.restore_hash_cache(&graph_id).await {
+        eprintln!("Failed to restore embedding hash cache: {e}");
+    }
+
     let mut cursor = PageBatchCursor::new(AI_INDEX_BATCH_SIZE);
-    let mut total = 0;
+    let mut indexed_chunks = 0;
+    let mut pages_processed = 0;
+    let mut pages_failed = 0;
 
     while let Some(pages) = cursor.next_batch(|limit, offset| {
         graph
@@ -342,15 +407,23 @@ pub async fn ai_index_all_pages(
 
         for (page, blocks) in &pages_and_blocks {
             match engine.index_page(page, blocks, &graph_id).await {
-                Ok(count) => total += count,
+                Ok(count) => {
+                    indexed_chunks += count;
+                    pages_processed += 1;
+                }
                 Err(e) => {
+                    pages_failed += 1;
                     eprintln!("Failed to index page '{}': {}", page.title, e);
                 }
             }
         }
     }
 
-    Ok(total)
+    Ok(IndexAllResult {
+        indexed_chunks,
+        pages_processed,
+        pages_failed,
+    })
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────
@@ -519,10 +592,7 @@ pub async fn ai_research_web(
 /// caller wrap terms identically instead of re-implementing matching
 /// logic per call site.
 #[tauri::command(rename_all = "camelCase")]
-pub fn text_wrap_known_terms(
-    content: String,
-    terms: Vec<grafium_core::parser::TagTerm>,
-) -> String {
+pub fn text_wrap_known_terms(content: String, terms: Vec<grafium_core::parser::TagTerm>) -> String {
     grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
 }
 
@@ -543,23 +613,10 @@ pub fn ai_insert_page_summary(
 ) -> Result<(), String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
 
-    let mut summary_text = String::new();
-    if let Some(answer) = title_answer {
-        if !answer.trim().is_empty() {
-            summary_text.push_str(answer.trim());
-            summary_text.push_str("\n\n");
-        }
-    }
-    // One heading + paragraph per topic, same shape as the media-import
-    // transcript notes, so a multi-subject "Research this page" summary
-    // (e.g. a long podcast transcript) keeps every topic distinguishable.
+    // Collect every topic's tags up front so the in-place wiki-linking pass
+    // below sees them regardless of how the blocks get nested.
     let mut all_tags: Vec<grafium_core::parser::TagTerm> = Vec::new();
-    for (i, topic) in topics.iter().enumerate() {
-        if i > 0 {
-            summary_text.push_str("\n\n");
-        }
-        summary_text.push_str(&format!("### {}\n\n", topic.topic.trim()));
-        summary_text.push_str(topic.summary.trim());
+    for topic in &topics {
         for tag in &topic.tags {
             if !all_tags
                 .iter()
@@ -570,9 +627,45 @@ pub fn ai_insert_page_summary(
         }
     }
 
-    graph
-        .insert_block_at_top(&page_id, &summary_text)
+    // Build a real block tree rather than one block holding headings and
+    // prose as flat text. Grafium is an outliner: a heading only "owns" the
+    // paragraphs beneath it when they are its children, so a flat summary
+    // leaves every topic heading structurally unrelated to its own body —
+    // backlinks, block refs, and collapsing all treat them as unconnected
+    // siblings.
+    let root = graph
+        .insert_block_at_top(
+            &page_id,
+            title_answer.as_deref().unwrap_or("Summary").trim(),
+        )
         .map_err(|e| e.to_string())?;
+
+    for (index, topic) in topics.iter().enumerate() {
+        let heading = graph
+            .create_block(
+                &page_id,
+                Some(&root.id),
+                index as i32,
+                &format!("### {}", topic.topic.trim()),
+                grafium_core::models::BlockType::Text,
+                serde_json::json!({}),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let body = topic.summary.trim();
+        if !body.is_empty() {
+            graph
+                .create_block(
+                    &page_id,
+                    Some(&heading.id),
+                    0,
+                    body,
+                    grafium_core::models::BlockType::Text,
+                    serde_json::json!({}),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     if !all_tags.is_empty() {
         let blocks = graph
@@ -595,12 +688,44 @@ pub fn ai_insert_page_summary(
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
+/// A structured citation surfaced to the UI so it can render source chips
+/// and navigate to the originating page/block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceDto {
+    pub index: usize,
+    pub page_id: String,
+    pub page_title: String,
+    pub block_id: String,
+    pub date: Option<String>,
+}
+
+impl From<Source> for SourceDto {
+    fn from(s: Source) -> Self {
+        SourceDto {
+            index: s.index,
+            page_id: s.page_id,
+            page_title: s.page_title,
+            block_id: s.block_id,
+            date: s.date,
+        }
+    }
+}
+
+/// Answer plus structured sources returned by `ai_ask`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskResult {
+    pub answer: String,
+    pub sources: Vec<SourceDto>,
+}
+
 #[tauri::command]
 pub async fn ai_ask(
+    app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
-) -> Result<String, String> {
+) -> Result<AskResult, String> {
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -614,28 +739,89 @@ pub async fn ai_ask(
         );
     }
 
-    engine
-        .ask(&question, graph_id.as_deref())
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let resolved_graph_id =
+        graph_id.unwrap_or_else(|| snapshot.root_dir.to_string_lossy().to_string());
+    let graph = crate::open_graph_snapshot(&snapshot)?;
+
+    let response = engine
+        .ask(&graph.db, &question, Some(resolved_graph_id.as_str()))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(AskResult {
+        answer: response.answer,
+        sources: response.sources.into_iter().map(SourceDto::from).collect(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskStreamChunk {
     pub request_id: String,
     pub delta: String,
+    /// The current answering phase (`retrieving`, `processing_prompt`,
+    /// `thinking`, `generating`, and — in the two-part web-research flow —
+    /// `searching_web`, `reading_sources`), when this chunk reports a phase
+    /// transition. `None` for a pure text delta or the terminal `done` event.
+    /// Drives the UI's evidence-based status indicator; reasoning is never sent
+    /// as `delta`, only reflected as the `thinking` phase.
+    pub phase: Option<String>,
+    /// A transient human-readable progress note for the current phase — e.g.
+    /// "Reading source 2/5: …" during a web-research pass. Shown verbatim under
+    /// the status label and then discarded; never appended to the answer text.
+    #[serde(default)]
+    pub note: Option<String>,
     pub done: bool,
     pub error: Option<String>,
+}
+
+/// A web source cited by the "From the web" research section, surfaced to the
+/// UI so it can render clickable external-link chips distinct from the graph
+/// page chips in [`SourceDto`]. `number` matches the inline `[n]` marker in the
+/// streamed summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSourceDto {
+    pub number: usize,
+    pub title: String,
+    pub url: String,
+}
+
+impl From<Citation> for WebSourceDto {
+    fn from(c: Citation) -> Self {
+        WebSourceDto {
+            number: c.number,
+            title: c.title,
+            url: c.url,
+        }
+    }
+}
+
+/// Emitted once per request on `ai://chat_sources`, carrying the structured
+/// citations for the answer. Kept as a separate event so the existing
+/// `AskStreamChunk` shape on `ai://chat_stream` is unchanged and backward
+/// compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskSourcesPayload {
+    pub request_id: String,
+    pub sources: Vec<SourceDto>,
+    /// Web sources for the "From the web" section — empty for an ordinary
+    /// graph-only answer, so existing consumers are unaffected. Rendered as
+    /// clickable external links, distinct from the graph `sources` chips.
+    #[serde(default)]
+    pub web_sources: Vec<WebSourceDto>,
 }
 
 #[tauri::command]
 pub async fn ai_ask_stream(
     state: State<'_, KnowledgeState>,
     app: tauri::AppHandle,
+    app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
     request_id: String,
+    history: Option<Vec<ChatTurn>>,
 ) -> Result<(), String> {
+    let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -649,51 +835,138 @@ pub async fn ai_ask_stream(
         );
     }
 
-    let answer = engine
-        .ask(&question, graph_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
+    let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
+    let resolved_graph_id =
+        graph_id.unwrap_or_else(|| snapshot.root_dir.to_string_lossy().to_string());
+    let graph = crate::open_graph_snapshot(&snapshot)?;
 
-    // Stream by small chunks to give responsive UI updates across all providers.
-    const CHUNK_SIZE: usize = 24;
-    if answer.is_empty() {
-        app.emit(
+    // Register a cancellation flag so `ai_cancel_stream` can stop a slow local
+    // generation instead of leaving the user staring at a frozen pane.
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut map) = state.cancels.lock() {
+        map.insert(request_id.clone(), cancel.clone());
+    }
+
+    // A research trigger ("… search the web") turns Chat into a two-part
+    // answer: the notes-grounded reply plus a live internet research pass. We
+    // strip the trigger phrase (via the core detector) so neither retrieval nor
+    // the web queries are polluted by "search the web", then route to the
+    // two-part path. An LLM is required for both arms — already checked above.
+    // A research trigger may carry no topic of its own ("look it up on the
+    // internet") — mid-conversation that's the normal way to ask, so the topic
+    // is taken from the turn it refers back to rather than refusing.
+    let rule_match = detect_research_intent(&question).and_then(|intent| {
+        if !intent.needs_conversation_context {
+            return Some(intent.cleaned_question);
+        }
+        let resolved = conversation::resolve_followup(&intent.cleaned_question, &history);
+        // With nothing to resolve against, searching for "it" would be worse
+        // than not searching at all.
+        conversation::is_self_contained(&resolved).then_some(resolved)
+    });
+
+    // Rules are instant and deterministic, so an explicit "search the web"
+    // costs nothing. They can't read a misspelled or merely *implied* request
+    // though ("what papers did Levin publish recently" names no web at all),
+    // and extending the phrase list was repeatedly followed by another
+    // phrasing it missed. So anything the rules neither match nor confidently
+    // reject is put to the model — about half a second, and only on questions
+    // that would otherwise have been answered without the web.
+    let research = match rule_match {
+        Some(q) => Some(q),
+        None if grafium_core::knowledge::research_intent::rules_reject_research(&question) => None,
+        None => {
+            let resolved = conversation::resolve_followup(&question, &history);
+            match engine.classify_needs_web(&resolved).await {
+                true => Some(resolved),
+                false => None,
+            }
+        }
+    };
+    let effective_question = research.clone().unwrap_or_else(|| question.clone());
+
+    // Forward real token deltas and phase transitions as they happen. Phase
+    // events let the UI show *what* the model is doing (and prove it's alive);
+    // reasoning is surfaced only as the `thinking` phase, never as `delta`. In
+    // the research flow, `Note` carries the per-source progress line.
+    let app_for_events = app.clone();
+    let rid = request_id.clone();
+    let mut on_event = move |ev: AskStreamEvent<'_>| {
+        let (delta, phase, note) = match ev {
+            AskStreamEvent::Delta(d) => (d.to_string(), None, None),
+            AskStreamEvent::Phase(p) => (String::new(), Some(p.as_str().to_string()), None),
+            AskStreamEvent::Note(n) => (String::new(), None, Some(n.to_string())),
+        };
+        let _ = app_for_events.emit(
             "ai://chat_stream",
             AskStreamChunk {
-                request_id,
-                delta: String::new(),
-                done: true,
+                request_id: rid.clone(),
+                delta,
+                phase,
+                note,
+                done: false,
                 error: None,
             },
-        )
-        .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
+        );
+    };
 
-    let mut buf = String::new();
-    for ch in answer.chars() {
-        buf.push(ch);
-        if buf.chars().count() >= CHUNK_SIZE {
-            app.emit(
-                "ai://chat_stream",
-                AskStreamChunk {
-                    request_id: request_id.clone(),
-                    delta: std::mem::take(&mut buf),
-                    done: false,
-                    error: None,
-                },
+    let outcome = if research.is_some() {
+        engine
+            .ask_stream_with_web(
+                &graph.db,
+                &effective_question,
+                Some(resolved_graph_id.as_str()),
+                Some(cancel),
+                &mut on_event,
             )
-            .map_err(|e| e.to_string())?;
-            tokio::time::sleep(std::time::Duration::from_millis(12)).await;
-        }
+            .await
+    } else {
+        engine
+            .ask_stream(
+                &graph.db,
+                &effective_question,
+                Some(resolved_graph_id.as_str()),
+                &history,
+                Some(cancel),
+                &mut on_event,
+            )
+            .await
+    };
+
+    // Deregister the cancel flag regardless of outcome.
+    if let Ok(mut map) = state.cancels.lock() {
+        map.remove(&request_id);
     }
 
-    if !buf.is_empty() {
+    let outcome = outcome.map_err(|e| e.to_string())?;
+
+    // Emit the structured citations now that the answer is complete — graph
+    // page chips and, for a research answer, the clickable web sources.
+    app.emit(
+        "ai://chat_sources",
+        AskSourcesPayload {
+            request_id: request_id.clone(),
+            sources: outcome.sources.into_iter().map(SourceDto::from).collect(),
+            web_sources: outcome
+                .web_citations
+                .into_iter()
+                .map(WebSourceDto::from)
+                .collect(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    // If the model produced only reasoning (budget exhausted with no answer),
+    // show the explanatory message in place of an answer rather than an empty
+    // pane or raw chain-of-thought.
+    if let Some(message) = outcome.trailing_message {
         app.emit(
             "ai://chat_stream",
             AskStreamChunk {
                 request_id: request_id.clone(),
-                delta: buf,
+                delta: message,
+                phase: None,
+                note: None,
                 done: false,
                 error: None,
             },
@@ -706,12 +979,30 @@ pub async fn ai_ask_stream(
         AskStreamChunk {
             request_id,
             delta: String::new(),
+            phase: None,
+            note: None,
             done: true,
             error: None,
         },
     )
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Cancel an in-flight streamed answer started by `ai_ask_stream`. Flips the
+/// request's cancellation flag; the local generation loop checks it and stops,
+/// returning what it has so far. A no-op if the request already finished.
+#[tauri::command]
+pub async fn ai_cancel_stream(
+    state: State<'_, KnowledgeState>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Ok(map) = state.cancels.lock() {
+        if let Some(flag) = map.get(&request_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
     Ok(())
 }
 

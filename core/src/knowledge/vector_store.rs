@@ -486,6 +486,50 @@ impl VectorStore for SqliteVectorStore {
             Ok(count as usize)
         })
     }
+
+    fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>> {
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM vectors WHERE graph_id = ?1",
+                [graph_id],
+                |row| row.get(0),
+            )?;
+            Ok(count as usize)
+        })
+    }
+
+    fn list_content_hashes<'a>(
+        &'a self,
+        graph_id: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, String)>>> {
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {}", e)))?;
+            let mut stmt = conn.prepare(
+                "SELECT chunk_id, json_extract(metadata, '$.content_hash') \
+                 FROM vectors WHERE graph_id = ?1",
+            )?;
+            let rows = stmt.query_map([graph_id], |row| {
+                let chunk_id: String = row.get(0)?;
+                let hash: Option<String> = row.get(1)?;
+                Ok((chunk_id, hash))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (chunk_id, hash) = row?;
+                if let Some(hash) = hash {
+                    out.push((chunk_id, hash));
+                }
+            }
+            Ok(out)
+        })
+    }
 }
 
 /// Internal row representation.
@@ -572,6 +616,31 @@ mod tests {
             embedding,
             metadata: json!({ "chunk": chunk_id }),
         }
+    }
+
+    #[tokio::test]
+    async fn list_content_hashes_recovers_stored_hashes_per_graph() -> Result<()> {
+        let store = SqliteVectorStore::in_memory()?;
+        let mut a = test_chunk("chunk-a", 3);
+        a.metadata = json!({ "content_hash": "hash-a" });
+        let mut b = test_chunk("chunk-b", 3);
+        b.metadata = json!({ "content_hash": "hash-b" });
+        // A chunk in another graph must not leak into the result.
+        let mut other = test_chunk("chunk-c", 3);
+        other.graph_id = "graph-2".to_string();
+        other.metadata = json!({ "content_hash": "hash-c" });
+        store.upsert(&[a, b, other]).await?;
+
+        let mut hashes = store.list_content_hashes("graph-1").await?;
+        hashes.sort();
+        assert_eq!(
+            hashes,
+            vec![
+                ("chunk-a".to_string(), "hash-a".to_string()),
+                ("chunk-b".to_string(), "hash-b".to_string()),
+            ]
+        );
+        Ok(())
     }
 
     #[tokio::test]

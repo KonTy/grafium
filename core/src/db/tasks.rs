@@ -33,6 +33,52 @@ fn upsert_task_on_conn(
     })
 }
 
+fn sync_task_from_content_on_conn(
+    conn: &Connection,
+    block_id: &str,
+    marker: &str,
+    fields: &crate::parser::task::TaskFields,
+    closed_at: Option<i64>,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let time_of = |ts: &Option<crate::parser::task::TaskTimestamp>| {
+        ts.as_ref()
+            .and_then(|t| t.time.map(|x| x.format("%H:%M").to_string()))
+    };
+    conn.execute(
+        // An empty marker means "leave the state alone": the indexing path has
+        // already written it from the parsed block, and overwriting it here
+        // with a blank would wipe the task's state on every re-index.
+        "UPDATE tasks SET
+             state = COALESCE(NULLIF(?1, ''), state),
+             scheduled_date = ?2,
+             scheduled_time = ?3,
+             deadline_date = ?4,
+             deadline_time = ?5,
+             repeat_rule = ?6,
+             priority = ?7,
+             closed_at = ?8,
+             updated_at = ?9
+         WHERE block_id = ?10",
+        params![
+            marker,
+            fields.scheduled.as_ref().map(|t| t.date.to_string()),
+            time_of(&fields.scheduled),
+            fields.deadline.as_ref().map(|t| t.date.to_string()),
+            time_of(&fields.deadline),
+            fields
+                .scheduled
+                .as_ref()
+                .and_then(|t| t.repeater.map(|r| r.render())),
+            fields.priority.map(|p| p.as_str().to_string()),
+            closed_at,
+            now,
+            block_id,
+        ],
+    )?;
+    Ok(())
+}
+
 fn delete_task_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
     conn.execute("DELETE FROM tasks WHERE block_id = ?1", params![block_id])?;
     Ok(())
@@ -167,6 +213,76 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Mirror everything the markdown now says about a task into its row.
+    ///
+    /// The file is the durable copy of all of this; the columns exist so the
+    /// Tasks page can group and sort without re-reading every page on disk.
+    pub fn sync_task_from_content(
+        &self,
+        block_id: &str,
+        marker: &str,
+        fields: &crate::parser::task::TaskFields,
+        closed_at: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        sync_task_from_content_on_conn(&conn, block_id, marker, fields, closed_at)
+    }
+
+    pub(crate) fn sync_task_from_content_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+        marker: &str,
+        fields: &crate::parser::task::TaskFields,
+        closed_at: Option<i64>,
+    ) -> Result<()> {
+        sync_task_from_content_on_conn(conn, block_id, marker, fields, closed_at)
+    }
+
+    /// Completed tasks and when they were completed, from the event log.
+    ///
+    /// The latest `DONE` event per block, for tasks still in that state. Used
+    /// once, to move history that predates completions being written to disk
+    /// into the files where it can actually survive.
+    pub fn completion_times_for_backfill(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.block_id, MAX(e.timestamp)
+             FROM tasks t
+             JOIN task_events e ON e.block_id = t.block_id
+             WHERE t.state = 'DONE' AND e.to_state = 'DONE'
+             GROUP BY t.block_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Move a task's `updated_at` back in time. Test-only.
+    #[doc(hidden)]
+    pub fn backdate_task_for_test(&self, block_id: &str, updated_at: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1 WHERE block_id = ?2",
+            params![updated_at, block_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mirror the `CLOSED:` timestamp from the markdown into the task row.
+    ///
+    /// The file is the durable copy; this column exists so the Tasks page can
+    /// order by completion without re-reading every page on disk.
+    pub fn set_task_closed_at(&self, block_id: &str, closed_at: Option<i64>) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE tasks SET closed_at = ?1 WHERE block_id = ?2",
+            params![closed_at, block_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_task(&self, block_id: &str) -> Result<()> {
         let conn = self.conn()?;
         delete_task_on_conn(&conn, block_id)
@@ -198,9 +314,10 @@ impl Database {
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
             "SELECT day, SUM(cnt) as total FROM (
-                SELECT date(timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
-                FROM task_events
-                WHERE to_state = 'DONE' AND timestamp >= ?1
+                SELECT date(te.timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+                FROM task_events te
+                JOIN blocks b ON b.id = te.block_id
+                WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
                 GROUP BY day
               UNION ALL
                 SELECT date(t.updated_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
@@ -221,11 +338,15 @@ impl Database {
     /// Get open tasks (TODO/DOING/NOW/LATER) with their last-updated timestamp,
     /// block content, page title, block_id, and state.
     ///
-    /// Returns rows sorted by most-recently updated first. Intended to power the
-    /// "Open Tasks" section in the UI so voice-added TODOs show up immediately.
-    pub fn get_open_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String, String)>> {
+    /// Every open task, most recently touched first.
+    ///
+    /// Deliberately unwindowed. This used to drop anything untouched for six
+    /// months, which is exactly backwards for a task list: the task you have
+    /// been avoiding longest is the one that most needs to be seen, and
+    /// instead it silently disappeared. `days` is retained for callers that
+    /// still pass it and is ignored.
+    pub fn get_open_tasks(&self, _days: i64) -> Result<Vec<(i64, String, String, String, String)>> {
         let conn = self.conn()?;
-        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
             "SELECT t.updated_at as ts, COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title, t.block_id, t.state
@@ -233,11 +354,10 @@ impl Database {
              LEFT JOIN blocks b ON b.id = t.block_id
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO', 'DOING', 'NOW', 'LATER')
-               AND t.updated_at >= ?1
              ORDER BY t.updated_at DESC",
         )?;
         let rows = stmt
-            .query_map(params![cutoff], |row| {
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -251,6 +371,14 @@ impl Database {
     }
 
     /// Get completed tasks with their completion timestamp, block content, and page title.
+    /// Completed tasks in the last `days`, newest first.
+    ///
+    /// A completion event outlives the block it refers to, so these joins are
+    /// inner rather than outer on purpose: a `task_events` row whose block has
+    /// since been deleted has no text and no page to return to, and rendering it
+    /// produced a row showing nothing but a timestamp that could not be clicked.
+    /// The daily counts apply the same filter, so the heat map never claims
+    /// completions the list is unable to show.
     pub fn get_completed_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String)>> {
         let conn = self.conn()?;
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
@@ -259,8 +387,8 @@ impl Database {
                 SELECT te.timestamp as ts, COALESCE(b.content, '') as content,
                        COALESCE(p.title, '') as title, te.block_id as block_id
                 FROM task_events te
-                LEFT JOIN blocks b ON b.id = te.block_id
-                LEFT JOIN pages p ON p.id = b.page_id
+                JOIN blocks b ON b.id = te.block_id
+                JOIN pages p ON p.id = b.page_id
                 WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
               UNION ALL
                 SELECT t.updated_at as ts, b.content, p.title, t.block_id
@@ -299,7 +427,7 @@ impl Database {
                     COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title,
                     t.state,
-                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    LOWER(COALESCE(t.priority, json_extract(b.properties, '$.priority'), '')) as priority,
                     t.scheduled_date,
                     t.deadline_date,
                     t.updated_at
@@ -307,9 +435,16 @@ impl Database {
              LEFT JOIN blocks b ON b.id = t.block_id
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO','DOING','NOW','LATER')
+             -- Both spellings: `[#A]`/`[#B]`/`[#C]` written into the markdown,
+             -- and the older `priority:: high` block property. Without the
+             -- letter arms every task fell through to the default and the sort
+             -- silently did nothing.
              ORDER BY CASE priority
+                        WHEN 'a' THEN 0
                         WHEN 'urgent' THEN 0
+                        WHEN 'b' THEN 1
                         WHEN 'high' THEN 1
+                        WHEN 'c' THEN 2
                         WHEN 'medium' THEN 2
                         WHEN 'low' THEN 3
                         ELSE 4
@@ -400,7 +535,7 @@ impl Database {
                     COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title,
                     t.state,
-                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    LOWER(COALESCE(t.priority, json_extract(b.properties, '$.priority'), '')) as priority,
                     t.scheduled_date,
                     t.deadline_date,
                     t.updated_at
@@ -409,9 +544,16 @@ impl Database {
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO','DOING','NOW','LATER')
              {}
+             -- Both spellings: `[#A]`/`[#B]`/`[#C]` written into the markdown,
+             -- and the older `priority:: high` block property. Without the
+             -- letter arms every task fell through to the default and the sort
+             -- silently did nothing.
              ORDER BY CASE priority
+                        WHEN 'a' THEN 0
                         WHEN 'urgent' THEN 0
+                        WHEN 'b' THEN 1
                         WHEN 'high' THEN 1
+                        WHEN 'c' THEN 2
                         WHEN 'medium' THEN 2
                         WHEN 'low' THEN 3
                         ELSE 4
@@ -438,4 +580,202 @@ fn row_to_assistant_task(row: &rusqlite::Row) -> rusqlite::Result<AssistantTaskR
         deadline_date: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+/// One open task, with everything the Tasks page needs to place it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OpenTaskRow {
+    pub block_id: String,
+    pub content: String,
+    pub page_title: String,
+    pub state: String,
+    pub priority: Option<String>,
+    pub scheduled_date: Option<String>,
+    pub scheduled_time: Option<String>,
+    pub deadline_date: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Flow metrics for the Tasks page.
+///
+/// Deliberately no streak and no procrastination score. Both were considered
+/// and rejected on the evidence: GitHub dropped its streak counter in 2016
+/// after burnout reports, and a visible "procrastination" number is a shame
+/// metric that drives avoidance rather than action. The same insight is here,
+/// framed as elapsed time — how long work waits, and how long it takes once
+/// started — which is actionable without keeping score against the reader.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TaskFlowStats {
+    /// Completions per day over the last 7 days, and the 7 before it.
+    pub throughput_7d: f64,
+    pub throughput_prev_7d: f64,
+    /// Completions per week, oldest first, for a sparkline.
+    pub weekly_completions: Vec<i64>,
+    /// Median time from starting a task to finishing it, in ms.
+    pub median_cycle_ms: Option<i64>,
+    /// Median time from a task appearing to being started, in ms.
+    pub median_wait_ms: Option<i64>,
+    /// Of tasks with a deadline that are finished, the share finished by it.
+    pub on_time_rate: Option<f64>,
+    /// Age of the longest-open task, in days.
+    pub oldest_open_days: Option<i64>,
+    pub open_count: i64,
+    pub done_count: i64,
+    /// Completions per page, biggest first.
+    pub by_page: Vec<(String, i64)>,
+}
+
+fn median(mut values: Vec<i64>) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+impl Database {
+    /// Every open task, with dates and priority, for grouping in the UI.
+    pub fn list_open_task_rows(&self) -> Result<Vec<OpenTaskRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.block_id, COALESCE(b.content, ''), COALESCE(p.title, ''), t.state,
+                    t.priority, t.scheduled_date, t.scheduled_time, t.deadline_date,
+                    t.created_at, t.updated_at
+             FROM tasks t
+             JOIN blocks b ON b.id = t.block_id
+             LEFT JOIN pages p ON p.id = b.page_id
+             WHERE t.state IN ('TODO','DOING','NOW','LATER')",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(OpenTaskRow {
+                    block_id: row.get(0)?,
+                    content: row.get(1)?,
+                    page_title: row.get(2)?,
+                    state: row.get(3)?,
+                    priority: row.get(4)?,
+                    scheduled_date: row.get(5)?,
+                    scheduled_time: row.get(6)?,
+                    deadline_date: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Flow metrics derived from the task rows and their transition history.
+    pub fn task_flow_stats(&self, weeks: i64) -> Result<TaskFlowStats> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        let day = 24 * 60 * 60 * 1000i64;
+
+        let count_done_between = |from: i64, to: i64| -> Result<i64> {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM tasks
+                 WHERE state = 'DONE' AND closed_at IS NOT NULL
+                   AND closed_at >= ?1 AND closed_at < ?2",
+                params![from, to],
+                |r| r.get(0),
+            )?)
+        };
+
+        let last7 = count_done_between(now - 7 * day, now)?;
+        let prev7 = count_done_between(now - 14 * day, now - 7 * day)?;
+
+        let mut weekly_completions = Vec::new();
+        for w in (0..weeks).rev() {
+            weekly_completions.push(count_done_between(now - (w + 1) * 7 * day, now - w * 7 * day)?);
+        }
+
+        // Cycle time: first move into active work, through to completion.
+        // Read from the transition log rather than the file so a task edited
+        // elsewhere still counts.
+        let mut cycle_stmt = conn.prepare(
+            "SELECT t.closed_at - MIN(e.timestamp)
+             FROM tasks t
+             JOIN task_events e ON e.block_id = t.block_id
+             WHERE t.state = 'DONE' AND t.closed_at IS NOT NULL
+               AND e.to_state IN ('DOING','NOW')
+             GROUP BY t.block_id
+             HAVING t.closed_at > MIN(e.timestamp)",
+        )?;
+        let cycles: Vec<i64> = cycle_stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Wait time: how long a task sat before anyone started it.
+        let mut wait_stmt = conn.prepare(
+            "SELECT MIN(e.timestamp) - t.created_at
+             FROM tasks t
+             JOIN task_events e ON e.block_id = t.block_id
+             WHERE e.to_state IN ('DOING','NOW')
+             GROUP BY t.block_id
+             HAVING MIN(e.timestamp) > t.created_at",
+        )?;
+        let waits: Vec<i64> = wait_stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Of finished tasks that had a deadline, how many landed by it. The
+        // deadline is a date, so a task closed any time that day counts.
+        let (with_deadline, on_time): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN date(closed_at / 1000, 'unixepoch') <= deadline_date
+                             THEN 1 ELSE 0 END)
+             FROM tasks
+             WHERE state = 'DONE' AND closed_at IS NOT NULL AND deadline_date IS NOT NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        )?;
+
+        let oldest_open: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(created_at) FROM tasks
+                 WHERE state IN ('TODO','DOING','NOW','LATER')",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or(None);
+
+        let open_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE state IN ('TODO','DOING','NOW','LATER')",
+            [],
+            |r| r.get(0),
+        )?;
+        let done_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE state = 'DONE'",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let mut page_stmt = conn.prepare(
+            "SELECT COALESCE(p.title, ''), COUNT(*) as n
+             FROM tasks t
+             JOIN blocks b ON b.id = t.block_id
+             JOIN pages p ON p.id = b.page_id
+             WHERE t.state = 'DONE' AND t.closed_at IS NOT NULL AND t.closed_at >= ?1
+             GROUP BY p.title
+             ORDER BY n DESC
+             LIMIT 8",
+        )?;
+        let by_page: Vec<(String, i64)> = page_stmt
+            .query_map(params![now - weeks * 7 * day], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(TaskFlowStats {
+            throughput_7d: last7 as f64 / 7.0,
+            throughput_prev_7d: prev7 as f64 / 7.0,
+            weekly_completions,
+            median_cycle_ms: median(cycles),
+            median_wait_ms: median(waits),
+            on_time_rate: (with_deadline > 0).then(|| on_time as f64 / with_deadline as f64),
+            oldest_open_days: oldest_open.map(|c| (now - c) / day),
+            open_count,
+            done_count,
+            by_page,
+        })
+    }
 }

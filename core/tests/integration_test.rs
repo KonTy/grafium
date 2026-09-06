@@ -336,3 +336,158 @@ fn test_backfill_properties() {
     let genres = db.get_property_values("genre", "page").unwrap();
     assert_eq!(genres, vec!["fiction"]);
 }
+
+/// A card is reviewed away from the page it came from, but it can refer to
+/// media stored beside that page. The review query therefore carries the
+/// owning page's file path so those references still resolve.
+#[test]
+fn test_flashcards_due_carry_their_page_path() {
+    let db = Database::in_memory().unwrap();
+
+    let page = db.create_page("mybooks/coolbook/terms", false).unwrap();
+    db.set_page_file_path(&page.id, "pages/mybooks/coolbook/terms.md")
+        .unwrap();
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "![cover](assets/cover.png) :: the cover #flashcard",
+            BlockType::Flashcard,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    db.upsert_flashcard(&block.id, "![cover](assets/cover.png)", "the cover", &[])
+        .unwrap();
+
+    let due = db.list_flashcards_due(None, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0].page_file_path.as_deref(),
+        Some("pages/mybooks/coolbook/terms.md")
+    );
+}
+
+/// A page that exists only because something linked to it has no file on disk
+/// yet. Its cards must still come up for review; they simply have no page
+/// directory to resolve media against.
+#[test]
+fn test_flashcards_due_survive_a_page_with_no_file() {
+    let db = Database::in_memory().unwrap();
+
+    let page = db.create_page("linked-but-never-opened", false).unwrap();
+    assert_eq!(page.file_path, None);
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "front :: back #flashcard",
+            BlockType::Flashcard,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let card = db
+        .upsert_flashcard(&block.id, "front", "back", &[])
+        .unwrap();
+
+    let due = db.list_flashcards_due(None, 10).unwrap();
+    assert_eq!(due.len(), 1, "the card must still come up for review");
+    assert_eq!(due[0].id, card.id);
+    assert_eq!(due[0].page_file_path, None);
+}
+
+/// Media is referenced from more places than block markdown, and "unreferenced"
+/// drives a delete button. A source missing from this list means real,
+/// irreplaceable media — a recorded voice note, a handwriting page — gets
+/// offered to the user as an orphan to delete.
+#[test]
+fn test_media_references_cover_more_than_block_text() {
+    let db = Database::in_memory().unwrap();
+    let page = db.create_page("Notes", false).unwrap();
+
+    // A block whose own text says nothing about the files hanging off it.
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "recorded a thought",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    db.register_audio_note(&block.id, "../assets/voice-note-2025.wav", 4200)
+        .unwrap();
+    db.register_ink_page(&block.id, "../assets/handwriting-page-1.svg")
+        .unwrap();
+
+    let refs = db.get_all_media_references().unwrap();
+    let mentions = |needle: &str| refs.iter().any(|r| r.contains(needle));
+
+    assert!(mentions("recorded a thought"), "block text is still included");
+    assert!(
+        mentions("voice-note-2025.wav"),
+        "an audio note's file must count as referenced: {refs:?}"
+    );
+    assert!(
+        mentions("handwriting-page-1.svg"),
+        "a handwriting page's file must count as referenced: {refs:?}"
+    );
+}
+
+/// A graph created before tasks carried times, repeats, priority and a
+/// completion timestamp must gain those columns on open, without losing rows.
+///
+/// The failure this guards against is silent: a missing column makes every
+/// task write fail at runtime, long after the upgrade looked successful.
+#[test]
+fn test_task_columns_are_added_to_an_older_database() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("grafium.db");
+
+    // Build the pre-widening shape by hand, with a row in it.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                block_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL DEFAULT 'TODO',
+                scheduled_date TEXT,
+                deadline_date TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO tasks (id, block_id, state, created_at, updated_at)
+            VALUES ('t1', 'b1', 'TODO', 1, 1);",
+        )
+        .unwrap();
+    }
+
+    Database::new(&path).unwrap();
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for column in [
+        "scheduled_time",
+        "deadline_time",
+        "repeat_rule",
+        "priority",
+        "closed_at",
+    ] {
+        let exists: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?1")
+            .unwrap()
+            .exists([column])
+            .unwrap();
+        assert!(exists, "column {column} must be added on open");
+    }
+
+    let kept: i64 = conn
+        .query_row("SELECT count(*) FROM tasks WHERE block_id = 'b1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "the existing task must survive the migration");
+
+    // Opening again must be a no-op rather than an error.
+    Database::new(&path).unwrap();
+}

@@ -1,6 +1,22 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
-  import { countPages, listPagesWindow, createPage, deletePage } from "../lib/api";
+  import PageTree from "./PageTree.svelte";
+  import { countPages, listPagesWindow, createPage, deletePage, getGraphInfo } from "../lib/api";
+  import {
+    getPageTree,
+    toPageTreeView,
+    withMissingCommandFallback,
+    type PageTreeSource,
+  } from "../lib/pageTree";
+  import {
+    ALL_PAGES_TREE_STORAGE_KEY,
+    ALL_PAGES_SORT_STORAGE_KEY,
+    graphScopedKey,
+    filterTreeByQuery,
+    countTreePages,
+    sortTree,
+    type PageTreeViewNode,
+  } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -20,6 +36,27 @@
   let total = $state(0);
   let sortByTitle = $state(false); // false = Recent (updated_at), true = A-Z (title)
   let newPageTitle = $state("");
+  let viewMode = $state<"tree" | "list">("tree");
+  let treeSource = $state<PageTreeSource>("namespace");
+  let pageTree: PageTreeViewNode[] = $state([]);
+  let pageTreeAvailable: boolean | null = $state(null);
+  let pageTreeLoading = $state(false);
+  let pageTreeError = $state("");
+  let pageTreeRequest = 0;
+
+  /// Free-text filter over the tree.
+  ///
+  /// Scoped to the tree deliberately: the list view is virtualized, fetching
+  /// only the rows around the viewport, so filtering it client-side would
+  /// silently search a fraction of the graph and report "no matches" for pages
+  /// that exist. The tree holds every page, so filtering it is a real search.
+  let filterQuery = $state("");
+  // Sorted first, then filtered. Filtering preserves order, so ordering the
+  // whole tree once per sort change beats re-sorting the filtered result on
+  // every keystroke — the sort is the expensive half.
+  let sortedTree = $derived(sortTree(pageTree, sortByTitle ? "name" : "recent"));
+  let visibleTree = $derived(filterTreeByQuery(sortedTree, filterQuery));
+  let filteredCount = $derived(countTreePages(visibleTree));
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
   // updates as windows stream in.
@@ -43,6 +80,68 @@
 
   $effect(() => {
     void refreshCount();
+  });
+
+  /// Storage keys are scoped to the open graph — an expansion path is only
+  /// meaningful inside the graph it came from.
+  let graphPath: string | null = $state(null);
+  /// Whether we have heard back about which graph is open at all.
+  ///
+  /// Distinct from `graphPath === null`, which is a real answer meaning "no
+  /// path". Until this flips, the scoped key is not yet knowable and anything
+  /// keyed on it would be reading and writing an unscoped key shared by every
+  /// graph.
+  let graphResolved = $state(false);
+  $effect(() => {
+    void getGraphInfo()
+      .then((info) => { graphPath = info.path; })
+      .catch(() => { graphPath = null; })
+      .finally(() => { graphResolved = true; });
+  });
+
+  // Restored per graph: the order you browse in is a lasting preference, and
+  // resetting it on every launch would undo the choice each time.
+  let sortStorageKey = $derived(graphScopedKey(ALL_PAGES_SORT_STORAGE_KEY, graphPath));
+  let restoredSortFor: string | null = $state(null);
+  $effect(() => {
+    // Nothing before the graph is known: restoring against the unscoped key
+    // would apply one graph's preference to another, and would then be
+    // overwritten a moment later when the real key arrives — silently
+    // reverting a choice made in between.
+    if (!graphResolved) return;
+    const key = sortStorageKey;
+    if (restoredSortFor === key) return;
+    restoredSortFor = key;
+    try {
+      const saved = window.localStorage.getItem(key);
+      const restored = saved === "name";
+      if ((saved === "name" || saved === "recent") && restored !== sortByTitle) {
+        sortByTitle = restored;
+        // Any rows already fetched came back in the other order.
+        resetWindows();
+      }
+    } catch {
+      // Ignore an unreadable store and keep the default.
+    }
+  });
+
+  $effect(() => {
+    const source = treeSource;
+    if (viewMode !== "tree") return;
+    void loadPageTree(source);
+  });
+
+  // The sidebar listens for this too. All Pages currently reloads on mount and
+  // handles its own create/delete, so today it is always fresh — but it only
+  // *dispatches* the event, and would silently show a stale tree the moment it
+  // stays mounted beside an editor. Listening costs nothing and removes the
+  // trap rather than leaving it for whoever changes the routing.
+  $effect(() => {
+    const refreshTree = () => {
+      if (viewMode === "tree" && pageTreeAvailable !== false) void loadPageTree(treeSource);
+    };
+    window.addEventListener("page-tree-refresh", refreshTree);
+    return () => window.removeEventListener("page-tree-refresh", refreshTree);
   });
 
   // Track scroll/resize of the enclosing .main-content scroller.
@@ -108,6 +207,31 @@
     }
   }
 
+  async function loadPageTree(source: PageTreeSource) {
+    const request = ++pageTreeRequest;
+    pageTreeLoading = true;
+    pageTreeError = "";
+    pageTree = [];
+    try {
+      const result = await withMissingCommandFallback(
+        () => getPageTree(source),
+        [],
+      );
+      if (request !== pageTreeRequest || source !== treeSource) return;
+      pageTreeAvailable = result.available;
+      pageTree = result.available ? toPageTreeView(result.value, source) : [];
+      if (!result.available) viewMode = "list";
+    } catch (error) {
+      if (request !== pageTreeRequest || source !== treeSource) return;
+      pageTreeAvailable = true;
+      pageTree = [];
+      pageTreeError = String(error);
+      console.warn(`[page-tree] Failed to load ${source} tree:`, error);
+    } finally {
+      if (request === pageTreeRequest) pageTreeLoading = false;
+    }
+  }
+
   function resetWindows() {
     rows.clear();
     requested.clear();
@@ -118,6 +242,11 @@
     if (byTitle === sortByTitle) return;
     sortByTitle = byTitle;
     resetWindows();
+    try {
+      window.localStorage.setItem(sortStorageKey, byTitle ? "name" : "recent");
+    } catch {
+      // A full or disabled store only costs the preference, not the sort.
+    }
   }
 
   async function handleCreatePage() {
@@ -127,20 +256,28 @@
     newPageTitle = "";
     resetWindows();
     await refreshCount();
+    if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
   async function handleDeletePage(page: Page) {
     await deletePage(page.id);
     resetWindows();
     await refreshCount();
+    if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") handleCreatePage();
   }
 
-  function fmtDate(ts: number): string {
-    return new Date(ts).toLocaleDateString();
+  function fmtDate(ts: number | string): string {
+    const value = typeof ts === "number" ? ts : Number(ts);
+    if (!Number.isFinite(value) || value <= 0) return "—";
+    const milliseconds = value < 1e12 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString();
   }
 </script>
 
@@ -164,15 +301,119 @@
     <button onclick={() => onNavigate("__import_media__")} class="btn-import-media" title="Import from video/audio (URL or file)">
       Import Media
     </button>
-    <div class="sort-controls">
-      <button class="sort-btn" class:active={!sortByTitle} onclick={() => setSort(false)}>Recent</button>
-      <button class="sort-btn" class:active={sortByTitle} onclick={() => setSort(true)}>A-Z</button>
+  </div>
+
+  <div class="browser-controls">
+    <div class="control-group" role="group" aria-label="Page browser view">
+      <button
+        class="mode-btn"
+        class:active={viewMode === "tree"}
+        aria-pressed={viewMode === "tree"}
+        disabled={pageTreeAvailable === false}
+        title={pageTreeAvailable === false ? "Page trees are unavailable in this build" : undefined}
+        onclick={() => { viewMode = "tree"; }}
+      >
+        Tree
+      </button>
+      <button
+        class="mode-btn"
+        class:active={viewMode === "list"}
+        aria-pressed={viewMode === "list"}
+        onclick={() => { viewMode = "list"; }}
+      >
+        List
+      </button>
+    </div>
+
+    {#if viewMode === "tree"}
+      <div class="control-group" role="group" aria-label="Tree source">
+        <button
+          class="mode-btn"
+          class:active={treeSource === "namespace"}
+          aria-pressed={treeSource === "namespace"}
+          onclick={() => { treeSource = "namespace"; }}
+        >
+          Namespace
+        </button>
+        <button
+          class="mode-btn"
+          class:active={treeSource === "tags"}
+          aria-pressed={treeSource === "tags"}
+          onclick={() => { treeSource = "tags"; }}
+        >
+          Tags
+        </button>
+      </div>
+    {/if}
+
+    <div class="control-group" role="group" aria-label="Sort order">
+      <button
+        class="mode-btn"
+        class:active={!sortByTitle}
+        aria-pressed={!sortByTitle}
+        title="Folders first, then newest. A folder counts as its most recently edited page."
+        onclick={() => setSort(false)}
+      >
+        Recent
+      </button>
+      <button
+        class="mode-btn"
+        class:active={sortByTitle}
+        aria-pressed={sortByTitle}
+        title="Folders first, then alphabetical"
+        onclick={() => setSort(true)}
+      >
+        A–Z
+      </button>
     </div>
   </div>
 
   {#if total === 0}
     <div class="empty-state">
       <p>No pages yet. Create one above!</p>
+    </div>
+  {:else}
+    <!-- Tree view only — see `filterQuery`. -->
+    <div class="page-filter" hidden={viewMode !== "tree"}>
+      <input
+        type="search"
+        class="page-filter-input"
+        placeholder="Filter pages…"
+        aria-label="Filter pages"
+        bind:value={filterQuery}
+      />
+      {#if filterQuery.trim()}
+        <span class="page-filter-count" aria-live="polite">
+          {filteredCount} match{filteredCount === 1 ? "" : "es"}
+        </span>
+      {/if}
+    </div>
+  {/if}
+
+  {#if total === 0}
+    <!-- handled above -->
+  {:else if viewMode === "tree"}
+    <div class="tree-browser" aria-busy={pageTreeLoading}>
+      {#if pageTreeLoading && pageTree.length === 0}
+        <p class="tree-message">Loading {treeSource === "namespace" ? "namespace" : "tag"} tree…</p>
+      {:else if pageTreeError}
+        <div class="tree-error" role="alert">
+          <p>Could not load the {treeSource === "namespace" ? "namespace" : "tag"} tree.</p>
+          <button type="button" onclick={() => loadPageTree(treeSource)}>Try again</button>
+        </div>
+      {:else}
+        <PageTree
+          nodes={visibleTree}
+          columns
+          revealToken={filterQuery.trim()}
+          {onNavigate}
+          storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
+          ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
+          emptyText={treeSource === "namespace"
+            ? "No page namespaces yet. Use / in a page title to build one."
+            : "No tagged pages yet."}
+        />
+      {/if}
     </div>
   {:else}
     <div class="pages-spacer" bind:this={spacerEl} style="height: {total * ROW_H}px;">
@@ -198,10 +439,21 @@
 </div>
 
 <style>
+  /* Wide, because this is an index to scan rather than prose to read: at 920px
+     a few hundred pages became one long column with most of the window empty.
+     Still capped so the tree does not stretch into unreadably long rows on an
+     ultrawide display. */
   .all-pages {
-    max-width: 800px;
+    max-width: 1680px;
     margin: 0 auto;
     padding: 40px 24px;
+  }
+
+  /* The controls are single fields, so they follow the old measure instead of
+     growing with the page. */
+  .controls,
+  .page-filter {
+    max-width: 920px;
   }
 
   .header {
@@ -229,6 +481,7 @@
     align-items: center;
     margin-bottom: 20px;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .new-page {
@@ -248,14 +501,22 @@
     outline: none;
   }
 
+  /* A border-colour change alone is easy to miss, and `outline: none` above
+     removed the only other cue. Keyboard focus gets a real ring. */
+  .new-page-input:focus-visible {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
   .new-page-input:focus {
     border-color: var(--accent);
   }
 
   .btn-create {
     padding: 8px 16px;
-    background: var(--accent);
-    color: white;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
     border: none;
     border-radius: 6px;
     font-size: 14px;
@@ -264,12 +525,27 @@
   }
 
   .btn-create:hover {
-    opacity: 0.9;
+    background: var(--btn-primary-hover);
   }
 
-  .sort-controls {
+  .browser-controls {
     display: flex;
-    gap: 4px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .control-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-secondary);
   }
 
   .btn-import-media {
@@ -290,20 +566,104 @@
     border-color: var(--accent);
   }
 
-  .sort-btn {
+  .mode-btn {
     padding: 6px 12px;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 4px;
+    min-height: 32px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
     color: var(--text-secondary);
     font-size: 12px;
     cursor: pointer;
   }
 
-  .sort-btn.active {
+  .mode-btn.active {
     background: var(--bg-active);
     color: var(--text-primary);
-    border-color: var(--accent);
+  }
+
+  .mode-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+
+  .mode-btn:focus-visible,
+  .tree-error button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .mode-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+
+  .page-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 10px;
+  }
+
+  .page-filter-input {
+    flex: 1;
+    padding: 7px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .page-filter-input:focus-visible {
+    outline: 2px solid var(--text-link);
+    outline-offset: 1px;
+  }
+
+  .page-filter-count {
+    flex: none;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .tree-browser {
+    min-height: 160px;
+  }
+
+  .tree-message,
+  .tree-error {
+    margin: 0;
+    padding: 26px 10px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .tree-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .tree-error p {
+    margin: 0;
+  }
+
+  .tree-error button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--btn-bg);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .tree-error button:hover {
+    background: var(--btn-bg-hover);
+    color: var(--text-primary);
   }
 
   .pages-spacer {
@@ -374,11 +734,18 @@
     font-size: 18px;
     cursor: pointer;
     padding: 2px 6px;
+    min-width: 32px;
+    min-height: 32px;
     border-radius: 4px;
     opacity: 0;
   }
 
-  .page-row:hover .btn-delete {
+  /* `:focus-within` matters as much as `:hover` here: the button is revealed
+     on hover only, so a keyboard user used to tab onto a delete control that
+     was invisible — focus landed on something they could not see, one keypress
+     away from deleting a page. */
+  .page-row:hover .btn-delete,
+  .page-row:focus-within .btn-delete {
     opacity: 1;
   }
 
@@ -387,9 +754,46 @@
     color: var(--danger);
   }
 
+  .btn-delete:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--danger, var(--accent));
+    outline-offset: 1px;
+  }
+
   .empty-state {
     text-align: center;
     padding: 60px 20px;
     color: var(--text-muted);
+  }
+
+  @media (max-width: 640px) {
+    .all-pages {
+      padding: 24px 14px 88px;
+    }
+
+    .controls {
+      align-items: stretch;
+    }
+
+    .new-page {
+      min-width: 100%;
+    }
+
+    .btn-import-media {
+      flex: 1;
+    }
+
+    .browser-controls {
+      align-items: stretch;
+    }
+
+    .control-group {
+      flex: 1;
+    }
+
+    .mode-btn {
+      flex: 1;
+      padding-inline: 8px;
+    }
   }
 </style>

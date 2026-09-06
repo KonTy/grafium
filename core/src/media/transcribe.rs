@@ -38,18 +38,38 @@ impl WhisperTranscriber {
     /// `"en"`) to force transcription in that language, or `None` to let
     /// whisper.cpp auto-detect it.
     pub fn load(model_path: &Path, language: Option<&str>) -> Result<Self> {
-        // whisper.cpp/GGML log verbosely to stderr by default, which would
-        // corrupt a raw-mode terminal (e.g. the TUI). Route logs through
-        // `whisper-rs`'s hooks instead — since we don't enable the
-        // `log_backend`/`tracing_backend` features, this silences them.
-        static INSTALL_LOGGING_HOOKS: std::sync::Once = std::sync::Once::new();
-        INSTALL_LOGGING_HOOKS.call_once(whisper_rs::install_logging_hooks);
+        // Deliberately do NOT install whisper-rs's silent logging hooks: they
+        // hide the real reason `WhisperContext::new_with_params` fails (bad
+        // model file, incompatible GGML backend, OOM, ...). The desktop app
+        // is a GUI, not a TUI, so stderr is safe to write to.
+        let model_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+        tracing::info!(
+            path = %model_path.display(),
+            size_bytes = model_size,
+            language = ?language,
+            "loading whisper model — whisper.cpp/GGML logs follow on stderr"
+        );
 
-        let ctx = WhisperContext::new_with_params(
+        let ctx = match WhisperContext::new_with_params(
             &*model_path.to_string_lossy(),
             WhisperContextParameters::default(),
-        )
-        .map_err(|e| CoreError::Other(format!("failed to load whisper model: {e}")))?;
+        ) {
+            Ok(ctx) => {
+                tracing::info!(path = %model_path.display(), "whisper model loaded");
+                ctx
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %model_path.display(),
+                    error = ?e,
+                    "whisper context creation failed"
+                );
+                return Err(CoreError::Other(format!(
+                    "failed to load whisper model at {}: {e:?}",
+                    model_path.display()
+                )));
+            }
+        };
         Ok(Self {
             ctx,
             language: language.map(str::to_string),

@@ -17,6 +17,14 @@ pub struct CompletionOptions {
     pub system_prompt: Option<String>,
     /// Stop sequences.
     pub stop: Option<Vec<String>>,
+    /// Cooperative cancellation flag. When set to `true` mid-generation, a
+    /// provider that supports it (currently the local llama.cpp provider)
+    /// stops the token loop and returns what it has so far, so a slow local
+    /// generation can be aborted from the UI. Skipped for (de)serialization —
+    /// it's a live in-process handle, never part of persisted config — and
+    /// ignored by remote providers, which return in one shot anyway.
+    #[serde(skip)]
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for CompletionOptions {
@@ -26,6 +34,7 @@ impl Default for CompletionOptions {
             temperature: Some(0.3),
             system_prompt: None,
             stop: None,
+            cancel: None,
         }
     }
 }
@@ -85,6 +94,32 @@ pub struct ChunkEmbedding {
 // type instead of each module declaring its own `Pin<Box<dyn Future<...>>>`.
 pub use crate::async_util::BoxFuture;
 
+/// Describes whether local inference is actually using the GPU, so the UI can
+/// warn the user when a model silently fell back to CPU (a 5–10× slowdown that
+/// otherwise presents as a hang). Only the embedded local provider reports
+/// this; remote providers return `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceleratorStatus {
+    /// Whether this build can offload to a GPU at all (compiled with a GPU
+    /// backend, e.g. `llm-local-vulkan`). When `false`, running on CPU is
+    /// expected and the UI should not warn about it.
+    pub gpu_supported: bool,
+    /// Whether inference is actually running with GPU-offloaded layers
+    /// (`gpu_supported` and a non-zero effective `gpu_layers`).
+    pub on_gpu: bool,
+    /// Effective layers requested for GPU offload. The sentinel value for
+    /// "all layers" is large (see `OFFLOAD_ALL_LAYERS`); `0` means CPU-only.
+    pub gpu_layers: u32,
+    /// Free VRAM observed at load time, in MiB — the figure that drove the
+    /// CPU/GPU decision. `None` if it couldn't be queried (no `nvidia-smi`).
+    pub free_vram_mib_at_load: Option<u64>,
+    /// The model file's on-disk size in MiB, for the "needs ~X MiB" message.
+    pub model_mib: Option<u64>,
+    /// Whether `gpu_layers` was pinned explicitly in config (so the free-VRAM
+    /// heuristic was bypassed). An explicit setting always wins.
+    pub explicit: bool,
+}
+
 /// LLM provider trait — abstracts over Ollama, OpenAI, Anthropic, etc.
 pub trait LlmProvider: Send + Sync {
     /// Generate a completion from a prompt.
@@ -99,6 +134,27 @@ pub trait LlmProvider: Send + Sync {
 
     /// Check if the provider is available (connection test).
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
+
+    /// The model's context window in tokens, if the provider can report it.
+    ///
+    /// Used by the knowledge engine to size the retrieved-context budget so
+    /// the assembled prompt cannot overflow the model's window (embedded
+    /// llama.cpp hard-errors when the prompt token count reaches `n_ctx`).
+    /// Remote providers that don't expose this cheaply return `None`, and
+    /// callers fall back to a conservative default.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// Whether this provider's model is a "reasoning" model that emits a
+    /// `<think>…</think>` chain-of-thought before answering. Callers use this
+    /// to request non-thinking mode where possible and to size the output
+    /// token budget so the model still has room to answer *after* it thinks.
+    /// Defaults to `false`; only the local llama.cpp provider inspects the
+    /// model's chat template to detect it.
+    fn supports_thinking(&self) -> bool {
+        false
+    }
 
     /// Same as `complete`, but reports incremental output through `on_token`
     /// as it's produced, for callers that want to show the model "thinking"
@@ -123,6 +179,13 @@ pub trait LlmProvider: Send + Sync {
             Ok(text)
         })
     }
+
+    /// Reports whether this provider is actually using GPU acceleration, so
+    /// the UI can warn about a silent CPU fallback. Only the embedded local
+    /// provider knows this; all others return `None` (not applicable).
+    fn accelerator_status(&self) -> Option<AcceleratorStatus> {
+        None
+    }
 }
 
 /// Embedding model trait — separate from LLM because embedding models are different.
@@ -131,11 +194,53 @@ pub trait Embedder: Send + Sync {
     /// Returns one vector per input text.
     fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>>;
 
+    /// Embed a batch of *documents* (the indexed side of retrieval).
+    ///
+    /// Asymmetric embedding models (e.g. Nomic's `search_document:` /
+    /// `search_query:` convention, or E5's `passage:` / `query:`) need the
+    /// document and query sides prefixed differently or retrieval quality
+    /// drops materially. The default delegates to [`embed`] for models that
+    /// don't distinguish the two; providers that do should override both this
+    /// and [`embed_query`].
+    fn embed_documents<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        self.embed(texts)
+    }
+
+    /// Embed a single search *query* (the lookup side of retrieval). See
+    /// [`embed_documents`] for why query and document sides differ.
+    fn embed_query<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            let texts = [text.to_string()];
+            let mut out = self.embed_queries(&texts).await?;
+            out.pop().ok_or_else(|| {
+                crate::error::CoreError::Other("embedder returned no vector for query".into())
+            })
+        })
+    }
+
+    /// Embed a batch of search *queries* (the lookup side of retrieval).
+    /// Same asymmetry rationale as [`embed_documents`]; the default delegates
+    /// to [`embed`].
+    fn embed_queries<'a>(&'a self, texts: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>>> {
+        self.embed(texts)
+    }
+
     /// Embedding dimension (needed for vector store initialization).
     fn dimension(&self) -> usize;
 
     /// Model name for logging.
     fn model_name(&self) -> &str;
+
+    /// Stable identifier for anything that affects the *stored vector* but is
+    /// not part of the hashed chunk text — chiefly the asymmetric document
+    /// prefix this model family applies. It is folded into the content hash so
+    /// that changing the prefix scheme (or switching to a family with a
+    /// different one) invalidates previously-embedded chunks and forces a
+    /// rewrite, rather than silently running prefixed queries against
+    /// unprefixed documents. Default: empty (no prefix).
+    fn embedding_scheme_id(&self) -> String {
+        String::new()
+    }
 }
 
 /// Vector store trait — abstracts over LanceDB, Qdrant, SQLite-vec, etc.
@@ -171,4 +276,19 @@ pub trait VectorStore: Send + Sync {
 
     /// Total number of stored vectors.
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<usize>>;
+
+    /// Number of stored vectors belonging to a specific graph.
+    fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>>;
+
+    /// List `(chunk_id, content_hash)` for every stored chunk in a graph, so a
+    /// fresh process can rebuild its in-memory hash cache from vectors that
+    /// already exist on disk and avoid needlessly re-embedding unchanged
+    /// content after a restart. Default: empty (no restore available).
+    fn list_content_hashes<'a>(
+        &'a self,
+        graph_id: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, String)>>> {
+        let _ = graph_id;
+        Box::pin(async move { Ok(Vec::new()) })
+    }
 }

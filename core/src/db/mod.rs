@@ -1,5 +1,6 @@
 mod audio;
 mod blocks;
+mod collections;
 mod favorites;
 mod flashcards;
 mod graph_support;
@@ -8,13 +9,17 @@ mod links;
 mod pages;
 mod properties;
 mod raw_query;
+mod retrieval;
 mod schema;
-mod tasks;
+pub mod tasks;
 
 use crate::error::Result;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
+
+pub(crate) use blocks::chat_salient_terms;
+pub use retrieval::BlockPageMeta;
 
 struct FunctionCustomizer;
 
@@ -139,6 +144,31 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(timestamp DESC);
             ")?;
         }
+
+        // Widen `tasks` for graphs created before it carried times, repeats,
+        // priority and a completion timestamp. Adding a nullable column is
+        // cheap and rewrites nothing, so this just runs every open.
+        for (column, decl) in [
+            ("scheduled_time", "TEXT"),
+            ("deadline_time", "TEXT"),
+            ("repeat_rule", "TEXT"),
+            ("priority", "TEXT"),
+            ("closed_at", "INTEGER"),
+        ] {
+            let exists = conn
+                .prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?1")
+                .and_then(|mut stmt| stmt.exists([column]))
+                .unwrap_or(true);
+            if !exists {
+                // A failure here must not stop the graph opening; the column is
+                // additive and the next launch tries again.
+                let _ = conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {column} {decl}"), []);
+            }
+        }
+        let _ = conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_closed ON tasks(closed_at) WHERE closed_at IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE priority IS NOT NULL;",
+        );
 
         // Backfill normalized properties if tables are empty but JSON blobs have data
         let prop_count: i64 = conn

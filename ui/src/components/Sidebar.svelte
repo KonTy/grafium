@@ -1,7 +1,13 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import {
+    pagesListCollections,
+    pageSetCollection,
+    getCollectionKind,
+    withMissingCommandFallback,
+  } from "../lib/pageTree";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
+  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
   import type { Page, PageSummary, Block } from "../lib/api";
   import type { SidebarSearchResult } from "../lib/sidebarSearch";
@@ -24,13 +30,17 @@
   let searchResults: SidebarSearchResult[] = $state([]);
   let showSearch = $state(false);
   let searchInputEl: HTMLInputElement | null = $state(null);
+  /// Storage keys are scoped to the open graph: an expansion path only means
+  /// something inside the graph it came from.
+  let graphPath: string | null = $state(null);
 
   // Context menu state
   interface ContextMenu {
     x: number;
     y: number;
-    page: Page;
+    page: Pick<Page, "id" | "title">;
     isFav: boolean;
+    collectionStatus: "page" | "collection" | "loading" | "unavailable" | "error";
   }
   let contextMenu: ContextMenu | null = $state(null);
 
@@ -40,8 +50,8 @@
 
   // Refresh recent pages whenever currentPage changes
   $effect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    currentPage;
+    const pageId = currentPage?.id;
+    if (!pageId) return;
     listRecentPages(10).then((p) => { recentPages = p; }).catch(() => {});
   });
 
@@ -56,23 +66,79 @@
     };
   });
 
+
   async function loadSidebar() {
-    try {
-      favorites = await listFavorites();
-    } catch { favorites = []; }
-    try {
-      recentPages = await listRecentPages(10);
-    } catch { recentPages = []; }
+    // Resolve which graph we're in before anything keyed to it is written.
+    graphPath = await getGraphInfo()
+      .then((info) => info.path)
+      .catch(() => null);
+    const [favoriteResult, recentResult] = await Promise.allSettled([
+      listFavorites(),
+      listRecentPages(10),
+    ]);
+    favorites = favoriteResult.status === "fulfilled" ? favoriteResult.value : [];
+    recentPages = recentResult.status === "fulfilled" ? recentResult.value : [];
   }
 
   function favSet(): Set<string> {
     return new Set(favorites.map((f) => f.id));
   }
 
-  function handlePageRightClick(e: MouseEvent, page: Page) {
+  function handlePageRightClick(e: MouseEvent, page: Pick<Page, "id" | "title">) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { x: e.clientX, y: e.clientY, page, isFav: favSet().has(page.id) };
+    contextMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      page,
+      isFav: favSet().has(page.id),
+      collectionStatus: "loading",
+    };
+    void loadContextCollectionStatus(page.id);
+  }
+
+  async function loadContextCollectionStatus(pageId: string) {
+    try {
+      const result = await withMissingCommandFallback(
+        () => pagesListCollections(),
+        [],
+      );
+      if (contextMenu?.page.id !== pageId) return;
+      const collection = result.value.find((entry) => entry.id === pageId);
+      contextMenu.collectionStatus = result.available
+        ? collection ? "collection" : "page"
+        : "unavailable";
+    } catch (error) {
+      if (contextMenu?.page.id !== pageId) return;
+      contextMenu.collectionStatus = "error";
+      console.warn("[collection] Failed to load page kind:", error);
+    }
+  }
+
+  async function handleToggleCollection() {
+    if (!contextMenu) return;
+    const { page, collectionStatus } = contextMenu;
+    if (
+      collectionStatus === "loading"
+      || collectionStatus === "unavailable"
+      || collectionStatus === "error"
+    ) return;
+
+    contextMenu.collectionStatus = "loading";
+    try {
+      await pageSetCollection(
+        page.id,
+        collectionStatus === "collection" ? null : "book",
+      );
+      contextMenu = null;
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+      window.dispatchEvent(new CustomEvent("page-collection-refresh", {
+        detail: { pageId: page.id },
+      }));
+    } catch (error) {
+      if (contextMenu?.page.id === page.id) contextMenu.collectionStatus = "error";
+      console.warn("[collection] Failed to update page kind:", error);
+    }
   }
 
   async function handleToggleFavorite() {
@@ -144,9 +210,25 @@
   }
 
   function handleSidebarGraphChanged() {
+    // Drop the outgoing graph's tree *synchronously*, before any await. The
+    // tree is a list of page titles, and navigation resolves a title against
+    // whatever graph is now open — so a leftover node clicked during the
+    // reload doesn't just show the wrong thing, it looks up a title that
+    // doesn't exist here and creates it. A stale row was therefore able to
+    // write a page into a graph it never belonged to.
+    invalidateGraphBoundState();
     void loadSidebar();
     resetSearchState();
     onGraphChanged();
+  }
+
+  /// Clears everything keyed to the graph that is being navigated away from.
+  /// Bumping the request counter also abandons any in-flight tree response,
+  /// which would otherwise land after the switch and repopulate the old data.
+  function invalidateGraphBoundState() {
+    favorites = [];
+    recentPages = [];
+    contextMenu = null;
   }
 
   $effect(() => {
@@ -252,7 +334,7 @@
         <path d="M12 20V4"></path>
         <path d="M6 20v-6"></path>
       </svg>
-      <span>Statistics</span>
+      <span>Tasks</span>
     </button>
     <button class="nav-item" onclick={() => onNavigate("__all_pages__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -284,7 +366,7 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
       </svg>
-      <span>Chatbot</span>
+      <span>Chat</span>
     </button>
     <button class="nav-item" onclick={() => onNavigate("__settings__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -369,6 +451,27 @@
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
           </svg>
           Add to Favorites
+        {/if}
+      </button>
+      <button
+        class="context-menu-item"
+        disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
+        onclick={handleToggleCollection}
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M2.25 3.25h4l1.25 1.5h6.25v8H2.25z" stroke-linejoin="round" />
+          <path d="M5 8h6M5 10.5h4" stroke-linecap="round" />
+        </svg>
+        {#if contextMenu.collectionStatus === "collection"}
+          Convert to Regular Page
+        {:else if contextMenu.collectionStatus === "loading"}
+          Loading Collection Status…
+        {:else if contextMenu.collectionStatus === "unavailable"}
+          Collections Unavailable
+        {:else if contextMenu.collectionStatus === "error"}
+          Collection Status Unavailable
+        {:else}
+          Mark as Book Collection
         {/if}
       </button>
     </div>
@@ -602,7 +705,7 @@
     background: var(--bg-sidebar);
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--bg-primary) 72%, transparent);
     padding: 4px;
     min-width: 170px;
   }
@@ -625,5 +728,10 @@
   .context-menu-item:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .context-menu-item:disabled {
+    color: var(--text-muted);
+    cursor: default;
   }
 </style>

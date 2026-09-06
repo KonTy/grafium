@@ -104,10 +104,23 @@ fn cached_transcriber(
         .model_ref
         .resolve(&models_dir, ModelKind::Whisper)
         .map_err(|e| e.to_string())?;
+    tracing::info!(
+        models_dir = %models_dir.display(),
+        configured_model = ?config.whisper.model_ref.model,
+        language = ?config.whisper.language,
+        resolved = %resolved_path.display(),
+        "resolved whisper model"
+    );
     let cache_key = (resolved_path, config.whisper.language.clone());
 
-    static CACHE: OnceLock<Mutex<Option<((PathBuf, Option<String>), Arc<grafium_core::media::WhisperTranscriber>)>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<
+        Mutex<
+            Option<(
+                (PathBuf, Option<String>),
+                Arc<grafium_core::media::WhisperTranscriber>,
+            )>,
+        >,
+    > = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().map_err(|e| e.to_string())?;
 
@@ -175,7 +188,13 @@ fn fetch_transcript_blocking(
     _media_config: &MediaConfig,
     _data_dir: &std::path::Path,
     on_progress: &mut dyn FnMut(&str),
-) -> Result<(grafium_core::media::Transcript, grafium_core::media::TranscriptSource), String> {
+) -> Result<
+    (
+        grafium_core::media::Transcript,
+        grafium_core::media::TranscriptSource,
+    ),
+    String,
+> {
     grafium_core::media::fetch_captions_with_progress(url, workdir, lang, on_progress)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {

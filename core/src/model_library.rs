@@ -45,6 +45,13 @@ pub enum ModelKind {
     /// `ai::providers::local_embedder::LocalEmbedder`, distinct from a
     /// general chat/completion LLM even though both ship as `.gguf` files.
     Embedding,
+    /// A cross-encoder reranker (e.g. `bge-reranker-v2-m3`). Superficially
+    /// looks like an embedding model (shares the `bge-` family prefix) but
+    /// produces relevance *scores* for (query, document) pairs, NOT the
+    /// sentence embedding vectors [`Embedding`] models produce. Feeding a
+    /// reranker into [`LocalEmbedder`] silently yields garbage vectors, so
+    /// it gets its own kind and is excluded from embedding auto-resolution.
+    Reranker,
     /// Didn't match any recognized naming convention.
     Unknown,
 }
@@ -66,16 +73,10 @@ pub fn default_models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("models")
 }
 
-/// Naming fragments whisper.cpp model releases always include somewhere in
-/// the file name (`ggml-base.en.bin`, `ggml-large-v3.bin`,
-/// `whisper-large-v3-q5_0.gguf`, ...).
-const WHISPER_SIZE_NAMES: &[&str] = &["tiny", "base", "small", "medium", "large-v"];
-
 /// Naming fragments the common local embedding model families always
-/// include somewhere in the file name. Checked *before* the whisper
-/// heuristic below since several of these families reuse whisper's generic
-/// size words (e.g. `bge-base-en-v1.5.gguf`, `gte-small.gguf`) — without
-/// this ordering those would be misclassified as whisper checkpoints.
+/// include somewhere in the file name. Checked before the whisper heuristic
+/// below since several of these families reuse whisper's generic size words
+/// (e.g. `bge-base-en-v1.5.gguf`, `gte-small.gguf`).
 const EMBEDDING_MARKERS: &[&str] = &[
     "embed",
     "bge-",
@@ -94,16 +95,33 @@ const EMBEDDING_MARKERS: &[&str] = &[
 /// Classifies a file name by the naming conventions its ecosystem uses:
 /// embedding models mention "embed" or one of a handful of well-known
 /// embedding family prefixes; whisper.cpp checkpoints are `ggml-*` or
-/// otherwise mention "whisper" or a whisper size name; llama.cpp
-/// quantizations are `*.gguf` (or the older `*.bin`) without those markers.
+/// otherwise explicitly mention "whisper"; llama.cpp quantizations are
+/// `*.gguf` (or the older `*.bin`) without those markers.
+///
+/// We intentionally do NOT use bare Whisper size words ("small", "base",
+/// "medium", ...) as classification signals — LLM naming widely reuses
+/// them (e.g. `Mistral-Small-3.2-24B`, `Qwen3-Small`, `phi-small`) and
+/// misclassifying an LLM as Whisper causes the auto-picker to feed a
+/// multi-GB LLM file into whisper.cpp and produce `Failed to create a new
+/// whisper context`.
 pub fn classify(file_name: &str) -> ModelKind {
     let lower = file_name.to_lowercase();
+    // Rerankers must be checked BEFORE the embedding markers: they share the
+    // `bge-` family prefix (e.g. `bge-reranker-v2-m3-Q8_0.gguf`) but are
+    // cross-encoders, not sentence-embedding models. Classifying one as
+    // `Embedding` would let the auto-picker feed it into `LocalEmbedder` and
+    // silently produce garbage vectors.
+    if lower.contains("rerank") {
+        return ModelKind::Reranker;
+    }
     if EMBEDDING_MARKERS.iter().any(|m| lower.contains(m)) {
         return ModelKind::Embedding;
     }
-    let looks_like_whisper = lower.starts_with("ggml-")
-        || lower.contains("whisper")
-        || WHISPER_SIZE_NAMES.iter().any(|s| lower.contains(s));
+    // Whisper checkpoints come from ggerganov's naming: `ggml-<size>.bin`
+    // or `ggml-<size>-q*.bin`. The upstream `whisper.cpp` repo distributes
+    // exactly this shape. Third-party quantizations always include the
+    // literal word "whisper".
+    let looks_like_whisper = lower.starts_with("ggml-") || lower.contains("whisper");
     if looks_like_whisper {
         ModelKind::Whisper
     } else if lower.ends_with(".gguf") || lower.ends_with(".bin") {
@@ -212,11 +230,70 @@ pub fn resolve_model(
         )));
     }
 
-    scan_models_dir(models_dir)?
+    let candidates: Vec<ModelInfo> = scan_models_dir(models_dir)?
         .into_iter()
-        .find(|m| m.kind == kind)
+        .filter(|m| m.kind == kind)
+        .collect();
+
+    // Only chat models are GPU-offloaded by this path, and only they are
+    // large enough for the choice to matter; anything else keeps the simple
+    // first-match behaviour.
+    let picked = if kind == ModelKind::Llm {
+        pick_best_llm(candidates, crate::ai::gpu_fit::detect_free_vram_bytes())
+    } else {
+        candidates.into_iter().next()
+    };
+
+    picked
         .map(|m| m.path)
         .ok_or_else(|| CoreError::NotFound(model_not_found_hint(models_dir, kind)))
+}
+
+/// Chooses which chat model to auto-load when the user hasn't configured one.
+///
+/// Previously this was simply "first match in alphabetical order", which is
+/// effectively random with respect to the only property that matters. On a
+/// real 16 GB machine holding eight GGUFs it selected a 5.9 GB vision model
+/// that emits its reasoning in Chinese, and the next alphabetical candidate
+/// was a 13.6 GB model that runs on the CPU at ~1.5 tok/s. Neither is a
+/// defensible zero-config default when a 2.4 GB model on the same box does
+/// 60-74 tok/s.
+///
+/// The rule: never auto-pick a model that can't run on the GPU if one that
+/// can is available, and among the models that do fit prefer the largest,
+/// since parameter count is the best size-only proxy for answer quality.
+/// `Tight` ranks below `Fits` but above CPU-bound, so a borderline model is
+/// only chosen when nothing fits comfortably.
+///
+/// When free VRAM can't be measured, this deliberately falls back to the
+/// historical alphabetical behaviour rather than guessing — an unmeasurable
+/// GPU shouldn't silently change which model a user's machine loads.
+fn pick_best_llm(
+    mut candidates: Vec<ModelInfo>,
+    free_vram_bytes: Option<u64>,
+) -> Option<ModelInfo> {
+    use crate::ai::gpu_fit::{assess_gpu_fit, GpuFit};
+
+    // No GPU reading available (non-NVIDIA, no `nvidia-smi`, unparsable
+    // output): keep the historical first-alphabetically pick. Returning
+    // `None` here instead would turn "can't measure VRAM" into "no model
+    // found", breaking auto-detect outright on those machines.
+    let Some(free) = free_vram_bytes else {
+        return candidates.into_iter().next();
+    };
+
+    // Ranks ascending so the best candidate sorts last: fit tier first, then
+    // size as the quality proxy within a tier.
+    candidates.sort_by_key(|m| {
+        let tier = match assess_gpu_fit(m.size_bytes, Some(free)) {
+            GpuFit::Fits => 3,
+            GpuFit::Tight => 2,
+            GpuFit::CpuOnly => 1,
+            GpuFit::Unknown => 0,
+        };
+        (tier, m.size_bytes)
+    });
+    candidates.pop()
 }
 
 /// A reference to a locally-managed model file, exactly as it's meant to
@@ -279,6 +356,11 @@ fn model_not_found_hint(models_dir: &Path, kind: ModelKind) -> String {
              Hugging Face) and either place it in that directory or import it from Settings.",
             models_dir.display()
         ),
+        ModelKind::Reranker => format!(
+            "No reranker model found in {}. Download a GGUF reranker (e.g. \
+             bge-reranker-v2-m3) and either place it in that directory or import it from Settings.",
+            models_dir.display()
+        ),
         ModelKind::Unknown => format!("No matching model found in {}.", models_dir.display()),
     }
 }
@@ -287,11 +369,98 @@ fn model_not_found_hint(models_dir: &Path, kind: ModelKind) -> String {
 mod tests {
     use super::*;
 
+    /// Builds a candidate list from `(file_name, size_mib)` pairs.
+    fn llms(specs: &[(&str, u64)]) -> Vec<ModelInfo> {
+        specs
+            .iter()
+            .map(|(name, mib)| ModelInfo {
+                file_name: (*name).to_string(),
+                path: PathBuf::from(*name),
+                size_bytes: mib * 1024 * 1024,
+                kind: ModelKind::Llm,
+            })
+            .collect()
+    }
+
+    /// The real models directory that produced the original complaint, in
+    /// the alphabetical order `scan_models_dir` returns. The old
+    /// "first match wins" rule picked GLM (a vision model that reasons in
+    /// Chinese); the next candidates were CPU-bound multi-GB models. On a
+    /// 16 GB card the only sensible auto-pick is the 4B.
+    fn real_world_lineup() -> Vec<ModelInfo> {
+        llms(&[
+            ("GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf", 5881),
+            ("Huihui-Qwen3-14B-abliterated-v2.Q4_K_M.gguf", 8585),
+            ("Mistral-Small-3.2-24B-Instruct-2506.i1-Q4_K_M.gguf", 13670),
+            ("Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf", 17698),
+            ("Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2382),
+            ("zen-pro-qwen3-8b.gguf", 4984),
+        ])
+    }
+
+    #[test]
+    fn auto_pick_prefers_the_largest_model_that_fits_in_vram() {
+        // A 16 GB card with a couple of GB already in use by the desktop.
+        let free = Some(14_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("a model should be picked");
+        // 8585 MiB is the largest that clears the margin at this free size.
+        assert_eq!(
+            picked.file_name,
+            "Huihui-Qwen3-14B-abliterated-v2.Q4_K_M.gguf"
+        );
+    }
+
+    #[test]
+    fn auto_pick_never_prefers_a_cpu_bound_model_over_one_that_fits() {
+        // Only ~4 GB free: everything but the 4B is CPU-bound.
+        let free = Some(4_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("a model should be picked");
+        assert_eq!(picked.file_name, "Qwen3-4B-Instruct-2507-Q4_K_M.gguf");
+    }
+
+    /// Regression: the previous rule returned whatever sorted first, which on
+    /// this machine was a 5.9 GB vision model.
+    #[test]
+    fn auto_pick_is_not_merely_alphabetical() {
+        let free = Some(14_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).unwrap();
+        assert_ne!(
+            picked.file_name,
+            "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf"
+        );
+    }
+
+    #[test]
+    fn auto_pick_falls_back_to_first_when_vram_is_unmeasurable() {
+        // Must not degrade to "no model found" on non-NVIDIA machines.
+        let picked = pick_best_llm(real_world_lineup(), None).expect("must still pick something");
+        assert_eq!(
+            picked.file_name,
+            "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf"
+        );
+    }
+
+    #[test]
+    fn auto_pick_returns_none_only_when_there_are_no_candidates() {
+        assert!(pick_best_llm(Vec::new(), Some(14_000 * 1024 * 1024)).is_none());
+        assert!(pick_best_llm(Vec::new(), None).is_none());
+    }
+
+    /// When nothing fits, still pick *something* — the largest CPU-bound
+    /// model is a defensible last resort, and erroring out would be worse.
+    #[test]
+    fn auto_pick_still_returns_a_model_when_nothing_fits() {
+        let free = Some(1_000 * 1024 * 1024);
+        let picked = pick_best_llm(real_world_lineup(), free).expect("must still pick something");
+        assert_eq!(picked.file_name, "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf");
+    }
+
     #[test]
     fn classify_recognizes_whisper_and_llm_naming_conventions() {
         assert_eq!(classify("ggml-base.en.bin"), ModelKind::Whisper);
         assert_eq!(classify("ggml-medium.bin"), ModelKind::Whisper);
         assert_eq!(classify("ggml-large-v3.bin"), ModelKind::Whisper);
+        assert_eq!(classify("ggml-large-v3-turbo.bin"), ModelKind::Whisper);
         assert_eq!(classify("whisper-large-v3-q5_0.gguf"), ModelKind::Whisper);
         assert_eq!(
             classify("llama-3.1-8b-instruct.Q4_K_M.gguf"),
@@ -299,6 +468,20 @@ mod tests {
         );
         assert_eq!(classify("qwen2.5-14b-instruct-q4_k_m.gguf"), ModelKind::Llm);
         assert_eq!(classify("notes.txt"), ModelKind::Unknown);
+    }
+
+    #[test]
+    fn classify_does_not_treat_llm_size_words_as_whisper() {
+        // Real-world LLM names include Whisper's generic size words
+        // ("small", "medium") as marketing labels. Misclassifying them
+        // sends a multi-GB LLM into whisper.cpp and fails with
+        // "Failed to create a new whisper context".
+        assert_eq!(
+            classify("Mistral-Small-3.2-24B-Instruct-2506-Heretic-v1.2-2.i1-Q4_K_M.gguf"),
+            ModelKind::Llm
+        );
+        assert_eq!(classify("phi-medium-4k-Q4_K_M.gguf"), ModelKind::Llm);
+        assert_eq!(classify("Qwen3-Small-Instruct-Q4.gguf"), ModelKind::Llm);
     }
 
     #[test]
@@ -319,6 +502,53 @@ mod tests {
         assert_eq!(
             classify("bge-base-en-v1.5-q4_k_m.gguf"),
             ModelKind::Embedding
+        );
+    }
+
+    #[test]
+    fn classify_recognizes_rerankers_as_their_own_kind() {
+        // Rerankers share the `bge-` family prefix with embedding models but
+        // are cross-encoders: feeding one into `LocalEmbedder` produces
+        // garbage vectors. They must be classified distinctly and excluded
+        // from embedding auto-resolution.
+        assert_eq!(
+            classify("bge-reranker-v2-m3-Q8_0.gguf"),
+            ModelKind::Reranker
+        );
+        assert_eq!(
+            classify("bge-reranker-large.Q4_K_M.gguf"),
+            ModelKind::Reranker
+        );
+        assert_eq!(classify("jina-reranker-v2-base.gguf"), ModelKind::Reranker);
+    }
+
+    #[test]
+    fn resolve_model_does_not_auto_pick_a_reranker_for_embeddings() {
+        // Regression: with only a reranker on disk, embedding auto-resolution
+        // must fail loudly rather than silently hand the reranker to
+        // `LocalEmbedder`.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bge-reranker-v2-m3-Q8_0.gguf"),
+            b"fake reranker bytes",
+        )
+        .unwrap();
+        let resolved = resolve_model(None, dir.path(), ModelKind::Embedding);
+        assert!(
+            resolved.is_err(),
+            "a reranker must not be auto-resolved as an embedding model"
+        );
+
+        // But a real embedding model alongside it still resolves.
+        fs::write(
+            dir.path().join("nomic-embed-text-v1.5.f16.gguf"),
+            b"fake embed bytes",
+        )
+        .unwrap();
+        let resolved = resolve_model(None, dir.path(), ModelKind::Embedding).unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|n| n.to_str()),
+            Some("nomic-embed-text-v1.5.f16.gguf")
         );
     }
 

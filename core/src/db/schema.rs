@@ -172,6 +172,18 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             state TEXT NOT NULL DEFAULT 'TODO',
             scheduled_date TEXT,
             deadline_date TEXT,
+            -- Time of day, kept apart from the date so date-only comparisons
+            -- stay plain string comparisons against an index.
+            scheduled_time TEXT,
+            deadline_time TEXT,
+            -- Repeat cookie from the SCHEDULED timestamp, e.g. `.+1d`.
+            repeat_rule TEXT,
+            -- `[#A]`/`[#B]`/`[#C]`. Sortable as a plain string: A < B < C.
+            priority TEXT,
+            -- When the task was completed, in epoch millis. Mirrors the
+            -- `CLOSED:` line in the markdown, which is the durable copy — this
+            -- column exists so the Tasks page can sort without re-reading files.
+            closed_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
@@ -181,6 +193,9 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
         CREATE INDEX IF NOT EXISTS idx_tasks_scheduled ON tasks(scheduled_date) WHERE scheduled_date IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline_date) WHERE deadline_date IS NOT NULL;
+        -- Indexes on the columns added later live with the migration in
+        -- `db::mod`, not here: this batch runs first, and indexing a column an
+        -- older `tasks` table does not have yet fails the whole open.
 
         CREATE TABLE IF NOT EXISTS task_events (
             id TEXT PRIMARY KEY,
@@ -233,6 +248,18 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_pp_key_value ON page_properties(key, value);
         CREATE INDEX IF NOT EXISTS idx_pp_page ON page_properties(page_id);
+
+        -- Pages whose vector (semantic) index may be stale relative to their
+        -- current block content, so auto-indexing can reindex them without a
+        -- manual click. One row per page (edits coalesce); `marked_at` drives
+        -- the per-page debounce and, being persisted, survives a crash/restart
+        -- so pending edits still get reindexed on next launch.
+        CREATE TABLE IF NOT EXISTS pending_reindex (
+            page_id TEXT PRIMARY KEY,
+            marked_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pending_reindex_marked ON pending_reindex(marked_at);
     ")?;
     Ok(())
 }

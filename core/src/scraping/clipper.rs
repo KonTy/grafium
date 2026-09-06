@@ -131,6 +131,7 @@ impl<'a> WebClipper<'a> {
             temperature: Some(0.0),
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
             stop: None,
+            cancel: None,
         };
 
         let raw = llm.complete(&messages, &options).await?;

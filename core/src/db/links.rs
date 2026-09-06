@@ -1,6 +1,6 @@
 use super::Database;
 use crate::error::Result;
-use crate::models::{Block, BlockType, Link, LinkType};
+use crate::models::{Block, BlockType, Link, LinkType, Page};
 use rusqlite::{params, Connection};
 
 fn insert_link_on_conn(
@@ -93,6 +93,39 @@ impl Database {
         Ok(results)
     }
 
+    /// The pages that are used as tags — every page some block points at with a
+    /// tag-typed link. This is the input to the tag tree: because writing
+    /// `#tech/linux` creates the `tech/linux` page and a tag link to it, "the
+    /// tags" and "the pages that are tags" are the same set, and organizing it
+    /// is the exact `/`-nesting the namespace tree already does.
+    ///
+    /// `DISTINCT` collapses the many-to-one shape of the `links` table (a page
+    /// can be tagged from dozens of blocks) down to one row per tag page.
+    pub fn list_tag_pages(&self) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT p.id, p.title, p.file_path, p.created_at, p.updated_at, p.is_journal, p.properties
+             FROM pages p
+             JOIN links l ON l.to_page_id = p.id
+             WHERE l.link_type = 'tag'
+             ORDER BY p.title ASC",
+        )?;
+        let pages = stmt
+            .query_map([], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
+    }
+
     pub fn get_links_from_page(&self, page_id: &str) -> Result<Vec<Link>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -171,35 +204,72 @@ impl Database {
             // a connected neighborhood. Picking the top-N pages purely by degree
             // yields no edges when links are sparse/random, because two arbitrary
             // hubs are almost never linked to each other.
-            let seed: Option<String> = conn
-                .query_row(
-                    "SELECT to_page_id FROM links
-                     GROUP BY to_page_id ORDER BY count(*) DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            // Rank hubs by how many *distinct other pages* link to them, not by
+            // raw link count. Counting rows let a page that links to itself win
+            // outright: a tag-like page whose every block contains its own
+            // backlink scored 7513 while having zero neighbours, so the graph
+            // seeded there, found nothing to expand to, and rendered a single
+            // isolated node on a graph of 141 pages and 134 real edges.
+            let mut hubs = conn.prepare(
+                "SELECT l.to_page_id, COUNT(DISTINCT b.page_id) AS c
+                 FROM links l JOIN blocks b ON b.id = l.from_block_id
+                 WHERE b.page_id <> l.to_page_id
+                 GROUP BY l.to_page_id ORDER BY c DESC",
+            )?;
+            let ranked: Vec<String> = hubs
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            if let Some(seed) = seed {
+            if !ranked.is_empty() {
                 let mut seen: HashSet<String> = HashSet::new();
                 let mut queue: VecDeque<String> = VecDeque::new();
+                let seed = ranked[0].clone();
                 seen.insert(seed.clone());
                 node_ids.push(seed.clone());
                 queue.push_back(seed);
 
                 // Cap per-node fan-out so one hub can't consume the whole budget.
+                // `<> ?1` drops self-links: a page linking to itself is not a
+                // route to anywhere, and letting them through wastes the
+                // per-node fan-out budget on edges that can't expand the view.
                 let mut out = conn.prepare(
                     "SELECT DISTINCT l.to_page_id
                      FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE b.page_id = ?1 LIMIT 64",
+                     WHERE b.page_id = ?1 AND l.to_page_id <> ?1 LIMIT 64",
                 )?;
                 let mut inb = conn.prepare(
                     "SELECT DISTINCT b.page_id
                      FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE l.to_page_id = ?1 LIMIT 64",
+                     WHERE l.to_page_id = ?1 AND b.page_id <> ?1 LIMIT 64",
                 )?;
 
-                'bfs: while let Some(cur) = queue.pop_front() {
+                // A knowledge graph is rarely one connected component — notes
+                // cluster by topic. Exploring only the seed's component left
+                // most of the graph invisible even after the seeding fix,
+                // because the largest real cluster here is a handful of pages.
+                // So when a component is exhausted and budget remains, restart
+                // from the next-best hub not yet visited.
+                let mut next_hub = 1usize;
+                'bfs: loop {
+                    if queue.is_empty() {
+                        if node_ids.len() >= node_limit as usize {
+                            break;
+                        }
+                        let Some(next) = ranked[next_hub..]
+                            .iter()
+                            .position(|id| !seen.contains(id))
+                            .map(|offset| ranked[next_hub + offset].clone())
+                        else {
+                            break;
+                        };
+                        next_hub = ranked.iter().position(|id| *id == next).unwrap_or(next_hub) + 1;
+                        seen.insert(next.clone());
+                        node_ids.push(next.clone());
+                        queue.push_back(next);
+                    }
+                    let Some(cur) = queue.pop_front() else {
+                        break;
+                    };
                     if node_ids.len() >= node_limit as usize {
                         break;
                     }
@@ -387,5 +457,65 @@ impl Database {
         }
 
         Ok((blocks_scanned, links_inserted))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::Result;
+    use crate::models::{BlockType, LinkType};
+
+    #[test]
+    fn list_tag_pages_returns_only_tag_link_targets() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        // Pages that get referenced. `rust` and `linux` are tagged; `Notes` is
+        // only a plain page link and must not show up as a tag.
+        let rust = db.create_page("rust", false)?;
+        let linux = db.create_page("tech/linux", false)?;
+        let notes = db.create_page("Notes", false)?;
+
+        let source = db.create_page("Journal", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "#rust #tech/linux and see [[Notes]]",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        db.insert_link(&block.id, &rust.id, LinkType::Tag)?;
+        db.insert_link(&block.id, &linux.id, LinkType::Tag)?;
+        db.insert_link(&block.id, &notes.id, LinkType::Page)?;
+
+        let tags = db.list_tag_pages()?;
+        let titles: Vec<&str> = tags.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, vec!["rust", "tech/linux"]);
+        Ok(())
+    }
+
+    #[test]
+    fn list_tag_pages_deduplicates_multiply_tagged_pages() -> Result<()> {
+        let db = Database::in_memory()?;
+        let rust = db.create_page("rust", false)?;
+        let source = db.create_page("Journal", false)?;
+
+        // Two different blocks both tag `rust`; it should come back once.
+        for (i, id) in ["b0", "b1"].iter().enumerate() {
+            let block = db.create_block_with_id(
+                id,
+                &source.id,
+                None,
+                i as i32,
+                "#rust",
+                BlockType::Text,
+                serde_json::json!({}),
+            )?;
+            db.insert_link(&block.id, &rust.id, LinkType::Tag)?;
+        }
+
+        assert_eq!(db.list_tag_pages()?.len(), 1);
+        Ok(())
     }
 }

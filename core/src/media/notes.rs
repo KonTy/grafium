@@ -19,13 +19,19 @@ use crate::media::types::{Transcript, TranscriptSource};
 /// caption cue, which would be far too granular to read.
 const TIMESTAMP_GROUP_MS: i64 = 30_000;
 
-/// Builds the full markdown content for a transcript note: YAML
-/// frontmatter (source URL, title, uploader, duration, where the
-/// transcript came from, when it was fetched), an optional AI-generated
-/// "## Summary" section — one `###`-headed paragraph + `#hashtag` tags per
-/// distinct topic discussed, plus a title-answer line — when `summary` is
-/// available, followed by the transcript body, grouped into `~30s` chunks
-/// each prefixed with a `**[mm:ss]**` timestamp marker.
+/// Builds the full markdown content for a transcript note in Grafium's
+/// Logseq-style outliner format: YAML frontmatter, then a nested block tree
+/// where the page title, "Source" line, "## Summary" (with one topic per
+/// child), and "## Transcript" (with one child per `~30s` timestamp group)
+/// are all indented under a single root bullet.
+///
+/// The prior flat-markdown output made every heading, summary paragraph,
+/// and transcript line a top-level sibling, so nothing referenced the
+/// heading it belonged to — links, backlinks, and hashtag attribution
+/// couldn't tell that a transcript segment "belonged to" the video's
+/// summary or title. Producing an outliner tree instead of raw prose fixes
+/// that at the source, so every downstream index (search, references,
+/// backlinks, block references) sees the intended parentage.
 pub fn transcript_to_markdown(
     url: &str,
     metadata: &VideoMetadata,
@@ -64,15 +70,22 @@ pub fn transcript_to_markdown(
     }
     out.push_str("---\n\n");
 
-    if let Some(title) = &metadata.title {
-        out.push_str(&format!("# {title}\n\n"));
-    }
-    out.push_str(&format!("Source: {url}\n\n"));
+    // Root block: the page title (or the URL as fallback so there's always
+    // exactly one root to reparent everything else under).
+    let root_label = metadata
+        .title
+        .as_deref()
+        .map(|t| format!("# {t}"))
+        .unwrap_or_else(|| format!("# {url}"));
+    push_bullet(&mut out, 0, &root_label);
+
+    // Source URL as first child of the root.
+    push_bullet(&mut out, 1, &format!("Source: {url}"));
 
     if let Some(summary) = summary {
-        out.push_str("## Summary\n\n");
+        push_bullet(&mut out, 1, "## Summary");
         if let Some(title_answer) = &summary.title_answer {
-            out.push_str(&format!("**{title_answer}**\n\n"));
+            push_bullet(&mut out, 2, &format!("**{title_answer}**"));
         }
         // One heading + paragraph per distinct topic, rather than a single
         // blended summary, so a long multi-subject recording (e.g. a
@@ -80,9 +93,8 @@ pub fn transcript_to_markdown(
         // once the transcript below is eventually deleted and this
         // section becomes the only record of what was discussed.
         for topic in &summary.topics {
-            out.push_str(&format!("### {}\n\n", topic.topic.trim()));
-            out.push_str(topic.summary.trim());
-            out.push_str("\n\n");
+            push_bullet(&mut out, 2, &format!("### {}", topic.topic.trim()));
+            push_bullet(&mut out, 3, topic.summary.trim());
             if !topic.tags.is_empty() {
                 let hashtags = topic
                     .tags
@@ -90,17 +102,18 @@ pub fn transcript_to_markdown(
                     .map(|tag| format!("#{}", tag.label().replace(' ', "_")))
                     .collect::<Vec<_>>()
                     .join(" ");
-                out.push_str(&hashtags);
-                out.push_str("\n\n");
+                push_bullet(&mut out, 3, &hashtags);
             }
         }
     }
 
-    out.push_str("## Transcript\n\n");
+    push_bullet(&mut out, 1, "## Transcript");
 
     if transcript.segments.is_empty() {
-        out.push_str(transcript.full_text.trim());
-        out.push('\n');
+        let text = transcript.full_text.trim();
+        if !text.is_empty() {
+            push_bullet(&mut out, 2, text);
+        }
         return out;
     }
 
@@ -112,11 +125,15 @@ pub fn transcript_to_markdown(
         if group_text.trim().is_empty() {
             return;
         }
-        out.push_str(&format!(
-            "**[{}]** {}\n\n",
-            format_timestamp(group_start_ms),
-            group_text.trim()
-        ));
+        push_bullet(
+            out,
+            2,
+            &format!(
+                "**[{}]** {}",
+                format_timestamp(group_start_ms),
+                group_text.trim()
+            ),
+        );
     };
 
     for segment in &transcript.segments {
@@ -136,6 +153,26 @@ pub fn transcript_to_markdown(
     flush_group(&mut out, group_start_ms, &group_text);
 
     out
+}
+
+/// Emits one bullet at `depth` (2 spaces per level, Logseq's on-disk convention).
+/// A multi-line body is folded into a single block by joining with spaces —
+/// Grafium's parser splits blocks on blank lines / new bullets, not newlines
+/// inside a bullet, but keeping content on a single line is the simplest
+/// guarantee that a paragraph won't accidentally split into siblings.
+fn push_bullet(out: &mut String, depth: usize, content: &str) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    out.push_str("- ");
+    let single_line = content
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    out.push_str(&single_line);
+    out.push('\n');
 }
 
 /// Formats a millisecond offset as `mm:ss` (or `h:mm:ss` past an hour).
@@ -204,7 +241,7 @@ mod tests {
         assert!(md.contains("uploader: \"Some Channel\""));
         assert!(md.contains("duration_seconds: 40"));
         assert!(md.contains("transcript_source: youtube_captions"));
-        assert!(md.contains("# My Video"));
+        assert!(md.contains("- # My Video\n"));
     }
 
     #[test]
@@ -231,11 +268,44 @@ mod tests {
             TranscriptSource::Whisper,
             None,
         );
-        // First two segments (0ms, 5000ms) are within one 30s group starting
-        // at 0:00; the third segment starts at 32s, past the 30s window, so
-        // it starts a new group at 0:32.
-        assert!(md.contains("**[0:00]** Welcome to the video. Today we'll talk about Rust."));
-        assert!(md.contains("**[0:32]** Let's get started."));
+        // Transcript groups are children of the "## Transcript" heading, which
+        // is itself a child of the page's root "#" title bullet. Two levels of
+        // indent (4 spaces) with a leading "- " puts each group as a sibling
+        // block linkable to its parent transcript heading.
+        assert!(
+            md.contains("    - **[0:00]** Welcome to the video. Today we'll talk about Rust.\n")
+        );
+        assert!(md.contains("    - **[0:32]** Let's get started.\n"));
+    }
+
+    #[test]
+    fn transcript_body_is_a_child_of_the_transcript_heading_not_a_sibling() {
+        // Regression: everything under "## Transcript" must live under it in
+        // the outliner tree so backlinks and block references can attribute
+        // a segment to its video. Prior to the outliner rewrite, headings and
+        // segments were all flat top-level blocks with no parent-child link.
+        let md = transcript_to_markdown(
+            "https://youtu.be/abc123",
+            &VideoMetadata {
+                title: Some("Rust Talk".to_string()),
+                ..Default::default()
+            },
+            &sample_transcript(),
+            TranscriptSource::Whisper,
+            None,
+        );
+        let title_line = md.lines().find(|l| l.contains("# Rust Talk")).unwrap();
+        let transcript_line = md.lines().find(|l| l.contains("## Transcript")).unwrap();
+        let segment_line = md.lines().find(|l| l.contains("**[0:00]**")).unwrap();
+        assert!(title_line.starts_with("- "), "title is the root bullet");
+        assert!(
+            transcript_line.starts_with("  - "),
+            "Transcript heading is a child of the title"
+        );
+        assert!(
+            segment_line.starts_with("    - "),
+            "Segment is a child of the Transcript heading"
+        );
     }
 
     #[test]
@@ -274,7 +344,9 @@ mod tests {
             TranscriptSource::Whisper,
             None,
         );
-        assert!(md.contains("Just some text, no timing info."));
+        // Even the segment-less fallback body must live under the Transcript
+        // heading, not as a top-level sibling.
+        assert!(md.contains("    - Just some text, no timing info.\n"));
         assert!(!md.contains("**["));
     }
 
@@ -297,13 +369,13 @@ mod tests {
             Some(&summary),
         );
         assert!(md.contains("tags: [\"magnesium\", \"insulin_resistance\"]"));
-        assert!(md.contains("## Summary"));
-        assert!(md.contains("**Yes, magnesium helps with sleep.**"));
-        assert!(md.contains("### Magnesium and sleep"));
+        assert!(md.contains("  - ## Summary\n"));
+        assert!(md.contains("    - **Yes, magnesium helps with sleep.**\n"));
+        assert!(md.contains("    - ### Magnesium and sleep\n"));
         assert!(md.contains(
-            "The video covers magnesium's role in sleep and insulin sensitivity."
+            "      - The video covers magnesium's role in sleep and insulin sensitivity.\n"
         ));
-        assert!(md.contains("#magnesium #insulin_resistance"));
+        assert!(md.contains("      - #magnesium #insulin_resistance\n"));
         // Summary must come before the transcript body.
         assert!(md.find("## Summary").unwrap() < md.find("## Transcript").unwrap());
     }
@@ -360,10 +432,10 @@ mod tests {
             TranscriptSource::Whisper,
             Some(&summary),
         );
-        assert!(md.contains("### Magnesium and sleep"));
-        assert!(md.contains("Magnesium glycinate can improve sleep onset."));
-        assert!(md.contains("### Insulin resistance"));
-        assert!(md.contains("Cutting refined carbs helps insulin sensitivity."));
+        assert!(md.contains("    - ### Magnesium and sleep\n"));
+        assert!(md.contains("      - Magnesium glycinate can improve sleep onset.\n"));
+        assert!(md.contains("    - ### Insulin resistance\n"));
+        assert!(md.contains("      - Cutting refined carbs helps insulin sensitivity.\n"));
         // Both topics' tags should be merged into the frontmatter tags list.
         assert!(md.contains("tags: [\"magnesium\", \"insulin_resistance\"]"));
         assert!(md.find("Magnesium and sleep").unwrap() < md.find("Insulin resistance").unwrap());

@@ -20,6 +20,7 @@
 
 pub mod browser;
 pub mod clipper;
+pub mod engines;
 pub mod extract;
 pub mod search;
 

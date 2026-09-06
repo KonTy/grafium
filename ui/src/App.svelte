@@ -7,7 +7,7 @@
   import GraphView from "./components/GraphView.svelte";
   import Statistics from "./components/Statistics.svelte";
   import FlashcardReview from "./components/FlashcardReview.svelte";
-  import ChatbotView from "./components/ChatbotView.svelte";
+  import ChatView from "./components/ChatView.svelte";
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
@@ -835,7 +835,13 @@
   let showCreateGraphDialog = $state(false);
   let newGraphName = $state("");
 
-  function handleNavigate(target: PageNavigationTarget) {
+  /// Term to highlight on the page being navigated to, set by callers that
+  /// know why the user is going there (the graph passes its active filter).
+  /// Cleared on every navigation so a stale term can't follow the user around.
+  let pendingHighlight = $state("");
+
+  function handleNavigate(target: PageNavigationTarget, highlight = "") {
+    pendingHighlight = highlight;
     if (target === "__journal__") {
       navigateToJournal();
       return;
@@ -1121,7 +1127,7 @@
     {:else if currentView === "flashcards"}
       <FlashcardReview onNavigate={handleNavigate} />
     {:else if currentView === "chat"}
-      <ChatbotView onOpenSettings={() => handleNavigate("__settings__")} />
+      <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
       <Settings />
     {:else if currentView === "journal"}
@@ -1132,7 +1138,7 @@
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
-        <PageContent page={currentPage} />
+        <PageContent page={currentPage} highlight={pendingHighlight} />
       {/key}
     {/if}
     </main>
@@ -1174,7 +1180,7 @@
           <path d="M12 20V4"></path>
           <path d="M6 20v-6"></path>
         </svg>
-        <span>Stats</span>
+        <span>Tasks</span>
       </button>
       <button class="bottom-nav-item" class:active={currentView === "all-pages"} onclick={() => handleNavigate("__all_pages__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1241,7 +1247,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
-          <span>Chatbot</span>
+          <span>Chat</span>
         </button>
         <button class="more-menu-item" onclick={handleMobileOpenGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

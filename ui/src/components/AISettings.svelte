@@ -101,6 +101,26 @@
     }
   }
 
+  // A one-glance speed verdict in the option label itself. Without this the
+  // dropdown shows only a name and a size, which gives no hint that a 13.6 GB
+  // model on a 16 GB card drops to CPU and runs ~40x slower than a 2.4 GB one.
+  function fitSuffix(m: LocalModelInfo): string {
+    switch (m.gpu_fit) {
+      case "fits":
+        return " — fast";
+      case "tight":
+        return " — tight fit";
+      case "cpu_only":
+        return " — slow (CPU)";
+      default:
+        return "";
+    }
+  }
+
+  let selectedModelFit = $derived(
+    localModelOptions.find((m) => m.file_name === localModelPath && m.gpu_fit_detail),
+  );
+
   async function refreshMediaModelOptions() {
     try {
       const all = await listLocalModels(mediaModelsDir || undefined);
@@ -226,8 +246,14 @@
     isIndexing = true;
     indexCount = null;
     try {
-      indexCount = await aiIndexAllPages();
-      showMessage(`Indexed ${indexCount} chunks`, "success");
+      const result = await aiIndexAllPages();
+      indexCount = result.indexed_chunks;
+      const failed =
+        result.pages_failed > 0 ? `, ${result.pages_failed} page(s) failed` : "";
+      showMessage(
+        `Indexed ${result.indexed_chunks} chunks from ${result.pages_processed} page(s)${failed}`,
+        result.pages_failed > 0 ? "error" : "success"
+      );
       health = await aiHealthCheck();
     } catch (e: any) {
       showMessage("Indexing failed: " + e, "error");
@@ -372,9 +398,14 @@
                 <select bind:value={localModelPath} class="field-select">
                   <option value="">Auto-detect (only chat GGUF file in folder)</option>
                   {#each localModelOptions as m (m.file_name)}
-                    <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
+                    <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)}){fitSuffix(m)}</option>
                   {/each}
                 </select>
+                {#if selectedModelFit}
+                  <p class="field-hint fit-hint" class:fit-warn={selectedModelFit.gpu_fit === "cpu_only"} class:fit-caution={selectedModelFit.gpu_fit === "tight"}>
+                    {selectedModelFit.gpu_fit_detail}
+                  </p>
+                {/if}
               {:else}
                 <p class="field-hint">
                   No chat GGUF files found yet in the Models Directory above. Download one there,
@@ -674,6 +705,23 @@
 
   .field-hint.warning {
     color: #fbbf24;
+  }
+
+  /* Speed verdict for the selected chat model. Escalates in weight with the
+     severity so a CPU-bound choice is hard to scroll past, while a comfortable
+     fit stays quiet. Uses theme accents rather than fixed hex so it stays
+     legible (and WCAG-checked) across every theme, including OLED. */
+  .fit-hint {
+    margin-top: 4px;
+  }
+
+  .fit-hint.fit-caution {
+    color: var(--accent-yellow, #fbbf24);
+  }
+
+  .fit-hint.fit-warn {
+    color: var(--accent-orange, #fb923c);
+    font-weight: 500;
   }
 
   .field-input {

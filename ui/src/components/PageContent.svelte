@@ -1,12 +1,16 @@
 <script lang="ts">
+  import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
   import { onMount, tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
   import UnifiedPageEditor from "./UnifiedPageEditor.svelte";
+  import CollectionMembers from "./CollectionMembers.svelte";
+  import PageMenu from "./PageMenu.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
+  import { planIndentSelection } from "../lib/blockIndent";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
-  import { renderBlock } from "../lib/markdown";
+  import { renderBlock, assetBaseDirFor } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
     applyIfCurrentPageLoad,
@@ -20,23 +24,77 @@
   import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
   import type { UndoAction } from "../lib/undoStack";
   import { aiSummarizeSelection, wrapKnownTermsInText, type TagTerm } from "../lib/knowledge";
+  import {
+    collectionMembersFromBlocks,
+    getCollectionKind,
+    pagesListCollections,
+    pageTreeReferencesChanged,
+    pageSetCollection,
+    withMissingCommandFallback,
+  } from "../lib/pageTree";
   import { listen } from "@tauri-apps/api/event";
 
   interface Props {
     page: Page;
     compact?: boolean;
+    /** Term to highlight on arrival, e.g. what was searched in the graph. */
+    highlight?: string;
   }
 
-  let { page, compact = false }: Props = $props();
+  let { page, compact = false, highlight = "" }: Props = $props();
+
+  // Asset references in this page's blocks are resolved relative to the
+  // directory its markdown file lives in, so media stored beside a page (and a
+  // whole book folder copied elsewhere) keeps working. Set before any block
+  // renders; cleared to the graph root when the page has no file yet.
+  // Derived, not an effect: effects run after the template has already
+  // rendered, so an effect would hand the *previous* page's directory to this
+  // page's first render — and the journal view mounts several pages at once,
+  // which no single shared value can describe.
+  // A page that exists only because something linked to it has no markdown
+  // file until its first block is created, which happens right below on open.
+  // The `page` prop still says `null` at that point, so the freshly created
+  // path is tracked here — otherwise media pasted into a brand-new page
+  // resolves against the graph root and renders broken until you navigate away
+  // and back.
+  let materializedFilePath = $state<string | null>(null);
+  let assetBaseDir = $derived(assetBaseDirFor(page.file_path ?? materializedFilePath));
 
   let blocks: Block[] = $state([]);
+
+  // Highlight after the blocks are in the DOM. Depending on `blocks` as well as
+  // `highlight` matters: navigation renders the page before its content loads,
+  // so running only on the prop would search an empty container and find
+  // nothing.
+  $effect(() => {
+    const term = highlight;
+    void blocks.length;
+    const container = blocksViewportEl;
+    if (!container) return;
+    if (!term.trim()) {
+      clearHighlights(container);
+      return;
+    }
+    // One frame's delay so `{@html}` block content has been committed.
+    const handle = requestAnimationFrame(() => {
+      const first = highlightTerm(container, term);
+      first?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(handle);
+  });
   let focusedBlockId: string | null = $state(null);
   let navigatingBlock = false;
   // Imperative handles to each BlockEditor, keyed by block id, for deterministic
   // cross-block Arrow Up/Down caret movement.
   let blockRefs: Record<string, { focusForNav: (x: number, edge: "top" | "bottom") => void }> = {};
   type BacklinkTreeNode = { block: Block; depth: number };
-  type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
+  type BacklinkView = BacklinkResult & {
+    sourcePageTitle: string;
+    /** Where the *source* page lives, so its media resolves against its own
+     *  folder rather than the folder of whatever page you happen to be on. */
+    sourceAssetBaseDir: string;
+    tree: BacklinkTreeNode[];
+  };
 
   let backlinks: BacklinkView[] = $state([]);
   // Rendering every linked reference at once is what actually crashes the
@@ -50,6 +108,11 @@
   let backlinksRenderLimit = $state(BACKLINKS_PAGE_SIZE);
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
+  let collectionKind: string | null = $state(null);
+  let collectionMemberCount: number | undefined = $state(undefined);
+  let collectionStatus: "page" | "collection" | "loading" | "unavailable" | "error" = $state("loading");
+  let collectionBusy = $state(false);
+  let collectionRequest = 0;
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
   let collapsedIds: Set<string> = $state(new Set());
@@ -69,6 +132,7 @@
 
   const blockRenderState = $derived.by(() => buildBlockRenderState(blocks, collapsedIds));
   const visibleBlocks = $derived(blockRenderState.visibleBlocks);
+  const collectionMembers = $derived(collectionMembersFromBlocks(blocks));
   const virtualWindow = $derived.by(() => {
     const anchorIndex = windowAnchorBlockId
       ? blockRenderState.visibleIndexById.get(windowAnchorBlockId) ?? null
@@ -151,6 +215,8 @@
       if (!detail || detail.pageId !== pageId) return;
       void listBlocks(page.id).then((updated) => {
         blocks = updated;
+        refreshCollectionAfterMutation();
+        refreshPageTrees();
       });
     };
 
@@ -266,6 +332,8 @@
     if (page?.id) {
       setUndoCallback(page.id, (_action: UndoAction) => {
         void loadBlocks(currentPageLoad());
+        refreshCollectionAfterMutation();
+        refreshPageTrees();
       });
       return () => {
         removeUndoCallback(page.id);
@@ -285,12 +353,92 @@
     }
   });
 
+  $effect(() => {
+    const pageId = page?.id;
+    if (!pageId || compact) {
+      collectionKind = null;
+      collectionMemberCount = undefined;
+      collectionStatus = "page";
+      return;
+    }
+    collectionKind = getCollectionKind(page.properties);
+    collectionMemberCount = undefined;
+    void loadCollection(pageId);
+  });
+
+  $effect(() => {
+    const pageId = page.id;
+    if (compact) return;
+    const refreshCollection = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId?: string }>).detail;
+      if (!detail?.pageId || detail.pageId === pageId) void loadCollection(pageId);
+    };
+    window.addEventListener("page-collection-refresh", refreshCollection);
+    return () => window.removeEventListener("page-collection-refresh", refreshCollection);
+  });
+
+  async function loadCollection(pageId: string) {
+    const request = ++collectionRequest;
+    collectionStatus = "loading";
+    try {
+      const result = await withMissingCommandFallback(
+        () => pagesListCollections(),
+        [],
+      );
+      if (request !== collectionRequest || page.id !== pageId) return;
+      if (!result.available) {
+        collectionStatus = "unavailable";
+        return;
+      }
+      const summary = result.value.find((collection) => collection.id === pageId);
+      collectionKind = summary?.kind ?? null;
+      collectionMemberCount = summary?.member_count ?? 0;
+      collectionStatus = summary ? "collection" : "page";
+    } catch (error) {
+      if (request !== collectionRequest || page.id !== pageId) return;
+      collectionStatus = "error";
+      console.warn("[collection] Failed to load page collection:", error);
+    }
+  }
+
+  function refreshCollectionAfterMutation() {
+    if (!compact && collectionKind !== null && collectionStatus !== "unavailable") {
+      void loadCollection(page.id);
+    }
+  }
+
+  function refreshPageTrees() {
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+  }
+
+  async function updateCollection(kind: string | null) {
+    if (collectionBusy || collectionStatus === "loading" || collectionStatus === "unavailable") {
+      return;
+    }
+    collectionBusy = true;
+    try {
+      await pageSetCollection(page.id, kind);
+      await loadCollection(page.id);
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    } catch (error) {
+      collectionStatus = "error";
+      console.warn("[collection] Failed to update page kind:", error);
+    } finally {
+      collectionBusy = false;
+    }
+  }
+
+  function navigateToCollectionMember(title: string) {
+    window.dispatchEvent(new CustomEvent("navigate-page", { detail: title }));
+  }
+
   async function loadBlocks(request: PageLoadRequest = currentPageLoad()) {
     try {
       if (isCurrentPageLoad(pageLoadState, request)) {
         loadError = null;
         windowAnchorBlockId = null;
         blockHeights.clear();
+        materializedFilePath = null;
       }
 
       const loadedBlocks = await listBlocks(request.pageId);
@@ -304,6 +452,18 @@
         nextBlocks = [newBlock];
       }
       blocks = nextBlocks;
+
+      // Creating that first block is what writes the page's markdown file, so
+      // the page object we were handed can be out of date. Asked on every
+      // reload rather than only when the page started empty: reloading after
+      // an undo finds blocks already present, and only refreshing in the empty
+      // case left the path null for good — media on the page then resolved
+      // against the graph root and broke.
+      if (!page.file_path) {
+        const refreshed = await getPage({ id: request.pageId }).catch(() => null);
+        if (!isCurrentPageLoad(pageLoadState, request)) return;
+        materializedFilePath = refreshed?.file_path ?? null;
+      }
     } catch (e: any) {
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       loadError = e?.toString() || "Unknown error loading blocks";
@@ -403,10 +563,10 @@
       // lookups for the same page_id all await the same one promise.
       const uniquePageIds = Array.from(new Set(backlinkResults.map((r) => r.block.page_id)));
       const blocksPromiseCache = new Map<string, Promise<Block[]>>();
-      const titlePromiseCache = new Map<string, Promise<string>>();
+      const pagePromiseCache = new Map<string, Promise<Page | null>>();
       for (const pageId of uniquePageIds) {
         blocksPromiseCache.set(pageId, listBlocks(pageId));
-        titlePromiseCache.set(pageId, getPage({ id: pageId }).then((p) => p.title));
+        pagePromiseCache.set(pageId, getPage({ id: pageId }).catch(() => null));
       }
 
       const indexCache = new Map<string, Promise<BacklinkSourceIndex>>();
@@ -418,14 +578,15 @@
       }
 
       const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
-        const [sourcePageTitle, index] = await Promise.all([
-          titlePromiseCache.get(result.block.page_id)!,
+        const [sourcePage, index] = await Promise.all([
+          pagePromiseCache.get(result.block.page_id)!,
           indexCache.get(result.block.page_id)!,
         ]);
 
         return {
           ...result,
-          sourcePageTitle,
+          sourcePageTitle: sourcePage?.title ?? "",
+          sourceAssetBaseDir: assetBaseDirFor(sourcePage?.file_path),
           tree: buildBacklinkTree(result.block.id, index),
         };
       }));
@@ -473,6 +634,14 @@
 
   function handleBlur(blockId: string) {
     focusedBlockId = null;
+    const before = preEditSnapshots.get(blockId);
+    const after = blockRenderState.blockById.get(blockId);
+    if (before && after && pageTreeReferencesChanged(before.content, after.content)) {
+      refreshPageTrees();
+    }
+    if (collectionStatus === "collection") {
+      void loadCollection(page.id);
+    }
     // Don't auto-delete if we're navigating to another block
     if (navigatingBlock) {
       navigatingBlock = false;
@@ -490,9 +659,11 @@
       // Persist the current block content before any structural operation
       // (create/move), otherwise write-page operations can serialize stale empty text.
       if (block.content !== content) {
+        const referencesChanged = pageTreeReferencesChanged(block.content, content);
         await updateBlock(blockId, content);
         block.content = content;
         blocks = [...blocks];
+        if (referencesChanged) refreshPageTrees();
       }
 
       // Enter at the very start of a block inserts an empty sibling above it.
@@ -516,6 +687,7 @@
         const newBlock = await createBlock(page.id, parentId, insertOrder, "");
         const idx = blocks.findIndex((b) => b.id === blockId);
         blocks = [...blocks.slice(0, idx), newBlock, ...blocks.slice(idx)];
+        refreshCollectionAfterMutation();
 
         requestAnimationFrame(() => {
           focusedBlockId = newBlock.id;
@@ -547,6 +719,7 @@
       // Insert after current block in the array
       const idx = blocks.findIndex((b) => b.id === blockId);
       blocks = [...blocks.slice(0, idx + 1), newBlock, ...blocks.slice(idx + 1)];
+      refreshCollectionAfterMutation();
       // Focus the new block
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
@@ -596,6 +769,10 @@
       }
       // Insert all new blocks after the current block
       blocks = [...blocks.slice(0, idx + 1), ...newBlocks, ...blocks.slice(idx + 1)];
+      refreshCollectionAfterMutation();
+      if (pasteBlocks.some((block) => pageTreeReferencesChanged("", block.content))) {
+        refreshPageTrees();
+      }
       // Focus the last new block
       const lastNew = newBlocks[newBlocks.length - 1];
       requestAnimationFrame(() => {
@@ -616,6 +793,7 @@
       const lastOrder = blocks.length > 0 ? blocks[blocks.length - 1].order_index + 1 : 0;
       const newBlock = await createBlock(page.id, null, lastOrder, "");
       blocks = [...blocks, newBlock];
+      refreshCollectionAfterMutation();
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
         const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
@@ -642,6 +820,8 @@
     await deleteBlock(blockId);
     const idx = blocks.findIndex((b) => b.id === blockId);
     blocks = blocks.filter((b) => b.id !== blockId);
+    refreshCollectionAfterMutation();
+    if (block && pageTreeReferencesChanged(block.content, "")) refreshPageTrees();
     // Focus previous block
     const prevIdx = Math.max(0, idx - 1);
     if (blocks[prevIdx]) {
@@ -681,6 +861,7 @@
     if (typeof currentContent === "string" && currentContent !== block.content) {
       await persistBlockContentIfChanged(block, currentContent, (id, value) => updateBlock(id, value));
       blocks = [...blocks];
+      refreshCollectionAfterMutation();
     }
 
     console.log("[telemetry] indent start", JSON.stringify({
@@ -709,6 +890,7 @@
         block.parent_id = prevSibling.id;
         block.order_index = childCount;
         blocks = [...blocks];
+        refreshCollectionAfterMutation();
         console.log("[telemetry] indent in done", JSON.stringify({
           blockId: block.id,
           newParentId: block.parent_id,
@@ -745,6 +927,29 @@
     }
   }
 
+  /**
+   * Indent or outdent the whole multi-block selection together, preserving
+   * relative structure. No-ops silently for units that can't move (e.g. the
+   * first child of the document on indent). Selection is preserved.
+   */
+  async function handleIndentSelection(direction: "in" | "out") {
+    if (selectedBlockIds.size === 0) return;
+    const plan = planIndentSelection(blocks, selectedBlockIds, direction);
+    if (plan.moves.length === 0) return; // nothing movable — silent no-op
+
+    const keep = new Set(selectedBlockIds);
+    try {
+      for (const move of plan.moves) {
+        await moveBlock(move.id, move.newParentId, move.newOrderIndex);
+      }
+      blocks = plan.blocks;
+      selectedBlockIds = keep;
+      refreshCollectionAfterMutation();
+    } catch (e) {
+      console.error("Failed to indent/outdent selection:", e);
+    }
+  }
+
   function handleBulletClick(blockId: string, event: MouseEvent) {
     if (event.shiftKey && selectedBlockIds.size > 0) {
       // Range select from last selected to this block
@@ -767,9 +972,16 @@
       }
       selectedBlockIds = newSelection;
     }
-    // Clear any active editor focus
+    // Clear any active editor focus AND actively blur the DOM so subsequent
+    // keydowns (Tab, etc.) reach the window handler instead of a stale
+    // CodeMirror editor that our `focusedBlockId` reset alone doesn't
+    // physically defocus.
     if (focusedBlockId) {
       focusedBlockId = null;
+    }
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
     }
   }
 
@@ -794,6 +1006,10 @@
       blocks = remaining;
     }
     selectedBlockIds = new Set();
+    refreshCollectionAfterMutation();
+    if (deletedBlocks.some((block) => pageTreeReferencesChanged(block.content, ""))) {
+      refreshPageTrees();
+    }
   }
 
   let analyzingSelection = $state(false);
@@ -849,22 +1065,40 @@
         }
       }
 
-      const parts: string[] = [];
-      if (summary.title_answer) parts.push(`**${summary.title_answer}**`);
-      for (const topic of summary.topics) {
-        parts.push(`### ${topic.topic}\n\n${topic.summary}`);
-      }
-      const content = parts.join("\n\n");
-
       const lastBlock = selected[selected.length - 1];
       const siblings = blocks.filter((b) => b.parent_id === lastBlock.parent_id);
       const siblingIdx = siblings.findIndex((b) => b.id === lastBlock.id);
       const newOrder = siblingIdx + 1;
 
-      const newBlock = await createBlock(page.id, lastBlock.parent_id, newOrder, content);
+      // Build a block tree, not one block of flat text. Grafium is an
+      // outliner: a heading only "owns" the prose beneath it when that prose
+      // is its child, so emitting headings and paragraphs as siblings leaves
+      // every topic structurally disconnected from its own summary.
+      const rootContent = summary.title_answer
+        ? `**${summary.title_answer}**`
+        : "**Summary**";
+      const rootBlock = await createBlock(page.id, lastBlock.parent_id, newOrder, rootContent);
+      const created: Block[] = [rootBlock];
+
+      for (const [index, topic] of summary.topics.entries()) {
+        const heading = await createBlock(
+          page.id,
+          rootBlock.id,
+          index,
+          `### ${topic.topic.trim()}`,
+        );
+        created.push(heading);
+        const body = topic.summary.trim();
+        if (body) {
+          created.push(await createBlock(page.id, heading.id, 0, body));
+        }
+      }
+
       const insertAt = blocks.findIndex((b) => b.id === lastBlock.id);
-      blocks = [...blocks.slice(0, insertAt + 1), newBlock, ...blocks.slice(insertAt + 1)];
+      blocks = [...blocks.slice(0, insertAt + 1), ...created, ...blocks.slice(insertAt + 1)];
       selectedBlockIds = new Set();
+      refreshCollectionAfterMutation();
+      refreshPageTrees();
     } catch (e) {
       analyzeSelectionError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -874,9 +1108,86 @@
     }
   }
 
+  /**
+   * Resolves the block a DOM node lives in, via the `data-block-id` marker on
+   * each rendered block shell.
+   */
+  function blockIdFromNode(node: Node | null): string | null {
+    if (!node) return null;
+    const el = node instanceof Element ? node : node.parentElement;
+    const shell = el?.closest?.("[data-block-id]") as HTMLElement | null;
+    return shell?.dataset?.blockId ?? null;
+  }
+
+  /**
+   * Promotes a native text selection that spans multiple blocks into a
+   * block-level selection, the way Logseq does.
+   *
+   * Dragging across block boundaries is the primary way users select several
+   * blocks, but a DOM range carries no block semantics, so structural commands
+   * (Tab/Shift+Tab to indent, Backspace to delete, Analyze Selection) had
+   * nothing to act on and Tab fell through to native focus traversal — which
+   * looked like "selecting blocks then pressing Tab just clears them".
+   *
+   * A drag inside a single block is left alone so partial-text selection (copy,
+   * Analyze Selection on a phrase) keeps working.
+   */
+  function promoteTextSelectionToBlocks() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+
+    const startId = blockIdFromNode(sel.anchorNode);
+    const endId = blockIdFromNode(sel.focusNode);
+    if (!startId || !endId || startId === endId) return;
+
+    const startIdx = blocks.findIndex((b) => b.id === startId);
+    const endIdx = blocks.findIndex((b) => b.id === endId);
+    // Both ends must belong to *this* PageContent instance; the journal renders
+    // one instance per day, so a cross-day drag simply isn't a block selection.
+    if (startIdx === -1 || endIdx === -1) return;
+
+    const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+    const next = new Set<string>();
+    for (let i = from; i <= to; i++) {
+      next.add(blocks[i].id);
+    }
+
+    selectedBlockIds = next;
+    focusedBlockId = null;
+    sel.removeAllRanges();
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
+    }
+  }
+
+  function handleSelectionMouseUp() {
+    // Defer so the browser has committed the final range for this drag.
+    setTimeout(promoteTextSelectionToBlocks, 0);
+  }
+
+  /**
+   * True for both Tab and Shift+Tab.
+   *
+   * WebKitGTK reports Shift+Tab as the X11 `ISO_Left_Tab` keysym rather than
+   * `Tab`, so matching only `e.key === "Tab"` silently loses every outdent.
+   * `e.code` is layout-independent and stays `"Tab"` for both, with the key
+   * names kept as a fallback for engines that don't populate `code`.
+   */
+  function isTabKey(e: KeyboardEvent): boolean {
+    return e.code === "Tab" || e.key === "Tab" || e.key === "ISO_Left_Tab";
+  }
+
   function handleKeydownForSelection(e: KeyboardEvent) {
     if (selectedBlockIds.size === 0) return;
-    if (e.key === "Backspace" || e.key === "Delete") {
+    if (isTabKey(e)) {
+      // Selection presence is the intent signal — no need to consult
+      // document.activeElement. Multi-block Tab always takes precedence over
+      // in-editor Tab (a stale editor focus from the last click would otherwise
+      // let the browser move focus and clear the selection).
+      e.preventDefault();
+      void handleIndentSelection(e.shiftKey ? "out" : "in");
+    } else if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       handleDeleteSelected();
     } else if (e.key === "Escape") {
@@ -896,23 +1207,42 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydownForSelection} />
+<svelte:window onkeydown={handleKeydownForSelection} onmouseup={handleSelectionMouseUp} />
 
 <div class="page-content" class:compact>
-  <div class="page-title-row">
+  <div class="page-heading">
     <h1 class="page-title">{page.title}</h1>
-    <button
-      class="prototype-toggle"
-      type="button"
-      onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
-      title="Try the one-surface editor prototype for cross-block text selection"
-    >
-      {useUnifiedEditorPrototype ? "Classic block editor" : "Unified editor prototype"}
-    </button>
+    <div class="page-heading-actions">
+      {#if !compact}
+        <PageMenu
+          {collectionStatus}
+          {collectionKind}
+          busy={collectionBusy}
+          onSetCollection={updateCollection}
+        />
+      {/if}
+      <button
+        class="prototype-toggle"
+        type="button"
+        onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
+        title="Try the one-surface editor prototype for cross-block text selection"
+      >
+        {useUnifiedEditorPrototype ? "Classic block editor" : "Unified editor prototype"}
+      </button>
+    </div>
   </div>
 
+  {#if !compact && collectionKind !== null}
+    <CollectionMembers
+      kind={collectionKind}
+      members={collectionMembers}
+      memberCount={collectionMemberCount}
+      onNavigate={navigateToCollectionMember}
+    />
+  {/if}
+
   {#if loadError}
-    <div class="load-error" style="color: #f38ba8; background: #1e1e2e; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-family: monospace; font-size: 13px; white-space: pre-wrap;">
+    <div class="load-error">
       Error: {loadError}
     </div>
   {/if}
@@ -963,6 +1293,7 @@
             {block}
             pageId={page.id}
             pageTitle={page.title}
+            {assetBaseDir}
             depth={getBlockDepth(block.id)}
             focused={focusedBlockId === block.id}
             selected={selectedBlockIds.has(block.id)}
@@ -1040,7 +1371,7 @@
                 >
                   <span class="backlink-bullet">•</span>
                   <div class="backlink-content" use:hydrateRenderedMedia={node.block.content}>
-                    {@html renderBlock(node.block.content)}
+                    {@html renderBlock(node.block.content, bl.sourceAssetBaseDir)}
                   </div>
                 </button>
               {/each}
@@ -1071,14 +1402,23 @@
     font-weight: 700;
     margin: 0;
     color: var(--text-primary);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
-  .page-title-row {
+  .page-heading {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 8px;
+  }
+
+  .page-heading-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .prototype-toggle {
@@ -1097,9 +1437,34 @@
     color: var(--text-primary);
   }
 
+  /* Highlights are injected into rendered block HTML, so the selector has to
+     be :global — and the colour comes from the theme's accent set rather than
+     a fixed yellow, which is invisible on the amber themes and illegible on
+     the light ones. */
+  .blocks-container :global(mark.search-highlight) {
+    background: color-mix(in srgb, var(--accent-yellow) 32%, transparent);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+    /* Not colour alone: an underline keeps the match findable under any
+       colour-vision deficiency and on a theme where the accent is subtle. */
+    box-shadow: inset 0 -2px 0 var(--accent-yellow);
+  }
+
   .blocks-container {
     display: flex;
     flex-direction: column;
+  }
+
+  .load-error {
+    margin-bottom: 16px;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-family: monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
   }
 
   .selection-toolbar {
@@ -1109,8 +1474,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--bg-tertiary, #252535);
-    border: 1px solid var(--accent-color, #7c3aed);
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent);
     border-radius: 8px;
     padding: 8px 10px;
     margin-bottom: 8px;
@@ -1118,7 +1483,7 @@
 
   .selection-count {
     font-size: 12px;
-    color: var(--text-secondary, #aaa);
+    color: var(--text-secondary);
     margin-right: 4px;
   }
 
@@ -1127,13 +1492,13 @@
     padding: 4px 10px;
     border-radius: 6px;
     border: 1px solid var(--border);
-    background: var(--bg-secondary, #1a1a24);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     cursor: pointer;
   }
 
   .selection-toolbar-btn:hover:not(:disabled) {
-    border-color: var(--accent-color, #7c3aed);
+    border-color: var(--accent);
   }
 
   .selection-toolbar-btn:disabled {
@@ -1142,18 +1507,29 @@
   }
 
   .selection-toolbar-btn.danger {
-    color: var(--error-color, #e57373);
+    color: var(--danger);
   }
 
   .selection-toolbar-error {
     font-size: 12px;
-    color: var(--error-color, #e57373);
+    color: var(--danger);
     margin-bottom: 8px;
   }
 
   .block-shell {
     padding-bottom: 2px;
     box-sizing: border-box;
+    /*
+     * Scope layout and style invalidation to the individual block.
+     *
+     * WebKitGTK can't use the DMABUF renderer on NVIDIA + Wayland (it aborts
+     * with "Error 71 (Protocol error)"), so frames are rasterized on the CPU
+     * and repaint cost scales with the invalidated area. Without containment,
+     * editing one block lets WebKit treat the whole block list as dirty.
+     * `paint` is deliberately omitted: it would clip CodeMirror's completion
+     * tooltips, which render inside the block's own DOM subtree.
+     */
+    contain: layout style;
   }
 
   .virtual-spacer {
@@ -1174,7 +1550,7 @@
     font-size: 16px;
   }
 
-  .compact .page-title-row {
+  .compact .page-heading {
     margin-bottom: 4px;
   }
 
@@ -1315,7 +1691,7 @@
   }
 
   .backlink-node:hover {
-    background: var(--bg-hover);
+    background: var(--bg-secondary);
   }
 
   .backlink-bullet {
@@ -1338,7 +1714,7 @@
     width: 100%;
     margin-top: 8px;
     padding: 8px 12px;
-    border: 1px solid var(--border-color, #444);
+    border: 1px solid var(--border);
     border-radius: 4px;
     background: none;
     color: var(--text-muted);

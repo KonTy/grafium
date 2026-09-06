@@ -1,8 +1,21 @@
 <script lang="ts">
-  import { getCompletionCounts, getCompletedTasks, getOpenTasks, cycleTaskState } from "../lib/api";
+  import {
+    getCompletionCounts,
+    getCompletedTasks,
+    listOpenTaskRows,
+    taskFlowStats,
+    cycleTaskState,
+  } from "../lib/api";
+  import {
+    groupTasks,
+    humanDuration,
+    paceTrend,
+    type OpenTaskRow,
+    type TaskFlowStats,
+  } from "../lib/taskBoard";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
-  import type { CompletedTask, OpenTask } from "../lib/api";
+  import type { CompletedTask } from "../lib/api";
 
   interface Props {
     onNavigate?: (title: string) => void;
@@ -12,11 +25,14 @@
 
   let completionMap = $state<Map<string, number>>(new Map());
   let completedTasks = $state<CompletedTask[]>([]);
-  let openTasks = $state<OpenTask[]>([]);
+  let openTasks = $state<OpenTaskRow[]>([]);
+  let flow = $state<TaskFlowStats | null>(null);
+  // Recomputed each load rather than continuously: the buckets only move when
+  // the day does, and a task drifting between groups mid-read is disorienting.
+  let today = $state(new Date());
+  let groups = $derived(groupTasks(openTasks, today));
   let loading = $state(true);
   let totalCompleted = $state(0);
-  let currentStreak = $state(0);
-  let longestStreak = $state(0);
   let hoveredDay: { date: string; count: number; x: number; y: number } | null = $state(null);
 
   const WEEKS = 26;
@@ -29,11 +45,14 @@
   async function loadStats() {
     loading = true;
     try {
-      const [counts, tasks, open] = await Promise.all([
+      const [counts, tasks, open, stats] = await Promise.all([
         getCompletionCounts(DAYS),
         getCompletedTasks(DAYS),
-        getOpenTasks(DAYS),
+        listOpenTaskRows(),
+        taskFlowStats(12),
       ]);
+      today = new Date();
+      flow = stats;
       const map = new Map<string, number>();
       let total = 0;
       for (const [date, count] of counts) {
@@ -44,7 +63,6 @@
       completedTasks = tasks;
       openTasks = open;
       totalCompleted = total;
-      computeStreaks(map);
     } catch (e) {
       console.error("Failed to load stats:", e);
     } finally {
@@ -52,44 +70,6 @@
     }
   }
 
-  function computeStreaks(map: Map<string, number>) {
-    const today = new Date();
-    let streak = 0;
-    let longest = 0;
-    let running = 0;
-    // Walk backwards from today
-    for (let i = 0; i < DAYS; i++) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const key = d.toISOString().split("T")[0];
-      if (map.has(key) && (map.get(key) ?? 0) > 0) {
-        running++;
-        if (i === 0 || streak > 0) streak = running;
-      } else {
-        if (i === 0) streak = 0; // no completion today, check yesterday
-        else if (i === 1 && streak === 0) streak = 0; // nothing yesterday either
-        if (running > longest) longest = running;
-        running = 0;
-      }
-    }
-    // If first day missed but second day had, check
-    if (streak === 0) {
-      // Check if yesterday started a streak
-      let yStreak = 0;
-      for (let i = 1; i < DAYS; i++) {
-        const d = new Date(today);
-        d.setDate(d.getDate() - i);
-        const key = d.toISOString().split("T")[0];
-        if (map.has(key) && (map.get(key) ?? 0) > 0) {
-          yStreak++;
-        } else break;
-      }
-      streak = yStreak;
-    }
-    if (running > longest) longest = running;
-    currentStreak = streak;
-    longestStreak = longest;
-  }
 
   function getColor(count: number): string {
     if (count === 0) return "var(--heatmap-empty)";
@@ -222,7 +202,7 @@
 
 <div class="statistics-view">
   <div class="stats-header">
-    <h1>Statistics</h1>
+    <h1>Tasks</h1>
   </div>
 
   {#if loading}
@@ -248,7 +228,7 @@
               {/each}
             </div>
             <!-- Grid -->
-            <div class="heatmap-grid" style="grid-template-columns: repeat({WEEKS}, 1fr); aspect-ratio: {WEEKS} / 7;">
+            <div class="heatmap-grid">
               {#each grid as cell}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
@@ -273,23 +253,41 @@
           </div>
         </div>
 
-        <!-- Summary cards -->
+        <!-- Flow metrics.
+             Streaks used to live here and were deliberately removed. GitHub
+             dropped its streak counter in 2016 after burnout reports: a streak
+             motivates for a few weeks, then flips to fear of losing it, and
+             breaking a long one leaves people worse off than before they
+             started. The heatmap stays because it describes without setting a
+             target you can fail. What replaced the counters is elapsed time —
+             how long work waits and how long it takes — which is actionable
+             without keeping score against the reader. -->
         <div class="summary-cards">
           <div class="stat-card">
-            <span class="stat-value">{totalCompleted}</span>
-            <span class="stat-label">Completed</span>
+            <span class="stat-value">
+              {flow ? flow.throughput_7d.toFixed(1) : "—"}
+              {#if flow && paceTrend(flow) !== "steady"}
+                <span
+                  class="trend {paceTrend(flow)}"
+                  title={paceTrend(flow) === "up" ? "Ahead of last week" : "Quieter than last week"}
+                >{paceTrend(flow) === "up" ? "▲" : "▼"}</span>
+              {/if}
+            </span>
+            <span class="stat-label">Done / day</span>
           </div>
-          <div class="stat-card">
-            <span class="stat-value">{currentStreak}</span>
-            <span class="stat-label">Current Streak</span>
+          <div class="stat-card" title="Median time from starting a task to finishing it">
+            <span class="stat-value">{(flow && humanDuration(flow.median_cycle_ms)) ?? "—"}</span>
+            <span class="stat-label">Time to finish</span>
           </div>
-          <div class="stat-card">
-            <span class="stat-value">{longestStreak}</span>
-            <span class="stat-label">Longest Streak</span>
+          <div class="stat-card" title="Median time a task waits before you start it">
+            <span class="stat-value">{(flow && humanDuration(flow.median_wait_ms)) ?? "—"}</span>
+            <span class="stat-label">Time to start</span>
           </div>
-          <div class="stat-card">
-            <span class="stat-value">{completedTasks.length > 0 ? (totalCompleted / Math.max(1, completionMap.size)).toFixed(1) : "0"}</span>
-            <span class="stat-label">Avg/Day</span>
+          <div class="stat-card" title="Of tasks that had a deadline, the share finished by it">
+            <span class="stat-value">
+              {flow?.on_time_rate != null ? `${Math.round(flow.on_time_rate * 100)}%` : "—"}
+            </span>
+            <span class="stat-label">On time</span>
           </div>
         </div>
       </div>
@@ -303,47 +301,95 @@
       </div>
     {/if}
 
-    <!-- Open TODOs -->
+    <!-- Open tasks, grouped by when they need a decision.
+         "From earlier" rather than "Overdue", and no count badge on it: a
+         growing red number reads as an accusation and drives avoidance rather
+         than action. The oldest-task line below says the same thing in terms
+         of time, which is something you can act on. -->
     <div class="open-tasks">
       <h2 class="section-heading">
-        Open Tasks
+        Open
         <span class="section-count">{openTasks.length}</span>
       </h2>
+
+      {#if flow?.oldest_open_days != null && flow.oldest_open_days > 14}
+        <p class="oldest-note">
+          Your longest-waiting task has been open {flow.oldest_open_days} days.
+        </p>
+      {/if}
+
       {#if openTasks.length === 0}
         <div class="empty-state">
-          <p>No open tasks. Add one with a <code>- TODO ...</code> block, or say &quot;add todo &lt;text&gt;&quot; to your voice assistant.</p>
+          <p>Nothing open. Add a task with a <code>- TODO ...</code> block.</p>
         </div>
       {:else}
-        <div class="task-list">
-          {#each openTasks as task}
-            <div class="task-item open">
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <div
-                class="task-check open"
-                title="Mark done"
-                onclick={() => completeTask(task.block_id)}
-              >&#9633;</div>
-              <div class="task-body">
-                <span class="task-content" use:hydrateRenderedMedia={task.content}>
-                  <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
-                  {@html renderBlock(stripTaskMarker(task.content))}
-                </span>
-                <span class="task-meta">
+        {#each groups as group (group.bucket)}
+          <div class="task-group">
+            <div class="date-header">
+              <span class="date-text">{group.label}</span>
+              <span class="date-count">{group.tasks.length}</span>
+            </div>
+            <div class="task-list">
+              {#each group.tasks as task (task.block_id)}
+                <div class="task-item open">
                   <!-- svelte-ignore a11y_click_events_have_key_events -->
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <span
-                    class="task-page"
-                    onclick={() => onNavigate?.(task.page_title)}
-                  >{task.page_title}</span>
-                  <span class="task-time">{formatDate(new Date(task.timestamp).toISOString().split("T")[0])}</span>
-                </span>
-              </div>
+                  <div
+                    class="task-check open"
+                    title="Mark done"
+                    onclick={() => completeTask(task.block_id)}
+                  >&#9633;</div>
+                  <div class="task-body">
+                    <button
+                      class="task-content task-open"
+                      onclick={() => onNavigate?.(task.page_title)}
+                      title={`Open ${task.page_title}`}
+                    >
+                      {#if task.priority}
+                        <span class="task-priority priority-{task.priority}">[#{task.priority}]</span>
+                      {/if}
+                      <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
+                      <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                    </button>
+                    <span class="task-meta">
+                      <!-- svelte-ignore a11y_click_events_have_key_events -->
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <span
+                        class="task-page"
+                        onclick={() => onNavigate?.(task.page_title)}
+                      >{task.page_title}</span>
+                      {#if task.deadline_date}
+                        <span class="task-time">due {task.deadline_date}</span>
+                      {:else if task.scheduled_date}
+                        <span class="task-time">{task.scheduled_date}{task.scheduled_time ? ` ${task.scheduled_time}` : ""}</span>
+                      {/if}
+                    </span>
+                  </div>
+                </div>
+              {/each}
             </div>
-          {/each}
-        </div>
+          </div>
+        {/each}
       {/if}
     </div>
+
+    {#if flow && flow.by_page.length > 1}
+      <div class="by-page">
+        <h2 class="section-heading">Where the work went</h2>
+        <div class="page-bars">
+          {#each flow.by_page as [title, count] (title)}
+            <button class="page-bar" onclick={() => onNavigate?.(title)} title={`Open ${title}`}>
+              <span class="page-bar-name">{title}</span>
+              <span
+                class="page-bar-fill"
+                style="width: {Math.round((count / flow.by_page[0][1]) * 100)}%"
+              ></span>
+              <span class="page-bar-count">{count}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
 
     <!-- Completed tasks grouped by date -->
     <div class="completed-tasks">
@@ -364,9 +410,13 @@
                 <div class="task-item">
                   <div class="task-check">&#10003;</div>
                   <div class="task-body">
-                    <span class="task-content" use:hydrateRenderedMedia={task.content}>
-                      {@html renderBlock(stripTaskMarker(task.content))}
-                    </span>
+                    <button
+                      class="task-content task-open"
+                      onclick={() => onNavigate?.(task.page_title)}
+                      title={`Open ${task.page_title}`}
+                    >
+                      <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                    </button>
                     <span class="task-meta">
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -453,6 +503,109 @@
     gap: 2px;
   }
 
+  .trend {
+    font-size: 0.7em;
+    vertical-align: middle;
+  }
+
+  /* Direction only, never a percentage: a hard number invites reading an
+     ordinary quiet week as a failure. */
+  .trend.up {
+    color: var(--success, #3fb950);
+  }
+
+  .trend.down {
+    color: var(--text-muted);
+  }
+
+  .oldest-note {
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .task-group {
+    margin-bottom: 18px;
+  }
+
+  .task-priority {
+    font-weight: 700;
+    margin-right: 6px;
+  }
+
+  .task-priority.priority-A {
+    color: var(--danger, #f85149);
+  }
+
+  .task-priority.priority-B {
+    color: var(--warning, #d29922);
+  }
+
+  .task-priority.priority-C {
+    color: var(--text-muted);
+  }
+
+  .by-page {
+    margin-top: 28px;
+  }
+
+  .page-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .page-bar {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    min-height: 32px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
+  /* Sits behind the label rather than beside it, so a long page title still
+     gets the full width to be readable in. */
+  .page-bar-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--accent);
+    opacity: 0.16;
+    pointer-events: none;
+  }
+
+  .page-bar-name {
+    position: relative;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .page-bar-count {
+    position: relative;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .page-bar:hover {
+    background: var(--bg-hover, var(--bg-secondary));
+  }
+
+  .page-bar:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
   .stat-value {
     font-size: 1.5rem;
     font-weight: 700;
@@ -467,7 +620,10 @@
   }
 
   /* Heatmap */
+  /* Keeps the calendar to its natural size instead of filling the row, so the
+     summary cards sit beside it rather than being pushed to the far edge. */
   .heatmap-container {
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -501,7 +657,8 @@
 
   .day-labels {
     display: grid;
-    grid-template-rows: repeat(7, 1fr);
+    grid-template-rows: repeat(7, var(--heatmap-cell, 11px));
+    row-gap: 2px;
     gap: 1px;
     width: 24px;
     flex-shrink: 0;
@@ -516,17 +673,23 @@
     justify-content: flex-end;
   }
 
+  /* Fixed cells rather than stretch-to-fill.
+     `flex: 1` plus `aspect-ratio: 26/7` meant the grid took whatever width was
+     going and then demanded a proportional height — on a wide window that is a
+     ~430px wall of squares, dwarfing the tasks underneath it. Cells are sized
+     like GitHub's contribution graph instead, so the calendar stays a glance
+     rather than a centrepiece. */
   .heatmap-grid {
     display: grid;
-    grid-template-rows: repeat(7, 1fr);
+    grid-template-rows: repeat(7, var(--heatmap-cell, 11px));
+    grid-auto-columns: var(--heatmap-cell, 11px);
     grid-auto-flow: column;
-    gap: 1px;
-    flex: 1;
+    gap: 2px;
     min-width: 0;
   }
 
   .heatmap-cell {
-    border-radius: 1px;
+    border-radius: 2px;
     width: 100%;
     height: 100%;
     cursor: pointer;
@@ -684,7 +847,7 @@
   }
 
   .task-item:hover {
-    background: var(--bg-hover);
+    background: var(--bg-secondary);
   }
 
   .task-check {
@@ -713,6 +876,29 @@
     font-size: 0.9rem;
     line-height: 1.4;
     word-break: break-word;
+  }
+
+  /* A real <button> so the row is reachable and activatable by keyboard;
+     styled flat so it still reads as part of the list rather than a control. */
+  .task-open {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .task-open:hover {
+    color: var(--text-link);
+  }
+
+  .task-open:focus-visible {
+    outline: 2px solid var(--text-link);
+    outline-offset: 2px;
+    border-radius: 3px;
   }
 
   .task-content :global(.page-link) {

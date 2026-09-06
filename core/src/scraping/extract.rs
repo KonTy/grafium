@@ -41,7 +41,7 @@ pub fn extract(resource: &FetchedResource) -> Result<PageContent> {
     }
 }
 
-fn is_pdf(resource: &FetchedResource) -> bool {
+pub(crate) fn is_pdf(resource: &FetchedResource) -> bool {
     let content_type_is_pdf = resource
         .content_type
         .as_deref()

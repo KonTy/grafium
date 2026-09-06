@@ -30,6 +30,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 
 use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
 use crate::ai::config::LocalLlmSettings;
+use crate::ai::gpu_fit::{self, detect_free_vram_bytes, detect_free_vram_bytes_best};
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
@@ -48,11 +49,26 @@ const DEFAULT_CTX_SIZE: u32 = 4096;
 /// than this can still opt in explicitly via `context_size` in Settings.
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
-/// Safety margin subtracted from detected free VRAM before deciding whether
-/// a model fits — leaves headroom for the KV cache/context buffers (which
-/// scale with context size and aren't accounted for by the model file size
-/// alone) and for other GPU consumers (compositor, other apps).
-const VRAM_SAFETY_MARGIN_BYTES: u64 = 1536 * 1024 * 1024; // 1.5 GiB
+/// Outcome of the GPU-offload decision, carried alongside the chosen
+/// `gpu_layers` so the load path can report *why* it landed on CPU vs GPU
+/// (surfaced to the UI via [`crate::ai::traits::AcceleratorStatus`]).
+struct GpuDecision {
+    gpu_layers: u32,
+    free_vram_bytes: Option<u64>,
+    model_size_bytes: Option<u64>,
+}
+
+/// Adapts the shared [`gpu_fit`] verdict onto llama.cpp's `n_gpu_layers`
+/// knob. The fit arithmetic itself deliberately lives in `gpu_fit` so that
+/// Settings' model picker warns using the *same* rule this loader applies —
+/// see that module's docs for why they must not diverge.
+fn gpu_layers_for_vram(model_size_bytes: u64, free_vram_bytes: u64) -> u32 {
+    if gpu_fit::fits_in_vram(model_size_bytes, free_vram_bytes) {
+        OFFLOAD_ALL_LAYERS
+    } else {
+        0
+    }
+}
 
 /// Picks a default `n_gpu_layers` for a model the caller hasn't pinned an
 /// explicit `gpu_layers` setting for.
@@ -69,45 +85,40 @@ const VRAM_SAFETY_MARGIN_BYTES: u64 = 1536 * 1024 * 1024; // 1.5 GiB
 /// non-NVIDIA GPU, parse failure, etc.) this falls back to the previous
 /// "offload everything" default rather than guessing further — a Vulkan
 /// backend on a card we can't query is treated the same as before.
-fn default_gpu_layers_for(model_path: &Path) -> u32 {
-    let Some(free_vram_bytes) = detect_free_vram_bytes() else {
-        return OFFLOAD_ALL_LAYERS;
+fn decide_gpu_layers(model_path: &Path) -> GpuDecision {
+    let free_vram_bytes = detect_free_vram_bytes_best();
+    let model_size_bytes = std::fs::metadata(model_path).map(|m| m.len()).ok();
+
+    let gpu_layers = match (model_size_bytes, free_vram_bytes) {
+        (Some(model), Some(free)) => {
+            let layers = gpu_layers_for_vram(model, free);
+            if layers == 0 {
+                // Visible on stderr (not only `tracing::warn!`, which had no
+                // subscriber capturing it on the affected machine — the log
+                // there showed no trace of this decision at all). This is a
+                // 5–10× slowdown; the user needs to be able to see why.
+                let msg = format!(
+                    "grafium: local chat model is ~{} MiB but only ~{} MiB VRAM was free at \
+                     load — running on CPU (much slower). Free VRAM and use \"Retry on GPU\" in \
+                     Chat, or set an explicit \"GPU layers\" value in Settings.",
+                    model / (1024 * 1024),
+                    free / (1024 * 1024)
+                );
+                eprintln!("{msg}");
+                tracing::warn!("{msg}");
+            }
+            layers
+        }
+        // Can't measure one side — keep the historical "offload everything"
+        // default rather than guessing CPU.
+        _ => OFFLOAD_ALL_LAYERS,
     };
 
-    let Ok(model_size_bytes) = std::fs::metadata(model_path).map(|m| m.len()) else {
-        return OFFLOAD_ALL_LAYERS;
-    };
-
-    if model_size_bytes + VRAM_SAFETY_MARGIN_BYTES > free_vram_bytes {
-        tracing::warn!(
-            "Model {} is ~{} MiB but only ~{} MiB VRAM is free — defaulting to CPU-only \
-             (gpu_layers=0) instead of offloading everything, since it would not fit. Set an \
-             explicit \"GPU layers\" value in Settings to force partial GPU offload.",
-            model_path.display(),
-            model_size_bytes / (1024 * 1024),
-            free_vram_bytes / (1024 * 1024)
-        );
-        0
-    } else {
-        OFFLOAD_ALL_LAYERS
+    GpuDecision {
+        gpu_layers,
+        free_vram_bytes,
+        model_size_bytes,
     }
-}
-
-/// Free VRAM in bytes on the first NVIDIA GPU reported by `nvidia-smi`, or
-/// `None` if the tool isn't installed / no GPU is reported / its output
-/// can't be parsed.
-fn detect_free_vram_bytes() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let first_line = text.lines().next()?.trim();
-    let free_mib: u64 = first_line.parse().ok()?;
-    Some(free_mib * 1024 * 1024)
 }
 
 /// Multiplier applied to a GGUF file's on-disk size to estimate the *host
@@ -227,14 +238,19 @@ pub struct LocalLlm {
     model: Arc<LlamaModel>,
     ctx_size: NonZeroU32,
     name: String,
+    /// Whether the model's baked-in chat template marks it as a reasoning
+    /// ("thinking") model — detected once at load from the template text.
+    supports_thinking: bool,
+    /// Whether inference actually landed on the GPU, and the VRAM figures that
+    /// drove that decision — surfaced to the UI so a silent CPU fallback is
+    /// visible instead of presenting as a hang.
+    accel: crate::ai::traits::AcceleratorStatus,
 }
 
-/// The process-wide llama.cpp backend. llama.cpp only wants to be
-/// initialized once; every `LocalLlm` instance shares the same handle
-/// rather than each `load()` call re-initializing it — see
-/// `llama_shared::shared_backend`, also used by `LocalEmbedder` so both can
-/// be in use in the same process at once.
-
+// The process-wide llama.cpp backend. llama.cpp only wants to be initialized
+// once; every `LocalLlm` instance shares the same handle rather than each
+// `load()` call re-initializing it — see `llama_shared::shared_backend`, also
+// used by `LocalEmbedder` so both can be in use in the same process at once.
 impl LocalLlm {
     /// Loads a GGUF model from `model_path`.
     ///
@@ -262,9 +278,21 @@ impl LocalLlm {
         // whole process OOM-killed by the kernel (observed in practice).
         // Instead, when the caller hasn't pinned an explicit `gpu_layers`,
         // proactively estimate whether the model can plausibly fit in free
-        // VRAM at all and decide up front, so we only ever allocate once.
-        let requested_gpu_layers =
-            gpu_layers.unwrap_or_else(|| default_gpu_layers_for(model_path));
+        // VRAM at all and decide up front, so we only ever allocate once. An
+        // *explicit* `gpu_layers` always wins over the heuristic.
+        let explicit = gpu_layers.is_some();
+        let decision = match gpu_layers {
+            Some(layers) => GpuDecision {
+                gpu_layers: layers,
+                // Report the current free VRAM for context, but a single
+                // (non-retried) read is fine here since it doesn't drive any
+                // decision — the user pinned the value.
+                free_vram_bytes: detect_free_vram_bytes(),
+                model_size_bytes: std::fs::metadata(model_path).map(|m| m.len()).ok(),
+            },
+            None => decide_gpu_layers(model_path),
+        };
+        let requested_gpu_layers = decision.gpu_layers;
 
         if requested_gpu_layers == 0 {
             check_cpu_ram_budget(model_path)?;
@@ -325,11 +353,49 @@ impl LocalLlm {
             .unwrap_or("local-llm")
             .to_string();
 
+        // Reasoning models (Qwen3, DeepSeek-R1, ...) advertise themselves in
+        // their chat template — Qwen3's references `enable_thinking` and both
+        // families emit `<think>` control markers. Detecting it here (once,
+        // from the template text) lets the engine request non-thinking mode
+        // and budget output tokens for a model that reasons before answering.
+        //
+        // When a GGUF carries *no* template at all, assume it might reason.
+        // The two errors are not symmetric: sending `/no_think` to a model
+        // that doesn't reason costs a few harmless tokens, while failing to
+        // send it to one that does makes the model emit its raw
+        // chain-of-thought as the answer. That is exactly what happened with
+        // an abliterated Qwen3 build whose template had been stripped during
+        // conversion — every reply began mid-thought ("Okay, I need to…"),
+        // which reads as the model being broken.
+        let supports_thinking = model
+            .chat_template(None)
+            .ok()
+            .and_then(|t| t.to_string().ok())
+            .map(|tmpl| {
+                let lower = tmpl.to_lowercase();
+                lower.contains("enable_thinking") || lower.contains("<think>")
+            })
+            .unwrap_or(true);
+
+        // GPU offload is only physically possible when a GPU backend was
+        // compiled in; otherwise CPU is expected and the UI must not warn.
+        let gpu_supported = cfg!(feature = "llm-local-vulkan");
+        let accel = crate::ai::traits::AcceleratorStatus {
+            gpu_supported,
+            on_gpu: gpu_supported && requested_gpu_layers > 0,
+            gpu_layers: requested_gpu_layers,
+            free_vram_mib_at_load: decision.free_vram_bytes.map(|b| b / (1024 * 1024)),
+            model_mib: decision.model_size_bytes.map(|b| b / (1024 * 1024)),
+            explicit,
+        };
+
         Ok(Self {
             backend,
             model: Arc::new(model),
             ctx_size,
             name,
+            supports_thinking,
+            accel,
         })
     }
 
@@ -349,6 +415,14 @@ impl LocalLlm {
     /// about) because `check_cpu_ram_budget` always runs *before* any
     /// weights are actually read for a CPU-only load, so the first
     /// (failing) attempt never allocated anything to begin with.
+    /// The model's raw chat template, for diagnosing reasoning detection.
+    pub fn chat_template_for_debug(&self) -> Option<String> {
+        self.model
+            .chat_template(None)
+            .ok()
+            .and_then(|t| t.to_string().ok())
+    }
+
     pub fn from_settings(models_dir: &Path, settings: &LocalLlmSettings) -> Result<Self> {
         let model_path = settings.model_ref.resolve(models_dir, ModelKind::Llm)?;
         match Self::load(&model_path, settings.context_size, settings.gpu_layers) {
@@ -388,6 +462,38 @@ impl LocalLlm {
             .unwrap_or_else(|| model_library::default_models_dir(data_dir));
         Self::from_settings(&models_dir, &local.local_llm)
     }
+
+    /// User-initiated "try the GPU now" reload: same resolution as
+    /// [`Self::from_config`] but forces full GPU offload, bypassing both the
+    /// free-VRAM heuristic and any configured `gpu_layers`. This is the
+    /// action behind Chat's "Retry on GPU" button — the free-VRAM heuristic
+    /// may have landed on CPU because VRAM was *transiently* busy at startup
+    /// (the embedder mid-index, a previous instance shutting down); once that
+    /// has cleared, this lets the user move inference onto the GPU without
+    /// restarting or editing Settings. A fresh single load attempt, so it
+    /// doesn't risk the double-allocation hazard `load()` warns about.
+    pub fn from_config_forcing_gpu(
+        config: &crate::ai::config::AiConfig,
+        data_dir: &Path,
+    ) -> Result<Self> {
+        let local = config
+            .local
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("No local AI provider configured".to_string()))?;
+        let models_dir = local
+            .models_dir
+            .clone()
+            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
+        let model_path = local
+            .local_llm
+            .model_ref
+            .resolve(&models_dir, ModelKind::Llm)?;
+        Self::load(
+            &model_path,
+            local.local_llm.context_size,
+            Some(OFFLOAD_ALL_LAYERS),
+        )
+    }
 }
 
 impl LlmProvider for LocalLlm {
@@ -401,10 +507,11 @@ impl LlmProvider for LocalLlm {
         let ctx_size = self.ctx_size;
         let messages = messages.to_vec();
         let options = options.clone();
+        let disable_thinking = self.supports_thinking;
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options)?;
+                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
                 generate(&model, &backend, ctx_size, &prompt, &options, None)
             })
             .await
@@ -414,6 +521,14 @@ impl LlmProvider for LocalLlm {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        Some(self.ctx_size.get() as usize)
+    }
+
+    fn supports_thinking(&self) -> bool {
+        self.supports_thinking
     }
 
     fn complete_stream<'a>(
@@ -427,6 +542,7 @@ impl LlmProvider for LocalLlm {
         let ctx_size = self.ctx_size;
         let messages = messages.to_vec();
         let options = options.clone();
+        let disable_thinking = self.supports_thinking;
 
         Box::pin(async move {
             // `generate()` runs on a blocking thread (llama.cpp is
@@ -437,7 +553,7 @@ impl LlmProvider for LocalLlm {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
             let generation = tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options)?;
+                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
                 generate(&model, &backend, ctx_size, &prompt, &options, Some(&tx))
             });
 
@@ -458,6 +574,10 @@ impl LlmProvider for LocalLlm {
         // (no network endpoint to probe, unlike Ollama/OpenAI-compatible).
         Box::pin(async move { Ok(true) })
     }
+
+    fn accelerator_status(&self) -> Option<crate::ai::traits::AcceleratorStatus> {
+        Some(self.accel.clone())
+    }
 }
 
 /// Formats a conversation (`options.system_prompt` + `messages`) using the
@@ -470,18 +590,30 @@ fn build_chat_prompt(
     model: &LlamaModel,
     messages: &[ChatMessage],
     options: &CompletionOptions,
+    disable_thinking: bool,
 ) -> Result<String> {
     let mut chat = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &options.system_prompt {
         chat.push(new_chat_message("system", system)?);
     }
-    for message in messages {
+    // For reasoning models, append the `/no_think` soft switch to the final
+    // user turn. Qwen3 (and compatible templates) honour this directive to
+    // skip the <think> reasoning pass — cheaper and more reliable than hoping
+    // the model answers before exhausting its budget. `<think>` stripping in
+    // the engine remains as a backstop for models that ignore the directive.
+    let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
+    for (i, message) in messages.iter().enumerate() {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
         };
-        chat.push(new_chat_message(role, &message.content)?);
+        let content = if disable_thinking && Some(i) == last_user {
+            format!("{}\n\n/no_think", message.content)
+        } else {
+            message.content.clone()
+        };
+        chat.push(new_chat_message(role, &content)?);
     }
 
     let template = match model.chat_template(None) {
@@ -585,6 +717,18 @@ fn generate(
     let stop_at_token = n_cur + max_new_tokens;
 
     while n_cur < stop_at_token && n_cur < n_ctx {
+        // Cooperative cancellation: the UI can flip this flag (via
+        // `CompletionOptions.cancel`) to abort a slow local generation
+        // instead of leaving the user staring at a frozen pane. Return what
+        // we have so far rather than erroring.
+        if options
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            break;
+        }
+
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
@@ -650,7 +794,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let message = err.to_string();
         assert!(
@@ -676,7 +821,8 @@ mod config_tests {
         });
 
         let err = LocalLlm::from_config(&ai_config, data_dir.path())
-            .map(|_| ()).unwrap_err();
+            .map(|_| ())
+            .unwrap_err();
 
         let default_dir = data_dir.path().join("models");
         assert!(
@@ -727,3 +873,107 @@ mod config_tests {
     }
 }
 
+#[cfg(test)]
+mod thinking_detection_tests {
+    /// Mirrors the classifier in `load`, which can't be called without a real
+    /// GGUF on disk. Kept in lockstep with it deliberately: the asymmetry it
+    /// encodes is the whole point.
+    fn detect(template: Option<&str>) -> bool {
+        template
+            .map(|tmpl| {
+                let lower = tmpl.to_lowercase();
+                lower.contains("enable_thinking") || lower.contains("<think>")
+            })
+            .unwrap_or(true)
+    }
+
+    #[test]
+    fn a_template_advertising_reasoning_is_detected() {
+        assert!(detect(Some("{% if enable_thinking %}...")));
+        assert!(detect(Some("assistant emits <think> blocks")));
+    }
+
+    #[test]
+    fn a_plain_template_is_not_treated_as_reasoning() {
+        assert!(!detect(Some(
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )));
+    }
+
+    /// Regression: an abliterated Qwen3 build shipped with its chat template
+    /// stripped during conversion. Detection returned "not a reasoning model",
+    /// so `/no_think` was never sent and every answer arrived as raw
+    /// chain-of-thought ("Okay, I need to…"). A missing template must mean
+    /// "assume it reasons" — the directive is cheap, the leak is not.
+    #[test]
+    fn a_missing_template_assumes_reasoning() {
+        assert!(detect(None));
+    }
+}
+
+#[cfg(test)]
+mod gpu_decision_tests {
+    use super::*;
+    // The margin arithmetic itself now lives in `gpu_fit` (shared with the
+    // Settings model picker); these tests cover the layer-count adapter and
+    // the real-model regression cases against it.
+    use crate::ai::gpu_fit::{
+        vram_safety_margin_bytes, VRAM_SAFETY_MARGIN_MAX_BYTES, VRAM_SAFETY_MARGIN_MIN_BYTES,
+    };
+
+    #[test]
+    fn safety_margin_scales_with_model_and_clamps() {
+        // Tiny model: 20% would be well under the floor → clamped to 512 MiB.
+        let tiny = 256 * 1024 * 1024; // 256 MiB
+        assert_eq!(vram_safety_margin_bytes(tiny), VRAM_SAFETY_MARGIN_MIN_BYTES);
+
+        // Mid model: 5 GiB → 20% = 1 GiB, inside the band → used as-is.
+        let mid = 5 * 1024 * 1024 * 1024; // 5 GiB
+        assert_eq!(vram_safety_margin_bytes(mid), 1024 * 1024 * 1024);
+
+        // Huge model: 30 GiB → 20% = 6 GiB, above the ceiling → clamped.
+        let huge = 30u64 * 1024 * 1024 * 1024;
+        assert_eq!(vram_safety_margin_bytes(huge), VRAM_SAFETY_MARGIN_MAX_BYTES);
+    }
+
+    #[test]
+    fn gpu_layers_decision_fits_and_does_not_fit() {
+        let model = 5 * 1024 * 1024 * 1024; // 5 GiB → margin 1 GiB → needs 6 GiB free
+        let needed = model + vram_safety_margin_bytes(model);
+
+        // Comfortably enough free VRAM → offload everything.
+        assert_eq!(gpu_layers_for_vram(model, needed), OFFLOAD_ALL_LAYERS);
+        assert_eq!(
+            gpu_layers_for_vram(model, needed + 1024 * 1024 * 1024),
+            OFFLOAD_ALL_LAYERS
+        );
+
+        // One byte short of the requirement → CPU-only.
+        assert_eq!(gpu_layers_for_vram(model, needed - 1), 0);
+
+        // The exact real-machine numbers from the bug report: a 4,983 MiB
+        // model with only ~5,000 MiB free (a transient dip) does not fit;
+        // with 16 GiB free it does.
+        let real_model = 4_983u64 * 1024 * 1024;
+        assert_eq!(gpu_layers_for_vram(real_model, 5_000 * 1024 * 1024), 0);
+        assert_eq!(
+            gpu_layers_for_vram(real_model, 16 * 1024 * 1024 * 1024),
+            OFFLOAD_ALL_LAYERS
+        );
+    }
+
+    #[test]
+    fn best_of_free_readings_ignores_a_transient_dip() {
+        // The whole point of sampling the *max*: a momentary dip (5 GiB)
+        // between two healthy readings (16 GiB) must not be what we decide
+        // on. Emulate the reduction the sampler performs.
+        let readings = [16u64, 5, 16].map(|g| g * 1024 * 1024 * 1024);
+        let best = readings.iter().copied().reduce(|a, b| a.max(b)).unwrap();
+        assert_eq!(best, 16 * 1024 * 1024 * 1024);
+
+        let real_model = 4_983u64 * 1024 * 1024;
+        // With the dip we'd have (wrongly) picked CPU; with the best reading
+        // we correctly offload.
+        assert_eq!(gpu_layers_for_vram(real_model, best), OFFLOAD_ALL_LAYERS);
+    }
+}

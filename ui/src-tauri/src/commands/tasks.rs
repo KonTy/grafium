@@ -124,3 +124,59 @@ pub fn set_task_date(
         .set_task_date(&block_id, &kind, date.as_deref())
         .map_err(|e| e.to_string())
 }
+
+/// Every open task with its dates, for grouping by when it is due.
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_open_task_rows(
+    state: State<AppState>,
+) -> Result<Vec<grafium_core::db::tasks::OpenTaskRow>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.db.list_open_task_rows().map_err(|e| e.to_string())
+}
+
+/// Flow metrics for the Tasks dashboard.
+#[tauri::command(rename_all = "camelCase")]
+pub fn task_flow_stats(
+    state: State<AppState>,
+    weeks: Option<i64>,
+) -> Result<grafium_core::db::tasks::TaskFlowStats, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .task_flow_stats(weeks.unwrap_or(12))
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct BackfillReport {
+    pub pages_scanned: usize,
+    pub tasks_updated: usize,
+    pub backup_path: Option<String>,
+    pub dry_run: bool,
+}
+
+/// Write completion times held only in the database into the markdown.
+///
+/// History recorded before completions were written to disk exists only in
+/// `task_events`, so it would be lost the next time the graph is rebuilt or
+/// opened somewhere else. This walks those events and adds the `CLOSED:` line
+/// each finished task should have had.
+///
+/// Always run with `dry_run` first: it reports what it would touch without
+/// writing anything. A real run takes a full copy of the graph beforehand.
+#[tauri::command(rename_all = "camelCase")]
+pub fn backfill_task_completions(
+    state: State<AppState>,
+    dry_run: bool,
+) -> Result<BackfillReport, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let report = graph
+        .backfill_task_completions(dry_run)
+        .map_err(|e| e.to_string())?;
+    Ok(BackfillReport {
+        pages_scanned: report.pages_scanned,
+        tasks_updated: report.tasks_updated,
+        backup_path: report.backup_path,
+        dry_run,
+    })
+}

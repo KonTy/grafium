@@ -1,6 +1,6 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -57,8 +57,77 @@ export interface AiConfigPayload {
 export interface StreamChunk {
   request_id: string;
   delta: string;
+  /** Current answering phase on a transition, else null; never carries reasoning text. */
+  phase?: string | null;
+  /** Transient per-phase progress note (e.g. "Reading source 2/5: …") during a
+   *  web-research pass. Display-only; never part of the answer text. */
+  note?: string | null;
   done: boolean;
   error?: string | null;
+}
+
+// A structured citation returned alongside a Chat answer, so the UI can render
+// clickable source chips and navigate to the originating page/block.
+export interface ChatSource {
+  index: number;
+  page_id: string;
+  page_title: string;
+  block_id: string;
+  date?: string | null;
+}
+
+// A web source cited by the "From the web" section of a research answer. Unlike
+// a ChatSource (which points at a local page/block), this is an external URL the
+// UI renders as a clickable link opened in the system browser. `number` matches
+// the inline `[n]` marker in the streamed web summary.
+export interface WebSource {
+  number: number;
+  title: string;
+  url: string;
+}
+
+export interface SourcesPayload {
+  request_id: string;
+  sources: ChatSource[];
+  /** Web sources for a research answer; empty/absent for an ordinary answer. */
+  web_sources?: WebSource[];
+}
+
+export interface AskResult {
+  answer: string;
+  sources: ChatSource[];
+}
+
+// Compact label for a source chip, e.g. "[3] 2026-03-14 · Journal" or
+// "[1] Rust". Pure so it can be unit-tested and reused.
+export function formatSourceLabel(source: ChatSource): string {
+  const parts = [`[${source.index}]`];
+  if (source.date) parts.push(source.date);
+  parts.push(source.page_title);
+  return parts.join(" · ");
+}
+
+// Compact label for a web-source chip, e.g. "[2] example.com · How creatine
+// works". Falls back to the raw URL when it can't be parsed. Pure and reusable.
+export function formatWebSourceLabel(source: WebSource): string {
+  let host = "";
+  try {
+    host = new URL(source.url).hostname.replace(/^www\./, "");
+  } catch {
+    host = source.url;
+  }
+  const title = source.title.trim();
+  const label = title && title !== host ? `${host} · ${title}` : host;
+  return `[${source.number}] ${label}`;
+}
+
+// Whether the Chat empty-index banner should be shown: the status has loaded
+// and there are zero indexed chunks. A null status (not yet loaded / errored)
+// keeps the banner hidden.
+export function shouldShowIndexBanner(
+  indexedChunks: number | null
+): boolean {
+  return indexedChunks === 0;
 }
 
 export interface HealthStatus {
@@ -199,11 +268,56 @@ export function aiHealthCheck(): Promise<HealthStatus> {
 
 // ─── Indexing ────────────────────────────────────────────────────────────────
 
+/** GPU/CPU status of the local chat model, mirrors core's `AcceleratorStatus`. */
+export interface AcceleratorStatus {
+  /** Whether this build can offload to a GPU at all. When false, CPU is expected. */
+  gpu_supported: boolean;
+  /** Whether inference is actually running on the GPU. */
+  on_gpu: boolean;
+  /** Effective GPU layers; 0 means CPU-only. */
+  gpu_layers: number;
+  /** Free VRAM observed at load time (MiB), or null if unqueryable. */
+  free_vram_mib_at_load: number | null;
+  /** Model file size (MiB). */
+  model_mib: number | null;
+  /** Whether gpu_layers was pinned explicitly in config. */
+  explicit: boolean;
+}
+
+export interface IndexStatus {
+  indexed_chunks: number;
+  total_blocks: number;
+  /** Pages edited since their last index, awaiting a background reindex. */
+  pending_pages: number;
+  embedder_ready: boolean;
+  llm_ready: boolean;
+  /** Local LLM GPU/CPU status, or null for remote providers / no LLM loaded. */
+  accelerator: AcceleratorStatus | null;
+}
+
+export function aiIndexStatus(): Promise<IndexStatus> {
+  return invoke("ai_index_status");
+}
+
+/**
+ * Reload the local chat model forcing full GPU offload — Chat's "Retry on
+ * GPU" action. Returns the refreshed accelerator status (or null).
+ */
+export function aiRetryLlmOnGpu(): Promise<AcceleratorStatus | null> {
+  return invoke("ai_retry_llm_on_gpu");
+}
+
 export function aiIndexPage(pageId: string): Promise<number> {
   return invoke("ai_index_page", { pageId });
 }
 
-export function aiIndexAllPages(): Promise<number> {
+export interface IndexAllResult {
+  indexed_chunks: number;
+  pages_processed: number;
+  pages_failed: number;
+}
+
+export function aiIndexAllPages(): Promise<IndexAllResult> {
   return invoke("ai_index_all_pages");
 }
 
@@ -267,8 +381,14 @@ export function aiInsertPageSummary(
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
-export function aiAsk(question: string, graphId?: string): Promise<string> {
+export function aiAsk(question: string, graphId?: string): Promise<AskResult> {
   return invoke("ai_ask", { question, graphId });
+}
+
+/** One prior message in the Chat transcript, as the backend expects it. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
 }
 
 export async function aiAskStream(
@@ -277,36 +397,93 @@ export async function aiAskStream(
     onChunk: (delta: string) => void;
     onDone: () => void;
     onError?: (message: string) => void;
+    onSources?: (sources: ChatSource[]) => void;
+    onWebSources?: (sources: WebSource[]) => void;
+    onPhase?: (phase: string) => void;
+    onNote?: (note: string) => void;
+    onStart?: (requestId: string) => void;
   },
-  graphId?: string
+  graphId?: string,
+  /** Prior turns, oldest first. Sent whole — the backend decides how much to
+   *  replay verbatim and compacts the rest. */
+  history?: ChatTurn[]
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  handlers.onStart?.(requestId);
 
-  const unlisten = await listen<StreamChunk>("ai://chat_stream", (event) => {
-    const payload = event.payload;
-    if (!payload || payload.request_id !== requestId) return;
-
-    if (payload.error) {
-      handlers.onError?.(payload.error);
-      return;
-    }
-
-    if (payload.delta) {
-      handlers.onChunk(payload.delta);
-    }
-
-    if (payload.done) {
-      handlers.onDone();
-    }
-  });
-
+  // Acquire both listeners inside the guarded block with nullable handles.
+  // Previously the two listen() calls ran before the try, so a rejection from
+  // the first left Chat stuck "active" with onError never called, and a
+  // rejection from the second leaked the first subscription. Now any setup
+  // failure routes through onError and whatever was acquired is always removed.
+  let unlistenStream: UnlistenFn | null = null;
+  let unlistenSources: UnlistenFn | null = null;
   try {
-    await invoke("ai_ask_stream", { question, graphId, requestId });
+    unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+
+      if (payload.error) {
+        handlers.onError?.(payload.error);
+        return;
+      }
+
+      // A phase transition (retrieving / processing_prompt / thinking /
+      // generating / searching_web / reading_sources) carries no answer text — it
+      // drives the status indicator.
+      if (payload.phase) {
+        handlers.onPhase?.(payload.phase);
+      }
+
+      // A progress note (e.g. "Reading source 2/5: …") is display-only detail for
+      // the current phase; it is never appended to the answer.
+      if (payload.note) {
+        handlers.onNote?.(payload.note);
+      }
+
+      if (payload.delta) {
+        handlers.onChunk(payload.delta);
+      }
+
+      if (payload.done) {
+        handlers.onDone();
+      }
+    });
+
+    unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
+      const payload = event.payload;
+      if (!payload || payload.request_id !== requestId) return;
+      handlers.onSources?.(payload.sources ?? []);
+      if (payload.web_sources && payload.web_sources.length > 0) {
+        handlers.onWebSources?.(payload.web_sources);
+      }
+    });
+
+    await invoke("ai_ask_stream", { question, graphId, requestId, history: history ?? [] });
   } catch (e: any) {
-    handlers.onError?.(String(e));
+    // A user Stop cancels the run; when that surfaces as the canonical
+    // cancellation rejection it's a normal end, not an error to report.
+    if (!isResearchCancellation(String(e))) handlers.onError?.(String(e));
   } finally {
-    unlisten();
+    unlistenStream?.();
+    unlistenSources?.();
   }
+}
+
+// Cancel an in-flight streamed answer. The local generation loop checks the
+// flag and stops, returning what it has so far; a no-op if already finished.
+export function aiCancelStream(requestId: string): Promise<void> {
+  return invoke("ai_cancel_stream", { requestId });
+}
+
+// The backend rejects a cancelled web-research run with this exact message
+// (core/src/ai/web_research.rs RESEARCH_CANCELLED). Stopping a run is a normal,
+// expected end — not a failure to surface — so both stream wrappers use this to
+// tell a genuine error apart from the user pressing Stop.
+export const RESEARCH_CANCELLED_MESSAGE = "Web research was cancelled.";
+
+export function isResearchCancellation(message: string): boolean {
+  return message.includes(RESEARCH_CANCELLED_MESSAGE);
 }
 
 // ─── Graph Registry ──────────────────────────────────────────────────────────

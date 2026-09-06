@@ -1,8 +1,10 @@
 <script lang="ts">
   import { getGraphData, type GraphData } from "../lib/api";
+  import { assignClusterHues, edgeHue, exceedsDragThreshold } from "../lib/graphColor";
+  import type { TagHue } from "../lib/tagColor";
 
   interface Props {
-    onNavigate: (title: string) => void;
+    onNavigate: (title: string, highlight?: string) => void;
     currentPageId?: string;
     currentPageTitle?: string;
   }
@@ -54,6 +56,15 @@
   let offsetY = 0;
 
   // ---- Simulation data (non-reactive, mutated in the rAF loop) ----
+  /// Cluster hue per node id — see `graphColor.ts`. Recomputed on load, not on
+  /// every frame: it depends only on topology, which doesn't change as the
+  /// layout settles.
+  let clusterHues = new Map<string, TagHue>();
+  /// Resolved `--accent-<hue>` values, read once per draw. `getComputedStyle`
+  /// is a layout-flushing call, so doing it per node would cost a reflow for
+  /// every dot on screen.
+  let huePalette = new Map<string, string>();
+
   let nodes: SimNode[] = [];
   let edges: SimEdge[] = [];
   let nodeById = new Map<string, SimNode>();
@@ -68,6 +79,10 @@
   let hoverNode: SimNode | null = null;
   let panning = false;
   let pointerMoved = false;
+  /// Where the pointer went down, so a press can be classified as click or
+  /// drag by distance rather than by "did any move event arrive".
+  let pointerDownX = 0;
+  let pointerDownY = 0;
   let lastX = 0;
   let lastY = 0;
 
@@ -95,6 +110,10 @@
   }
 
   function buildSimulation(data: GraphData) {
+    clusterHues = assignClusterHues(
+      data.nodes.map((n) => n.id),
+      data.edges.map((e) => ({ source: e.source, target: e.target }))
+    );
     nodeById = new Map();
     const cx = width / 2;
     const cy = height / 2;
@@ -290,14 +309,29 @@
     const textColor = themeColor("--text-secondary", "#aaa");
     const q = searchText.trim().toLowerCase();
 
-    // Edges — thickness/opacity scale with tie magnitude (weight).
-    ctx.strokeStyle = edgeColor;
+    // One `getComputedStyle` per hue per frame instead of one per element.
+    huePalette = new Map();
+    const hueColor = (hue: TagHue | null): string => {
+      if (!hue) return edgeColor;
+      const cached = huePalette.get(hue);
+      if (cached) return cached;
+      const resolved = themeColor(`--accent-${hue}`, nodeColor);
+      huePalette.set(hue, resolved);
+      return resolved;
+    };
+
+    // Edges — thickness/opacity scale with tie magnitude (weight), and hue
+    // follows the cluster. An edge *between* clusters keeps the neutral border
+    // colour, which makes bridges between topics legible as the pale lines.
     for (const e of edges) {
       const [x1, y1] = toScreen(e.source.x, e.source.y);
       const [x2, y2] = toScreen(e.target.x, e.target.y);
       const rel = e.weight / maxWeight;
+      ctx.strokeStyle = hueColor(
+        edgeHue(clusterHues, { source: e.source.id, target: e.target.id })
+      );
       ctx.lineWidth = Math.max(0.4, (0.6 + rel * 3.5) * scale);
-      ctx.globalAlpha = 0.18 + rel * 0.5;
+      ctx.globalAlpha = 0.22 + rel * 0.5;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -315,15 +349,19 @@
 
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
-      if (isFocus) ctx.fillStyle = "#e0af68";
-      else if (isMatch) ctx.fillStyle = "#9ece6a";
-      else ctx.fillStyle = nodeColor;
+      // Focus and search-match keep dedicated theme accents so they stay
+      // distinguishable from whatever hue their cluster happens to hold; every
+      // other node wears its cluster's colour. These were hardcoded hex, which
+      // was unreadable on light themes.
+      if (isFocus) ctx.fillStyle = themeColor("--accent-yellow", "#e0af68");
+      else if (isMatch) ctx.fillStyle = themeColor("--accent-green", "#9ece6a");
+      else ctx.fillStyle = hueColor(clusterHues.get(node.id) ?? null);
       ctx.globalAlpha = q.length > 0 && !isMatch && !isFocus ? 0.25 : 1;
       ctx.fill();
 
       if (isHover || isFocus) {
         ctx.lineWidth = 2;
-        ctx.strokeStyle = "#fff";
+        ctx.strokeStyle = themeColor("--text-primary", "#fff");
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
@@ -394,6 +432,8 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     pointerMoved = false;
+    pointerDownX = sx;
+    pointerDownY = sy;
     lastX = sx;
     lastY = sy;
     const hit = pickNode(sx, sy);
@@ -411,21 +451,33 @@
     const rect = canvasEl.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    if (dragNode) {
-      const [wx, wy] = toWorld(sx, sy);
-      dragNode.x = wx;
-      dragNode.y = wy;
-      dragNode.vx = 0;
-      dragNode.vy = 0;
+    // Treating *any* pointermove as a drag made nodes effectively unclickable:
+    // a real mouse emits a sub-pixel move between press and release almost
+    // every time, which marked the gesture as a drag and suppressed
+    // navigation. Classify by distance instead.
+    if (!pointerMoved && exceedsDragThreshold(pointerDownX, pointerDownY, sx, sy)) {
       pointerMoved = true;
-      nudge();
+    }
+
+    if (dragNode) {
+      // Hold the node still until the gesture is genuinely a drag, so a click
+      // can't nudge the graph out from under the pointer.
+      if (pointerMoved) {
+        const [wx, wy] = toWorld(sx, sy);
+        dragNode.x = wx;
+        dragNode.y = wy;
+        dragNode.vx = 0;
+        dragNode.vy = 0;
+        nudge();
+      }
     } else if (panning) {
-      offsetX += sx - lastX;
-      offsetY += sy - lastY;
+      if (pointerMoved) {
+        offsetX += sx - lastX;
+        offsetY += sy - lastY;
+        wake();
+      }
       lastX = sx;
       lastY = sy;
-      pointerMoved = true;
-      wake();
     } else {
       const prev = hoverNode;
       hoverNode = pickNode(sx, sy);
@@ -440,10 +492,10 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     if (dragNode && !pointerMoved) {
-      onNavigate(dragNode.title);
+      onNavigate(dragNode.title, searchText.trim());
     } else if (!dragNode && !pointerMoved) {
       const hit = pickNode(sx, sy);
-      if (hit) onNavigate(hit.title);
+      if (hit) onNavigate(hit.title, searchText.trim());
     }
     dragNode = null;
     panning = false;

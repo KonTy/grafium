@@ -1,0 +1,223 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  camelToSnakeDeep,
+  collectionMembersFromBlocks,
+  getCollectionKind,
+  isCommandNotRegistered,
+  pagesListCollections,
+  pagesNamespaceTree,
+  pagesTagTree,
+  pageTreeReferencesChanged,
+  pageSetCollection,
+  snakeToCamelDeep,
+  toPageTreeView,
+  withMissingCommandFallback,
+  type TreeNode,
+} from "./pageTree";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
+
+const mockInvoke = vi.mocked(invoke);
+
+beforeEach(() => {
+  mockInvoke.mockReset();
+});
+
+describe("page tree payload casing", () => {
+  it("maps nested keys without changing values", () => {
+    expect(snakeToCamelDeep({
+      page_id: "page_id-is-a-value",
+      children: [{ page_count: 2 }],
+    })).toEqual({
+      pageId: "page_id-is-a-value",
+      children: [{ pageCount: 2 }],
+    });
+  });
+
+  it("round-trips nested payloads", () => {
+    const payload = {
+      page_id: "p1",
+      members: [{ page_title: "Chapter One", order_index: 0 }],
+    };
+    expect(camelToSnakeDeep(snakeToCamelDeep(payload))).toEqual(payload);
+  });
+
+  it("maps deeply nested payloads without recursion", () => {
+    const root: Record<string, unknown> = {};
+    let cursor = root;
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child_nodes = child;
+      cursor = child;
+    }
+    cursor.page_id = "leaf";
+
+    let mapped = snakeToCamelDeep<Record<string, unknown>>(root);
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      mapped = mapped.childNodes as Record<string, unknown>;
+    }
+    expect(mapped.pageId).toBe("leaf");
+  });
+});
+
+describe("page tree commands", () => {
+  it("passes command arguments in Tauri camelCase", async () => {
+    mockInvoke.mockResolvedValueOnce([]);
+    await pagesNamespaceTree();
+    expect(mockInvoke).toHaveBeenCalledWith("pages_namespace_tree");
+
+    mockInvoke.mockResolvedValueOnce([]);
+    await pagesTagTree();
+    expect(mockInvoke).toHaveBeenCalledWith("pages_tag_tree");
+
+    mockInvoke.mockResolvedValueOnce([]);
+    await pagesListCollections();
+    expect(mockInvoke).toHaveBeenCalledWith("pages_list_collections");
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await pageSetCollection("p1", "book");
+    expect(mockInvoke).toHaveBeenCalledWith("page_set_collection", {
+      pageId: "p1",
+      kind: "book",
+    });
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await pageSetCollection("p1", null);
+    expect(mockInvoke).toHaveBeenCalledWith("page_set_collection", {
+      pageId: "p1",
+      kind: null,
+    });
+  });
+
+  it("normalizes a contract tree iteratively for the shared renderer", () => {
+    const nodes: TreeNode[] = [{
+      key: "tech",
+      label: "tech",
+      page_id: "p1",
+      children: [{
+        key: "tech/linux",
+        label: "linux",
+        page_id: "p2",
+        children: [],
+        descendant_count: 1,
+        updated_at: 20,
+      }],
+      descendant_count: 2,
+      updated_at: 20,
+    }];
+
+    expect(toPageTreeView(nodes, "namespace")).toEqual([{
+      id: "namespace:tech",
+      label: "tech",
+      page_id: "p1",
+      page_title: "tech",
+      count: 2,
+      updated_at: 20,
+      children: [{
+        id: "namespace:tech/linux",
+        label: "linux",
+        page_id: "p2",
+        page_title: "tech/linux",
+        count: 1,
+        updated_at: 20,
+        children: [],
+      }],
+    }]);
+  });
+
+  it("normalizes deeply nested payloads without recursion", () => {
+    const root: TreeNode = {
+      key: "0",
+      label: "0",
+      page_id: null,
+      children: [],
+      descendant_count: 10_001,
+      updated_at: 0,
+    };
+    let cursor = root;
+    for (let depth = 1; depth <= 10_000; depth += 1) {
+      const child: TreeNode = {
+        key: String(depth),
+        label: String(depth),
+        page_id: null,
+        children: [],
+        descendant_count: 10_001 - depth,
+        updated_at: 0,
+      };
+      cursor.children = [child];
+      cursor = child;
+    }
+
+    const [viewRoot] = toPageTreeView([root], "namespace");
+    let viewCursor = viewRoot;
+    for (let depth = 1; depth <= 10_000; depth += 1) {
+      viewCursor = viewCursor.children[0];
+    }
+    expect(viewCursor.id).toBe("namespace:10000");
+  });
+});
+
+describe("collection projections", () => {
+  /// Must mirror `collection_of` in `core/src/knowledge/collections.rs`
+  /// exactly: both decode the same wire data, and an earlier version of this
+  /// test asserted the opposite shape — so it passed while the reader could
+  /// never match real backend data, and would have failed any correct fix.
+  it("reads the flat string marker the backend actually writes", () => {
+    expect(getCollectionKind({ collection: "book" })).toBe("book");
+    expect(getCollectionKind({ collection: "  project  " })).toBe("project");
+    // The retired nested shape is not a marker — the Rust side rejects it too.
+    expect(getCollectionKind({ collection: { kind: "book" } })).toBeNull();
+    // A status without a kind is not a collection.
+    expect(getCollectionKind({ "collection-status": "draft" })).toBeNull();
+    for (const bad of [{ collection: "" }, { collection: "   " }, { collection: 7 }, null]) {
+      expect(getCollectionKind(bad)).toBeNull();
+    }
+  });
+
+  it("projects linked blocks in their supplied tree order", () => {
+    expect(collectionMembersFromBlocks([
+      { id: "b2", order_index: 4, content: "Read [[Part\\Two]] then [[Appendix]]" },
+      { id: "b1", order_index: 0, content: "A note without a member" },
+      { id: "b3", order_index: 1, content: "[[Part Three]]" },
+    ])).toEqual([
+      { block_id: "b2", order_index: 4, page_title: "Part/Two" },
+      { block_id: "b3", order_index: 1, page_title: "Part Three" },
+    ]);
+  });
+
+  it("detects only page and tag reference changes that can affect a tree", () => {
+    expect(pageTreeReferencesChanged(
+      "Read [[Tech\\Linux]] and #systems",
+      "Read [[tech/Linux]] more carefully and #systems",
+    )).toBe(false);
+    expect(pageTreeReferencesChanged("No links", "Add [[New Page]]")).toBe(true);
+    expect(pageTreeReferencesChanged("#flashcard", "#flashcard")).toBe(false);
+    expect(pageTreeReferencesChanged("#old", "#new")).toBe(true);
+  });
+});
+
+describe("missing page tree commands", () => {
+  it.each([
+    "Command pages_namespace_tree not found",
+    "pages_namespace_tree not allowed",
+    "Unknown command: pages_namespace_tree",
+    "command is not registered",
+  ])("recognizes an unavailable command: %s", (message) => {
+    expect(isCommandNotRegistered(message)).toBe(true);
+  });
+
+  it("returns a typed fallback only for unavailable commands", async () => {
+    await expect(withMissingCommandFallback(
+      () => Promise.reject("Command pages_namespace_tree not found"),
+      [] as TreeNode[],
+    )).resolves.toEqual({ available: false, value: [] });
+
+    await expect(withMissingCommandFallback(
+      () => Promise.reject(new Error("database is locked")),
+      [] as TreeNode[],
+    )).rejects.toThrow("database is locked");
+  });
+});

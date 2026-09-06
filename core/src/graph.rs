@@ -96,6 +96,127 @@ impl IndexedParsedBlock {
     }
 }
 
+/// Every media file in the graph, as graph-relative paths, from the shared
+/// `assets/` folder and from each `assets/` folder sitting beside a page.
+///
+/// Media used to live in exactly one place, so the maintenance commands looked
+/// in exactly one place. Now that a book carries its own images, a scan that
+/// only reads the root would report a graph as clean while page-local media
+/// accumulated unseen.
+pub fn collect_asset_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, in_assets: bool, out: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Skip dotfiles so `.grafium/` internals are never offered up as
+            // deletable media.
+            if name.starts_with('.') {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, root, in_assets || name == "assets", out),
+                Ok(t) if t.is_file() && in_assets => {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(rel.to_string_lossy().replace('\\', "/"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, false, &mut out);
+    out.sort();
+    out
+}
+
+/// Directory that should hold media for the page whose markdown file is at
+/// `file_path` (as stored on the page record, graph-relative and possibly using
+/// native separators), or `None` if that cannot be trusted.
+///
+/// A page's stored path is not automatically safe to build a write path from.
+/// A page titled `../../outside/note` yields `pages/../../outside/note.md`,
+/// and an absolute stored path makes `join` discard the graph root entirely —
+/// either one would place downloaded media outside the graph. Anything that
+/// does not resolve to a real directory inside `root` is rejected, and the
+/// caller falls back to the shared assets folder.
+pub fn page_asset_dir(root: &Path, file_path: &str) -> Option<PathBuf> {
+    let normalized = file_path.replace('\\', "/");
+    let parent = Path::new(&normalized).parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+
+    let canon_root = root.canonicalize().ok()?;
+    // The page's own directory must already exist — its markdown file lives
+    // there — so canonicalizing it is a containment check, not just cleanup.
+    let canon_parent = root.join(parent).canonicalize().ok()?;
+    (canon_parent.starts_with(&canon_root) && canon_parent.is_dir()).then_some(canon_parent)
+}
+
+
+/// Copy a directory tree. Used to snapshot a graph before editing it in bulk.
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else if entry.file_type()?.is_file() {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a graph-relative asset reference to a real file inside `root`.
+///
+/// Tries the reference as given first. If that misses and the reference points
+/// into an `assets/` folder, it retries from the graph root — so a note that
+/// says `assets/x.png` still finds the shared `<graph>/assets/x.png` even
+/// though page-relative references now resolve beside the page. Without that
+/// fallback, media co-location would silently 404 every note written before it,
+/// and a broken image is easy to miss across thousands of files.
+///
+/// Returns a canonicalized path guaranteed to sit inside the graph root, or
+/// `None` if the reference escapes it, names a directory, or matches nothing.
+pub fn resolve_asset_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let canon_root = root.canonicalize().ok()?;
+
+    let mut candidates = vec![rel];
+    // `pages/mybooks/coolbook/assets/x.png` → `assets/x.png`
+    if let Some(idx) = rel.rfind("assets/") {
+        if idx > 0 {
+            candidates.push(&rel[idx..]);
+        }
+    }
+
+    candidates.into_iter().find_map(|candidate| {
+        let target = root.join(candidate).canonicalize().ok()?;
+        (target.starts_with(&canon_root) && target.is_file()).then_some(target)
+    })
+}
+
+
+/// What a completion backfill did, or would do.
+#[derive(Debug, Clone, Default)]
+pub struct BackfillReport {
+    pub pages_scanned: usize,
+    pub tasks_updated: usize,
+    pub backup_path: Option<String>,
+}
+
 impl Graph {
     pub fn default_metadata_dir_name() -> &'static str {
         DEFAULT_METADATA_DIR_NAME
@@ -520,18 +641,40 @@ impl Graph {
                 }
                 self.index_directory_recursive(&path)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                self.index_file(&path)?;
+                // Bulk rebuild: index without marking pending — a full
+                // reindex_all regenerates the whole DB, so flagging every page
+                // as "stale" here would be noise, not a real vector change.
+                self.index_file_impl(&path)?;
             }
         }
         Ok(())
     }
 
     /// Index a single .md file into the database.
+    ///
+    /// This is the choke point for content arriving *from disk* — the file
+    /// watcher (external editors / USB sync), imports, and page creation all
+    /// funnel through here — so it also marks the affected page for a vector
+    /// reindex. The bulk `reindex_all` path deliberately calls
+    /// [`Self::index_file_impl`] directly instead, so rebuilding the whole
+    /// graph DB doesn't flood the pending set (and mislabel every page as
+    /// "stale") when the vectors themselves haven't changed.
     pub fn index_file(&self, path: &Path) -> Result<()> {
+        if let Some(page_id) = self.index_file_impl(path)? {
+            self.mark_page_dirty(&page_id);
+        }
+        Ok(())
+    }
+
+    /// Index a single .md file into the database, returning the id of the page
+    /// it touched (or `None` when the on-disk bytes were unchanged and nothing
+    /// was re-parsed). Does *not* mark the page for reindex — see
+    /// [`Self::index_file`].
+    fn index_file_impl(&self, path: &Path) -> Result<Option<String>> {
         let content = fs::read_to_string(path)?;
         let content_hash = Self::content_hash(&content);
         if self.indexed_content_matches(path, &content_hash) {
-            return Ok(());
+            return Ok(None);
         }
 
         let filename = path
@@ -584,7 +727,7 @@ impl Graph {
         tx.commit()?;
         self.remember_indexed_content_hash(path, content_hash);
 
-        Ok(())
+        Ok(Some(page.id))
     }
 
     fn apply_parsed_blocks_in_connection(
@@ -744,6 +887,18 @@ impl Graph {
                 block.scheduled_date.as_deref(),
                 block.deadline_date.as_deref(),
             )?;
+            // Re-read the richer fields straight from the block text. Indexing
+            // is the path a file edited elsewhere arrives by, so this is what
+            // makes a completion time written on another machine — or by hand
+            // in another editor — land in the table rather than being ignored.
+            let fields = crate::parser::task::parse_fields(&block.content);
+            self.db.sync_task_from_content_in_connection(
+                conn,
+                block_id,
+                "",
+                &fields,
+                fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
+            )?;
         } else {
             self.db.delete_task_in_connection(conn, block_id)?;
         }
@@ -865,6 +1020,128 @@ impl Graph {
         }
     }
 
+
+
+    /// Write completion times that exist only in the database into the files.
+    ///
+    /// Completions recorded before they were written to disk live only in
+    /// `task_events`. That table survives a re-index, but not a rebuilt
+    /// database or a move to another machine — so this walks it and gives each
+    /// finished task the `CLOSED:` line it should have had.
+    ///
+    /// Only ever *adds* a line to a task that has none. A task that already
+    /// records its completion is left exactly as it is, so running this twice
+    /// changes nothing the second time.
+    ///
+    /// `dry_run` reports what would change and writes nothing. A real run
+    /// copies the whole graph first, because this edits notes in bulk and the
+    /// notes are the only copy that exists.
+    pub fn backfill_task_completions(&self, dry_run: bool) -> Result<BackfillReport> {
+        use crate::parser::task;
+        use chrono::TimeZone;
+
+        let mut report = BackfillReport::default();
+
+        // Every DONE task that has a recorded completion event.
+        let completions = self.db.completion_times_for_backfill()?;
+        if completions.is_empty() {
+            return Ok(report);
+        }
+
+        if !dry_run {
+            report.backup_path = Some(self.backup_graph()?);
+        }
+
+        let mut seen_pages = std::collections::HashSet::new();
+        for (block_id, closed_ms) in completions {
+            let Ok(block) = self.db.get_block_by_id(&block_id) else {
+                continue;
+            };
+            seen_pages.insert(block.page_id.clone());
+
+            // Never overwrite a completion the file already records.
+            if task::parse_fields(&block.content).closed_at.is_some() {
+                continue;
+            }
+            let Some(at) = chrono::Local.timestamp_millis_opt(closed_ms).single() else {
+                continue;
+            };
+            let marker = task::current_marker(&block.content);
+            if marker.is_empty() {
+                continue;
+            }
+
+            report.tasks_updated += 1;
+            if dry_run {
+                continue;
+            }
+
+            let new_content = task::apply_state_change(
+                &block.content,
+                &marker,
+                &marker,
+                at.naive_local(),
+            );
+            let page = self.db.get_page_by_id(&block.page_id)?;
+            self.db.update_block(&block_id, &new_content, None)?;
+            let updated = self.db.get_block_by_id(&block_id)?;
+            let _ = self.write_single_block_update_to_disk(&page, &updated)?;
+            self.db.set_task_closed_at(&block_id, Some(closed_ms))?;
+        }
+
+        report.pages_scanned = seen_pages.len();
+        Ok(report)
+    }
+
+    /// Copy the whole graph beside itself before a bulk edit.
+    fn backup_graph(&self) -> Result<String> {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let dest = self
+            .root_dir
+            .parent()
+            .unwrap_or(&self.root_dir)
+            .join(format!(
+                "{}-backup-{stamp}",
+                self.root_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("graph")
+            ));
+        copy_dir_recursive(&self.root_dir, &dest)?;
+        Ok(dest.to_string_lossy().to_string())
+    }
+
+    /// Register (or clear) the task row for a block from its own text.
+    ///
+    /// Links are indexed inline on create and update for the same reason:
+    /// without it a `TODO` typed into a block reaches the Tasks page only once
+    /// something else happens to re-index that file, so a task could be written
+    /// and simply not show up.
+    fn sync_task_row(&self, block_id: &str, content: &str) -> Result<()> {
+        use crate::parser::task;
+
+        let marker = task::current_marker(content);
+        if marker.is_empty() {
+            return self.db.delete_task(block_id);
+        }
+        let Some(state) = crate::models::TaskState::from_str(&marker) else {
+            return Ok(());
+        };
+        let fields = task::parse_fields(content);
+        self.db.upsert_task(
+            block_id,
+            &state,
+            fields.scheduled.as_ref().map(|t| t.date.to_string()).as_deref(),
+            fields.deadline.as_ref().map(|t| t.date.to_string()).as_deref(),
+        )?;
+        self.db.sync_task_from_content(
+            block_id,
+            &marker,
+            &fields,
+            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
+        )
+    }
+
     /// Create a block: updates the .md file, then re-indexes.
     pub fn create_block(
         &self,
@@ -900,6 +1177,8 @@ impl Graph {
             let (target, link_type) = self.resolve_link_target(link)?;
             self.db.insert_link(&block_id, &target, link_type)?;
         }
+
+        self.sync_task_row(&block_id, content)?;
 
         // Re-serialize the page to disk
         self.write_page_to_disk(&page)?;
@@ -945,6 +1224,10 @@ impl Graph {
             self.db.insert_link(block_id, &target, link_type)?;
         }
 
+        // …and the task row, for the same reason: editing a line into or out
+        // of being a task must be visible on the Tasks page straight away.
+        self.sync_task_row(block_id, content)?;
+
         Ok(())
     }
 
@@ -952,23 +1235,54 @@ impl Graph {
     /// the tasks table, the .md file on disk, and logging the event.
     /// Returns the new state string.
     pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
-        // 1. Cycle in DB (tasks table + task_events log)
+        let before = self.db.get_block_by_id(block_id)?;
+        let from_state = crate::parser::task::current_marker(&before.content);
         let new_state = self.db.cycle_task_state(block_id)?;
+        self.write_state_change(block_id, &from_state, &new_state)?;
+        Ok(new_state)
+    }
 
-        // 2. Update block content to reflect the new marker
+    /// Rewrite a task block for a state change and persist it to disk.
+    ///
+    /// The markdown is the durable record. Keeping the completion time and the
+    /// path a task took only in SQLite meant both vanished on a re-index, a
+    /// fresh database, or a move to another machine — so the transition is
+    /// written into the file here, not just logged in the database.
+    fn write_state_change(&self, block_id: &str, from: &str, to: &str) -> Result<()> {
+        use crate::parser::task;
+
         let block = self.db.get_block_by_id(block_id)?;
-        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re
-            .replace(&block.content, &format!("{} ", new_state))
-            .to_string();
+        let now = chrono::Local::now().naive_local();
 
-        if new_content != block.content {
-            let page = self.db.get_page_by_id(&block.page_id)?;
-            self.db.update_block(block_id, &new_content, None)?;
-            let _ = self.write_single_block_update_to_disk(&page, &block)?;
+        // Finishing something that repeats rolls it forward instead of closing
+        // it, so the next occurrence is already waiting rather than needing to
+        // be recreated by hand.
+        let recurred = matches!(to, "DONE" | "CANCELED" | "CANCELLED")
+            .then(|| task::apply_recurrence(&block.content, from, now))
+            .flatten();
+        let new_content =
+            recurred.unwrap_or_else(|| task::apply_state_change(&block.content, from, to, now));
+        if new_content == block.content {
+            return Ok(());
         }
 
-        Ok(new_state)
+        let page = self.db.get_page_by_id(&block.page_id)?;
+        self.db.update_block(block_id, &new_content, None)?;
+        let updated = self.db.get_block_by_id(block_id)?;
+        let _ = self.write_single_block_update_to_disk(&page, &updated)?;
+
+        // Mirror what the file now says into the row the Tasks page sorts on,
+        // so it does not have to re-read every page to order by it. A recurring
+        // task lands back on TODO here, which is what the table must reflect.
+        let fields = task::parse_fields(&new_content);
+        let marker = task::current_marker(&new_content);
+        self.db.sync_task_from_content(
+            block_id,
+            &marker,
+            &fields,
+            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
+        )?;
+        Ok(())
     }
 
     /// Set a task to a specific state, updating block content and .md file.
@@ -977,22 +1291,10 @@ impl Graph {
         block_id: &str,
         state: &crate::models::TaskState,
     ) -> Result<()> {
-        // 1. Update tasks table + log event
+        let before = self.db.get_block_by_id(block_id)?;
+        let from_state = crate::parser::task::current_marker(&before.content);
         self.db.update_task_state(block_id, state)?;
-
-        // 2. Update block content
-        let block = self.db.get_block_by_id(block_id)?;
-        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re
-            .replace(&block.content, &format!("{} ", state.as_str()))
-            .to_string();
-
-        if new_content != block.content {
-            let page = self.db.get_page_by_id(&block.page_id)?;
-            self.db.update_block(block_id, &new_content, None)?;
-            let _ = self.write_single_block_update_to_disk(&page, &block)?;
-        }
-
+        self.write_state_change(block_id, &from_state, state.as_str())?;
         Ok(())
     }
 
@@ -1198,6 +1500,12 @@ impl Graph {
         self.db.delete_blocks_for_page(page_id)?;
         self.db.delete_page(page_id)?;
         self.forget_indexed_content(&full_path);
+
+        // Flag for the drainer to purge this page's vectors. The page no
+        // longer exists in the DB, so the drainer treats a pending id it can't
+        // load as a removal and deletes the stored vectors — otherwise a
+        // deleted page would keep surfacing phantom citations in Chat.
+        self.mark_page_dirty(page_id);
 
         Ok(())
     }
@@ -1429,8 +1737,30 @@ impl Graph {
         patched.push_str(&fragment);
         patched.push_str(&current_content[byte_range.end..]);
         self.persist_page_content(&file_path, &patched)?;
+        // The full-rewrite branches above mark via `write_page_to_disk`; this
+        // incremental single-block patch writes straight to disk, so mark the
+        // page dirty here too or a fast-path edit would slip past auto-index.
+        self.mark_page_dirty(&page.id);
 
         Ok(PageWriteStrategy::IncrementalPatch)
+    }
+
+    /// Update a page's properties in the database **and** rewrite its file.
+    ///
+    /// Writing only the database is not enough for anything that must last:
+    /// indexing a file replaces a page's properties with whatever the parser
+    /// read back from disk, so a database-only property survives exactly until
+    /// the next file-watcher event, reindex or sync pull and then vanishes with
+    /// no error. Persisting both means the property is durable and travels
+    /// between devices in the markdown itself.
+    pub fn update_page_properties(
+        &self,
+        page_id: &str,
+        properties: serde_json::Value,
+    ) -> Result<()> {
+        self.db.update_page(page_id, None, Some(&properties))?;
+        let page = self.db.get_page_by_id(page_id)?;
+        self.write_page_to_disk(&page)
     }
 
     /// Serialize all blocks for a page and write the .md file.
@@ -1438,7 +1768,23 @@ impl Graph {
         let file_path = self.resolve_page_file_path(page)?;
         let blocks = self.db.list_blocks_for_page(&page.id)?;
         let content = parser::serialize_page(&page.properties, &blocks);
-        self.persist_page_content(&file_path, &content)
+        self.persist_page_content(&file_path, &content)?;
+        // Choke point for in-app content edits (create/update/delete/move/
+        // reorder blocks, task and flashcard mutations all rewrite the page
+        // through here): flag the page so its vectors get refreshed.
+        self.mark_page_dirty(&page.id);
+        Ok(())
+    }
+
+    /// Flag a page for an eventual vector-index refresh. Best-effort: a
+    /// failure to record the dirty flag must never fail the user's edit, and
+    /// carries no cost beyond a slightly-stale semantic index until the next
+    /// full reindex. Cheap enough to call on every write; the background
+    /// drainer debounces and coalesces before doing any embedding work.
+    fn mark_page_dirty(&self, page_id: &str) {
+        if let Err(e) = self.db.mark_page_pending_reindex(page_id) {
+            eprintln!("Warning: could not mark page '{page_id}' for reindex: {e}");
+        }
     }
 }
 
@@ -1500,6 +1846,144 @@ mod tests {
         let conn = graph.db.conn()?;
         let count = conn.query_row(sql, params![param], |row| row.get(0))?;
         Ok(count)
+    }
+
+    fn pending_page_ids(graph: &Graph) -> Result<Vec<String>> {
+        let conn = graph.db.conn()?;
+        let mut stmt = conn.prepare("SELECT page_id FROM pending_reindex ORDER BY page_id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    fn clear_pending(graph: &Graph) -> Result<()> {
+        let conn = graph.db.conn()?;
+        conn.execute("DELETE FROM pending_reindex", [])?;
+        Ok(())
+    }
+
+    #[test]
+    fn editing_a_block_marks_only_its_page_dirty() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page_a = graph.create_page("Alpha", false)?;
+        let page_b = graph.create_page("Beta", false)?;
+        // Page creation itself marks pending; start from a clean slate to
+        // isolate the edit under test.
+        clear_pending(&graph)?;
+
+        graph.create_block(
+            &page_a.id,
+            None,
+            0,
+            "a new thought",
+            BlockType::Text,
+            json_obj(),
+        )?;
+
+        assert_eq!(pending_page_ids(&graph)?, vec![page_a.id.clone()]);
+        assert!(!pending_page_ids(&graph)?.contains(&page_b.id));
+        Ok(())
+    }
+
+    #[test]
+    fn rapid_edits_to_one_page_coalesce_into_a_single_pending_row() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Journal", false)?;
+        let block = graph.create_block(&page.id, None, 0, "first", BlockType::Text, json_obj())?;
+        clear_pending(&graph)?;
+
+        for i in 0..5 {
+            graph.update_block(&block.id, &format!("edit number {i}"), None)?;
+        }
+
+        // Five edits, one pending job for the page — the drainer will reindex
+        // it once, after the debounce window.
+        assert_eq!(graph.db.count_pending_reindex()?, 1);
+        assert_eq!(pending_page_ids(&graph)?, vec![page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_page_marks_it_pending_so_the_drainer_purges_vectors() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Ephemeral", false)?;
+        clear_pending(&graph)?;
+
+        graph.delete_page(&page.id)?;
+
+        // The page is gone from the DB but flagged pending: the drainer sees an
+        // id it can't resolve and purges its vectors instead of reindexing.
+        assert!(graph.db.get_page_by_id(&page.id).is_err());
+        assert_eq!(pending_page_ids(&graph)?, vec![page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn reindex_all_does_not_flood_the_pending_set() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let file_path = graph.pages_dir.join("bulk.md");
+        fs::write(
+            &file_path,
+            "- one long enough bullet\n- two long enough bullet\n",
+        )?;
+
+        // The individual (external-edit) index_file path DOES mark pending.
+        graph.index_file(&file_path)?;
+        assert!(!pending_page_ids(&graph)?.is_empty());
+
+        // A full rebuild must not flag every page as stale — it regenerates the
+        // whole DB and resets the dirty set.
+        graph.reindex_all()?;
+        assert_eq!(graph.db.count_pending_reindex()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_reindex_survives_a_restart() -> Result<()> {
+        let temp = tempdir()?;
+        let page_id = {
+            let graph = Graph::open(temp.path())?;
+            let page = graph.create_page("Persisted", false)?;
+            assert!(graph.db.count_pending_reindex()? >= 1);
+            page.id
+        };
+
+        // Reopen the same on-disk graph — a simulated restart. Pending edits
+        // must still be there so they get reindexed on next launch.
+        let graph = Graph::open(temp.path())?;
+        assert!(pending_page_ids(&graph)?.contains(&page_id));
+        Ok(())
+    }
+
+    #[test]
+    fn list_pending_reindex_due_respects_the_debounce_and_clear_guard() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("Debounced", false)?;
+        clear_pending(&graph)?;
+        graph.db.mark_page_pending_reindex(&page.id)?;
+
+        // Just marked → not yet due under a 15s debounce, but due at 0.
+        assert!(graph.db.list_pending_reindex_due(15_000, 10)?.is_empty());
+        let due = graph.db.list_pending_reindex_due(0, 10)?;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, page.id);
+
+        // Clearing with a stale marked_at (a newer edit landed) is a no-op…
+        assert!(!graph.db.clear_pending_reindex(&page.id, due[0].1 - 1)?);
+        // …but clearing with the exact marked_at removes the row.
+        assert!(graph.db.clear_pending_reindex(&page.id, due[0].1)?);
+        assert_eq!(graph.db.count_pending_reindex()?, 0);
+        Ok(())
+    }
+
+    fn json_obj() -> serde_json::Value {
+        serde_json::json!({})
     }
 
     #[test]
@@ -1638,7 +2122,8 @@ mod tests {
 
         let page = graph.create_page_with_content("Journal Page", false, "- Existing note\n")?;
 
-        let updated = graph.append_content_to_page(&page.id, "- Imported line one\n- Imported line two\n")?;
+        let updated =
+            graph.append_content_to_page(&page.id, "- Imported line one\n- Imported line two\n")?;
         assert_eq!(updated.id, page.id);
 
         let blocks = graph.db.list_blocks_for_page(&page.id)?;
@@ -1878,7 +2363,10 @@ mod tests {
 
         // Nested child's relative position/parent is untouched.
         let child = blocks.iter().find(|b| b.id == nested_child.id).unwrap();
-        assert_eq!(child.parent_id.as_deref(), Some(second_existing.id.as_str()));
+        assert_eq!(
+            child.parent_id.as_deref(),
+            Some(second_existing.id.as_str())
+        );
         assert_eq!(child.order_index, 0);
 
         Ok(())

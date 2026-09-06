@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Page {
   id: string;
   title: string;
+  /** Graph-relative path of the page's markdown file, e.g.
+   *  `pages/mybooks/coolbook/toc.md`. `null` until the page has content,
+   *  since a page referenced by a link exists in the index before any file
+   *  is written for it. */
+  file_path?: string | null;
   is_journal: boolean;
   created_at: string;
   updated_at: string;
@@ -145,6 +150,31 @@ export function cycleTaskState(blockId: string): Promise<string> {
   return invoke("cycle_task_state", { blockId });
 }
 
+export type { OpenTaskRow, TaskFlowStats } from "./taskBoard";
+
+/** Every open task with its dates, for grouping by when it is due. */
+export function listOpenTaskRows(): Promise<import("./taskBoard").OpenTaskRow[]> {
+  return invoke("list_open_task_rows", {});
+}
+
+/** Flow metrics for the Tasks dashboard. */
+export function taskFlowStats(weeks = 12): Promise<import("./taskBoard").TaskFlowStats> {
+  return invoke("task_flow_stats", { weeks });
+}
+
+export interface BackfillReport {
+  pages_scanned: number;
+  tasks_updated: number;
+  backup_path: string | null;
+  dry_run: boolean;
+}
+
+/** Write completion times held only in the database into the markdown.
+ *  Always call with `dryRun` first — a real run edits notes in bulk. */
+export function backfillTaskCompletions(dryRun: boolean): Promise<BackfillReport> {
+  return invoke("backfill_task_completions", { dryRun });
+}
+
 export function setTaskDate(blockId: string, kind: "scheduled" | "deadline", date: string | null): Promise<string> {
   return invoke("set_task_date", { blockId, kind, date });
 }
@@ -207,6 +237,10 @@ export interface Flashcard {
   ease_factor: number;
   interval_days: number;
   review_count: number;
+  /** Graph-relative path of the page the card came from, when it has a file.
+   *  Review happens away from the page, so media stored beside that page needs
+   *  its directory to resolve. */
+  page_file_path?: string | null;
 }
 
 export interface FlashcardTopic {
@@ -379,8 +413,8 @@ export function setAppTheme(themeId: string): Promise<void> {
 }
 
 // Asset management
-export function downloadAsset(url: string): Promise<string> {
-  return invoke("download_asset", { url });
+export function downloadAsset(url: string, pageId?: string): Promise<string> {
+  return invoke("download_asset", { url, pageId });
 }
 
 export function listAssets(): Promise<string[]> {
@@ -388,6 +422,9 @@ export function listAssets(): Promise<string[]> {
 }
 
 export interface OrphanedAsset {
+  /** Graph-relative path, e.g. `assets/x.png` or
+   *  `pages/mybooks/coolbook/assets/x.png`. Media can sit beside its own page,
+   *  so a bare name would not say which file is meant. */
   filename: string;
   size: number;
 }
@@ -396,6 +433,7 @@ export function findOrphanedAssets(): Promise<OrphanedAsset[]> {
   return invoke("find_orphaned_assets", {});
 }
 
+/** Delete media by graph-relative path, as reported by `findOrphanedAssets`. */
 export function deleteAssets(filenames: string[]): Promise<number> {
   return invoke("delete_assets", { filenames });
 }
@@ -441,7 +479,12 @@ export function mediaSetConfig(payload: MediaConfigPayload): Promise<void> {
 export interface LocalModelInfo {
   file_name: string;
   size_bytes: number;
-  kind: "llm" | "whisper" | "embedding" | "unknown";
+  kind: "llm" | "whisper" | "embedding" | "reranker" | "unknown";
+  /** How this model is expected to perform on the current GPU. Only
+   *  meaningful for `kind: "llm"`; other kinds always report `"unknown"`. */
+  gpu_fit: "fits" | "tight" | "cpu_only" | "unknown";
+  /** Plain-English rationale for `gpu_fit`, safe to render verbatim. */
+  gpu_fit_detail: string;
 }
 
 export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {

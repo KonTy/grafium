@@ -438,7 +438,8 @@
     error = "";
     askAnswer = "";
     try {
-      askAnswer = await aiAsk(askQuery);
+      const result = await aiAsk(askQuery);
+      askAnswer = result.answer;
     } catch (e: any) {
       error = e?.toString() || "Ask failed";
     } finally {
