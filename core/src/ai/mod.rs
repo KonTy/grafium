@@ -12,6 +12,7 @@ pub mod embeddings;
 pub mod gpu_fit;
 pub mod providers;
 pub mod reasoning;
+pub mod text;
 pub mod references;
 pub mod traits;
 pub mod web_research;

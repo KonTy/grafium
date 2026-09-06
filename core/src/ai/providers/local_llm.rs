@@ -738,8 +738,7 @@ fn build_chat_prompt(
     let prompt = strip_trailing_think_prompt(&raw_prompt);
 
     if tracing::enabled!(tracing::Level::INFO) {
-        let tail_len = 240usize.min(prompt.len());
-        let tail_start = prompt.len().saturating_sub(tail_len);
+        let tail_start = crate::ai::text::char_boundary_tail_start(&prompt, 240);
         tracing::info!(
             target: "grafium_core::ai::providers::local_llm",
             "build_chat_prompt: len={} stripped_think={} tail={:?}",
@@ -1244,4 +1243,5 @@ mod config_tests {
         assert_eq!(out, raw);
     }
 }
+
 
