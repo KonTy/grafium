@@ -37,7 +37,7 @@ pub use config::{MediaConfig, WhisperSettings};
 pub use ingest::{fetch_audio, fetch_audio_with_progress, MediaSource};
 pub use notes::transcript_to_markdown;
 #[cfg(feature = "media")]
-pub use transcribe::{Transcriber, WhisperTranscriber};
+pub use transcribe::{TranscribeProgress, Transcriber, WhisperBackend, WhisperTranscriber};
 pub use types::{Transcript, TranscriptSegment, TranscriptSource};
 
 use crate::error::Result;
@@ -102,8 +102,14 @@ pub fn fetch_transcript_with_progress(
     on_progress("No captions available — falling back to local transcription.");
     let source = MediaSource::parse(url);
     let wav_path = ingest::fetch_audio_with_progress(&source, workdir, on_progress)?;
-    on_progress("Transcribing audio locally with Whisper (this can take a while)...");
-    let transcript = transcriber.transcribe(&wav_path)?;
+    // Route whisper.cpp's own periodic percent updates through the
+    // caller's plain-text progress channel so the UI can show
+    // "Transcribing 3:24 of audio with Whisper… 42%" rather than a
+    // single-message "…(this can take a while)…" followed by minutes
+    // of silence.
+    let transcript = transcriber.transcribe_with_progress(&wav_path, &mut |progress| {
+        on_progress(&progress.message);
+    })?;
     on_progress("Transcription complete.");
     let _ = std::fs::remove_file(&wav_path);
     Ok((transcript, TranscriptSource::Whisper))

@@ -5,6 +5,7 @@
   import JournalView from "./components/JournalView.svelte";
   import AllPages from "./components/AllPages.svelte";
   import GraphView from "./components/GraphView.svelte";
+  import GraphView3D from "./components/GraphView3D.svelte";
   import Statistics from "./components/Statistics.svelte";
   import FlashcardReview from "./components/FlashcardReview.svelte";
   import ChatView from "./components/ChatView.svelte";
@@ -49,12 +50,23 @@
 
   let currentView: View = $state("page");
   let currentPage: Page | null = $state(null);
+  // Journals are a scrolling feed, not a single page — this tracks whichever day-entry is
+  // currently most visible, so the Reference/Knowledge panel has something to analyze there too.
+  let journalActivePage: Page | null = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
   let sidebarVisible = $state(true);
   let sidebarWidth = $state(260);
   let isResizingSidebar = $state(false);
+  let referencePanelWidth = $state(380);
+  let isResizingReferencePanel = $state(false);
   let appLayoutEl: HTMLDivElement | null = null;
+  let sidebarRef: {
+    focusSearch: () => void;
+    hasFocus: () => boolean;
+    refresh: () => Promise<void>;
+  } | null = $state(null);
+  let showBlockGuides = $state(true);
   let zenMode = $state(false);
   let referencePanelVisible = $state(false);
   let referencePanelTab = $state<"references" | "search" | "ask">("references");
@@ -88,6 +100,9 @@
   const SIDEBAR_MIN_WIDTH = 180;
   const SIDEBAR_MAX_WIDTH = 520;
   const MAIN_CONTENT_MIN_WIDTH = 360;
+  const DEFAULT_REFERENCE_PANEL_WIDTH = 380;
+  const REFERENCE_PANEL_MIN_WIDTH = 280;
+  const REFERENCE_PANEL_MAX_WIDTH = 720;
   const DEFAULT_UI_ZOOM = 1;
   const MIN_UI_ZOOM = 0.7;
   const MAX_UI_ZOOM = 1.8;
@@ -149,6 +164,29 @@
     }
   }
 
+  // "Bullet threading" / block hierarchy guide lines — a purely visual
+  // indicator of parent/child nesting (default on). Exposed as a Settings
+  // toggle since it adds a handful of extra DOM nodes per indented block,
+  // so users on lower-end machines can turn it off if it's ever noticeably
+  // slow on very large/deeply nested pages.
+  function loadShowBlockGuidesPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.pageContent.showBlockGuides");
+      if (raw !== null) showBlockGuides = raw === "true";
+    } catch {
+      // Ignore localStorage failures and keep the default (on).
+    }
+  }
+
+  function setShowBlockGuides(value: boolean) {
+    showBlockGuides = value;
+    try {
+      localStorage.setItem("grafium.pageContent.showBlockGuides", String(value));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
   function resetSidebarWidth() {
     sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
     saveSidebarWidthPreference(sidebarWidth);
@@ -187,6 +225,106 @@
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
       saveSidebarWidthPreference(sidebarWidth);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  // Graph view has two renderers: the default 2D canvas (GraphView.svelte,
+  // works everywhere) and an opt-in 3D orbit view (GraphView3D.svelte,
+  // WebGL via three.js/3d-force-graph). Persisted like other layout
+  // preferences; defaults to 2D on Android since drag-to-orbit + pinch-zoom
+  // touch gestures are more prone to jank/incompatibility on mobile
+  // WebViews even where WebGL itself works fine.
+  const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  let graphViewMode = $state<"2d" | "3d">("2d");
+
+  function loadGraphViewModePreference() {
+    try {
+      const raw = localStorage.getItem("grafium.graphView.mode");
+      if (raw === "2d" || raw === "3d") {
+        graphViewMode = raw;
+        return;
+      }
+    } catch {
+      // Ignore localStorage failures and keep the default.
+    }
+    // No saved preference yet — default to 2D on Android (touch-based
+    // orbit/pinch gestures on the 3D view are less reliable there), 3D
+    // isn't blocked, just not the first thing you land on.
+    if (isAndroid) graphViewMode = "2d";
+  }
+
+  function saveGraphViewModePreference(mode: "2d" | "3d") {
+    try {
+      localStorage.setItem("grafium.graphView.mode", mode);
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function setGraphViewMode(mode: "2d" | "3d") {
+    graphViewMode = mode;
+    saveGraphViewModePreference(mode);
+  }
+
+  function loadReferencePanelWidthPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.referencePanel.width");
+      if (!raw) return;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) return;
+      referencePanelWidth = Math.max(
+        REFERENCE_PANEL_MIN_WIDTH,
+        Math.min(REFERENCE_PANEL_MAX_WIDTH, parsed)
+      );
+    } catch {
+      // Ignore localStorage failures and keep defaults.
+    }
+  }
+
+  function saveReferencePanelWidthPreference(width: number) {
+    try {
+      localStorage.setItem("grafium.referencePanel.width", String(Math.round(width)));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function resetReferencePanelWidth() {
+    referencePanelWidth = DEFAULT_REFERENCE_PANEL_WIDTH;
+    saveReferencePanelWidthPreference(referencePanelWidth);
+  }
+
+  function applyReferencePanelWidthFromPointer(clientX: number) {
+    if (!appLayoutEl) return;
+    const rect = appLayoutEl.getBoundingClientRect();
+    const maxByLayout = Math.max(REFERENCE_PANEL_MIN_WIDTH, rect.width - MAIN_CONTENT_MIN_WIDTH);
+    const maxWidth = Math.min(REFERENCE_PANEL_MAX_WIDTH, maxByLayout);
+    // The panel is pinned to the right edge, so dragging the handle on its
+    // left side means width = distance from the pointer to the right edge.
+    const next = rect.right - clientX;
+    referencePanelWidth = Math.max(REFERENCE_PANEL_MIN_WIDTH, Math.min(maxWidth, next));
+  }
+
+  function startReferencePanelResize(e: PointerEvent) {
+    e.preventDefault();
+    isResizingReferencePanel = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (moveEvent: PointerEvent) => {
+      applyReferencePanelWidthFromPointer(moveEvent.clientX);
+    };
+
+    const onUp = () => {
+      isResizingReferencePanel = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      saveReferencePanelWidthPreference(referencePanelWidth);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
@@ -424,6 +562,36 @@
     referencePanelVisible = true;
   }
 
+  // Opens (if needed) and switches the right Knowledge Panel to a given tab,
+  // bumping the focus trigger so the tab's own effect re-focuses its input
+  // even if that tab was already active.
+  function openReferencePanelTab(tab: "references" | "search" | "ask") {
+    referencePanelTab = tab;
+    referencePanelFocusTrigger += 1;
+    referencePanelVisible = true;
+  }
+
+  // Ctrl+B "seamless" focus/close for the left sidebar:
+  // - hidden -> show it (also leaving zen mode) and focus its search box
+  // - visible but not focused -> just focus its search box
+  // - visible and already focused -> close it
+  // This mirrors the request that Ctrl+B behave like a real toggle+focus
+  // combo instead of only ever opening/focusing and never closing.
+  async function focusLeftSidebar() {
+    if (!sidebarVisible) {
+      if (zenMode) zenMode = false;
+      sidebarVisible = true;
+      await tick();
+      sidebarRef?.focusSearch();
+      return;
+    }
+    if (sidebarRef?.hasFocus()) {
+      sidebarVisible = false;
+      return;
+    }
+    sidebarRef?.focusSearch();
+  }
+
   // Register hotkeys
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
@@ -519,6 +687,45 @@
       return;
     }
 
+    // Ctrl+B focuses/opens the left sidebar — always works, including while
+    // editing a block, so switching pages/searching never requires first
+    // escaping out of the editor.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      void focusLeftSidebar();
+      return;
+    }
+
+    // Ctrl+Shift+A / F / D jump straight to a right-panel (Knowledge Panel)
+    // sub-tab — References/Summarize, Search, Ask respectively — always
+    // works, including while editing a block.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === "a") {
+        e.preventDefault();
+        openReferencePanelTab("references");
+        return;
+      }
+      if (key === "f") {
+        e.preventDefault();
+        openReferencePanelTab("search");
+        return;
+      }
+      if (key === "d") {
+        e.preventDefault();
+        openReferencePanelTab("ask");
+        return;
+      }
+      // Ctrl+Shift+J = jump to today's journal, always available —
+      // including from inside the editor. Complements the nav-mode
+      // "g j" chord which is unusable mid-typing.
+      if (key === "j") {
+        e.preventDefault();
+        void navigateToJournal();
+        return;
+      }
+    }
+
     // Ctrl+. toggles reference panel (always works regardless of editing state)
     if ((e.ctrlKey || e.metaKey) && e.key === ".") {
       e.preventDefault();
@@ -607,12 +814,28 @@
     window.addEventListener("toggle-reference-panel", () => {
       referencePanelVisible = !referencePanelVisible;
     });
+    // Snapshot the last location on window close so the next launch
+    // can restore it. beforeunload fires reliably on Tauri window
+    // close as well as on webview reloads.
+    const persistOnClose = () => saveLastLocation();
+    window.addEventListener("beforeunload", persistOnClose);
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown, true);
       window.removeEventListener("mouseup", handleMouseNavigation);
       window.removeEventListener("wheel", handleWheelZoom);
+      window.removeEventListener("beforeunload", persistOnClose);
       clearRestoreTimer();
     };
+  });
+
+  // Also persist eagerly on every navigation so a hard crash doesn't
+  // lose the "last location" — beforeunload alone isn't enough if the
+  // webview dies unexpectedly.
+  $effect(() => {
+    currentView;
+    currentPage;
+    if (!hasInitialized) return;
+    saveLastLocation();
   });
 
   // Navigate to tutorial welcome page on start (only once)
@@ -626,7 +849,110 @@
     }
   });
 
+  // ─── Last-location persistence ────────────────────────────────
+  // Restores whatever page/view was open on close. Journal entries
+  // (both the scrolling journal feed and dated day-pages) are treated
+  // as "today" on restore — yesterday's journal is rarely what you
+  // want the next morning; today's is.
+  const LAST_LOCATION_KEY = "grafium.session.lastLocation";
+
+  type SavedLocation =
+    | { kind: "page"; title: string }
+    | { kind: "journal" }
+    | { kind: "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" };
+
+  function isJournalDateTitle(title: string | undefined): boolean {
+    return !!title && /^\d{4}-\d{2}-\d{2}$/.test(title);
+  }
+
+  function saveLastLocation() {
+    try {
+      let payload: SavedLocation | null = null;
+      if (currentView === "page" && currentPage) {
+        payload = { kind: "page", title: currentPage.title };
+      } else if (currentView === "journal") {
+        payload = { kind: "journal" };
+      } else if (
+        currentView === "all-pages" ||
+        currentView === "flashcards" ||
+        currentView === "statistics" ||
+        currentView === "chat" ||
+        currentView === "settings" ||
+        currentView === "graph"
+      ) {
+        payload = { kind: currentView };
+      }
+      if (payload) {
+        localStorage.setItem(LAST_LOCATION_KEY, JSON.stringify(payload));
+      }
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function loadLastLocation(): SavedLocation | null {
+    try {
+      const raw = localStorage.getItem(LAST_LOCATION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as SavedLocation | null;
+      if (!parsed || typeof parsed !== "object" || !("kind" in parsed)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function todayJournalTitle(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
   async function navigateToStartupPage() {
+    // Prefer whatever the user was looking at when they closed the
+    // app last. Journal entries always come back as today's journal.
+    const saved = loadLastLocation();
+    if (saved) {
+      try {
+        if (saved.kind === "journal") {
+          await navigateToJournal();
+          return;
+        }
+        if (saved.kind === "page") {
+          if (isJournalDateTitle(saved.title)) {
+            // Was a dated journal page → open today's date instead.
+            await navigateToPage(todayJournalTitle(), true);
+            return;
+          }
+          await navigateToPage(saved.title);
+          return;
+        }
+        if (saved.kind === "all-pages") {
+          await navigateToPage("__all_pages__");
+          return;
+        }
+        if (saved.kind === "graph") {
+          await navigateToPage("__graph__");
+          return;
+        }
+        if (saved.kind === "flashcards") {
+          await navigateToPage("__flashcards__");
+          return;
+        }
+        if (saved.kind === "statistics") {
+          await navigateToPage("__statistics__");
+          return;
+        }
+        if (saved.kind === "chat") {
+          await navigateToPage("__chat__");
+          return;
+        }
+        // Deliberately don't auto-open settings — nobody wants to
+        // land on the settings screen on every launch.
+      } catch {
+        // Fall through to the legacy defaults if restoring failed.
+      }
+    }
+
     try {
       // Only open Welcome when it already exists (tutorial graph).
       await getPage({ title: "Welcome To Grafium" });
@@ -1069,6 +1395,9 @@
 
   $effect(() => {
     loadSidebarWidthPreference();
+    loadReferencePanelWidthPreference();
+    loadGraphViewModePreference();
+    loadShowBlockGuidesPreference();
   });
 </script>
 
@@ -1092,7 +1421,7 @@
   <div class="app-layout" bind:this={appLayoutEl}>
     {#if sidebarVisible && !zenMode}
       <div class="sidebar-container" style={`width: ${sidebarWidth}px;`}>
-        <Sidebar {currentPage} {sidebarWidth} onNavigate={handleNavigate} onGraphChanged={handleGraphChanged} />
+        <Sidebar bind:this={sidebarRef} {currentPage} {sidebarWidth} onNavigate={handleNavigate} onGraphChanged={handleGraphChanged} />
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -1115,13 +1444,27 @@
     {:else if loading}
       <div class="loading">Loading...</div>
     {:else if currentView === "all-pages"}
-      <AllPages onNavigate={handleNavigate} />
+      <AllPages onNavigate={handleNavigate} onPageDeleted={() => { void sidebarRef?.refresh(); }} />
     {:else if currentView === "graph"}
-      <GraphView
-        onNavigate={handleNavigate}
-        currentPageId={currentPage?.id ?? ""}
-        currentPageTitle={currentPage?.title ?? ""}
-      />
+      <div class="graph-view-wrapper">
+        <div class="graph-renderer-toggle">
+          <button class:active={graphViewMode === "2d"} onclick={() => setGraphViewMode("2d")}>2D</button>
+          <button class:active={graphViewMode === "3d"} onclick={() => setGraphViewMode("3d")}>3D</button>
+        </div>
+        {#if graphViewMode === "3d"}
+          <GraphView3D
+            onNavigate={handleNavigate}
+            currentPageId={currentPage?.id ?? ""}
+            currentPageTitle={currentPage?.title ?? ""}
+          />
+        {:else}
+          <GraphView
+            onNavigate={handleNavigate}
+            currentPageId={currentPage?.id ?? ""}
+            currentPageTitle={currentPage?.title ?? ""}
+          />
+        {/if}
+      </div>
     {:else if currentView === "statistics"}
       <Statistics onNavigate={handleNavigate} />
     {:else if currentView === "flashcards"}
@@ -1129,12 +1472,14 @@
     {:else if currentView === "chat"}
       <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
-      <Settings />
+      <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} />
     {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
         onNavigate={handleNavigate}
+        onActivePageChange={(page) => (journalActivePage = page)}
+        onPageDeleted={() => { void sidebarRef?.refresh(); }}
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
@@ -1145,22 +1490,27 @@
 
     <!-- Reference / Knowledge Panel -->
     {#if referencePanelVisible}
-      <div style="position:fixed;top:40px;right:0;bottom:0;width:380px;background:#1a1a2e;border-left:2px solid #e74c3c;z-index:9999;display:flex;flex-direction:column;padding:16px;color:#fff;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <h3 style="margin:0;">Knowledge Panel</h3>
-          <button onclick={() => (referencePanelVisible = false)} style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;">✕</button>
-        </div>
-        <p style="color:#aaa;">Panel is working! Press Escape or click ✕ to close.</p>
-        <ReferencePanel
-          visible={true}
-          pageId={currentPage?.id || ""}
-          pageTitle={currentPage?.title || ""}
-          initialTab={referencePanelTab}
-          focusTrigger={referencePanelFocusTrigger}
-          onClose={() => (referencePanelVisible = false)}
-          onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
-        />
-      </div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="reference-panel-resizer"
+        class:resizing={isResizingReferencePanel}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize reference panel"
+        style="position:fixed;top:0;bottom:0;right:{referencePanelWidth - 3}px;width:6px;z-index:10000;"
+        onpointerdown={startReferencePanelResize}
+        ondblclick={resetReferencePanelWidth}
+      ></div>
+      <ReferencePanel
+        visible={true}
+        pageId={(currentView === "journal" ? journalActivePage?.id : currentPage?.id) || ""}
+        pageTitle={(currentView === "journal" ? journalActivePage?.title : currentPage?.title) || ""}
+        initialTab={referencePanelTab}
+        focusTrigger={referencePanelFocusTrigger}
+        width={referencePanelWidth}
+        onClose={() => (referencePanelVisible = false)}
+        onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
+      />
     {/if}
 
     <!-- Bottom nav for narrow screens -->
@@ -1333,7 +1683,7 @@
         autofocus
       />
       {#if importMediaBusy && importMediaProgress}
-        <p class="dialog-progress">{importMediaProgress}</p>
+        <pre class="dialog-progress">{importMediaProgress}</pre>
       {/if}
       {#if importMediaError}
         <p class="dialog-error">{importMediaError}</p>
@@ -1421,6 +1771,62 @@
 
   .sidebar-resizer:hover::after,
   .sidebar-resizer.resizing::after {
+    opacity: 1;
+  }
+
+  .graph-view-wrapper {
+    position: relative;
+    height: 100%;
+    width: 100%;
+  }
+
+  .graph-renderer-toggle {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 20;
+    display: flex;
+    gap: 2px;
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 6px;
+    padding: 2px;
+  }
+
+  .graph-renderer-toggle button {
+    padding: 4px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary, #aaa);
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .graph-renderer-toggle button.active {
+    background: var(--accent, #6ea8fe);
+    color: #0b0b10;
+  }
+
+  .reference-panel-resizer {
+    cursor: col-resize;
+    background: transparent;
+  }
+
+  .reference-panel-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 2px;
+    width: 1px;
+    height: 100%;
+    background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .reference-panel-resizer:hover::after,
+  .reference-panel-resizer.resizing::after {
     opacity: 1;
   }
 
@@ -1548,6 +1954,12 @@
     color: var(--text-secondary, #999);
     margin: 8px 0 0 0;
     font-style: italic;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    max-height: 220px;
+    overflow-y: auto;
+    line-height: 1.4;
   }
 
   .dialog-label {

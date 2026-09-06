@@ -1555,6 +1555,75 @@ impl Graph {
         })
     }
 
+    /// Insert a new text block immediately after `after_block_id` among
+    /// its siblings (same `parent_id`, at the next order position). Used
+    /// by the "Insert into page" button in `ReferencePanel.svelte` when
+    /// the user has an active caret in the editor — the summary lands
+    /// where they were reading, not always at the top of the page. Only
+    /// the anchor block's own sibling list is renumbered, so nested
+    /// children and unrelated subtrees are untouched.
+    ///
+    /// Returns an error if `after_block_id` doesn't belong to `page_id`,
+    /// so a stale focused-block id from a previous page can't corrupt an
+    /// unrelated page's ordering.
+    pub fn insert_block_after(
+        &self,
+        page_id: &str,
+        after_block_id: &str,
+        content: &str,
+    ) -> Result<Block> {
+        let anchor = self.db.get_block_by_id(after_block_id)?;
+        if anchor.page_id != page_id {
+            return Err(crate::error::CoreError::Other(format!(
+                "insert_block_after: anchor block {} belongs to page {}, not {}",
+                after_block_id, anchor.page_id, page_id
+            )));
+        }
+
+        let sibling_ids: Vec<String> = self
+            .db
+            .list_blocks_for_page(page_id)?
+            .into_iter()
+            .filter(|b| b.parent_id == anchor.parent_id)
+            .map(|b| b.id)
+            .collect();
+
+        let order = self.next_order_index_for_page(page_id)?;
+        let block = self.create_block(
+            page_id,
+            anchor.parent_id.as_deref(),
+            order,
+            content,
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let mut ordered_ids = Vec::with_capacity(sibling_ids.len() + 1);
+        for id in &sibling_ids {
+            ordered_ids.push(id.clone());
+            if id == &anchor.id {
+                ordered_ids.push(block.id.clone());
+            }
+        }
+        // Defensive: if the anchor somehow wasn't found in the sibling
+        // list (shouldn't happen — we just fetched it and filtered by its
+        // own parent_id), append the new block to the end rather than
+        // silently dropping it from the reorder.
+        if !ordered_ids.contains(&block.id) {
+            ordered_ids.push(block.id.clone());
+        }
+        self.reorder_blocks(page_id, &ordered_ids)?;
+
+        let new_index = ordered_ids
+            .iter()
+            .position(|id| id == &block.id)
+            .unwrap_or(0) as i32;
+        Ok(Block {
+            order_index: new_index,
+            ..block
+        })
+    }
+
     // ─── Internal helpers ────────────────────────────────────────────────────────
 
     /// Migrate legacy %2F-encoded flat files to folder hierarchy.
@@ -2316,6 +2385,138 @@ mod tests {
             Some(second_existing.id.as_str())
         );
         assert_eq!(child.order_index, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_places_new_block_after_anchor() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("insert-after-target", false)?;
+
+        // Set up a page with three root blocks (Alpha, Beta, Gamma) and
+        // one nested child under Beta, so we can verify that inserting
+        // after Beta lands the new block between Beta and Gamma, and
+        // that Beta's nested child stays put with the right parent.
+        let first_existing = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&first_existing.id, "Alpha", None)?;
+        let beta = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Beta",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let gamma = graph.create_block(
+            &page.id,
+            None,
+            2,
+            "Gamma",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let beta_child = graph.create_block(
+            &page.id,
+            Some(&beta.id),
+            0,
+            "Beta child",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = graph.insert_block_after(&page.id, &beta.id, "AI summary block")?;
+        assert!(inserted.parent_id.is_none());
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        let mut root_blocks: Vec<_> = blocks.iter().filter(|b| b.parent_id.is_none()).collect();
+        root_blocks.sort_by_key(|b| b.order_index);
+
+        assert_eq!(root_blocks.len(), 4);
+        assert_eq!(root_blocks[0].id, first_existing.id);
+        assert_eq!(root_blocks[1].id, beta.id);
+        assert_eq!(root_blocks[2].id, inserted.id);
+        assert_eq!(root_blocks[2].content, "AI summary block");
+        assert_eq!(root_blocks[3].id, gamma.id);
+
+        // Nested Beta-child stays a child of Beta.
+        let child = blocks.iter().find(|b| b.id == beta_child.id).unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(beta.id.as_str()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_nested_anchor_creates_sibling_child() -> Result<()> {
+        // Anchor is a nested (non-root) block: the new block must land as
+        // its next sibling (same parent), not at page root.
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("insert-after-nested", false)?;
+
+        let parent = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Parent",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child_one = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            0,
+            "Child one",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child_two = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            1,
+            "Child two",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted =
+            graph.insert_block_after(&page.id, &child_one.id, "Summary between children")?;
+        assert_eq!(inserted.parent_id.as_deref(), Some(parent.id.as_str()));
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        let mut children: Vec<_> = blocks
+            .iter()
+            .filter(|b| b.parent_id.as_deref() == Some(parent.id.as_str()))
+            .collect();
+        children.sort_by_key(|b| b.order_index);
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].id, child_one.id);
+        assert_eq!(children[1].id, inserted.id);
+        assert_eq!(children[2].id, child_two.id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_rejects_cross_page_anchor() -> Result<()> {
+        // A stale focused-block-id from an unrelated page must not be
+        // able to reorder the current page's blocks.
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page_a = graph.create_page("page-a", false)?;
+        let page_b = graph.create_page("page-b", false)?;
+        let stray = graph.create_block(
+            &page_b.id,
+            None,
+            1,
+            "On other page",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let result = graph.insert_block_after(&page_a.id, &stray.id, "Should be rejected");
+        assert!(result.is_err(), "cross-page insert must fail");
 
         Ok(())
     }

@@ -170,6 +170,26 @@ fn fetch_transcript_blocking(
 
     on_progress("Loading Whisper model...");
     let transcriber = cached_transcriber(media_config, data_dir)?;
+    // Show which backend Whisper actually landed on *before* audio
+    // download/decode starts, so if the user is going to be sitting
+    // through minutes of CPU-only transcription they know that up
+    // front (and can cancel + fix drivers) instead of only finding
+    // out when it takes 10x realtime.
+    match transcriber.backend() {
+        grafium_core::media::WhisperBackend::Vulkan { device } => {
+            let label = device
+                .as_deref()
+                .map(|d| format!("Vulkan GPU ({d})"))
+                .unwrap_or_else(|| "Vulkan GPU".to_string());
+            on_progress(&format!("Whisper loaded on {label}."));
+        }
+        grafium_core::media::WhisperBackend::Cpu { reason } => {
+            on_progress(&format!(
+                "⚠ Whisper GPU unavailable — falling back to CPU. Reason: {reason} \
+                 (transcription will be significantly slower)."
+            ));
+        }
+    }
     grafium_core::media::fetch_transcript_with_progress(
         url,
         workdir,
@@ -283,7 +303,11 @@ pub async fn media_import_video(
             Some(engine) if engine.is_llm_ready() => {
                 emit_summary_progress("Summarizing transcript...");
                 match engine
-                    .summarize_text(&title, &transcript.full_text, &mut emit_summary_progress)
+                    .summarize_text(
+                        &title,
+                        &transcript.full_text,
+                        &mut emit_summary_progress,
+                    )
                     .await
                 {
                     Ok(summary) => Some(summary),

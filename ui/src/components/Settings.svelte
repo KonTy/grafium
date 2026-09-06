@@ -16,6 +16,13 @@
     config: any;
   }
 
+  interface Props {
+    showBlockGuides?: boolean;
+    onSetShowBlockGuides?: (value: boolean) => void;
+  }
+
+  let { showBlockGuides = true, onSetShowBlockGuides }: Props = $props();
+
   let currentThemeId = $state("auto");
   let smplosThemeName = $state<string | null>(null);
   let appVersion = $state("...");
@@ -283,6 +290,17 @@
             <span class="setting-value">{reindexStatus}</span>
           {/if}
         </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Block hierarchy guide lines</span>
+        <label class="setting-checkbox">
+          <input
+            type="checkbox"
+            checked={showBlockGuides}
+            onchange={(e) => onSetShowBlockGuides?.((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span>Show vertical "thread" lines connecting parent/child blocks</span>
+        </label>
       </div>
     </div>
   </details>
@@ -717,6 +735,20 @@
     font-family: monospace;
     word-break: break-all;
     text-align: right;
+  }
+
+  .setting-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: right;
+    cursor: pointer;
+  }
+
+  .setting-checkbox input {
+    cursor: pointer;
   }
 
   .section-desc {

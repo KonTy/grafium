@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "./api";
-import { buildBlockRenderState, computeVirtualWindow } from "./pageContentVirtualization";
+import { buildBlockRenderState, computeVirtualWindow, getAncestorGuides } from "./pageContentVirtualization";
 
 function makeBlock(
   id: string,
@@ -115,5 +115,86 @@ describe("page content virtual window", () => {
     expect(windowed.startIndex).toBeLessThanOrEqual(targetIndex);
     expect(windowed.endIndex).toBeGreaterThan(targetIndex);
     expect(windowed.items.some((block) => block.id === `block-${targetIndex}`)).toBe(true);
+  });
+
+  it("never unmounts already-rendered blocks below minStartIndex/minEndIndex, e.g. during a mouse-drag text selection", () => {
+    const blocks = Array.from({ length: 5000 }, (_, index) => makeBlock(`block-${index}`, null, index));
+    const measuredHeights = new Map(blocks.map((block) => [block.id, 60]));
+    const options = {
+      viewportHeight: 600,
+      measuredHeights,
+      defaultHeight: 60,
+      overscanPx: 240,
+    };
+
+    // Simulate: user started a drag-selection somewhere near the top, then
+    // the browser auto-scrolled the container down while the mouse stayed
+    // pinned past the bottom edge. Without a sticky floor, the window
+    // computed at the new scrollTop would drop the blocks the selection
+    // anchor started in.
+    const atDragStart = computeVirtualWindow(blocks, { ...options, scrollTop: 0 });
+    const afterAutoscroll = computeVirtualWindow(blocks, {
+      ...options,
+      scrollTop: 3_000,
+      minStartIndex: atDragStart.startIndex,
+      minEndIndex: atDragStart.endIndex,
+    });
+
+    expect(afterAutoscroll.startIndex).toBeLessThanOrEqual(atDragStart.startIndex);
+    expect(afterAutoscroll.endIndex).toBeGreaterThanOrEqual(atDragStart.endIndex);
+    // The window must still have grown to cover the new scroll position too.
+    const plainAfterAutoscroll = computeVirtualWindow(blocks, { ...options, scrollTop: 3_000 });
+    expect(afterAutoscroll.endIndex).toBeGreaterThanOrEqual(plainAfterAutoscroll.endIndex);
+    for (const block of atDragStart.items) {
+      expect(afterAutoscroll.items.some((b) => b.id === block.id)).toBe(true);
+    }
+  });
+});
+
+describe("getAncestorGuides", () => {
+  it("draws no guides for a root-level block", () => {
+    const blocks = [makeBlock("a", null, 0)];
+    const state = buildBlockRenderState(blocks, new Set());
+    const guides = getAncestorGuides("a", state.parentById, state.depthById, state.isLastChildById);
+    expect(guides).toEqual([]);
+  });
+
+  it("draws a guide for a parent that has a later sibling", () => {
+    // a
+    //   b (child of a)
+    // c (sibling of a, comes after)
+    const blocks = [makeBlock("a", null, 0), makeBlock("b", "a", 0), makeBlock("c", null, 1)];
+    const state = buildBlockRenderState(blocks, new Set());
+    const guides = getAncestorGuides("b", state.parentById, state.depthById, state.isLastChildById);
+    // b's only ancestor level (level 0, "a") should draw a guide since "a" has
+    // a later sibling ("c") — more content still follows in that column.
+    expect(guides).toEqual([true]);
+  });
+
+  it("omits the guide when the ancestor is the last child", () => {
+    // a
+    //   b (child of a, and a is an only child overall)
+    const blocks = [makeBlock("a", null, 0), makeBlock("b", "a", 0)];
+    const state = buildBlockRenderState(blocks, new Set());
+    const guides = getAncestorGuides("b", state.parentById, state.depthById, state.isLastChildById);
+    expect(guides).toEqual([false]);
+  });
+
+  it("computes an independent guide per ancestor level for deeply nested blocks", () => {
+    // a
+    //   b
+    //     c
+    // d (sibling of a, after)
+    const blocks = [
+      makeBlock("a", null, 0),
+      makeBlock("b", "a", 0),
+      makeBlock("c", "b", 0),
+      makeBlock("d", null, 1),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    const guides = getAncestorGuides("c", state.parentById, state.depthById, state.isLastChildById);
+    // Level 0 (ancestor "a"): has later sibling "d" -> guide drawn.
+    // Level 1 (ancestor "b"): only child of "a" -> no guide.
+    expect(guides).toEqual([true, false]);
   });
 });

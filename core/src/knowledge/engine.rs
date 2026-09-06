@@ -873,6 +873,7 @@ impl KnowledgeEngine {
                 embedder.as_ref(),
                 store.as_ref(),
                 on_progress,
+                &crate::cancel::CancellationToken::new(),
             )
             .await
     }
@@ -895,7 +896,13 @@ impl KnowledgeEngine {
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        crate::ai::references::generate_page_summary(title, full_text, llm.as_ref(), on_progress)
+        crate::ai::references::generate_page_summary(
+            title,
+            full_text,
+            llm.as_ref(),
+            on_progress,
+            &crate::cancel::CancellationToken::new(),
+        )
             .await
     }
 
