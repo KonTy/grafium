@@ -27,6 +27,7 @@
     collectionMembersFromBlocks,
     getCollectionKind,
     listCollections,
+    pageTreeReferencesChanged,
     setPageCollection,
     withMissingCommandFallback,
   } from "../lib/pageTree";
@@ -181,6 +182,7 @@
       void listBlocks(page.id).then((updated) => {
         blocks = updated;
         refreshCollectionAfterMutation();
+        refreshPageTrees();
       });
     };
 
@@ -281,6 +283,7 @@
       setUndoCallback(page.id, (_action: UndoAction) => {
         void loadBlocks(currentPageLoad());
         refreshCollectionAfterMutation();
+        refreshPageTrees();
       });
       return () => {
         removeUndoCallback(page.id);
@@ -349,9 +352,13 @@
   }
 
   function refreshCollectionAfterMutation() {
-    if (!compact && collectionKind && collectionStatus !== "unavailable") {
+    if (!compact && collectionKind !== null && collectionStatus !== "unavailable") {
       void loadCollection(page.id);
     }
+  }
+
+  function refreshPageTrees() {
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
   async function updateCollection(kind: string | null) {
@@ -563,6 +570,11 @@
 
   function handleBlur(blockId: string) {
     focusedBlockId = null;
+    const before = preEditSnapshots.get(blockId);
+    const after = blockRenderState.blockById.get(blockId);
+    if (before && after && pageTreeReferencesChanged(before.content, after.content)) {
+      refreshPageTrees();
+    }
     if (collectionStatus === "collection") {
       void loadCollection(page.id);
     }
@@ -583,9 +595,11 @@
       // Persist the current block content before any structural operation
       // (create/move), otherwise write-page operations can serialize stale empty text.
       if (block.content !== content) {
+        const referencesChanged = pageTreeReferencesChanged(block.content, content);
         await updateBlock(blockId, content);
         block.content = content;
         blocks = [...blocks];
+        if (referencesChanged) refreshPageTrees();
       }
 
       // Enter at the very start of a block inserts an empty sibling above it.
@@ -692,6 +706,9 @@
       // Insert all new blocks after the current block
       blocks = [...blocks.slice(0, idx + 1), ...newBlocks, ...blocks.slice(idx + 1)];
       refreshCollectionAfterMutation();
+      if (pasteBlocks.some((block) => pageTreeReferencesChanged("", block.content))) {
+        refreshPageTrees();
+      }
       // Focus the last new block
       const lastNew = newBlocks[newBlocks.length - 1];
       requestAnimationFrame(() => {
@@ -740,6 +757,7 @@
     const idx = blocks.findIndex((b) => b.id === blockId);
     blocks = blocks.filter((b) => b.id !== blockId);
     refreshCollectionAfterMutation();
+    if (block && pageTreeReferencesChanged(block.content, "")) refreshPageTrees();
     // Focus previous block
     const prevIdx = Math.max(0, idx - 1);
     if (blocks[prevIdx]) {
@@ -925,6 +943,9 @@
     }
     selectedBlockIds = new Set();
     refreshCollectionAfterMutation();
+    if (deletedBlocks.some((block) => pageTreeReferencesChanged(block.content, ""))) {
+      refreshPageTrees();
+    }
   }
 
   let analyzingSelection = $state(false);
@@ -1013,6 +1034,7 @@
       blocks = [...blocks.slice(0, insertAt + 1), ...created, ...blocks.slice(insertAt + 1)];
       selectedBlockIds = new Set();
       refreshCollectionAfterMutation();
+      refreshPageTrees();
     } catch (e) {
       analyzeSelectionError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -1136,7 +1158,7 @@
     {/if}
   </div>
 
-  {#if !compact && collectionKind}
+  {#if !compact && collectionKind !== null}
     <CollectionMembers
       kind={collectionKind}
       members={collectionMembers}

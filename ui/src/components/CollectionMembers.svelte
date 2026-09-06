@@ -16,6 +16,7 @@
 
   const kindLabel = $derived(
     kind
+      .trim()
       .replace(/[_-]+/g, " ")
       .replace(/\b\w/g, (letter) => letter.toUpperCase()),
   );

@@ -7,6 +7,7 @@ import {
   getPageTree,
   isCommandNotRegistered,
   listCollections,
+  pageTreeReferencesChanged,
   setPageCollection,
   snakeToCamelDeep,
   toPageTreeView,
@@ -169,6 +170,16 @@ describe("collection projections", () => {
       { block_id: "b2", order_index: 4, page_title: "Part/Two" },
       { block_id: "b3", order_index: 1, page_title: "Part Three" },
     ]);
+  });
+
+  it("detects only page and tag reference changes that can affect a tree", () => {
+    expect(pageTreeReferencesChanged(
+      "Read [[Tech\\Linux]] and #systems",
+      "Read [[tech/Linux]] more carefully and #systems",
+    )).toBe(false);
+    expect(pageTreeReferencesChanged("No links", "Add [[New Page]]")).toBe(true);
+    expect(pageTreeReferencesChanged("#flashcard", "#flashcard")).toBe(false);
+    expect(pageTreeReferencesChanged("#old", "#new")).toBe(true);
   });
 });
 

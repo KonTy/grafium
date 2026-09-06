@@ -146,7 +146,7 @@ export function collectionMembersFromBlocks(
 ): CollectionMember[] {
   const members: CollectionMember[] = [];
   for (const block of blocks) {
-    const match = /\[\[([^\]\n]+)\]\]/.exec(block.content);
+    const match = /\[\[([^\]]+)\]\]/.exec(block.content);
     if (!match) continue;
     members.push({
       block_id: block.id,
@@ -155,6 +155,28 @@ export function collectionMembersFromBlocks(
     });
   }
   return members;
+}
+
+export function pageTreeReferencesChanged(previous: string, next: string): boolean {
+  const before = collectTreeReferences(previous);
+  const after = collectTreeReferences(next);
+  if (before.size !== after.size) return true;
+  for (const reference of before) {
+    if (!after.has(reference)) return true;
+  }
+  return false;
+}
+
+function collectTreeReferences(content: string): Set<string> {
+  const references = new Set<string>();
+  for (const match of content.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    references.add(`page:${match[1].replace(/\\/g, "/").toLowerCase()}`);
+  }
+  for (const match of content.matchAll(/#([a-zA-Z0-9_/\\-]+)/g)) {
+    if (match[1] === "flashcard") continue;
+    references.add(`tag:${match[1].replace(/\\/g, "/").toLowerCase()}`);
+  }
+  return references;
 }
 
 export function toPageTreeView(
