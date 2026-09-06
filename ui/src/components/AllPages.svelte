@@ -85,10 +85,18 @@
   /// Storage keys are scoped to the open graph — an expansion path is only
   /// meaningful inside the graph it came from.
   let graphPath: string | null = $state(null);
+  /// Whether we have heard back about which graph is open at all.
+  ///
+  /// Distinct from `graphPath === null`, which is a real answer meaning "no
+  /// path". Until this flips, the scoped key is not yet knowable and anything
+  /// keyed on it would be reading and writing an unscoped key shared by every
+  /// graph.
+  let graphResolved = $state(false);
   $effect(() => {
     void getGraphInfo()
       .then((info) => { graphPath = info.path; })
-      .catch(() => { graphPath = null; });
+      .catch(() => { graphPath = null; })
+      .finally(() => { graphResolved = true; });
   });
 
   // Restored per graph: the order you browse in is a lasting preference, and
@@ -96,6 +104,11 @@
   let sortStorageKey = $derived(graphScopedKey(ALL_PAGES_SORT_STORAGE_KEY, graphPath));
   let restoredSortFor: string | null = $state(null);
   $effect(() => {
+    // Nothing before the graph is known: restoring against the unscoped key
+    // would apply one graph's preference to another, and would then be
+    // overwritten a moment later when the real key arrives — silently
+    // reverting a choice made in between.
+    if (!graphResolved) return;
     const key = sortStorageKey;
     if (restoredSortFor === key) return;
     restoredSortFor = key;
