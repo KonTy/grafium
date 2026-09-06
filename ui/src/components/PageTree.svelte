@@ -386,7 +386,11 @@
     border: none;
     border-radius: 6px;
     background: transparent;
-    color: var(--text-secondary);
+    /* Actionable text, so it takes the primary token. `--text-secondary` is a
+       de-emphasis colour and drops to ~2.9:1 on the light themes, which is
+       below AA for 13px — fine for supporting metadata, not for something you
+       are meant to read and click. */
+    color: var(--text-primary);
     font: inherit;
     font-size: 13px;
     text-align: left;

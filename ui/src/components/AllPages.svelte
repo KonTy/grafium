@@ -1,14 +1,14 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
   import PageTree from "./PageTree.svelte";
-  import { countPages, listPagesWindow, createPage, deletePage } from "../lib/api";
+  import { countPages, listPagesWindow, createPage, deletePage, getGraphInfo } from "../lib/api";
   import {
     getPageTree,
     toPageTreeView,
     withMissingCommandFallback,
     type PageTreeSource,
   } from "../lib/pageTree";
-  import { ALL_PAGES_TREE_STORAGE_KEY, type PageTreeViewNode } from "../lib/pageTreeState";
+  import { ALL_PAGES_TREE_STORAGE_KEY, graphScopedKey, type PageTreeViewNode } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -58,6 +58,15 @@
 
   $effect(() => {
     void refreshCount();
+  });
+
+  /// Storage keys are scoped to the open graph — an expansion path is only
+  /// meaningful inside the graph it came from.
+  let graphPath: string | null = $state(null);
+  $effect(() => {
+    void getGraphInfo()
+      .then((info) => { graphPath = info.path; })
+      .catch(() => { graphPath = null; });
   });
 
   $effect(() => {
@@ -299,7 +308,7 @@
         <PageTree
           nodes={pageTree}
           {onNavigate}
-          storageKey={`${ALL_PAGES_TREE_STORAGE_KEY}.${treeSource}`}
+          storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
           emptyText={treeSource === "namespace"
             ? "No page namespaces yet. Use / in a page title to build one."

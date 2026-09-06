@@ -292,3 +292,31 @@ describe("worst-case contrast summary", () => {
     console.table(rows);
   });
 });
+
+/**
+ * Actionable text — tree rows, menu items — must be readable on the surfaces
+ * it actually renders on.
+ *
+ * The guard previously only checked accent hues, so it stayed green while an
+ * audit measured tree labels at 2.89:1 on Flexoki Light and menu items at
+ * 3.59:1: the components were using `--text-secondary`, a de-emphasis token,
+ * for text you are meant to read and click. Pinning the composition here is
+ * what stops the next component reaching for the same token.
+ */
+describe("actionable text meets WCAG AA on the surfaces it renders on", () => {
+  for (const theme of themes) {
+    it(`${theme.id}: primary text is legible on every surface`, () => {
+      const c = theme.colors;
+      for (const [name, surface] of [
+        ["bg-primary", c.bgPrimary],
+        ["bg-secondary", c.bgSecondary],
+      ] as const) {
+        const ratio = contrastRatio(c.textPrimary, surface);
+        expect(
+          ratio,
+          `${theme.id}: --text-primary on ${name} is ${ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+});

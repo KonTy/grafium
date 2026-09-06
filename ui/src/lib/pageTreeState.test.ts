@@ -9,6 +9,8 @@ import {
   saveExpansionState,
   type StorageLike,
   type TreeNavigationItem,
+  graphScopedKey,
+  SIDEBAR_TREE_STORAGE_KEY,
 } from "./pageTreeState";
 
 interface Node {
@@ -167,5 +169,58 @@ describe("page tree expansion persistence", () => {
   it("degrades when storage is unavailable", () => {
     expect(loadExpansionState(null, "tree")).toEqual(new Set());
     expect(saveExpansionState(null, "tree", new Set(["tech"]))).toBe(false);
+  });
+});
+
+describe("graphScopedKey", () => {
+  /// Expansion paths only mean anything inside their own graph. Sharing one
+  /// key meant opening graph B pruned graph A's saved paths against B's tree
+  /// and wrote the result back, quietly destroying A's state on every switch.
+  it("gives different graphs different keys", () => {
+    const a = graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, "/home/me/graph-a");
+    const b = graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, "/home/me/graph-b");
+    expect(a).not.toBe(b);
+    expect(a.startsWith(SIDEBAR_TREE_STORAGE_KEY)).toBe(true);
+  });
+
+  it("is stable for the same graph", () => {
+    const p = "/home/me/graph-a";
+    expect(graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, p)).toBe(
+      graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, p),
+    );
+  });
+
+  it("falls back to the bare key when the graph is unknown", () => {
+    expect(graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, null)).toBe(SIDEBAR_TREE_STORAGE_KEY);
+  });
+
+  /// The key must not embed a filesystem path.
+  it("does not leak the graph path", () => {
+    expect(graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, "/home/me/secret-graph")).not.toContain("secret");
+  });
+});
+
+describe("saveExpansionState bounds", () => {
+  /// A single deep title expands to one entry per level; unbounded, that
+  /// serialized to tens of megabytes, blew the quota, and persisted nothing.
+  it("caps what it persists so one absurd branch can't cost everything", () => {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    const expanded = new Set<string>();
+    let deep = "x";
+    for (let i = 0; i < 5000; i++) {
+      deep += "/x";
+      expanded.add(deep);
+    }
+    expanded.add("shallow");
+
+    expect(saveExpansionState(storage, "k", expanded)).toBe(true);
+    const written = store.get("k")!;
+    expect(written.length).toBeLessThan(500_000);
+    expect(JSON.parse(written).expanded).toContain("shallow");
   });
 });

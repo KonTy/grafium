@@ -57,6 +57,30 @@ export const SIDEBAR_TREE_STORAGE_KEY = "grafium.pageTree.sidebar.expanded";
 export const ALL_PAGES_TREE_STORAGE_KEY = "grafium.pageTree.allPages.expanded";
 
 /**
+ * Scope a storage key to one graph.
+ *
+ * Expansion state is a set of page paths, which are meaningful only inside the
+ * graph they came from. Sharing one key meant opening graph B pruned graph A's
+ * saved paths against B's tree and wrote the result back over the shared key —
+ * so every switch quietly destroyed the other graph's expansion state, and a
+ * path that happened to exist in both carried across as if it were the same
+ * node.
+ *
+ * The graph's path is its stable identity; it is hashed so the key stays short
+ * and doesn't leak a filesystem path into storage.
+ */
+export function graphScopedKey(baseKey: string, graphPath: string | null | undefined): string {
+  if (!graphPath) return baseKey;
+  // FNV-1a, matching `tagColor.ts` — deterministic across runs and platforms.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < graphPath.length; i++) {
+    hash ^= graphPath.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${baseKey}.${hash.toString(36)}`;
+}
+
+/**
  * Builds the visible projection once per expansion change. Keeping rendering
  * flat avoids recursive Svelte components and repeated subtree walks.
  */
@@ -281,20 +305,43 @@ export function loadExpansionState(
   }
 }
 
+/**
+ * Most expanded paths to persist.
+ *
+ * Each entry is a full path, so cost is proportional to path *length*, not
+ * just count: a legitimately deep title expands into one entry per level, and
+ * a 5000-level path alone serializes to tens of megabytes — far past any
+ * localStorage quota, so the write fails and nothing persists at all. Capping
+ * keeps a pathological graph from costing every other graph its saved state.
+ */
+export const MAX_PERSISTED_EXPANSIONS = 2_000;
+
+/// Longest single path persisted. A path this deep is not something anyone is
+/// navigating by hand; dropping it costs a restored expansion, not data.
+const MAX_PERSISTED_PATH_LENGTH = 512;
+
 export function saveExpansionState(
   storage: StorageLike | null | undefined,
   key: string,
   expanded: ReadonlySet<string>,
 ): boolean {
   if (!storage) return false;
-  const payload: PersistedExpansion = {
-    version: 1,
-    expanded: Array.from(expanded).sort(),
-  };
+  // Shortest-first, so a budget spent on shallow paths restores the parts of
+  // the tree a person actually sees rather than one absurd branch.
+  const entries = Array.from(expanded)
+    .filter((path) => path.length <= MAX_PERSISTED_PATH_LENGTH)
+    .sort((a, b) => a.length - b.length || a.localeCompare(b))
+    .slice(0, MAX_PERSISTED_EXPANSIONS)
+    .sort();
+
+  const payload: PersistedExpansion = { version: 1, expanded: entries };
   try {
     storage.setItem(key, JSON.stringify(payload));
     return true;
   } catch {
+    // Quota exhausted or storage denied. Reporting failure lets the caller
+    // stop retrying on every subsequent toggle instead of throwing at the
+    // same wall repeatedly.
     return false;
   }
 }

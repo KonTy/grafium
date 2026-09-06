@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import GraphMenu from "./GraphMenu.svelte";
   import PageTree from "./PageTree.svelte";
-  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
+  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import {
     getPageTree,
     pagesListCollections,
@@ -10,7 +10,7 @@
     toPageTreeView,
     withMissingCommandFallback,
   } from "../lib/pageTree";
-  import { SIDEBAR_TREE_STORAGE_KEY, type PageTreeViewNode } from "../lib/pageTreeState";
+  import { SIDEBAR_TREE_STORAGE_KEY, graphScopedKey, type PageTreeViewNode } from "../lib/pageTreeState";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
   import type { Page, PageSummary, Block } from "../lib/api";
   import type { SidebarSearchResult } from "../lib/sidebarSearch";
@@ -37,6 +37,10 @@
   let pageTreeAvailable: boolean | null = $state(null);
   let pageTreeError = $state(false);
   let pageTreeRequest = 0;
+  /// Storage keys are scoped to the open graph: an expansion path only means
+  /// something inside the graph it came from.
+  let graphPath: string | null = $state(null);
+  let treeStorageKey = $derived(graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, graphPath));
   let pageTreePageIds = new Set<string>();
 
   // Context menu state
@@ -79,6 +83,10 @@
   });
 
   async function loadSidebar() {
+    // Resolve which graph we're in before anything keyed to it is written.
+    graphPath = await getGraphInfo()
+      .then((info) => info.path)
+      .catch(() => null);
     const [favoriteResult, recentResult] = await Promise.allSettled([
       listFavorites(),
       listRecentPages(10),
@@ -258,9 +266,29 @@
   }
 
   function handleSidebarGraphChanged() {
+    // Drop the outgoing graph's tree *synchronously*, before any await. The
+    // tree is a list of page titles, and navigation resolves a title against
+    // whatever graph is now open — so a leftover node clicked during the
+    // reload doesn't just show the wrong thing, it looks up a title that
+    // doesn't exist here and creates it. A stale row was therefore able to
+    // write a page into a graph it never belonged to.
+    invalidateGraphBoundState();
     void loadSidebar();
     resetSearchState();
     onGraphChanged();
+  }
+
+  /// Clears everything keyed to the graph that is being navigated away from.
+  /// Bumping the request counter also abandons any in-flight tree response,
+  /// which would otherwise land after the switch and repopulate the old data.
+  function invalidateGraphBoundState() {
+    pageTreeRequest++;
+    pageTree = [];
+    pageTreePageIds = new Set();
+    pageTreeError = false;
+    favorites = [];
+    recentPages = [];
+    contextMenu = null;
   }
 
   $effect(() => {
@@ -426,7 +454,7 @@
           nodes={pageTree}
           {onNavigate}
           selectedPageId={currentPage?.id ?? null}
-          storageKey={SIDEBAR_TREE_STORAGE_KEY}
+          storageKey={treeStorageKey}
           ariaLabel="Page namespaces"
           density="compact"
           onPageContextMenu={handleTreePageRightClick}
