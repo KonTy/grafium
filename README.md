@@ -134,7 +134,28 @@ cd ui && npm run tauri build
 
 # Run Rust tests
 cargo test -p grafium-core
+
+# Run frontend unit tests
+cd ui && npm test
 ```
+
+### Browser UI tests
+
+`npm test` and `svelte-check` both pass straight through a class of failure
+that only appears once components run together — an effect loop that freezes a
+whole screen, a filter that finds matches and leaves them hidden, a search that
+quietly collapses folders you had opened. Each of those shipped, and each was
+caught here and nowhere else.
+
+```bash
+cd ui
+npx playwright install chromium   # once
+npm run test:ui
+```
+
+The run starts its own dev server and stops it again, and stubs the Tauri IPC,
+so it needs no graph and touches no data. It is kept out of `npm test` because
+it needs a browser.
 
 ## License
 
