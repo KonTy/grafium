@@ -50,7 +50,14 @@
   // rendered, so an effect would hand the *previous* page's directory to this
   // page's first render — and the journal view mounts several pages at once,
   // which no single shared value can describe.
-  let assetBaseDir = $derived(assetBaseDirFor(page.file_path));
+  // A page that exists only because something linked to it has no markdown
+  // file until its first block is created, which happens right below on open.
+  // The `page` prop still says `null` at that point, so the freshly created
+  // path is tracked here — otherwise media pasted into a brand-new page
+  // resolves against the graph root and renders broken until you navigate away
+  // and back.
+  let materializedFilePath = $state<string | null>(null);
+  let assetBaseDir = $derived(assetBaseDirFor(page.file_path ?? materializedFilePath));
 
   let blocks: Block[] = $state([]);
 
@@ -398,6 +405,7 @@
         loadError = null;
         windowAnchorBlockId = null;
         blockHeights.clear();
+        materializedFilePath = null;
       }
 
       const loadedBlocks = await listBlocks(request.pageId);
@@ -409,6 +417,13 @@
         const newBlock = await createBlock(request.pageId, null, 0, "");
         if (!isCurrentPageLoad(pageLoadState, request)) return;
         nextBlocks = [newBlock];
+        // That first block is what writes the page's markdown file, so the
+        // page we were handed no longer describes where it lives.
+        if (!page.file_path) {
+          const refreshed = await getPage({ id: request.pageId }).catch(() => null);
+          if (!isCurrentPageLoad(pageLoadState, request)) return;
+          materializedFilePath = refreshed?.file_path ?? null;
+        }
       }
       blocks = nextBlocks;
     } catch (e: any) {
