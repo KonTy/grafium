@@ -66,6 +66,19 @@
     void loadPageTree(source);
   });
 
+  // The sidebar listens for this too. All Pages currently reloads on mount and
+  // handles its own create/delete, so today it is always fresh — but it only
+  // *dispatches* the event, and would silently show a stale tree the moment it
+  // stays mounted beside an editor. Listening costs nothing and removes the
+  // trap rather than leaving it for whoever changes the routing.
+  $effect(() => {
+    const refreshTree = () => {
+      if (viewMode === "tree" && pageTreeAvailable !== false) void loadPageTree(treeSource);
+    };
+    window.addEventListener("page-tree-refresh", refreshTree);
+    return () => window.removeEventListener("page-tree-refresh", refreshTree);
+  });
+
   // Track scroll/resize of the enclosing .main-content scroller.
   $effect(() => {
     if (!spacerEl) return;

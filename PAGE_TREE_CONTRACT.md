@@ -49,11 +49,22 @@ Rules both trees must obey:
 
 ## Collections (books/projects) — phase 3
 
-A collection is an ordinary page whose `properties` contain:
+A collection is an ordinary page marked with **flat string** properties:
 
 ```json
-{ "collection": { "kind": "book", "status": "draft" } }
+{ "collection": "book", "collection-status": "draft" }
 ```
+
+**Flat, not nested, and this is load-bearing.** The markdown serializer only
+emits `key:: value` for *string* values, and indexing a file replaces a page's
+properties with whatever the parser read back — so a nested marker was written
+to the database and then silently erased by the next reindex, watcher event or
+sync pull, with the collections list simply coming back empty and no error to
+explain it. A flat string round-trips through markdown, which also means the
+marking travels between devices in the file itself.
+
+Both decoders — `collection_of` in Rust and `getCollectionKind` in TypeScript —
+read this same wire data and must stay byte-compatible.
 
 Its **ordered members are its blocks**, each containing a `[[page link]]`.
 Ordering, drag-to-reorder, and free-form brainstorm text therefore come from

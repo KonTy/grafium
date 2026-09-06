@@ -155,11 +155,20 @@ describe("page tree commands", () => {
 });
 
 describe("collection projections", () => {
-  it("reads only a valid collection marker", () => {
-    expect(getCollectionKind({ collection: { kind: "book" } })).toBe("book");
-    expect(getCollectionKind({ collection: { status: "draft" } })).toBeNull();
-    expect(getCollectionKind({ collection: "book" })).toBeNull();
-    expect(getCollectionKind(null)).toBeNull();
+  /// Must mirror `collection_of` in `core/src/knowledge/collections.rs`
+  /// exactly: both decode the same wire data, and an earlier version of this
+  /// test asserted the opposite shape — so it passed while the reader could
+  /// never match real backend data, and would have failed any correct fix.
+  it("reads the flat string marker the backend actually writes", () => {
+    expect(getCollectionKind({ collection: "book" })).toBe("book");
+    expect(getCollectionKind({ collection: "  project  " })).toBe("project");
+    // The retired nested shape is not a marker — the Rust side rejects it too.
+    expect(getCollectionKind({ collection: { kind: "book" } })).toBeNull();
+    // A status without a kind is not a collection.
+    expect(getCollectionKind({ "collection-status": "draft" })).toBeNull();
+    for (const bad of [{ collection: "" }, { collection: "   " }, { collection: 7 }, null]) {
+      expect(getCollectionKind(bad)).toBeNull();
+    }
   });
 
   it("projects linked blocks in their supplied tree order", () => {

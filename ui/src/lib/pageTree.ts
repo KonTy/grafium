@@ -130,12 +130,23 @@ export function getPageTree(source: PageTreeSource): Promise<TreeNode[]> {
   return source === "namespace" ? pagesNamespaceTree() : pagesTagTree();
 }
 
+/**
+ * Read a page's collection kind from its properties.
+ *
+ * The marker is a **flat string** (`collection:: book`), not a nested object.
+ * That shape is forced by persistence: the markdown serializer only writes
+ * string properties, and indexing a file replaces a page's properties with
+ * whatever the parser read back — so a nested marker was written to the
+ * database and then silently erased by the next reindex or sync pull. See
+ * `core/src/knowledge/collections.rs`; this must stay byte-compatible with
+ * `collection_of` there, since both decode the same wire data.
+ */
 export function getCollectionKind(properties: unknown): string | null {
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return null;
   const marker = (properties as Record<string, unknown>).collection;
-  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
-  const kind = (marker as Record<string, unknown>).kind;
-  return typeof kind === "string" ? kind : null;
+  if (typeof marker !== "string") return null;
+  const kind = marker.trim();
+  return kind === "" ? null : kind;
 }
 
 /**
