@@ -51,10 +51,6 @@ export function camelToSnakeDeep<T = unknown>(value: unknown): T {
   return mapKeysDeep(value, camelToSnakeKey) as T;
 }
 
-function toWire<T>(value: T): unknown {
-  return PAYLOAD_CASE === "camel" ? snakeToCamelDeep(value) : value;
-}
-
 function fromWire<T>(value: unknown): T {
   return PAYLOAD_CASE === "camel" ? camelToSnakeDeep<T>(value) : value as T;
 }
@@ -90,11 +86,11 @@ export async function withMissingCommandFallback<T>(
 // conversion stays impossible to bypass at individual call sites.
 export type PageTreeSource = "namespace" | "tags";
 
-export interface PageTreeNode {
+export interface TreeNode {
   key: string;
   label: string;
   page_id: string | null;
-  children: PageTreeNode[];
+  children: TreeNode[];
   descendant_count: number;
 }
 
@@ -111,21 +107,27 @@ export interface CollectionMember {
   page_title: string;
 }
 
-export async function getPageTree(source: PageTreeSource): Promise<PageTreeNode[]> {
-  const command = source === "namespace"
-    ? "pages_namespace_tree"
-    : "pages_tag_tree";
-  const raw = await invoke(command);
-  return fromWire<PageTreeNode[]>(raw);
+export async function pagesNamespaceTree(): Promise<TreeNode[]> {
+  const raw = await invoke("pages_namespace_tree");
+  return fromWire<TreeNode[]>(raw);
 }
 
-export function setPageCollection(pageId: string, kind: string | null): Promise<void> {
-  return invoke("page_set_collection", { pageId, kind: toWire(kind) });
+export async function pagesTagTree(): Promise<TreeNode[]> {
+  const raw = await invoke("pages_tag_tree");
+  return fromWire<TreeNode[]>(raw);
 }
 
-export async function listCollections(): Promise<CollectionSummary[]> {
+export function pageSetCollection(pageId: string, kind: string | null): Promise<void> {
+  return invoke("page_set_collection", { pageId, kind });
+}
+
+export async function pagesListCollections(): Promise<CollectionSummary[]> {
   const raw = await invoke("pages_list_collections");
   return fromWire<CollectionSummary[]>(raw);
+}
+
+export function getPageTree(source: PageTreeSource): Promise<TreeNode[]> {
+  return source === "namespace" ? pagesNamespaceTree() : pagesTagTree();
 }
 
 export function getCollectionKind(properties: unknown): string | null {
@@ -180,12 +182,12 @@ function collectTreeReferences(content: string): Set<string> {
 }
 
 export function toPageTreeView(
-  nodes: readonly PageTreeNode[],
+  nodes: readonly TreeNode[],
   source: PageTreeSource,
 ): PageTreeViewNode[] {
   const output: PageTreeViewNode[] = [];
   const pending: Array<{
-    sourceNode: PageTreeNode;
+    sourceNode: TreeNode;
     target: PageTreeViewNode[];
   }> = [];
 

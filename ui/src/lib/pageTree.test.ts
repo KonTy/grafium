@@ -4,15 +4,16 @@ import {
   camelToSnakeDeep,
   collectionMembersFromBlocks,
   getCollectionKind,
-  getPageTree,
   isCommandNotRegistered,
-  listCollections,
+  pagesListCollections,
+  pagesNamespaceTree,
+  pagesTagTree,
   pageTreeReferencesChanged,
-  setPageCollection,
+  pageSetCollection,
   snakeToCamelDeep,
   toPageTreeView,
   withMissingCommandFallback,
-  type PageTreeNode,
+  type TreeNode,
 } from "./pageTree";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -65,26 +66,26 @@ describe("page tree payload casing", () => {
 describe("page tree commands", () => {
   it("passes command arguments in Tauri camelCase", async () => {
     mockInvoke.mockResolvedValueOnce([]);
-    await getPageTree("namespace");
+    await pagesNamespaceTree();
     expect(mockInvoke).toHaveBeenCalledWith("pages_namespace_tree");
 
     mockInvoke.mockResolvedValueOnce([]);
-    await getPageTree("tags");
+    await pagesTagTree();
     expect(mockInvoke).toHaveBeenCalledWith("pages_tag_tree");
 
     mockInvoke.mockResolvedValueOnce([]);
-    await listCollections();
+    await pagesListCollections();
     expect(mockInvoke).toHaveBeenCalledWith("pages_list_collections");
 
     mockInvoke.mockResolvedValueOnce(undefined);
-    await setPageCollection("p1", "book");
+    await pageSetCollection("p1", "book");
     expect(mockInvoke).toHaveBeenCalledWith("page_set_collection", {
       pageId: "p1",
       kind: "book",
     });
 
     mockInvoke.mockResolvedValueOnce(undefined);
-    await setPageCollection("p1", null);
+    await pageSetCollection("p1", null);
     expect(mockInvoke).toHaveBeenCalledWith("page_set_collection", {
       pageId: "p1",
       kind: null,
@@ -92,7 +93,7 @@ describe("page tree commands", () => {
   });
 
   it("normalizes a contract tree iteratively for the shared renderer", () => {
-    const nodes: PageTreeNode[] = [{
+    const nodes: TreeNode[] = [{
       key: "tech",
       label: "tech",
       page_id: "p1",
@@ -124,7 +125,7 @@ describe("page tree commands", () => {
   });
 
   it("normalizes deeply nested payloads without recursion", () => {
-    const root: PageTreeNode = {
+    const root: TreeNode = {
       key: "0",
       label: "0",
       page_id: null,
@@ -133,7 +134,7 @@ describe("page tree commands", () => {
     };
     let cursor = root;
     for (let depth = 1; depth <= 10_000; depth += 1) {
-      const child: PageTreeNode = {
+      const child: TreeNode = {
         key: String(depth),
         label: String(depth),
         page_id: null,
@@ -195,13 +196,13 @@ describe("missing page tree commands", () => {
 
   it("returns a typed fallback only for unavailable commands", async () => {
     await expect(withMissingCommandFallback(
-      () => Promise.reject(new Error("Command pages_namespace_tree not found")),
-      [] as PageTreeNode[],
+      () => Promise.reject("Command pages_namespace_tree not found"),
+      [] as TreeNode[],
     )).resolves.toEqual({ available: false, value: [] });
 
     await expect(withMissingCommandFallback(
       () => Promise.reject(new Error("database is locked")),
-      [] as PageTreeNode[],
+      [] as TreeNode[],
     )).rejects.toThrow("database is locked");
   });
 });

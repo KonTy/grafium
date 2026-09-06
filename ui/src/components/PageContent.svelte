@@ -26,9 +26,9 @@
   import {
     collectionMembersFromBlocks,
     getCollectionKind,
-    listCollections,
+    pagesListCollections,
     pageTreeReferencesChanged,
-    setPageCollection,
+    pageSetCollection,
     withMissingCommandFallback,
   } from "../lib/pageTree";
   import { listen } from "@tauri-apps/api/event";
@@ -332,7 +332,7 @@
     collectionStatus = "loading";
     try {
       const result = await withMissingCommandFallback(
-        () => listCollections(),
+        () => pagesListCollections(),
         [],
       );
       if (request !== collectionRequest || page.id !== pageId) return;
@@ -367,7 +367,7 @@
     }
     collectionBusy = true;
     try {
-      await setPageCollection(page.id, kind);
+      await pageSetCollection(page.id, kind);
       await loadCollection(page.id);
       window.dispatchEvent(new CustomEvent("page-tree-refresh"));
     } catch (error) {

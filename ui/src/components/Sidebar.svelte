@@ -5,8 +5,8 @@
   import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite } from "../lib/api";
   import {
     getPageTree,
-    listCollections,
-    setPageCollection,
+    pagesListCollections,
+    pageSetCollection,
     toPageTreeView,
     withMissingCommandFallback,
   } from "../lib/pageTree";
@@ -148,7 +148,7 @@
   async function loadContextCollectionStatus(pageId: string) {
     try {
       const result = await withMissingCommandFallback(
-        () => listCollections(),
+        () => pagesListCollections(),
         [],
       );
       if (contextMenu?.page.id !== pageId) return;
@@ -174,7 +174,7 @@
 
     contextMenu.collectionStatus = "loading";
     try {
-      await setPageCollection(
+      await pageSetCollection(
         page.id,
         collectionStatus === "collection" ? null : "book",
       );
