@@ -8,7 +8,13 @@
     withMissingCommandFallback,
     type PageTreeSource,
   } from "../lib/pageTree";
-  import { ALL_PAGES_TREE_STORAGE_KEY, graphScopedKey, type PageTreeViewNode } from "../lib/pageTreeState";
+  import {
+    ALL_PAGES_TREE_STORAGE_KEY,
+    graphScopedKey,
+    filterTreeByQuery,
+    countTreePages,
+    type PageTreeViewNode,
+  } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -35,6 +41,16 @@
   let pageTreeLoading = $state(false);
   let pageTreeError = $state("");
   let pageTreeRequest = 0;
+
+  /// Free-text filter over the tree.
+  ///
+  /// Scoped to the tree deliberately: the list view is virtualized, fetching
+  /// only the rows around the viewport, so filtering it client-side would
+  /// silently search a fraction of the graph and report "no matches" for pages
+  /// that exist. The tree holds every page, so filtering it is a real search.
+  let filterQuery = $state("");
+  let visibleTree = $derived(filterTreeByQuery(pageTree, filterQuery));
+  let filteredCount = $derived(countTreePages(visibleTree));
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
   // updates as windows stream in.
@@ -295,6 +311,26 @@
     <div class="empty-state">
       <p>No pages yet. Create one above!</p>
     </div>
+  {:else}
+    <!-- Tree view only — see `filterQuery`. -->
+    <div class="page-filter" hidden={viewMode !== "tree"}>
+      <input
+        type="search"
+        class="page-filter-input"
+        placeholder="Filter pages…"
+        aria-label="Filter pages"
+        bind:value={filterQuery}
+      />
+      {#if filterQuery.trim()}
+        <span class="page-filter-count" aria-live="polite">
+          {filteredCount} match{filteredCount === 1 ? "" : "es"}
+        </span>
+      {/if}
+    </div>
+  {/if}
+
+  {#if total === 0}
+    <!-- handled above -->
   {:else if viewMode === "tree"}
     <div class="tree-browser" aria-busy={pageTreeLoading}>
       {#if pageTreeLoading && pageTree.length === 0}
@@ -306,7 +342,7 @@
         </div>
       {:else}
         <PageTree
-          nodes={pageTree}
+          nodes={visibleTree}
           {onNavigate}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
@@ -477,6 +513,35 @@
     color: var(--text-muted);
     cursor: not-allowed;
     opacity: 0.65;
+  }
+
+  .page-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 10px;
+  }
+
+  .page-filter-input {
+    flex: 1;
+    padding: 7px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .page-filter-input:focus-visible {
+    outline: 2px solid var(--text-link);
+    outline-offset: 1px;
+  }
+
+  .page-filter-count {
+    flex: none;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .tree-browser {

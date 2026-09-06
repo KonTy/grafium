@@ -11,6 +11,7 @@ import {
   type TreeNavigationItem,
   graphScopedKey,
   SIDEBAR_TREE_STORAGE_KEY,
+  filterTreeByQuery,
 } from "./pageTreeState";
 
 interface Node {
@@ -222,5 +223,57 @@ describe("saveExpansionState bounds", () => {
     const written = store.get("k")!;
     expect(written.length).toBeLessThan(500_000);
     expect(JSON.parse(written).expanded).toContain("shallow");
+  });
+});
+
+describe("filterTreeByQuery", () => {
+  const tree = [
+    {
+      id: "namespace:mybooks", label: "mybooks", page_id: null, page_title: "mybooks", count: 2,
+      children: [
+        {
+          id: "namespace:mybooks/thingsilove", label: "thingsilove", page_id: "p1",
+          page_title: "mybooks/thingsilove", count: 2,
+          children: [
+            { id: "namespace:mybooks/thingsilove/arc", label: "arc", page_id: "p2",
+              page_title: "mybooks/thingsilove/arc", count: 1, children: [] },
+          ],
+        },
+      ],
+    },
+    { id: "namespace:tech", label: "tech", page_id: "p3", page_title: "tech", count: 1, children: [] },
+  ];
+
+  it("returns everything for an empty query", () => {
+    expect(filterTreeByQuery(tree, "")).toHaveLength(2);
+  });
+
+  /// A deep match is meaningless without its ancestors — a bare "arc" gives
+  /// no clue it lives under mybooks/thingsilove.
+  it("keeps the path to a deep match", () => {
+    const out = filterTreeByQuery(tree, "arc");
+    expect(out).toHaveLength(1);
+    expect(out[0].label).toBe("mybooks");
+    expect(out[0].children[0].children[0].label).toBe("arc");
+  });
+
+  it("keeps a matching node's whole subtree", () => {
+    const out = filterTreeByQuery(tree, "thingsilove");
+    expect(out[0].children[0].children).toHaveLength(1);
+  });
+
+  it("drops branches with no match", () => {
+    const out = filterTreeByQuery(tree, "tech");
+    expect(out).toHaveLength(1);
+    expect(out[0].label).toBe("tech");
+  });
+
+  /// Matching the full path is what lets a query span segments.
+  it("matches across path segments", () => {
+    expect(filterTreeByQuery(tree, "mybooks arc")).toHaveLength(1);
+  });
+
+  it("returns nothing when nothing matches", () => {
+    expect(filterTreeByQuery(tree, "zzzzz")).toEqual([]);
   });
 });

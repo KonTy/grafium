@@ -1,16 +1,13 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import GraphMenu from "./GraphMenu.svelte";
-  import PageTree from "./PageTree.svelte";
-  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import {
-    getPageTree,
     pagesListCollections,
     pageSetCollection,
-    toPageTreeView,
+    getCollectionKind,
     withMissingCommandFallback,
   } from "../lib/pageTree";
-  import { SIDEBAR_TREE_STORAGE_KEY, graphScopedKey, type PageTreeViewNode } from "../lib/pageTreeState";
+  import GraphMenu from "./GraphMenu.svelte";
+  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
   import type { Page, PageSummary, Block } from "../lib/api";
   import type { SidebarSearchResult } from "../lib/sidebarSearch";
@@ -33,15 +30,9 @@
   let searchResults: SidebarSearchResult[] = $state([]);
   let showSearch = $state(false);
   let searchInputEl: HTMLInputElement | null = $state(null);
-  let pageTree: PageTreeViewNode[] = $state([]);
-  let pageTreeAvailable: boolean | null = $state(null);
-  let pageTreeError = $state(false);
-  let pageTreeRequest = 0;
   /// Storage keys are scoped to the open graph: an expansion path only means
   /// something inside the graph it came from.
   let graphPath: string | null = $state(null);
-  let treeStorageKey = $derived(graphScopedKey(SIDEBAR_TREE_STORAGE_KEY, graphPath));
-  let pageTreePageIds = new Set<string>();
 
   // Context menu state
   interface ContextMenu {
@@ -62,7 +53,6 @@
     const pageId = currentPage?.id;
     if (!pageId) return;
     listRecentPages(10).then((p) => { recentPages = p; }).catch(() => {});
-    if (!pageTreePageIds.has(pageId)) void loadPageTree();
   });
 
   // Close context menu on any click outside
@@ -76,11 +66,6 @@
     };
   });
 
-  $effect(() => {
-    const refreshTree = () => { void loadPageTree(); };
-    window.addEventListener("page-tree-refresh", refreshTree);
-    return () => window.removeEventListener("page-tree-refresh", refreshTree);
-  });
 
   async function loadSidebar() {
     // Resolve which graph we're in before anything keyed to it is written.
@@ -93,42 +78,6 @@
     ]);
     favorites = favoriteResult.status === "fulfilled" ? favoriteResult.value : [];
     recentPages = recentResult.status === "fulfilled" ? recentResult.value : [];
-    await loadPageTree();
-  }
-
-  async function loadPageTree() {
-    const request = ++pageTreeRequest;
-    pageTreeError = false;
-    try {
-      const result = await withMissingCommandFallback(
-        () => getPageTree("namespace"),
-        [],
-      );
-      if (request !== pageTreeRequest) return;
-      pageTreeAvailable = result.available;
-      pageTree = result.available
-        ? toPageTreeView(result.value, "namespace")
-        : [];
-      pageTreePageIds = collectPageIds(pageTree);
-    } catch (error) {
-      if (request !== pageTreeRequest) return;
-      pageTreeAvailable = true;
-      pageTreeError = true;
-      pageTree = [];
-      pageTreePageIds = new Set();
-      console.warn("[page-tree] Failed to load sidebar tree:", error);
-    }
-  }
-
-  function collectPageIds(nodes: readonly PageTreeViewNode[]): Set<string> {
-    const ids = new Set<string>();
-    const stack = [...nodes];
-    while (stack.length > 0) {
-      const node = stack.pop()!;
-      if (node.page_id) ids.add(node.page_id);
-      for (const child of node.children) stack.push(child);
-    }
-    return ids;
   }
 
   function favSet(): Set<string> {
@@ -146,11 +95,6 @@
       collectionStatus: "loading",
     };
     void loadContextCollectionStatus(page.id);
-  }
-
-  function handleTreePageRightClick(event: MouseEvent, node: PageTreeViewNode) {
-    if (!node.page_id || !node.page_title) return;
-    handlePageRightClick(event, { id: node.page_id, title: node.page_title });
   }
 
   async function loadContextCollectionStatus(pageId: string) {
@@ -282,10 +226,6 @@
   /// Bumping the request counter also abandons any in-flight tree response,
   /// which would otherwise land after the switch and repopulate the old data.
   function invalidateGraphBoundState() {
-    pageTreeRequest++;
-    pageTree = [];
-    pageTreePageIds = new Set();
-    pageTreeError = false;
     favorites = [];
     recentPages = [];
     contextMenu = null;
@@ -436,32 +376,6 @@
       <span>Settings</span>
     </button>
   </nav>
-
-  {#if pageTreeAvailable !== false}
-    <div class="sidebar-section page-tree-section">
-      <div class="section-heading">
-        <h3 class="section-title">Pages</h3>
-        {#if pageTreeError}
-          <button type="button" class="tree-retry" onclick={loadPageTree}>Retry</button>
-        {/if}
-      </div>
-      {#if pageTreeAvailable === null}
-        <p class="tree-status">Loading hierarchy…</p>
-      {:else if pageTreeError}
-        <p class="tree-status">Could not load the page hierarchy.</p>
-      {:else}
-        <PageTree
-          nodes={pageTree}
-          {onNavigate}
-          selectedPageId={currentPage?.id ?? null}
-          storageKey={treeStorageKey}
-          ariaLabel="Page namespaces"
-          density="compact"
-          onPageContextMenu={handleTreePageRightClick}
-        />
-      {/if}
-    </div>
-  {/if}
 
   {#if favorites.length > 0}
     <div class="sidebar-section">

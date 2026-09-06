@@ -1,3 +1,4 @@
+import { fuzzyMatches } from "./fuzzy";
 export interface TreeNodeLike<TNode extends TreeNodeLike<TNode>> {
   children: TNode[];
 }
@@ -350,4 +351,65 @@ function isPersistedExpansion(value: unknown): value is PersistedExpansion {
   if (value === null || typeof value !== "object") return false;
   const candidate = value as Partial<PersistedExpansion>;
   return candidate.version === 1 && Array.isArray(candidate.expanded);
+}
+
+/**
+ * Filter a tree to nodes matching `query`, keeping the path to each match.
+ *
+ * A match deep in a namespace is meaningless without its ancestors — showing a
+ * bare `arc` gives no clue it lives under `mybooks/thingsilove` — so an
+ * ancestor is kept whenever any descendant matches, even if the ancestor
+ * itself doesn't. A node that matches keeps its whole subtree, since once
+ * you've found `tech/linux` you want to see what's inside it.
+ *
+ * Returns the tree unchanged for an empty query, so an empty search box costs
+ * nothing.
+ */
+export function filterTreeByQuery(
+  nodes: readonly PageTreeViewNode[],
+  query: string,
+): PageTreeViewNode[] {
+  if (query.trim() === "") return nodes as PageTreeViewNode[];
+
+  const walk = (list: readonly PageTreeViewNode[]): PageTreeViewNode[] => {
+    const kept: PageTreeViewNode[] = [];
+    for (const node of list) {
+      // Match against the full path, not just the label: typing "linux net"
+      // should find `tech/linux/networking` even though no single segment
+      // contains both words.
+      const path = node.page_title ?? node.id;
+      const selfMatches = fuzzyMatches(path, query) || fuzzyMatches(node.label, query);
+      const children = selfMatches ? [...node.children] : walk(node.children);
+      if (selfMatches || children.length > 0) {
+        kept.push({ ...node, children });
+      }
+    }
+    return kept;
+  };
+
+  return walk(nodes);
+}
+
+/** Every node key in a tree — used to expand all matches after filtering. */
+export function collectAllKeys(nodes: readonly PageTreeViewNode[]): Set<string> {
+  const keys = new Set<string>();
+  const stack = [...nodes];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    keys.add(node.id);
+    for (const child of node.children) stack.push(child);
+  }
+  return keys;
+}
+
+/** Count real pages (not grouping nodes) in a tree. */
+export function countTreePages(nodes: readonly PageTreeViewNode[]): number {
+  let count = 0;
+  const stack = [...nodes];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.page_id) count++;
+    for (const child of node.children) stack.push(child);
+  }
+  return count;
 }
