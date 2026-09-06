@@ -14,6 +14,11 @@ use grafium_core::media::{fetch_audio, MediaConfig, MediaSource, Transcriber, Wh
 use grafium_core::model_library;
 
 fn main() {
+    if grafium_core::ai::worker::is_worker_invocation() {
+        std::process::exit(grafium_core::ai::worker::run_from_stdio());
+    }
+    grafium_core::ai::worker::configure_current_executable()
+        .expect("failed to configure native AI worker");
     let mut args = std::env::args().skip(1);
     let downloaded_model = PathBuf::from(
         args.next()

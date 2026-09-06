@@ -37,6 +37,18 @@ encoding_rs = { version = "0.8", optional = true }
 scraper = "0.27"
 pdf-extract = "0.12"
 url = "2"
+sysinfo = "0.33"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [features]
 default = ["sync"]
@@ -85,3 +97,15 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # events are silently dropped (as they are in the `tui` binary, which
 # never installs one either).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "local_llm_smoke_test"
+required-features = ["llm-local"]
+
+[[example]]
+name = "media_smoke_test"
+required-features = ["media"]
+
+[[example]]
+name = "model_settings_smoke_test"
+required-features = ["media"]

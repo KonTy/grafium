@@ -709,3 +709,332 @@ fn test_two_way_merge_no_base() {
     // But the shared line should appear
     assert!(r.content.contains("shared line"));
 }
+
+// ===========================================================================
+// Regression: a reachable-but-wrong sync target must never wipe the graph
+// ===========================================================================
+
+#[test]
+fn empty_or_wrong_remote_does_not_delete_local_notes() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+    write_local(local.path(), "pages/note-b.md", "- important note B\n");
+    write_local(local.path(), "journals/2026-05-04.md", "- journal\n");
+
+    let usb = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+
+    let first = engine.sync(&usb).unwrap();
+    assert_eq!(first.pushed.len(), 3, "expected initial push of all notes");
+
+    // The mount point is reachable but holds nothing: the drive was never
+    // really mounted, is a different stick, or was reformatted.
+    let empty_usb = MockBackend::new("usb");
+
+    let err = engine
+        .sync(&empty_usb)
+        .expect_err("sync against an unrecognised target must fail loudly");
+    assert!(
+        err.to_string().contains("sync marker"),
+        "unexpected error: {}",
+        err
+    );
+
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+    assert!(local_exists(local.path(), "pages/note-b.md"));
+    assert!(local_exists(local.path(), "journals/2026-05-04.md"));
+}
+
+#[test]
+fn sync_target_with_a_different_marker_is_rejected() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let usb_a = MockBackend::new("usb-a");
+    engine.sync(&usb_a).unwrap();
+
+    // A second stick that is a valid Grafium sync target, but not ours.
+    let usb_b = MockBackend::new("usb-b");
+    usb_b.set_file(".grafium-sync-id", b"11111111-2222-3333-4444-555555555555");
+
+    let err = engine.sync(&usb_b).expect_err("must reject a foreign target");
+    assert!(
+        err.to_string().contains("different sync location"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+}
+
+#[test]
+fn unmounted_usb_mount_point_does_not_wipe_the_graph() {
+    use grafium_core::sync::filesystem::FilesystemBackend;
+
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note-a.md", "- important note A\n");
+    write_local(local.path(), "pages/note-b.md", "- important note B\n");
+
+    let stick = tempfile::tempdir().unwrap();
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let usb = FilesystemBackend::new(stick.path().to_path_buf(), "USB".to_string());
+
+    let first = engine.sync(&usb).unwrap();
+    assert_eq!(first.pushed.len(), 2);
+
+    // The automount directory exists but the drive behind it is not mounted,
+    // so it is simply an empty directory. is_available() still returns true.
+    let bare_mount_point = tempfile::tempdir().unwrap();
+    let unmounted = FilesystemBackend::new(bare_mount_point.path().to_path_buf(), "USB".to_string());
+    assert!(
+        unmounted.is_available(),
+        "an empty mount point still looks available"
+    );
+
+    let err = engine
+        .sync(&unmounted)
+        .expect_err("must refuse to sync against an unmounted drive");
+    assert!(err.to_string().contains("sync marker"), "got: {}", err);
+
+    assert!(local_exists(local.path(), "pages/note-a.md"));
+    assert!(local_exists(local.path(), "pages/note-b.md"));
+
+    // The real stick still works afterwards.
+    assert!(engine.sync(&usb).is_ok());
+}
+
+#[test]
+fn remote_supplied_traversal_path_cannot_escape_the_graph() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- note\n");
+
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    fs::write(&victim, "original\n").unwrap();
+
+    let backend = MockBackend::new("hostile");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    // A compromised server (or a mangled PROPFIND href) offers a path that
+    // climbs out of the graph directory.
+    let escape = format!(
+        "pages/../../../../../../../../..{}",
+        victim.to_string_lossy()
+    );
+    backend.set_file(&escape, b"pwned\n");
+
+    let result = engine.sync(&backend).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "original\n",
+        "a remote path escaped the graph directory"
+    );
+    assert!(
+        !result.pulled.iter().any(|p| p.contains("..")),
+        "traversal path should never be pulled: {:?}",
+        result.pulled
+    );
+}
+
+// ===========================================================================
+// Assets / media
+// ===========================================================================
+
+/// A PNG header followed by bytes that are not valid UTF-8.
+fn fake_png(marker: u8) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&[0xff, 0xfe, 0xfd, marker, 0x00, 0x80]);
+    bytes
+}
+
+#[test]
+fn assets_are_synced_alongside_notes() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- ![](../assets/pic.png)\n");
+    let png = fake_png(1);
+    fs::create_dir_all(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/pic.png"), &png).unwrap();
+    fs::create_dir_all(local.path().join("assets/audio")).unwrap();
+    fs::write(local.path().join("assets/audio/note.mp3"), fake_png(2)).unwrap();
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    let r = engine.sync(&backend).unwrap();
+
+    assert!(
+        r.pushed.contains(&"assets/pic.png".to_string()),
+        "asset was not pushed: {:?}",
+        r.pushed
+    );
+    assert!(
+        r.pushed.contains(&"assets/audio/note.mp3".to_string()),
+        "nested asset was not pushed: {:?}",
+        r.pushed
+    );
+    assert_eq!(
+        backend.get_file("assets/pic.png").unwrap(),
+        png,
+        "asset bytes were altered in transit"
+    );
+}
+
+#[test]
+fn remote_assets_are_pulled_with_bytes_intact() {
+    let local = setup_local_graph();
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    let png = fake_png(7);
+    backend.set_file("assets/from-phone.png", &png);
+
+    let r = engine.sync(&backend).unwrap();
+    assert!(r.pulled.contains(&"assets/from-phone.png".to_string()));
+    assert_eq!(
+        fs::read(local.path().join("assets/from-phone.png")).unwrap(),
+        png
+    );
+}
+
+#[test]
+fn conflicting_binary_assets_are_never_merged_and_both_survive() {
+    let local = setup_local_graph();
+    fs::create_dir_all(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    // Same asset replaced differently on each machine.
+    let local_version = fake_png(0xA1);
+    let remote_version = fake_png(0xB2);
+    fs::write(local.path().join("assets/pic.png"), &local_version).unwrap();
+    backend.set_file("assets/pic.png", &remote_version);
+
+    let r = engine.sync(&backend).unwrap();
+    assert_eq!(r.conflicts, vec!["assets/pic.png".to_string()]);
+    assert!(r.merged.is_empty(), "a binary must never be merged");
+
+    // Whatever won, the primary must be one of the two originals byte for
+    // byte, never a splice of them.
+    let primary = fs::read(local.path().join("assets/pic.png")).unwrap();
+    assert!(
+        primary == local_version || primary == remote_version,
+        "binary conflict produced corrupted content"
+    );
+
+    // And the other version must still exist somewhere.
+    let assets: Vec<Vec<u8>> = fs::read_dir(local.path().join("assets"))
+        .unwrap()
+        .map(|e| fs::read(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(assets.contains(&local_version), "local version was lost");
+    assert!(assets.contains(&remote_version), "remote version was lost");
+}
+
+#[test]
+fn binary_conflict_resolution_converges_on_both_machines() {
+    let local_version = fake_png(0xA1);
+    let remote_version = fake_png(0xB2);
+
+    // Machine A sees local=A1, remote=B2. Machine B sees them the other way
+    // round. Both must end up with the same primary and the same copy name.
+    let mut outcomes = Vec::new();
+    for (mine, theirs) in [
+        (&local_version, &remote_version),
+        (&remote_version, &local_version),
+    ] {
+        let local = setup_local_graph();
+        fs::create_dir_all(local.path().join("assets")).unwrap();
+        fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
+
+        let backend = MockBackend::new("usb");
+        let engine = SyncEngine::new(local.path().to_path_buf());
+        engine.sync(&backend).unwrap();
+
+        fs::write(local.path().join("assets/pic.png"), mine).unwrap();
+        backend.set_file("assets/pic.png", theirs);
+        engine.sync(&backend).unwrap();
+
+        let mut names: Vec<String> = fs::read_dir(local.path().join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        outcomes.push((
+            fs::read(local.path().join("assets/pic.png")).unwrap(),
+            names,
+        ));
+    }
+
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "two machines resolved the same conflict differently"
+    );
+}
+
+#[test]
+fn corrupt_sync_state_is_preserved_rather_than_silently_discarded() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/note.md", "- note\n");
+
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
+
+    let state_path = local
+        .path()
+        .join(grafium_core::graph::DEFAULT_METADATA_DIR_NAME)
+        .join("sync-state.json");
+    assert!(state_path.exists(), "sync state should exist after a sync");
+    fs::write(&state_path, "{ this is not json").unwrap();
+
+    // The graph must still be intact, and the damaged state kept for
+    // diagnosis rather than thrown away.
+    let _ = engine.sync(&backend);
+    assert!(local_exists(local.path(), "pages/note.md"));
+    assert!(
+        state_path.with_extension("json.corrupt").exists(),
+        "corrupt sync state was discarded instead of being moved aside"
+    );
+}
+
+#[test]
+fn merge_preserves_crlf_and_absent_trailing_newline() {
+    // Both sides changed a different line, so this takes the real merge path
+    // rather than a fast path.
+    let base = "alpha\r\nbeta\r\ngamma\r\n";
+    let local = "alpha EDITED\r\nbeta\r\ngamma\r\n";
+    let remote = "alpha\r\nbeta\r\ngamma EDITED\r\n";
+
+    let merged = three_way_merge(base, local, remote);
+    assert!(!merged.has_conflicts);
+    assert!(
+        merged.content.contains("\r\n"),
+        "CRLF line endings were rewritten to LF: {:?}",
+        merged.content
+    );
+    assert!(
+        !merged.content.contains("\n\n") || merged.content.contains("\r\n\r\n"),
+        "stray bare LF introduced: {:?}",
+        merged.content
+    );
+
+    // A file with no trailing newline must not silently gain one.
+    let base = "alpha\nbeta\ngamma";
+    let local = "alpha EDITED\nbeta\ngamma";
+    let remote = "alpha\nbeta\ngamma EDITED";
+    let merged = three_way_merge(base, local, remote);
+    assert!(
+        !merged.content.ends_with('\n'),
+        "merge added a trailing newline that was not there: {:?}",
+        merged.content
+    );
+
+    // And one that had a trailing newline keeps it.
+    let merged = three_way_merge("a\nb\nc\n", "a EDITED\nb\nc\n", "a\nb\nc EDITED\n");
+    assert!(merged.content.ends_with('\n'));
+}

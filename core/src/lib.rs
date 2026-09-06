@@ -5,6 +5,7 @@ pub mod cancel;
 pub mod db;
 pub mod error;
 pub mod gpu_info;
+pub mod fsutil;
 pub mod graph;
 pub mod import;
 pub mod ink;

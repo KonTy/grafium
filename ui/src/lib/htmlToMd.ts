@@ -1,5 +1,7 @@
 import TurndownService from "turndown";
 
+type TagName = keyof HTMLElementTagNameMap;
+
 const turndown = new TurndownService({
   headingStyle: "atx",
   codeBlockStyle: "fenced",
@@ -8,7 +10,9 @@ const turndown = new TurndownService({
 
 // Strikethrough support
 turndown.addRule("strikethrough", {
-  filter: ["del", "s", "strike"],
+  // `strike` is a valid (deprecated) tag Turndown handles at runtime, but it is
+  // absent from TypeScript's HTMLElementTagNameMap, so the list needs a cast.
+  filter: ["del", "s", "strike"] as unknown as TagName[],
   replacement: (content) => `~~${content}~~`,
 });
 

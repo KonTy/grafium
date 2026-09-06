@@ -14,8 +14,11 @@ pub mod providers;
 pub mod reasoning;
 pub mod text;
 pub mod references;
+pub mod resources;
 pub mod traits;
 pub mod web_research;
+#[cfg(any(feature = "llm-local", feature = "media"))]
+pub mod worker;
 
 pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;

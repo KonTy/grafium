@@ -69,6 +69,18 @@ pub fn three_way_merge(base: &str, local: &str, remote: &str) -> MergeResult {
     let local_regions = diff_regions(&base_lines, &local_lines);
     let remote_regions = diff_regions(&base_lines, &remote_lines);
 
+    // `.lines()` discards the line terminators, so the original style has to
+    // be carried through reconstruction: otherwise a CRLF note silently comes
+    // back LF, and a file with no trailing newline gains one. Both rules are
+    // symmetric in local/remote so two machines merging the same pair still
+    // reach the same result.
+    let eol = if local.contains("\r\n") || remote.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let trailing_newline = local.ends_with('\n') || remote.ends_with('\n');
+
     // Merge the two sets of regions
     merge_change_regions(
         &base_lines,
@@ -76,6 +88,8 @@ pub fn three_way_merge(base: &str, local: &str, remote: &str) -> MergeResult {
         &remote_lines,
         &local_regions,
         &remote_regions,
+        eol,
+        trailing_newline,
     )
 }
 
@@ -236,6 +250,8 @@ fn merge_change_regions(
     remote: &[&str],
     local_regions: &[DiffRegion],
     remote_regions: &[DiffRegion],
+    eol: &str,
+    trailing_newline: bool,
 ) -> MergeResult {
     let mut output = Vec::<String>::new();
     let mut conflicts = 0usize;
@@ -331,7 +347,11 @@ fn merge_change_regions(
     let content = if output.is_empty() {
         String::new()
     } else {
-        output.join("\n") + "\n"
+        let mut joined = output.join(eol);
+        if trailing_newline {
+            joined.push_str(eol);
+        }
+        joined
     };
 
     MergeResult {

@@ -11,6 +11,7 @@
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
+  import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
@@ -120,6 +121,15 @@
   let queryError: string | null = $state(null);
   let queryLoading = $state(false);
   let queryBlockIdCol = $state(-1);
+  // Query results are unbounded — a broad query can return thousands of rows,
+  // each of which renders markdown per cell. Render a page at a time so a
+  // large result set cannot lock up the editor.
+  const QUERY_ROW_PAGE = 100;
+  let queryRowLimit = $state(QUERY_ROW_PAGE);
+  let visibleQueryRows = $derived.by(() => {
+    const rows = queryRows;
+    return rows === null ? null : rows.slice(0, queryRowLimit);
+  });
   let bulletMinHeight = $derived(getBulletMinHeight(block.content));
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
   let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
@@ -143,6 +153,7 @@
         });
       });
       queryRows = rows;
+      queryRowLimit = QUERY_ROW_PAGE;
       queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
       // Find the block id column (id, block_id, _block_id)
       const lowerCols = queryColumns.map((c) => c.toLowerCase());
@@ -391,13 +402,13 @@
   // Save content on blur
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
-    console.log("[telemetry] savecontext", JSON.stringify(context));
+    telemetry("savecontext", () => (context));
     try {
       const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
       saveError = null;
       pendingSaveContent = null;
       if (changed) {
-        console.log("[telemetry] saveContent", JSON.stringify(context));
+        telemetry("saveContent", () => (context));
       }
       return changed;
     } catch (e) {
@@ -1246,7 +1257,7 @@
                 </tr>
               </thead>
               <tbody>
-                {#each queryRows as row}
+                {#each visibleQueryRows ?? [] as row}
                   <tr>
                     {#each row as [col, val], i}
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
@@ -1266,6 +1277,15 @@
               </tbody>
             </table>
           </div>
+          {#if queryRows.length > queryRowLimit}
+            <div class="query-more">
+              <span>Showing {queryRowLimit} of {queryRows.length}</span>
+              <button
+                class="query-more-btn"
+                onclick={(e) => { e.stopPropagation(); queryRowLimit += QUERY_ROW_PAGE; }}
+              >Show more</button>
+            </div>
+          {/if}
         {/if}
       </div>
     {:else}
@@ -1901,6 +1921,30 @@
     padding: 10px 12px;
     color: var(--text-muted);
     font-size: 12px;
+  }
+
+  .query-more {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .query-more-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 10px;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .query-more-btn:hover {
+    background: var(--bg-hover);
   }
 
   .query-error {

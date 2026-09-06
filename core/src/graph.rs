@@ -5,7 +5,7 @@
 //! then update the index. External file changes are detected and re-indexed.
 
 use crate::db::Database;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::models::{Block, BlockType, LinkType, Page, TaskState};
 use crate::parser::links::ExtractedLink;
 use crate::parser::{self, ParsedBlock};
@@ -553,8 +553,23 @@ impl Graph {
         }
     }
 
-    fn content_hash(content: &str) -> String {
-        let mut hasher = Sha256::new();
+    /// Write `content` to `path` atomically.
+    ///
+    /// `fs::write` truncates the target before writing, so an interruption
+    /// (crash, power loss, full disk) can leave a note truncated or empty.
+    /// These files are the user's only copy, so instead write to a temporary
+    /// file in the same directory, flush and fsync it, then rename over the
+    /// target. Rename is atomic within a filesystem, so a reader sees either
+    /// the old content or the new content, never a partial write.
+    ///
+    /// The temporary file deliberately does not use a `.md` extension: the
+    /// filesystem watcher only reacts to `.md` files, so the scratch file
+    /// cannot trigger a spurious re-index.
+    fn atomic_write(path: &Path, content: &str) -> Result<()> {
+        crate::fsutil::atomic_write(path, content.as_bytes())
+    }
+
+    fn content_hash(content: &str) -> String {        let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         format!("{:x}", hasher.finalize())
     }
@@ -957,7 +972,7 @@ impl Graph {
         content: &str,
     ) -> Result<Page> {
         let file_path = self.page_file_path(title, is_journal)?;
-        fs::write(&file_path, content)?;
+        Self::atomic_write(&file_path, content)?;
 
         // Index the file
         self.index_file(&file_path)?;
@@ -1005,13 +1020,71 @@ impl Graph {
     /// creating any parent directories a hierarchical title (e.g.
     /// `"Books/MyCoolBook/Chapter1"`) needs. Shared by every "create a page"
     /// entry point so file-path resolution rules live in exactly one place.
+    /// Resolve a page title to a file path inside the graph, refusing any
+    /// title that would escape it.
+    ///
+    /// Titles legitimately use `/` to express hierarchy
+    /// (`projects/grafium/roadmap` -> `pages/projects/grafium/roadmap.md`),
+    /// so the separator itself must be preserved. But the title reaches this
+    /// point unvalidated and can also arrive from sources the user did not
+    /// type by hand (sync, Anki import), so a `..` segment or an absolute
+    /// path would otherwise write outside the graph directory entirely.
+    fn safe_relative_page_path(title: &str) -> Result<PathBuf> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Other("Page title cannot be empty".into()));
+        }
+
+        // Treat both separators as hierarchy so a Windows-style title cannot
+        // smuggle a traversal segment past a '/'-only check.
+        let mut rel = PathBuf::new();
+        for raw in trimmed.split(['/', '\\']) {
+            let segment = raw.trim();
+            match segment {
+                // Collapse empty and "." segments the way a path walk would.
+                "" | "." => continue,
+                ".." => {
+                    return Err(CoreError::Other(format!(
+                        "Invalid page title '{title}': '..' is not allowed"
+                    )));
+                }
+                _ => {}
+            }
+            // A segment carrying a root or prefix (e.g. "C:") would make the
+            // join absolute and escape the graph.
+            let as_path = Path::new(segment);
+            if as_path.is_absolute() || as_path.components().count() != 1 {
+                return Err(CoreError::Other(format!(
+                    "Invalid page title '{title}': unsupported path segment '{segment}'"
+                )));
+            }
+            rel.push(segment);
+        }
+
+        if rel.as_os_str().is_empty() {
+            return Err(CoreError::Other(format!(
+                "Invalid page title '{title}': no usable name"
+            )));
+        }
+
+        let mut file_name = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        file_name.push_str(".md");
+        rel.set_file_name(file_name);
+
+        Ok(rel)
+    }
+
     fn page_file_path(&self, title: &str, is_journal: bool) -> Result<PathBuf> {
         if is_journal {
             let filename = format!("{}.md", title.replace('/', "_"));
             Ok(self.journals_dir.join(&filename))
         } else {
             // Use folder hierarchy: "Books/MyCoolBook/Chapter1" → pages/Books/MyCoolBook/Chapter1.md
-            let rel_path = format!("{}.md", title);
+            let rel_path = Self::safe_relative_page_path(title)?;
             let full_path = self.pages_dir.join(&rel_path);
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -1476,6 +1549,32 @@ impl Graph {
     }
 
     /// Delete a page: removes the .md file and all DB records.
+    /// Drop a file's rows from the index after it has already gone from disk.
+    ///
+    /// The watcher only ever re-indexes paths that still exist, so a note
+    /// removed by a sync (or by anything outside the app) otherwise stays
+    /// searchable, keeps its backlinks, and keeps its tasks. Unlike
+    /// `delete_page` this touches only the index, because the file is gone.
+    ///
+    /// Returns whether anything was actually indexed for that path.
+    pub fn deindex_file(&self, path: &Path) -> Result<bool> {
+        let rel_path = path
+            .strip_prefix(&self.root_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        let Some(page) = self.db.find_page_by_file_path(&rel_path)? else {
+            self.forget_indexed_content(path);
+            return Ok(false);
+        };
+
+        self.db.delete_blocks_for_page(&page.id)?;
+        self.db.delete_page(&page.id)?;
+        self.forget_indexed_content(path);
+        Ok(true)
+    }
+
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
 
@@ -1690,7 +1789,7 @@ impl Graph {
     }
 
     fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
-        fs::write(&file_path, &content)?;
+        Self::atomic_write(file_path, content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
         // create/modify event instead of treating it as an external change
@@ -2035,6 +2134,92 @@ mod tests {
 
     fn json_obj() -> serde_json::Value {
         serde_json::json!({})
+    }
+
+    #[test]
+    fn safe_relative_page_path_preserves_hierarchy() -> Result<()> {
+        // The slash hierarchy feature must keep working exactly as before.
+        assert_eq!(
+            Graph::safe_relative_page_path("projects/grafium/roadmap")?,
+            PathBuf::from("projects").join("grafium").join("roadmap.md")
+        );
+        assert_eq!(
+            Graph::safe_relative_page_path("Simple Page")?,
+            PathBuf::from("Simple Page.md")
+        );
+        // Unicode titles are fine; only traversal is rejected.
+        assert_eq!(
+            Graph::safe_relative_page_path("日本語/ノート")?,
+            PathBuf::from("日本語").join("ノート.md")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn safe_relative_page_path_rejects_traversal() {
+        for title in ["../escape", "a/../../escape", "..", "..\\escape", "", "   "] {
+            assert!(
+                Graph::safe_relative_page_path(title).is_err(),
+                "expected {title:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_relative_page_path_normalizes_leading_separators() -> Result<()> {
+        // A leading separator is stripped rather than rejected: the result is
+        // still safely inside the graph, so this stays a usable title.
+        let rel = Graph::safe_relative_page_path("/etc/passwd")?;
+        assert_eq!(rel, PathBuf::from("etc").join("passwd.md"));
+        assert!(rel.is_relative());
+        Ok(())
+    }
+
+    #[test]
+    fn page_file_path_stays_inside_the_graph() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+
+        let ok = graph.page_file_path("nested/page", false)?;
+        assert!(ok.starts_with(&graph.pages_dir));
+
+        assert!(graph.page_file_path("../../outside", false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_scratch_files() -> Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path();
+        let target = dir.join("note.md");
+
+        Graph::atomic_write(&target, "- first\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- first\n");
+
+        // Overwriting must fully replace, not append or leave a tail behind.
+        Graph::atomic_write(&target, "- second\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- second\n");
+
+        // The temp file must be renamed away, never left in the user's graph.
+        let strays: Vec<_> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "note.md")
+            .collect();
+        assert!(strays.is_empty(), "unexpected leftover files: {strays:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_creates_missing_parent_directories() -> Result<()> {
+        let temp = tempdir()?;
+        let target = temp.path().join("nested").join("deep").join("note.md");
+
+        Graph::atomic_write(&target, "- body\n")?;
+
+        assert_eq!(fs::read_to_string(&target)?, "- body\n");
+        Ok(())
     }
 
     #[test]

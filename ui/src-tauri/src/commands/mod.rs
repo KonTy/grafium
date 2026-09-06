@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod favorites;
 pub mod flashcards;
 pub mod graph;
+pub mod jobs;
 pub mod knowledge;
 pub mod links;
 pub mod media;
