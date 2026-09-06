@@ -5,7 +5,7 @@
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
-  import { renderBlock, hydrateAssetMedia } from "../lib/markdown";
+  import { renderBlock, hydrateAssetMedia, assetBaseDirFor } from "../lib/markdown";
   import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
@@ -69,6 +69,21 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
+
+  /**
+   * Base directory for one query result row.
+   *
+   * Query results are rows from arbitrary pages, so this block's own directory
+   * is the wrong answer for them — and worse than no answer, since a
+   * same-named file next to the query would render in place of the real one.
+   * The row's own `file_path` is used when the query happened to select it,
+   * and otherwise the graph root, which is where the historical `../assets/`
+   * form resolves anyway.
+   */
+  function queryRowBaseDir(row: [string, unknown][]): string {
+    const filePath = row.find(([col]) => col === "file_path")?.[1];
+    return typeof filePath === "string" ? assetBaseDirFor(filePath) : "";
+  }
   let saveError = $state<string | null>(null);
   let pendingSaveContent = $state<string | null>(null);
   let finishEditingPromise: Promise<boolean> | null = null;
@@ -1215,7 +1230,7 @@
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
                         <td>
                           {#if col === "content" && val}
-                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val), assetBaseDir)}</span>
+                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val), queryRowBaseDir(row))}</span>
                           {:else if col === "state" && val}
                             <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
                           {:else}

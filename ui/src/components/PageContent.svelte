@@ -87,7 +87,13 @@
   // cross-block Arrow Up/Down caret movement.
   let blockRefs: Record<string, { focusForNav: (x: number, edge: "top" | "bottom") => void }> = {};
   type BacklinkTreeNode = { block: Block; depth: number };
-  type BacklinkView = BacklinkResult & { sourcePageTitle: string; tree: BacklinkTreeNode[] };
+  type BacklinkView = BacklinkResult & {
+    sourcePageTitle: string;
+    /** Where the *source* page lives, so its media resolves against its own
+     *  folder rather than the folder of whatever page you happen to be on. */
+    sourceAssetBaseDir: string;
+    tree: BacklinkTreeNode[];
+  };
 
   let backlinks: BacklinkView[] = $state([]);
   // Rendering every linked reference at once is what actually crashes the
@@ -417,15 +423,20 @@
         const newBlock = await createBlock(request.pageId, null, 0, "");
         if (!isCurrentPageLoad(pageLoadState, request)) return;
         nextBlocks = [newBlock];
-        // That first block is what writes the page's markdown file, so the
-        // page we were handed no longer describes where it lives.
-        if (!page.file_path) {
-          const refreshed = await getPage({ id: request.pageId }).catch(() => null);
-          if (!isCurrentPageLoad(pageLoadState, request)) return;
-          materializedFilePath = refreshed?.file_path ?? null;
-        }
       }
       blocks = nextBlocks;
+
+      // Creating that first block is what writes the page's markdown file, so
+      // the page object we were handed can be out of date. Asked on every
+      // reload rather than only when the page started empty: reloading after
+      // an undo finds blocks already present, and only refreshing in the empty
+      // case left the path null for good — media on the page then resolved
+      // against the graph root and broke.
+      if (!page.file_path) {
+        const refreshed = await getPage({ id: request.pageId }).catch(() => null);
+        if (!isCurrentPageLoad(pageLoadState, request)) return;
+        materializedFilePath = refreshed?.file_path ?? null;
+      }
     } catch (e: any) {
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       loadError = e?.toString() || "Unknown error loading blocks";
@@ -525,10 +536,10 @@
       // lookups for the same page_id all await the same one promise.
       const uniquePageIds = Array.from(new Set(backlinkResults.map((r) => r.block.page_id)));
       const blocksPromiseCache = new Map<string, Promise<Block[]>>();
-      const titlePromiseCache = new Map<string, Promise<string>>();
+      const pagePromiseCache = new Map<string, Promise<Page | null>>();
       for (const pageId of uniquePageIds) {
         blocksPromiseCache.set(pageId, listBlocks(pageId));
-        titlePromiseCache.set(pageId, getPage({ id: pageId }).then((p) => p.title));
+        pagePromiseCache.set(pageId, getPage({ id: pageId }).catch(() => null));
       }
 
       const indexCache = new Map<string, Promise<BacklinkSourceIndex>>();
@@ -540,14 +551,15 @@
       }
 
       const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
-        const [sourcePageTitle, index] = await Promise.all([
-          titlePromiseCache.get(result.block.page_id)!,
+        const [sourcePage, index] = await Promise.all([
+          pagePromiseCache.get(result.block.page_id)!,
           indexCache.get(result.block.page_id)!,
         ]);
 
         return {
           ...result,
-          sourcePageTitle,
+          sourcePageTitle: sourcePage?.title ?? "",
+          sourceAssetBaseDir: assetBaseDirFor(sourcePage?.file_path),
           tree: buildBacklinkTree(result.block.id, index),
         };
       }));
@@ -1313,7 +1325,7 @@
                 >
                   <span class="backlink-bullet">•</span>
                   <div class="backlink-content" use:hydrateRenderedMedia={node.block.content}>
-                    {@html renderBlock(node.block.content, assetBaseDir)}
+                    {@html renderBlock(node.block.content, bl.sourceAssetBaseDir)}
                   </div>
                 </button>
               {/each}

@@ -118,7 +118,11 @@
   // the guard never matched, the effect wrote state it also read, and Svelte
   // aborted with `effect_update_depth_exceeded`, freezing the whole view.
   $effect(() => {
-    if (nodes.length === 0) return;
+    // Never while filtering. `branchIds` comes from the *filtered* tree, so
+    // pruning then would read every branch the filter hid as deleted and
+    // persist their removal — expand two folders, search, clear the search,
+    // and the folder you were not searching for is collapsed for good.
+    if (revealing || nodes.length === 0) return;
     const next = pruneExpansionState(expanded, branchIds);
     if (next.size !== expanded.size) expanded = next;
   });

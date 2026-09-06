@@ -453,6 +453,14 @@ export function groupRowsByRoot<TNode>(
 export type PageTreeSortMode = "name" | "recent";
 
 /**
+ * Shared collator.
+ *
+ * `localeCompare` builds locale machinery on every call, which shows up when
+ * sorting a large tree; an `Intl.Collator` builds it once.
+ */
+const LABEL_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
+
+/**
  * Reorder a tree without changing its shape.
  *
  * Folders are always their own group at the top, the way a file manager orders
@@ -477,8 +485,7 @@ export function sortTree(
   // cannot order them on its own; the id breaks the remaining tie to give a
   // total order that does not depend on the order rows arrived in.
   const byName = (a: PageTreeViewNode, b: PageTreeViewNode) =>
-    a.label.localeCompare(b.label, undefined, { sensitivity: "base" })
-    || a.id.localeCompare(b.id);
+    LABEL_COLLATOR.compare(a.label, b.label) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const within =
     mode === "recent"
       ? (a: PageTreeViewNode, b: PageTreeViewNode) =>

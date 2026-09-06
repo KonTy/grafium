@@ -51,9 +51,11 @@
   /// silently search a fraction of the graph and report "no matches" for pages
   /// that exist. The tree holds every page, so filtering it is a real search.
   let filterQuery = $state("");
-  let visibleTree = $derived(
-    sortTree(filterTreeByQuery(pageTree, filterQuery), sortByTitle ? "name" : "recent"),
-  );
+  // Sorted first, then filtered. Filtering preserves order, so ordering the
+  // whole tree once per sort change beats re-sorting the filtered result on
+  // every keystroke — the sort is the expensive half.
+  let sortedTree = $derived(sortTree(pageTree, sortByTitle ? "name" : "recent"));
+  let visibleTree = $derived(filterTreeByQuery(sortedTree, filterQuery));
   let filteredCount = $derived(countTreePages(visibleTree));
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
