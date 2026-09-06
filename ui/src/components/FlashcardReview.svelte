@@ -7,7 +7,7 @@
     type Flashcard,
     type FlashcardTopic,
   } from "../lib/api";
-  import { renderBlock, hydrateAssetMedia } from "../lib/markdown";
+  import { renderBlock, hydrateAssetMedia, assetBaseDirFor } from "../lib/markdown";
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
 
@@ -56,6 +56,9 @@
   );
 
   const current = $derived(cards[index] ?? null);
+  // A card is shown away from its page, so the page's own directory has to
+  // come along or media stored beside it will not resolve.
+  const currentBaseDir = $derived(assetBaseDirFor(current?.page_file_path));
 
   // The rendered card container, used to hydrate <audio>/<video> media that
   // WebKitGTK can't load from the custom asset scheme.
@@ -285,10 +288,10 @@
       </div>
     {:else}
       <div class="card" bind:this={cardEl}>
-        <div class="face front">{@html renderBlock(current.front)}</div>
+        <div class="face front">{@html renderBlock(current.front, currentBaseDir)}</div>
         {#if showBack}
           <hr />
-          <div class="face back">{@html renderBlock(current.back)}</div>
+          <div class="face back">{@html renderBlock(current.back, currentBaseDir)}</div>
         {/if}
       </div>
 

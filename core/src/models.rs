@@ -133,6 +133,13 @@ pub struct Flashcard {
     pub ease_factor: f64,
     pub interval_days: i32,
     pub review_count: i32,
+    /// Graph-relative path of the markdown file the card came from, when known.
+    ///
+    /// Review renders a card outside its page, but a card can refer to media
+    /// stored beside that page (`assets/x.png`), which only resolves if the
+    /// page's own directory is known.
+    #[serde(default)]
+    pub page_file_path: Option<String>,
 }
 
 /// A study "topic" (deck) derived from a flashcard tag, with review counts.

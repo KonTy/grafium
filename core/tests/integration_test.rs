@@ -336,3 +336,63 @@ fn test_backfill_properties() {
     let genres = db.get_property_values("genre", "page").unwrap();
     assert_eq!(genres, vec!["fiction"]);
 }
+
+/// A card is reviewed away from the page it came from, but it can refer to
+/// media stored beside that page. The review query therefore carries the
+/// owning page's file path so those references still resolve.
+#[test]
+fn test_flashcards_due_carry_their_page_path() {
+    let db = Database::in_memory().unwrap();
+
+    let page = db.create_page("mybooks/coolbook/terms", false).unwrap();
+    db.set_page_file_path(&page.id, "pages/mybooks/coolbook/terms.md")
+        .unwrap();
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "![cover](assets/cover.png) :: the cover #flashcard",
+            BlockType::Flashcard,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    db.upsert_flashcard(&block.id, "![cover](assets/cover.png)", "the cover", &[])
+        .unwrap();
+
+    let due = db.list_flashcards_due(None, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0].page_file_path.as_deref(),
+        Some("pages/mybooks/coolbook/terms.md")
+    );
+}
+
+/// A page that exists only because something linked to it has no file on disk
+/// yet. Its cards must still come up for review; they simply have no page
+/// directory to resolve media against.
+#[test]
+fn test_flashcards_due_survive_a_page_with_no_file() {
+    let db = Database::in_memory().unwrap();
+
+    let page = db.create_page("linked-but-never-opened", false).unwrap();
+    assert_eq!(page.file_path, None);
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "front :: back #flashcard",
+            BlockType::Flashcard,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let card = db
+        .upsert_flashcard(&block.id, "front", "back", &[])
+        .unwrap();
+
+    let due = db.list_flashcards_due(None, 10).unwrap();
+    assert_eq!(due.len(), 1, "the card must still come up for review");
+    assert_eq!(due[0].id, card.id);
+    assert_eq!(due[0].page_file_path, None);
+}

@@ -204,6 +204,10 @@ export interface Flashcard {
   ease_factor: number;
   interval_days: number;
   review_count: number;
+  /** Graph-relative path of the page the card came from, when it has a file.
+   *  Review happens away from the page, so media stored beside that page needs
+   *  its directory to resolve. */
+  page_file_path?: string | null;
 }
 
 export interface FlashcardTopic {
