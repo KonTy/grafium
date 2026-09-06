@@ -96,6 +96,101 @@ impl IndexedParsedBlock {
     }
 }
 
+/// Every media file in the graph, as graph-relative paths, from the shared
+/// `assets/` folder and from each `assets/` folder sitting beside a page.
+///
+/// Media used to live in exactly one place, so the maintenance commands looked
+/// in exactly one place. Now that a book carries its own images, a scan that
+/// only reads the root would report a graph as clean while page-local media
+/// accumulated unseen.
+pub fn collect_asset_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, in_assets: bool, out: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Skip dotfiles so `.grafium/` internals are never offered up as
+            // deletable media.
+            if name.starts_with('.') {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, root, in_assets || name == "assets", out),
+                Ok(t) if t.is_file() && in_assets => {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(rel.to_string_lossy().replace('\\', "/"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, false, &mut out);
+    out.sort();
+    out
+}
+
+/// Directory that should hold media for the page whose markdown file is at
+/// `file_path` (as stored on the page record, graph-relative and possibly using
+/// native separators), or `None` if that cannot be trusted.
+///
+/// A page's stored path is not automatically safe to build a write path from.
+/// A page titled `../../outside/note` yields `pages/../../outside/note.md`,
+/// and an absolute stored path makes `join` discard the graph root entirely —
+/// either one would place downloaded media outside the graph. Anything that
+/// does not resolve to a real directory inside `root` is rejected, and the
+/// caller falls back to the shared assets folder.
+pub fn page_asset_dir(root: &Path, file_path: &str) -> Option<PathBuf> {
+    let normalized = file_path.replace('\\', "/");
+    let parent = Path::new(&normalized).parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+
+    let canon_root = root.canonicalize().ok()?;
+    // The page's own directory must already exist — its markdown file lives
+    // there — so canonicalizing it is a containment check, not just cleanup.
+    let canon_parent = root.join(parent).canonicalize().ok()?;
+    (canon_parent.starts_with(&canon_root) && canon_parent.is_dir()).then_some(canon_parent)
+}
+
+/// Resolve a graph-relative asset reference to a real file inside `root`.
+///
+/// Tries the reference as given first. If that misses and the reference points
+/// into an `assets/` folder, it retries from the graph root — so a note that
+/// says `assets/x.png` still finds the shared `<graph>/assets/x.png` even
+/// though page-relative references now resolve beside the page. Without that
+/// fallback, media co-location would silently 404 every note written before it,
+/// and a broken image is easy to miss across thousands of files.
+///
+/// Returns a canonicalized path guaranteed to sit inside the graph root, or
+/// `None` if the reference escapes it, names a directory, or matches nothing.
+pub fn resolve_asset_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let canon_root = root.canonicalize().ok()?;
+
+    let mut candidates = vec![rel];
+    // `pages/mybooks/coolbook/assets/x.png` → `assets/x.png`
+    if let Some(idx) = rel.rfind("assets/") {
+        if idx > 0 {
+            candidates.push(&rel[idx..]);
+        }
+    }
+
+    candidates.into_iter().find_map(|candidate| {
+        let target = root.join(candidate).canonicalize().ok()?;
+        (target.starts_with(&canon_root) && target.is_file()).then_some(target)
+    })
+}
+
 impl Graph {
     pub fn default_metadata_dir_name() -> &'static str {
         DEFAULT_METADATA_DIR_NAME

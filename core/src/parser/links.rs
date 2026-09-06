@@ -339,10 +339,7 @@ mod tests {
     fn test_wrap_known_terms_respects_word_boundaries() {
         // "cat" is not a standalone word anywhere in this sentence (it's
         // embedded in "categories" and "cats"), so nothing should wrap.
-        let out = wrap_known_terms_as_links(
-            "This is about categories, not cats.",
-            &["cat".into()],
-        );
+        let out = wrap_known_terms_as_links("This is about categories, not cats.", &["cat".into()]);
         assert_eq!(out, "This is about categories, not cats.");
 
         // But when "cat" does appear as a standalone word, it should wrap.

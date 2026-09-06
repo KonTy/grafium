@@ -502,7 +502,11 @@
           <div class="orphan-list">
             {#each orphanedAssets as asset}
               <div class="orphan-item">
-                <span class="orphan-name">{asset.filename}</span>
+                <span class="orphan-name" title={asset.filename}>
+                  {#if asset.filename.includes("/")}
+                    <span class="orphan-dir">{asset.filename.slice(0, asset.filename.lastIndexOf("/") + 1)}</span>
+                  {/if}<span class="orphan-file">{asset.filename.slice(asset.filename.lastIndexOf("/") + 1)}</span>
+                </span>
                 <span class="orphan-size">{formatBytes(asset.size)}</span>
                 <button class="orphan-delete" onclick={() => deleteSingleOrphan(asset.filename)} disabled={assetDeleting}>✕</button>
               </div>
@@ -1063,12 +1067,26 @@
     border-bottom: none;
   }
 
+  /* Media can now live beside its page, so these are paths rather than bare
+     names. Truncating the end would cut off the file name — the part that
+     actually identifies the asset — so the folder shrinks and the name does
+     not. */
   .orphan-name {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    display: flex;
+    min-width: 0;
     white-space: nowrap;
     color: var(--text-primary);
+  }
+
+  .orphan-dir {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-tertiary, var(--text-secondary));
+  }
+
+  .orphan-file {
+    flex-shrink: 0;
   }
 
   .orphan-size {

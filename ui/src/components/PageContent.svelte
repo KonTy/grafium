@@ -9,7 +9,7 @@
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
-  import { renderBlock, setAssetBaseDir } from "../lib/markdown";
+  import { renderBlock, assetBaseDirFor } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
     applyIfCurrentPageLoad,
@@ -46,11 +46,11 @@
   // directory its markdown file lives in, so media stored beside a page (and a
   // whole book folder copied elsewhere) keeps working. Set before any block
   // renders; cleared to the graph root when the page has no file yet.
-  $effect(() => {
-    const filePath = page.file_path ?? "";
-    const dir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
-    setAssetBaseDir(dir);
-  });
+  // Derived, not an effect: effects run after the template has already
+  // rendered, so an effect would hand the *previous* page's directory to this
+  // page's first render — and the journal view mounts several pages at once,
+  // which no single shared value can describe.
+  let assetBaseDir = $derived(assetBaseDirFor(page.file_path));
 
   let blocks: Block[] = $state([]);
 
@@ -1221,6 +1221,7 @@
           {block}
           pageId={page.id}
           pageTitle={page.title}
+          {assetBaseDir}
           depth={getBlockDepth(block.id)}
           focused={focusedBlockId === block.id}
           selected={selectedBlockIds.has(block.id)}
@@ -1297,7 +1298,7 @@
                 >
                   <span class="backlink-bullet">•</span>
                   <div class="backlink-content" use:hydrateRenderedMedia={node.block.content}>
-                    {@html renderBlock(node.block.content)}
+                    {@html renderBlock(node.block.content, assetBaseDir)}
                   </div>
                 </button>
               {/each}

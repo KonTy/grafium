@@ -443,3 +443,4 @@ fn test_book_link_in_journal_keeps_journal_text_in_the_journal() {
         "journal text must never land in the book file"
     );
 }
+

@@ -101,8 +101,14 @@ mod tests {
 
     #[test]
     fn transcript_source_labels_are_stable() {
-        assert_eq!(TranscriptSource::CreatorCaptions.label(), "youtube_captions");
-        assert_eq!(TranscriptSource::AutoCaptions.label(), "youtube_auto_captions");
+        assert_eq!(
+            TranscriptSource::CreatorCaptions.label(),
+            "youtube_captions"
+        );
+        assert_eq!(
+            TranscriptSource::AutoCaptions.label(),
+            "youtube_auto_captions"
+        );
         assert_eq!(TranscriptSource::Whisper.label(), "whisper");
     }
 }

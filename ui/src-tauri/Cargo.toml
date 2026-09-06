@@ -60,3 +60,6 @@ tauri-build = { version = "2", features = [] }
 [lib]
 name = "grafium_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dev-dependencies]
+tempfile = "3"

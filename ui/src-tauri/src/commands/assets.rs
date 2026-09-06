@@ -21,13 +21,7 @@ pub fn read_asset_data_url(state: State<AppState>, path: String) -> Result<Strin
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         graph.root_dir.clone()
     };
-    let candidate = root.join(rel);
-
-    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
-    let canon_target = candidate.canonicalize().map_err(|e| e.to_string())?;
-    if !canon_target.starts_with(&canon_root) {
-        return Err("asset outside graph".into());
-    }
+    let canon_target = grafium_core::graph::resolve_asset_path(&root, rel).ok_or("asset not found")?;
 
     let bytes = fs::read(&canon_target).map_err(|e| e.to_string())?;
     let mime = crate::mime_for_path(&canon_target);
@@ -49,18 +43,25 @@ pub async fn download_asset(
     // shared folder when there's no page context or the page has no file yet.
     let (assets_dir, reference_prefix) = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let page_dir = page_id
-            .as_deref()
-            .and_then(|id| graph.db.get_page_by_id(id).ok())
-            .and_then(|page| page.file_path)
-            .and_then(|path| {
-                path.rsplit_once('/')
-                    .map(|(dir, _)| dir.to_string())
-            });
+        let page_dir = match page_id.as_deref() {
+            // A page id was supplied, so a lookup failure is a real error and
+            // must not quietly deposit the media in the shared folder under a
+            // reference that points at the wrong place.
+            Some(id) => {
+                let page = graph
+                    .db
+                    .get_page_by_id(id)
+                    .map_err(|e| format!("unknown page {id}: {e}"))?;
+                page.file_path
+                    .as_deref()
+                    .and_then(|fp| grafium_core::graph::page_asset_dir(&graph.root_dir, fp))
+            }
+            None => None,
+        };
         match page_dir {
             // A plain relative reference, so the link also resolves correctly
             // in any other markdown tool that opens the folder.
-            Some(dir) => (graph.root_dir.join(&dir).join("assets"), "assets".to_string()),
+            Some(dir) => (dir.join("assets"), "assets".to_string()),
             None => (graph.root_dir.join("assets"), "../assets".to_string()),
         }
     };
@@ -106,99 +107,95 @@ pub async fn download_asset(
     Ok(format!("{reference_prefix}/{filename}"))
 }
 
-/// List all files in the assets/ directory.
+/// List every media file in the graph, as graph-relative paths.
+///
+/// Covers both the shared `assets/` folder and the `assets/` folder beside each
+/// page, so media stored with a book is not invisible to maintenance.
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_assets(state: State<AppState>) -> Result<Vec<String>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let assets_dir = graph.root_dir.join("assets");
-    drop(graph);
-
-    if !assets_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut files = Vec::new();
-    for entry in fs::read_dir(&assets_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if entry.file_type().map_err(|e| e.to_string())?.is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                files.push(name.to_string());
-            }
-        }
-    }
-    Ok(files)
-}
-
-/// Find orphaned assets (files in assets/ not referenced by any block).
-#[tauri::command(rename_all = "camelCase")]
-pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let assets_dir = graph.root_dir.join("assets");
-
-    if !assets_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    // Get all asset filenames
-    let mut asset_files: Vec<String> = Vec::new();
-    for entry in fs::read_dir(&assets_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if entry.file_type().map_err(|e| e.to_string())?.is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                asset_files.push(name.to_string());
-            }
-        }
-    }
-
-    // Query all block content to check for references
-    let all_content = graph
-        .db
-        .get_all_block_content()
-        .map_err(|e| e.to_string())?;
-
-    let mut orphans = Vec::new();
-    for filename in &asset_files {
-        let referenced = all_content.iter().any(|content| content.contains(filename));
-        if !referenced {
-            let path = assets_dir.join(filename);
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            orphans.push(OrphanedAsset {
-                filename: filename.clone(),
-                size,
-            });
-        }
-    }
-
-    Ok(orphans)
-}
-
-/// Delete specific assets by filename.
-#[tauri::command(rename_all = "camelCase")]
-pub fn delete_assets(state: State<AppState>, filenames: Vec<String>) -> Result<u32, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let assets_dir = graph.root_dir.join("assets");
-    drop(graph);
-
-    let mut deleted = 0u32;
-    for filename in &filenames {
-        // Sanitize: prevent path traversal
-        if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
-            continue;
-        }
-        let path = assets_dir.join(filename);
-        if path.exists() && path.starts_with(&assets_dir) {
-            if fs::remove_file(&path).is_ok() {
-                deleted += 1;
-            }
-        }
-    }
-    Ok(deleted)
+    Ok(grafium_core::graph::collect_asset_files(&graph.root_dir))
 }
 
 #[derive(serde::Serialize)]
 pub struct OrphanedAsset {
     pub filename: String,
     pub size: u64,
+}
+
+/// Find media that no block refers to any more.
+#[tauri::command(rename_all = "camelCase")]
+pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let assets = grafium_core::graph::collect_asset_files(&graph.root_dir);
+    if assets.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let all_content = graph
+        .db
+        .get_all_block_content()
+        .map_err(|e| e.to_string())?;
+
+    let mut orphans = Vec::new();
+    for rel in &assets {
+        // Matched on the bare file name rather than the whole path: the same
+        // file is referred to as `assets/x.png` from its own page and
+        // `../assets/x.png` from elsewhere, and a path-shaped match would call
+        // a referenced file an orphan — which the settings screen offers to
+        // delete.
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if all_content.iter().any(|content| content.contains(name)) {
+            continue;
+        }
+        let size = fs::metadata(graph.root_dir.join(rel))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        orphans.push(OrphanedAsset {
+            filename: rel.clone(),
+            size,
+        });
+    }
+
+    Ok(orphans)
+}
+
+/// Delete media by graph-relative path, as reported by `find_orphaned_assets`.
+///
+/// Paths are relative because media no longer lives in one folder — a bare file
+/// name cannot say whether it means the shared copy or a book's own. Each path
+/// must resolve to a real file inside the graph's media folders, so a crafted
+/// path cannot reach a note, a database or anything outside the graph.
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_assets(state: State<AppState>, filenames: Vec<String>) -> Result<u32, String> {
+    let root = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph.root_dir.clone()
+    };
+    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
+
+    let mut deleted = 0u32;
+    for rel in &filenames {
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+            continue;
+        }
+        let Ok(path) = root.join(rel).canonicalize() else {
+            continue;
+        };
+        // Only ever delete a real file that sits inside an `assets/` folder
+        // within the graph. Without the folder check a path like `pages/x.md`
+        // would delete a note.
+        let inside_graph = path.starts_with(&canon_root);
+        let inside_assets = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "assets");
+        if inside_graph && inside_assets && path.is_file() && fs::remove_file(&path).is_ok() {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
 }
 
 fn extension_from_content_type(ct: &str) -> Option<&'static str> {
@@ -240,3 +237,4 @@ fn chrono_timestamp() -> String {
         .as_secs();
     format!("{}", secs)
 }
+

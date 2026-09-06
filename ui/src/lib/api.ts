@@ -385,6 +385,9 @@ export function listAssets(): Promise<string[]> {
 }
 
 export interface OrphanedAsset {
+  /** Graph-relative path, e.g. `assets/x.png` or
+   *  `pages/mybooks/coolbook/assets/x.png`. Media can sit beside its own page,
+   *  so a bare name would not say which file is meant. */
   filename: string;
   size: number;
 }
@@ -393,6 +396,7 @@ export function findOrphanedAssets(): Promise<OrphanedAsset[]> {
   return invoke("find_orphaned_assets", {});
 }
 
+/** Delete media by graph-relative path, as reported by `findOrphanedAssets`. */
 export function deleteAssets(filenames: string[]): Promise<number> {
   return invoke("delete_assets", { filenames });
 }

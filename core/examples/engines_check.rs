@@ -21,7 +21,10 @@ async fn main() {
     let browser = HttpBrowserDriver::new();
 
     println!("query: {query:?}\n");
-    println!("{:<18} {:<10} {:>7}  {}", "engine", "category", "hits", "first result");
+    println!(
+        "{:<18} {:<10} {:>7}  {}",
+        "engine", "category", "hits", "first result"
+    );
     println!("{}", "-".repeat(100));
 
     let mut working = 0usize;
@@ -34,7 +37,13 @@ async fn main() {
             Ok(results) => {
                 working += 1;
                 let first = results[0].title.chars().take(56).collect::<String>();
-                println!("{:<18} {:<10} {:>7}  {}", engine.id, label, results.len(), first);
+                println!(
+                    "{:<18} {:<10} {:>7}  {}",
+                    engine.id,
+                    label,
+                    results.len(),
+                    first
+                );
             }
             Err(err) => {
                 let msg = err.to_string().chars().take(56).collect::<String>();
@@ -42,5 +51,8 @@ async fn main() {
             }
         }
     }
-    println!("\n{working}/{} engines returned results", config.engines.len());
+    println!(
+        "\n{working}/{} engines returned results",
+        config.engines.len()
+    );
 }

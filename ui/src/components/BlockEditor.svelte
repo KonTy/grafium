@@ -21,6 +21,9 @@
     block: Block;
     pageId: string;
     pageTitle?: string;
+    /** Graph-relative directory of the page's markdown file, so a page-relative
+     * asset reference (`assets/x.png`) resolves beside the page. */
+    assetBaseDir?: string;
     depth?: number;
     focused?: boolean;
     selected?: boolean;
@@ -41,6 +44,7 @@
     block,
     pageId,
     pageTitle = "",
+    assetBaseDir = "",
     depth = 0,
     focused = false,
     selected = false,
@@ -64,7 +68,7 @@
   let shiftHeld = false;
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
-  let renderedHtml = $derived(renderBlock(block.content));
+  let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
   let saveError = $state<string | null>(null);
   let pendingSaveContent = $state<string | null>(null);
   let finishEditingPromise: Promise<boolean> | null = null;
@@ -1211,7 +1215,7 @@
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
                         <td>
                           {#if col === "content" && val}
-                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val))}</span>
+                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val), assetBaseDir)}</span>
                           {:else if col === "state" && val}
                             <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
                           {:else}

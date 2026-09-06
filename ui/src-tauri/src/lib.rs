@@ -1140,16 +1140,12 @@ fn asset_scheme_handler(
         None => return not_found(),
     };
 
-    let candidate = root.join(&decoded);
-
-    // Canonicalize both and confirm the target stays within the graph root.
-    let (canon_root, canon_target) = match (root.canonicalize(), candidate.canonicalize()) {
-        (Ok(r), Ok(t)) => (r, t),
-        _ => return not_found(),
+    // Falls back to the shared `assets/` folder when a page-relative reference
+    // misses, so notes written before media co-location still render.
+    let canon_target = match grafium_core::graph::resolve_asset_path(&root, &decoded) {
+        Some(p) => p,
+        None => return not_found(),
     };
-    if !canon_target.starts_with(&canon_root) {
-        return not_found();
-    }
 
     let bytes = match std::fs::read(&canon_target) {
         Ok(b) => b,

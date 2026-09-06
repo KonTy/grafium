@@ -26,19 +26,29 @@ const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
 // leading ./ or ../). Used both for the custom scheme URL and for in-memory
 // hydration of media elements.
 /**
- * Directory the current page's markdown file lives in, graph-relative and
+ * Directory the page being rendered *right now* lives in, graph-relative and
  * without a trailing slash (e.g. `pages/mybooks/coolbook`).
  *
- * Set while rendering so a *file-relative* asset reference resolves the way
- * every other markdown tool resolves it. Module-level rather than threaded
- * through every render call because `marked`'s renderer hooks are synchronous
- * and give no place to pass context; rendering is likewise synchronous, so
- * there is no interleaving to worry about.
+ * `marked`'s renderer hooks are synchronous and give no place to pass context,
+ * so this is module-level — but it is assigned only for the duration of a
+ * single synchronous `renderBlock` call, never by callers. An earlier version
+ * let components set it from a Svelte `$effect`, which is wrong in both
+ * directions: effects run *after* the template has already rendered, and the
+ * journal view mounts several pages at once, so one shared value cannot
+ * describe all of them. The base directory is a render argument, not state.
  */
 let assetBaseDir = "";
 
-export function setAssetBaseDir(dir: string): void {
-  assetBaseDir = dir.replace(/^\/+|\/+$/g, "");
+function normalizeBaseDir(dir: string): string {
+  return dir.replace(/^\/+|\/+$/g, "");
+}
+
+/** Graph-relative directory of `filePath`, for use as a render base directory. */
+export function assetBaseDirFor(filePath: string | null | undefined): string {
+  if (!filePath) return "";
+  const normalized = normalizeBaseDir(filePath.replace(/\\/g, "/"));
+  const slash = normalized.lastIndexOf("/");
+  return slash > 0 ? normalized.slice(0, slash) : "";
 }
 
 /**
@@ -49,18 +59,23 @@ export function setAssetBaseDir(dir: string): void {
  *   - `../assets/x.png` — the historical form. It was always resolved against
  *     the graph root regardless of how deep the page sat, so it keeps doing
  *     exactly that; thousands of existing references depend on it.
- *   - `assets/x.png` — a plain relative path, resolved against the page's own
- *     directory, which is what Obsidian, VS Code and GitHub do. That is what
- *     lets media sit beside the page that uses it and survive the folder being
- *     copied somewhere else.
+ *   - `assets/x.png` or `./assets/x.png` — a plain relative path, resolved
+ *     against the page's own directory, which is what Obsidian, VS Code and
+ *     GitHub do. That is what lets media sit beside the page that uses it and
+ *     survive the folder being copied somewhere else.
+ *
+ * A page-relative guess that turns out to be wrong is not fatal: the backend
+ * falls back to the graph-root `assets/` folder when the page-local file does
+ * not exist, so an older note that already used the plain form still renders.
  */
 function cleanAssetPath(href: string): string {
   const h = href.trim();
-  const isLegacyRootRelative = /^([./]*\/)|^\.\.?\//.test(h);
-  const rel = h
-    .replace(/^([./]*\/)+/, "")
-    .replace(/^\.\.?\//, "")
-    .replace(/^(\.\.?\/)+/, "");
+  // Only `../` (and a leading `/`) mean "from the graph root". A leading `./`
+  // is an ordinary relative path and must resolve like the plain form does —
+  // treating it as root-relative made `./assets/x.png` and `assets/x.png`,
+  // which mean the same thing everywhere else, resolve to different files.
+  const isLegacyRootRelative = /^\.\.\//.test(h) || h.startsWith("/");
+  const rel = h.replace(/^\/+/, "").replace(/^(\.\.?\/)+/, "");
 
   if (isLegacyRootRelative || assetBaseDir === "") return rel;
   return `${assetBaseDir}/${rel}`;
@@ -74,7 +89,18 @@ function cleanAssetPath(href: string): string {
 function resolveAssetUrl(href: string): string {
   const h = href.trim();
   if (/^(https?:|data:|blob:|grafium-asset:)/i.test(h)) return h;
-  return `grafium-asset://localhost/${encodeURI(cleanAssetPath(h))}`;
+  return `grafium-asset://localhost/${encodePathForUrl(cleanAssetPath(h))}`;
+}
+
+/**
+ * Percent-encode a path for use as a URL path, one segment at a time.
+ *
+ * `encodeURI` is not enough: it leaves `#` and `?` alone because they are
+ * legal URL *syntax*, so a page at `pages/C#/intro.md` produced a URL whose
+ * path silently ended at `pages/C` and every image on it 404'd.
+ */
+function encodePathForUrl(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }
 
 function extOf(url: string): string {
@@ -286,19 +312,31 @@ function renderMathOutsideCodeFences(markdown: string): string {
  * Render a block's markdown content to HTML.
  * Handles [[page links]], #tags, ((block refs)), checkboxes, etc.
  */
-export function renderBlock(content: string): string {
+export function renderBlock(content: string, baseDir = ""): string {
   // The base directory is part of the output — the same block renders
   // different asset URLs on different pages — so it has to be part of the key.
   // Keying on content alone meant navigating to another page served the
   // previous page's asset paths from cache.
-  const cacheKey = `${assetBaseDir}\u0000${content}`;
+  const dir = normalizeBaseDir(baseDir);
+  const cacheKey = `${dir}\u0000${content}`;
   const cached = getCached(cacheKey);
   if (cached !== undefined) return cached;
 
-  // A whole-block admonition (`#+BEGIN_TIP` … `#+END_TIP`) renders as a
-  // styled callout wrapping the (recursively rendered) body.
-  const callout = renderCalloutBlock(content);
-  const html = callout !== null ? callout : renderMarkdownContent(content);
+  // Assigned for exactly this synchronous render so marked's renderer hooks,
+  // which take no context argument, can see it. Restored afterwards so a
+  // nested render (a callout body renders recursively) cannot leak its
+  // directory to whatever called it.
+  const previousBaseDir = assetBaseDir;
+  assetBaseDir = dir;
+  let html: string;
+  try {
+    // A whole-block admonition (`#+BEGIN_TIP` … `#+END_TIP`) renders as a
+    // styled callout wrapping the (recursively rendered) body.
+    const callout = renderCalloutBlock(content);
+    html = callout !== null ? callout : renderMarkdownContent(content);
+  } finally {
+    assetBaseDir = previousBaseDir;
+  }
 
   setCache(cacheKey, html);
   return html;

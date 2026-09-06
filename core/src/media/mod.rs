@@ -96,8 +96,7 @@ pub fn fetch_transcript_with_progress(
     transcriber: &dyn Transcriber,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(Transcript, TranscriptSource)> {
-    if let Some(result) = captions::fetch_captions_with_progress(url, workdir, lang, on_progress)?
-    {
+    if let Some(result) = captions::fetch_captions_with_progress(url, workdir, lang, on_progress)? {
         return Ok(result);
     }
     on_progress("No captions available — falling back to local transcription.");
@@ -109,4 +108,3 @@ pub fn fetch_transcript_with_progress(
     let _ = std::fs::remove_file(&wav_path);
     Ok((transcript, TranscriptSource::Whisper))
 }
-

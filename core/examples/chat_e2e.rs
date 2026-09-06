@@ -20,8 +20,14 @@ use grafium_core::Graph;
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    let graph_dir = PathBuf::from(args.next().expect("usage: <graph-dir> <data-dir> [--index]"));
-    let data_dir = PathBuf::from(args.next().expect("usage: <graph-dir> <data-dir> [--index]"));
+    let graph_dir = PathBuf::from(
+        args.next()
+            .expect("usage: <graph-dir> <data-dir> [--index]"),
+    );
+    let data_dir = PathBuf::from(
+        args.next()
+            .expect("usage: <graph-dir> <data-dir> [--index]"),
+    );
     let do_index = args.any(|a| a == "--index");
 
     let config_path = data_dir.join("ai_config.json");
@@ -33,7 +39,10 @@ async fn main() {
         "config: mode={:?} llm={:?} embedder={:?}",
         config.mode,
         config.local.as_ref().map(|l| &l.local_llm.model_ref.model),
-        config.local.as_ref().map(|l| &l.local_embedding.model_ref.model)
+        config
+            .local
+            .as_ref()
+            .map(|l| &l.local_embedding.model_ref.model)
     );
 
     let graph = Graph::open(&graph_dir).expect("cannot open graph");
@@ -90,11 +99,13 @@ async fn main() {
 
     let questions: Vec<String> = std::env::var("CHAT_E2E_QUERIES")
         .map(|v| v.split('|').map(str::to_string).collect())
-        .unwrap_or_else(|_| vec![
-            "when was the last time I was upset".to_string(),
-            "when did I paint my room".to_string(),
-            "explain how mutexes work".to_string(),
-        ]);
+        .unwrap_or_else(|_| {
+            vec![
+                "when was the last time I was upset".to_string(),
+                "when did I paint my room".to_string(),
+                "explain how mutexes work".to_string(),
+            ]
+        });
     let questions: Vec<&str> = questions.iter().map(String::as_str).collect();
 
     for q in questions {
@@ -105,7 +116,12 @@ async fn main() {
                 println!("retrieved {} hits in {:?}", hits.len(), started.elapsed());
                 for (i, h) in hits.iter().take(5).enumerate() {
                     let snippet: String = h.content.chars().take(90).collect();
-                    println!("  [{}] {} :: {}", i + 1, h.page_title, snippet.replace('\n', " "));
+                    println!(
+                        "  [{}] {} :: {}",
+                        i + 1,
+                        h.page_title,
+                        snippet.replace('\n', " ")
+                    );
                 }
             }
             Err(e) => println!("  retrieval error: {e}"),

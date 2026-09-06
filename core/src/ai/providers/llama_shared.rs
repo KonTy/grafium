@@ -27,6 +27,8 @@ pub(crate) fn shared_backend() -> Arc<LlamaBackend> {
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
     });
     BACKEND
-        .get_or_init(|| Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend")))
+        .get_or_init(|| {
+            Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend"))
+        })
         .clone()
 }

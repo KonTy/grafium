@@ -268,7 +268,10 @@ pub fn resolve_model(
 /// When free VRAM can't be measured, this deliberately falls back to the
 /// historical alphabetical behaviour rather than guessing — an unmeasurable
 /// GPU shouldn't silently change which model a user's machine loads.
-fn pick_best_llm(mut candidates: Vec<ModelInfo>, free_vram_bytes: Option<u64>) -> Option<ModelInfo> {
+fn pick_best_llm(
+    mut candidates: Vec<ModelInfo>,
+    free_vram_bytes: Option<u64>,
+) -> Option<ModelInfo> {
     use crate::ai::gpu_fit::{assess_gpu_fit, GpuFit};
 
     // No GPU reading available (non-NVIDIA, no `nvidia-smi`, unparsable
@@ -421,14 +424,20 @@ mod tests {
     fn auto_pick_is_not_merely_alphabetical() {
         let free = Some(14_000 * 1024 * 1024);
         let picked = pick_best_llm(real_world_lineup(), free).unwrap();
-        assert_ne!(picked.file_name, "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf");
+        assert_ne!(
+            picked.file_name,
+            "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf"
+        );
     }
 
     #[test]
     fn auto_pick_falls_back_to_first_when_vram_is_unmeasurable() {
         // Must not degrade to "no model found" on non-NVIDIA machines.
         let picked = pick_best_llm(real_world_lineup(), None).expect("must still pick something");
-        assert_eq!(picked.file_name, "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf");
+        assert_eq!(
+            picked.file_name,
+            "GLM-4.6V-Flash-heretic-imatrix-Q4_K_M.gguf"
+        );
     }
 
     #[test]
@@ -445,7 +454,6 @@ mod tests {
         let picked = pick_best_llm(real_world_lineup(), free).expect("must still pick something");
         assert_eq!(picked.file_name, "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf");
     }
-
 
     #[test]
     fn classify_recognizes_whisper_and_llm_naming_conventions() {

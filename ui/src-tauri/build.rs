@@ -53,15 +53,12 @@ fn bundle_native_libs() {
     let Ok(entries) = fs::read_dir(build_dir) else {
         return;
     };
-    let sys_crate_dirs = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("llama-cpp-sys-2-"))
-                .unwrap_or(false)
-        });
+    let sys_crate_dirs = entries.flatten().map(|e| e.path()).filter(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("llama-cpp-sys-2-"))
+            .unwrap_or(false)
+    });
 
     let is_windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let mut copied_any = false;

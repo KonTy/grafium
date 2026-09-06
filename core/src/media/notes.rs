@@ -272,9 +272,9 @@ mod tests {
         // is itself a child of the page's root "#" title bullet. Two levels of
         // indent (4 spaces) with a leading "- " puts each group as a sibling
         // block linkable to its parent transcript heading.
-        assert!(md.contains(
-            "    - **[0:00]** Welcome to the video. Today we'll talk about Rust.\n"
-        ));
+        assert!(
+            md.contains("    - **[0:00]** Welcome to the video. Today we'll talk about Rust.\n")
+        );
         assert!(md.contains("    - **[0:32]** Let's get started.\n"));
     }
 
