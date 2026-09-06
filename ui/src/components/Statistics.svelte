@@ -248,7 +248,7 @@
               {/each}
             </div>
             <!-- Grid -->
-            <div class="heatmap-grid" style="grid-template-columns: repeat({WEEKS}, 1fr); aspect-ratio: {WEEKS} / 7;">
+            <div class="heatmap-grid">
               {#each grid as cell}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
@@ -478,7 +478,10 @@
   }
 
   /* Heatmap */
+  /* Keeps the calendar to its natural size instead of filling the row, so the
+     summary cards sit beside it rather than being pushed to the far edge. */
   .heatmap-container {
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -512,7 +515,8 @@
 
   .day-labels {
     display: grid;
-    grid-template-rows: repeat(7, 1fr);
+    grid-template-rows: repeat(7, var(--heatmap-cell, 11px));
+    row-gap: 2px;
     gap: 1px;
     width: 24px;
     flex-shrink: 0;
@@ -527,17 +531,23 @@
     justify-content: flex-end;
   }
 
+  /* Fixed cells rather than stretch-to-fill.
+     `flex: 1` plus `aspect-ratio: 26/7` meant the grid took whatever width was
+     going and then demanded a proportional height — on a wide window that is a
+     ~430px wall of squares, dwarfing the tasks underneath it. Cells are sized
+     like GitHub's contribution graph instead, so the calendar stays a glance
+     rather than a centrepiece. */
   .heatmap-grid {
     display: grid;
-    grid-template-rows: repeat(7, 1fr);
+    grid-template-rows: repeat(7, var(--heatmap-cell, 11px));
+    grid-auto-columns: var(--heatmap-cell, 11px);
     grid-auto-flow: column;
-    gap: 1px;
-    flex: 1;
+    gap: 2px;
     min-width: 0;
   }
 
   .heatmap-cell {
-    border-radius: 1px;
+    border-radius: 2px;
     width: 100%;
     height: 100%;
     cursor: pointer;

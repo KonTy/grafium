@@ -1069,23 +1069,42 @@ impl Graph {
     /// the tasks table, the .md file on disk, and logging the event.
     /// Returns the new state string.
     pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
-        // 1. Cycle in DB (tasks table + task_events log)
+        let before = self.db.get_block_by_id(block_id)?;
+        let from_state = crate::parser::task::current_marker(&before.content);
         let new_state = self.db.cycle_task_state(block_id)?;
+        self.write_state_change(block_id, &from_state, &new_state)?;
+        Ok(new_state)
+    }
 
-        // 2. Update block content to reflect the new marker
+    /// Rewrite a task block for a state change and persist it to disk.
+    ///
+    /// The markdown is the durable record. Keeping the completion time and the
+    /// path a task took only in SQLite meant both vanished on a re-index, a
+    /// fresh database, or a move to another machine — so the transition is
+    /// written into the file here, not just logged in the database.
+    fn write_state_change(&self, block_id: &str, from: &str, to: &str) -> Result<()> {
         let block = self.db.get_block_by_id(block_id)?;
-        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re
-            .replace(&block.content, &format!("{} ", new_state))
-            .to_string();
-
-        if new_content != block.content {
-            let page = self.db.get_page_by_id(&block.page_id)?;
-            self.db.update_block(block_id, &new_content, None)?;
-            let _ = self.write_single_block_update_to_disk(&page, &block)?;
+        let now = chrono::Local::now().naive_local();
+        let new_content = crate::parser::task::apply_state_change(&block.content, from, to, now);
+        if new_content == block.content {
+            return Ok(());
         }
 
-        Ok(new_state)
+        let page = self.db.get_page_by_id(&block.page_id)?;
+        self.db.update_block(block_id, &new_content, None)?;
+        let updated = self.db.get_block_by_id(block_id)?;
+        let _ = self.write_single_block_update_to_disk(&page, &updated)?;
+
+        // Mirror the completion time into the row the Tasks page sorts on, so
+        // it does not have to re-read every file to order by it.
+        let fields = crate::parser::task::parse_fields(&new_content);
+        self.db.set_task_closed_at(
+            block_id,
+            fields
+                .closed_at
+                .map(|at| at.and_utc().timestamp_millis()),
+        )?;
+        Ok(())
     }
 
     /// Set a task to a specific state, updating block content and .md file.
@@ -1094,22 +1113,10 @@ impl Graph {
         block_id: &str,
         state: &crate::models::TaskState,
     ) -> Result<()> {
-        // 1. Update tasks table + log event
+        let before = self.db.get_block_by_id(block_id)?;
+        let from_state = crate::parser::task::current_marker(&before.content);
         self.db.update_task_state(block_id, state)?;
-
-        // 2. Update block content
-        let block = self.db.get_block_by_id(block_id)?;
-        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let new_content = task_re
-            .replace(&block.content, &format!("{} ", state.as_str()))
-            .to_string();
-
-        if new_content != block.content {
-            let page = self.db.get_page_by_id(&block.page_id)?;
-            self.db.update_block(block_id, &new_content, None)?;
-            let _ = self.write_single_block_update_to_disk(&page, &block)?;
-        }
-
+        self.write_state_change(block_id, &from_state, state.as_str())?;
         Ok(())
     }
 

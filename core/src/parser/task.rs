@@ -405,6 +405,151 @@ pub fn render_state_change(to: &str, from: &str, at: NaiveDateTime) -> String {
     )
 }
 
+// ─── Editing a task block ────────────────────────────────────────────────────
+
+const LOGBOOK_OPEN: &str = ":LOGBOOK:";
+const LOGBOOK_CLOSE: &str = ":END:";
+
+fn is_planning_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("CLOSED:") || t.starts_with("SCHEDULED:") || t.starts_with("DEADLINE:")
+}
+
+/// A task block pulled apart into the pieces that have to be reordered.
+struct BlockParts {
+    marker_line: String,
+    closed: Option<String>,
+    scheduled: Option<String>,
+    deadline: Option<String>,
+    logbook: Vec<String>,
+    body: Vec<String>,
+}
+
+fn split_block(content: &str) -> BlockParts {
+    let mut lines = content.lines();
+    let marker_line = lines.next().unwrap_or_default().to_string();
+
+    let mut parts = BlockParts {
+        marker_line,
+        closed: None,
+        scheduled: None,
+        deadline: None,
+        logbook: Vec::new(),
+        body: Vec::new(),
+    };
+
+    let mut in_logbook = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == LOGBOOK_OPEN {
+            in_logbook = true;
+            continue;
+        }
+        if in_logbook {
+            if trimmed == LOGBOOK_CLOSE {
+                in_logbook = false;
+            } else if !trimmed.is_empty() {
+                parts.logbook.push(trimmed.to_string());
+            }
+            continue;
+        }
+        if is_planning_line(line) {
+            let t = trimmed.to_string();
+            if t.starts_with("CLOSED:") {
+                parts.closed = Some(t);
+            } else if t.starts_with("SCHEDULED:") {
+                parts.scheduled = Some(t);
+            } else {
+                parts.deadline = Some(t);
+            }
+            continue;
+        }
+        parts.body.push(line.to_string());
+    }
+    parts
+}
+
+fn join_block(parts: BlockParts) -> String {
+    // Org order: the marker, then its planning lines, then the drawer, then
+    // whatever the note actually says.
+    let mut out = vec![parts.marker_line];
+    out.extend(parts.closed);
+    out.extend(parts.scheduled);
+    out.extend(parts.deadline);
+    if !parts.logbook.is_empty() {
+        out.push(LOGBOOK_OPEN.to_string());
+        out.extend(parts.logbook);
+        out.push(LOGBOOK_CLOSE.to_string());
+    }
+    out.extend(parts.body);
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// States that mean the task is finished, and so carry a `CLOSED:` timestamp.
+fn is_closing(state: &str) -> bool {
+    matches!(state, "DONE" | "CANCELED" | "CANCELLED")
+}
+
+static MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b\s*").unwrap()
+});
+
+/// The task marker a block currently carries, or "" if it has none.
+pub fn current_marker(content: &str) -> String {
+    content
+        .lines()
+        .next()
+        .and_then(|line| MARKER_RE.find(line.trim_start()))
+        .map(|m| m.as_str().trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Rewrite a task block for a state change, recording it in the markdown.
+///
+/// This is the whole point of the feature: the completion time and the history
+/// of how a task got there live in the file, so they survive a re-index, a
+/// fresh database, or moving to another machine. Keeping them only in SQLite
+/// meant "when did I finish this?" quietly evaporated.
+///
+/// Finishing a task adds `CLOSED:`; reopening one removes it, because a task
+/// you have picked back up was plainly not closed. Every transition appends a
+/// `:LOGBOOK:` line, so the time from first `DOING` to `DONE` is answerable
+/// afterwards.
+pub fn apply_state_change(content: &str, from: &str, to: &str, at: NaiveDateTime) -> String {
+    let mut parts = split_block(content);
+
+    parts.marker_line = if MARKER_RE.is_match(&parts.marker_line) {
+        MARKER_RE
+            .replace(&parts.marker_line, format!("{to} "))
+            .to_string()
+    } else {
+        format!("{to} {}", parts.marker_line)
+    };
+
+    parts.closed = is_closing(to).then(|| render_closed(at));
+    parts.logbook.push(render_state_change(to, from, at));
+
+    join_block(parts)
+}
+
+/// Replace or clear a `SCHEDULED:`/`DEADLINE:` timestamp, keeping block order.
+pub fn set_planning_timestamp(
+    content: &str,
+    keyword: &str,
+    timestamp: Option<&TaskTimestamp>,
+) -> String {
+    let mut parts = split_block(content);
+    let rendered = timestamp.map(|ts| format!("{keyword}: {}", ts.render()));
+    match keyword {
+        "SCHEDULED" => parts.scheduled = rendered,
+        _ => parts.deadline = rendered,
+    }
+    join_block(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +763,124 @@ mod tests {
         assert_eq!(&line[end..], "Pay invoice");
     }
 
+
+    // ─── Editing a task block ────────────────────────────────────────────────
+
+    #[test]
+    fn completing_a_task_records_when() {
+        // The point of the whole feature: this line is what survives a
+        // re-index, a fresh database, or moving to another machine.
+        let out = apply_state_change("DOING Write report", "DOING", "DONE", dt("2026-09-06 11:42"));
+        assert_eq!(
+            out,
+            ["DONE Write report",
+             "CLOSED: [2026-09-06 Sun 11:42]",
+             ":LOGBOOK:",
+             "* State \"DONE\" from \"DOING\" [2026-09-06 Sun 11:42]",
+             ":END:"].join("\n")
+        );
+    }
+
+    #[test]
+    fn reopening_a_task_drops_the_completion_line() {
+        let done = apply_state_change("TODO x", "TODO", "DONE", dt("2026-09-06 11:00"));
+        let reopened = apply_state_change(&done, "DONE", "TODO", dt("2026-09-06 12:00"));
+        assert!(!reopened.contains("CLOSED:"), "a reopened task is not closed:\n{reopened}");
+        assert!(reopened.starts_with("TODO x"));
+    }
+
+    #[test]
+    fn history_accumulates_across_transitions() {
+        // Answering "how long did that actually take" needs the start, not
+        // just the finish.
+        let a = apply_state_change("TODO Fix bug", "TODO", "DOING", dt("2026-09-06 09:00"));
+        let b = apply_state_change(&a, "DOING", "DONE", dt("2026-09-06 11:30"));
+        assert!(b.contains("* State \"DOING\" from \"TODO\" [2026-09-06 Sun 09:00]"));
+        assert!(b.contains("* State \"DONE\" from \"DOING\" [2026-09-06 Sun 11:30]"));
+        assert_eq!(b.matches(":LOGBOOK:").count(), 1, "one drawer, not one per change");
+        assert_eq!(b.matches(":END:").count(), 1);
+    }
+
+    #[test]
+    fn planning_lines_and_body_survive_a_transition() {
+        let content = "TODO [#A] Ship it\nSCHEDULED: <2026-09-07 Mon 09:00>\nDEADLINE: <2026-09-10 Thu>\nsome notes about the release\nmore notes";
+        let out = apply_state_change(content, "TODO", "DONE", dt("2026-09-08 15:00"));
+        assert!(out.contains("SCHEDULED: <2026-09-07 Mon 09:00>"));
+        assert!(out.contains("DEADLINE: <2026-09-10 Thu>"));
+        assert!(out.contains("some notes about the release"));
+        assert!(out.contains("more notes"));
+        assert!(out.contains("[#A]"), "priority must not be eaten by the marker rewrite");
+    }
+
+    #[test]
+    fn the_block_keeps_org_ordering() {
+        // Planning lines before the drawer, body last, however the input was
+        // arranged — otherwise repeated edits shuffle the file around.
+        let content = ["TODO x", "body line", "SCHEDULED: <2026-09-07 Mon>"].join("\n");
+        let out = apply_state_change(&content, "TODO", "DONE", dt("2026-09-08 15:00"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "DONE x");
+        assert_eq!(lines[1], "CLOSED: [2026-09-08 Tue 15:00]");
+        assert_eq!(lines[2], "SCHEDULED: <2026-09-07 Mon>");
+        assert_eq!(lines[3], ":LOGBOOK:");
+        assert_eq!(*lines.last().unwrap(), "body line");
+    }
+
+    #[test]
+    fn a_block_with_no_marker_gains_one() {
+        let out = apply_state_change("Just a note", "", "TODO", dt("2026-09-06 11:00"));
+        assert!(out.starts_with("TODO Just a note"));
+    }
+
+    #[test]
+    fn a_cancelled_task_is_also_closed() {
+        let out = apply_state_change("TODO x", "TODO", "CANCELED", dt("2026-09-06 11:00"));
+        assert!(out.contains("CLOSED: [2026-09-06 Sun 11:00]"));
+    }
+
+    #[test]
+    fn the_result_can_be_read_back() {
+        let out = apply_state_change(
+            "DOING [#B] Thing\nSCHEDULED: <2026-09-07 Mon 08:00 ++1w>",
+            "DOING",
+            "DONE",
+            dt("2026-09-06 11:42"),
+        );
+        let fields = parse_fields(&out);
+        assert_eq!(fields.closed_at, Some(dt("2026-09-06 11:42")));
+        assert_eq!(fields.priority, Some(Priority::B));
+        assert!(fields.scheduled.unwrap().repeater.is_some());
+    }
+
+    // ─── Planning timestamps ─────────────────────────────────────────────────
+
+    #[test]
+    fn sets_and_clears_a_scheduled_date() {
+        let ts = parse_timestamp("<2026-09-07 Mon 09:00>").unwrap();
+        let with = set_planning_timestamp("TODO x", "SCHEDULED", Some(&ts));
+        assert_eq!(with, "TODO x\nSCHEDULED: <2026-09-07 Mon 09:00>");
+        let without = set_planning_timestamp(&with, "SCHEDULED", None);
+        assert_eq!(without, "TODO x");
+    }
+
+    #[test]
+    fn replacing_a_date_does_not_leave_the_old_one() {
+        let first = parse_timestamp("<2026-09-07 Mon>").unwrap();
+        let second = parse_timestamp("<2026-09-14 Mon>").unwrap();
+        let a = set_planning_timestamp("TODO x", "SCHEDULED", Some(&first));
+        let b = set_planning_timestamp(&a, "SCHEDULED", Some(&second));
+        assert_eq!(b.matches("SCHEDULED:").count(), 1);
+        assert!(b.contains("2026-09-14"));
+    }
+
+    #[test]
+    fn setting_a_date_leaves_the_logbook_alone() {
+        let done = apply_state_change("TODO x", "TODO", "DOING", dt("2026-09-06 09:00"));
+        let ts = parse_timestamp("<2026-09-07 Mon>").unwrap();
+        let out = set_planning_timestamp(&done, "DEADLINE", Some(&ts));
+        assert!(out.contains("* State \"DOING\" from \"TODO\""));
+        assert!(out.contains("DEADLINE: <2026-09-07 Mon>"));
+    }
     // ─── Rendering ───────────────────────────────────────────────────────────
 
     #[test]

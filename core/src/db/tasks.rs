@@ -167,6 +167,19 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Mirror the `CLOSED:` timestamp from the markdown into the task row.
+    ///
+    /// The file is the durable copy; this column exists so the Tasks page can
+    /// order by completion without re-reading every page on disk.
+    pub fn set_task_closed_at(&self, block_id: &str, closed_at: Option<i64>) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE tasks SET closed_at = ?1 WHERE block_id = ?2",
+            params![closed_at, block_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_task(&self, block_id: &str) -> Result<()> {
         let conn = self.conn()?;
         delete_task_on_conn(&conn, block_id)

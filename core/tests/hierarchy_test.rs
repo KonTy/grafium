@@ -444,3 +444,90 @@ fn test_book_link_in_journal_keeps_journal_text_in_the_journal() {
     );
 }
 
+
+// ─── Task completion history ─────────────────────────────────────────────────
+
+/// Completing a task must leave a record in the markdown, not just the database.
+///
+/// This is the whole point: a completion time held only in SQLite is lost the
+/// moment the graph is re-indexed, copied to another machine, or opened against
+/// a fresh database — and "when did I finish that?" is not recoverable.
+#[test]
+fn test_completion_time_is_written_to_the_file_and_survives_reindex() {
+    let (tmp, graph) = open_graph();
+
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Write the report",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Doing)
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let path = tmp.path().join("pages/work.md");
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(on_disk.contains("DONE Write the report"), "{on_disk}");
+    assert!(on_disk.contains("CLOSED: ["), "completion time must be in the file:\n{on_disk}");
+    assert!(
+        on_disk.contains(r#"* State "DOING" from "TODO""#),
+        "the start must be recorded too, or duration is unanswerable:\n{on_disk}"
+    );
+    assert!(on_disk.contains(r#"* State "DONE" from "DOING""#), "{on_disk}");
+
+    // Re-index from disk, the way a fresh machine or a rebuilt database would.
+    graph.index_file(&path).unwrap();
+
+    let reloaded = graph.db.list_blocks_for_page(&page.id).unwrap();
+    let task_block = reloaded
+        .iter()
+        .find(|b| b.content.starts_with("DONE"))
+        .expect("the task must still be there");
+    let fields = grafium_core::parser::task::parse_fields(&task_block.content);
+    assert!(
+        fields.closed_at.is_some(),
+        "the completion time must survive a re-index: {:?}",
+        task_block.content
+    );
+}
+
+/// Re-opening a finished task clears its completion time everywhere.
+#[test]
+fn test_reopening_a_task_clears_the_completion_time() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Fix the bug",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Todo)
+        .unwrap();
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
+    assert!(!on_disk.contains("CLOSED:"), "a reopened task is not closed:\n{on_disk}");
+    assert!(
+        on_disk.contains(r#"* State "TODO" from "DONE""#),
+        "reopening is itself part of the history:\n{on_disk}"
+    );
+}
