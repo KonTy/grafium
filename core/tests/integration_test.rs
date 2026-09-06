@@ -435,3 +435,59 @@ fn test_media_references_cover_more_than_block_text() {
         "a handwriting page's file must count as referenced: {refs:?}"
     );
 }
+
+/// A graph created before tasks carried times, repeats, priority and a
+/// completion timestamp must gain those columns on open, without losing rows.
+///
+/// The failure this guards against is silent: a missing column makes every
+/// task write fail at runtime, long after the upgrade looked successful.
+#[test]
+fn test_task_columns_are_added_to_an_older_database() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("grafium.db");
+
+    // Build the pre-widening shape by hand, with a row in it.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                block_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL DEFAULT 'TODO',
+                scheduled_date TEXT,
+                deadline_date TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO tasks (id, block_id, state, created_at, updated_at)
+            VALUES ('t1', 'b1', 'TODO', 1, 1);",
+        )
+        .unwrap();
+    }
+
+    Database::new(&path).unwrap();
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for column in [
+        "scheduled_time",
+        "deadline_time",
+        "repeat_rule",
+        "priority",
+        "closed_at",
+    ] {
+        let exists: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?1")
+            .unwrap()
+            .exists([column])
+            .unwrap();
+        assert!(exists, "column {column} must be added on open");
+    }
+
+    let kept: i64 = conn
+        .query_row("SELECT count(*) FROM tasks WHERE block_id = 'b1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "the existing task must survive the migration");
+
+    // Opening again must be a no-op rather than an error.
+    Database::new(&path).unwrap();
+}
