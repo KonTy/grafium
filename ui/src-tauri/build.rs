@@ -16,6 +16,16 @@ fn main() {
         bundle_native_libs();
     }
 
+    // The frontend is embedded into the binary by `generate_context!` at
+    // compile time, but a proc macro cannot tell Cargo what it read. Cargo
+    // also stops watching the package as soon as a build script emits any
+    // `rerun-if-changed`, which `bundle_native_libs` does — so without this,
+    // changing only frontend files rebuilt nothing and the binary silently
+    // kept serving the previous UI. That failure is invisible: the build
+    // succeeds, the app runs, and it is simply the old interface.
+    println!("cargo:rerun-if-changed=../dist");
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+
     tauri_build::build();
 }
 

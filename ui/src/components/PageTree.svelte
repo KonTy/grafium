@@ -40,8 +40,6 @@
   let expanded = $state<Set<string>>(new Set());
   let focusedId = $state<string | null>(null);
   let revealedPageId = $state<string | null>(null);
-  let revealedNodes: PageTreeViewNode[] | null = $state(null);
-  let prunedNodes: PageTreeViewNode[] | null = $state(null);
   let loadedStorageKey = $state<string | null>(null);
   const itemElements = new Map<string, HTMLButtonElement>();
 
@@ -76,21 +74,27 @@
     );
   });
 
+  // Drop expansion state for branches that no longer exist.
+  //
+  // Deliberately idempotent rather than guarded by "have I seen this array
+  // before": pruning an already-pruned set changes nothing, so the effect
+  // settles after one pass on its own. The previous version compared array
+  // identity, which silently depended on the caller passing the *same* array
+  // back every time — the moment one sorted the tree (a new array each render)
+  // the guard never matched, the effect wrote state it also read, and Svelte
+  // aborted with `effect_update_depth_exceeded`, freezing the whole view.
   $effect(() => {
-    const branches = branchIds;
-    if (nodes.length === 0 || prunedNodes === nodes) return;
-    prunedNodes = nodes;
-    const next = pruneExpansionState(expanded, branches);
+    if (nodes.length === 0) return;
+    const next = pruneExpansionState(expanded, branchIds);
     if (next.size !== expanded.size) expanded = next;
   });
 
   $effect(() => {
     const pageId = selectedPageId;
-    if (
-      !pageId
-      || (revealedPageId === pageId && revealedNodes === nodes)
-      || nodes.length === 0
-    ) return;
+    // Keyed on the page alone. Including the node array meant re-revealing
+    // whenever the tree was rebuilt, which also re-expanded ancestors the
+    // reader had deliberately collapsed.
+    if (!pageId || revealedPageId === pageId || nodes.length === 0) return;
     const ancestors = findAncestorIdsForPage(
       nodes,
       pageId,
@@ -99,11 +103,10 @@
     );
     if (ancestors === null) return;
     revealedPageId = pageId;
-    revealedNodes = nodes;
     if (ancestors.length === 0) return;
     const next = new Set(expanded);
     for (const id of ancestors) next.add(id);
-    expanded = next;
+    if (next.size !== expanded.size) expanded = next;
   });
 
   $effect(() => {

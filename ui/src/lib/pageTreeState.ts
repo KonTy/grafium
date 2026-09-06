@@ -196,6 +196,14 @@ export function findAncestorIdsForPage<TNode extends TreeNodeLike<TNode>>(
   return ancestors;
 }
 
+/**
+ * Drop expansion state for branches that no longer exist.
+ *
+ * Idempotent, and the tree component depends on that: it prunes from an effect
+ * that both reads and writes the expansion set, so pruning an already-pruned
+ * set has to be a no-op or the effect never settles and Svelte tears the view
+ * down with `effect_update_depth_exceeded`.
+ */
 export function pruneExpansionState(
   expanded: ReadonlySet<string>,
   branchIds: ReadonlySet<string>,

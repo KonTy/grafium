@@ -413,3 +413,30 @@ describe("sortTree", () => {
     expect(sortTree([], "recent")).toEqual([]);
   });
 });
+
+describe("pruneExpansionState idempotency", () => {
+  // The tree prunes from an effect that both reads and writes the expansion
+  // set. If a second pass could still change the set, that effect would never
+  // settle — Svelte aborts with `effect_update_depth_exceeded` and stops
+  // updating the view, which looks like every button in All Pages going dead.
+  it("changes nothing on a second pass", () => {
+    const branches = new Set(["a", "b"]);
+    const once = pruneExpansionState(new Set(["a", "gone", "b", "also-gone"]), branches);
+    const twice = pruneExpansionState(once, branches);
+    expect([...once].sort()).toEqual(["a", "b"]);
+    expect(twice.size).toBe(once.size);
+    expect([...twice].sort()).toEqual([...once].sort());
+  });
+
+  it("is a no-op when nothing is stale", () => {
+    const branches = new Set(["a"]);
+    const expanded = new Set(["a"]);
+    expect(pruneExpansionState(expanded, branches).size).toBe(expanded.size);
+  });
+
+  it("empties the set when every branch is gone", () => {
+    const once = pruneExpansionState(new Set(["a", "b"]), new Set());
+    expect(once.size).toBe(0);
+    expect(pruneExpansionState(once, new Set()).size).toBe(0);
+  });
+});
