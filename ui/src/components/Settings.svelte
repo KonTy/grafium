@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
   import { keymap_manager } from "../lib/keymap";
   import type { Shortcut } from "../lib/keymap";
@@ -40,6 +40,37 @@
   let orphanedAssets = $state<OrphanedAsset[]>([]);
   let assetScanDone = $state(false);
   let assetDeleting = $state(false);
+
+  let backfillPreview = $state<import("../lib/api").BackfillReport | null>(null);
+  let backfillResult = $state<import("../lib/api").BackfillReport | null>(null);
+  let backfillBusy = $state(false);
+  let backfillError = $state("");
+
+  async function previewBackfill() {
+    backfillBusy = true;
+    backfillError = "";
+    backfillResult = null;
+    try {
+      backfillPreview = await backfillTaskCompletions(true);
+    } catch (e) {
+      backfillError = String(e);
+    } finally {
+      backfillBusy = false;
+    }
+  }
+
+  async function runBackfill() {
+    backfillBusy = true;
+    backfillError = "";
+    try {
+      backfillResult = await backfillTaskCompletions(false);
+      backfillPreview = null;
+    } catch (e) {
+      backfillError = String(e);
+    } finally {
+      backfillBusy = false;
+    }
+  }
 
   async function scanOrphanedAssets() {
     try {
@@ -486,6 +517,53 @@
       <span class="section-title">Asset Cleanup</span>
     </summary>
     <div class="section-content">
+      <!-- Completion history rescue.
+           Tasks finished before completions were written to disk have their
+           timestamp only in the database, where it does not survive a rebuild
+           or a move to another machine. This copies it into the markdown. It
+           edits notes in bulk, so it previews first and copies the graph
+           before writing. -->
+      <p class="setting-desc">
+        Tasks completed before Grafium recorded completions in your files still have
+        their timestamp in the database only, where it will not survive a rebuild or
+        a move to another machine. This writes them into the markdown.
+      </p>
+      <button class="sync-btn" onclick={previewBackfill} disabled={backfillBusy}>
+        {backfillBusy ? "Working…" : "Check what would change"}
+      </button>
+
+      {#if backfillError}
+        <p class="setting-desc" style="margin-top: 8px; color: var(--danger);">{backfillError}</p>
+      {/if}
+
+      {#if backfillPreview}
+        {#if backfillPreview.tasks_updated === 0}
+          <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">
+            Nothing to do — every completed task already records when it was finished.
+          </p>
+        {:else}
+          <p class="setting-desc" style="margin-top: 8px;">
+            {backfillPreview.tasks_updated} task{backfillPreview.tasks_updated === 1 ? "" : "s"}
+            across {backfillPreview.pages_scanned} page{backfillPreview.pages_scanned === 1 ? "" : "s"}
+            would gain a completion time. Your graph is copied first.
+          </p>
+          <button class="sync-btn" onclick={runBackfill} disabled={backfillBusy}>
+            {backfillBusy ? "Writing…" : `Back up and write ${backfillPreview.tasks_updated}`}
+          </button>
+        {/if}
+      {/if}
+
+      {#if backfillResult}
+        <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">
+          Wrote {backfillResult.tasks_updated} completion time{backfillResult.tasks_updated === 1 ? "" : "s"}.
+          {#if backfillResult.backup_path}
+            <br />Backup: <code>{backfillResult.backup_path}</code>
+          {/if}
+        </p>
+      {/if}
+
+      <hr class="setting-divider" />
+
       <p class="setting-desc">Find and remove images in assets/ that are no longer referenced by any block.</p>
       <button class="sync-btn" onclick={scanOrphanedAssets}>
         {assetScanDone ? "Re-scan" : "Scan for orphaned assets"}
@@ -1099,6 +1177,12 @@
     color: var(--text-muted);
     font-size: 11px;
     white-space: nowrap;
+  }
+
+  .setting-divider {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 18px 0;
   }
 
   .orphan-delete {

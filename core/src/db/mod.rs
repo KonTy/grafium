@@ -11,7 +11,7 @@ mod properties;
 mod raw_query;
 mod retrieval;
 mod schema;
-mod tasks;
+pub mod tasks;
 
 use crate::error::Result;
 use r2d2::{Pool, PooledConnection};

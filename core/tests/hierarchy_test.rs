@@ -594,3 +594,162 @@ fn test_a_repeating_task_reopens_on_its_next_date() {
         "its date must have moved on:\n{on_disk}"
     );
 }
+
+// ─── Flow statistics ─────────────────────────────────────────────────────────
+
+/// The Tasks dashboard numbers, computed from real transitions.
+///
+/// These are the metrics chosen over a streak counter and a procrastination
+/// score: elapsed time rather than a score kept against the reader.
+#[test]
+fn test_flow_stats_measure_real_work() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+
+    let make = |title: &str| {
+        graph
+            .create_block(
+                &page.id,
+                None,
+                0,
+                title,
+                grafium_core::models::BlockType::Text,
+                serde_json::json!({}),
+            )
+            .unwrap()
+    };
+    use grafium_core::models::TaskState;
+
+    // Started and finished: contributes a cycle time and a wait time.
+    let a = make("TODO Ship the thing");
+    graph.update_task_state(&a.id, &TaskState::Doing).unwrap();
+    graph.update_task_state(&a.id, &TaskState::Done).unwrap();
+
+    // Finished without ever being started: no cycle time to measure.
+    let b = make("TODO Quick fix");
+    graph.update_task_state(&b.id, &TaskState::Done).unwrap();
+
+    // Still open: counts towards the open total and the oldest-open age.
+    make("TODO Someday");
+
+    let stats = graph.db.task_flow_stats(8).unwrap();
+    assert_eq!(stats.done_count, 2);
+    assert_eq!(stats.open_count, 1);
+    assert!(stats.throughput_7d > 0.0, "two completions today should register");
+    assert_eq!(stats.weekly_completions.len(), 8);
+    assert_eq!(
+        stats.weekly_completions.last().copied(),
+        Some(2),
+        "both completions land in the current week"
+    );
+    assert!(
+        stats.by_page.iter().any(|(title, n)| title == "work" && *n == 2),
+        "completions are attributed to their page: {:?}",
+        stats.by_page
+    );
+    assert!(stats.oldest_open_days.is_some());
+}
+
+/// On-time rate only counts tasks that actually had a deadline.
+#[test]
+fn test_on_time_rate_ignores_tasks_without_a_deadline() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    use grafium_core::models::TaskState;
+
+    // No deadline at all — must not drag the rate down.
+    let plain = graph
+        .create_block(&page.id, None, 0, "TODO No deadline",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&plain.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, None);
+
+    // Finished comfortably before a deadline a long way off.
+    let timely = graph
+        .create_block(&page.id, None, 1, "TODO Beat the deadline\nDEADLINE: <2099-01-01 Fri>",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&timely.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(1.0));
+
+    // And one finished long after its deadline.
+    let late = graph
+        .create_block(&page.id, None, 2, "TODO Missed it\nDEADLINE: <2000-01-01 Sat>",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&late.id, &TaskState::Done).unwrap();
+    assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(0.5));
+}
+
+// ─── Backfilling completion history ──────────────────────────────────────────
+
+/// Completions recorded before they were written to disk are moved into files.
+///
+/// This edits notes in bulk and the notes are the only copy that exists, so the
+/// behaviour that matters is: report before touching anything, never overwrite
+/// a completion the file already records, and be safe to run twice.
+#[test]
+fn test_backfill_writes_missing_completion_times() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    use grafium_core::models::TaskState;
+
+    let block = graph
+        .create_block(&page.id, None, 0, "TODO Old finished thing",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph.update_task_state(&block.id, &TaskState::Done).unwrap();
+
+    // Strip the CLOSED: line to recreate a task finished before this existed,
+    // leaving its completion event behind in the database.
+    let stripped: String = graph
+        .db
+        .get_block_by_id(&block.id)
+        .unwrap()
+        .content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("CLOSED:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    graph.update_block(&block.id, &stripped, None).unwrap();
+    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+
+    // A dry run reports without writing and without a backup.
+    let preview = graph.backfill_task_completions(true).unwrap();
+    assert_eq!(preview.tasks_updated, 1);
+    assert!(preview.backup_path.is_none(), "a dry run must not copy anything");
+    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+
+    // The real run writes the line and leaves a backup behind.
+    let done = graph.backfill_task_completions(false).unwrap();
+    assert_eq!(done.tasks_updated, 1);
+    let backup = done.backup_path.expect("a bulk edit must take a backup first");
+    assert!(std::path::Path::new(&backup).exists(), "backup missing at {backup}");
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
+    assert!(on_disk.contains("CLOSED: ["), "{on_disk}");
+
+    // Running again must be a no-op rather than a second line.
+    let again = graph.backfill_task_completions(true).unwrap();
+    assert_eq!(again.tasks_updated, 0, "already-recorded completions are left alone");
+}
+
+/// A task whose file already records its completion is never rewritten.
+#[test]
+fn test_backfill_leaves_existing_completion_times_alone() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(&page.id, None, 0, "TODO Thing",
+            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .unwrap();
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let before = graph.db.get_block_by_id(&block.id).unwrap().content;
+    assert_eq!(graph.backfill_task_completions(true).unwrap().tasks_updated, 0);
+    graph.backfill_task_completions(false).unwrap();
+    assert_eq!(graph.db.get_block_by_id(&block.id).unwrap().content, before);
+}

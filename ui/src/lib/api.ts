@@ -142,6 +142,31 @@ export function cycleTaskState(blockId: string): Promise<string> {
   return invoke("cycle_task_state", { blockId });
 }
 
+export type { OpenTaskRow, TaskFlowStats } from "./taskBoard";
+
+/** Every open task with its dates, for grouping by when it is due. */
+export function listOpenTaskRows(): Promise<import("./taskBoard").OpenTaskRow[]> {
+  return invoke("list_open_task_rows", {});
+}
+
+/** Flow metrics for the Tasks dashboard. */
+export function taskFlowStats(weeks = 12): Promise<import("./taskBoard").TaskFlowStats> {
+  return invoke("task_flow_stats", { weeks });
+}
+
+export interface BackfillReport {
+  pages_scanned: number;
+  tasks_updated: number;
+  backup_path: string | null;
+  dry_run: boolean;
+}
+
+/** Write completion times held only in the database into the markdown.
+ *  Always call with `dryRun` first — a real run edits notes in bulk. */
+export function backfillTaskCompletions(dryRun: boolean): Promise<BackfillReport> {
+  return invoke("backfill_task_completions", { dryRun });
+}
+
 export function setTaskDate(blockId: string, kind: "scheduled" | "deadline", date: string | null): Promise<string> {
   return invoke("set_task_date", { blockId, kind, date });
 }

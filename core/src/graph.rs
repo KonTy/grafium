@@ -159,6 +159,23 @@ pub fn page_asset_dir(root: &Path, file_path: &str) -> Option<PathBuf> {
     (canon_parent.starts_with(&canon_root) && canon_parent.is_dir()).then_some(canon_parent)
 }
 
+
+/// Copy a directory tree. Used to snapshot a graph before editing it in bulk.
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else if entry.file_type()?.is_file() {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a graph-relative asset reference to a real file inside `root`.
 ///
 /// Tries the reference as given first. If that misses and the reference points
@@ -189,6 +206,15 @@ pub fn resolve_asset_path(root: &Path, rel: &str) -> Option<PathBuf> {
         let target = root.join(candidate).canonicalize().ok()?;
         (target.starts_with(&canon_root) && target.is_file()).then_some(target)
     })
+}
+
+
+/// What a completion backfill did, or would do.
+#[derive(Debug, Clone, Default)]
+pub struct BackfillReport {
+    pub pages_scanned: usize,
+    pub tasks_updated: usize,
+    pub backup_path: Option<String>,
 }
 
 impl Graph {
@@ -994,6 +1020,96 @@ impl Graph {
         }
     }
 
+
+
+    /// Write completion times that exist only in the database into the files.
+    ///
+    /// Completions recorded before they were written to disk live only in
+    /// `task_events`. That table survives a re-index, but not a rebuilt
+    /// database or a move to another machine — so this walks it and gives each
+    /// finished task the `CLOSED:` line it should have had.
+    ///
+    /// Only ever *adds* a line to a task that has none. A task that already
+    /// records its completion is left exactly as it is, so running this twice
+    /// changes nothing the second time.
+    ///
+    /// `dry_run` reports what would change and writes nothing. A real run
+    /// copies the whole graph first, because this edits notes in bulk and the
+    /// notes are the only copy that exists.
+    pub fn backfill_task_completions(&self, dry_run: bool) -> Result<BackfillReport> {
+        use crate::parser::task;
+        use chrono::TimeZone;
+
+        let mut report = BackfillReport::default();
+
+        // Every DONE task that has a recorded completion event.
+        let completions = self.db.completion_times_for_backfill()?;
+        if completions.is_empty() {
+            return Ok(report);
+        }
+
+        if !dry_run {
+            report.backup_path = Some(self.backup_graph()?);
+        }
+
+        let mut seen_pages = std::collections::HashSet::new();
+        for (block_id, closed_ms) in completions {
+            let Ok(block) = self.db.get_block_by_id(&block_id) else {
+                continue;
+            };
+            seen_pages.insert(block.page_id.clone());
+
+            // Never overwrite a completion the file already records.
+            if task::parse_fields(&block.content).closed_at.is_some() {
+                continue;
+            }
+            let Some(at) = chrono::Local.timestamp_millis_opt(closed_ms).single() else {
+                continue;
+            };
+            let marker = task::current_marker(&block.content);
+            if marker.is_empty() {
+                continue;
+            }
+
+            report.tasks_updated += 1;
+            if dry_run {
+                continue;
+            }
+
+            let new_content = task::apply_state_change(
+                &block.content,
+                &marker,
+                &marker,
+                at.naive_local(),
+            );
+            let page = self.db.get_page_by_id(&block.page_id)?;
+            self.db.update_block(&block_id, &new_content, None)?;
+            let updated = self.db.get_block_by_id(&block_id)?;
+            let _ = self.write_single_block_update_to_disk(&page, &updated)?;
+            self.db.set_task_closed_at(&block_id, Some(closed_ms))?;
+        }
+
+        report.pages_scanned = seen_pages.len();
+        Ok(report)
+    }
+
+    /// Copy the whole graph beside itself before a bulk edit.
+    fn backup_graph(&self) -> Result<String> {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let dest = self
+            .root_dir
+            .parent()
+            .unwrap_or(&self.root_dir)
+            .join(format!(
+                "{}-backup-{stamp}",
+                self.root_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("graph")
+            ));
+        copy_dir_recursive(&self.root_dir, &dest)?;
+        Ok(dest.to_string_lossy().to_string())
+    }
 
     /// Register (or clear) the task row for a block from its own text.
     ///
