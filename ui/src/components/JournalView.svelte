@@ -7,15 +7,35 @@
     restorePageTitle?: string;
     restoreRequestId?: number;
     onNavigate?: (target: string) => void;
+    onActivePageChange?: (page: Page | null) => void;
+    onPageDeleted?: () => void;
   }
 
-  let { restorePageTitle = "", restoreRequestId = 0, onNavigate }: Props = $props();
+  let { restorePageTitle = "", restoreRequestId = 0, onNavigate, onActivePageChange, onPageDeleted }: Props = $props();
 
   let journalPages: Page[] = $state([]);
   let loading = $state(true);
   let loadingMore = $state(false);
   let hasMore = $state(true);
   let bottomSentinel: HTMLDivElement | null = $state(null);
+
+  // Journals are a scrolling feed of many day-pages rather than one "current page", so the
+  // Reference/Knowledge panel needs to know which entry is actually in view to enable
+  // "Summarize this Page" / "Summarize Selection" while browsing the journal.
+  const visibilityRatios = new Map<string, number>();
+
+  function reportMostVisibleEntry() {
+    let bestId: string | null = null;
+    let bestRatio = 0;
+    for (const [id, ratio] of visibilityRatios) {
+      if (ratio > bestRatio) {
+        bestRatio = ratio;
+        bestId = id;
+      }
+    }
+    const active = bestId ? journalPages.find((page) => page.id === bestId) ?? null : null;
+    onActivePageChange?.(active);
+  }
 
   interface ContextMenu {
     x: number;
@@ -74,6 +94,38 @@
     return () => observer.disconnect();
   });
 
+  let visibilityObserver: IntersectionObserver | null = null;
+
+  /** Svelte action: tracks how much of a journal-entry is on-screen so we can report the
+   * "most visible" one as the active page for the Reference/Knowledge panel. */
+  function trackVisibility(node: HTMLElement, pageId: string) {
+    if (!visibilityObserver) {
+      const root = node.closest(".main-content");
+      visibilityObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const id = (entry.target as HTMLElement).dataset.pageId;
+            if (!id) continue;
+            visibilityRatios.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+          }
+          reportMostVisibleEntry();
+        },
+        { root, threshold: [0, 0.1, 0.25, 0.5, 0.75, 1] }
+      );
+    }
+
+    node.dataset.pageId = pageId;
+    visibilityObserver.observe(node);
+
+    return {
+      destroy() {
+        visibilityObserver?.unobserve(node);
+        visibilityRatios.delete(pageId);
+        reportMostVisibleEntry();
+      },
+    };
+  }
+
   $effect(() => {
     function closeMenu() {
       contextMenu = null;
@@ -111,6 +163,9 @@
 
       const next = await listJournalPages(1, journalPages.length);
       hasMore = next.length > 0;
+      // Ask App.svelte to refresh the sidebar's Favorites + Recent Pages
+      // so the just-deleted journal entry doesn't linger there.
+      onPageDeleted?.();
     } catch (e) {
       console.error("Failed to delete journal page:", e);
       alert("Failed to delete journal page.");
@@ -195,6 +250,7 @@
         id={`journal-page-${page.title}`}
         data-page-title={page.title}
         oncontextmenu={(e) => handleDateRightClick(e, page)}
+        use:trackVisibility={page.id}
       >
         <PageContent {page} compact />
       </div>

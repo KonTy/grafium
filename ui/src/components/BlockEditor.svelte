@@ -20,6 +20,12 @@
     pageId: string;
     pageTitle?: string;
     depth?: number;
+    /// Per-ancestor-level flags for drawing the vertical "thread" guide line
+    /// (see `getAncestorGuides` in pageContentVirtualization.ts). Index i
+    /// corresponds to indent level i; true draws a full-height line at that
+    /// level's column, false/undefined draws nothing (that ancestor has no
+    /// more siblings below, so there's nothing to visually connect to).
+    guides?: boolean[];
     focused?: boolean;
     selected?: boolean;
     hasChildren?: boolean;
@@ -40,6 +46,7 @@
     pageId,
     pageTitle = "",
     depth = 0,
+    guides = [],
     focused = false,
     selected = false,
     hasChildren = false,
@@ -1066,11 +1073,26 @@
   class:selected
   class:code-block={isCodeBlock !== null}
   style="padding-left: {depth * 24}px"
+  data-block-id={block.id}
 >
+  {#if guides.length > 0}
+    <div class="indent-guides" aria-hidden="true">
+      {#each guides as active, level (level)}
+        {#if active}
+          <span class="indent-guide-line" style={`left: ${level * 24 + 10}px`}></span>
+        {/if}
+      {/each}
+    </div>
+  {/if}
   {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== "" && !isQuoteBlock}
     <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
       e.stopPropagation();
-      if (hasChildren) {
+      // A plain click on a bullet with children collapses/expands it (existing
+      // behavior). But shift/ctrl/cmd-click should always select the block for
+      // multi-select — otherwise header/parent blocks (which always have
+      // children) could never be added to a selection, and the "Delete
+      // selected" toolbar button would silently have nothing to act on.
+      if (hasChildren && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
         onToggleCollapse?.(block.id);
       } else {
         onBulletClick?.(block.id, e);
@@ -1187,6 +1209,7 @@
     border-radius: 4px;
     transition: background-color 0.1s;
     scroll-margin: 40px;
+    position: relative;
   }
 
   .block-item.editing {
@@ -1207,6 +1230,27 @@
     justify-content: center;
     flex-shrink: 0;
     cursor: pointer;
+  }
+
+  /* Bullet-threading hierarchy guide lines: a thin vertical line per
+     ancestor indent level, positioned under that ancestor's bullet, running
+     the full height of this row so consecutive sibling/child rows read as a
+     continuous connector (see getAncestorGuides in
+     pageContentVirtualization.ts for which levels get a line). Purely
+     decorative — never intercepts clicks. */
+  .indent-guides {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .indent-guide-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--text-secondary, currentColor);
+    opacity: 0.55;
   }
 
   .bullet {

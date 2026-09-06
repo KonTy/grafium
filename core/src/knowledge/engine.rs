@@ -42,6 +42,18 @@ pub struct KnowledgeEngine {
     /// instead of two different feature-namespaced ones a user would never
     /// guess at.
     models_root: PathBuf,
+    /// The exact error from the most recent failed attempt to load the
+    /// embedded local chat model (`ProviderType::HuggingFace`), if any —
+    /// `None` once a load succeeds. Surfaced via [`Self::llm_load_error`]
+    /// and [`HealthStatus::llm_load_error`] so Settings/the "Ask"/"Analyze"
+    /// UI can show the *actual* reason (e.g. "doesn't fit in available
+    /// RAM... try one of: ...") instead of a generic "AI engine not ready"
+    /// that gives the user nothing actionable — see the
+    /// `ProviderType::HuggingFace` branch of [`Self::initialize_providers`]
+    /// for where this gets set, and `LocalLlm::from_settings`'s docs for
+    /// why a load failure is never silently papered over with a different
+    /// model instead.
+    llm_load_error: Option<String>,
 }
 
 impl KnowledgeEngine {
@@ -64,6 +76,7 @@ impl KnowledgeEngine {
             registry: RwLock::new(registry),
             data_dir: data_dir.to_path_buf(),
             models_root: data_dir.to_path_buf(),
+            llm_load_error: None,
         };
 
         if config.enabled {
@@ -84,6 +97,7 @@ impl KnowledgeEngine {
 
     /// Initialize AI providers based on config.
     fn initialize_providers(&mut self) -> Result<()> {
+        self.llm_load_error = None;
         match &self.config.mode {
             AiMode::Local => {
                 if let Some(local) = &self.config.local {
@@ -136,7 +150,15 @@ impl KnowledgeEngine {
                                 // error and lets the user retry (e.g. after
                                 // freeing VRAM or picking a smaller model)
                                 // without restarting the app.
-                                match crate::ai::providers::local_llm::LocalLlm::from_config(
+                                //
+                                // `LocalLlmProcess` (not `LocalLlm`
+                                // directly) — runs the exact same model-
+                                // loading/generation logic in a separate
+                                // `grafium-llm-worker` process, so a native
+                                // llama.cpp crash (a real, observed failure
+                                // mode — see that module's docs) can never
+                                // take the whole app down with it.
+                                match crate::ai::providers::local_llm_process::LocalLlmProcess::from_config(
                                     &self.config,
                                     &self.models_root,
                                 ) {
@@ -148,6 +170,7 @@ impl KnowledgeEngine {
                                              resolved — check the model file, available VRAM, \
                                              and the \"GPU layers\" setting): {e}"
                                         );
+                                        self.llm_load_error = Some(e.to_string());
                                     }
                                 }
                                 // Best-effort: an embedding model is a
@@ -355,6 +378,24 @@ impl KnowledgeEngine {
         self.config.enabled && self.llm.is_some()
     }
 
+    /// The actual reason the embedded local chat model isn't loaded, if
+    /// it failed rather than never having been attempted — see
+    /// [`Self::initialize_providers`]'s `ProviderType::HuggingFace` branch
+    /// for where this is set. `None` whenever `self.llm` is loaded, or
+    /// when a different provider (cloud, Ollama, ...) is configured.
+    pub fn llm_load_error(&self) -> Option<&str> {
+        self.llm_load_error.as_deref()
+    }
+
+    /// Direct handle to the underlying [`LlmProvider`] so callers with a
+    /// legitimate need to talk to it out-of-band (e.g. the Tauri
+    /// `ai_cancel_operation` command, which has to hard-abort an
+    /// in-flight local worker) can do so without going through a task
+    /// method. Returns `None` when no chat LLM is loaded.
+    pub fn llm_provider(&self) -> Option<&dyn LlmProvider> {
+        self.llm.as_ref().map(|llm| llm.as_ref())
+    }
+
     /// Health check — verify all providers are reachable.
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let llm_ok = if let Some(llm) = &self.llm {
@@ -376,6 +417,7 @@ impl KnowledgeEngine {
             vector_store_available: self.vector_store.is_some(),
             vector_count,
             mode: self.config.mode.clone(),
+            llm_load_error: self.llm_load_error.clone(),
         })
     }
 
@@ -461,6 +503,7 @@ impl KnowledgeEngine {
         blocks: &[(String, String)], // (block_id, content)
         graph_id: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
+        cancel: &crate::cancel::CancellationToken,
     ) -> Result<PageReferencesMeta> {
         let llm = self
             .llm
@@ -485,6 +528,7 @@ impl KnowledgeEngine {
                 embedder.as_ref(),
                 store.as_ref(),
                 on_progress,
+                cancel,
             )
             .await
     }
@@ -501,14 +545,21 @@ impl KnowledgeEngine {
         title: &str,
         full_text: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
+        cancel: &crate::cancel::CancellationToken,
     ) -> Result<PageSummary> {
         let llm = self
             .llm
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        crate::ai::references::generate_page_summary(title, full_text, llm.as_ref(), on_progress)
-            .await
+        crate::ai::references::generate_page_summary(
+            title,
+            full_text,
+            llm.as_ref(),
+            on_progress,
+            cancel,
+        )
+        .await
     }
 
     /// Actually researches `title`/`seed_text` on the open internet — plans
@@ -523,6 +574,7 @@ impl KnowledgeEngine {
         title: &str,
         seed_text: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
+        cancel: &crate::cancel::CancellationToken,
     ) -> Result<crate::ai::web_research::WebResearchResult> {
         let llm = self
             .llm
@@ -531,7 +583,7 @@ impl KnowledgeEngine {
 
         let browser = crate::scraping::HttpBrowserDriver::new();
         crate::ai::web_research::WebResearchEngine::new(llm.as_ref(), &browser)
-            .research(title, seed_text, on_progress)
+            .research(title, seed_text, on_progress, cancel)
             .await
     }
 
@@ -541,7 +593,20 @@ impl KnowledgeEngine {
     /// configured — the Embedded (llama.cpp) local provider is chat-only,
     /// so requiring semantic search here would make "Ask" completely
     /// unusable for it even though the LLM itself works fine.
-    pub async fn ask(&self, question: &str, graph_id: Option<&str>) -> Result<String> {
+    ///
+    /// `graph_context`, when provided, is a short block of graph-structure
+    /// facts (page/link counts, most-connected page titles) gathered by the
+    /// caller from the live graph database — the knowledge engine itself
+    /// only has a vector store, not the page/link tables, so it can't
+    /// compute this on its own. Passing it in lets the assistant answer
+    /// graph-shaped questions ("how many notes do I have", "what's my most
+    /// connected topic") instead of just chunk-similarity questions.
+    pub async fn ask(
+        &self,
+        question: &str,
+        graph_id: Option<&str>,
+        graph_context: Option<&str>,
+    ) -> Result<String> {
         let llm = self
             .llm
             .as_ref()
@@ -555,11 +620,28 @@ impl KnowledgeEngine {
         };
 
         if results.is_empty() {
-            // No context found, answer directly.
-            let messages = vec![crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::User,
-                content: question.to_string(),
-            }];
+            // No chunk context found, but we may still have graph stats.
+            let messages = if let Some(graph_context) = graph_context.filter(|s| !s.is_empty()) {
+                vec![
+                    crate::ai::traits::ChatMessage {
+                        role: crate::ai::traits::MessageRole::System,
+                        content: format!(
+                            "You are a knowledge assistant with access to structural facts about \
+                             the user's note graph (below). Use them when relevant.\n\n{}",
+                            graph_context
+                        ),
+                    },
+                    crate::ai::traits::ChatMessage {
+                        role: crate::ai::traits::MessageRole::User,
+                        content: question.to_string(),
+                    },
+                ]
+            } else {
+                vec![crate::ai::traits::ChatMessage {
+                    role: crate::ai::traits::MessageRole::User,
+                    content: question.to_string(),
+                }]
+            };
             return llm
                 .complete(&messages, &crate::ai::traits::CompletionOptions::default())
                 .await;
@@ -572,14 +654,19 @@ impl KnowledgeEngine {
             .map(|(i, r)| format!("[{}] From \"{}\":\n{}\n", i + 1, r.page_title, r.content))
             .collect();
 
+        let graph_context_block = graph_context
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("\nGraph structure facts:\n{}\n", s))
+            .unwrap_or_default();
+
         let messages = vec![
             crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::System,
                 content: format!(
                     "You are a knowledge assistant. Answer based on the following context from the user's notes. \
-                     Cite sources using [N] notation. If the context doesn't contain enough information, say so.\n\n\
-                     Context:\n{}",
-                    context
+                     Cite sources using [N] notation. If the context doesn't contain enough information, say so.\n\
+                     {}\nContext:\n{}",
+                    graph_context_block, context
                 ),
             },
             crate::ai::traits::ChatMessage {
@@ -587,6 +674,7 @@ impl KnowledgeEngine {
                 content: question.to_string(),
             },
         ];
+
 
         llm.complete(&messages, &crate::ai::traits::CompletionOptions::default())
             .await
@@ -617,6 +705,11 @@ pub struct HealthStatus {
     pub vector_store_available: bool,
     pub vector_count: usize,
     pub mode: AiMode,
+    /// The actual reason the embedded local chat model failed to load, if
+    /// any — see [`KnowledgeEngine::llm_load_error`]. Lets Settings show
+    /// e.g. "doesn't fit in available RAM, try one of: ..." instead of a
+    /// generic "not connected" when `llm_available` is `false`.
+    pub llm_load_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -806,6 +899,7 @@ mod tests {
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             models_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            llm_load_error: None,
         })
     }
 

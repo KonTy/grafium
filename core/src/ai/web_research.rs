@@ -25,7 +25,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::references::{clean_tag_terms, concept_parse_error, extract_json_object, TagJson};
+use crate::ai::references::{
+    append_no_think_directive, clean_tag_terms, concept_parse_error, extract_json_object,
+    strip_reasoning_block, TagJson,
+};
 use crate::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::parser::TagTerm;
@@ -127,9 +130,16 @@ impl<'a> WebResearchEngine<'a> {
         title: &str,
         seed_text: &str,
         progress: &mut (dyn FnMut(&str) + Send),
+        cancel: &crate::cancel::CancellationToken,
     ) -> Result<WebResearchResult> {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         progress("Planning search queries...");
         let queries = self.plan_queries(title, seed_text).await?;
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         if queries.is_empty() {
             return Err(CoreError::Other(
                 "The AI didn't produce any search queries for this topic.".to_string(),
@@ -140,6 +150,9 @@ impl<'a> WebResearchEngine<'a> {
         let mut candidates: Vec<WebSearchResult> = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
         for query in &queries {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
             let results = web_search(self.browser, query, self.config.results_per_query).await?;
             for result in results {
                 if seen_urls.insert(result.url.clone()) {
@@ -153,6 +166,9 @@ impl<'a> WebResearchEngine<'a> {
             ));
         }
 
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         progress("Choosing the most relevant sources...");
         let picked = self.pick_sources(title, &candidates).await?;
         if picked.is_empty() {
@@ -164,6 +180,9 @@ impl<'a> WebResearchEngine<'a> {
         let mut citations = Vec::new();
         let mut source_excerpts = Vec::new();
         for (i, candidate) in picked.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
             progress(&format!(
                 "Reading source {}/{}: {}",
                 i + 1,
@@ -195,9 +214,24 @@ impl<'a> WebResearchEngine<'a> {
         }
 
         progress("Synthesizing cited summary...");
-        let (title_answer, topics) = self
-            .synthesize(title, seed_text, &source_excerpts)
-            .await?;
+        // The synthesize step is the expensive one (full LLM generation
+        // with all source excerpts stuffed into the prompt), so race it
+        // against cancellation directly rather than only checking at
+        // step boundaries — otherwise a mid-synthesis cancel forces the
+        // user to wait out the whole generation before their click
+        // takes effect. The abort_in_flight() hard-kill matches
+        // `stream_completion`'s cancel branch: on `LocalLlmProcess`
+        // this kills the worker child, on cloud providers the dropped
+        // future closes the socket.
+        let synthesis = self.synthesize(title, seed_text, &source_excerpts);
+        tokio::pin!(synthesis);
+        let (title_answer, topics) = tokio::select! {
+            r = &mut synthesis => r?,
+            _ = cancel.cancelled() => {
+                self.llm.abort_in_flight();
+                return Err(CoreError::Cancelled);
+            }
+        };
 
         Ok(WebResearchResult {
             title_answer,
@@ -222,10 +256,14 @@ impl<'a> WebResearchEngine<'a> {
         );
         let messages = [ChatMessage {
             role: MessageRole::User,
-            content: prompt,
+            content: append_no_think_directive(&prompt),
         }];
         let options = CompletionOptions {
-            max_tokens: Some(200),
+            // See `references::concept_extraction_options`'s comment —
+            // same reasoning-model headroom rationale (a `<think>` block
+            // easily dwarfs a 200-token cap meant only for the queries
+            // themselves).
+            max_tokens: Some(2048),
             temperature: Some(0.2),
             system_prompt: Some(
                 "Reply with ONLY a JSON object of the form {\"queries\": [\"...\", ...]} — no \
@@ -236,7 +274,7 @@ impl<'a> WebResearchEngine<'a> {
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
-        let json_str = extract_json_object(raw.trim())?;
+        let json_str = extract_json_object(strip_reasoning_block(raw.trim()))?;
         let parsed: QueriesJson = serde_json::from_str(json_str)
             .map_err(|e| concept_parse_error(&format!("invalid search-query JSON: {e}"), &raw))?;
 
@@ -279,10 +317,11 @@ impl<'a> WebResearchEngine<'a> {
 
         let messages = [ChatMessage {
             role: MessageRole::User,
-            content: prompt,
+            content: append_no_think_directive(&prompt),
         }];
         let options = CompletionOptions {
-            max_tokens: Some(150),
+            // See `references::concept_extraction_options`'s comment.
+            max_tokens: Some(2048),
             temperature: Some(0.0),
             system_prompt: Some(
                 "Reply with ONLY a JSON object of the form {\"picks\": [<indices>]} — no other \
@@ -293,7 +332,7 @@ impl<'a> WebResearchEngine<'a> {
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
-        let json_str = extract_json_object(raw.trim())?;
+        let json_str = extract_json_object(strip_reasoning_block(raw.trim()))?;
         let parsed: PicksJson = serde_json::from_str(json_str)
             .map_err(|e| concept_parse_error(&format!("invalid source-pick JSON: {e}"), &raw))?;
 
@@ -343,17 +382,18 @@ impl<'a> WebResearchEngine<'a> {
 
         let messages = [ChatMessage {
             role: MessageRole::User,
-            content: prompt,
+            content: append_no_think_directive(&prompt),
         }];
         let options = CompletionOptions {
-            max_tokens: Some(1400),
+            // See `references::concept_extraction_options`'s comment.
+            max_tokens: Some(4096),
             temperature: Some(0.3),
             system_prompt: Some(RESEARCH_SYNTHESIS_PROMPT.to_string()),
             stop: None,
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
-        let trimmed = raw.trim();
+        let trimmed = strip_reasoning_block(raw.trim());
         let json_str = extract_json_object(trimmed)?;
         let parsed: SynthesisJson = serde_json::from_str(json_str).map_err(|error| {
             concept_parse_error(&format!("invalid research synthesis JSON: {error}"), trimmed)
@@ -522,9 +562,14 @@ mod tests {
         let engine = WebResearchEngine::new(&llm, &browser);
         let mut progress_log = Vec::new();
         let result = engine
-            .research("Does magnesium help sleep?", "Some seed text.", &mut |m| {
-                progress_log.push(m.to_string());
-            })
+            .research(
+                "Does magnesium help sleep?",
+                "Some seed text.",
+                &mut |m| {
+                    progress_log.push(m.to_string());
+                },
+                &crate::cancel::CancellationToken::disabled(),
+            )
             .await
             .unwrap();
 
@@ -558,7 +603,12 @@ mod tests {
 
         let engine = WebResearchEngine::new(&llm, &browser);
         let result = engine
-            .research("Some title", "seed", &mut |_| {})
+            .research(
+                "Some title",
+                "seed",
+                &mut |_| {},
+                &crate::cancel::CancellationToken::disabled(),
+            )
             .await
             .unwrap();
 
@@ -576,7 +626,12 @@ mod tests {
 
         let engine = WebResearchEngine::new(&llm, &browser);
         let err = engine
-            .research("Title", "seed", &mut |_| {})
+            .research(
+                "Title",
+                "seed",
+                &mut |_| {},
+                &crate::cancel::CancellationToken::disabled(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("No search results"));

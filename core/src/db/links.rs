@@ -113,6 +113,13 @@ impl Database {
         Ok(links)
     }
 
+    /// Total number of block-to-page links across the graph.
+    pub fn count_links(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM links", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
     /// Build a page-to-page graph for the Graph View.
     ///
     /// * `focus_page_id = Some(id)` → local graph: the focus page plus its direct
@@ -131,7 +138,6 @@ impl Database {
         focus_page_id: Option<&str>,
         node_limit: i64,
     ) -> Result<(Vec<(String, String, i64)>, Vec<(String, String, i64)>)> {
-        use rusqlite::OptionalExtension;
         use std::collections::{HashMap, HashSet, VecDeque};
         let conn = self.conn()?;
         let node_limit = node_limit.clamp(1, 2000);
@@ -171,33 +177,60 @@ impl Database {
             // a connected neighborhood. Picking the top-N pages purely by degree
             // yields no edges when links are sparse/random, because two arbitrary
             // hubs are almost never linked to each other.
-            let seed: Option<String> = conn
-                .query_row(
-                    "SELECT to_page_id FROM links
-                     GROUP BY to_page_id ORDER BY count(*) DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            //
+            // Self-loops (a page whose links all point back to itself — e.g. a
+            // page tagged with its own name thousands of times, like `#gre` on
+            // a huge flashcard page referencing itself) are excluded from both
+            // hub ranking and BFS expansion. Without this, a self-loop-heavy
+            // page can have the highest raw inbound count yet zero real
+            // neighbours, so the "busiest hub" BFS never leaves that one node
+            // and the graph view renders a single dot instead of the graph.
+            //
+            // If a component runs dry before `node_limit` is reached (e.g. the
+            // first hub's whole neighbourhood is smaller than the limit), keep
+            // seeding additional components from the next-busiest unvisited
+            // hub so the view still fills up instead of stopping early.
+            let mut seed_candidates: VecDeque<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT b.page_id
+                     FROM links l JOIN blocks b ON b.id = l.from_block_id
+                     WHERE l.to_page_id != b.page_id
+                     GROUP BY b.page_id
+                     ORDER BY count(*) DESC",
+                )?;
+                let result = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<VecDeque<_>, _>>()?;
+                result
+            };
 
-            if let Some(seed) = seed {
-                let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            // Cap per-node fan-out so one hub can't consume the whole budget.
+            let mut out = conn.prepare(
+                "SELECT DISTINCT l.to_page_id
+                 FROM links l JOIN blocks b ON b.id = l.from_block_id
+                 WHERE b.page_id = ?1 AND l.to_page_id != ?1 LIMIT 64",
+            )?;
+            let mut inb = conn.prepare(
+                "SELECT DISTINCT b.page_id
+                 FROM links l JOIN blocks b ON b.id = l.from_block_id
+                 WHERE l.to_page_id = ?1 AND b.page_id != ?1 LIMIT 64",
+            )?;
+
+            while node_ids.len() < node_limit as usize {
+                let mut next_seed = None;
+                while let Some(candidate) = seed_candidates.pop_front() {
+                    if !seen.contains(&candidate) {
+                        next_seed = Some(candidate);
+                        break;
+                    }
+                }
+                let Some(seed) = next_seed else { break };
+
                 let mut queue: VecDeque<String> = VecDeque::new();
                 seen.insert(seed.clone());
                 node_ids.push(seed.clone());
                 queue.push_back(seed);
-
-                // Cap per-node fan-out so one hub can't consume the whole budget.
-                let mut out = conn.prepare(
-                    "SELECT DISTINCT l.to_page_id
-                     FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE b.page_id = ?1 LIMIT 64",
-                )?;
-                let mut inb = conn.prepare(
-                    "SELECT DISTINCT b.page_id
-                     FROM links l JOIN blocks b ON b.id = l.from_block_id
-                     WHERE l.to_page_id = ?1 LIMIT 64",
-                )?;
 
                 'bfs: while let Some(cur) = queue.pop_front() {
                     if node_ids.len() >= node_limit as usize {
@@ -387,5 +420,71 @@ impl Database {
         }
 
         Ok((blocks_scanned, links_inserted))
+    }
+}
+
+#[cfg(test)]
+mod graph_data_tests {
+    use super::Database;
+    use crate::error::Result;
+    use crate::models::{BlockType, LinkType};
+    use serde_json::json;
+
+    /// Regression test for a bug where the global graph view rendered only a
+    /// single node. A page whose links are almost all self-referential (e.g.
+    /// a huge flashcard page tagged with its own name thousands of times) has
+    /// the highest raw inbound link count, so the old "seed from busiest hub"
+    /// BFS picked it first — but since every link from/to it pointed back to
+    /// itself, the BFS never found a real neighbour and stopped at one node,
+    /// even though a real, well-connected cluster of other pages existed.
+    #[test]
+    fn global_graph_skips_self_loop_hub_and_finds_the_real_cluster() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        // A page dominated by self-loops: far more inbound links than any
+        // other page, but none of them lead anywhere else.
+        let self_loop_page = db.create_page("Self Loop Hub", false)?;
+        for i in 0..50 {
+            let block = db.create_block(
+                &self_loop_page.id,
+                None,
+                i,
+                "self reference",
+                BlockType::Text,
+                json!({}),
+            )?;
+            db.insert_link(&block.id, &self_loop_page.id, LinkType::Tag)?;
+        }
+
+        // A genuinely connected cluster of pages with far fewer links each,
+        // but real edges between distinct pages.
+        let alpha = db.create_page("Alpha", false)?;
+        let beta = db.create_page("Beta", false)?;
+        let gamma = db.create_page("Gamma", false)?;
+
+        let block_a = db.create_block(&alpha.id, None, 0, "-> beta", BlockType::Text, json!({}))?;
+        db.insert_link(&block_a.id, &beta.id, LinkType::Page)?;
+        let block_b = db.create_block(&beta.id, None, 0, "-> gamma", BlockType::Text, json!({}))?;
+        db.insert_link(&block_b.id, &gamma.id, LinkType::Page)?;
+        let block_c = db.create_block(&gamma.id, None, 0, "-> alpha", BlockType::Text, json!({}))?;
+        db.insert_link(&block_c.id, &alpha.id, LinkType::Page)?;
+
+        let (nodes, edges) = db.graph_data(None, 200)?;
+
+        let node_ids: std::collections::HashSet<_> =
+            nodes.iter().map(|(id, _, _)| id.clone()).collect();
+        assert!(
+            node_ids.contains(&alpha.id) && node_ids.contains(&beta.id) && node_ids.contains(&gamma.id),
+            "expected the real alpha/beta/gamma cluster to be included, got: {:?}",
+            nodes
+        );
+        assert!(
+            nodes.len() > 1,
+            "graph view should not collapse to a single node, got: {:?}",
+            nodes
+        );
+        assert!(!edges.is_empty(), "expected real edges among the cluster");
+
+        Ok(())
     }
 }

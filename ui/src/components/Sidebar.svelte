@@ -130,6 +130,32 @@
     searchInputEl?.select();
   }
 
+  // Exposed to App.svelte via `bind:this` so the Ctrl+B "focus left sidebar"
+  // hotkey can jump straight into the sidebar's own search box, regardless
+  // of whether the sidebar was already visible.
+  export function focusSearch() {
+    void openSearch();
+  }
+
+  // Exposed to App.svelte: reload favorites + recent pages from disk.
+  // Called after a mutation that could affect them (page deletion in
+  // AllPages, etc.) so the sidebar drops stale entries immediately.
+  export async function refresh() {
+    await loadSidebar();
+  }
+
+  // Root <aside> element, bound in markup below. Used by `hasFocus()` so
+  // App.svelte's Ctrl+B handler can tell whether focus is already inside
+  // the sidebar (in which case the shortcut should close it instead of
+  // re-focusing it).
+  let rootEl: HTMLElement | null = $state(null);
+
+  // Exposed to App.svelte: true if the currently focused element (if any)
+  // lives inside this sidebar.
+  export function hasFocus(): boolean {
+    return !!rootEl && !!document.activeElement && rootEl.contains(document.activeElement);
+  }
+
   function toggleSearch() {
     if (showSearch) {
       showSearch = false;
@@ -194,7 +220,7 @@
   }
 </script>
 
-<aside class="sidebar">
+<aside class="sidebar" bind:this={rootEl}>
   <div class="sidebar-header">
     <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
     <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)">

@@ -20,11 +20,18 @@ static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
 
 /// Returns the shared process-wide llama.cpp backend handle, initializing
-/// it (and silencing llama.cpp/GGML's verbose stderr logging, which would
-/// otherwise corrupt a raw-mode terminal UI) on first use.
+/// it on first use. llama.cpp/GGML's own logs (buffer allocations, memory
+/// type selection, Vulkan driver errors, etc.) are routed through `tracing`
+/// rather than suppressed — the `tui` binary that also links this crate
+/// never installs a `tracing` subscriber, so these events are silently
+/// dropped there regardless; only the desktop app's subscriber (see
+/// `ui/src-tauri/src/lib.rs`) actually prints them, to `grafium.log`. This
+/// visibility is what lets us see e.g. `ggml_vulkan: ... memory allocation
+/// ... failed` lines that were previously invisible — critical for
+/// debugging the VRAM/driver crashes this local-LLM path is prone to.
 pub(crate) fn shared_backend() -> Arc<LlamaBackend> {
     INSTALL_LOGGING.call_once(|| {
-        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
     });
     BACKEND
         .get_or_init(|| Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend")))

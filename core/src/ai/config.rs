@@ -140,6 +140,26 @@ pub struct LocalLlmSettings {
     /// a GPU feature (`llm-local-vulkan`); ignored on CPU-only builds.
     /// `None` offloads every layer — the common "just use the GPU" case.
     pub gpu_layers: Option<u32>,
+    /// Whether llama.cpp is allowed to memory-map the model file
+    /// (`llama_model_params.use_mmap`).
+    ///
+    /// `None`: pick automatically — mmap OFF for CPU-only loads (so the
+    ///   RAM budget check up front is meaningful), mmap ON for GPU loads
+    ///   (avoids duplicating tensor bytes into RAM before they get copied
+    ///   to VRAM). Matches the historical behavior.
+    /// `Some(false)`: force mmap OFF regardless. Safer on unreliable
+    ///   storage (removable drives, network mounts, systems under heavy
+    ///   disk pressure) — an mmap page-fault that fails to fault in a
+    ///   page raises SIGBUS mid-generation and crashes the worker;
+    ///   disabling mmap makes the whole model resident up front so no
+    ///   later fault can fail. Slower initial load, higher peak RAM.
+    /// `Some(true)`: force mmap ON regardless. Fastest load; only pick
+    ///   this if you know your storage is reliable.
+    ///
+    /// The process wrapper (`LocalLlmProcess`) may also flip this to
+    /// `Some(false)` at runtime after a SIGBUS-flavored worker crash,
+    /// so a follow-up request auto-heals — see `handle_worker_crash`.
+    pub use_mmap: Option<bool>,
 }
 
 /// Settings for the embedded local embedding runtime (llama.cpp via

@@ -434,8 +434,36 @@ export interface LocalModelInfo {
   file_name: string;
   size_bytes: number;
   kind: "llm" | "whisper" | "embedding" | "unknown";
+  architecture: string | null;
+  description: string | null;
+  unstable_architecture: boolean;
+  // How comfortably this model is expected to run on the detected GPU —
+  // computed backend-side by comparing estimated VRAM need against
+  // `detectGpuInfo().total_vram_bytes`. "unknown" when GPU detection
+  // failed, in which case the UI shows no fit annotation. Only set for
+  // `kind === "llm"`; other kinds always report "unknown".
+  vram_fit: "fits" | "tight" | "wont-fit" | "unknown";
+  // Estimated VRAM needed (weights + KV cache + compute buffers). Used
+  // by the description pane to show "needs ~15 GB VRAM". Null when we
+  // wouldn't show it (non-LLM kind).
+  vram_needed_bytes: number | null;
 }
 
 export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {
   return invoke("list_local_models", { modelsDir });
+}
+
+// Best-effort report of the primary discrete GPU (name + total/free VRAM
+// + which command surfaced it). Empty/all-null on machines where nothing
+// worked — the UI treats that as "no annotations, don't lie about the
+// hardware".
+export interface GpuInfo {
+  name: string | null;
+  total_vram_bytes: number | null;
+  available_vram_bytes: number | null;
+  source: "none" | "nvidia-smi" | "rocm-smi" | "vulkaninfo" | "sysfs";
+}
+
+export function detectGpuInfo(): Promise<GpuInfo> {
+  return invoke("detect_gpu_info");
 }

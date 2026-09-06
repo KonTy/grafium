@@ -6,23 +6,60 @@ use grafium_core::ai::config::{
 };
 use grafium_core::ai::references::PageReferencesMeta;
 use grafium_core::ai::traits::SearchResult;
+use grafium_core::cancel::CancellationToken;
 use grafium_core::knowledge::engine::HealthStatus;
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
 use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::KnowledgeEngine;
 use grafium_core::model_library::LocalModelRef;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// Shared state for the knowledge engine.
 pub struct KnowledgeState {
     pub engine: Arc<RwLock<Option<KnowledgeEngine>>>,
+    /// Registry of cancellation tokens for in-flight AI operations, keyed
+    /// by the caller-supplied `operationId`. Populated when
+    /// `ai_generate_references` / `ai_summarize_selection` /
+    /// `ai_research_web` starts, cleared when it finishes. Drained by
+    /// `ai_cancel_operation` to signal the running command it should
+    /// stop and by [`LlmProvider::abort_in_flight`] to hard-kill the
+    /// local worker child (the only way to interrupt a llama.cpp
+    /// generation in progress).
+    ///
+    /// A plain `std::sync::Mutex` (not `tokio::sync::Mutex`) is
+    /// intentional: the critical section is a one-op HashMap update, so
+    /// blocking briefly is fine and *not* holding it across `.await`
+    /// avoids the risk of deadlocking with the engine's own RwLock. All
+    /// callers `.lock()` and immediately release before doing any await
+    /// work.
+    pub cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 const AI_INDEX_BATCH_SIZE: i64 = 100;
+
+/// Error message for commands that need the chat LLM ready (Ask, Analyze
+/// Selection, Web Research, ...) when it isn't. Includes the *actual*
+/// reason from `KnowledgeEngine::llm_load_error` when there is one (e.g.
+/// "doesn't fit in available RAM... try one of: ...") — the embedded local
+/// provider deliberately never silently substitutes a different model
+/// than the one configured (see `LocalLlm::from_settings`'s docs), so
+/// surfacing why here, instead of a bare generic message, is how the user
+/// finds out what to actually do about it instead of guessing.
+fn llm_not_ready_error(engine: &KnowledgeEngine) -> String {
+    match engine.llm_load_error() {
+        Some(reason) => format!(
+            "AI engine not ready: {reason}\n\n(Settings \u{2192} AI / Knowledge Engine)"
+        ),
+        None => "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge \
+                  Engine."
+            .to_string(),
+    }
+}
 
 /// Error message for commands that need semantic search (indexing, vector
 /// search, "research this page" references) when the engine's LLM is fine
@@ -32,8 +69,7 @@ const AI_INDEX_BATCH_SIZE: i64 = 100;
 /// loaded and working fine for chat.
 fn semantic_search_unavailable_error(engine: &KnowledgeEngine) -> String {
     if !engine.is_llm_ready() {
-        "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
-            .to_string()
+        llm_not_ready_error(engine)
     } else {
         "This needs a search embedding model, but none is configured yet. If you're using the \
          Embedded (llama.cpp) provider, download a GGUF embedding model (e.g. \
@@ -89,6 +125,20 @@ pub struct AiConfigPayload {
     pub local_base_url: Option<String>,
     pub local_api_key: Option<String>,
     pub local_model_path: Option<String>,
+    /// Context window size in tokens for the embedded (llama.cpp) local
+    /// LLM. `None` uses the model's own trained context length. See
+    /// `LocalLlmSettings::context_size`.
+    pub local_context_size: Option<u32>,
+    /// Number of transformer layers to offload to the GPU for the
+    /// embedded (llama.cpp) local LLM. `None` offloads every layer.
+    /// See `LocalLlmSettings::gpu_layers`.
+    pub local_gpu_layers: Option<u32>,
+    /// Whether llama.cpp is allowed to memory-map the model file for
+    /// the embedded local LLM. `None` uses the built-in heuristic
+    /// (mmap OFF for CPU-only, ON for GPU); `Some(false)` disables
+    /// mmap outright as a durable fix for repeated SIGBUS crashes on
+    /// unreliable storage. See `LocalLlmSettings::use_mmap`.
+    pub local_use_mmap: Option<bool>,
     /// GGUF embedding model file for the Embedded (llama.cpp) local
     /// provider — resolved against `ModelKind::Embedding` rather than
     /// `ModelKind::Llm`, so an "Embedded" provider can do semantic search /
@@ -169,7 +219,9 @@ pub async fn ai_set_config(
             model_ref: LocalModelRef {
                 model: payload.local_model_path,
             },
-            ..Default::default()
+            context_size: payload.local_context_size,
+            gpu_layers: payload.local_gpu_layers,
+            use_mmap: payload.local_use_mmap,
         },
         local_embedding: LocalEmbeddingSettings {
             model_ref: LocalModelRef {
@@ -263,6 +315,7 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
             vector_store_available: false,
             vector_count: 0,
             mode: AiMode::Local,
+            llm_load_error: None,
         })
     }
 }
@@ -379,12 +432,88 @@ pub async fn ai_search(
 
 // ─── References ──────────────────────────────────────────────────────────────
 
-#[tauri::command]
+/// RAII helper for the [`KnowledgeState::cancellations`] map: registers a
+/// token on construction and de-registers on drop. Guarantees the map
+/// stays clean even if the command errors out or is cancelled itself,
+/// because Rust runs `Drop` unconditionally at scope exit — so we don't
+/// leak dead tokens the next `cancel_operation` would then target.
+struct CancelGuard {
+    id: Option<String>,
+    slot: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+impl CancelGuard {
+    fn install(
+        slot: Arc<Mutex<HashMap<String, CancellationToken>>>,
+        id: Option<String>,
+    ) -> (Self, CancellationToken) {
+        let token = CancellationToken::new();
+        if let Some(ref id) = id {
+            slot.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), token.clone());
+        }
+        (Self { id, slot }, token)
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if let Some(id) = &self.id {
+            self.slot
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(id);
+        }
+    }
+}
+
+/// Signal cancellation of a running AI operation the frontend previously
+/// launched with an `operationId` — currently one of
+/// [`ai_generate_references`], [`ai_summarize_selection`],
+/// [`ai_research_web`], which all accept an optional `operationId` param.
+/// This looks the id up in [`KnowledgeState::cancellations`], flips its
+/// atomic latch, and hard-kills any in-flight local LLM worker so the
+/// C++ inference loop actually stops (it checks nothing between tokens
+/// otherwise). A no-op if the id doesn't match a live operation — safe
+/// to call from a slow "did the user press it twice" render.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ai_cancel_operation(
+    state: State<'_, KnowledgeState>,
+    operation_id: String,
+) -> Result<(), String> {
+    let token = state
+        .cancellations
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&operation_id)
+        .cloned();
+    if let Some(token) = token {
+        token.cancel();
+    }
+    // Also proactively hard-kill any current LLM worker. Cancelling the
+    // token alone is co-operative — the running command will honor it at
+    // its next `select!` branch — but the worker process's llama.cpp
+    // generation loop checks nothing between tokens, so without the
+    // kill the user's "cancel" would only take effect after the current
+    // generation finished naturally (i.e. never, for the hung-model
+    // case). See `LlmProvider::abort_in_flight` for the full rationale.
+    let engine_guard = state.engine.read().await;
+    if let Some(engine) = engine_guard.as_ref() {
+        if let Some(llm) = engine.llm_provider() {
+            llm.abort_in_flight();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn ai_generate_references(
     app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
     app_state: State<'_, crate::AppState>,
     page_id: String,
+    operation_id: Option<String>,
 ) -> Result<PageReferencesMeta, String> {
     let guard = state.engine.read().await;
     let engine = guard
@@ -421,6 +550,12 @@ pub async fn ai_generate_references(
         let _ = app.emit("ai-reference-progress", message);
     };
 
+    // RAII: this registers the cancel token in the shared map now and
+    // removes it when the guard drops (either at the end of this fn or
+    // on any early return). Prevents the map from accumulating dead
+    // entries that would then confuse the next `ai_cancel_operation`.
+    let (_guard, cancel) = CancelGuard::install(state.cancellations.clone(), operation_id);
+
     engine
         .generate_references(
             &page_id,
@@ -428,6 +563,7 @@ pub async fn ai_generate_references(
             &blocks_data,
             &graph_id,
             &mut emit_progress,
+            &cancel,
         )
         .await
         .map_err(|e| e.to_string())
@@ -445,6 +581,7 @@ pub async fn ai_summarize_selection(
     state: State<'_, KnowledgeState>,
     text: String,
     title: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<grafium_core::ai::references::PageSummary, String> {
     let guard = state.engine.read().await;
     let engine = guard
@@ -452,10 +589,7 @@ pub async fn ai_summarize_selection(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_llm_ready() {
-        return Err(
-            "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
-                .to_string(),
-        );
+        return Err(llm_not_ready_error(engine));
     }
 
     let mut emit_progress = move |message: &str| {
@@ -463,8 +597,10 @@ pub async fn ai_summarize_selection(
     };
     let title = title.unwrap_or_else(|| "Selected text".to_string());
 
+    let (_guard, cancel) = CancelGuard::install(state.cancellations.clone(), operation_id);
+
     engine
-        .summarize_text(&title, &text, &mut emit_progress)
+        .summarize_text(&title, &text, &mut emit_progress, &cancel)
         .await
         .map_err(|e| e.to_string())
 }
@@ -487,6 +623,7 @@ pub async fn ai_research_web(
     state: State<'_, KnowledgeState>,
     title: String,
     seed_text: String,
+    operation_id: Option<String>,
 ) -> Result<grafium_core::ai::web_research::WebResearchResult, String> {
     let guard = state.engine.read().await;
     let engine = guard
@@ -494,18 +631,17 @@ pub async fn ai_research_web(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_llm_ready() {
-        return Err(
-            "AI engine not ready — check configuration in Settings \u{2192} AI / Knowledge Engine."
-                .to_string(),
-        );
+        return Err(llm_not_ready_error(engine));
     }
 
     let mut emit_progress = move |message: &str| {
         let _ = app.emit("ai-web-research-progress", message);
     };
 
+    let (_guard, cancel) = CancelGuard::install(state.cancellations.clone(), operation_id);
+
     engine
-        .research_web(&title, &seed_text, &mut emit_progress)
+        .research_web(&title, &seed_text, &mut emit_progress, &cancel)
         .await
         .map_err(|e| e.to_string())
 }
@@ -526,21 +662,65 @@ pub fn text_wrap_known_terms(
     grafium_core::parser::wrap_known_terms_as_links(&content, &terms)
 }
 
+/// Details of a single "wrap known tags as `[[wiki-link]]`s" change made
+/// during a summary insert — enough to reverse or reapply it without
+/// re-parsing anything, so Ctrl-Z after "Insert into page" can restore
+/// each block's exact previous content and Ctrl-Y can put the wrapped
+/// version back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryWrapChange {
+    pub block_id: String,
+    pub previous_content: String,
+    pub new_content: String,
+}
+
+/// What `ai_insert_page_summary` did — returned so the frontend can push
+/// a matching undo action onto its stack (see `undoStack.ts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInsertSummaryResult {
+    /// The id of the freshly-created block that holds the summary text.
+    pub inserted_block_id: String,
+    /// The exact markdown that went into that block, kept so redo can
+    /// recreate it verbatim (topic ordering, formatting, tag-wrapping).
+    pub inserted_content: String,
+    /// The anchor block id the summary was placed after, or `None` when
+    /// it landed at the top of the page. Used by redo to put the block
+    /// back in roughly the same spot.
+    pub inserted_after_block_id: Option<String>,
+    /// Blocks whose existing content was rewritten to embed the new
+    /// `[[wiki-link]]`s. Both previous and new content are captured so
+    /// undo can restore, and redo can reapply.
+    pub wrap_changes: Vec<SummaryWrapChange>,
+}
+
 /// Inserts an AI-generated page summary (title answer + one paragraph per
-/// topic) as a new block at the very top of the page (right after the
-/// title), and wraps each topic's `tags` in place — as `[[wiki-link]]`s,
-/// substituting any `qualified` disambiguation phrase — across the page's
-/// existing block content wherever those terms already appear verbatim.
-/// Used by the "Insert into page" button in `ReferencePanel.svelte`, which
-/// only fires on explicit user action so repeated "Research this page"
-/// runs never duplicate content.
+/// topic) as a new block on the page, and wraps each topic's `tags` in
+/// place — as `[[wiki-link]]`s, substituting any `qualified` disambiguation
+/// phrase — across the page's existing block content wherever those terms
+/// already appear verbatim. Used by the "Insert into page" button in
+/// `ReferencePanel.svelte`, which only fires on explicit user action so
+/// repeated "Research this page" runs never duplicate content.
+///
+/// When `after_block_id` is provided (the id of the block the user last
+/// had a caret in), the summary is inserted immediately after that block
+/// as its next sibling — so the summary lands "at the cursor" wherever
+/// the user was reading. When it's `None` or an empty string, the summary
+/// falls back to the top of the page.
+///
+/// Returns an [`AiInsertSummaryResult`] describing everything that
+/// changed so the frontend can push a corresponding undo action —
+/// Ctrl-Z should reverse the whole operation, including the tag-wrap
+/// rewrites of unrelated pre-existing blocks.
 #[tauri::command(rename_all = "camelCase")]
 pub fn ai_insert_page_summary(
     app_state: State<'_, crate::AppState>,
     page_id: String,
     title_answer: Option<String>,
     topics: Vec<grafium_core::ai::references::TopicSummary>,
-) -> Result<(), String> {
+    after_block_id: Option<String>,
+) -> Result<AiInsertSummaryResult, String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
 
     let mut summary_text = String::new();
@@ -570,34 +750,210 @@ pub fn ai_insert_page_summary(
         }
     }
 
-    graph
-        .insert_block_at_top(&page_id, &summary_text)
-        .map_err(|e| e.to_string())?;
+    // Normalize an empty-string anchor id to None so callers that always
+    // pass a value (e.g. TypeScript `lastFocusedBlockId ?? ""`) still get
+    // the top-of-page fallback when there was no caret.
+    let anchor = after_block_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
+    let anchor_used_str = anchor.map(String::from);
+    let mut inserted_after_block_id = anchor_used_str.clone();
+
+    let inserted_block = match anchor {
+        Some(anchor_id) => match graph.insert_block_after(&page_id, anchor_id, &summary_text) {
+            Ok(b) => b,
+            Err(e) => {
+                // Stale anchor (deleted, cross-page). Preserve the
+                // (expensive) summary by falling back to top-of-page,
+                // and clear `inserted_after_block_id` in the return so
+                // redo doesn't try to re-anchor to the stale id.
+                tracing::warn!(
+                    "ai_insert_page_summary: insert_block_after failed ({}); falling back to top of page",
+                    e
+                );
+                inserted_after_block_id = None;
+                graph
+                    .insert_block_at_top(&page_id, &summary_text)
+                    .map_err(|e| e.to_string())?
+            }
+        },
+        None => graph
+            .insert_block_at_top(&page_id, &summary_text)
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut wrap_changes: Vec<SummaryWrapChange> = Vec::new();
     if !all_tags.is_empty() {
         let blocks = graph
             .db
             .list_blocks_for_page(&page_id)
             .map_err(|e| e.to_string())?;
         for block in blocks {
+            // Never rewrap the block we just created — its content is
+            // already the finished summary text.
+            if block.id == inserted_block.id {
+                continue;
+            }
             let wrapped =
                 grafium_core::parser::wrap_known_terms_as_links(&block.content, &all_tags);
             if wrapped != block.content {
                 graph
                     .update_block(&block.id, &wrapped, None)
                     .map_err(|e| e.to_string())?;
+                wrap_changes.push(SummaryWrapChange {
+                    block_id: block.id,
+                    previous_content: block.content,
+                    new_content: wrapped,
+                });
             }
+        }
+    }
+
+    Ok(AiInsertSummaryResult {
+        inserted_block_id: inserted_block.id,
+        inserted_content: summary_text,
+        inserted_after_block_id,
+        wrap_changes,
+    })
+}
+
+/// Undoes a previous `ai_insert_page_summary` call: deletes the summary
+/// block and restores each block whose content was rewrapped back to its
+/// pre-wrap text. Silent no-op for a block that has since been deleted
+/// (so a Ctrl-Z after a user manually deletes the summary block and
+/// then some wrapped block still restores the survivors instead of
+/// erroring out).
+#[tauri::command(rename_all = "camelCase")]
+pub fn ai_undo_summary_insert(
+    app_state: State<'_, crate::AppState>,
+    inserted_block_id: String,
+    wrap_changes: Vec<SummaryWrapChange>,
+) -> Result<(), String> {
+    let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
+
+    // Best-effort delete: if the user already deleted the summary block
+    // themselves, don't fail the whole undo — just move on to the wrap
+    // restorations.
+    if let Err(e) = graph.delete_block(&inserted_block_id) {
+        tracing::warn!(
+            "ai_undo_summary_insert: delete_block({}) failed ({}); continuing with wrap restore",
+            inserted_block_id,
+            e
+        );
+    }
+
+    for change in &wrap_changes {
+        // Same best-effort logic per wrap change: skip blocks that no
+        // longer exist rather than aborting the whole undo.
+        if let Err(e) = graph.update_block(&change.block_id, &change.previous_content, None) {
+            tracing::warn!(
+                "ai_undo_summary_insert: restore of {} failed ({}); skipping",
+                change.block_id,
+                e
+            );
         }
     }
 
     Ok(())
 }
 
+/// Redoes a previously-undone summary insert: recreates the summary
+/// block (after its original anchor if the anchor still exists, else at
+/// the top of the page) and reapplies each wrap change so the on-page
+/// `[[wiki-link]]`s come back. Returns a fresh
+/// [`AiInsertSummaryResult`] carrying the new summary block's id, so
+/// the undo stack can flip it back into an undo entry.
+#[tauri::command(rename_all = "camelCase")]
+pub fn ai_reapply_summary_insert(
+    app_state: State<'_, crate::AppState>,
+    page_id: String,
+    inserted_content: String,
+    inserted_after_block_id: Option<String>,
+    wrap_changes: Vec<SummaryWrapChange>,
+) -> Result<AiInsertSummaryResult, String> {
+    let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
+
+    let anchor = inserted_after_block_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut effective_anchor = anchor.map(String::from);
+    let inserted_block = match anchor {
+        Some(anchor_id) => match graph.insert_block_after(&page_id, anchor_id, &inserted_content) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    "ai_reapply_summary_insert: insert_block_after failed ({}); falling back to top of page",
+                    e
+                );
+                effective_anchor = None;
+                graph
+                    .insert_block_at_top(&page_id, &inserted_content)
+                    .map_err(|e| e.to_string())?
+            }
+        },
+        None => graph
+            .insert_block_at_top(&page_id, &inserted_content)
+            .map_err(|e| e.to_string())?,
+    };
+
+    for change in &wrap_changes {
+        if let Err(e) = graph.update_block(&change.block_id, &change.new_content, None) {
+            tracing::warn!(
+                "ai_reapply_summary_insert: reapply of {} failed ({}); skipping",
+                change.block_id,
+                e
+            );
+        }
+    }
+
+    Ok(AiInsertSummaryResult {
+        inserted_block_id: inserted_block.id,
+        inserted_content,
+        inserted_after_block_id: effective_anchor,
+        wrap_changes,
+    })
+}
+
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
+
+/// Gathers a short block of graph-structure facts (page/link counts, the
+/// most-connected page titles) from the currently open graph's live
+/// database. The knowledge engine's RAG context is chunk-similarity only
+/// (from the separate vectors.db), so without this the assistant has no way
+/// to answer graph-shaped questions like "how many notes do I have" or
+/// "what's my most connected topic".
+fn build_graph_context(app_state: &crate::AppState) -> Option<String> {
+    let graph = app_state.graph.lock().ok()?;
+    let page_count = graph.db.count_pages().ok()?;
+    let link_count = graph.db.count_links().ok()?;
+    let (mut nodes, _edges) = graph.db.graph_data(None, 8).ok()?;
+    nodes.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut out = format!(
+        "The user's current graph has {} page(s) and {} link(s) between them.",
+        page_count, link_count
+    );
+    if !nodes.is_empty() {
+        out.push_str(" Most-connected pages: ");
+        let top: Vec<String> = nodes
+            .iter()
+            .take(8)
+            .map(|(_, title, degree)| format!("\"{}\" ({} connections)", title, degree))
+            .collect();
+        out.push_str(&top.join(", "));
+        out.push('.');
+    }
+    Some(out)
+}
 
 #[tauri::command]
 pub async fn ai_ask(
     state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
 ) -> Result<String, String> {
@@ -607,15 +963,12 @@ pub async fn ai_ask(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_llm_ready() {
-        return Err(
-            "AI chat isn't ready — configure and save a Local or Cloud provider in Settings \
-             \u{2192} AI / Knowledge Engine first."
-                .to_string(),
-        );
+        return Err(llm_not_ready_error(engine));
     }
 
+    let graph_context = build_graph_context(&app_state);
     engine
-        .ask(&question, graph_id.as_deref())
+        .ask(&question, graph_id.as_deref(), graph_context.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -631,6 +984,7 @@ pub struct AskStreamChunk {
 #[tauri::command]
 pub async fn ai_ask_stream(
     state: State<'_, KnowledgeState>,
+    app_state: State<'_, crate::AppState>,
     app: tauri::AppHandle,
     question: String,
     graph_id: Option<String>,
@@ -642,15 +996,12 @@ pub async fn ai_ask_stream(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
     if !engine.is_llm_ready() {
-        return Err(
-            "AI chat isn't ready — configure and save a Local or Cloud provider in Settings \
-             \u{2192} AI / Knowledge Engine first."
-                .to_string(),
-        );
+        return Err(llm_not_ready_error(engine));
     }
 
+    let graph_context = build_graph_context(&app_state);
     let answer = engine
-        .ask(&question, graph_id.as_deref())
+        .ask(&question, graph_id.as_deref(), graph_context.as_deref())
         .await
         .map_err(|e| e.to_string())?;
 

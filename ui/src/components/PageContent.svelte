@@ -4,7 +4,7 @@
   import BlockEditor from "./BlockEditor.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
-  import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
+  import { buildBlockRenderState, computeVirtualWindow, getAncestorGuides } from "../lib/pageContentVirtualization";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
@@ -24,12 +24,22 @@
   interface Props {
     page: Page;
     compact?: boolean;
+    showBlockGuides?: boolean;
   }
 
-  let { page, compact = false }: Props = $props();
+  let { page, compact = false, showBlockGuides = true }: Props = $props();
 
   let blocks: Block[] = $state([]);
   let focusedBlockId: string | null = $state(null);
+  // Remembers the block the caret was last in on the current page, and
+  // KEEPS the id after blur (unlike `focusedBlockId`, which clears when
+  // focus moves out of the editor to e.g. a Reference-panel button).
+  // Broadcast to the ReferencePanel via the `page-content-focus-changed`
+  // window event so its "Insert into page" button can drop the summary
+  // right after where the user was reading, instead of always at the top.
+  // Reset to null whenever the visible page changes so the id from one
+  // page can't accidentally be reused as an anchor on another page.
+  let lastFocusedBlockId: string | null = $state(null);
   let navigatingBlock = false;
   // Imperative handles to each BlockEditor, keyed by block id, for deterministic
   // cross-block Arrow Up/Down caret movement.
@@ -63,6 +73,16 @@
   let blocksRelTop = $state(0);
   let blocksViewportHeight = $state(800);
   let windowAnchorBlockId: string | null = $state(null);
+  // While the user is holding the mouse button down (native text-selection
+  // drag), the virtual window must never *shrink* — unmounting a block that
+  // holds the current selection's anchor/focus node mid-drag makes the
+  // selection visibly snap back instead of extending, which is exactly what
+  // happens when dragging past the bottom edge triggers browser autoscroll.
+  // These track the widest range seen so far during the current drag; reset
+  // on mouseup so normal (tighter) virtualization resumes for scroll perf.
+  let isMouseSelecting = $state(false);
+  let stickyStartIndex: number | null = $state(null);
+  let stickyEndIndex: number | null = $state(null);
 
   const blockRenderState = $derived.by(() => buildBlockRenderState(blocks, collapsedIds));
   const visibleBlocks = $derived(blockRenderState.visibleBlocks);
@@ -78,9 +98,49 @@
       defaultHeight: DEFAULT_BLOCK_HEIGHT,
       overscanPx: BLOCK_WINDOW_OVERSCAN_PX,
       anchorIndex,
+      minStartIndex: isMouseSelecting ? stickyStartIndex : null,
+      minEndIndex: isMouseSelecting ? stickyEndIndex : null,
     });
   });
   const windowedBlocks = $derived(virtualWindow.items);
+
+  // Grow (never shrink) the sticky range to match the widest window seen
+  // so far during the current mouse-drag; see the comment above the state
+  // declarations for why.
+  $effect(() => {
+    if (!isMouseSelecting) return;
+    const { startIndex, endIndex } = virtualWindow;
+    if (stickyStartIndex === null || startIndex < stickyStartIndex) {
+      stickyStartIndex = startIndex;
+    }
+    if (stickyEndIndex === null || endIndex > stickyEndIndex) {
+      stickyEndIndex = endIndex;
+    }
+  });
+
+  $effect(() => {
+    const handleMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      isMouseSelecting = true;
+      stickyStartIndex = null;
+      stickyEndIndex = null;
+    };
+    const handleMouseUp = () => {
+      isMouseSelecting = false;
+      stickyStartIndex = null;
+      stickyEndIndex = null;
+    };
+
+    blocksViewportEl?.addEventListener("mousedown", handleMouseDown);
+    // Listen on window, not just the container, so a drag that ends with
+    // the mouse released outside the scroll area still clears the sticky
+    // state instead of leaving extra blocks pinned in the DOM forever.
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      blocksViewportEl?.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  });
 
   $effect(() => {
     const activeIds = new Set(blocks.map((block) => block.id));
@@ -157,6 +217,20 @@
 
   function getBlockDepth(blockId: string): number {
     return blockRenderState.depthById.get(blockId) ?? 0;
+  }
+
+  // Empty array shared across calls when guides are disabled or a block is
+  // at depth 0, to avoid allocating a new array per block on every render.
+  const NO_GUIDES: boolean[] = [];
+
+  function getBlockGuides(blockId: string): boolean[] {
+    if (!showBlockGuides) return NO_GUIDES;
+    return getAncestorGuides(
+      blockId,
+      blockRenderState.parentById,
+      blockRenderState.depthById,
+      blockRenderState.isLastChildById
+    );
   }
 
   function trackBlockHeight(node: HTMLElement, blockId: string) {
@@ -251,6 +325,17 @@
     const pageId = page?.id;
     const pageTitle = page?.title;
     if (pageId) {
+      // A new page means the previous page's `lastFocusedBlockId` is
+      // no longer a valid anchor for the ReferencePanel "Insert into
+      // page" button. Tell the panel to drop it (blockId=null) so a
+      // fresh summary on the new page falls back to top-of-page unless
+      // the user actually clicks into a block here.
+      lastFocusedBlockId = null;
+      window.dispatchEvent(
+        new CustomEvent("page-content-focus-changed", {
+          detail: { pageId, blockId: null },
+        }),
+      );
       const request = beginPageLoad(pageLoadState, pageId, pageTitle ?? "");
       void loadBlocks(request);
       void loadBacklinks(request);
@@ -436,6 +521,16 @@
 
   function handleFocus(blockId: string) {
     focusedBlockId = blockId;
+    lastFocusedBlockId = blockId;
+    // Let the ReferencePanel know where the caret just landed so its
+    // "Insert into page" button can target this spot after the panel
+    // steals focus. Detail carries the page id so a stale value from a
+    // no-longer-visible page can't accidentally be used.
+    window.dispatchEvent(
+      new CustomEvent("page-content-focus-changed", {
+        detail: { pageId: page.id, blockId },
+      }),
+    );
     selectedBlockIds = new Set();
     // Snapshot the block content before the user edits it
     const block = blockRenderState.blockById.get(blockId);
@@ -746,27 +841,63 @@
     }
   }
 
+  let deleteSelectedError = $state("");
+
+  /// Deleting a selected block also deletes its whole subtree. Blocks have
+  /// no DB-level cascade on parent_id (only page_id cascades), so without
+  /// this, deleting a header/parent block would silently orphan its
+  /// children: they'd disappear from the saved .md file but keep rendering
+  /// on screen (since the render tree treats a missing parent as visible),
+  /// making it look like "Delete" did nothing at all.
+  function collectWithDescendants(ids: Set<string>): string[] {
+    const childrenByParent = new Map<string, Block[]>();
+    for (const b of blocks) {
+      if (!b.parent_id) continue;
+      const siblings = childrenByParent.get(b.parent_id) ?? [];
+      siblings.push(b);
+      childrenByParent.set(b.parent_id, siblings);
+    }
+    const result = new Set<string>();
+    const stack = [...ids];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (result.has(id)) continue;
+      result.add(id);
+      for (const child of childrenByParent.get(id) ?? []) {
+        stack.push(child.id);
+      }
+    }
+    return [...result];
+  }
+
   async function handleDeleteSelected() {
     if (selectedBlockIds.size === 0) return;
-    const toDelete = [...selectedBlockIds];
+    deleteSelectedError = "";
+    try {
+      const toDelete = collectWithDescendants(selectedBlockIds);
+      const toDeleteSet = new Set(toDelete);
 
-    // Save deleted blocks for undo
-    const deletedBlocks = blocks.filter((b) => selectedBlockIds.has(b.id));
-    pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
+      // Save deleted blocks (including descendants) for undo
+      const deletedBlocks = blocks.filter((b) => toDeleteSet.has(b.id));
+      pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
 
-    for (const id of toDelete) {
-      await deleteBlock(id);
+      for (const id of toDelete) {
+        await deleteBlock(id);
+      }
+
+      const remaining = blocks.filter((b) => !toDeleteSet.has(b.id));
+      if (remaining.length === 0) {
+        // All blocks deleted — create a fresh empty block
+        const newBlock = await createBlock(page.id, null, 0, "");
+        blocks = [newBlock];
+      } else {
+        blocks = remaining;
+      }
+      selectedBlockIds = new Set();
+    } catch (e) {
+      console.error("[DELETE] handleDeleteSelected failed:", e);
+      deleteSelectedError = e instanceof Error ? e.message : String(e);
     }
-
-    const remaining = blocks.filter((b) => !selectedBlockIds.has(b.id));
-    if (remaining.length === 0) {
-      // All blocks deleted — create a fresh empty block
-      const newBlock = await createBlock(page.id, null, 0, "");
-      blocks = [newBlock];
-    } else {
-      blocks = remaining;
-    }
-    selectedBlockIds = new Set();
   }
 
   let analyzingSelection = $state(false);
@@ -847,13 +978,59 @@
     }
   }
 
+  /// Blocks are only individually editable (via CodeMirror) while
+  /// `focused`; unfocused blocks render as plain read-only HTML. That
+  /// means a user can perfectly well drag-select text spanning several
+  /// unfocused blocks with the mouse (ordinary browser selection, no
+  /// custom UI, no "N selected" toolbar) and then hit Backspace/Delete
+  /// expecting it to remove what's highlighted — but since none of that
+  /// content is actually editable, the browser has nothing to act on and
+  /// the keypress silently does nothing. This maps that native selection
+  /// back to the block ids it covers so Backspace/Delete can still work.
+  function getNativeSelectionBlockIds(): string[] {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return [];
+    const range = sel.getRangeAt(0);
+    const container = blocksViewportEl;
+    if (!container || !container.contains(range.commonAncestorContainer)) return [];
+    // If the selection lives inside an actively-focused CodeMirror editor,
+    // leave it alone — that's normal in-block text editing, which
+    // CodeMirror already handles itself.
+    const anchorEl =
+      range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? (range.commonAncestorContainer as Element)
+        : range.commonAncestorContainer.parentElement;
+    if (anchorEl?.closest(".cm-editor")) return [];
+
+    const ids: string[] = [];
+    for (const el of container.querySelectorAll<HTMLElement>(".block-item[data-block-id]")) {
+      if (range.intersectsNode(el)) {
+        const id = el.getAttribute("data-block-id");
+        if (id) ids.push(id);
+      }
+    }
+    return ids;
+  }
+
   function handleKeydownForSelection(e: KeyboardEvent) {
-    if (selectedBlockIds.size === 0) return;
+    if (selectedBlockIds.size > 0) {
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        handleDeleteSelected();
+      } else if (e.key === "Escape") {
+        selectedBlockIds = new Set();
+      }
+      return;
+    }
+
     if (e.key === "Backspace" || e.key === "Delete") {
-      e.preventDefault();
-      handleDeleteSelected();
-    } else if (e.key === "Escape") {
-      selectedBlockIds = new Set();
+      const ids = getNativeSelectionBlockIds();
+      if (ids.length > 0) {
+        e.preventDefault();
+        window.getSelection()?.removeAllRanges();
+        selectedBlockIds = new Set(ids);
+        handleDeleteSelected();
+      }
     }
   }
 
@@ -900,6 +1077,9 @@
     {#if analyzeSelectionError}
       <div class="selection-toolbar-error">{analyzeSelectionError}</div>
     {/if}
+    {#if deleteSelectedError}
+      <div class="selection-toolbar-error">Delete failed: {deleteSelectedError}</div>
+    {/if}
   {/if}
 
   <div class="blocks-container" bind:this={blocksViewportEl}>
@@ -919,6 +1099,7 @@
           pageId={page.id}
           pageTitle={page.title}
           depth={getBlockDepth(block.id)}
+          guides={getBlockGuides(block.id)}
           focused={focusedBlockId === block.id}
           selected={selectedBlockIds.has(block.id)}
           hasChildren={hasChildren(block.id)}

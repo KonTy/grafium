@@ -172,9 +172,20 @@ fn embed_all(
         .with_n_threads_batch(n_threads)
         .with_embeddings(true);
 
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| CoreError::Other(format!("failed to create llama context: {e}")))?;
+    let mut ctx = model.new_context(backend, ctx_params).map_err(|e| {
+        // Longest text about to be sent through this context — the batch
+        // size and prompt-tokens hints in the shared error shaper are
+        // most useful when they reflect the biggest thing we were about
+        // to try to embed. This is a rough estimate (we haven't
+        // tokenized the texts yet); good enough for the hint.
+        let biggest_char_count = texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+        CoreError::Other(super::local_llm::context_creation_error_message(
+            &e.to_string(),
+            ctx_size.get(),
+            ctx_size.get(),
+            biggest_char_count,
+        ))
+    })?;
 
     let n_ctx = ctx.n_ctx() as i32;
     let mut embeddings = Vec::with_capacity(texts.len());

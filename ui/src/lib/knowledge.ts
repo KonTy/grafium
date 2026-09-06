@@ -14,6 +14,9 @@ export interface AiConfig {
     models_dir?: string;
     local_llm?: {
       model?: string;
+      context_size?: number;
+      gpu_layers?: number;
+      use_mmap?: boolean | null;
     };
     local_embedding?: {
       model?: string;
@@ -40,6 +43,10 @@ export interface AiConfigPayload {
   local_base_url?: string;
   local_api_key?: string;
   local_model_path?: string;
+  local_context_size?: number;
+  local_gpu_layers?: number;
+  /// null = auto (use built-in heuristic); true/false = force mmap on/off.
+  local_use_mmap?: boolean | null;
   local_embedding_model_path?: string;
   local_models_dir?: string;
   llm_model?: string;
@@ -68,6 +75,7 @@ export interface HealthStatus {
   vector_store_available: boolean;
   vector_count: number;
   mode: string;
+  llm_load_error?: string | null;
 }
 
 export interface SemanticSearchResult {
@@ -123,6 +131,12 @@ export interface PageReferencesMeta {
   reference_count: number;
   references: GeneratedReference[];
   summary: PageSummary | null;
+  // When `summary` is null because generation was *attempted and failed*
+  // (as opposed to skipped because the page had no eligible blocks),
+  // this holds the human-readable reason from the backend so the UI can
+  // render an actionable "why there's no summary" notice instead of
+  // silently showing nothing.
+  summary_error?: string | null;
 }
 
 // A cited web source found and read by "Web Research".
@@ -219,8 +233,11 @@ export function aiSearch(
 
 // ─── References ──────────────────────────────────────────────────────────────
 
-export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta> {
-  return invoke("ai_generate_references", { pageId });
+export function aiGenerateReferences(
+  pageId: string,
+  operationId?: string
+): Promise<PageReferencesMeta> {
+  return invoke("ai_generate_references", { pageId, operationId });
 }
 
 // Summarizes an arbitrary text selection (e.g. concatenated content of
@@ -228,8 +245,12 @@ export function aiGenerateReferences(pageId: string): Promise<PageReferencesMeta
 // shape as `PageReferencesMeta.summary` (one paragraph + tags per distinct
 // topic covered) — used by "Analyze Selected" in PageContent.svelte to
 // insert a summary block right after a selection.
-export function aiSummarizeSelection(text: string, title?: string): Promise<PageSummary> {
-  return invoke("ai_summarize_selection", { text, title });
+export function aiSummarizeSelection(
+  text: string,
+  title?: string,
+  operationId?: string
+): Promise<PageSummary> {
+  return invoke("ai_summarize_selection", { text, title, operationId });
 }
 
 // Actually researches `title`/`seedText` on the open internet — plans
@@ -238,8 +259,22 @@ export function aiSummarizeSelection(text: string, title?: string): Promise<Page
 // source URLs in the returned `citations`). Unlike `aiGenerateReferences`/
 // `aiSummarizeSelection`, this can take a while (multiple web fetches) and
 // reports progress via the "ai-web-research-progress" event.
-export function aiResearchWeb(title: string, seedText: string): Promise<WebResearchResult> {
-  return invoke("ai_research_web", { title, seedText });
+export function aiResearchWeb(
+  title: string,
+  seedText: string,
+  operationId?: string
+): Promise<WebResearchResult> {
+  return invoke("ai_research_web", { title, seedText, operationId });
+}
+
+// Signal the backend that the user pressed Cancel on the progress toast
+// for a currently-running AI operation. Flips a cancellation token that
+// the engine cooperatively checks between steps, and also hard-kills the
+// local LLM worker (llama.cpp's C++ inference loop checks nothing between
+// tokens, so we can't stop it any other way). Safe to call for an
+// unknown/finished operationId — it's a no-op in that case.
+export function aiCancelOperation(operationId: string): Promise<void> {
+  return invoke("ai_cancel_operation", { operationId });
 }
 
 // Wraps the first verbatim, whole-word occurrence of each term found in
@@ -252,17 +287,73 @@ export function wrapKnownTermsInText(content: string, terms: TagTerm[]): Promise
   return invoke("text_wrap_known_terms", { content, terms });
 }
 
-// Inserts an AI-generated page summary as a new block at the top of the
-// page (right after the title) — one heading + paragraph per topic — and
-// wraps each topic's tags in place as `[[wiki-link]]`s across the page's
-// existing blocks. Used by the "Insert into page" button in
-// ReferencePanel.svelte.
+// Result of a successful `aiInsertPageSummary` call — the fields needed to
+// push a matching entry onto the undo stack (see undoStack.ts) so Ctrl-Z
+// after "Insert into page" cleanly reverses the full change, including
+// the tag-wrap rewrites of unrelated pre-existing blocks.
+export interface SummaryWrapChange {
+  blockId: string;
+  previousContent: string;
+  newContent: string;
+}
+
+export interface AiInsertSummaryResult {
+  insertedBlockId: string;
+  insertedContent: string;
+  insertedAfterBlockId: string | null;
+  wrapChanges: SummaryWrapChange[];
+}
+
+// Inserts an AI-generated page summary as a new block on the page — one
+// heading + paragraph per topic — and wraps each topic's tags in place as
+// `[[wiki-link]]`s across the page's existing blocks. Used by the "Insert
+// into page" button in ReferencePanel.svelte.
+//
+// `afterBlockId` is the id of the block the user last had a caret in on
+// the current page — when provided, the summary is inserted immediately
+// after that block (so it lands "at the cursor" wherever they were
+// reading); when null, it falls back to the top of the page.
+//
+// The returned `AiInsertSummaryResult` carries exactly what undo needs
+// to reverse the write — the id of the freshly-created summary block
+// plus the previous/new content of every block whose text was rewritten
+// during tag-wrap.
 export function aiInsertPageSummary(
   pageId: string,
   titleAnswer: string | null,
-  topics: TopicSummary[]
+  topics: TopicSummary[],
+  afterBlockId: string | null = null
+): Promise<AiInsertSummaryResult> {
+  return invoke("ai_insert_page_summary", { pageId, titleAnswer, topics, afterBlockId });
+}
+
+// Undoes a previous aiInsertPageSummary — deletes the summary block and
+// restores each rewrapped block to its previous content. Best-effort per
+// block: skips any that have since been deleted rather than aborting.
+export function aiUndoSummaryInsert(
+  insertedBlockId: string,
+  wrapChanges: SummaryWrapChange[]
 ): Promise<void> {
-  return invoke("ai_insert_page_summary", { pageId, titleAnswer, topics });
+  return invoke("ai_undo_summary_insert", { insertedBlockId, wrapChanges });
+}
+
+// Redoes a previously-undone summary insert — recreates the summary
+// block after the same anchor (falling back to top-of-page if the anchor
+// has since been deleted) and reapplies each wrap change. Returns a
+// fresh AiInsertSummaryResult so the undo stack can flip the redo entry
+// back into an undo entry with the new block id.
+export function aiReapplySummaryInsert(
+  pageId: string,
+  insertedContent: string,
+  insertedAfterBlockId: string | null,
+  wrapChanges: SummaryWrapChange[]
+): Promise<AiInsertSummaryResult> {
+  return invoke("ai_reapply_summary_insert", {
+    pageId,
+    insertedContent,
+    insertedAfterBlockId,
+    wrapChanges,
+  });
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────

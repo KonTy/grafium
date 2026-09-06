@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getGraphData, type GraphData } from "../lib/api";
+  import { clusterColor, computeGraphClusters } from "../lib/graphClusters";
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -63,6 +64,14 @@
   let raf = 0;
   let running = false;
 
+  // Connected components (see lib/graphClusters.ts): nodes reachable from
+  // each other through links count as the same "cluster" and share a
+  // color, so a densely-linked group of pages reads as one color family
+  // instead of a uniform accent-colored blob. Isolated nodes (no links at
+  // all) get a plain muted color instead of a palette slot.
+  let clusterIndexById = new Map<string, number>();
+  let isolatedIds = new Set<string>();
+
   // Interaction
   let dragNode: SimNode | null = null;
   let hoverNode: SimNode | null = null;
@@ -72,6 +81,20 @@
   let lastY = 0;
 
   const MIN_ALPHA = 0.008;
+
+  function isLightTheme(): boolean {
+    return typeof document !== "undefined" && document.documentElement.style.colorScheme === "light";
+  }
+
+  function nodeColorFor(node: SimNode): string {
+    if (isolatedIds.has(node.id)) return themeColor("--text-muted", isLightTheme() ? "#888" : "#aaa");
+    return clusterColor(clusterIndexById.get(node.id) ?? 0, isLightTheme());
+  }
+
+  function edgeColorFor(edge: SimEdge): string {
+    if (isolatedIds.has(edge.source.id)) return themeColor("--text-secondary", isLightTheme() ? "#666" : "#aaa");
+    return clusterColor(clusterIndexById.get(edge.source.id) ?? 0, isLightTheme());
+  }
 
   function themeColor(varName: string, fallback: string): string {
     if (typeof window === "undefined") return fallback;
@@ -121,6 +144,12 @@
     }
     maxDegree = Math.max(1, ...data.nodes.map((n) => n.degree));
     maxWeight = Math.max(1, ...edges.map((e) => e.weight));
+    const clusters = computeGraphClusters(
+      data.nodes.map((n) => n.id),
+      data.edges
+    );
+    clusterIndexById = clusters.clusterIndexById;
+    isolatedIds = clusters.isolatedIds;
     // Reset camera to fit
     scale = 1;
     offsetX = 0;
@@ -285,19 +314,19 @@
     ctx.fillStyle = themeColor("--bg-primary", "#16161e");
     ctx.fillRect(0, 0, width, height);
 
-    const edgeColor = themeColor("--border", "#333");
-    const nodeColor = themeColor("--accent", "#6ea8fe");
     const textColor = themeColor("--text-secondary", "#aaa");
     const q = searchText.trim().toLowerCase();
 
-    // Edges — thickness/opacity scale with tie magnitude (weight).
-    ctx.strokeStyle = edgeColor;
+    // Edges — thickness/opacity scale with tie magnitude (weight); color
+    // matches the source node's cluster so a linked group of pages reads
+    // as one color family instead of a uniform accent-colored blob.
     for (const e of edges) {
       const [x1, y1] = toScreen(e.source.x, e.source.y);
       const [x2, y2] = toScreen(e.target.x, e.target.y);
       const rel = e.weight / maxWeight;
-      ctx.lineWidth = Math.max(0.4, (0.6 + rel * 3.5) * scale);
-      ctx.globalAlpha = 0.18 + rel * 0.5;
+      ctx.strokeStyle = edgeColorFor(e);
+      ctx.lineWidth = Math.max(0.5, (0.7 + rel * 3.5) * scale);
+      ctx.globalAlpha = 0.45 + rel * 0.5;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -317,7 +346,7 @@
       ctx.arc(x, y, r, 0, Math.PI * 2);
       if (isFocus) ctx.fillStyle = "#e0af68";
       else if (isMatch) ctx.fillStyle = "#9ece6a";
-      else ctx.fillStyle = nodeColor;
+      else ctx.fillStyle = nodeColorFor(node);
       ctx.globalAlpha = q.length > 0 && !isMatch && !isFocus ? 0.25 : 1;
       ctx.fill();
 

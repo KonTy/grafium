@@ -229,6 +229,17 @@ export function registerDefaultShortcuts(actions: {
       description: "Go to today's journal",
     },
     {
+      // Editor-safe variant of "g j": Ctrl+Shift+J works even while
+      // typing in a block. The always-on delivery lives in
+      // App.svelte's handleGlobalKeydown; this entry only exists so
+      // a future help/command-palette listing shows it.
+      binding: "mod+shift+j",
+      action: actions.goJournal,
+      navOnly: false,
+      category: "navigation",
+      description: "Go to today's journal (works while editing)",
+    },
+    {
       binding: "g h",
       action: actions.goHome,
       category: "navigation",
