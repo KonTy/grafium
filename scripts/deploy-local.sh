@@ -24,6 +24,24 @@ if [[ ! -x "$binary" ]]; then
   exit 1
 fi
 
+# Refuse to install a binary older than the frontend it is supposed to contain.
+#
+# The UI is embedded at compile time, so a binary built before the last
+# `npm run build` ships the *previous* interface. Nothing about that looks
+# wrong: the build succeeds, the app starts, and it is simply the old UI —
+# which reads as "my change did nothing" and sends you hunting a bug that
+# isn't there.
+dist_dir="$repo_root/ui/dist"
+if [[ -d "$dist_dir" ]]; then
+  newer="$(find "$dist_dir" -type f -newer "$binary" -print -quit 2>/dev/null || true)"
+  if [[ -n "$newer" ]]; then
+    echo "error: $dist_dir is newer than $binary" >&2
+    echo "       the binary embeds the frontend, so this would install a stale UI" >&2
+    echo "hint:  cargo build --release -p grafium   # after npm run build" >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$bin_dir" "$lib_dir"
 
 # The launcher sets LD_LIBRARY_PATH rather than relying on the binary's

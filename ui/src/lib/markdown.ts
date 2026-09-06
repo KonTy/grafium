@@ -69,7 +69,10 @@ export function assetBaseDirFor(filePath: string | null | undefined): string {
  * not exist, so an older note that already used the plain form still renders.
  */
 function cleanAssetPath(href: string): string {
-  const h = href.trim();
+  // Backslashes first: a reference written `..\assets\x.png` means the same
+  // thing as `../assets/x.png`, and without normalizing, the historical
+  // root-relative form went unrecognised and resolved against the page.
+  const h = href.trim().replace(/\\/g, "/");
   // Only `../` (and a leading `/`) mean "from the graph root". A leading `./`
   // is an ordinary relative path and must resolve like the plain form does —
   // treating it as root-relative made `./assets/x.png` and `assets/x.png`,

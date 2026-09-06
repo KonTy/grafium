@@ -613,6 +613,34 @@ impl Database {
             .collect::<std::result::Result<Vec<String>, _>>()?;
         Ok(rows)
     }
+
+    /// Every stored string that could name a media file.
+    ///
+    /// Block markdown is the obvious source but not the only one: a recorded
+    /// audio note keeps its path in `audio_notes`, a handwriting page keeps
+    /// its SVG in `ink_pages`, and properties can hold a cover or icon. This
+    /// backs "which media is unreferenced?", and a source missing from here
+    /// means real, irreplaceable media gets offered to the user for deletion —
+    /// so err towards including a table rather than leaving it out.
+    pub fn get_all_media_references(&self) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut out = Vec::new();
+        for sql in [
+            "SELECT content FROM blocks WHERE content != ''",
+            "SELECT audio_path FROM audio_notes",
+            "SELECT file_path FROM ink_pages",
+            "SELECT value FROM block_properties WHERE value != ''",
+            "SELECT value FROM page_properties WHERE value != ''",
+            "SELECT properties FROM pages WHERE properties != '{}'",
+        ] {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            out.extend(rows);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

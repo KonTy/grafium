@@ -393,14 +393,27 @@ describe("sortTree", () => {
   });
 
   it("compares names case-insensitively", () => {
-    const sorted = sortTree([node("beta", 1), node("Alpha", 1)], "name");
-    expect(labels(sorted)).toEqual(["Alpha", "beta"]);
+    // "Alpha"/"beta" cannot show this: uppercase sorts before lowercase by
+    // codepoint anyway, so a fully case-sensitive sort passes too. "alpha"
+    // against "Beta" separates them — codepoint order puts "Beta" first.
+    const sorted = sortTree([node("Beta", 1), node("alpha", 1)], "name");
+    expect(labels(sorted)).toEqual(["alpha", "Beta"]);
   });
 
-  it("leaves the input untouched", () => {
-    const input = [node("z", 1), node("a", 2)];
-    sortTree(input, "name");
-    expect(labels(input)).toEqual(["z", "a"]);
+  it("leaves the input untouched, children included", () => {
+    // A flat fixture would miss the likelier regression: sorting a nested
+    // level in place while leaving the root array alone.
+    const child = node("z-child", 1);
+    const input = [node("root", 3, [child, node("a-child", 2)]), node("a-root", 4)];
+    const sorted = sortTree(input, "name");
+
+    expect(labels(input)).toEqual(["root", "a-root"]);
+    expect(labels(input[0].children)).toEqual(["z-child", "a-child"]);
+    expect(input[0].children[0]).toBe(child);
+    // and the copy really was sorted
+    expect(labels(sorted)).toEqual(["root", "a-root"]);
+    expect(labels(sorted[0].children)).toEqual(["a-child", "z-child"]);
+    expect(sorted[0].children[0]).not.toBe(child);
   });
 
   it("handles a deep tree without recursing", () => {
@@ -429,9 +442,14 @@ describe("pruneExpansionState idempotency", () => {
   });
 
   it("is a no-op when nothing is stale", () => {
-    const branches = new Set(["a"]);
-    const expanded = new Set(["a"]);
-    expect(pruneExpansionState(expanded, branches).size).toBe(expanded.size);
+    // Asserting only on size would pass for an implementation that returned a
+    // completely different set of the same size. The effect's convergence
+    // relies on "same size implies same membership", so pin the membership.
+    const branches = new Set(["a", "b"]);
+    const expanded = new Set(["a", "b"]);
+    const pruned = pruneExpansionState(expanded, branches);
+    expect([...pruned].sort()).toEqual(["a", "b"]);
+    expect(pruned.size).toBe(expanded.size);
   });
 
   it("empties the set when every branch is gone", () => {

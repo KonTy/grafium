@@ -113,8 +113,13 @@ pub async fn download_asset(
 /// page, so media stored with a book is not invisible to maintenance.
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_assets(state: State<AppState>) -> Result<Vec<String>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    Ok(grafium_core::graph::collect_asset_files(&graph.root_dir))
+    // The lock is released before walking the graph: every other command waits
+    // on this mutex, and the walk is unbounded disk IO.
+    let root = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph.root_dir.clone()
+    };
+    Ok(grafium_core::graph::collect_asset_files(&root))
 }
 
 #[derive(serde::Serialize)]
@@ -126,16 +131,21 @@ pub struct OrphanedAsset {
 /// Find media that no block refers to any more.
 #[tauri::command(rename_all = "camelCase")]
 pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let assets = grafium_core::graph::collect_asset_files(&graph.root_dir);
+    let (root, all_content) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let refs = graph
+            .db
+            .get_all_media_references()
+            .map_err(|e| e.to_string())?;
+        (graph.root_dir.clone(), refs)
+    };
+
+    // Walked with the lock released — this is unbounded disk IO and every
+    // other command queues behind that mutex.
+    let assets = grafium_core::graph::collect_asset_files(&root);
     if assets.is_empty() {
         return Ok(vec![]);
     }
-
-    let all_content = graph
-        .db
-        .get_all_block_content()
-        .map_err(|e| e.to_string())?;
 
     let mut orphans = Vec::new();
     for rel in &assets {
@@ -148,9 +158,7 @@ pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>
         if all_content.iter().any(|content| content.contains(name)) {
             continue;
         }
-        let size = fs::metadata(graph.root_dir.join(rel))
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = fs::metadata(root.join(rel)).map(|m| m.len()).unwrap_or(0);
         orphans.push(OrphanedAsset {
             filename: rel.clone(),
             size,
@@ -186,12 +194,16 @@ pub fn delete_assets(state: State<AppState>, filenames: Vec<String>) -> Result<u
         // Only ever delete a real file that sits inside an `assets/` folder
         // within the graph. Without the folder check a path like `pages/x.md`
         // would delete a note.
-        let inside_graph = path.starts_with(&canon_root);
+        //
+        // Any ancestor counts, not just the immediate parent: Anki imports nest
+        // media as `assets/anki/<deck>/x.mp3`, and checking only the parent
+        // silently refused to delete every one of them while still listing them
+        // as orphans — a cleanup button that reported success and freed nothing.
         let inside_assets = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .is_some_and(|n| n == "assets");
-        if inside_graph && inside_assets && path.is_file() && fs::remove_file(&path).is_ok() {
+            .strip_prefix(&canon_root)
+            .map(|rel| rel.components().any(|c| c.as_os_str() == "assets"))
+            .unwrap_or(false);
+        if inside_assets && path.is_file() && fs::remove_file(&path).is_ok() {
             deleted += 1;
         }
     }

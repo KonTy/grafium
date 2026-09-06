@@ -390,6 +390,7 @@
         <PageTree
           nodes={visibleTree}
           columns
+          revealToken={filterQuery.trim()}
           {onNavigate}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
@@ -485,6 +486,14 @@
     outline: none;
   }
 
+  /* A border-colour change alone is easy to miss, and `outline: none` above
+     removed the only other cue. Keyboard focus gets a real ring. */
+  .new-page-input:focus-visible {
+    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
   .new-page-input:focus {
     border-color: var(--accent);
   }
@@ -544,6 +553,7 @@
 
   .mode-btn {
     padding: 6px 12px;
+    min-height: 32px;
     background: transparent;
     border: none;
     border-radius: 5px;
@@ -709,17 +719,30 @@
     font-size: 18px;
     cursor: pointer;
     padding: 2px 6px;
+    min-width: 32px;
+    min-height: 32px;
     border-radius: 4px;
     opacity: 0;
   }
 
-  .page-row:hover .btn-delete {
+  /* `:focus-within` matters as much as `:hover` here: the button is revealed
+     on hover only, so a keyboard user used to tab onto a delete control that
+     was invisible — focus landed on something they could not see, one keypress
+     away from deleting a page. */
+  .page-row:hover .btn-delete,
+  .page-row:focus-within .btn-delete {
     opacity: 1;
   }
 
   .btn-delete:hover {
     background: var(--danger-bg);
     color: var(--danger);
+  }
+
+  .btn-delete:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--danger, var(--accent));
+    outline-offset: 1px;
   }
 
   .empty-state {

@@ -20,6 +20,15 @@
     ariaLabel?: string;
     density?: "compact" | "comfortable";
     emptyText?: string;
+    /**
+     * Active filter text, or "" when unfiltered.
+     *
+     * While filtering, every branch is revealed so matches are actually
+     * visible: the filter keeps a match's ancestors to give it context, and
+     * without revealing them the match sits hidden inside a collapsed folder
+     * and the search looks like it found nothing.
+     */
+    revealToken?: string;
     /** Flow top-level branches into as many columns as the width allows. */
     columns?: boolean;
     onPageContextMenu?: (event: MouseEvent, node: PageTreeViewNode) => void;
@@ -33,6 +42,7 @@
     ariaLabel = "Pages",
     density = "comfortable",
     emptyText = "No pages in this tree.",
+    revealToken = "",
     columns = false,
     onPageContextMenu,
   }: Props = $props();
@@ -43,8 +53,32 @@
   let loadedStorageKey = $state<string | null>(null);
   const itemElements = new Map<string, HTMLButtonElement>();
 
+  const revealing = $derived(revealToken !== "");
+
+  /**
+   * Branches collapsed by hand during the current reveal.
+   *
+   * Tagged with the filter text it belongs to rather than cleared by an
+   * effect, so it lapses on its own when the filter changes — no effect that
+   * writes state it also reads, which is what froze this view once already.
+   */
+  let handCollapsed = $state<{ token: string; ids: Set<string> }>({
+    token: "",
+    ids: new Set(),
+  });
+
+  /** What the tree actually draws: the reader's own state, or a full reveal. */
+  const effectiveExpanded = $derived.by(() => {
+    if (!revealing) return expanded;
+    const shown = new Set(branchIds);
+    if (handCollapsed.token === revealToken) {
+      for (const id of handCollapsed.ids) shown.delete(id);
+    }
+    return shown;
+  });
+
   const visibleRows = $derived(
-    flattenVisibleTree(nodes, expanded, (node) => node.id),
+    flattenVisibleTree(nodes, effectiveExpanded, (node) => node.id),
   );
   const branchIds = $derived(
     collectBranchIds(nodes, (node) => node.id),
@@ -137,6 +171,16 @@
   }
 
   function setExpanded(id: string, shouldExpand: boolean) {
+    // While filtering, a collapse applies to the reveal only. Writing it to the
+    // reader's own expansion state would let a search quietly rearrange the
+    // tree they come back to once the filter is cleared.
+    if (revealing) {
+      const ids = new Set(handCollapsed.token === revealToken ? handCollapsed.ids : []);
+      if (shouldExpand) ids.delete(id);
+      else ids.add(id);
+      handCollapsed = { token: revealToken, ids };
+      return;
+    }
     const next = new Set(expanded);
     if (shouldExpand) next.add(id);
     else next.delete(id);
@@ -144,7 +188,7 @@
   }
 
   function toggleExpanded(id: string) {
-    setExpanded(id, !expanded.has(id));
+    setExpanded(id, !effectiveExpanded.has(id));
   }
 
   function activateNode(node: PageTreeViewNode) {
@@ -235,7 +279,7 @@
                 aria-level={row.level}
                 aria-posinset={row.position}
                 aria-setsize={row.set_size}
-                aria-expanded={row.has_children ? expanded.has(row.id) : undefined}
+                aria-expanded={row.has_children ? effectiveExpanded.has(row.id) : undefined}
                 aria-selected={row.node.page_id !== null ? row.node.page_id === selectedPageId : undefined}
                 tabindex={focusedId === row.id ? 0 : -1}
                 use:registerTreeItem={row.id}
@@ -247,11 +291,11 @@
                   <span
                     class="disclosure"
                     data-disclosure
-                    title={`${expanded.has(row.id) ? "Collapse" : "Expand"} ${row.node.label}`}
+                    title={`${effectiveExpanded.has(row.id) ? "Collapse" : "Expand"} ${row.node.label}`}
                     aria-hidden="true"
                   >
                   <svg
-                    class:expanded={expanded.has(row.id)}
+                    class:expanded={effectiveExpanded.has(row.id)}
                     width="12"
                     height="12"
                     viewBox="0 0 16 16"
@@ -304,7 +348,11 @@
      `display: block` is required: a flex container ignores column-width. */
   .tree.columns {
     display: block;
-    column-width: 22rem;
+    /* Capped as well as sized: columns read top-to-bottom then left-to-right,
+       which stays followable at four but stops being so once a listing is
+       spread across six or seven. The cap also holds if the container is ever
+       widened or the reader's font size is small. */
+    columns: 4 22rem;
     column-gap: 28px;
   }
 

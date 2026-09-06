@@ -193,3 +193,24 @@ mod collecting {
         assert!(collect_asset_files(tmp.path()).is_empty());
     }
 }
+
+// ─── Nested media ────────────────────────────────────────────────────────────
+
+mod nested {
+    use grafium_core::graph::collect_asset_files;
+    use std::fs;
+
+    /// Anki imports nest media as `assets/anki/<deck>/x.mp3`. These must be
+    /// found, or a graph looks clean while nested media accumulates unseen.
+    #[test]
+    fn collects_media_nested_inside_assets() {
+        let tmp = super::graph();
+        fs::create_dir_all(tmp.path().join("assets/anki/gre")).unwrap();
+        fs::write(tmp.path().join("assets/anki/gre/word.mp3"), b"audio").unwrap();
+        let found = collect_asset_files(tmp.path());
+        assert!(
+            found.contains(&"assets/anki/gre/word.mp3".to_string()),
+            "{found:?}"
+        );
+    }
+}

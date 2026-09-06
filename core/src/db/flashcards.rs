@@ -272,8 +272,14 @@ impl Database {
             interval_days: row.get(10)?,
             review_count: row.get(11)?,
             // Only the review query joins the owning page; everywhere else the
-            // column is absent and the card simply has no page context.
-            page_file_path: row.get(12).unwrap_or(None),
+            // column is absent. A missing column is expected and means "no page
+            // context"; anything else is a real decoding failure and must not
+            // be quietly turned into None.
+            page_file_path: match row.get::<_, Option<String>>(12) {
+                Ok(value) => value,
+                Err(rusqlite::Error::InvalidColumnIndex(_)) => None,
+                Err(e) => return Err(e),
+            },
         })
     }
 }

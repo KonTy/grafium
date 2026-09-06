@@ -473,8 +473,12 @@ export function sortTree(
   nodes: readonly PageTreeViewNode[],
   mode: PageTreeSortMode,
 ): PageTreeViewNode[] {
+  // `sensitivity: "base"` treats `Cafe`/`café` and `Foo`/`foo` as equal, so it
+  // cannot order them on its own; the id breaks the remaining tie to give a
+  // total order that does not depend on the order rows arrived in.
   const byName = (a: PageTreeViewNode, b: PageTreeViewNode) =>
-    a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+    a.label.localeCompare(b.label, undefined, { sensitivity: "base" })
+    || a.id.localeCompare(b.id);
   const within =
     mode === "recent"
       ? (a: PageTreeViewNode, b: PageTreeViewNode) =>

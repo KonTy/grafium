@@ -396,3 +396,42 @@ fn test_flashcards_due_survive_a_page_with_no_file() {
     assert_eq!(due[0].id, card.id);
     assert_eq!(due[0].page_file_path, None);
 }
+
+/// Media is referenced from more places than block markdown, and "unreferenced"
+/// drives a delete button. A source missing from this list means real,
+/// irreplaceable media — a recorded voice note, a handwriting page — gets
+/// offered to the user as an orphan to delete.
+#[test]
+fn test_media_references_cover_more_than_block_text() {
+    let db = Database::in_memory().unwrap();
+    let page = db.create_page("Notes", false).unwrap();
+
+    // A block whose own text says nothing about the files hanging off it.
+    let block = db
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "recorded a thought",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    db.register_audio_note(&block.id, "../assets/voice-note-2025.wav", 4200)
+        .unwrap();
+    db.register_ink_page(&block.id, "../assets/handwriting-page-1.svg")
+        .unwrap();
+
+    let refs = db.get_all_media_references().unwrap();
+    let mentions = |needle: &str| refs.iter().any(|r| r.contains(needle));
+
+    assert!(mentions("recorded a thought"), "block text is still included");
+    assert!(
+        mentions("voice-note-2025.wav"),
+        "an audio note's file must count as referenced: {refs:?}"
+    );
+    assert!(
+        mentions("handwriting-page-1.svg"),
+        "a handwriting page's file must count as referenced: {refs:?}"
+    );
+}

@@ -1085,8 +1085,14 @@
     color: var(--text-tertiary, var(--text-secondary));
   }
 
+  /* Holds its ground against a long directory, but still gives way rather than
+     pushing the size and delete button out of the row when the file name
+     itself is enormous. */
   .orphan-file {
     flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .orphan-size {
@@ -1101,8 +1107,15 @@
     color: var(--text-muted);
     cursor: pointer;
     padding: 2px 6px;
+    min-width: 32px;
+    min-height: 32px;
     border-radius: 4px;
     font-size: 14px;
+  }
+
+  .orphan-delete:focus-visible {
+    outline: 2px solid var(--danger, var(--accent));
+    outline-offset: 1px;
   }
 
   .orphan-delete:hover {

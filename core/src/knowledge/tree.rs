@@ -229,11 +229,13 @@ fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str, i64)>) -> Vec
                 if arena[idx].page_id.is_none() {
                     arena[idx].page_id = Some(page_id.to_string());
                     arena[idx].updated_at = arena[idx].updated_at.max(updated_at);
-            arena[idx].updated_at = arena[idx].updated_at.max(updated_at);
                 } else if arena[idx].key != title {
                     let literal =
                         get_or_create(&mut arena, &mut index_of, &mut roots, parent, title, title);
                     arena[literal].page_id = Some(page_id.to_string());
+                    // Without this the page is dated 0 and sinks to the bottom
+                    // of a recency sort for good.
+                    arena[literal].updated_at = arena[literal].updated_at.max(updated_at);
                 }
             }
             parent = Some(idx);

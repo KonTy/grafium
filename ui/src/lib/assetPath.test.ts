@@ -48,8 +48,31 @@ describe("asset path resolution", () => {
   });
 
   it("still rejects traversal out of the graph", () => {
+    // Asserting only "no .. survives" passes for any implementation that
+    // strips dots, including one that then happily requests the wrong file.
+    // Pin the exact resolved path instead.
     const html = renderBlock("![x](../../../../etc/passwd)", "pages/deep");
+    expect(html).toContain("grafium-asset://localhost/etc/passwd");
     expect(html).not.toContain("..");
+  });
+
+  it("keeps a mid-path .. inside the page directory for the backend to reject", () => {
+    const html = renderBlock("![x](a/../../b.png)", BOOK);
+    expect(html).toContain(`${BOOK}/a/../../b.png`);
+  });
+
+  it("treats a windows-style ..\\ reference as the legacy root form", () => {
+    // `..\assets\x.png` means the same as `../assets/x.png`. Without
+    // normalizing separators it was resolved against the page instead.
+    const html = renderBlock("![x](..\\assets\\x.png)", BOOK);
+    expect(html).toContain("localhost/assets/x.png");
+    expect(html).not.toContain(BOOK);
+  });
+
+  it("does not treat a protocol-relative path as a network URL", () => {
+    const html = renderBlock("![x](//evil.com/x.png)", BOOK);
+    expect(html).toContain("grafium-asset://localhost/evil.com/x.png");
+    expect(html).not.toContain("https://evil.com");
   });
 
   it("renders the same block differently for different pages", () => {
