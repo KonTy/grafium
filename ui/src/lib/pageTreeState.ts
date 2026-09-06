@@ -9,6 +9,8 @@ export interface PageTreeViewNode extends TreeNodeLike<PageTreeViewNode> {
   page_id: string | null;
   page_title: string | null;
   count: number;
+  /** Newest `updated_at` at or below this node, in epoch milliseconds. */
+  updated_at: number;
   children: PageTreeViewNode[];
 }
 
@@ -56,6 +58,7 @@ interface PersistedExpansion {
 
 export const SIDEBAR_TREE_STORAGE_KEY = "grafium.pageTree.sidebar.expanded";
 export const ALL_PAGES_TREE_STORAGE_KEY = "grafium.pageTree.allPages.expanded";
+export const ALL_PAGES_SORT_STORAGE_KEY = "grafium.pageTree.allPages.sort";
 
 /**
  * Scope a storage key to one graph.
@@ -437,4 +440,61 @@ export function groupRowsByRoot<TNode>(
     else groups[groups.length - 1].push(row);
   }
   return groups;
+}
+
+export type PageTreeSortMode = "name" | "recent";
+
+/**
+ * Reorder a tree without changing its shape.
+ *
+ * Folders are always their own group at the top, the way a file manager orders
+ * a listing: structure stays put, and the chosen order applies *within* each
+ * group rather than shuffling folders in among hundreds of loose pages.
+ *
+ * The mode decides the order inside a group:
+ *
+ *   - `name` — alphabetical, case-insensitive.
+ *   - `recent` — newest first. A folder carries the date of its newest page,
+ *     so a book you edited this morning leads the folders instead of sitting
+ *     wherever its name happens to fall.
+ *
+ * Ties fall back to name so the order never wanders between renders — pages
+ * imported together commonly share a timestamp to the millisecond.
+ */
+export function sortTree(
+  nodes: readonly PageTreeViewNode[],
+  mode: PageTreeSortMode,
+): PageTreeViewNode[] {
+  const byName = (a: PageTreeViewNode, b: PageTreeViewNode) =>
+    a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+  const within =
+    mode === "recent"
+      ? (a: PageTreeViewNode, b: PageTreeViewNode) =>
+          b.updated_at - a.updated_at || byName(a, b)
+      : byName;
+
+  const compare = (a: PageTreeViewNode, b: PageTreeViewNode) => {
+    const aBranch = a.children.length > 0;
+    const bBranch = b.children.length > 0;
+    if (aBranch !== bBranch) return aBranch ? -1 : 1;
+    return within(a, b);
+  };
+
+  // Iterative: depth here is a page title's segment count, which is user data,
+  // and a deeply nested tag would overflow the stack on the way down.
+  const sorted = nodes.map((node) => ({ ...node, children: [...node.children] }));
+  const stack: PageTreeViewNode[][] = [sorted];
+  while (stack.length > 0) {
+    const level = stack.pop()!;
+    level.sort(compare);
+    for (const node of level) {
+      if (node.children.length === 0) continue;
+      node.children = node.children.map((child) => ({
+        ...child,
+        children: [...child.children],
+      }));
+      stack.push(node.children);
+    }
+  }
+  return sorted;
 }

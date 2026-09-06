@@ -10,9 +10,11 @@
   } from "../lib/pageTree";
   import {
     ALL_PAGES_TREE_STORAGE_KEY,
+    ALL_PAGES_SORT_STORAGE_KEY,
     graphScopedKey,
     filterTreeByQuery,
     countTreePages,
+    sortTree,
     type PageTreeViewNode,
   } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
@@ -49,7 +51,9 @@
   /// silently search a fraction of the graph and report "no matches" for pages
   /// that exist. The tree holds every page, so filtering it is a real search.
   let filterQuery = $state("");
-  let visibleTree = $derived(filterTreeByQuery(pageTree, filterQuery));
+  let visibleTree = $derived(
+    sortTree(filterTreeByQuery(pageTree, filterQuery), sortByTitle ? "name" : "recent"),
+  );
   let filteredCount = $derived(countTreePages(visibleTree));
 
   // Loaded rows keyed by absolute index; SvelteMap is reactive so the template
@@ -83,6 +87,27 @@
     void getGraphInfo()
       .then((info) => { graphPath = info.path; })
       .catch(() => { graphPath = null; });
+  });
+
+  // Restored per graph: the order you browse in is a lasting preference, and
+  // resetting it on every launch would undo the choice each time.
+  let sortStorageKey = $derived(graphScopedKey(ALL_PAGES_SORT_STORAGE_KEY, graphPath));
+  let restoredSortFor: string | null = $state(null);
+  $effect(() => {
+    const key = sortStorageKey;
+    if (restoredSortFor === key) return;
+    restoredSortFor = key;
+    try {
+      const saved = window.localStorage.getItem(key);
+      const restored = saved === "name";
+      if ((saved === "name" || saved === "recent") && restored !== sortByTitle) {
+        sortByTitle = restored;
+        // Any rows already fetched came back in the other order.
+        resetWindows();
+      }
+    } catch {
+      // Ignore an unreadable store and keep the default.
+    }
   });
 
   $effect(() => {
@@ -202,6 +227,11 @@
     if (byTitle === sortByTitle) return;
     sortByTitle = byTitle;
     resetWindows();
+    try {
+      window.localStorage.setItem(sortStorageKey, byTitle ? "name" : "recent");
+    } catch {
+      // A full or disabled store only costs the preference, not the sort.
+    }
   }
 
   async function handleCreatePage() {
@@ -299,12 +329,28 @@
           Tags
         </button>
       </div>
-    {:else}
-      <div class="control-group" role="group" aria-label="Page list sort">
-        <button class="mode-btn" class:active={!sortByTitle} aria-pressed={!sortByTitle} onclick={() => setSort(false)}>Recent</button>
-        <button class="mode-btn" class:active={sortByTitle} aria-pressed={sortByTitle} onclick={() => setSort(true)}>A–Z</button>
-      </div>
     {/if}
+
+    <div class="control-group" role="group" aria-label="Sort order">
+      <button
+        class="mode-btn"
+        class:active={!sortByTitle}
+        aria-pressed={!sortByTitle}
+        title="Folders first, then newest. A folder counts as its most recently edited page."
+        onclick={() => setSort(false)}
+      >
+        Recent
+      </button>
+      <button
+        class="mode-btn"
+        class:active={sortByTitle}
+        aria-pressed={sortByTitle}
+        title="Folders first, then alphabetical"
+        onclick={() => setSort(true)}
+      >
+        A–Z
+      </button>
+    </div>
   </div>
 
   {#if total === 0}

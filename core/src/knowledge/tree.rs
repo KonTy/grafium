@@ -61,6 +61,13 @@ pub struct TreeNode {
     /// branch is hiding, which a raw child count could not — a branch can be
     /// one grouping node deep yet hold fifty pages.
     pub descendant_count: usize,
+    /// Newest `updated_at` at or below this node, in epoch milliseconds.
+    ///
+    /// A folder takes its newest page's timestamp so that sorting by recency
+    /// floats a book you touched this morning to the top, rather than stranding
+    /// it wherever its name happens to fall. `0` for a grouping node whose
+    /// subtree somehow contains no page.
+    pub updated_at: i64,
 }
 
 /// Which taxonomy a tree presents. Kept as a plain enum (rather than two
@@ -85,7 +92,7 @@ pub fn build_namespace_tree(pages: &[Page]) -> Vec<TreeNode> {
         pages
             .iter()
             .filter(|page| !page.is_journal)
-            .map(|page| (page.title.as_str(), page.id.as_str())),
+            .map(|page| (page.title.as_str(), page.id.as_str(), page.updated_at)),
     )
 }
 
@@ -104,7 +111,7 @@ pub fn build_tag_tree(tag_pages: &[Page]) -> Vec<TreeNode> {
     build_tree(
         tag_pages
             .iter()
-            .map(|page| (page.title.as_str(), page.id.as_str())),
+            .map(|page| (page.title.as_str(), page.id.as_str(), page.updated_at)),
     )
 }
 
@@ -118,6 +125,7 @@ struct Scratch {
     label: String,
     page_id: Option<String>,
     children: Vec<usize>,
+    updated_at: i64,
 }
 
 /// The shared core behind both public builders.
@@ -148,7 +156,7 @@ fn canonical_key(title: &str) -> String {
         .join("/")
 }
 
-fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<TreeNode> {
+fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str, i64)>) -> Vec<TreeNode> {
     let mut arena: Vec<Scratch> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut roots: Vec<usize> = Vec::new();
@@ -160,10 +168,10 @@ fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Tree
     // Pages whose title already equals its normalized key are processed first
     // and therefore own it; the messy spellings fall through to a literal node
     // of their own below.
-    let mut ordered: Vec<(&str, &str)> = entries.collect();
-    ordered.sort_by_key(|(title, _)| canonical_key(title) != *title);
+    let mut ordered: Vec<(&str, &str, i64)> = entries.collect();
+    ordered.sort_by_key(|(title, _, _)| canonical_key(title) != *title);
 
-    for (title, page_id) in ordered {
+    for (title, page_id, updated_at) in ordered {
         let normalized = title.replace('\\', "/");
 
         // Empty segments (leading/trailing/doubled slashes) are dropped so
@@ -186,6 +194,7 @@ fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Tree
                 &normalized,
             );
             arena[idx].page_id = Some(page_id.to_string());
+            arena[idx].updated_at = arena[idx].updated_at.max(updated_at);
             continue;
         }
 
@@ -219,6 +228,8 @@ fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Tree
                 // literal title, so every page stays reachable.
                 if arena[idx].page_id.is_none() {
                     arena[idx].page_id = Some(page_id.to_string());
+                    arena[idx].updated_at = arena[idx].updated_at.max(updated_at);
+            arena[idx].updated_at = arena[idx].updated_at.max(updated_at);
                 } else if arena[idx].key != title {
                     let literal =
                         get_or_create(&mut arena, &mut index_of, &mut roots, parent, title, title);
@@ -255,6 +266,9 @@ fn get_or_create(
         label: label.to_string(),
         page_id: None,
         children: Vec::new(),
+        // Grouping nodes carry no date of their own; `assemble` rolls up the
+        // newest date from the pages underneath.
+        updated_at: 0,
     });
     index_of.insert(key.to_string(), idx);
     match parent {
@@ -332,8 +346,10 @@ fn assemble(arena: &[Scratch], root: usize) -> TreeNode {
                     .collect();
 
                 let mut descendant_count = usize::from(arena[idx].page_id.is_some());
+                let mut updated_at = arena[idx].updated_at;
                 for child in &children {
                     descendant_count += child.descendant_count;
+                    updated_at = updated_at.max(child.updated_at);
                 }
 
                 built.insert(
@@ -344,6 +360,7 @@ fn assemble(arena: &[Scratch], root: usize) -> TreeNode {
                         page_id: arena[idx].page_id.clone(),
                         children,
                         descendant_count,
+                        updated_at,
                     },
                 );
             }
@@ -368,6 +385,50 @@ mod collision_tests {
             is_journal: false,
             properties: serde_json::json!({}),
         }
+    }
+
+    fn page_at(id: &str, title: &str, updated_at: i64) -> Page {
+        Page {
+            updated_at,
+            ..page(id, title)
+        }
+    }
+
+    /// A folder is only as old as its newest page.
+    ///
+    /// Sorting by recency is meant to surface what you touched last. If a
+    /// folder reported no date of its own, a book edited this morning would
+    /// sink to the bottom of a recency sort and the feature would be useless
+    /// for exactly the case it exists for.
+    #[test]
+    fn a_folder_takes_the_date_of_its_newest_page() {
+        let pages = vec![
+            page_at("1", "mybooks/coolbook/toc", 100),
+            page_at("2", "mybooks/coolbook/plot", 900),
+            page_at("3", "mybooks/oldbook/toc", 50),
+            page_at("4", "loose", 500),
+        ];
+
+        let tree = build_namespace_tree(&pages);
+        let mybooks = tree.iter().find(|n| n.label == "mybooks").unwrap();
+        assert_eq!(mybooks.updated_at, 900, "newest page anywhere below it");
+
+        let coolbook = mybooks
+            .children
+            .iter()
+            .find(|n| n.label == "coolbook")
+            .unwrap();
+        assert_eq!(coolbook.updated_at, 900);
+
+        let oldbook = mybooks
+            .children
+            .iter()
+            .find(|n| n.label == "oldbook")
+            .unwrap();
+        assert_eq!(oldbook.updated_at, 50, "unaffected by a sibling branch");
+
+        let loose = tree.iter().find(|n| n.label == "loose").unwrap();
+        assert_eq!(loose.updated_at, 500);
     }
 
     /// Folders lead, then pages, each alphabetically.

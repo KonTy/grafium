@@ -13,6 +13,8 @@ import {
   SIDEBAR_TREE_STORAGE_KEY,
   filterTreeByQuery,
   groupRowsByRoot,
+  sortTree,
+  type PageTreeViewNode,
 } from "./pageTreeState";
 
 interface Node {
@@ -228,21 +230,22 @@ describe("saveExpansionState bounds", () => {
 });
 
 describe("filterTreeByQuery", () => {
-  const tree = [
+  const tree: PageTreeViewNode[] = [
     {
       id: "namespace:mybooks", label: "mybooks", page_id: null, page_title: "mybooks", count: 2,
+      updated_at: 0,
       children: [
         {
           id: "namespace:mybooks/thingsilove", label: "thingsilove", page_id: "p1",
-          page_title: "mybooks/thingsilove", count: 2,
+          page_title: "mybooks/thingsilove", count: 2, updated_at: 0,
           children: [
             { id: "namespace:mybooks/thingsilove/arc", label: "arc", page_id: "p2",
-              page_title: "mybooks/thingsilove/arc", count: 1, children: [] },
+              page_title: "mybooks/thingsilove/arc", count: 1, updated_at: 0, children: [] },
           ],
         },
       ],
     },
-    { id: "namespace:tech", label: "tech", page_id: "p3", page_title: "tech", count: 1, children: [] },
+    { id: "namespace:tech", label: "tech", page_id: "p3", page_title: "tech", count: 1, updated_at: 0, children: [] },
   ];
 
   it("returns everything for an empty query", () => {
@@ -317,5 +320,96 @@ describe("groupRowsByRoot", () => {
   it("gives each collapsed root its own group", () => {
     const groups = groupRowsByRoot([row("a", 1), row("b", 1), row("c", 1)]);
     expect(groups).toHaveLength(3);
+  });
+});
+
+describe("sortTree", () => {
+  const node = (
+    label: string,
+    updated_at: number,
+    children: PageTreeViewNode[] = [],
+  ): PageTreeViewNode => ({
+    id: `namespace:${label}`,
+    label,
+    page_id: `p-${label}`,
+    page_title: label,
+    count: 1,
+    updated_at,
+    children,
+  });
+
+  const labels = (nodes: PageTreeViewNode[]) => nodes.map((n) => n.label);
+
+  it("puts folders first, then names, when sorting by name", () => {
+    const sorted = sortTree(
+      [node("zebra", 1), node("folder", 2, [node("child", 3)]), node("apple", 4)],
+      "name",
+    );
+    expect(labels(sorted)).toEqual(["folder", "apple", "zebra"]);
+  });
+
+  it("puts the newest first when sorting by recency", () => {
+    const sorted = sortTree([node("old", 100), node("new", 900), node("mid", 500)], "recent");
+    expect(labels(sorted)).toEqual(["new", "mid", "old"]);
+  });
+
+  it("keeps folders at the top even when sorting by recency", () => {
+    // File-manager behaviour: folders are their own group, so a page edited
+    // just now still sorts below them rather than in among them.
+    const sorted = sortTree(
+      [node("justEdited", 900), node("oldbook", 100, [node("toc", 100)])],
+      "recent",
+    );
+    expect(labels(sorted)).toEqual(["oldbook", "justEdited"]);
+  });
+
+  it("sorts folders among themselves by recency", () => {
+    // The point of the roll-up: the book touched this morning leads the
+    // folders instead of sitting wherever its name falls.
+    const sorted = sortTree(
+      [
+        node("aaa-old-book", 100, [node("toc", 100)]),
+        node("zzz-new-book", 900, [node("toc", 900)]),
+        node("loose", 500),
+      ],
+      "recent",
+    );
+    expect(labels(sorted)).toEqual(["zzz-new-book", "aaa-old-book", "loose"]);
+  });
+
+  it("sorts children too, at every level", () => {
+    const sorted = sortTree(
+      [node("root", 9, [node("b", 1, [node("y", 1), node("x", 2)]), node("a", 2)])],
+      "name",
+    );
+    expect(labels(sorted[0].children)).toEqual(["b", "a"]);
+    expect(labels(sorted[0].children[0].children)).toEqual(["x", "y"]);
+  });
+
+  it("breaks ties by name so the order never wanders", () => {
+    // Pages imported together commonly share a timestamp to the millisecond.
+    const sorted = sortTree([node("c", 5), node("a", 5), node("b", 5)], "recent");
+    expect(labels(sorted)).toEqual(["a", "b", "c"]);
+  });
+
+  it("compares names case-insensitively", () => {
+    const sorted = sortTree([node("beta", 1), node("Alpha", 1)], "name");
+    expect(labels(sorted)).toEqual(["Alpha", "beta"]);
+  });
+
+  it("leaves the input untouched", () => {
+    const input = [node("z", 1), node("a", 2)];
+    sortTree(input, "name");
+    expect(labels(input)).toEqual(["z", "a"]);
+  });
+
+  it("handles a deep tree without recursing", () => {
+    let deep = node("leaf", 1);
+    for (let i = 0; i < 10_000; i += 1) deep = node(`n${i}`, 1, [deep]);
+    expect(() => sortTree([deep], "name")).not.toThrow();
+  });
+
+  it("returns nothing for an empty tree", () => {
+    expect(sortTree([], "recent")).toEqual([]);
   });
 });

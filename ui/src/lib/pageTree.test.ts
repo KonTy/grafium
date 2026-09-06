@@ -103,8 +103,10 @@ describe("page tree commands", () => {
         page_id: "p2",
         children: [],
         descendant_count: 1,
+        updated_at: 20,
       }],
       descendant_count: 2,
+      updated_at: 20,
     }];
 
     expect(toPageTreeView(nodes, "namespace")).toEqual([{
@@ -113,12 +115,14 @@ describe("page tree commands", () => {
       page_id: "p1",
       page_title: "tech",
       count: 2,
+      updated_at: 20,
       children: [{
         id: "namespace:tech/linux",
         label: "linux",
         page_id: "p2",
         page_title: "tech/linux",
         count: 1,
+        updated_at: 20,
         children: [],
       }],
     }]);
@@ -131,6 +135,7 @@ describe("page tree commands", () => {
       page_id: null,
       children: [],
       descendant_count: 10_001,
+      updated_at: 0,
     };
     let cursor = root;
     for (let depth = 1; depth <= 10_000; depth += 1) {
@@ -140,6 +145,7 @@ describe("page tree commands", () => {
         page_id: null,
         children: [],
         descendant_count: 10_001 - depth,
+        updated_at: 0,
       };
       cursor.children = [child];
       cursor = child;

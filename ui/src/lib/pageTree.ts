@@ -92,6 +92,8 @@ export interface TreeNode {
   page_id: string | null;
   children: TreeNode[];
   descendant_count: number;
+  /** Newest `updated_at` at or below this node, in epoch milliseconds. */
+  updated_at: number;
 }
 
 export interface CollectionSummary {
@@ -214,6 +216,7 @@ export function toPageTreeView(
       page_id: sourceNode.page_id,
       page_title: sourceNode.page_id ? sourceNode.key : null,
       count: sourceNode.descendant_count,
+      updated_at: sourceNode.updated_at ?? 0,
       children: [],
     };
     target.push(viewNode);
