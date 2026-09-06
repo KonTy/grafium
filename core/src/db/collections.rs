@@ -35,7 +35,7 @@ impl Database {
                        JOIN blocks b ON b.id = l.from_block_id
                       WHERE b.page_id = p.id AND l.link_type = 'page') AS member_count
              FROM pages p
-             WHERE json_extract(p.properties, '$.collection.kind') IS NOT NULL
+             WHERE COALESCE(TRIM(json_extract(p.properties, '$.collection')), '') <> ''
              ORDER BY p.title ASC",
         )?;
         let rows = stmt

@@ -78,8 +78,7 @@ pub fn page_set_collection(
     }
 
     graph
-        .db
-        .update_page(&page_id, None, Some(&properties))
+        .update_page_properties(&page_id, properties)
         .map_err(|e| e.to_string())
 }
 

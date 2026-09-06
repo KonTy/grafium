@@ -1447,6 +1447,24 @@ impl Graph {
         Ok(PageWriteStrategy::IncrementalPatch)
     }
 
+    /// Update a page's properties in the database **and** rewrite its file.
+    ///
+    /// Writing only the database is not enough for anything that must last:
+    /// indexing a file replaces a page's properties with whatever the parser
+    /// read back from disk, so a database-only property survives exactly until
+    /// the next file-watcher event, reindex or sync pull and then vanishes with
+    /// no error. Persisting both means the property is durable and travels
+    /// between devices in the markdown itself.
+    pub fn update_page_properties(
+        &self,
+        page_id: &str,
+        properties: serde_json::Value,
+    ) -> Result<()> {
+        self.db.update_page(page_id, None, Some(&properties))?;
+        let page = self.db.get_page_by_id(page_id)?;
+        self.write_page_to_disk(&page)
+    }
+
     /// Serialize all blocks for a page and write the .md file.
     fn write_page_to_disk(&self, page: &Page) -> Result<()> {
         let file_path = self.resolve_page_file_path(page)?;

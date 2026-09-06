@@ -16,16 +16,29 @@
 //! column change:
 //!
 //! ```json
-//! { "collection": { "kind": "book", "status": "draft" } }
+//! { "collection": "book", "collection-status": "draft" }
 //! ```
 //!
-//! The helpers here read and write *only* that key. Everything else a page
+//! The helpers here read and write *only* those keys. Everything else a page
 //! carries in `properties` is unrelated user data, so clobbering it while
 //! toggling a marker would be a real data-loss bug — hence the surgical
 //! insert/remove rather than replacing the whole blob.
 
 use crate::models::Page;
 use serde::{Deserialize, Serialize};
+
+/// Property keys holding the collection marking.
+///
+/// Deliberately **flat string** properties rather than a nested object. The
+/// markdown serializer only emits `key:: value` for string values, and
+/// indexing a file *replaces* a page's properties with whatever the parser
+/// read back — so a nested `{"collection": {...}}` was written to the database
+/// and then silently erased by the next reindex, file-watcher event or sync
+/// pull, with `pages_list_collections` simply returning nothing and no error
+/// to explain it. A flat string survives the markdown round trip, which also
+/// means a collection travels between devices in the file itself.
+pub const COLLECTION_KIND_KEY: &str = "collection";
+pub const COLLECTION_STATUS_KEY: &str = "collection-status";
 
 /// What a page's `collection` marker says about it.
 ///
@@ -45,58 +58,44 @@ pub struct CollectionInfo {
 /// treated as "not a collection" rather than surfaced as a half-broken one, so
 /// a stray hand-edit to the JSON can't wedge the UI.
 pub fn collection_of(page: &Page) -> Option<CollectionInfo> {
-    let collection = page.properties.get("collection")?;
-    let kind = collection.get("kind")?.as_str()?.to_string();
-    let status = collection
-        .get("status")
+    let kind = page
+        .properties
+        .get(COLLECTION_KIND_KEY)
         .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let status = page
+        .properties
+        .get(COLLECTION_STATUS_KEY)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string);
     Some(CollectionInfo { kind, status })
 }
 
-/// Mark `props` as a collection of `kind`, leaving every other property intact.
-///
-/// If the page already carried a `status`, it is preserved: changing what kind
-/// of collection a page is shouldn't silently reset where it is in its
-/// workflow. When `props` isn't a JSON object yet (a fresh page serializes its
-/// properties as `null`), it is promoted to an empty object first so the marker
-/// has somewhere to live.
+/// Marks `props` as a collection of `kind`, leaving every other property alone.
 pub fn mark_collection(props: &mut serde_json::Value, kind: &str) {
     if !props.is_object() {
-        *props = serde_json::Value::Object(serde_json::Map::new());
+        // A page whose properties are null/array/string still has to be
+        // markable; replacing a non-object is the only option, and there was
+        // nothing structured there to lose.
+        *props = serde_json::json!({});
     }
-    // Guaranteed by the promotion above; the `else` only exists so a future
-    // change can't turn this into a panic.
-    let Some(object) = props.as_object_mut() else {
-        return;
-    };
-
-    let existing_status = object
-        .get("collection")
-        .and_then(|collection| collection.get("status"))
-        .cloned();
-
-    let mut collection = serde_json::Map::new();
-    collection.insert(
-        "kind".to_string(),
-        serde_json::Value::String(kind.to_string()),
-    );
-    if let Some(status) = existing_status {
-        collection.insert("status".to_string(), status);
+    if let Some(obj) = props.as_object_mut() {
+        obj.insert(
+            COLLECTION_KIND_KEY.to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
     }
-    object.insert(
-        "collection".to_string(),
-        serde_json::Value::Object(collection),
-    );
 }
 
-/// Remove a page's collection marker, leaving every other property intact.
-///
-/// A no-op when the page has no properties object or no marker, so "un-mark"
-/// is safe to call unconditionally from the page menu.
+/// Removes the collection marking, leaving unrelated properties untouched.
 pub fn clear_collection(props: &mut serde_json::Value) {
-    if let Some(object) = props.as_object_mut() {
-        object.remove("collection");
+    if let Some(obj) = props.as_object_mut() {
+        obj.remove(COLLECTION_KIND_KEY);
+        obj.remove(COLLECTION_STATUS_KEY);
     }
 }
 
@@ -126,13 +125,13 @@ mod tests {
     #[test]
     fn collection_of_reads_kind_and_optional_status() {
         let page = page_with_props(serde_json::json!({
-            "collection": { "kind": "book", "status": "draft" }
+            "collection": "book", "collection-status": "draft"
         }));
         let info = collection_of(&page).expect("marker present");
         assert_eq!(info.kind, "book");
         assert_eq!(info.status.as_deref(), Some("draft"));
 
-        let no_status = page_with_props(serde_json::json!({ "collection": { "kind": "project" } }));
+        let no_status = page_with_props(serde_json::json!({ "collection": "project" }));
         let info = collection_of(&no_status).unwrap();
         assert_eq!(info.kind, "project");
         assert_eq!(info.status, None);
@@ -140,16 +139,22 @@ mod tests {
 
     #[test]
     fn malformed_marker_reads_as_not_a_collection() {
-        // `collection` present but without a string `kind` must not surface a
-        // half-populated CollectionInfo.
+        // A status with no kind is not a collection: the kind is what makes
+        // the page one, and half-populated info would show an empty header.
         assert!(collection_of(&page_with_props(
-            serde_json::json!({ "collection": { "status": "draft" } })
+            serde_json::json!({ "collection-status": "draft" })
         ))
         .is_none());
-        assert!(collection_of(&page_with_props(
-            serde_json::json!({ "collection": "book" })
-        ))
-        .is_none());
+        // Non-string or blank values are equally not a marking. Properties are
+        // free-form and round-trip through markdown, so anything can land here.
+        for bad in [
+            serde_json::json!({ "collection": "" }),
+            serde_json::json!({ "collection": "   " }),
+            serde_json::json!({ "collection": 7 }),
+            serde_json::json!({ "collection": { "kind": "book" } }),
+        ] {
+            assert!(collection_of(&page_with_props(bad)).is_none());
+        }
     }
 
     #[test]
@@ -172,20 +177,17 @@ mod tests {
         assert_eq!(props["icon"], serde_json::json!("📕"));
         assert_eq!(props["color"], serde_json::json!("red"));
         assert_eq!(props["tags"], serde_json::json!(["fiction", "1900s"]));
-        assert_eq!(props["collection"]["kind"], serde_json::json!("book"));
+        assert_eq!(props["collection"], serde_json::json!("book"));
     }
 
     #[test]
     fn re_marking_a_new_kind_preserves_existing_status() {
         let mut props = serde_json::json!({
-            "collection": { "kind": "book", "status": "published" }
+            "collection": "book", "collection-status": "published"
         });
         mark_collection(&mut props, "project");
-        assert_eq!(props["collection"]["kind"], serde_json::json!("project"));
-        assert_eq!(
-            props["collection"]["status"],
-            serde_json::json!("published")
-        );
+        assert_eq!(props["collection"], serde_json::json!("project"));
+        assert_eq!(props["collection-status"], serde_json::json!("published"));
     }
 
     #[test]
@@ -193,14 +195,14 @@ mod tests {
         let mut props = serde_json::Value::Null;
         mark_collection(&mut props, "book");
         assert!(props.is_object());
-        assert_eq!(props["collection"]["kind"], serde_json::json!("book"));
+        assert_eq!(props["collection"], serde_json::json!("book"));
     }
 
     #[test]
     fn clear_removes_only_the_marker() {
         let mut props = serde_json::json!({
             "icon": "📕",
-            "collection": { "kind": "book", "status": "draft" }
+            "collection": "book", "collection-status": "draft"
         });
         clear_collection(&mut props);
 

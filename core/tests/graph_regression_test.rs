@@ -165,3 +165,66 @@ fn graph_data_spans_disconnected_clusters() {
         nodes.len()
     );
 }
+
+/// A collection marking must survive the markdown round trip.
+///
+/// Regression: the marker was stored as a nested JSON object, but the
+/// serializer only emits string properties and indexing a file *replaces* a
+/// page's properties with whatever the parser read back. So the mark was
+/// written to the database and then silently erased by the next reindex,
+/// file-watcher event or sync pull — `pages_list_collections` returned an
+/// empty list with no error, and the marking never travelled between devices.
+#[test]
+fn collection_marking_survives_a_disk_round_trip() {
+    use grafium_core::knowledge::collections::{collection_of, mark_collection};
+
+    let temp = tempfile::tempdir().unwrap();
+    let graph = Graph::open(temp.path()).unwrap();
+    let page = graph.create_page("My Books/Dune", false).unwrap();
+
+    // Give the page a block so it has real content alongside the marker, and
+    // an unrelated property that must not be collateral damage.
+    graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "[[Chapter 1]]",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let mut props = serde_json::json!({ "icon": "book" });
+    mark_collection(&mut props, "book");
+    graph.update_page_properties(&page.id, props).unwrap();
+
+    let stored = graph.db.get_page_by_id(&page.id).unwrap();
+    assert_eq!(collection_of(&stored).map(|c| c.kind), Some("book".into()));
+
+    // Re-index the file from disk, which is what a watcher event or sync pull
+    // does, and is where the marker used to disappear.
+    // `file_path` is stored relative to the graph root.
+    let file_path = temp
+        .path()
+        .join(stored.file_path.clone().expect("page should have a file"));
+    assert!(
+        std::fs::read_to_string(&file_path)
+            .expect("page file should exist on disk")
+            .contains("collection:: book"),
+        "the marker must actually be written into the markdown"
+    );
+    graph.index_file(&file_path).unwrap();
+
+    let reindexed = graph.db.get_page_by_id(&page.id).unwrap();
+    assert_eq!(
+        collection_of(&reindexed).map(|c| c.kind),
+        Some("book".into()),
+        "collection marking must survive reindexing from disk"
+    );
+    assert_eq!(
+        reindexed.properties["icon"],
+        serde_json::json!("book"),
+        "unrelated properties must survive too"
+    );
+}

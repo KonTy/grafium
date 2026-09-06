@@ -136,12 +136,34 @@ struct Scratch {
 /// the tree sorts each node's children once; summed over the tree that is
 /// `O(N log N)` for `N` nodes (`N ≤ T`). Overall `O(T log T)` — linearithmic,
 /// with no per-page rescan that would make it quadratic on a large graph.
+/// The key a title nests under: backslashes normalized and empty segments
+/// dropped. A title equal to its own canonical key is "tidy" and owns that
+/// node; anything else is a messy spelling of it.
+fn canonical_key(title: &str) -> String {
+    title
+        .replace('\\', "/")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<TreeNode> {
     let mut arena: Vec<Scratch> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut roots: Vec<usize> = Vec::new();
 
-    for (title, page_id) in entries {
+    // Order matters when two titles normalize onto one key (`a//b` and `a/b`,
+    // or `tech\linux` and `tech/linux`). Both pages are real — titles are
+    // UNIQUE in the database — so the node has to belong to one of them
+    // *predictably*, not to whichever the iterator happened to yield first.
+    // Pages whose title already equals its normalized key are processed first
+    // and therefore own it; the messy spellings fall through to a literal node
+    // of their own below.
+    let mut ordered: Vec<(&str, &str)> = entries.collect();
+    ordered.sort_by_key(|(title, _)| canonical_key(title) != *title);
+
+    for (title, page_id) in ordered {
         let normalized = title.replace('\\', "/");
 
         // Empty segments (leading/trailing/doubled slashes) are dropped so
@@ -188,7 +210,20 @@ fn build_tree<'a>(entries: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Tree
             // stay grouping nodes unless they are themselves some page's final
             // segment (processed on their own iteration, in any order).
             if depth == last {
-                arena[idx].page_id = Some(page_id.to_string());
+                // Two distinct pages can normalize onto one key — `a//b` and
+                // `a/b`, or `tech\linux` and `tech/linux` — and overwriting
+                // here made the loser vanish from the tree entirely, with no
+                // error and no way to reach it. Titles are UNIQUE in the
+                // database, so both pages are real; the first claim keeps the
+                // shared node and the other gets its own node keyed by its
+                // literal title, so every page stays reachable.
+                if arena[idx].page_id.is_none() {
+                    arena[idx].page_id = Some(page_id.to_string());
+                } else if arena[idx].key != title {
+                    let literal =
+                        get_or_create(&mut arena, &mut index_of, &mut roots, parent, title, title);
+                    arena[literal].page_id = Some(page_id.to_string());
+                }
             }
             parent = Some(idx);
         }
@@ -240,31 +275,143 @@ fn sort_indices(arena: &[Scratch], indices: &mut [usize]) {
     indices.sort_by_cached_key(|&idx| arena[idx].label.to_lowercase());
 }
 
-/// Materialize the owned `TreeNode` for one arena entry, depth-first.
+/// Materialize the owned `TreeNode` for one arena entry.
 ///
-/// Children are sorted here (not at insertion) so the arena can be built in one
-/// cheap pass; `descendant_count` is summed on the way back up, counting a node
-/// itself only when a real page sits there.
-fn assemble(arena: &[Scratch], idx: usize) -> TreeNode {
-    let mut child_indices = arena[idx].children.clone();
-    sort_indices(arena, &mut child_indices);
-
-    let children: Vec<TreeNode> = child_indices
-        .into_iter()
-        .map(|child| assemble(arena, child))
-        .collect();
-
-    let mut descendant_count = usize::from(arena[idx].page_id.is_some());
-    for child in &children {
-        descendant_count += child.descendant_count;
+/// Iterative rather than recursive on purpose. Depth here is the segment count
+/// of a page title, which is user data — a hashtag like `#a/a/a/…` nested
+/// thousands deep is enough to overflow the stack, and this runs while the
+/// graph mutex is held, so a panic would poison it and take down every later
+/// command rather than failing one request.
+///
+/// Two passes over an explicit stack: descend marking nodes, then build each
+/// node once its children are already built. Children are sorted here (not at
+/// insertion) so the arena can be built in one cheap pass, and
+/// `descendant_count` is summed on the way back up, counting a node itself
+/// only when a real page sits there.
+fn assemble(arena: &[Scratch], root: usize) -> TreeNode {
+    enum Step {
+        Descend(usize),
+        Build(usize),
     }
 
-    TreeNode {
-        key: arena[idx].key.clone(),
-        label: arena[idx].label.clone(),
-        page_id: arena[idx].page_id.clone(),
-        children,
-        descendant_count,
+    let mut stack = vec![Step::Descend(root)];
+    // Finished subtrees, keyed by arena index, consumed by their parent.
+    let mut built: std::collections::HashMap<usize, TreeNode> = std::collections::HashMap::new();
+    // Child order per node, computed once during the descent.
+    let mut ordered: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Descend(idx) => {
+                let mut child_indices = arena[idx].children.clone();
+                sort_indices(arena, &mut child_indices);
+                // Build runs after every child, because the stack pops in
+                // reverse order of pushes.
+                stack.push(Step::Build(idx));
+                for &child in &child_indices {
+                    stack.push(Step::Descend(child));
+                }
+                ordered.insert(idx, child_indices);
+            }
+            Step::Build(idx) => {
+                let child_indices = ordered.remove(&idx).unwrap_or_default();
+                let children: Vec<TreeNode> = child_indices
+                    .into_iter()
+                    .filter_map(|child| built.remove(&child))
+                    .collect();
+
+                let mut descendant_count = usize::from(arena[idx].page_id.is_some());
+                for child in &children {
+                    descendant_count += child.descendant_count;
+                }
+
+                built.insert(
+                    idx,
+                    TreeNode {
+                        key: arena[idx].key.clone(),
+                        label: arena[idx].label.clone(),
+                        page_id: arena[idx].page_id.clone(),
+                        children,
+                        descendant_count,
+                    },
+                );
+            }
+        }
+    }
+
+    built.remove(&root).expect("root is always built")
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use crate::models::Page;
+
+    fn page(id: &str, title: &str) -> Page {
+        Page {
+            id: id.to_string(),
+            title: title.to_string(),
+            file_path: None,
+            created_at: 0,
+            updated_at: 0,
+            is_journal: false,
+            properties: serde_json::json!({}),
+        }
+    }
+
+    fn all_page_ids(nodes: &[TreeNode], out: &mut Vec<String>) {
+        for n in nodes {
+            if let Some(id) = &n.page_id {
+                out.push(id.clone());
+            }
+            all_page_ids(&n.children, out);
+        }
+    }
+
+    /// Titles are UNIQUE in the database, so two pages that merely *normalize*
+    /// onto the same key are both real. Overwriting made one vanish from the
+    /// sidebar with no error and no route to it.
+    #[test]
+    fn pages_that_normalize_to_the_same_key_are_both_reachable() {
+        for (a, b) in [
+            ("a//b", "a/b"),
+            ("tech\\linux", "tech/linux"),
+            ("/tech/x/", "tech/x"),
+        ] {
+            let pages = vec![page("id-a", a), page("id-b", b)];
+            let tree = build_namespace_tree(&pages);
+            let mut ids = Vec::new();
+            all_page_ids(&tree, &mut ids);
+            ids.sort();
+            assert_eq!(
+                ids,
+                vec!["id-a".to_string(), "id-b".to_string()],
+                "both {a:?} and {b:?} must appear in the tree"
+            );
+        }
+    }
+
+    /// Depth comes from a page title, which is user data — a deeply nested
+    /// hashtag must not overflow the stack while the graph mutex is held.
+    #[test]
+    fn a_pathologically_deep_title_does_not_overflow_the_stack() {
+        let deep = std::iter::repeat("a")
+            .take(5_000)
+            .collect::<Vec<_>>()
+            .join("/");
+        let pages = vec![page("deep", &deep)];
+        let tree = build_namespace_tree(&pages);
+        assert_eq!(tree.len(), 1);
+
+        // Walk it iteratively; recursing here would defeat the point.
+        let mut depth = 0usize;
+        let mut cur = &tree[0];
+        while let Some(next) = cur.children.first() {
+            depth += 1;
+            cur = next;
+        }
+        assert_eq!(depth, 4_999);
     }
 }
 
@@ -405,12 +552,23 @@ mod tests {
     }
 
     #[test]
-    fn backslash_and_slash_titles_collapse_to_one_node() {
-        // `tech\linux` and `tech/linux` are the same hierarchy and must merge.
+    fn backslash_titles_nest_under_the_same_parent() {
+        // `tech\linux` nests as `tech/linux` — the separator is normalized, so
+        // both spellings live under one `tech` parent rather than creating a
+        // second root literally named "tech\linux".
         let tree = build_namespace_tree(&[page("a", "tech\\linux"), page("b", "tech/linux")]);
         let tech = find(&tree, "tech").unwrap();
-        assert_eq!(tech.children.len(), 1, "one merged child, not two");
-        assert_eq!(tech.descendant_count, 1);
+
+        // Both pages are real rows with UNIQUE titles, so both must remain
+        // reachable. An earlier version merged them and silently dropped one,
+        // which removed a page from the sidebar with no error.
+        assert_eq!(tech.descendant_count, 2, "neither page may be dropped");
+        let ids: Vec<&str> = tech
+            .children
+            .iter()
+            .filter_map(|c| c.page_id.as_deref())
+            .collect();
+        assert!(ids.contains(&"a") && ids.contains(&"b"));
     }
 
     #[test]
