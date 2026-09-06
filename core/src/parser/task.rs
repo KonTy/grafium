@@ -535,6 +535,43 @@ pub fn apply_state_change(content: &str, from: &str, to: &str, at: NaiveDateTime
     join_block(parts)
 }
 
+/// Where a repeating task goes when you finish it.
+///
+/// A repeating task is never really done, so completing one does not close it:
+/// Logseq rolls the timestamp forward and reopens the task in place rather
+/// than marking it `DONE` and leaving you to recreate it. Duplicating instead
+/// would grow the file without bound, one copy per occurrence.
+///
+/// Returns `None` when nothing repeats, in which case the caller completes the
+/// task normally.
+pub fn apply_recurrence(content: &str, from: &str, at: NaiveDateTime) -> Option<String> {
+    let fields = parse_fields(content);
+    let scheduled = fields.scheduled.as_ref();
+    let deadline = fields.deadline.as_ref();
+
+    let next_scheduled = scheduled.and_then(|ts| ts.next_occurrence(at));
+    let next_deadline = deadline.and_then(|ts| ts.next_occurrence(at));
+    if next_scheduled.is_none() && next_deadline.is_none() {
+        return None;
+    }
+
+    // Back to the un-started state of whichever workflow the task was using,
+    // so a repeating chore does not come back already marked in progress.
+    let reopened = match from {
+        "NOW" | "LATER" => "LATER",
+        _ => "TODO",
+    };
+
+    let mut out = apply_state_change(content, from, reopened, at);
+    if let Some(ts) = next_scheduled {
+        out = set_planning_timestamp(&out, "SCHEDULED", Some(&ts));
+    }
+    if let Some(ts) = next_deadline {
+        out = set_planning_timestamp(&out, "DEADLINE", Some(&ts));
+    }
+    Some(out)
+}
+
 /// Replace or clear a `SCHEDULED:`/`DEADLINE:` timestamp, keeping block order.
 pub fn set_planning_timestamp(
     content: &str,
@@ -850,6 +887,62 @@ mod tests {
         assert_eq!(fields.closed_at, Some(dt("2026-09-06 11:42")));
         assert_eq!(fields.priority, Some(Priority::B));
         assert!(fields.scheduled.unwrap().repeater.is_some());
+    }
+
+
+    // ─── Recurrence ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn finishing_a_repeating_task_reopens_it_on_the_next_date() {
+        // A repeating chore is never really done. Marking it DONE and leaving
+        // the reader to recreate it is how repeating tasks get lost.
+        let content = ["TODO Water the plants", "SCHEDULED: <2026-09-07 Mon .+3d>"].join("\n");
+        let out = apply_recurrence(&content, "TODO", dt("2026-09-08 18:00")).unwrap();
+        assert!(out.starts_with("TODO Water the plants"), "{out}");
+        assert!(out.contains("SCHEDULED: <2026-09-11 Fri .+3d>"), "{out}");
+        assert!(!out.contains("CLOSED:"), "a recurring task is not closed:\n{out}");
+        assert_eq!(out.matches("SCHEDULED:").count(), 1);
+    }
+
+    #[test]
+    fn the_repeat_is_recorded_in_the_logbook() {
+        let content = ["TODO Water", "SCHEDULED: <2026-09-07 Mon .+3d>"].join("\n");
+        let out = apply_recurrence(&content, "DOING", dt("2026-09-08 18:00")).unwrap();
+        assert!(out.contains("* State \"TODO\" from \"DOING\""), "{out}");
+    }
+
+    #[test]
+    fn a_now_later_task_reopens_as_later() {
+        // Two workflows share the file; a repeating NOW task coming back as
+        // TODO would silently move it into the other one.
+        let content = ["NOW Stretch", "SCHEDULED: <2026-09-07 Mon ++1w>"].join("\n");
+        let out = apply_recurrence(&content, "NOW", dt("2026-09-08 18:00")).unwrap();
+        assert!(out.starts_with("LATER Stretch"), "{out}");
+    }
+
+    #[test]
+    fn a_deadline_repeats_too() {
+        let content = ["TODO File taxes", "DEADLINE: <2026-01-31 Sat +1y>"].join("\n");
+        let out = apply_recurrence(&content, "TODO", dt("2026-02-01 09:00")).unwrap();
+        assert!(out.contains("DEADLINE: <2027-01-31 Sun +1y>"), "{out}");
+    }
+
+    #[test]
+    fn a_task_that_does_not_repeat_is_left_to_the_caller() {
+        let content = ["TODO One-off", "SCHEDULED: <2026-09-07 Mon>"].join("\n");
+        assert!(apply_recurrence(&content, "TODO", dt("2026-09-08 18:00")).is_none());
+        assert!(apply_recurrence("TODO bare", "TODO", dt("2026-09-08 18:00")).is_none());
+    }
+
+    #[test]
+    fn repeating_twice_keeps_moving_forward() {
+        // The rewritten block must still be recognisably repeating, or the
+        // second completion silently closes it.
+        let content = ["TODO Water", "SCHEDULED: <2026-09-07 Mon .+3d>"].join("\n");
+        let once = apply_recurrence(&content, "TODO", dt("2026-09-08 18:00")).unwrap();
+        let twice = apply_recurrence(&once, "TODO", dt("2026-09-12 18:00")).unwrap();
+        assert!(twice.contains("SCHEDULED: <2026-09-15 Tue .+3d>"), "{twice}");
+        assert_eq!(twice.matches(":LOGBOOK:").count(), 1);
     }
 
     // ─── Planning timestamps ─────────────────────────────────────────────────

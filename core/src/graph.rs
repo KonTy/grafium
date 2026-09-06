@@ -861,6 +861,18 @@ impl Graph {
                 block.scheduled_date.as_deref(),
                 block.deadline_date.as_deref(),
             )?;
+            // Re-read the richer fields straight from the block text. Indexing
+            // is the path a file edited elsewhere arrives by, so this is what
+            // makes a completion time written on another machine — or by hand
+            // in another editor — land in the table rather than being ignored.
+            let fields = crate::parser::task::parse_fields(&block.content);
+            self.db.sync_task_from_content_in_connection(
+                conn,
+                block_id,
+                "",
+                &fields,
+                fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
+            )?;
         } else {
             self.db.delete_task_in_connection(conn, block_id)?;
         }
@@ -982,6 +994,38 @@ impl Graph {
         }
     }
 
+
+    /// Register (or clear) the task row for a block from its own text.
+    ///
+    /// Links are indexed inline on create and update for the same reason:
+    /// without it a `TODO` typed into a block reaches the Tasks page only once
+    /// something else happens to re-index that file, so a task could be written
+    /// and simply not show up.
+    fn sync_task_row(&self, block_id: &str, content: &str) -> Result<()> {
+        use crate::parser::task;
+
+        let marker = task::current_marker(content);
+        if marker.is_empty() {
+            return self.db.delete_task(block_id);
+        }
+        let Some(state) = crate::models::TaskState::from_str(&marker) else {
+            return Ok(());
+        };
+        let fields = task::parse_fields(content);
+        self.db.upsert_task(
+            block_id,
+            &state,
+            fields.scheduled.as_ref().map(|t| t.date.to_string()).as_deref(),
+            fields.deadline.as_ref().map(|t| t.date.to_string()).as_deref(),
+        )?;
+        self.db.sync_task_from_content(
+            block_id,
+            &marker,
+            &fields,
+            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
+        )
+    }
+
     /// Create a block: updates the .md file, then re-indexes.
     pub fn create_block(
         &self,
@@ -1017,6 +1061,8 @@ impl Graph {
             let (target, link_type) = self.resolve_link_target(link)?;
             self.db.insert_link(&block_id, &target, link_type)?;
         }
+
+        self.sync_task_row(&block_id, content)?;
 
         // Re-serialize the page to disk
         self.write_page_to_disk(&page)?;
@@ -1062,6 +1108,10 @@ impl Graph {
             self.db.insert_link(block_id, &target, link_type)?;
         }
 
+        // …and the task row, for the same reason: editing a line into or out
+        // of being a task must be visible on the Tasks page straight away.
+        self.sync_task_row(block_id, content)?;
+
         Ok(())
     }
 
@@ -1083,9 +1133,19 @@ impl Graph {
     /// fresh database, or a move to another machine — so the transition is
     /// written into the file here, not just logged in the database.
     fn write_state_change(&self, block_id: &str, from: &str, to: &str) -> Result<()> {
+        use crate::parser::task;
+
         let block = self.db.get_block_by_id(block_id)?;
         let now = chrono::Local::now().naive_local();
-        let new_content = crate::parser::task::apply_state_change(&block.content, from, to, now);
+
+        // Finishing something that repeats rolls it forward instead of closing
+        // it, so the next occurrence is already waiting rather than needing to
+        // be recreated by hand.
+        let recurred = matches!(to, "DONE" | "CANCELED" | "CANCELLED")
+            .then(|| task::apply_recurrence(&block.content, from, now))
+            .flatten();
+        let new_content =
+            recurred.unwrap_or_else(|| task::apply_state_change(&block.content, from, to, now));
         if new_content == block.content {
             return Ok(());
         }
@@ -1095,14 +1155,16 @@ impl Graph {
         let updated = self.db.get_block_by_id(block_id)?;
         let _ = self.write_single_block_update_to_disk(&page, &updated)?;
 
-        // Mirror the completion time into the row the Tasks page sorts on, so
-        // it does not have to re-read every file to order by it.
-        let fields = crate::parser::task::parse_fields(&new_content);
-        self.db.set_task_closed_at(
+        // Mirror what the file now says into the row the Tasks page sorts on,
+        // so it does not have to re-read every page to order by it. A recurring
+        // task lands back on TODO here, which is what the table must reflect.
+        let fields = task::parse_fields(&new_content);
+        let marker = task::current_marker(&new_content);
+        self.db.sync_task_from_content(
             block_id,
-            fields
-                .closed_at
-                .map(|at| at.and_utc().timestamp_millis()),
+            &marker,
+            &fields,
+            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
         )?;
         Ok(())
     }

@@ -531,3 +531,66 @@ fn test_reopening_a_task_clears_the_completion_time() {
         "reopening is itself part of the history:\n{on_disk}"
     );
 }
+
+/// A task nobody has touched in months must still appear.
+///
+/// The open-task query used to drop anything older than 182 days, which is
+/// backwards for a task list: the thing you have been avoiding longest is the
+/// one that most needs to be seen, and instead it vanished silently.
+#[test]
+fn test_a_long_neglected_task_is_still_listed() {
+    let (_tmp, graph) = open_graph();
+    let page = graph.create_page("work", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Renew the domain",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    // Backdate it well past the old cutoff.
+    let ancient = chrono::Utc::now().timestamp_millis() - 400 * 24 * 60 * 60 * 1000;
+    graph.db.backdate_task_for_test(&block.id, ancient).unwrap();
+
+    let open = graph.db.get_open_tasks(182).unwrap();
+    assert!(
+        open.iter().any(|(_, content, _, _, _)| content.contains("Renew the domain")),
+        "a neglected task must not disappear from the list: {open:?}"
+    );
+}
+
+/// Completing a repeating task rolls it forward instead of closing it.
+#[test]
+fn test_a_repeating_task_reopens_on_its_next_date() {
+    let (tmp, graph) = open_graph();
+    let page = graph.create_page("chores", false).unwrap();
+    let block = graph
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Water the plants\nSCHEDULED: <2026-09-07 Mon .+3d>",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    graph
+        .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
+        .unwrap();
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pages/chores.md")).unwrap();
+    assert!(
+        on_disk.contains("TODO Water the plants"),
+        "a repeating task comes back open, not DONE:\n{on_disk}"
+    );
+    assert!(!on_disk.contains("CLOSED:"), "and it is not closed:\n{on_disk}");
+    assert!(
+        !on_disk.contains("<2026-09-07"),
+        "its date must have moved on:\n{on_disk}"
+    );
+}

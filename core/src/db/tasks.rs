@@ -33,6 +33,52 @@ fn upsert_task_on_conn(
     })
 }
 
+fn sync_task_from_content_on_conn(
+    conn: &Connection,
+    block_id: &str,
+    marker: &str,
+    fields: &crate::parser::task::TaskFields,
+    closed_at: Option<i64>,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let time_of = |ts: &Option<crate::parser::task::TaskTimestamp>| {
+        ts.as_ref()
+            .and_then(|t| t.time.map(|x| x.format("%H:%M").to_string()))
+    };
+    conn.execute(
+        // An empty marker means "leave the state alone": the indexing path has
+        // already written it from the parsed block, and overwriting it here
+        // with a blank would wipe the task's state on every re-index.
+        "UPDATE tasks SET
+             state = COALESCE(NULLIF(?1, ''), state),
+             scheduled_date = ?2,
+             scheduled_time = ?3,
+             deadline_date = ?4,
+             deadline_time = ?5,
+             repeat_rule = ?6,
+             priority = ?7,
+             closed_at = ?8,
+             updated_at = ?9
+         WHERE block_id = ?10",
+        params![
+            marker,
+            fields.scheduled.as_ref().map(|t| t.date.to_string()),
+            time_of(&fields.scheduled),
+            fields.deadline.as_ref().map(|t| t.date.to_string()),
+            time_of(&fields.deadline),
+            fields
+                .scheduled
+                .as_ref()
+                .and_then(|t| t.repeater.map(|r| r.render())),
+            fields.priority.map(|p| p.as_str().to_string()),
+            closed_at,
+            now,
+            block_id,
+        ],
+    )?;
+    Ok(())
+}
+
 fn delete_task_on_conn(conn: &Connection, block_id: &str) -> Result<()> {
     conn.execute("DELETE FROM tasks WHERE block_id = ?1", params![block_id])?;
     Ok(())
@@ -167,6 +213,43 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Mirror everything the markdown now says about a task into its row.
+    ///
+    /// The file is the durable copy of all of this; the columns exist so the
+    /// Tasks page can group and sort without re-reading every page on disk.
+    pub fn sync_task_from_content(
+        &self,
+        block_id: &str,
+        marker: &str,
+        fields: &crate::parser::task::TaskFields,
+        closed_at: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        sync_task_from_content_on_conn(&conn, block_id, marker, fields, closed_at)
+    }
+
+    pub(crate) fn sync_task_from_content_in_connection(
+        &self,
+        conn: &Connection,
+        block_id: &str,
+        marker: &str,
+        fields: &crate::parser::task::TaskFields,
+        closed_at: Option<i64>,
+    ) -> Result<()> {
+        sync_task_from_content_on_conn(conn, block_id, marker, fields, closed_at)
+    }
+
+    /// Move a task's `updated_at` back in time. Test-only.
+    #[doc(hidden)]
+    pub fn backdate_task_for_test(&self, block_id: &str, updated_at: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1 WHERE block_id = ?2",
+            params![updated_at, block_id],
+        )?;
+        Ok(())
+    }
+
     /// Mirror the `CLOSED:` timestamp from the markdown into the task row.
     ///
     /// The file is the durable copy; this column exists so the Tasks page can
@@ -235,11 +318,15 @@ impl Database {
     /// Get open tasks (TODO/DOING/NOW/LATER) with their last-updated timestamp,
     /// block content, page title, block_id, and state.
     ///
-    /// Returns rows sorted by most-recently updated first. Intended to power the
-    /// "Open Tasks" section in the UI so voice-added TODOs show up immediately.
-    pub fn get_open_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String, String)>> {
+    /// Every open task, most recently touched first.
+    ///
+    /// Deliberately unwindowed. This used to drop anything untouched for six
+    /// months, which is exactly backwards for a task list: the task you have
+    /// been avoiding longest is the one that most needs to be seen, and
+    /// instead it silently disappeared. `days` is retained for callers that
+    /// still pass it and is ignored.
+    pub fn get_open_tasks(&self, _days: i64) -> Result<Vec<(i64, String, String, String, String)>> {
         let conn = self.conn()?;
-        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
             "SELECT t.updated_at as ts, COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title, t.block_id, t.state
@@ -247,11 +334,10 @@ impl Database {
              LEFT JOIN blocks b ON b.id = t.block_id
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO', 'DOING', 'NOW', 'LATER')
-               AND t.updated_at >= ?1
              ORDER BY t.updated_at DESC",
         )?;
         let rows = stmt
-            .query_map(params![cutoff], |row| {
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -321,7 +407,7 @@ impl Database {
                     COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title,
                     t.state,
-                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    LOWER(COALESCE(t.priority, json_extract(b.properties, '$.priority'), '')) as priority,
                     t.scheduled_date,
                     t.deadline_date,
                     t.updated_at
@@ -329,9 +415,16 @@ impl Database {
              LEFT JOIN blocks b ON b.id = t.block_id
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO','DOING','NOW','LATER')
+             -- Both spellings: `[#A]`/`[#B]`/`[#C]` written into the markdown,
+             -- and the older `priority:: high` block property. Without the
+             -- letter arms every task fell through to the default and the sort
+             -- silently did nothing.
              ORDER BY CASE priority
+                        WHEN 'a' THEN 0
                         WHEN 'urgent' THEN 0
+                        WHEN 'b' THEN 1
                         WHEN 'high' THEN 1
+                        WHEN 'c' THEN 2
                         WHEN 'medium' THEN 2
                         WHEN 'low' THEN 3
                         ELSE 4
@@ -422,7 +515,7 @@ impl Database {
                     COALESCE(b.content, '') as content,
                     COALESCE(p.title, '') as title,
                     t.state,
-                    LOWER(COALESCE(json_extract(b.properties, '$.priority'), '')) as priority,
+                    LOWER(COALESCE(t.priority, json_extract(b.properties, '$.priority'), '')) as priority,
                     t.scheduled_date,
                     t.deadline_date,
                     t.updated_at
@@ -431,9 +524,16 @@ impl Database {
              LEFT JOIN pages p ON p.id = b.page_id
              WHERE t.state IN ('TODO','DOING','NOW','LATER')
              {}
+             -- Both spellings: `[#A]`/`[#B]`/`[#C]` written into the markdown,
+             -- and the older `priority:: high` block property. Without the
+             -- letter arms every task fell through to the default and the sort
+             -- silently did nothing.
              ORDER BY CASE priority
+                        WHEN 'a' THEN 0
                         WHEN 'urgent' THEN 0
+                        WHEN 'b' THEN 1
                         WHEN 'high' THEN 1
+                        WHEN 'c' THEN 2
                         WHEN 'medium' THEN 2
                         WHEN 'low' THEN 3
                         ELSE 4
