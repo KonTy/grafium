@@ -71,6 +71,14 @@ export function deletePage(id: string): Promise<void> {
   return invoke("delete_page", { id });
 }
 
+export function getPageSource(pageId: string): Promise<string> {
+  return invoke("get_page_source", { pageId });
+}
+
+export function updatePageSource(pageId: string, content: string): Promise<void> {
+  return invoke("update_page_source", { pageId, content });
+}
+
 export function getParentPage(title: string): Promise<Page | null> {
   return invoke("get_parent_page", { title });
 }

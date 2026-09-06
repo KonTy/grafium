@@ -23,6 +23,11 @@ pub struct AppState {
     watcher: Mutex<Option<GraphWatcherHandle>>,
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn debug_log(message: String) {
+    eprintln!("[frontend-debug] {}", message);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GraphRuntimeSnapshot {
     pub root_dir: PathBuf,
@@ -1366,6 +1371,20 @@ pub fn run() {
                                         let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                         return gtk::glib::Propagation::Stop;
                                     }
+                                    if shift && !ctrl && (keyval == gdk::keys::constants::Up || keyval == gdk::keys::constants::Down) {
+                                        let direction = if keyval == gdk::keys::constants::Up {
+                                            "up"
+                                        } else {
+                                            "down"
+                                        };
+                                        eprintln!("[GTK-WINDOW] => Shift+Arrow{} detected, calling eval(__handleNativeVerticalArrow)", direction);
+                                        let script = format!(
+                                            "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
+                                            direction
+                                        );
+                                        let _ = eval_window.eval(&script);
+                                        return gtk::glib::Propagation::Stop;
+                                    }
                                     gtk::glib::Propagation::Proceed
                                 });
                             } else {
@@ -1400,6 +1419,20 @@ pub fn run() {
                                 let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                 return gtk::glib::Propagation::Stop;
                             }
+                            if shift && !ctrl && (keyval == gdk::keys::constants::Up || keyval == gdk::keys::constants::Down) {
+                                let direction = if keyval == gdk::keys::constants::Up {
+                                    "up"
+                                } else {
+                                    "down"
+                                };
+                                eprintln!("[GTK-WEBVIEW] => Shift+Arrow{} detected", direction);
+                                let script = format!(
+                                    "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
+                                    direction
+                                );
+                                let _ = eval_window2.eval(&script);
+                                return gtk::glib::Propagation::Stop;
+                            }
                             gtk::glib::Propagation::Proceed
                         });
                     }) {
@@ -1426,6 +1459,8 @@ pub fn run() {
             commands::pages::create_page,
             commands::pages::update_page_meta,
             commands::pages::delete_page,
+            commands::pages::get_page_source,
+            commands::pages::update_page_source,
             commands::pages::get_parent_page,
             commands::pages::get_child_pages,
             commands::pages::search_page_titles,
@@ -1504,6 +1539,7 @@ pub fn run() {
             commands::knowledge::ai_register_graph,
             commands::knowledge::ai_list_schemas,
             commands::knowledge::ai_save_schema,
+            debug_log,
             commands::knowledge::ai_create_default_schemas,
             commands::media::media_import_video,
             commands::media::media_get_config,
