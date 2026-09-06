@@ -622,17 +622,6 @@
     margin-bottom: 16px;
   }
 
-  .page-tree-section {
-    padding-top: 2px;
-    border-top: 1px solid var(--border);
-  }
-
-  .section-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
   .section-title {
     font-size: 11px;
     font-weight: 600;
@@ -641,35 +630,6 @@
     letter-spacing: 0.5px;
     padding: 4px 10px;
     margin-bottom: 4px;
-  }
-
-  .tree-retry {
-    margin-right: 7px;
-    padding: 3px 4px;
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .tree-retry:hover {
-    color: var(--text-primary);
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-
-  .tree-retry:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-
-  .tree-status {
-    margin: 3px 10px 8px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    line-height: 1.4;
   }
 
   .page-item {
