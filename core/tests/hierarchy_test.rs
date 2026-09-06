@@ -369,3 +369,77 @@ fn test_multiblock_indent_non_contiguous_runs_reparent_independently() {
         ]
     );
 }
+
+// ─── A book link inside a journal ────────────────────────────────────────────
+
+/// Typing `[[mybooks/coolbook/toc]]` into a journal, then more journal text
+/// underneath it, must not mix the two: the words you type in the journal
+/// belong to the journal file, and the book page stays empty until you
+/// actually open it and write there.
+#[test]
+fn test_book_link_in_journal_keeps_journal_text_in_the_journal() {
+    let (tmp, graph) = open_graph();
+
+    let journal = graph.create_page("2025_01_15", true).unwrap();
+    graph
+        .create_block(
+            &journal.id,
+            None,
+            0,
+            "Starting on [[mybooks/coolbook/toc]]",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+    graph
+        .create_block(
+            &journal.id,
+            None,
+            1,
+            "thought about chapter ordering today",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let toc = graph
+        .db
+        .get_page_by_title_ci("mybooks/coolbook/toc")
+        .expect("linking must create the book page");
+
+    // Linking alone must not carve out folders on disk.
+    assert!(
+        toc.file_path.is_none(),
+        "a link alone must not create a file, got {:?}",
+        toc.file_path
+    );
+    assert!(
+        !tmp.path().join("pages/mybooks").exists(),
+        "a link alone must not create the book folder"
+    );
+
+    // The journal text stayed in the journal, and none of it leaked into the book.
+    let journal_text = std::fs::read_to_string(tmp.path().join("journals/2025_01_15.md")).unwrap();
+    assert!(journal_text.contains("chapter ordering"));
+    assert!(graph.db.list_blocks_for_page(&toc.id).unwrap().is_empty());
+
+    // Writing *in* the book page is what creates the folder and the file.
+    graph
+        .create_block(
+            &toc.id,
+            None,
+            0,
+            "1. Openings",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let toc_file = tmp.path().join("pages/mybooks/coolbook/toc.md");
+    assert!(toc_file.exists(), "writing in the page creates the folder");
+    assert!(std::fs::read_to_string(&toc_file).unwrap().contains("Openings"));
+    assert!(
+        !std::fs::read_to_string(&toc_file).unwrap().contains("chapter ordering"),
+        "journal text must never land in the book file"
+    );
+}
