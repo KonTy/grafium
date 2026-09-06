@@ -343,6 +343,7 @@
       {:else}
         <PageTree
           nodes={visibleTree}
+          columns
           {onNavigate}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
@@ -376,10 +377,21 @@
 </div>
 
 <style>
+  /* Wide, because this is an index to scan rather than prose to read: at 920px
+     a few hundred pages became one long column with most of the window empty.
+     Still capped so the tree does not stretch into unreadably long rows on an
+     ultrawide display. */
   .all-pages {
-    max-width: 920px;
+    max-width: 1680px;
     margin: 0 auto;
     padding: 40px 24px;
+  }
+
+  /* The controls are single fields, so they follow the old measure instead of
+     growing with the page. */
+  .controls,
+  .page-filter {
+    max-width: 920px;
   }
 
   .header {

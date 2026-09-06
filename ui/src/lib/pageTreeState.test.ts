@@ -12,6 +12,7 @@ import {
   graphScopedKey,
   SIDEBAR_TREE_STORAGE_KEY,
   filterTreeByQuery,
+  groupRowsByRoot,
 } from "./pageTreeState";
 
 interface Node {
@@ -275,5 +276,46 @@ describe("filterTreeByQuery", () => {
 
   it("returns nothing when nothing matches", () => {
     expect(filterTreeByQuery(tree, "zzzzz")).toEqual([]);
+  });
+});
+
+/**
+ * The column layout relies on this: CSS columns break wherever they run out of
+ * room, so rows are grouped per top-level branch and each group is kept whole.
+ */
+describe("groupRowsByRoot", () => {
+  const row = (id: string, level: number) =>
+    ({ id, level }) as unknown as Parameters<typeof groupRowsByRoot>[0][number];
+
+  it("starts a new group at each top-level row", () => {
+    const groups = groupRowsByRoot([
+      row("mybooks", 1),
+      row("mybooks/coolbook", 2),
+      row("mybooks/coolbook/toc", 3),
+      row("tech", 1),
+      row("tech/linux", 2),
+      row("absorption", 1),
+    ]);
+
+    expect(groups.map((g) => g.map((r) => r.id))).toEqual([
+      ["mybooks", "mybooks/coolbook", "mybooks/coolbook/toc"],
+      ["tech", "tech/linux"],
+      ["absorption"],
+    ]);
+  });
+
+  it("keeps every row when the first one is not top level", () => {
+    // Should not happen, but dropping rows here would silently hide pages.
+    const groups = groupRowsByRoot([row("orphan", 3), row("tech", 1)]);
+    expect(groups.flat().map((r) => r.id)).toEqual(["orphan", "tech"]);
+  });
+
+  it("returns nothing for no rows", () => {
+    expect(groupRowsByRoot([])).toEqual([]);
+  });
+
+  it("gives each collapsed root its own group", () => {
+    const groups = groupRowsByRoot([row("a", 1), row("b", 1), row("c", 1)]);
+    expect(groups).toHaveLength(3);
   });
 });

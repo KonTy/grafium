@@ -264,15 +264,25 @@ fn get_or_create(
     idx
 }
 
-/// Sort a sibling group case-insensitively by label.
+/// Sort a sibling group: branches first, then case-insensitively by label.
+///
+/// Branches lead because they are the structure of the tree — with a few
+/// hundred leaf pages, folders sorted alphabetically among them are scattered
+/// and effectively unfindable. Every file manager and IDE orders this way for
+/// the same reason.
 ///
 /// `sort_by_cached_key` is stable, so siblings whose labels differ only in case
 /// (the one way distinct siblings can compare equal — same-cased siblings would
 /// share a key and be the same node) keep their insertion order, which is the
-/// "stable for equal labels" the contract asks for. Caching the lowercased key
-/// also computes each label's fold once instead of on every comparison.
+/// "stable for equal labels" the contract asks for. Caching the key also folds
+/// each label once instead of on every comparison.
 fn sort_indices(arena: &[Scratch], indices: &mut [usize]) {
-    indices.sort_by_cached_key(|&idx| arena[idx].label.to_lowercase());
+    indices.sort_by_cached_key(|&idx| {
+        (
+            arena[idx].children.is_empty(),
+            arena[idx].label.to_lowercase(),
+        )
+    });
 }
 
 /// Materialize the owned `TreeNode` for one arena entry.
@@ -358,6 +368,45 @@ mod collision_tests {
             is_journal: false,
             properties: serde_json::json!({}),
         }
+    }
+
+    /// Folders lead, then pages, each alphabetically.
+    ///
+    /// With a few hundred loose pages, a folder sorted alphabetically among
+    /// them is scattered somewhere in the middle and effectively unfindable.
+    #[test]
+    fn branches_sort_before_loose_pages() {
+        let pages = vec![
+            page("1", "absorption"),
+            page("2", "zebra"),
+            page("3", "mybooks/coolbook/toc"),
+            page("4", "biology"),
+            page("5", "tech/linux"),
+        ];
+
+        let labels: Vec<String> = build_namespace_tree(&pages)
+            .into_iter()
+            .map(|n| n.label)
+            .collect();
+
+        assert_eq!(labels, vec!["mybooks", "tech", "absorption", "biology", "zebra"]);
+    }
+
+    /// A page that also has children is structure too, so it leads as well.
+    #[test]
+    fn a_page_with_children_sorts_with_the_folders() {
+        let pages = vec![
+            page("1", "aaa"),
+            page("2", "tech"),
+            page("3", "tech/linux"),
+        ];
+
+        let labels: Vec<String> = build_namespace_tree(&pages)
+            .into_iter()
+            .map(|n| n.label)
+            .collect();
+
+        assert_eq!(labels, vec!["tech", "aaa"]);
     }
 
     fn all_page_ids(nodes: &[TreeNode], out: &mut Vec<String>) {

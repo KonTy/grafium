@@ -4,6 +4,7 @@
     collectBranchIds,
     findAncestorIdsForPage,
     flattenVisibleTree,
+    groupRowsByRoot,
     loadExpansionState,
     pruneExpansionState,
     reduceTreeNavigation,
@@ -20,6 +21,8 @@
     density?: "compact" | "comfortable";
     showControls?: boolean;
     emptyText?: string;
+    /** Flow top-level branches into as many columns as the width allows. */
+    columns?: boolean;
     onPageContextMenu?: (event: MouseEvent, node: PageTreeViewNode) => void;
   }
 
@@ -32,6 +35,7 @@
     density = "comfortable",
     showControls = true,
     emptyText = "No pages in this tree.",
+    columns = false,
     onPageContextMenu,
   }: Props = $props();
 
@@ -49,6 +53,9 @@
   const branchIds = $derived(
     collectBranchIds(nodes, (node) => node.id),
   );
+
+  // Grouped so a folder is never split from its children by a column break.
+  const rowGroups = $derived(groupRowsByRoot(visibleRows));
 
   $effect(() => {
     const key = storageKey ?? null;
@@ -222,8 +229,17 @@
   {#if nodes.length === 0}
     <p class="tree-empty">{emptyText}</p>
   {:else}
-    <div class="tree" role="tree" aria-label={ariaLabel} tabindex="-1" onkeydown={handleTreeKeydown}>
-      {#each visibleRows as row (row.id)}
+    <div
+      class="tree"
+      class:columns
+      role="tree"
+      aria-label={ariaLabel}
+      tabindex="-1"
+      onkeydown={handleTreeKeydown}
+    >
+      {#each rowGroups as group (group[0].id)}
+      <div class="tree-group" role="none">
+      {#each group as row (row.id)}
         <div
           class="tree-row"
           role="none"
@@ -290,6 +306,8 @@
           </button>
         </div>
       {/each}
+      </div>
+      {/each}
     </div>
   {/if}
 </section>
@@ -297,6 +315,23 @@
 <style>
   .tree-shell {
     min-width: 0;
+  }
+
+  /* One column of a few hundred loose pages leaves most of a wide window empty
+     and pushes the rest below the fold. Sized in rem rather than as a fixed
+     count so the number of columns follows the window instead of fighting it.
+     `display: block` is required: a flex container ignores column-width. */
+  .tree.columns {
+    display: block;
+    column-width: 22rem;
+    column-gap: 28px;
+  }
+
+  /* Columns break wherever they run out of room, so each branch is kept whole
+     to stop a folder being separated from its children. */
+  .tree.columns .tree-group {
+    break-inside: avoid;
+    margin-bottom: 2px;
   }
 
   .tree-controls {
@@ -339,6 +374,14 @@
   }
 
   .tree {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  /* Rows sit inside a per-branch wrapper, so their spacing lives here rather
+     than on `.tree`, whose gap now falls between whole branches. */
+  .tree-group {
     display: flex;
     flex-direction: column;
     gap: 2px;

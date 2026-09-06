@@ -413,3 +413,28 @@ export function countTreePages(nodes: readonly PageTreeViewNode[]): number {
   }
   return count;
 }
+
+/**
+ * Group already-flattened rows so each top-level branch stays with its
+ * descendants.
+ *
+ * Only the column layout needs this, and it is the whole reason that layout is
+ * safe: CSS columns break wherever they run out of room, so without grouping a
+ * folder could sit at the foot of one column with its children stranded at the
+ * head of the next.
+ *
+ * Rows arrive in tree order, so a new group starts at every depth-1 row. Rows
+ * appearing before the first depth-1 row — which should not happen, but would
+ * silently drop pages if it did — are kept in a leading group rather than
+ * discarded.
+ */
+export function groupRowsByRoot<TNode>(
+  rows: readonly FlatTreeNode<TNode>[],
+): FlatTreeNode<TNode>[][] {
+  const groups: FlatTreeNode<TNode>[][] = [];
+  for (const row of rows) {
+    if (row.level === 1 || groups.length === 0) groups.push([row]);
+    else groups[groups.length - 1].push(row);
+  }
+  return groups;
+}
