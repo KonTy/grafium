@@ -334,11 +334,20 @@
             Disabled
           {:else if health.llm_available}
             Connected ({health.mode})
+          {:else if health.llm_load_error}
+            Model failed to load
           {:else}
             Not connected
           {/if}
         </span>
-        {#if health.enabled && health.llm_available && !health.embedder_available}
+        {#if health.llm_load_error}
+          <!-- The reason was always known and logged; it just never reached
+               the reader, who saw only "not connected" and had nothing to act
+               on — usually the model simply does not fit in available VRAM. -->
+          <span class="status-vectors warning" title={health.llm_load_error}>
+            {health.llm_load_error}
+          </span>
+        {:else if health.enabled && health.llm_available && !health.embedder_available}
           <span class="status-vectors warning">no search embedder</span>
         {:else if health.vector_count > 0}
           <span class="status-vectors">{health.vector_count} vectors</span>

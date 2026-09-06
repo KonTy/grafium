@@ -1483,7 +1483,7 @@
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
-        <PageContent page={currentPage} highlight={pendingHighlight} />
+        <PageContent page={currentPage} highlight={pendingHighlight} {showBlockGuides} />
       {/key}
     {/if}
     </main>

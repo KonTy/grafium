@@ -6,53 +6,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-/// How comfortably a specific chat GGUF is expected to run on this
-/// machine's GPU — computed by comparing
-/// [`grafium_core::gpu_info::estimated_vram_needed_bytes`] to the
-/// detected total VRAM. The model picker uses this to put a ⚠️ next to
-/// models that will spill to CPU/RAM and be slow, so the user can pick
-/// something appropriate without discovering the mismatch by watching
-/// the first summary crawl at 0.5 tok/s.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum VramFit {
-    /// Weights + estimated overhead comfortably fit in VRAM (with the
-    /// usual 1.5 GiB safety margin baked in). No warning shown.
-    Fits,
-    /// Weights fit but the estimated overhead pushes it over the top —
-    /// will *probably* run on GPU but with almost no headroom for a
-    /// larger context, background apps, etc. Amber warning.
-    Tight,
-    /// Weights alone won't fit — llama.cpp will offload only some layers
-    /// to GPU (or none at all if we're far over budget), streaming the
-    /// rest from host RAM and grinding at CPU-inference speeds. Red ⚠️.
-    WontFit,
-    /// GPU detection failed, so we have no basis for a warning. The UI
-    /// falls back to a plain size display.
-    Unknown,
-}
 
-fn classify_fit(model_bytes: u64, total_vram_bytes: Option<u64>) -> VramFit {
-    let Some(total) = total_vram_bytes else {
-        return VramFit::Unknown;
-    };
-    let needed = grafium_core::gpu_info::estimated_vram_needed_bytes(model_bytes);
-    // Split into three bands: comfortably-fits (< 85% of VRAM),
-    // tight-but-plausible (85-105%), won't-fit (> 105%). Percentages
-    // chosen empirically: at 85% of the card's total, there's still
-    // room for the desktop's own use of the GPU (compositor, browser
-    // GPU-accel, etc.); past 105% we're already asking llama.cpp to
-    // partial-offload, which is what triggers the slow path.
-    let tight_ceiling = total.saturating_mul(85) / 100;
-    let wont_fit_ceiling = total.saturating_mul(105) / 100;
-    if needed <= tight_ceiling {
-        VramFit::Fits
-    } else if needed <= wont_fit_ceiling {
-        VramFit::Tight
-    } else {
-        VramFit::WontFit
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelInfoPayload {
@@ -73,14 +27,12 @@ pub struct ModelInfoPayload {
     /// llama.cpp — the model picker shows a warning instead of letting the
     /// user pick it blind.
     pub unstable_architecture: bool,
-    /// How well this model is expected to fit in the detected GPU's
-    /// VRAM, or `Unknown` if we couldn't detect the GPU at all. Set on
-    /// `Llm` kind only — non-chat models don't get this annotation.
-    pub vram_fit: VramFit,
     /// The estimated VRAM (in bytes) needed to run this model with a
     /// typical context — same number the fit classification uses. Sent
     /// down so the UI can put "needs ~15 GB" in the description without
     /// re-deriving it in TypeScript.
+    /// Estimated VRAM this model needs, from the same margin `gpu_fit` uses,
+    /// so the picker's "needs about N GB" can never disagree with its verdict.
     pub vram_needed_bytes: Option<u64>,
     /// `"fits"`, `"tight"`, `"cpu_only"`, or `"unknown"` — mirrors
     /// `grafium_core::ai::gpu_fit::GpuFit`. Lets the picker warn *before* the
@@ -138,16 +90,10 @@ impl ModelInfoPayload {
         // are tiny compared to any modern GPU, and unknown-kind files
         // shouldn't be surfaced as loadable chat models anyway.
         let is_llm = matches!(info.kind, grafium_core::model_library::ModelKind::Llm);
-        let (vram_fit, vram_needed_bytes) = if is_llm {
-            (
-                classify_fit(info.size_bytes, total_vram_bytes),
-                Some(grafium_core::gpu_info::estimated_vram_needed_bytes(
-                    info.size_bytes,
-                )),
-            )
-        } else {
-            (VramFit::Unknown, None)
-        };
+        let vram_needed_bytes = is_llm.then(|| {
+            grafium_core::ai::gpu_fit::estimated_vram_needed_bytes(info.size_bytes)
+        });
+        let _ = total_vram_bytes;
         Self {
             file_name: info.file_name,
             size_bytes: info.size_bytes,
@@ -159,7 +105,6 @@ impl ModelInfoPayload {
             architecture: info.architecture,
             description: info.description,
             unstable_architecture: info.unstable_architecture,
-            vram_fit,
             vram_needed_bytes,
         }
     }

@@ -8,7 +8,11 @@
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
-  import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
+  import {
+    buildBlockRenderState,
+    computeVirtualWindow,
+    getAncestorGuides,
+  } from "../lib/pageContentVirtualization";
   import { renderBlock, assetBaseDirFor } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
@@ -38,9 +42,11 @@
     compact?: boolean;
     /** Term to highlight on arrival, e.g. what was searched in the graph. */
     highlight?: string;
+    /** Draw the vertical lines that connect a nested block to its ancestors. */
+    showBlockGuides?: boolean;
   }
 
-  let { page, compact = false, highlight = "" }: Props = $props();
+  let { page, compact = false, highlight = "", showBlockGuides = true }: Props = $props();
 
   // Asset references in this page's blocks are resolved relative to the
   // directory its markdown file lives in, so media stored beside a page (and a
@@ -219,6 +225,20 @@
 
   function isBlockVisible(blockId: string): boolean {
     return blockRenderState.visibleIds.has(blockId);
+  }
+
+  // Shared empty array for the disabled and depth-0 cases, so rendering a
+  // page does not allocate one per block per frame.
+  const NO_GUIDES: boolean[] = [];
+
+  function getBlockGuides(blockId: string): boolean[] {
+    if (!showBlockGuides) return NO_GUIDES;
+    return getAncestorGuides(
+      blockId,
+      blockRenderState.parentById,
+      blockRenderState.depthById,
+      blockRenderState.isLastChildById,
+    );
   }
 
   function getBlockDepth(blockId: string): number {
@@ -1249,6 +1269,7 @@
           pageId={page.id}
           pageTitle={page.title}
           {assetBaseDir}
+          guides={getBlockGuides(block.id)}
           depth={getBlockDepth(block.id)}
           focused={focusedBlockId === block.id}
           selected={selectedBlockIds.has(block.id)}

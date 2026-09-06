@@ -31,6 +31,11 @@ pub struct KnowledgeEngine {
     vector_store: Option<Arc<dyn VectorStore>>,
     pipeline: RwLock<EmbeddingPipeline>,
     reference_engine: ReferenceEngine,
+    /// Why the embedded chat model last failed to load, cleared once one
+    /// loads. The reason was already known and logged, but only to the
+    /// terminal — the UI could only say "AI engine not ready", which tells a
+    /// user nothing about a model that simply does not fit in their VRAM.
+    llm_load_error: Option<String>,
     registry: RwLock<GraphRegistry>,
     data_dir: PathBuf,
     /// Where `model_library::default_models_dir` looks for locally-managed
@@ -58,6 +63,7 @@ impl KnowledgeEngine {
         let reference_engine = ReferenceEngine::new(config.references.clone());
 
         let mut engine = Self {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: None,
@@ -151,6 +157,7 @@ impl KnowledgeEngine {
                                              resolved — check the model file, available VRAM, \
                                              and the \"GPU layers\" setting): {e}"
                                         );
+                                        self.llm_load_error = Some(e.to_string());
                                     }
                                 }
                                 // Best-effort: an embedding model is a
@@ -433,6 +440,17 @@ impl KnowledgeEngine {
     }
 
     /// Health check — verify all providers are reachable.
+    /// The active chat provider, for callers that need to reach past the
+    /// engine — cancelling an in-flight generation, in particular.
+    pub fn llm_provider(&self) -> Option<&dyn LlmProvider> {
+        self.llm.as_deref()
+    }
+
+    /// Why the embedded chat model last failed to load, if it did.
+    pub fn llm_load_error(&self) -> Option<&str> {
+        self.llm_load_error.as_deref()
+    }
+
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let llm_ok = if let Some(llm) = &self.llm {
             llm.health_check().await.unwrap_or(false)
@@ -447,6 +465,7 @@ impl KnowledgeEngine {
         };
 
         Ok(HealthStatus {
+            llm_load_error: self.llm_load_error.clone(),
             enabled: self.config.enabled,
             llm_available: llm_ok,
             embedder_available: self.embedder.is_some(),
@@ -1539,6 +1558,13 @@ pub struct HealthStatus {
     pub vector_store_available: bool,
     pub vector_count: usize,
     pub mode: AiMode,
+    /// Why the embedded chat model failed to load, when it did.
+    ///
+    /// Lets the UI say what actually went wrong — typically that the model
+    /// does not fit in available VRAM — instead of "AI engine not ready",
+    /// which gives the reader nothing to act on.
+    #[serde(default)]
+    pub llm_load_error: Option<String>,
 }
 
 /// Indexing coverage for a graph, for the Chat empty-index banner and
@@ -2328,6 +2354,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: Some(embedder),
@@ -2385,6 +2412,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: None,
@@ -3294,6 +3322,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: Some(llm),
             embedder: None,

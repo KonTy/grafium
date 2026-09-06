@@ -272,6 +272,9 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
             vector_store_available: false,
             vector_count: 0,
             mode: AiMode::Local,
+            // No engine at all is a different situation from an engine whose
+            // model failed to load, and must not be reported as the latter.
+            llm_load_error: None,
         })
     }
 }
@@ -1001,6 +1004,18 @@ pub async fn ai_cancel_stream(
     if let Ok(map) = state.cancels.lock() {
         if let Some(flag) = map.get(&request_id) {
             flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    // Flipping the flag alone is cooperative, and the local model does not
+    // cooperate: llama.cpp's generation loop checks nothing between tokens, so
+    // the flag is only noticed once generation finishes on its own — which for
+    // a model that has effectively hung is never. Killing the worker is the
+    // only thing that actually stops it, so Stop means stop.
+    let engine_guard = state.engine.read().await;
+    if let Some(engine) = engine_guard.as_ref() {
+        if let Some(llm) = engine.llm_provider() {
+            llm.abort_in_flight();
         }
     }
     Ok(())
