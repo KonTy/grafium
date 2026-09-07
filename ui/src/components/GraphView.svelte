@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getGraphData, type GraphData } from "../lib/api";
+  import { discoverLinkCandidates, getGraphData, type GraphData } from "../lib/api";
   import { assignClusterHues, edgeHue, exceedsDragThreshold } from "../lib/graphColor";
   import type { TagHue } from "../lib/tagColor";
 
@@ -25,6 +25,8 @@
     source: SimNode;
     target: SimNode;
     weight: number;
+    suggested: boolean;
+    confidence: number;
   }
 
   // ---- View / control state (Logseq-style) ----
@@ -36,12 +38,15 @@
   let linkDistance = $state(70);
   let nodeScale = $state(1); // multiplier for node radius
   let showLabels = $state(true);
+  let showSuggestedEdges = $state(false);
   let searchText = $state("");
   let animate = $state(false); // live jiggle; off = settle instantly, stay still
 
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
-  let stats = $state({ nodes: 0, edges: 0 });
+  let stats = $state({ nodes: 0, edges: 0, suggested: 0 });
+  let scanningSuggestions = $state(false);
+  let suggestionError = $state<string | null>(null);
 
   // ---- Canvas / camera ----
   let canvasEl: HTMLCanvasElement | null = $state(null);
@@ -99,9 +104,13 @@
     errorMsg = null;
     try {
       const focus = mode === "local" ? currentPageId || undefined : undefined;
-      const data: GraphData = await getGraphData(nodeLimit, focus);
+      const data: GraphData = await getGraphData(nodeLimit, focus, showSuggestedEdges);
       buildSimulation(data);
-      stats = { nodes: data.nodes.length, edges: data.edges.length };
+      stats = {
+        nodes: data.nodes.length,
+        edges: data.edges.length,
+        suggested: data.suggested_edges ?? data.edges.filter((edge) => edge.suggested).length,
+      };
     } catch (e) {
       errorMsg = String(e);
       console.error("Failed to load graph data:", e);
@@ -136,7 +145,15 @@
     for (const e of data.edges) {
       const s = nodeById.get(e.source);
       const t = nodeById.get(e.target);
-      if (s && t) edges.push({ source: s, target: t, weight: e.weight ?? 1 });
+      if (s && t) {
+        edges.push({
+          source: s,
+          target: t,
+          weight: e.weight ?? 1,
+          suggested: e.suggested ?? false,
+          confidence: e.confidence ?? 1,
+        });
+      }
     }
     maxDegree = Math.max(1, ...data.nodes.map((n) => n.degree));
     maxWeight = Math.max(1, ...edges.map((e) => e.weight));
@@ -330,13 +347,15 @@
       ctx.strokeStyle = hueColor(
         edgeHue(clusterHues, { source: e.source.id, target: e.target.id })
       );
-      ctx.lineWidth = Math.max(0.4, (0.6 + rel * 3.5) * scale);
-      ctx.globalAlpha = 0.22 + rel * 0.5;
+      ctx.setLineDash(e.suggested ? [4 * scale, 4 * scale] : []);
+      ctx.lineWidth = Math.max(0.4, (e.suggested ? 0.4 + rel * 2 : 0.6 + rel * 3.5) * scale);
+      ctx.globalAlpha = e.suggested ? 0.16 + rel * 0.28 : 0.22 + rel * 0.5;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.stroke();
     }
+    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
 
     // Nodes
@@ -533,6 +552,21 @@
     reheat(0.8);
   }
 
+  async function scanSuggestedLinks() {
+    scanningSuggestions = true;
+    suggestionError = null;
+    try {
+      const focus = mode === "local" ? currentPageId || undefined : undefined;
+      await discoverLinkCandidates(focus, mode === "local" ? 200 : 500);
+      showSuggestedEdges = true;
+      await loadData();
+    } catch (e) {
+      suggestionError = String(e);
+    } finally {
+      scanningSuggestions = false;
+    }
+  }
+
   // ---- Lifecycle ----
   $effect(() => {
     if (!canvasEl || !wrapperEl) return;
@@ -552,10 +586,16 @@
   // Reload when mode or node limit changes.
   let lastMode = mode;
   let lastLimit = nodeLimit;
+  let lastShowSuggestedEdges = showSuggestedEdges;
   $effect(() => {
-    if (mode !== lastMode || nodeLimit !== lastLimit) {
+    if (
+      mode !== lastMode ||
+      nodeLimit !== lastLimit ||
+      showSuggestedEdges !== lastShowSuggestedEdges
+    ) {
       lastMode = mode;
       lastLimit = nodeLimit;
+      lastShowSuggestedEdges = showSuggestedEdges;
       void loadData();
     }
   });
@@ -672,10 +712,31 @@
       <span>Animate layout</span>
     </label>
 
+    <label class="ctrl checkbox">
+      <input type="checkbox" bind:checked={showSuggestedEdges} />
+      <span>Show suggested edges</span>
+    </label>
+
+    <button
+      class="suggestion-scan-btn"
+      type="button"
+      onclick={scanSuggestedLinks}
+      disabled={scanningSuggestions}
+    >
+      {scanningSuggestions ? "Scanning..." : "Scan for suggested links"}
+    </button>
+
+    {#if suggestionError}
+      <div class="suggestion-error">{suggestionError}</div>
+    {/if}
+
     <div class="graph-stats">
       {stats.nodes.toLocaleString()} nodes · {stats.edges.toLocaleString()} links
+      {#if showSuggestedEdges && stats.suggested > 0}
+        · {stats.suggested.toLocaleString()} suggested
+      {/if}
     </div>
-    <p class="hint">Click a node to open it. Drag to move, scroll to zoom.</p>
+    <p class="hint">Click a node to open it. Dashed lines are suggestions until you accept them on a page.</p>
   </aside>
 </div>
 
@@ -810,6 +871,33 @@
     flex-direction: row;
     align-items: center;
     gap: 8px;
+  }
+
+  .suggestion-scan-btn {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 7px 10px;
+  }
+
+  .suggestion-scan-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+
+  .suggestion-scan-btn:disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+
+  .suggestion-error {
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    color: var(--danger);
+    font-size: 12px;
+    padding: 8px;
   }
 
   .graph-stats {

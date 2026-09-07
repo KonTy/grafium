@@ -1,7 +1,23 @@
 use super::Database;
 use crate::error::Result;
-use crate::models::{Block, BlockType, Link, LinkType, Page};
-use rusqlite::{params, Connection};
+use crate::models::{
+    Block, BlockType, GraphEdgeRow, Link, LinkCandidate, LinkCandidateStatus, LinkType, Page,
+};
+use chrono::Utc;
+use regex::Regex;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
+use std::sync::LazyLock;
+use uuid::Uuid;
+
+static CANDIDATE_WIKI_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\[[^\]]+\]\]").unwrap());
+static CANDIDATE_MARKDOWN_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[[^\]]+\]\([^)]+\)").unwrap());
+static CANDIDATE_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:https?://|mailto:)[^\s<>)\]]+").unwrap());
+
+const LINK_CANDIDATE_SOURCE_EXACT_TITLE: &str = "exact_title";
 
 fn insert_link_on_conn(
     conn: &Connection,
@@ -24,6 +40,175 @@ fn delete_links_from_block_on_conn(conn: &Connection, block_id: &str) -> Result<
     Ok(())
 }
 
+fn row_to_link_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkCandidate> {
+    Ok(LinkCandidate {
+        id: row.get(0)?,
+        from_block_id: row.get(1)?,
+        from_page_id: row.get(2)?,
+        from_page_title: row.get(3)?,
+        to_page_id: row.get(4)?,
+        to_page_title: row.get(5)?,
+        anchor_text: row.get(6)?,
+        anchor_start: row.get(7)?,
+        anchor_end: row.get(8)?,
+        status: LinkCandidateStatus::from_str(&row.get::<_, String>(9)?),
+        source: row.get(10)?,
+        confidence: row.get::<_, f64>(11)? as f32,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+fn link_candidate_select_sql() -> &'static str {
+    "SELECT c.id,
+            c.from_block_id,
+            c.from_page_id,
+            source_page.title AS from_page_title,
+            c.to_page_id,
+            target_page.title AS to_page_title,
+            c.anchor_text,
+            c.anchor_start,
+            c.anchor_end,
+            c.status,
+            c.source,
+            c.confidence,
+            c.created_at,
+            c.updated_at
+     FROM link_candidates c
+     JOIN pages source_page ON source_page.id = c.from_page_id
+     JOIN pages target_page ON target_page.id = c.to_page_id"
+}
+
+fn candidate_title_allowed(title: &str) -> bool {
+    let title = title.trim();
+    if title.chars().count() < 4 || !title.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    if title
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == '_' || c == '/')
+    {
+        return false;
+    }
+
+    !matches!(
+        title.to_ascii_lowercase().as_str(),
+        "home" | "index" | "notes" | "todo" | "tasks" | "daily" | "journal"
+    )
+}
+
+fn existing_explicit_page_targets(content: &str) -> HashSet<String> {
+    crate::parser::extract_links(content)
+        .into_iter()
+        .filter_map(|link| match link {
+            crate::parser::links::ExtractedLink::Page(title)
+            | crate::parser::links::ExtractedLink::Tag(title) => Some(title.to_lowercase()),
+            crate::parser::links::ExtractedLink::BlockRef(_) => None,
+        })
+        .collect()
+}
+
+fn protected_spans(content: &str) -> Vec<(usize, usize)> {
+    if content.contains("```") {
+        return vec![(0, content.len())];
+    }
+
+    let mut spans: Vec<(usize, usize)> = CANDIDATE_WIKI_LINK_RE
+        .find_iter(content)
+        .chain(CANDIDATE_MARKDOWN_LINK_RE.find_iter(content))
+        .chain(CANDIDATE_URL_RE.find_iter(content))
+        .map(|m| (m.start(), m.end()))
+        .collect();
+
+    let mut in_code = false;
+    let mut start = 0usize;
+    for (idx, ch) in content.char_indices() {
+        if ch == '`' {
+            if in_code {
+                spans.push((start, idx + ch.len_utf8()));
+            } else {
+                start = idx;
+            }
+            in_code = !in_code;
+        }
+    }
+    if in_code {
+        spans.push((start, content.len()));
+    }
+
+    spans.sort_unstable();
+    spans
+}
+
+fn overlaps_any(start: usize, end: usize, spans: &[(usize, usize)]) -> bool {
+    spans.iter().any(|&(s, e)| start < e && end > s)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn is_word_boundary(content: &str, at: usize) -> bool {
+    let before = content[..at].chars().next_back();
+    let after = content[at..].chars().next();
+    match (before, after) {
+        (Some(b), Some(a)) => !(is_word_char(b) && is_word_char(a)),
+        _ => true,
+    }
+}
+
+fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
+    let needle_chars: Vec<char> = needle.chars().collect();
+    if needle_chars.is_empty() {
+        return None;
+    }
+
+    let hay_chars: Vec<(usize, char)> = haystack.char_indices().collect();
+    let start_idx = hay_chars
+        .iter()
+        .position(|&(i, _)| i >= from)
+        .unwrap_or(hay_chars.len());
+
+    for start in start_idx..hay_chars.len() {
+        if start + needle_chars.len() > hay_chars.len() {
+            break;
+        }
+        let matched = needle_chars.iter().enumerate().all(|(offset, &nc)| {
+            let (_, hc) = hay_chars[start + offset];
+            hc.eq_ignore_ascii_case(&nc)
+        });
+        if matched {
+            let start_byte = hay_chars[start].0;
+            let end_byte = if start + needle_chars.len() < hay_chars.len() {
+                hay_chars[start + needle_chars.len()].0
+            } else {
+                haystack.len()
+            };
+            return Some((start_byte, end_byte));
+        }
+    }
+
+    None
+}
+
+fn find_unlinked_title_matches(content: &str, title: &str) -> Vec<(usize, usize, String)> {
+    let protected = protected_spans(content);
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some((start, end)) = find_case_insensitive(content, title, from) {
+        if is_word_boundary(content, start)
+            && is_word_boundary(content, end)
+            && !overlaps_any(start, end, &protected)
+        {
+            if let Some(anchor) = content.get(start..end) {
+                out.push((start, end, anchor.to_string()));
+            }
+        }
+        from = end.max(start + 1);
+    }
+    out
+}
+
 impl Database {
     pub fn insert_link(
         &self,
@@ -38,6 +223,227 @@ impl Database {
     pub fn delete_links_from_block(&self, block_id: &str) -> Result<()> {
         let conn = self.conn()?;
         delete_links_from_block_on_conn(&conn, block_id)
+    }
+
+    pub fn get_link_candidate(&self, id: &str) -> Result<LinkCandidate> {
+        let conn = self.conn()?;
+        let sql = format!("{} WHERE c.id = ?1", link_candidate_select_sql());
+        conn.query_row(&sql, params![id], row_to_link_candidate)
+            .map_err(Into::into)
+    }
+
+    pub fn list_link_candidates(
+        &self,
+        page_id: Option<&str>,
+        status: Option<LinkCandidateStatus>,
+        limit: i64,
+    ) -> Result<Vec<LinkCandidate>> {
+        let conn = self.conn()?;
+        let limit = limit.clamp(1, 500);
+        let status_text = status.as_ref().map(LinkCandidateStatus::as_str);
+        let sql = format!(
+            "{} WHERE (?1 IS NULL OR c.from_page_id = ?1)
+                AND (?2 IS NULL OR c.status = ?2)
+              ORDER BY c.updated_at DESC
+              LIMIT ?3",
+            link_candidate_select_sql()
+        );
+        let candidates = conn
+            .prepare(&sql)?
+            .query_map(params![page_id, status_text, limit], row_to_link_candidate)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(candidates)
+    }
+
+    pub fn discover_link_candidates(
+        &self,
+        page_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LinkCandidate>> {
+        let mut conn = self.conn()?;
+        let limit = limit.clamp(1, 1_000);
+        let now = Utc::now().timestamp_millis();
+
+        let pages: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title
+                 FROM pages
+                 WHERE is_journal = 0
+                 ORDER BY length(title) DESC, title ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .filter(|(_, title)| candidate_title_allowed(title))
+                .collect()
+        };
+
+        let blocks: Vec<(String, String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.page_id, p.title, b.content
+                 FROM blocks b
+                 JOIN pages p ON p.id = b.page_id
+                 WHERE (?1 IS NULL OR b.page_id = ?1)
+                 ORDER BY p.updated_at DESC, b.order_index ASC",
+            )?;
+            let rows = stmt.query_map(params![page_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let tx = conn.transaction()?;
+        if let Some(page_id) = page_id {
+            tx.execute(
+                "DELETE FROM link_candidates
+                 WHERE from_page_id = ?1 AND source = ?2 AND status = 'pending'",
+                params![page_id, LINK_CANDIDATE_SOURCE_EXACT_TITLE],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM link_candidates
+                 WHERE source = ?1 AND status = 'pending'",
+                params![LINK_CANDIDATE_SOURCE_EXACT_TITLE],
+            )?;
+        }
+
+        let mut insert = tx.prepare(
+            "INSERT OR IGNORE INTO link_candidates
+                (id, from_block_id, from_page_id, to_page_id, anchor_text, anchor_start, anchor_end,
+                 status, source, confidence, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, 1.0, ?9, ?9)",
+        )?;
+        let mut dismissed_exists = tx.prepare(
+            "SELECT 1
+             FROM link_candidates
+             WHERE from_block_id = ?1
+               AND to_page_id = ?2
+               AND source = ?3
+               AND status = 'dismissed'
+               AND lower(anchor_text) = lower(?4)
+             LIMIT 1",
+        )?;
+
+        let mut inserted = 0i64;
+        'blocks: for (block_id, from_page_id, _from_title, content) in &blocks {
+            let explicit_targets = existing_explicit_page_targets(content);
+            for (to_page_id, to_title) in &pages {
+                if from_page_id == to_page_id || explicit_targets.contains(&to_title.to_lowercase())
+                {
+                    continue;
+                }
+
+                for (start, end, anchor_text) in find_unlinked_title_matches(content, to_title) {
+                    let dismissed = dismissed_exists.exists(params![
+                        block_id,
+                        to_page_id,
+                        LINK_CANDIDATE_SOURCE_EXACT_TITLE,
+                        anchor_text
+                    ])?;
+                    if dismissed {
+                        continue;
+                    }
+
+                    inserted += insert.execute(params![
+                        Uuid::new_v4().to_string(),
+                        block_id,
+                        from_page_id,
+                        to_page_id,
+                        anchor_text,
+                        start as i64,
+                        end as i64,
+                        LINK_CANDIDATE_SOURCE_EXACT_TITLE,
+                        now
+                    ])? as i64;
+                    if inserted >= limit {
+                        break 'blocks;
+                    }
+                }
+            }
+        }
+        drop(dismissed_exists);
+        drop(insert);
+        tx.commit()?;
+        drop(conn);
+
+        self.list_link_candidates(page_id, Some(LinkCandidateStatus::Pending), limit)
+    }
+
+    pub fn dismiss_link_candidate(&self, id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE link_candidates
+             SET status = 'dismissed', dismissed_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn restore_link_candidate(&self, id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE link_candidates
+             SET status = 'pending', dismissed_at = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_link_candidate_accepted(&self, id: &str, undo_content: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE link_candidates
+             SET status = 'accepted',
+                 accepted_at = ?1,
+                 dismissed_at = NULL,
+                 undo_content = ?2,
+                 updated_at = ?1
+             WHERE id = ?3",
+            params![now, undo_content, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn undo_link_candidate_accept_content(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT undo_content
+                 FROM link_candidates
+                 WHERE id = ?1 AND status = 'accepted'",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn mark_link_candidate_pending_after_undo(&self, id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE link_candidates
+             SET status = 'pending',
+                 accepted_at = NULL,
+                 undo_content = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn insert_link_in_connection(
@@ -164,7 +570,6 @@ impl Database {
         focus_page_id: Option<&str>,
         node_limit: i64,
     ) -> Result<(Vec<(String, String, i64)>, Vec<(String, String, i64)>)> {
-        use rusqlite::OptionalExtension;
         use std::collections::{HashMap, HashSet, VecDeque};
         let conn = self.conn()?;
         let node_limit = node_limit.clamp(1, 2000);
@@ -373,6 +778,169 @@ impl Database {
         Ok((nodes, edges))
     }
 
+    pub fn graph_data_with_suggestions(
+        &self,
+        focus_page_id: Option<&str>,
+        node_limit: i64,
+        include_suggestions: bool,
+    ) -> Result<(Vec<(String, String, i64)>, Vec<GraphEdgeRow>)> {
+        use std::collections::{HashMap, HashSet};
+
+        let (nodes, explicit_edges) = self.graph_data(focus_page_id, node_limit)?;
+        let mut node_ids: Vec<String> = nodes.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut seen: HashSet<String> = node_ids.iter().cloned().collect();
+        let mut edges: Vec<GraphEdgeRow> = explicit_edges
+            .into_iter()
+            .map(|(source, target, weight)| GraphEdgeRow {
+                source,
+                target,
+                weight,
+                suggested: false,
+                confidence: 1.0,
+            })
+            .collect();
+
+        if include_suggestions {
+            let limit = node_limit.clamp(1, 2000) as usize;
+            for id in self.pending_candidate_neighbor_page_ids(focus_page_id, node_limit)? {
+                if seen.insert(id.clone()) {
+                    node_ids.push(id);
+                    if node_ids.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            let candidate_edges = self.pending_candidate_edges_for_nodes(&node_ids)?;
+            edges.extend(candidate_edges);
+        }
+
+        let mut titles = HashMap::new();
+        let conn = self.conn()?;
+        if !node_ids.is_empty() {
+            let placeholders = node_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("SELECT id, title FROM pages WHERE id IN ({placeholders})");
+            let mut stmt = conn.prepare(&sql)?;
+            let bind: Vec<&dyn rusqlite::ToSql> = node_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            for row in stmt.query_map(bind.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })? {
+                let (id, title) = row?;
+                titles.insert(id, title);
+            }
+        }
+
+        let mut degree: HashMap<String, i64> = HashMap::new();
+        for edge in &edges {
+            *degree.entry(edge.source.clone()).or_insert(0) += edge.weight;
+            *degree.entry(edge.target.clone()).or_insert(0) += edge.weight;
+        }
+
+        let nodes = node_ids
+            .into_iter()
+            .filter_map(|id| {
+                titles
+                    .get(&id)
+                    .map(|title| (id.clone(), title.clone(), *degree.get(&id).unwrap_or(&0)))
+            })
+            .collect();
+
+        Ok((nodes, edges))
+    }
+
+    fn pending_candidate_neighbor_page_ids(
+        &self,
+        focus_page_id: Option<&str>,
+        node_limit: i64,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let limit = node_limit.clamp(1, 2000);
+        if let Some(focus) = focus_page_id {
+            let mut stmt = conn.prepare(
+                "SELECT page_id
+                 FROM (
+                    SELECT DISTINCT to_page_id AS page_id
+                    FROM link_candidates
+                    WHERE status = 'pending' AND from_page_id = ?1
+                    UNION
+                    SELECT DISTINCT from_page_id AS page_id
+                    FROM link_candidates
+                    WHERE status = 'pending' AND to_page_id = ?1
+                 )
+                 LIMIT ?2",
+            )?;
+            let ids = stmt
+                .query_map(params![focus, limit], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            return Ok(ids);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT page_id
+             FROM (
+                SELECT from_page_id AS page_id, COUNT(*) AS c
+                FROM link_candidates
+                WHERE status = 'pending'
+                GROUP BY from_page_id
+                UNION ALL
+                SELECT to_page_id AS page_id, COUNT(*) AS c
+                FROM link_candidates
+                WHERE status = 'pending'
+                GROUP BY to_page_id
+             )
+             GROUP BY page_id
+             ORDER BY SUM(c) DESC
+             LIMIT ?1",
+        )?;
+        let ids = stmt
+            .query_map(params![limit], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    fn pending_candidate_edges_for_nodes(&self, node_ids: &[String]) -> Result<Vec<GraphEdgeRow>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn()?;
+        let placeholders = node_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT from_page_id, to_page_id, COUNT(*) AS weight, AVG(confidence) AS confidence
+             FROM link_candidates
+             WHERE status = 'pending'
+               AND from_page_id IN ({ph})
+               AND to_page_id IN ({ph})
+               AND from_page_id <> to_page_id
+             GROUP BY from_page_id, to_page_id",
+            ph = placeholders
+        );
+        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(node_ids.len() * 2);
+        for id in node_ids {
+            bind.push(id as &dyn rusqlite::ToSql);
+        }
+        for id in node_ids {
+            bind.push(id as &dyn rusqlite::ToSql);
+        }
+
+        let edges = conn
+            .prepare(&sql)?
+            .query_map(bind.as_slice(), |row| {
+                Ok(GraphEdgeRow {
+                    source: row.get(0)?,
+                    target: row.get(1)?,
+                    weight: row.get(2)?,
+                    suggested: true,
+                    confidence: row.get::<_, f64>(3)? as f32,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(edges)
+    }
+
     /// Rebuild the `links` table from the wiki-link / tag references already
     /// present in block content. This is additive and idempotent
     /// (`INSERT OR IGNORE`): it never clears existing rows and never touches
@@ -464,7 +1032,7 @@ impl Database {
 mod tests {
     use super::Database;
     use crate::error::Result;
-    use crate::models::{BlockType, LinkType};
+    use crate::models::{BlockType, LinkCandidateStatus, LinkType};
 
     #[test]
     fn list_tag_pages_returns_only_tag_link_targets() -> Result<()> {
@@ -516,6 +1084,85 @@ mod tests {
         }
 
         assert_eq!(db.list_tag_pages()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn discover_link_candidates_finds_safe_unlinked_page_titles() -> Result<()> {
+        let db = Database::in_memory()?;
+        let target = db.create_page("Magnesium", false)?;
+        let source = db.create_page("Sleep notes", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "Taking magnesium helped, but `Magnesium` in code is not a link.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let candidates = db.discover_link_candidates(Some(&source.id), 10)?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].from_block_id, block.id);
+        assert_eq!(candidates[0].to_page_id, target.id);
+        assert_eq!(candidates[0].anchor_text, "magnesium");
+        assert_eq!(candidates[0].status, LinkCandidateStatus::Pending);
+        assert!(db.get_links_from_page(&source.id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dismissed_link_candidates_stay_hidden_after_rescan() -> Result<()> {
+        let db = Database::in_memory()?;
+        db.create_page("Magnesium", false)?;
+        let source = db.create_page("Sleep notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "Magnesium helped with sleep.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let first = db.discover_link_candidates(Some(&source.id), 10)?;
+        assert_eq!(first.len(), 1);
+        db.dismiss_link_candidate(&first[0].id)?;
+
+        let second = db.discover_link_candidates(Some(&source.id), 10)?;
+        assert!(second.is_empty());
+        assert_eq!(
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Dismissed), 10)?
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_data_can_overlay_pending_candidate_edges() -> Result<()> {
+        let db = Database::in_memory()?;
+        db.create_page("Magnesium", false)?;
+        let source = db.create_page("Sleep notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "Magnesium helped with sleep.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        db.discover_link_candidates(Some(&source.id), 10)?;
+
+        let (_nodes, explicit_edges) = db.graph_data_with_suggestions(None, 20, false)?;
+        assert!(explicit_edges.iter().all(|edge| !edge.suggested));
+
+        let (nodes, edges) = db.graph_data_with_suggestions(None, 20, true)?;
+        let titles: std::collections::HashSet<_> =
+            nodes.iter().map(|(_, title, _)| title.as_str()).collect();
+        assert!(titles.contains("Sleep notes"));
+        assert!(titles.contains("Magnesium"));
+        assert!(edges.iter().any(|edge| edge.suggested && edge.weight == 1));
         Ok(())
     }
 }

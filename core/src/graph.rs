@@ -5,8 +5,10 @@
 //! then update the index. External file changes are detected and re-indexed.
 
 use crate::db::Database;
-use crate::error::Result;
-use crate::models::{Block, BlockType, LinkType, Page, TaskState};
+use crate::error::{CoreError, Result};
+use crate::models::{
+    Block, BlockType, LinkCandidate, LinkCandidateStatus, LinkType, Page, TaskState,
+};
 use crate::parser::links::ExtractedLink;
 use crate::parser::{self, ParsedBlock};
 use chrono::Utc;
@@ -39,6 +41,19 @@ pub struct Graph {
 }
 
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
+
+fn wrap_link_candidate_anchor(content: &str, start: i64, end: i64) -> Option<String> {
+    let start = usize::try_from(start).ok()?;
+    let end = usize::try_from(end).ok()?;
+    let anchor = content.get(start..end)?;
+    let mut wrapped = String::with_capacity(content.len() + 4);
+    wrapped.push_str(&content[..start]);
+    wrapped.push_str("[[");
+    wrapped.push_str(anchor);
+    wrapped.push_str("]]");
+    wrapped.push_str(&content[end..]);
+    Some(wrapped)
+}
 
 /// Validation report for a graph directory structure.
 /// Indicates whether the directory is a valid Grafium graph.
@@ -159,7 +174,6 @@ pub fn page_asset_dir(root: &Path, file_path: &str) -> Option<PathBuf> {
     (canon_parent.starts_with(&canon_root) && canon_parent.is_dir()).then_some(canon_parent)
 }
 
-
 /// Copy a directory tree. Used to snapshot a graph before editing it in bulk.
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
@@ -207,7 +221,6 @@ pub fn resolve_asset_path(root: &Path, rel: &str) -> Option<PathBuf> {
         (target.starts_with(&canon_root) && target.is_file()).then_some(target)
     })
 }
-
 
 /// What a completion backfill did, or would do.
 #[derive(Debug, Clone, Default)]
@@ -1020,8 +1033,6 @@ impl Graph {
         }
     }
 
-
-
     /// Write completion times that exist only in the database into the files.
     ///
     /// Completions recorded before they were written to disk live only in
@@ -1076,12 +1087,8 @@ impl Graph {
                 continue;
             }
 
-            let new_content = task::apply_state_change(
-                &block.content,
-                &marker,
-                &marker,
-                at.naive_local(),
-            );
+            let new_content =
+                task::apply_state_change(&block.content, &marker, &marker, at.naive_local());
             let page = self.db.get_page_by_id(&block.page_id)?;
             self.db.update_block(&block_id, &new_content, None)?;
             let updated = self.db.get_block_by_id(&block_id)?;
@@ -1131,8 +1138,16 @@ impl Graph {
         self.db.upsert_task(
             block_id,
             &state,
-            fields.scheduled.as_ref().map(|t| t.date.to_string()).as_deref(),
-            fields.deadline.as_ref().map(|t| t.date.to_string()).as_deref(),
+            fields
+                .scheduled
+                .as_ref()
+                .map(|t| t.date.to_string())
+                .as_deref(),
+            fields
+                .deadline
+                .as_ref()
+                .map(|t| t.date.to_string())
+                .as_deref(),
         )?;
         self.db.sync_task_from_content(
             block_id,
@@ -1140,6 +1155,111 @@ impl Graph {
             &fields,
             fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
         )
+    }
+
+    pub fn discover_link_candidates(
+        &self,
+        page_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LinkCandidate>> {
+        self.db.discover_link_candidates(page_id, limit)
+    }
+
+    pub fn list_link_candidates(
+        &self,
+        page_id: Option<&str>,
+        status: Option<LinkCandidateStatus>,
+        limit: i64,
+    ) -> Result<Vec<LinkCandidate>> {
+        self.db.list_link_candidates(page_id, status, limit)
+    }
+
+    pub fn dismiss_link_candidate(&self, candidate_id: &str) -> Result<LinkCandidate> {
+        self.db.dismiss_link_candidate(candidate_id)?;
+        self.db.get_link_candidate(candidate_id)
+    }
+
+    pub fn restore_link_candidate(&self, candidate_id: &str) -> Result<LinkCandidate> {
+        self.db.restore_link_candidate(candidate_id)?;
+        self.db.get_link_candidate(candidate_id)
+    }
+
+    pub fn accept_link_candidate(&self, candidate_id: &str) -> Result<LinkCandidate> {
+        let candidate = self.db.get_link_candidate(candidate_id)?;
+        if candidate.status != LinkCandidateStatus::Pending {
+            return Err(CoreError::Other(
+                "Only pending link suggestions can be accepted".to_string(),
+            ));
+        }
+
+        let block = self.db.get_block_by_id(&candidate.from_block_id)?;
+        let start = usize::try_from(candidate.anchor_start).map_err(|_| {
+            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
+        })?;
+        let end = usize::try_from(candidate.anchor_end).map_err(|_| {
+            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
+        })?;
+        let current_anchor = block.content.get(start..end).ok_or_else(|| {
+            CoreError::Other(
+                "This link suggestion is stale because the block changed; refresh suggestions."
+                    .to_string(),
+            )
+        })?;
+        if current_anchor != candidate.anchor_text {
+            return Err(CoreError::Other(
+                "This link suggestion is stale because the block changed; refresh suggestions."
+                    .to_string(),
+            ));
+        }
+
+        let linked = wrap_link_candidate_anchor(
+            &block.content,
+            candidate.anchor_start,
+            candidate.anchor_end,
+        )
+        .ok_or_else(|| {
+            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
+        })?;
+        self.update_block(&candidate.from_block_id, &linked, None)?;
+        self.db
+            .mark_link_candidate_accepted(candidate_id, &block.content)?;
+        self.db.get_link_candidate(candidate_id)
+    }
+
+    pub fn undo_link_candidate_accept(&self, candidate_id: &str) -> Result<LinkCandidate> {
+        let candidate = self.db.get_link_candidate(candidate_id)?;
+        if candidate.status != LinkCandidateStatus::Accepted {
+            return Err(CoreError::Other(
+                "Only accepted link suggestions can be undone".to_string(),
+            ));
+        }
+
+        let Some(previous_content) = self.db.undo_link_candidate_accept_content(candidate_id)?
+        else {
+            return Err(CoreError::Other(
+                "This accepted link suggestion has no undo snapshot".to_string(),
+            ));
+        };
+        let expected_linked = wrap_link_candidate_anchor(
+            &previous_content,
+            candidate.anchor_start,
+            candidate.anchor_end,
+        )
+        .ok_or_else(|| {
+            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
+        })?;
+        let block = self.db.get_block_by_id(&candidate.from_block_id)?;
+        if block.content != expected_linked {
+            return Err(CoreError::Other(
+                "This block changed after the link was accepted, so Grafium will not overwrite it."
+                    .to_string(),
+            ));
+        }
+
+        self.update_block(&candidate.from_block_id, &previous_content, None)?;
+        self.db
+            .mark_link_candidate_pending_after_undo(candidate_id)?;
+        self.db.get_link_candidate(candidate_id)
     }
 
     /// Create a block: updates the .md file, then re-indexes.
@@ -1984,6 +2104,33 @@ mod tests {
 
     fn json_obj() -> serde_json::Value {
         serde_json::json!({})
+    }
+
+    #[test]
+    fn accepting_link_candidate_wraps_markdown_and_undo_restores_it() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let target = graph.create_page("Magnesium", false)?;
+        let source = graph.create_page_with_content("Sleep notes", false, "- magnesium helps\n")?;
+        let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
+
+        let candidates = graph.discover_link_candidates(Some(&source.id), 10)?;
+        assert_eq!(candidates.len(), 1);
+
+        let accepted = graph.accept_link_candidate(&candidates[0].id)?;
+        assert_eq!(accepted.status, LinkCandidateStatus::Accepted);
+        let linked_block = graph.db.get_block_by_id(&block.id)?;
+        assert_eq!(linked_block.content, "[[magnesium]] helps");
+        assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+
+        let restored = graph.undo_link_candidate_accept(&accepted.id)?;
+        assert_eq!(restored.status, LinkCandidateStatus::Pending);
+        assert_eq!(
+            graph.db.get_block_by_id(&block.id)?.content,
+            "magnesium helps"
+        );
+        assert!(graph.db.get_backlinks(&target.id)?.is_empty());
+        Ok(())
     }
 
     #[test]

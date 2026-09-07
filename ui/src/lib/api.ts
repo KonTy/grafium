@@ -43,6 +43,25 @@ export interface BacklinkResult {
   block: Block;
 }
 
+export type LinkCandidateStatus = "pending" | "accepted" | "dismissed";
+
+export interface LinkCandidate {
+  id: string;
+  from_block_id: string;
+  from_page_id: string;
+  from_page_title: string;
+  to_page_id: string;
+  to_page_title: string;
+  anchor_text: string;
+  anchor_start: number;
+  anchor_end: number;
+  status: LinkCandidateStatus;
+  source: string;
+  confidence: number;
+  created_at: number;
+  updated_at: number;
+}
+
 // Pages
 export function listPages(limit = 100, offset = 0): Promise<Page[]> {
   return invoke("list_pages", { limit, offset });
@@ -135,6 +154,34 @@ export function searchFts(query: string, limit = 50): Promise<Block[]> {
 // Links
 export function getBacklinks(pageId: string): Promise<BacklinkResult[]> {
   return invoke("get_backlinks", { pageId });
+}
+
+export function discoverLinkCandidates(pageId?: string, limit = 100): Promise<LinkCandidate[]> {
+  return invoke("discover_link_candidates", { pageId: pageId ?? null, limit });
+}
+
+export function listLinkCandidates(
+  pageId?: string,
+  status: LinkCandidateStatus | "all" = "pending",
+  limit = 100
+): Promise<LinkCandidate[]> {
+  return invoke("list_link_candidates", { pageId: pageId ?? null, status, limit });
+}
+
+export function acceptLinkCandidate(candidateId: string): Promise<LinkCandidate> {
+  return invoke("accept_link_candidate", { candidateId });
+}
+
+export function dismissLinkCandidate(candidateId: string): Promise<LinkCandidate> {
+  return invoke("dismiss_link_candidate", { candidateId });
+}
+
+export function restoreLinkCandidate(candidateId: string): Promise<LinkCandidate> {
+  return invoke("restore_link_candidate", { candidateId });
+}
+
+export function undoLinkCandidateAccept(candidateId: string): Promise<LinkCandidate> {
+  return invoke("undo_link_candidate_accept", { candidateId });
 }
 
 // Tasks
@@ -341,15 +388,26 @@ export interface GraphEdge {
   source: string;
   target: string;
   weight: number;
+  suggested?: boolean;
+  confidence?: number;
 }
 
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  suggested_edges?: number;
 }
 
-export function getGraphData(nodeLimit: number, focusPageId?: string): Promise<GraphData> {
-  return invoke("get_graph_data", { nodeLimit, focusPageId: focusPageId ?? null });
+export function getGraphData(
+  nodeLimit: number,
+  focusPageId?: string,
+  includeSuggestedEdges = false
+): Promise<GraphData> {
+  return invoke("get_graph_data", {
+    nodeLimit,
+    focusPageId: focusPageId ?? null,
+    includeSuggestedEdges,
+  });
 }
 
 export function listGraphs(): Promise<GraphInfo[]> {

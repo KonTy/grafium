@@ -6,7 +6,24 @@
   import UnifiedPageEditor from "./UnifiedPageEditor.svelte";
   import CollectionMembers from "./CollectionMembers.svelte";
   import PageMenu from "./PageMenu.svelte";
-  import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
+  import {
+    listBlocks,
+    createBlock,
+    deleteBlock,
+    updateBlock,
+    moveBlock,
+    getBacklinks,
+    getPage,
+    getParentPage,
+    getChildPages,
+    discoverLinkCandidates,
+    listLinkCandidates,
+    acceptLinkCandidate,
+    dismissLinkCandidate,
+    restoreLinkCandidate,
+    undoLinkCandidateAccept,
+    type LinkCandidate,
+  } from "../lib/api";
   import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
   import { buildBlockRenderState, computeVirtualWindow } from "../lib/pageContentVirtualization";
@@ -106,6 +123,14 @@
   // user expand incrementally, same idea as Logseq's linked-references UX.
   const BACKLINKS_PAGE_SIZE = 50;
   let backlinksRenderLimit = $state(BACKLINKS_PAGE_SIZE);
+  let linkCandidates: LinkCandidate[] = $state([]);
+  let linkCandidatesLoading = $state(false);
+  let linkCandidatesError = $state("");
+  type LinkCandidateUndo =
+    | { kind: "accepted"; candidate: LinkCandidate }
+    | { kind: "dismissed"; candidate: LinkCandidate };
+  let lastLinkCandidateAction: LinkCandidateUndo | null = $state(null);
+  const autoScannedLinkCandidatePages = new Set<string>();
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
   let collectionKind: string | null = $state(null);
@@ -324,6 +349,7 @@
     const request = currentPageLoad();
     await loadBlocks(request);
     await loadBacklinks(request);
+    await loadLinkCandidates(request);
     await loadHierarchy(request);
   }
 
@@ -349,6 +375,8 @@
       const request = beginPageLoad(pageLoadState, pageId, pageTitle ?? "");
       void loadBlocks(request);
       void loadBacklinks(request);
+      void loadLinkCandidates(request);
+      scheduleLinkCandidateScan(request);
       void loadHierarchy(request);
     }
   });
@@ -469,6 +497,95 @@
       loadError = e?.toString() || "Unknown error loading blocks";
       console.error("loadBlocks failed:", e);
     }
+  }
+
+  function scheduleLinkCandidateScan(request: PageLoadRequest) {
+    if (compact || autoScannedLinkCandidatePages.has(request.pageId) || typeof window === "undefined") {
+      return;
+    }
+    autoScannedLinkCandidatePages.add(request.pageId);
+    window.setTimeout(() => {
+      if (isCurrentPageLoad(pageLoadState, request)) {
+        void loadLinkCandidates(request, true);
+      }
+    }, 800);
+  }
+
+  async function loadLinkCandidates(
+    request: PageLoadRequest = currentPageLoad(),
+    scan = false
+  ) {
+    if (compact) {
+      linkCandidates = [];
+      linkCandidatesError = "";
+      linkCandidatesLoading = false;
+      return;
+    }
+
+    linkCandidatesLoading = true;
+    linkCandidatesError = "";
+    try {
+      const candidates = scan
+        ? await discoverLinkCandidates(request.pageId, 50)
+        : await listLinkCandidates(request.pageId, "pending", 50);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      linkCandidates = candidates;
+    } catch (e: any) {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      linkCandidatesError = e?.toString() || "Failed to load link suggestions";
+    } finally {
+      if (isCurrentPageLoad(pageLoadState, request)) {
+        linkCandidatesLoading = false;
+      }
+    }
+  }
+
+  async function handleAcceptLinkCandidate(candidate: LinkCandidate) {
+    linkCandidatesError = "";
+    try {
+      const accepted = await acceptLinkCandidate(candidate.id);
+      lastLinkCandidateAction = { kind: "accepted", candidate: accepted };
+      await reloadCurrentPageContent();
+      refreshPageTrees();
+    } catch (e: any) {
+      linkCandidatesError = e?.toString() || "Failed to link suggestion";
+      await loadLinkCandidates(currentPageLoad(), true);
+    }
+  }
+
+  async function handleDismissLinkCandidate(candidate: LinkCandidate) {
+    linkCandidatesError = "";
+    try {
+      const dismissed = await dismissLinkCandidate(candidate.id);
+      lastLinkCandidateAction = { kind: "dismissed", candidate: dismissed };
+      linkCandidates = linkCandidates.filter((item) => item.id !== candidate.id);
+    } catch (e: any) {
+      linkCandidatesError = e?.toString() || "Failed to dismiss suggestion";
+      await loadLinkCandidates(currentPageLoad(), true);
+    }
+  }
+
+  async function undoLastLinkCandidateAction() {
+    if (!lastLinkCandidateAction) return;
+    const action = lastLinkCandidateAction;
+    linkCandidatesError = "";
+    try {
+      if (action.kind === "accepted") {
+        await undoLinkCandidateAccept(action.candidate.id);
+        await reloadCurrentPageContent();
+      } else {
+        await restoreLinkCandidate(action.candidate.id);
+        await loadLinkCandidates();
+      }
+      lastLinkCandidateAction = null;
+      refreshPageTrees();
+    } catch (e: any) {
+      linkCandidatesError = e?.toString() || "Failed to undo link suggestion action";
+    }
+  }
+
+  function navigateToCandidateTarget(candidate: LinkCandidate) {
+    window.dispatchEvent(new CustomEvent("navigate-page", { detail: candidate.to_page_title }));
   }
 
   async function loadHierarchy(request: PageLoadRequest = currentPageLoad()) {
@@ -1220,6 +1337,15 @@
           busy={collectionBusy}
           onSetCollection={updateCollection}
         />
+        <button
+          class="prototype-toggle"
+          type="button"
+          onclick={() => loadLinkCandidates(currentPageLoad(), true)}
+          disabled={linkCandidatesLoading}
+          title="Scan this page for plain mentions that can become real links"
+        >
+          {linkCandidatesLoading ? "Scanning..." : "Find links"}
+        </button>
       {/if}
       <button
         class="prototype-toggle"
@@ -1267,6 +1393,68 @@
     {#if analyzeSelectionError}
       <div class="selection-toolbar-error">{analyzeSelectionError}</div>
     {/if}
+  {/if}
+
+  {#if !compact && (linkCandidates.length > 0 || linkCandidatesLoading || linkCandidatesError || lastLinkCandidateAction)}
+    <div class="link-candidates-panel">
+      <div class="link-candidates-head">
+        <div>
+          <div class="link-candidates-title">Suggested links</div>
+          <div class="link-candidates-subtitle">Plain mentions that could become real graph edges.</div>
+        </div>
+        <button
+          class="link-candidates-refresh"
+          type="button"
+          onclick={() => loadLinkCandidates()}
+          disabled={linkCandidatesLoading}
+        >
+          {linkCandidatesLoading ? "Scanning..." : "Refresh"}
+        </button>
+      </div>
+
+      {#if linkCandidatesError}
+        <div class="link-candidates-error">{linkCandidatesError}</div>
+      {/if}
+
+      {#if lastLinkCandidateAction}
+        <div class="link-candidates-undo">
+          {lastLinkCandidateAction.kind === "accepted" ? "Linked suggestion." : "Dismissed suggestion."}
+          <button type="button" onclick={undoLastLinkCandidateAction}>Undo</button>
+        </div>
+      {/if}
+
+      {#if linkCandidates.length > 0}
+        <div class="link-candidates-list">
+          {#each linkCandidates.slice(0, 8) as candidate (candidate.id)}
+            <div class="link-candidate-row">
+              <div class="link-candidate-copy">
+                <span class="link-candidate-anchor">"{candidate.anchor_text}"</span>
+                <span class="link-candidate-arrow">-></span>
+                <button
+                  class="link-candidate-target"
+                  type="button"
+                  onclick={() => navigateToCandidateTarget(candidate)}
+                  title="Open suggested target page"
+                >
+                  {candidate.to_page_title}
+                </button>
+              </div>
+              <div class="link-candidate-actions">
+                <button type="button" onclick={() => handleAcceptLinkCandidate(candidate)}>Link</button>
+                <button type="button" onclick={() => handleDismissLinkCandidate(candidate)}>Not an edge</button>
+              </div>
+            </div>
+          {/each}
+        </div>
+        {#if linkCandidates.length > 8}
+          <div class="link-candidates-more">
+            Showing 8 of {linkCandidates.length}. Use Refresh after reviewing these.
+          </div>
+        {/if}
+      {:else if linkCandidatesLoading}
+        <div class="link-candidates-empty">Scanning for unlinked page mentions...</div>
+      {/if}
+    </div>
   {/if}
 
   {#if useUnifiedEditorPrototype}
@@ -1437,6 +1625,11 @@
     color: var(--text-primary);
   }
 
+  .prototype-toggle:disabled {
+    cursor: default;
+    opacity: 0.65;
+  }
+
   /* Highlights are injected into rendered block HTML, so the selector has to
      be :global — and the colour comes from the theme's accent set rather than
      a fixed yellow, which is invisible on the amber themes and illegible on
@@ -1514,6 +1707,134 @@
     font-size: 12px;
     color: var(--danger);
     margin-bottom: 8px;
+  }
+
+  .link-candidates-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent-cyan) 8%, var(--bg-secondary));
+    margin: 8px 0 12px;
+    padding: 10px;
+  }
+
+  .link-candidates-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .link-candidates-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .link-candidates-subtitle,
+  .link-candidates-empty,
+  .link-candidates-more {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .link-candidates-refresh,
+  .link-candidate-actions button,
+  .link-candidates-undo button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+
+  .link-candidates-refresh:hover:not(:disabled),
+  .link-candidate-actions button:hover,
+  .link-candidates-undo button:hover {
+    border-color: var(--accent);
+  }
+
+  .link-candidates-refresh:disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+
+  .link-candidates-error {
+    margin-top: 8px;
+    color: var(--danger);
+    font-size: 12px;
+  }
+
+  .link-candidates-undo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .link-candidates-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .link-candidate-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-primary);
+  }
+
+  .link-candidate-copy {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 12px;
+  }
+
+  .link-candidate-anchor {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+  }
+
+  .link-candidate-arrow {
+    color: var(--text-muted);
+  }
+
+  .link-candidate-target {
+    border: none;
+    background: none;
+    color: var(--text-link);
+    cursor: pointer;
+    padding: 0;
+    font-size: 12px;
+  }
+
+  .link-candidate-target:hover {
+    text-decoration: underline;
+  }
+
+  .link-candidate-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .link-candidates-empty,
+  .link-candidates-more {
+    margin-top: 8px;
   }
 
   .block-shell {

@@ -60,6 +60,34 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_page_id, link_type);
         CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_block_id);
 
+        CREATE TABLE IF NOT EXISTS link_candidates (
+            id TEXT PRIMARY KEY,
+            from_block_id TEXT NOT NULL,
+            from_page_id TEXT NOT NULL,
+            to_page_id TEXT NOT NULL,
+            anchor_text TEXT NOT NULL,
+            anchor_start INTEGER NOT NULL,
+            anchor_end INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            source TEXT NOT NULL DEFAULT 'exact_title',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            accepted_at INTEGER,
+            dismissed_at INTEGER,
+            undo_content TEXT,
+            FOREIGN KEY (from_block_id) REFERENCES blocks(id) ON DELETE CASCADE,
+            FOREIGN KEY (from_page_id) REFERENCES pages(id) ON DELETE CASCADE,
+            FOREIGN KEY (to_page_id) REFERENCES pages(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_link_candidates_unique_span
+            ON link_candidates(from_block_id, to_page_id, anchor_start, anchor_end, source);
+        CREATE INDEX IF NOT EXISTS idx_link_candidates_status_page
+            ON link_candidates(status, from_page_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_link_candidates_to
+            ON link_candidates(to_page_id, status);
+
         CREATE VIRTUAL TABLE IF NOT EXISTS fts_blocks USING fts5(
             block_id UNINDEXED,
             content,

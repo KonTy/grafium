@@ -203,6 +203,7 @@ impl Database {
             "
             DELETE FROM fts_blocks;
             DELETE FROM fts_block_rowid;
+            DELETE FROM link_candidates;
             DELETE FROM links;
             DELETE FROM tasks;
             DELETE FROM flashcards;

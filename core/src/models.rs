@@ -93,6 +93,59 @@ pub struct Link {
     pub link_type: LinkType,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkCandidateStatus {
+    Pending,
+    Accepted,
+    Dismissed,
+}
+
+impl LinkCandidateStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            LinkCandidateStatus::Pending => "pending",
+            LinkCandidateStatus::Accepted => "accepted",
+            LinkCandidateStatus::Dismissed => "dismissed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "accepted" => LinkCandidateStatus::Accepted,
+            "dismissed" => LinkCandidateStatus::Dismissed,
+            _ => LinkCandidateStatus::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkCandidate {
+    pub id: String,
+    pub from_block_id: String,
+    pub from_page_id: String,
+    pub from_page_title: String,
+    pub to_page_id: String,
+    pub to_page_title: String,
+    pub anchor_text: String,
+    pub anchor_start: i64,
+    pub anchor_end: i64,
+    pub status: LinkCandidateStatus,
+    pub source: String,
+    pub confidence: f32,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdgeRow {
+    pub source: String,
+    pub target: String,
+    pub weight: i64,
+    pub suggested: bool,
+    pub confidence: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandwritingStroke {
     pub id: String,

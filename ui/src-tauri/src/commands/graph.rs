@@ -27,12 +27,15 @@ pub struct GraphEdge {
     pub source: String,
     pub target: String,
     pub weight: i64,
+    pub suggested: bool,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    pub suggested_edges: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -168,12 +171,18 @@ pub fn get_graph_data(
     state: State<AppState>,
     node_limit: Option<i64>,
     focus_page_id: Option<String>,
+    include_suggested_edges: Option<bool>,
 ) -> Result<GraphData, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let (nodes, edges) = graph
         .db
-        .graph_data(focus_page_id.as_deref(), node_limit.unwrap_or(200))
+        .graph_data_with_suggestions(
+            focus_page_id.as_deref(),
+            node_limit.unwrap_or(200),
+            include_suggested_edges.unwrap_or(false),
+        )
         .map_err(|e| e.to_string())?;
+    let suggested_edges = edges.iter().filter(|edge| edge.suggested).count();
     Ok(GraphData {
         nodes: nodes
             .into_iter()
@@ -181,12 +190,15 @@ pub fn get_graph_data(
             .collect(),
         edges: edges
             .into_iter()
-            .map(|(source, target, weight)| GraphEdge {
-                source,
-                target,
-                weight,
+            .map(|edge| GraphEdge {
+                source: edge.source,
+                target: edge.target,
+                weight: edge.weight,
+                suggested: edge.suggested,
+                confidence: edge.confidence,
             })
             .collect(),
+        suggested_edges,
     })
 }
 
