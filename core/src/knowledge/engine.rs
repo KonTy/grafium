@@ -31,6 +31,11 @@ pub struct KnowledgeEngine {
     vector_store: Option<Arc<dyn VectorStore>>,
     pipeline: RwLock<EmbeddingPipeline>,
     reference_engine: ReferenceEngine,
+    /// Why the embedded chat model last failed to load, cleared once one
+    /// loads. The reason was already known and logged, but only to the
+    /// terminal — the UI could only say "AI engine not ready", which tells a
+    /// user nothing about a model that simply does not fit in their VRAM.
+    llm_load_error: Option<String>,
     registry: RwLock<GraphRegistry>,
     data_dir: PathBuf,
     /// Where `model_library::default_models_dir` looks for locally-managed
@@ -58,6 +63,7 @@ impl KnowledgeEngine {
         let reference_engine = ReferenceEngine::new(config.references.clone());
 
         let mut engine = Self {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: None,
@@ -151,6 +157,7 @@ impl KnowledgeEngine {
                                              resolved — check the model file, available VRAM, \
                                              and the \"GPU layers\" setting): {e}"
                                         );
+                                        self.llm_load_error = Some(e.to_string());
                                     }
                                 }
                                 // Best-effort: an embedding model is a
@@ -433,6 +440,17 @@ impl KnowledgeEngine {
     }
 
     /// Health check — verify all providers are reachable.
+    /// The active chat provider, for callers that need to reach past the
+    /// engine — cancelling an in-flight generation, in particular.
+    pub fn llm_provider(&self) -> Option<&dyn LlmProvider> {
+        self.llm.as_deref()
+    }
+
+    /// Why the embedded chat model last failed to load, if it did.
+    pub fn llm_load_error(&self) -> Option<&str> {
+        self.llm_load_error.as_deref()
+    }
+
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let llm_ok = if let Some(llm) = &self.llm {
             llm.health_check().await.unwrap_or(false)
@@ -447,6 +465,7 @@ impl KnowledgeEngine {
         };
 
         Ok(HealthStatus {
+            llm_load_error: self.llm_load_error.clone(),
             enabled: self.config.enabled,
             llm_available: llm_ok,
             embedder_available: self.embedder.is_some(),
@@ -873,6 +892,7 @@ impl KnowledgeEngine {
                 embedder.as_ref(),
                 store.as_ref(),
                 on_progress,
+                &crate::cancel::CancellationToken::new(),
             )
             .await
     }
@@ -895,7 +915,13 @@ impl KnowledgeEngine {
             .as_ref()
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
-        crate::ai::references::generate_page_summary(title, full_text, llm.as_ref(), on_progress)
+        crate::ai::references::generate_page_summary(
+            title,
+            full_text,
+            llm.as_ref(),
+            on_progress,
+            &crate::cancel::CancellationToken::new(),
+        )
             .await
     }
 
@@ -1532,6 +1558,13 @@ pub struct HealthStatus {
     pub vector_store_available: bool,
     pub vector_count: usize,
     pub mode: AiMode,
+    /// Why the embedded chat model failed to load, when it did.
+    ///
+    /// Lets the UI say what actually went wrong — typically that the model
+    /// does not fit in available VRAM — instead of "AI engine not ready",
+    /// which gives the reader nothing to act on.
+    #[serde(default)]
+    pub llm_load_error: Option<String>,
 }
 
 /// Indexing coverage for a graph, for the Chat empty-index banner and
@@ -2007,7 +2040,8 @@ claim with its [N] marker.\n\
 says \"note saved …; event date unknown\" is not an event date — don't treat it as one.\n\
 - Never invent citations or dates. If these notes don't contain the answer, say so plainly in one \
 sentence and stop — do not guess.\n\n\
-The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}\n\n{}",
+        crate::ai::ANSWER_LANGUAGE_RULE
     )
 }
 
@@ -2095,7 +2129,7 @@ fn render_web_section(result: &crate::ai::web_research::WebResearchResult) -> St
 fn build_system_prompt(context_block: &str, mode: AnswerMode) -> String {
     let base = "You are Grafium's assistant. You help the user with BOTH questions about their \
 personal knowledge graph (their notes) AND general questions using your own knowledge.";
-    match mode {
+    let body = match mode {
         AnswerMode::General => format!(
             "{base}\n\n\
 No relevant notes were retrieved from the user's graph for this question. Answer from your \
@@ -2129,7 +2163,12 @@ says \"note saved …; event date unknown\" is not an event date — don't treat
 notes. If you don't know, say you don't know.\n\n\
 Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
         ),
-    }
+    };
+    // The rule goes last, after the retrieved notes. Placed before them it is
+    // an instruction the model reads and then immediately buries under a wall
+    // of foreign-language text; placed here it is the final thing it sees
+    // before it starts writing, which is the whole point.
+    format!("{body}\n\n{}", crate::ai::ANSWER_LANGUAGE_RULE)
 }
 
 #[cfg(test)]
@@ -2140,6 +2179,32 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    /// Every arm that produces an answer must carry the language rule, not
+    /// just the one that was reported. Which arm runs depends purely on how
+    /// much the retrieval happened to return, and a single bilingual glossary
+    /// note is enough to flip an entire answer into another language — so a
+    /// rule present on only some arms is a rule that fails intermittently.
+    ///
+    /// It also has to come *last*. Ahead of the retrieved notes it is an
+    /// instruction the model reads and then buries under a wall of
+    /// foreign-language text, which is the position it demonstrably loses in.
+    #[test]
+    fn every_answer_prompt_ends_with_the_language_rule() {
+        for mode in [AnswerMode::General, AnswerMode::Notes, AnswerMode::Blend] {
+            let prompt = build_system_prompt("[1] 地下室笔记", mode);
+            assert!(
+                prompt.trim_end().ends_with(crate::ai::ANSWER_LANGUAGE_RULE),
+                "the {mode:?} prompt must end with the language rule, got:\n{prompt}"
+            );
+        }
+        assert!(
+            build_notes_only_system_prompt("[1] 地下室笔记")
+                .trim_end()
+                .ends_with(crate::ai::ANSWER_LANGUAGE_RULE),
+            "the notes-only prompt must end with the language rule"
+        );
+    }
 
     #[derive(Default)]
     struct MockEmbedderState {
@@ -2321,6 +2386,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: Some(embedder),
@@ -2378,6 +2444,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: None,
             embedder: None,
@@ -3287,6 +3354,7 @@ mod tests {
         let registry_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("graph_registry.engine-test.json");
         Ok(KnowledgeEngine {
+            llm_load_error: None,
             config: config.clone(),
             llm: Some(llm),
             embedder: None,

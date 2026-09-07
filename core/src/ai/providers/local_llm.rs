@@ -1,13 +1,11 @@
-//! Embedded local LLM inference via llama.cpp (through the `llama-cpp-2`
+//! Isolated local LLM inference via llama.cpp (through the `llama-cpp-2`
 //! bindings) — the LLM-side counterpart to `media::transcribe`'s
 //! `WhisperTranscriber`. Both:
 //!   * resolve a model file through the shared `model_library` instead of
 //!     requiring an exact path (`from_settings`/`from_config` mean the same
 //!     thing in both modules — see `media::transcribe` for the sibling this
 //!     one is deliberately shaped to match),
-//!   * silence their native library's verbose stderr logging once per
-//!     process (whisper.cpp there, llama.cpp here) so a raw-mode terminal
-//!     UI is never corrupted,
+//!   * execute native code in disposable resource-limited subprocesses,
 //!   * and expose themselves through this crate's existing trait
 //!     abstractions (`Transcriber` there, `LlmProvider` here) rather than a
 //!     bespoke call site — so summarization code depends on "an
@@ -18,8 +16,9 @@
 //! via Vulkan (no CUDA toolkit required — same rationale as `media-vulkan`).
 
 use std::num::NonZeroU32;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -27,230 +26,28 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
-use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
 use crate::ai::config::LocalLlmSettings;
-use crate::ai::gpu_fit::{self, detect_free_vram_bytes, detect_free_vram_bytes_best};
+use crate::ai::resources::{self, ModelWorkload};
 use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
 
-/// Context window used when neither the model's own trained context length
-/// nor an explicit `context_size` setting is usable.
-const DEFAULT_CTX_SIZE: u32 = 4096;
-
-/// Upper bound applied to a model's *own* trained context length when
-/// auto-deriving a default (i.e. when the user hasn't set an explicit
-/// `context_size`). Modern models increasingly advertise very large trained
-/// context windows (some Qwen3 checkpoints report 262144) — allocating a
-/// llama.cpp KV cache that size by default pins tens of gigabytes of RAM
-/// and can peg every CPU core for a single request, even for a short
-/// prompt, which reads as "it's just stuck". Users who actually need more
-/// than this can still opt in explicitly via `context_size` in Settings.
-const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
-
-/// Outcome of the GPU-offload decision, carried alongside the chosen
-/// `gpu_layers` so the load path can report *why* it landed on CPU vs GPU
-/// (surfaced to the UI via [`crate::ai::traits::AcceleratorStatus`]).
-struct GpuDecision {
-    gpu_layers: u32,
-    free_vram_bytes: Option<u64>,
-    model_size_bytes: Option<u64>,
-}
-
-/// Adapts the shared [`gpu_fit`] verdict onto llama.cpp's `n_gpu_layers`
-/// knob. The fit arithmetic itself deliberately lives in `gpu_fit` so that
-/// Settings' model picker warns using the *same* rule this loader applies —
-/// see that module's docs for why they must not diverge.
-fn gpu_layers_for_vram(model_size_bytes: u64, free_vram_bytes: u64) -> u32 {
-    if gpu_fit::fits_in_vram(model_size_bytes, free_vram_bytes) {
-        OFFLOAD_ALL_LAYERS
-    } else {
-        0
-    }
-}
-
-/// Picks a default `n_gpu_layers` for a model the caller hasn't pinned an
-/// explicit `gpu_layers` setting for.
-///
-/// Best-effort only: queries free VRAM via `nvidia-smi` (present whenever
-/// there's an NVIDIA GPU, which is what free-VRAM auto-detection can
-/// realistically support without vendor-specific APIs) and compares it
-/// against the GGUF file's on-disk size as a rough proxy for how much VRAM
-/// full offload would need. This is deliberately coarse — no attempt to
-/// count layers or split partially — because the goal here is narrow: stop
-/// defaulting to "offload everything" for a model that obviously can't
-/// fit at all (e.g. an ~18GB file on a 16GB card), which previously caused
-/// a hard load failure. When detection isn't possible (no `nvidia-smi`,
-/// non-NVIDIA GPU, parse failure, etc.) this falls back to the previous
-/// "offload everything" default rather than guessing further — a Vulkan
-/// backend on a card we can't query is treated the same as before.
-fn decide_gpu_layers(model_path: &Path) -> GpuDecision {
-    let free_vram_bytes = detect_free_vram_bytes_best();
-    let model_size_bytes = std::fs::metadata(model_path).map(|m| m.len()).ok();
-
-    let gpu_layers = match (model_size_bytes, free_vram_bytes) {
-        (Some(model), Some(free)) => {
-            let layers = gpu_layers_for_vram(model, free);
-            if layers == 0 {
-                // Visible on stderr (not only `tracing::warn!`, which had no
-                // subscriber capturing it on the affected machine — the log
-                // there showed no trace of this decision at all). This is a
-                // 5–10× slowdown; the user needs to be able to see why.
-                let msg = format!(
-                    "grafium: local chat model is ~{} MiB but only ~{} MiB VRAM was free at \
-                     load — running on CPU (much slower). Free VRAM and use \"Retry on GPU\" in \
-                     Chat, or set an explicit \"GPU layers\" value in Settings.",
-                    model / (1024 * 1024),
-                    free / (1024 * 1024)
-                );
-                eprintln!("{msg}");
-                tracing::warn!("{msg}");
-            }
-            layers
-        }
-        // Can't measure one side — keep the historical "offload everything"
-        // default rather than guessing CPU.
-        _ => OFFLOAD_ALL_LAYERS,
-    };
-
-    GpuDecision {
-        gpu_layers,
-        free_vram_bytes,
-        model_size_bytes,
-    }
-}
-
-/// Multiplier applied to a GGUF file's on-disk size to estimate the *host
-/// RAM* required to load and run it fully on CPU. Loading the raw weights
-/// alone would only need ~1x the file size, but llama.cpp additionally
-/// needs KV cache buffers (scaling with context size) and per-op compute
-/// buffers, and MoE architectures in particular (this exists because of a
-/// real incident loading an ~17.3GB Q4_K_M MoE GGUF, which peaked at
-/// ~32-34GB resident) can need substantially more scratch space than a
-/// dense model of the same file size. This factor is deliberately generous
-/// (over-cautious) estimate — better to sometimes refuse a model that
-/// would actually have fit than to let the kernel OOM-kill the whole
-/// process, which previously happened twice in a row and is not
-/// recoverable (unlike a clean `Err` from this function, which the caller
-/// already treats as best-effort/non-fatal).
-const CPU_RAM_SIZE_FACTOR: f64 = 2.5;
-
-/// Returns `Err` if loading `model_path` fully on CPU is estimated to need
-/// more RAM than is currently available, rather than letting the OS decide
-/// (via the OOM killer) partway through a multi-gigabyte allocation. Only
-/// meaningful when the model will actually run on CPU (`gpu_layers == 0`);
-/// GPU-resident layers are already accounted for by `default_gpu_layers_for`
-/// / an explicit `gpu_layers` setting, not this check.
-fn check_cpu_ram_budget(model_path: &Path) -> Result<()> {
-    let Ok(model_size_bytes) = std::fs::metadata(model_path).map(|m| m.len()) else {
-        return Ok(()); // Can't stat it; let the real load attempt surface the error.
-    };
-    let Some(available_bytes) = available_system_ram_bytes() else {
-        return Ok(()); // Can't detect (non-Linux, parse failure); proceed as before.
-    };
-
-    let required_bytes = (model_size_bytes as f64 * CPU_RAM_SIZE_FACTOR) as u64;
-    if required_bytes > available_bytes {
-        return Err(CoreError::Other(format!(
-            "refusing to load {} fully on CPU: estimated RAM need (~{} MiB, {}x its ~{} MiB \
-             file size) exceeds currently available RAM (~{} MiB). Loading anyway risks the \
-             OS killing the whole app outright instead of a clean error. Free up RAM, close \
-             other applications, or pick a smaller/more quantized model.",
-            model_path.display(),
-            required_bytes / (1024 * 1024),
-            CPU_RAM_SIZE_FACTOR,
-            model_size_bytes / (1024 * 1024),
-            available_bytes / (1024 * 1024)
-        )));
-    }
-    Ok(())
-}
-
-/// Distinguishes `check_cpu_ram_budget`'s "won't fit in RAM" error from any
-/// other load failure (missing file, corrupt GGUF, etc.), purely by
-/// checking for its known message prefix — there's no dedicated
-/// `CoreError` variant for this yet, and adding one is more churn than
-/// warranted for a single internal call site. Used to decide whether a
-/// fallback-to-smaller-model retry is safe/appropriate: it only ever makes
-/// sense when the *reason* was "too big for available RAM", not e.g. "file
-/// doesn't exist" (falling back on that would silently mask what's likely
-/// a misconfiguration).
-const RAM_BUDGET_ERROR_PREFIX: &str = "refusing to load";
-
-fn is_ram_budget_error(e: &CoreError) -> bool {
-    matches!(e, CoreError::Other(msg) if msg.starts_with(RAM_BUDGET_ERROR_PREFIX))
-}
-
-/// When the configured (or auto-picked) chat model doesn't fit in
-/// available RAM, looks for another already-downloaded LLM-kind model in
-/// the same directory that does — preferring the largest one that still
-/// fits (best quality available), so chat "just works" with whatever's
-/// actually usable right now rather than being completely unavailable
-/// until the user manually reconfigures Settings. Mirrors the "it just
-/// works" expectation the embedded Whisper transcription pipeline already
-/// delivers for the exact same models directory.
-fn find_fallback_llm_model(models_dir: &Path, exclude: &Path) -> Option<std::path::PathBuf> {
-    let mut candidates: Vec<_> = model_library::scan_models_dir(models_dir)
-        .ok()?
-        .into_iter()
-        .filter(|m| m.kind == ModelKind::Llm && m.path != exclude)
-        .collect();
-    candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    candidates
-        .into_iter()
-        .find(|m| check_cpu_ram_budget(&m.path).is_ok())
-        .map(|m| m.path)
-}
-
-/// Currently available system RAM in bytes (`MemAvailable` from
-/// `/proc/meminfo` on Linux — already accounts for reclaimable page cache,
-/// unlike `MemFree`). `None` on other platforms or if parsing fails.
-fn available_system_ram_bytes() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
-        for line in contents.lines() {
-            if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                let kib: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-                return Some(kib * 1024);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-/// Runs a GGUF model fully in-process via llama.cpp. Stateless per call
-/// beyond the loaded model, so one instance can be reused across many
-/// `complete()` calls (avoids re-loading the model each time — same
-/// reasoning as `WhisperTranscriber`).
-///
-/// `backend`/`model` are wrapped in `Arc` (not owned directly) purely so
-/// `complete()` can move cheap handles into a `tokio::task::spawn_blocking`
-/// closure — llama.cpp inference is synchronous CPU/GPU-bound work and must
-/// never run directly on the async executor.
+/// Resolves and validates a GGUF model, then runs each completion in a
+/// disposable resource-limited Grafium worker process.
 pub struct LocalLlm {
-    backend: Arc<LlamaBackend>,
-    model: Arc<LlamaModel>,
-    ctx_size: NonZeroU32,
+    model_path: PathBuf,
+    context_size: u32,
+    gpu_layers: u32,
     name: String,
-    /// Whether the model's baked-in chat template marks it as a reasoning
-    /// ("thinking") model — detected once at load from the template text.
-    supports_thinking: bool,
-    /// Whether inference actually landed on the GPU, and the VRAM figures that
-    /// drove that decision — surfaced to the UI so a silent CPU fallback is
-    /// visible instead of presenting as a hang.
-    accel: crate::ai::traits::AcceleratorStatus,
 }
 
-// The process-wide llama.cpp backend. llama.cpp only wants to be initialized
-// once; every `LocalLlm` instance shares the same handle rather than each
-// `load()` call re-initializing it — see `llama_shared::shared_backend`, also
-// used by `LocalEmbedder` so both can be in use in the same process at once.
+/// The process-wide llama.cpp backend. llama.cpp only wants to be
+/// initialized once; every `LocalLlm` instance shares the same handle
+/// rather than each `load()` call re-initializing it.
+static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
+
 impl LocalLlm {
     /// Loads a GGUF model from `model_path`.
     ///
@@ -258,94 +55,21 @@ impl LocalLlm {
     /// `gpu_layers` controls how many transformer layers to offload to the
     /// GPU (only meaningful when built with `llm-local-vulkan` — otherwise
     /// there's no GPU backend to offload to, so this is a harmless no-op).
-    /// `None` for either means "use a sensible default" (the model's
-    /// trained context length capped at `DEFAULT_AUTO_CTX_CAP`, and
-    /// "offload everything", respectively).
+    /// `None` uses Grafium's conservative defaults: 4096 context tokens and
+    /// CPU-only inference. GPU offload requires an explicit safety opt-in.
     pub fn load(
         model_path: &Path,
         context_size: Option<u32>,
         gpu_layers: Option<u32>,
     ) -> Result<Self> {
-        let backend = shared_backend();
-
-        // Only one load attempt is ever made — deliberately NOT "try GPU,
-        // retry fully-on-CPU on failure": llama.cpp/ggml gives no guarantee
-        // that a failed load releases whatever buffers it *did* manage to
-        // allocate before hitting the fatal one, so a retry-after-failure
-        // pattern here can leak the first attempt's memory and then
-        // allocate the *entire* model again for the second attempt — for
-        // an ~18GB model that's enough to exhaust RAM+swap and get the
-        // whole process OOM-killed by the kernel (observed in practice).
-        // Instead, when the caller hasn't pinned an explicit `gpu_layers`,
-        // proactively estimate whether the model can plausibly fit in free
-        // VRAM at all and decide up front, so we only ever allocate once. An
-        // *explicit* `gpu_layers` always wins over the heuristic.
-        let explicit = gpu_layers.is_some();
-        let decision = match gpu_layers {
-            Some(layers) => GpuDecision {
-                gpu_layers: layers,
-                // Report the current free VRAM for context, but a single
-                // (non-retried) read is fine here since it doesn't drive any
-                // decision — the user pinned the value.
-                free_vram_bytes: detect_free_vram_bytes(),
-                model_size_bytes: std::fs::metadata(model_path).map(|m| m.len()).ok(),
+        let context_size = resources::safe_context_size(context_size)?;
+        let gpu_layers = resources::safe_gpu_layers(gpu_layers)?;
+        resources::validate_model_load(
+            model_path,
+            ModelWorkload::Llm {
+                context_tokens: context_size,
             },
-            None => decide_gpu_layers(model_path),
-        };
-        let requested_gpu_layers = decision.gpu_layers;
-
-        if requested_gpu_layers == 0 {
-            check_cpu_ram_budget(model_path)?;
-        }
-
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
-
-        // Critical: llama.cpp defaults to `use_mmap(true)`, which makes
-        // `load_from_file` return almost immediately without actually
-        // reading the weights into RAM — pages are faulted in lazily,
-        // *later*, as generation touches each tensor (worse still for a
-        // MoE model like this, where different experts get paged in over
-        // the course of a run). That laziness is exactly what defeated
-        // `check_cpu_ram_budget` above in practice: it observed a stale,
-        // too-early snapshot of "available RAM" that had drifted by the
-        // time the real memory pressure hit, minutes later, during the
-        // token-generation loop. Forcing an eager (non-mmap) read for
-        // CPU-only loads makes the full cost of the model paid for, and
-        // checked, right here in one shot, immediately after the check
-        // above — closing that gap between "we checked" and "we actually
-        // used the memory". GPU-resident loads keep mmap enabled (its
-        // laziness/backing-store behavior only concerns host RAM, not
-        // VRAM, so it's not part of this specific hazard).
-        let model_params = if requested_gpu_layers == 0 {
-            model_params.with_use_mmap(false)
-        } else {
-            model_params
-        };
-
-        // NOTE: an OS-level `RLIMIT_AS` hard ceiling was also tried here as
-        // a last-resort safety net (in case the estimate above is still
-        // wrong), but was reverted: when llama.cpp/ggml's own allocator
-        // hits ENOMEM under a tightened `RLIMIT_AS`, it does not surface a
-        // clean `Result::Err` the way the Vulkan/GPU OOM path does — it
-        // segfaults (confirmed empirically: the process exited with
-        // SIGSEGV, code 139, the moment the self-imposed ceiling was hit).
-        // That's no safer than the kernel's own OOM killer, so the size
-        // estimate above (`check_cpu_ram_budget`) — now much more reliable
-        // since `use_mmap(false)` removes the drift window — is the only
-        // gate; if it's ever wrong, prefer lowering `CPU_RAM_SIZE_FACTOR`'s
-        // safety margin further rather than reintroducing a hard rlimit.
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
-            .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
-
-        let ctx_size = context_size
-            .filter(|&n| n > 0)
-            .or_else(|| {
-                Some(model.n_ctx_train())
-                    .filter(|&n| n > 0)
-                    .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
-            })
-            .and_then(NonZeroU32::new)
-            .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
+        )?;
 
         let name = model_path
             .file_name()
@@ -353,49 +77,11 @@ impl LocalLlm {
             .unwrap_or("local-llm")
             .to_string();
 
-        // Reasoning models (Qwen3, DeepSeek-R1, ...) advertise themselves in
-        // their chat template — Qwen3's references `enable_thinking` and both
-        // families emit `<think>` control markers. Detecting it here (once,
-        // from the template text) lets the engine request non-thinking mode
-        // and budget output tokens for a model that reasons before answering.
-        //
-        // When a GGUF carries *no* template at all, assume it might reason.
-        // The two errors are not symmetric: sending `/no_think` to a model
-        // that doesn't reason costs a few harmless tokens, while failing to
-        // send it to one that does makes the model emit its raw
-        // chain-of-thought as the answer. That is exactly what happened with
-        // an abliterated Qwen3 build whose template had been stripped during
-        // conversion — every reply began mid-thought ("Okay, I need to…"),
-        // which reads as the model being broken.
-        let supports_thinking = model
-            .chat_template(None)
-            .ok()
-            .and_then(|t| t.to_string().ok())
-            .map(|tmpl| {
-                let lower = tmpl.to_lowercase();
-                lower.contains("enable_thinking") || lower.contains("<think>")
-            })
-            .unwrap_or(true);
-
-        // GPU offload is only physically possible when a GPU backend was
-        // compiled in; otherwise CPU is expected and the UI must not warn.
-        let gpu_supported = cfg!(feature = "llm-local-vulkan");
-        let accel = crate::ai::traits::AcceleratorStatus {
-            gpu_supported,
-            on_gpu: gpu_supported && requested_gpu_layers > 0,
-            gpu_layers: requested_gpu_layers,
-            free_vram_mib_at_load: decision.free_vram_bytes.map(|b| b / (1024 * 1024)),
-            model_mib: decision.model_size_bytes.map(|b| b / (1024 * 1024)),
-            explicit,
-        };
-
         Ok(Self {
-            backend,
-            model: Arc::new(model),
-            ctx_size,
+            model_path: model_path.to_path_buf(),
+            context_size,
+            gpu_layers,
             name,
-            supports_thinking,
-            accel,
         })
     }
 
@@ -406,44 +92,9 @@ impl LocalLlm {
     /// makes "download a model from Hugging Face, put it in the models
     /// folder, it just works" apply identically to LLMs as it already does
     /// to Whisper.
-    ///
-    /// If the resolved model doesn't fit in available RAM, automatically
-    /// retries with the largest other already-downloaded LLM-kind model in
-    /// the same directory that does fit, instead of leaving chat entirely
-    /// unavailable — see `find_fallback_llm_model`. This is safe to do
-    /// (i.e. doesn't risk the double-allocation hazard `load()` warns
-    /// about) because `check_cpu_ram_budget` always runs *before* any
-    /// weights are actually read for a CPU-only load, so the first
-    /// (failing) attempt never allocated anything to begin with.
-    /// The model's raw chat template, for diagnosing reasoning detection.
-    pub fn chat_template_for_debug(&self) -> Option<String> {
-        self.model
-            .chat_template(None)
-            .ok()
-            .and_then(|t| t.to_string().ok())
-    }
-
     pub fn from_settings(models_dir: &Path, settings: &LocalLlmSettings) -> Result<Self> {
         let model_path = settings.model_ref.resolve(models_dir, ModelKind::Llm)?;
-        match Self::load(&model_path, settings.context_size, settings.gpu_layers) {
-            Ok(llm) => Ok(llm),
-            Err(e) if is_ram_budget_error(&e) => {
-                match find_fallback_llm_model(models_dir, &model_path) {
-                    Some(fallback_path) => {
-                        tracing::warn!(
-                            configured = %model_path.display(),
-                            fallback = %fallback_path.display(),
-                            "Configured chat model doesn't fit in available RAM; falling back \
-                             to a smaller already-downloaded model so chat stays usable. Pick a \
-                             different model explicitly in Settings to change this."
-                        );
-                        Self::load(&fallback_path, settings.context_size, settings.gpu_layers)
-                    }
-                    None => Err(e),
-                }
-            }
-            Err(e) => Err(e),
-        }
+        Self::load(&model_path, settings.context_size, settings.gpu_layers)
     }
 
     /// Same as [`Self::from_settings`], but takes the whole
@@ -451,27 +102,10 @@ impl LocalLlm {
     /// pre-extracted fields — the shape a caller loading settings straight
     /// from disk (e.g. the Tauri command layer, mirroring
     /// `ai_get_config`/`ai_set_config`) will actually have on hand.
-    pub fn from_config(config: &crate::ai::config::AiConfig, data_dir: &Path) -> Result<Self> {
-        let local = config
-            .local
-            .as_ref()
-            .ok_or_else(|| CoreError::Other("No local AI provider configured".to_string()))?;
-        let models_dir = local
-            .models_dir
-            .clone()
-            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
-        Self::from_settings(&models_dir, &local.local_llm)
-    }
-
-    /// User-initiated "try the GPU now" reload: same resolution as
-    /// [`Self::from_config`] but forces full GPU offload, bypassing both the
-    /// free-VRAM heuristic and any configured `gpu_layers`. This is the
-    /// action behind Chat's "Retry on GPU" button — the free-VRAM heuristic
-    /// may have landed on CPU because VRAM was *transiently* busy at startup
-    /// (the embedder mid-index, a previous instance shutting down); once that
-    /// has cleared, this lets the user move inference onto the GPU without
-    /// restarting or editing Settings. A fresh single load attempt, so it
-    /// doesn't risk the double-allocation hazard `load()` warns about.
+    /// Load the configured chat model with every layer forced onto the GPU.
+    ///
+    /// Used where a slow CPU fallback is worse than a clear failure: the
+    /// analysis passes would otherwise look like they had hung.
     pub fn from_config_forcing_gpu(
         config: &crate::ai::config::AiConfig,
         data_dir: &Path,
@@ -483,16 +117,24 @@ impl LocalLlm {
         let models_dir = local
             .models_dir
             .clone()
-            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
+            .unwrap_or_else(|| crate::model_library::default_models_dir(data_dir));
         let model_path = local
             .local_llm
             .model_ref
-            .resolve(&models_dir, ModelKind::Llm)?;
-        Self::load(
-            &model_path,
-            local.local_llm.context_size,
-            Some(OFFLOAD_ALL_LAYERS),
-        )
+            .resolve(&models_dir, crate::model_library::ModelKind::Llm)?;
+        Self::load(&model_path, local.local_llm.context_size, Some(u32::MAX))
+    }
+
+    pub fn from_config(config: &crate::ai::config::AiConfig, data_dir: &Path) -> Result<Self> {
+        let local = config
+            .local
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("No local AI provider configured".to_string()))?;
+        let models_dir = local
+            .models_dir
+            .clone()
+            .unwrap_or_else(|| model_library::default_models_dir(data_dir));
+        Self::from_settings(&models_dir, &local.local_llm)
     }
 }
 
@@ -502,20 +144,41 @@ impl LlmProvider for LocalLlm {
         messages: &'a [ChatMessage],
         options: &'a CompletionOptions,
     ) -> BoxFuture<'a, Result<String>> {
-        let model = self.model.clone();
-        let backend = self.backend.clone();
-        let ctx_size = self.ctx_size;
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
         let messages = messages.to_vec();
         let options = options.clone();
-        let disable_thinking = self.supports_thinking;
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
-                generate(&model, &backend, ctx_size, &prompt, &options, None)
+                let prompt_bytes = messages.iter().fold(
+                    options.system_prompt.as_ref().map_or(0, String::len),
+                    |total, message| total.saturating_add(message.content.len()),
+                );
+                resources::validate_prompt_bytes(prompt_bytes)?;
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::Llm {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                        messages,
+                        options,
+                    },
+                    Duration::from_secs(30 * 60),
+                )? {
+                    crate::ai::worker::WorkerOutput::Llm(output) => Ok(output),
+                    crate::ai::worker::WorkerOutput::Ready => Err(CoreError::Other(
+                        "native AI worker returned a health result for an LLM request".to_string(),
+                    )),
+                    #[cfg(feature = "media")]
+                    _ => Err(CoreError::Other(
+                        "native AI worker returned a transcription for an LLM request".to_string(),
+                    )),
+                }
             })
             .await
-            .map_err(|e| CoreError::Other(format!("LLM inference task panicked: {e}")))?
+            .map_err(|e| CoreError::Other(format!("LLM worker task panicked: {e}")))?
         })
     }
 
@@ -523,61 +186,159 @@ impl LlmProvider for LocalLlm {
         &self.name
     }
 
-    fn context_window(&self) -> Option<usize> {
-        Some(self.ctx_size.get() as usize)
-    }
-
-    fn supports_thinking(&self) -> bool {
-        self.supports_thinking
-    }
-
-    fn complete_stream<'a>(
-        &'a self,
-        messages: &'a [ChatMessage],
-        options: &'a CompletionOptions,
-        on_token: &'a mut (dyn FnMut(&str) + Send),
-    ) -> BoxFuture<'a, Result<String>> {
-        let model = self.model.clone();
-        let backend = self.backend.clone();
-        let ctx_size = self.ctx_size;
-        let messages = messages.to_vec();
-        let options = options.clone();
-        let disable_thinking = self.supports_thinking;
-
+    fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
         Box::pin(async move {
-            // `generate()` runs on a blocking thread (llama.cpp is
-            // synchronous), so pieces are handed back here through a
-            // channel rather than calling `on_token` directly from that
-            // thread — `on_token` is an arbitrary `&mut` closure the caller
-            // owns, and this keeps it running only on this async task.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-            let generation = tokio::task::spawn_blocking(move || {
-                let prompt = build_chat_prompt(&model, &messages, &options, disable_thinking)?;
-                generate(&model, &backend, ctx_size, &prompt, &options, Some(&tx))
-            });
-
-            let forward_tokens = async {
-                while let Some(piece) = rx.recv().await {
-                    on_token(&piece);
+            tokio::task::spawn_blocking(move || {
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::ValidateLlm {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                    },
+                    Duration::from_secs(10 * 60),
+                )? {
+                    crate::ai::worker::WorkerOutput::Ready => Ok(true),
+                    _ => Err(CoreError::Other(
+                        "native AI worker returned output while validating a model".to_string(),
+                    )),
                 }
-            };
-
-            let (result, ()) = tokio::join!(generation, forward_tokens);
-            result.map_err(|e| CoreError::Other(format!("LLM inference task panicked: {e}")))?
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("LLM health worker task panicked: {e}")))?
         })
     }
+}
 
-    fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
-        // The model is loaded fully in-process at construction time — if
-        // `LocalLlm::load`/`from_config` succeeded, it's ready by definition
-        // (no network endpoint to probe, unlike Ollama/OpenAI-compatible).
-        Box::pin(async move { Ok(true) })
-    }
+pub(crate) struct LlmSlot {
+    model_path: PathBuf,
+    context_size: u32,
+    gpu_layers: u32,
+    backend: Arc<LlamaBackend>,
+    model: LlamaModel,
+    model_size: u64,
+}
 
-    fn accelerator_status(&self) -> Option<crate::ai::traits::AcceleratorStatus> {
-        Some(self.accel.clone())
+impl LlmSlot {
+    fn matches(&self, model_path: &Path, context_size: u32, gpu_layers: u32) -> bool {
+        self.model_path == model_path
+            && self.context_size == context_size
+            && self.gpu_layers == gpu_layers
     }
+}
+
+pub(crate) fn install_llm_logging() {
+    static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
+    INSTALL_LOGGING.call_once(|| {
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+    });
+}
+
+fn ensure_slot(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+) -> Result<()> {
+    if slot
+        .as_ref()
+        .is_some_and(|cached| cached.matches(model_path, context_size, gpu_layers))
+    {
+        return Ok(());
+    }
+    // Drop any previously cached model first so its native memory is released
+    // before a potentially larger replacement is loaded.
+    *slot = None;
+    install_llm_logging();
+    let (backend, model) = load_native_model(model_path, gpu_layers)?;
+    let model_size = std::fs::metadata(model_path)
+        .map_err(|e| CoreError::Other(format!("Cannot inspect LLM model: {e}")))?
+        .len();
+    *slot = Some(LlmSlot {
+        model_path: model_path.to_path_buf(),
+        context_size,
+        gpu_layers,
+        backend,
+        model,
+        model_size,
+    });
+    Ok(())
+}
+
+pub(crate) fn validate_in_process(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+) -> Result<()> {
+    ensure_slot(slot, model_path, context_size, gpu_layers)?;
+    let slot = slot
+        .as_ref()
+        .expect("slot populated by ensure_slot for validation");
+    let ctx_size = NonZeroU32::new(context_size)
+        .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
+    resources::validate_inference_headroom(
+        "local LLM validation",
+        resources::estimate_llm_context_bytes(slot.model_size, ctx_size.get()),
+    )?;
+    let params = LlamaContextParams::default()
+        .with_n_ctx(Some(ctx_size))
+        .with_n_threads(1)
+        .with_n_threads_batch(1);
+    slot.model
+        .new_context(&slot.backend, params)
+        .map_err(|e| CoreError::Other(format!("failed to validate llama context: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn complete_in_process(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> Result<String> {
+    ensure_slot(slot, model_path, context_size, gpu_layers)?;
+    let slot = slot
+        .as_ref()
+        .expect("slot populated by ensure_slot for completion");
+    let ctx_size = NonZeroU32::new(context_size)
+        .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
+    let prompt = build_chat_prompt(&slot.model, messages, options)?;
+    generate(
+        &slot.model,
+        &slot.backend,
+        ctx_size,
+        slot.model_size,
+        &prompt,
+        options,
+    )
+}
+
+fn load_native_model(
+    model_path: &Path,
+    gpu_layers: u32,
+) -> Result<(Arc<LlamaBackend>, LlamaModel)> {
+    let backend = if let Some(backend) = BACKEND.get() {
+        Arc::clone(backend)
+    } else {
+        let initialized = Arc::new(LlamaBackend::init().map_err(|e| {
+            CoreError::Other(format!("failed to initialize the llama.cpp backend: {e}"))
+        })?);
+        let _ = BACKEND.set(Arc::clone(&initialized));
+        BACKEND.get().map(Arc::clone).unwrap_or(initialized)
+    };
+    // Disable mmap so the worker's virtual-memory ceiling tracks real model
+    // allocations instead of large file mappings.
+    let model_params = LlamaModelParams::default()
+        .with_n_gpu_layers(gpu_layers)
+        .with_use_mmap(false);
+    let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+        .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
+    Ok((backend, model))
 }
 
 /// Formats a conversation (`options.system_prompt` + `messages`) using the
@@ -590,30 +351,18 @@ fn build_chat_prompt(
     model: &LlamaModel,
     messages: &[ChatMessage],
     options: &CompletionOptions,
-    disable_thinking: bool,
 ) -> Result<String> {
     let mut chat = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &options.system_prompt {
         chat.push(new_chat_message("system", system)?);
     }
-    // For reasoning models, append the `/no_think` soft switch to the final
-    // user turn. Qwen3 (and compatible templates) honour this directive to
-    // skip the <think> reasoning pass — cheaper and more reliable than hoping
-    // the model answers before exhausting its budget. `<think>` stripping in
-    // the engine remains as a backstop for models that ignore the directive.
-    let last_user = messages.iter().rposition(|m| m.role == MessageRole::User);
-    for (i, message) in messages.iter().enumerate() {
+    for message in messages {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
         };
-        let content = if disable_thinking && Some(i) == last_user {
-            format!("{}\n\n/no_think", message.content)
-        } else {
-            message.content.clone()
-        };
-        chat.push(new_chat_message(role, &content)?);
+        chat.push(new_chat_message(role, &message.content)?);
     }
 
     let template = match model.chat_template(None) {
@@ -639,16 +388,28 @@ fn new_chat_message(role: &str, content: &str) -> Result<LlamaChatMessage> {
 /// Extracted as its own function so it's obvious this is the *only* place
 /// sampling policy is decided — nothing else should construct a
 /// `LlamaSampler` by hand.
-fn build_sampler(options: &CompletionOptions) -> LlamaSampler {
+fn build_sampler(model: &LlamaModel, options: &CompletionOptions) -> LlamaSampler {
     const SEED: u32 = 1234;
+    // Repetition control is applied to *both* chains, greedy included. Without
+    // it, greedy decoding has nothing to break a degenerate attractor: once the
+    // argmax token reproduces its own context, it stays the argmax forever and
+    // generation becomes the same token repeated until max_tokens. That is not
+    // hypothetical — it produced a full screen of "起来" from an English prompt,
+    // because these are Qwen-family models and their degenerate attractors land
+    // on common Chinese tokens.
+    //
+    // llama.cpp's own long-standing defaults: penalize within the last 64
+    // tokens, 1.1x repeat penalty, frequency/presence penalties off.
+    let penalties = || LlamaSampler::penalties(model.n_vocab(), 64, 1.1, 0.0, 0.0);
     match options.temperature {
         Some(t) if t > 0.0 => LlamaSampler::chain_simple([
+            penalties(),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.95, 1),
             LlamaSampler::temp(t),
             LlamaSampler::dist(SEED),
         ]),
-        _ => LlamaSampler::chain_simple([LlamaSampler::greedy()]),
+        _ => LlamaSampler::chain_simple([penalties(), LlamaSampler::greedy()]),
     }
 }
 
@@ -660,24 +421,24 @@ fn generate(
     model: &LlamaModel,
     backend: &LlamaBackend,
     ctx_size: NonZeroU32,
+    model_size: u64,
     prompt: &str,
     options: &CompletionOptions,
-    on_token: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<String> {
-    let n_threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
+    resources::validate_prompt_size(prompt)?;
+    resources::validate_inference_headroom(
+        "local LLM inference",
+        resources::estimate_llm_context_bytes(model_size, ctx_size.get()),
+    )?;
+    let n_threads = resources::inference_thread_count();
     let ctx_params = LlamaContextParams::default()
+        // n_batch is deliberately left at llama.cpp's default. Raising it to
+        // n_ctx looks like the obvious way to fit a long prompt in one decode,
+        // but llama.cpp derives n_outputs_max from n_batch and sizes the logits
+        // buffer as n_outputs_max * n_vocab * 4 bytes — on a 151936-token vocab
+        // that is ~20 GB at n_batch=32768, and context creation just returns
+        // null. The prompt is chunked to n_batch below instead.
         .with_n_ctx(Some(ctx_size))
-        // llama.cpp's decode() asserts the whole batch fits within
-        // `n_batch` (default 2048), independent of `n_ctx` — without this,
-        // a single-shot prompt longer than 2048 tokens (easy to hit once
-        // page content is included) crashes the whole process instead of
-        // returning an error. Matching n_batch/n_ubatch to the context
-        // size means "fits in the context window" is the only limit a
-        // caller needs to reason about.
-        .with_n_batch(ctx_size.get())
-        .with_n_ubatch(ctx_size.get())
         .with_n_threads(n_threads)
         .with_n_threads_batch(n_threads);
 
@@ -697,38 +458,39 @@ fn generate(
             tokens.len()
         )));
     }
-    let max_new_tokens = options.max_tokens.unwrap_or(1024) as i32;
+    let max_new_tokens = resources::safe_generated_tokens(options.max_tokens)? as i32;
 
-    let mut batch = LlamaBatch::new(tokens.len().max(512) + 1, 1);
+    // Prefill in chunks of at most n_batch tokens. Decoding the whole prompt in
+    // one batch trips `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` as soon as
+    // the prompt is longer than n_batch (2048 by default, regardless of n_ctx),
+    // and a failed GGML_ASSERT is an abort() — it kills the process rather than
+    // returning an error we can surface. Only the final token needs logits,
+    // since that is the one generation samples from.
+    let n_batch = (ctx.n_batch() as usize).max(1);
     let last_index = tokens.len() as i32 - 1;
-    for (i, token) in tokens.iter().enumerate() {
-        let is_last = i as i32 == last_index;
-        batch
-            .add(*token, i as i32, &[0], is_last)
-            .map_err(|e| CoreError::Other(format!("failed to queue prompt token: {e}")))?;
+    let mut batch = LlamaBatch::new(n_batch.min(tokens.len()).max(1), 1);
+    for chunk_start in (0..tokens.len()).step_by(n_batch) {
+        let chunk_end = (chunk_start + n_batch).min(tokens.len());
+        batch.clear();
+        for (offset, token) in tokens[chunk_start..chunk_end].iter().enumerate() {
+            let i = (chunk_start + offset) as i32;
+            batch
+                .add(*token, i, &[0], i == last_index)
+                .map_err(|e| CoreError::Other(format!("failed to queue prompt token: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| CoreError::Other(format!("llama.cpp decode of the prompt failed: {e}")))?;
     }
-    ctx.decode(&mut batch)
-        .map_err(|e| CoreError::Other(format!("llama.cpp decode of the prompt failed: {e}")))?;
 
-    let mut sampler = build_sampler(options);
+    let mut sampler = build_sampler(model, options);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut output = String::new();
-    let mut n_cur = batch.n_tokens();
+    // Absolute position in the sequence, which after a chunked prefill is the
+    // full prompt length rather than the size of the last batch decoded.
+    let mut n_cur = tokens.len() as i32;
     let stop_at_token = n_cur + max_new_tokens;
 
     while n_cur < stop_at_token && n_cur < n_ctx {
-        // Cooperative cancellation: the UI can flip this flag (via
-        // `CompletionOptions.cancel`) to abort a slow local generation
-        // instead of leaving the user staring at a frozen pane. Return what
-        // we have so far rather than erroring.
-        if options
-            .cancel
-            .as_ref()
-            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-        {
-            break;
-        }
-
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
@@ -739,11 +501,6 @@ fn generate(
         let piece = model
             .token_to_piece(token, &mut decoder, true, None)
             .map_err(|e| CoreError::Other(format!("failed to decode generated token: {e}")))?;
-        // Best-effort: if the receiving end was dropped (caller stopped
-        // listening), keep generating rather than aborting on a send error.
-        if let Some(tx) = on_token {
-            let _ = tx.send(piece.clone());
-        }
         output.push_str(&piece);
 
         if let Some(hit_len) = options
@@ -832,148 +589,82 @@ mod config_tests {
         );
     }
 
-    /// `find_fallback_llm_model` is what makes chat "just work" when the
-    /// configured/auto-picked model is too large for available RAM (e.g. a
-    /// user picked a 30B model but only has enough free RAM for a 4B one):
-    /// it should skip the excluded (too-large) model and pick the largest
-    /// *other* LLM-kind model that still passes the RAM budget check,
-    /// ignoring non-LLM files (embeddings) entirely.
     #[test]
-    fn find_fallback_llm_model_prefers_largest_model_that_still_fits_ram_budget() {
-        let dir = tempfile::tempdir().unwrap();
+    fn inference_leaves_cores_free_for_the_ui() {
+        // The whole point: never hand llama.cpp every core, or the WebView
+        // has nothing left to render with and typing stutters.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let threads = resources::inference_thread_count();
 
-        let too_big = dir.path().join("huge-model.gguf");
-        // Sparse file: reports a real (enormous) size via metadata without
-        // actually using that much disk space, guaranteeing it exceeds
-        // whatever RAM `check_cpu_ram_budget` sees on the test machine.
-        std::fs::File::create(&too_big)
-            .unwrap()
-            .set_len(10 * 1024 * 1024 * 1024 * 1024) // 10 TiB
-            .unwrap();
-
-        let fits_larger = dir.path().join("qwen-7b-instruct.gguf");
-        std::fs::write(&fits_larger, vec![0u8; 4096]).unwrap();
-        let fits_smaller = dir.path().join("qwen-4b-instruct.gguf");
-        std::fs::write(&fits_smaller, vec![0u8; 1024]).unwrap();
-        // Not an LLM at all — must never be picked as a chat-model fallback.
-        let embedding = dir.path().join("nomic-embed-text.gguf");
-        std::fs::write(&embedding, vec![0u8; 8192]).unwrap();
-
-        let fallback = find_fallback_llm_model(dir.path(), &too_big);
-        assert_eq!(fallback, Some(fits_larger));
+        assert!(threads >= 1, "must always use at least one thread");
+        if cores > 2 {
+            assert!(
+                (threads as usize) < cores,
+                "expected headroom for the UI: {threads} threads on {cores} cores"
+            );
+        }
     }
 
     #[test]
-    fn find_fallback_llm_model_returns_none_when_nothing_else_fits() {
-        let dir = tempfile::tempdir().unwrap();
-        let only_model = dir.path().join("qwen-2b-instruct.gguf");
-        std::fs::write(&only_model, vec![0u8; 1024]).unwrap();
-
-        assert_eq!(find_fallback_llm_model(dir.path(), &only_model), None);
+    fn inference_thread_count_never_reports_zero_on_small_machines() {
+        // saturating_sub + max(1) has to survive 1- and 2-core boxes.
+        for cores in [1usize, 2, 3] {
+            let computed = cores.saturating_sub(2).max(1);
+            assert!(computed >= 1, "{cores} cores produced {computed} threads");
+        }
     }
 }
 
-#[cfg(test)]
-mod thinking_detection_tests {
-    /// Mirrors the classifier in `load`, which can't be called without a real
-    /// GGUF on disk. Kept in lockstep with it deliberately: the asymmetry it
-    /// encodes is the whole point.
-    fn detect(template: Option<&str>) -> bool {
-        template
-            .map(|tmpl| {
-                let lower = tmpl.to_lowercase();
-                lower.contains("enable_thinking") || lower.contains("<think>")
-            })
-            .unwrap_or(true)
-    }
-
-    #[test]
-    fn a_template_advertising_reasoning_is_detected() {
-        assert!(detect(Some("{% if enable_thinking %}...")));
-        assert!(detect(Some("assistant emits <think> blocks")));
-    }
-
-    #[test]
-    fn a_plain_template_is_not_treated_as_reasoning() {
-        assert!(!detect(Some(
-            "{% for m in messages %}{{ m.content }}{% endfor %}"
-        )));
-    }
-
-    /// Regression: an abliterated Qwen3 build shipped with its chat template
-    /// stripped during conversion. Detection returned "not a reasoning model",
-    /// so `/no_think` was never sent and every answer arrived as raw
-    /// chain-of-thought ("Okay, I need to…"). A missing template must mean
-    /// "assume it reasons" — the directive is cheap, the leak is not.
-    #[test]
-    fn a_missing_template_assumes_reasoning() {
-        assert!(detect(None));
-    }
-}
-
-#[cfg(test)]
-mod gpu_decision_tests {
-    use super::*;
-    // The margin arithmetic itself now lives in `gpu_fit` (shared with the
-    // Settings model picker); these tests cover the layer-count adapter and
-    // the real-model regression cases against it.
-    use crate::ai::gpu_fit::{
-        vram_safety_margin_bytes, VRAM_SAFETY_MARGIN_MAX_BYTES, VRAM_SAFETY_MARGIN_MIN_BYTES,
+/// Rewrites the low-level `llama_new_context_with_model` failure — most
+/// often reported by the underlying binding as the bare string "null
+/// reference from llama.cpp" — into a user-actionable explanation.
+/// llama.cpp returns NULL from this call whenever the KV cache + compute
+/// buffer at the requested `n_ctx`/`n_batch` won't fit in whatever
+/// backend (Vulkan/CUDA VRAM, or host RAM on CPU-only) the model is
+/// running on, without distinguishing "backend allocator refused" from
+/// any other init failure — the bare message alone is next-to-useless.
+/// Sharing this one shaper between `local_llm::generate` and
+/// `local_embedder::embed_all` keeps the two paths' error phrasing
+/// identical so the surrounding chunking/error-handling logic doesn't
+/// have to string-match two subtly different messages.
+pub(crate) fn context_creation_error_message(
+    raw: &str,
+    ctx_size: u32,
+    n_batch: u32,
+    prompt_tokens: usize,
+) -> String {
+    // Include the most recent llama.cpp / GGML log lines verbatim — the
+    // binding's "null reference from llama.cpp" alone hides what
+    // actually went wrong (e.g. "ggml_vulkan: allocation failed", "no
+    // Vulkan device available"). Cap at the last ~30 seconds so this
+    // catches the current context-creation attempt without swallowing
+    // logs from a totally different operation. The cutoff intentionally
+    // predates the caller — we can't take an `Instant::now()` here
+    // without changing the call sites' signatures, so we look back a
+    // reasonable window.
+    let cutoff = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(30))
+        .unwrap_or_else(std::time::Instant::now);
+    let backend_log =
+        crate::log_tap::snapshot_since_targets(cutoff, &["llama", "ggml"]);
+    let details = if backend_log.is_empty() {
+        String::new()
+    } else {
+        let lines = backend_log
+            .iter()
+            .map(|ev| format!("  [{:?} {}] {}", ev.level, ev.target, ev.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nllama.cpp / GGML log:\n{lines}")
     };
-
-    #[test]
-    fn safety_margin_scales_with_model_and_clamps() {
-        // Tiny model: 20% would be well under the floor → clamped to 512 MiB.
-        let tiny = 256 * 1024 * 1024; // 256 MiB
-        assert_eq!(vram_safety_margin_bytes(tiny), VRAM_SAFETY_MARGIN_MIN_BYTES);
-
-        // Mid model: 5 GiB → 20% = 1 GiB, inside the band → used as-is.
-        let mid = 5 * 1024 * 1024 * 1024; // 5 GiB
-        assert_eq!(vram_safety_margin_bytes(mid), 1024 * 1024 * 1024);
-
-        // Huge model: 30 GiB → 20% = 6 GiB, above the ceiling → clamped.
-        let huge = 30u64 * 1024 * 1024 * 1024;
-        assert_eq!(vram_safety_margin_bytes(huge), VRAM_SAFETY_MARGIN_MAX_BYTES);
-    }
-
-    #[test]
-    fn gpu_layers_decision_fits_and_does_not_fit() {
-        let model = 5 * 1024 * 1024 * 1024; // 5 GiB → margin 1 GiB → needs 6 GiB free
-        let needed = model + vram_safety_margin_bytes(model);
-
-        // Comfortably enough free VRAM → offload everything.
-        assert_eq!(gpu_layers_for_vram(model, needed), OFFLOAD_ALL_LAYERS);
-        assert_eq!(
-            gpu_layers_for_vram(model, needed + 1024 * 1024 * 1024),
-            OFFLOAD_ALL_LAYERS
-        );
-
-        // One byte short of the requirement → CPU-only.
-        assert_eq!(gpu_layers_for_vram(model, needed - 1), 0);
-
-        // The exact real-machine numbers from the bug report: a 4,983 MiB
-        // model with only ~5,000 MiB free (a transient dip) does not fit;
-        // with 16 GiB free it does.
-        let real_model = 4_983u64 * 1024 * 1024;
-        assert_eq!(gpu_layers_for_vram(real_model, 5_000 * 1024 * 1024), 0);
-        assert_eq!(
-            gpu_layers_for_vram(real_model, 16 * 1024 * 1024 * 1024),
-            OFFLOAD_ALL_LAYERS
-        );
-    }
-
-    #[test]
-    fn best_of_free_readings_ignores_a_transient_dip() {
-        // The whole point of sampling the *max*: a momentary dip (5 GiB)
-        // between two healthy readings (16 GiB) must not be what we decide
-        // on. Emulate the reduction the sampler performs.
-        let readings = [16u64, 5, 16].map(|g| g * 1024 * 1024 * 1024);
-        let best = readings.iter().copied().reduce(|a, b| a.max(b)).unwrap();
-        assert_eq!(best, 16 * 1024 * 1024 * 1024);
-
-        let real_model = 4_983u64 * 1024 * 1024;
-        // With the dip we'd have (wrongly) picked CPU; with the best reading
-        // we correctly offload.
-        assert_eq!(gpu_layers_for_vram(real_model, best), OFFLOAD_ALL_LAYERS);
-    }
+    format!(
+        "failed to create llama.cpp inference context ({raw}). This almost always \
+         means the requested context/batch size didn't fit in available GPU (or CPU) \
+         memory. Context size {ctx_size}, batch size {n_batch}, prompt tokens \
+         {prompt_tokens}. Try (a) closing other apps that are using VRAM, (b) lowering \
+         the local LLM \"context_size\" or \"GPU layers\" in Settings, or (c) picking \
+         a smaller/more quantized model.{details}"
+    )
 }

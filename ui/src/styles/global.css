@@ -73,6 +73,26 @@
   --task-later-bg: #cba6f722;
   --task-later-fg: #cba6f7;
 
+  /* ------------------------------------------------------------
+     Compatibility aliases.
+     Several components were written against token names that were
+     never defined (--accent-color, --text, --border-color, --error,
+     --bg-alt, ...). Each use supplied a hardcoded fallback, so those
+     elements silently ignored the active theme and rendered a fixed
+     colour instead. Defining the aliases here makes them resolve to
+     the real theme tokens, so those surfaces theme correctly without
+     touching every call site. --warning-color maps to --task-todo-fg
+     because the theme factory derives both from the same `warning`.
+     ------------------------------------------------------------ */
+  --accent-color: var(--accent);
+  --border-color: var(--border);
+  --text: var(--text-primary);
+  --error: var(--danger);
+  --error-color: var(--danger);
+  --warning-color: var(--task-todo-fg);
+  --bg-alt: var(--bg-secondary);
+  --bg-tertiary: var(--surface-raised);
+
   /* Layout & spacing */
   --content-max-width: 100%;
   --content-padding-x: 8px;
@@ -123,6 +143,36 @@ body {
 ::selection {
   background: var(--accent);
   color: var(--bg-primary);
+}
+
+/* ============================================================
+   Baseline focus visibility.
+   Many components clear `outline` and signal focus only via border
+   colour, which is invisible for keyboard users on most controls.
+   This is a keyboard-only affordance (`:focus-visible`), so it never
+   appears on mouse click and cannot change the pointer experience.
+   ============================================================ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ============================================================
+   Reduced motion.
+   Honours the OS "reduce motion" preference. Durations are collapsed
+   rather than set to 0 so that `transitionend` / `animationend`
+   listeners still fire and no state machine stalls.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Force full-width content - override any scoped component styles */

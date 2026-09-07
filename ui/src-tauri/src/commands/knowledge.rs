@@ -272,6 +272,9 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
             vector_store_available: false,
             vector_count: 0,
             mode: AiMode::Local,
+            // No engine at all is a different situation from an engine whose
+            // model failed to load, and must not be reported as the latter.
+            llm_load_error: None,
         })
     }
 }
@@ -1003,6 +1006,18 @@ pub async fn ai_cancel_stream(
             flag.store(true, Ordering::Relaxed);
         }
     }
+
+    // Flipping the flag alone is cooperative, and the local model does not
+    // cooperate: llama.cpp's generation loop checks nothing between tokens, so
+    // the flag is only noticed once generation finishes on its own — which for
+    // a model that has effectively hung is never. Killing the worker is the
+    // only thing that actually stops it, so Stop means stop.
+    let engine_guard = state.engine.read().await;
+    if let Some(engine) = engine_guard.as_ref() {
+        if let Some(llm) = engine.llm_provider() {
+            llm.abort_in_flight();
+        }
+    }
     Ok(())
 }
 
@@ -1126,4 +1141,140 @@ pub async fn ai_create_default_schemas(
     let mut manager =
         grafium_core::knowledge::SchemaManager::load(&graph.root_dir).map_err(|e| e.to_string())?;
     manager.create_defaults().map_err(|e| e.to_string())
+}
+
+// ─── Ported from the AI-isolation branch ───────────────────────────────────
+
+/// Details of a single "wrap known tags as `[[wiki-link]]`s" change made
+/// during a summary insert — enough to reverse or reapply it without
+/// re-parsing anything, so Ctrl-Z after "Insert into page" can restore
+/// each block's exact previous content and Ctrl-Y can put the wrapped
+/// version back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryWrapChange {
+    pub block_id: String,
+    pub previous_content: String,
+    pub new_content: String,
+}
+
+/// What `ai_insert_page_summary` did — returned so the frontend can push
+/// a matching undo action onto its stack (see `undoStack.ts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInsertSummaryResult {
+    /// The id of the freshly-created block that holds the summary text.
+    pub inserted_block_id: String,
+    /// The exact markdown that went into that block, kept so redo can
+    /// recreate it verbatim (topic ordering, formatting, tag-wrapping).
+    pub inserted_content: String,
+    /// The anchor block id the summary was placed after, or `None` when
+    /// it landed at the top of the page. Used by redo to put the block
+    /// back in roughly the same spot.
+    pub inserted_after_block_id: Option<String>,
+    /// Blocks whose existing content was rewritten to embed the new
+    /// `[[wiki-link]]`s. Both previous and new content are captured so
+    /// undo can restore, and redo can reapply.
+    pub wrap_changes: Vec<SummaryWrapChange>,
+}
+
+
+
+/// Undoes a previous `ai_insert_page_summary` call: deletes the summary
+/// block and restores each block whose content was rewrapped back to its
+/// pre-wrap text. Silent no-op for a block that has since been deleted
+/// (so a Ctrl-Z after a user manually deletes the summary block and
+/// then some wrapped block still restores the survivors instead of
+/// erroring out).
+#[tauri::command(rename_all = "camelCase")]
+pub fn ai_undo_summary_insert(
+    app_state: State<'_, crate::AppState>,
+    inserted_block_id: String,
+    wrap_changes: Vec<SummaryWrapChange>,
+) -> Result<(), String> {
+    let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
+
+    // Best-effort delete: if the user already deleted the summary block
+    // themselves, don't fail the whole undo — just move on to the wrap
+    // restorations.
+    if let Err(e) = graph.delete_block(&inserted_block_id) {
+        tracing::warn!(
+            "ai_undo_summary_insert: delete_block({}) failed ({}); continuing with wrap restore",
+            inserted_block_id,
+            e
+        );
+    }
+
+    for change in &wrap_changes {
+        // Same best-effort logic per wrap change: skip blocks that no
+        // longer exist rather than aborting the whole undo.
+        if let Err(e) = graph.update_block(&change.block_id, &change.previous_content, None) {
+            tracing::warn!(
+                "ai_undo_summary_insert: restore of {} failed ({}); skipping",
+                change.block_id,
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Redoes a previously-undone summary insert: recreates the summary
+/// block (after its original anchor if the anchor still exists, else at
+/// the top of the page) and reapplies each wrap change so the on-page
+/// `[[wiki-link]]`s come back. Returns a fresh
+/// [`AiInsertSummaryResult`] carrying the new summary block's id, so
+/// the undo stack can flip it back into an undo entry.
+#[tauri::command(rename_all = "camelCase")]
+pub fn ai_reapply_summary_insert(
+    app_state: State<'_, crate::AppState>,
+    page_id: String,
+    inserted_content: String,
+    inserted_after_block_id: Option<String>,
+    wrap_changes: Vec<SummaryWrapChange>,
+) -> Result<AiInsertSummaryResult, String> {
+    let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
+
+    let anchor = inserted_after_block_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut effective_anchor = anchor.map(String::from);
+    let inserted_block = match anchor {
+        Some(anchor_id) => match graph.insert_block_after(&page_id, anchor_id, &inserted_content) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    "ai_reapply_summary_insert: insert_block_after failed ({}); falling back to top of page",
+                    e
+                );
+                effective_anchor = None;
+                graph
+                    .insert_block_at_top(&page_id, &inserted_content)
+                    .map_err(|e| e.to_string())?
+            }
+        },
+        None => graph
+            .insert_block_at_top(&page_id, &inserted_content)
+            .map_err(|e| e.to_string())?,
+    };
+
+    for change in &wrap_changes {
+        if let Err(e) = graph.update_block(&change.block_id, &change.new_content, None) {
+            tracing::warn!(
+                "ai_reapply_summary_insert: reapply of {} failed ({}); skipping",
+                change.block_id,
+                e
+            );
+        }
+    }
+
+    Ok(AiInsertSummaryResult {
+        inserted_block_id: inserted_block.id,
+        inserted_content,
+        inserted_after_block_id: effective_anchor,
+        wrap_changes,
+    })
 }

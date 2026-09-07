@@ -39,8 +39,14 @@ impl SyncResult {
         }
     }
 
-    pub fn is_clean(&self) -> bool {
-        self.pushed.is_empty()
+    /// A result representing a target that could not be synced at all.
+    pub fn failed(message: impl Into<String>) -> Self {
+        let mut result = Self::new();
+        result.errors.push(message.into());
+        result
+    }
+
+    pub fn is_clean(&self) -> bool {        self.pushed.is_empty()
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
             && self.merged.is_empty()
@@ -108,9 +114,115 @@ impl SyncEngine {
         fs::read(self.base_path(rel_path)).ok()
     }
 
+    /// Path of the marker file written at the root of every sync target. It
+    /// carries a random id that identifies this particular remote, so we can
+    /// tell "the drive is empty / not mounted / not the one we synced with"
+    /// apart from "these files were genuinely deleted on the other machine".
+    const REMOTE_MARKER_PATH: &'static str = ".grafium-sync-id";
+
+    /// Graph directories that participate in sync. `assets/` carries the media
+    /// that notes reference, so omitting it leaves broken links on the other
+    /// machine.
+    const SYNCED_DIRS: [&'static str; 3] = ["pages/", "journals/", "assets/"];
+
+    /// Only files under the graph's note directories participate in sync. This
+    /// also keeps the marker file out of the synced set.
+    ///
+    /// Paths originate from a remote listing, so a hostile or buggy server can
+    /// propose anything here. Reject traversal and absolute components: without
+    /// this, an href resolving to `pages/../../../etc/passwd` would be joined
+    /// onto the graph root and written outside it.
+    fn is_syncable_path(rel_path: &str) -> bool {
+        if !Self::SYNCED_DIRS
+            .iter()
+            .any(|dir| rel_path.starts_with(dir))
+        {
+            return false;
+        }
+        if Path::new(rel_path).is_absolute() {
+            return false;
+        }
+        rel_path
+            .split(['/', '\\'])
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+    }
+
+    fn read_remote_marker(backend: &dyn SyncBackend) -> Option<String> {
+        let bytes = backend.read_file(Self::REMOTE_MARKER_PATH).ok()?;
+        let id = String::from_utf8(bytes).ok()?.trim().to_string();
+        if id.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    /// Confirm the backend is the same remote we recorded last time.
+    ///
+    /// Without this check, a sync target that is reachable but empty — an
+    /// auto-mount point whose drive was never actually mounted, a different
+    /// stick, or a reformatted one — looks exactly like a remote on which
+    /// every file was deleted, and the engine happily deletes the entire
+    /// local graph to match it.
+    fn verify_remote_identity(
+        &self,
+        backend: &dyn SyncBackend,
+        state: &mut SyncState,
+        remote_count: usize,
+    ) -> Result<()> {
+        let marker = Self::read_remote_marker(backend);
+        let never_synced = state.files.is_empty() && state.remote_id.is_none();
+
+        match (marker, never_synced) {
+            // First sync against an already-initialised remote: adopt its id.
+            (Some(id), true) => {
+                state.remote_id = Some(id);
+            }
+            // First sync against a fresh remote: claim it.
+            (None, true) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                state.remote_id = Some(id);
+            }
+            (Some(id), false) => match &state.remote_id {
+                Some(known) if known != &id => {
+                    return Err(crate::error::CoreError::Other(format!(
+                        "Sync target '{}' is a different sync location than the one \
+                         this graph was last synced with. Refusing to sync so that \
+                         nothing is deleted. If you meant to switch to this location, \
+                         reset the sync state for this graph first.",
+                        backend.name()
+                    )));
+                }
+                Some(_) => {}
+                // State predates the marker; the remote already has one.
+                None => state.remote_id = Some(id),
+            },
+            (None, false) => {
+                // Synced before, but the remote has no marker.
+                if state.remote_id.is_none() && remote_count > 0 {
+                    // State predates the marker and the remote still holds
+                    // files: adopt it and write the marker for next time.
+                    let id = uuid::Uuid::new_v4().to_string();
+                    backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                    state.remote_id = Some(id);
+                } else {
+                    return Err(crate::error::CoreError::Other(format!(
+                        "Sync target '{}' does not contain this graph's sync marker. \
+                         The drive may not be mounted, may be a different device, or \
+                         may have been erased. Refusing to sync so that your {} local \
+                         note(s) are not deleted.",
+                        backend.name(),
+                        state.files.len()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run a full bidirectional sync against the given backend.
-    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {
-        if !backend.is_available() {
+    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {        if !backend.is_available() {
             return Err(crate::error::CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 format!("Sync target '{}' is not available", backend.name()),
@@ -119,6 +231,12 @@ impl SyncEngine {
 
         let mut state = SyncState::load(&self.state_path);
         let mut result = SyncResult::new();
+
+        // Step 0: Collect the remote listing and confirm this really is the
+        // sync target we used last time before we act on any deletion.
+        let mut remote_files_list = backend.list_files()?;
+        remote_files_list.retain(|f| Self::is_syncable_path(&f.rel_path));
+        self.verify_remote_identity(backend, &mut state, remote_files_list.len())?;
 
         // Step 1: Collect local files with cheap metadata. Reuse cached hashes
         // from sync state when size+mtime still match the last sync.
@@ -131,8 +249,7 @@ impl SyncEngine {
             }
         }
 
-        // Step 2: Collect remote files and likewise seed cached hashes.
-        let mut remote_files_list = backend.list_files()?;
+        // Step 2: Seed cached hashes for the remote listing gathered in step 0.
         for meta in &mut remote_files_list {
             if meta.hash.is_none() {
                 if let Some(hash) = state.cached_remote_hash(meta) {
@@ -154,6 +271,22 @@ impl SyncEngine {
             .collect();
 
         for rel_path in all_paths {
+            // A removable drive can be pulled out part way through. Once a
+            // file operation has failed, confirm the target is still there
+            // before working through the rest of the graph against it.
+            if !result.errors.is_empty() && !backend.is_available() {
+                state.last_sync = Some(Utc::now().timestamp());
+                let _ = state.save(&self.state_path);
+                return Err(crate::error::CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    format!(
+                        "Sync target '{}' disappeared part way through. {} file(s)                          were synced before it went away.",
+                        backend.name(),
+                        result.pushed.len() + result.pulled.len()
+                    ),
+                )));
+            }
+
             let local_exists = local_files.contains_key(&rel_path);
             let remote_exists = remote_files.contains_key(&rel_path);
             let was_synced = state.files.contains_key(&rel_path);
@@ -466,6 +599,83 @@ impl SyncEngine {
     /// The merged file (possibly with markers) is written to both local and
     /// remote so every device sees the same state. A `.conflict_*.md` backup
     /// of the remote version is still created so no data is ever lost.
+    /// Resolve a conflict between two versions of a non-text file.
+    ///
+    /// Both versions are always preserved. The winner is chosen by content
+    /// hash order rather than by which machine synced first, so two machines
+    /// resolving the same conflict independently arrive at the same result
+    /// instead of ping-ponging. The loser is kept alongside it under a name
+    /// derived from its own hash, which is likewise identical on both sides.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_binary_conflict(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        local_content: &[u8],
+        remote_content: &[u8],
+        remote_meta: Option<FileMetadata>,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) {
+        let local_hash = compute_hash(local_content);
+        let remote_hash = compute_hash(remote_content);
+
+        let (winner, winner_hash, loser, loser_hash) = if local_hash <= remote_hash {
+            (local_content, local_hash.clone(), remote_content, remote_hash.clone())
+        } else {
+            (remote_content, remote_hash.clone(), local_content, local_hash.clone())
+        };
+
+        let loser_path = make_content_conflict_path(rel_path, &loser_hash);
+        let local_loser_path = self.local_root.join(&loser_path);
+        if let Some(parent) = local_loser_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = crate::fsutil::atomic_write(&local_loser_path, loser) {
+            result
+                .errors
+                .push(format!("Write conflict copy {}: {}", loser_path, e));
+            // Without a preserved copy, overwriting the primary would lose
+            // that version for good, so stop here.
+            return;
+        }
+        if let Err(e) = backend.write_file(&loser_path, loser) {
+            result
+                .errors
+                .push(format!("Push conflict copy {}: {}", loser_path, e));
+            return;
+        }
+
+        let local_path = self.local_root.join(rel_path);
+        if winner_hash != local_hash {
+            if let Err(e) = crate::fsutil::atomic_write(&local_path, winner) {
+                result
+                    .errors
+                    .push(format!("Write winning {}: {}", rel_path, e));
+                return;
+            }
+        }
+        if winner_hash != remote_hash {
+            if let Err(e) = backend.write_file(rel_path, winner) {
+                result
+                    .errors
+                    .push(format!("Push winning {}: {}", rel_path, e));
+                return;
+            }
+        }
+
+        self.save_base(rel_path, winner);
+
+        let local_meta = Self::metadata_for_path(&local_path, &self.local_root).ok();
+        state.record_sync(
+            rel_path,
+            &winner_hash,
+            local_meta.as_ref(),
+            remote_meta.as_ref(),
+        );
+        result.conflicts.push(rel_path.to_string());
+    }
+
     fn handle_conflict(
         &self,
         backend: &dyn SyncBackend,
@@ -495,9 +705,23 @@ impl SyncEngine {
             }
         };
 
+        // A line-based merge only makes sense for text. Running it over a PNG
+        // or an MP3 would splice the two files together and destroy both.
+        if !is_mergeable(rel_path, &local_content, &remote_content) {
+            self.resolve_binary_conflict(
+                backend,
+                rel_path,
+                &local_content,
+                &remote_content,
+                remote_meta,
+                state,
+                result,
+            );
+            return;
+        }
+
         let local_text = String::from_utf8_lossy(&local_content);
         let remote_text = String::from_utf8_lossy(&remote_content);
-
         // Attempt 3-way merge if we have a cached base
         let merge_result = if let Some(base_content) = self.load_base(rel_path) {
             let base_text = String::from_utf8_lossy(&base_content);
@@ -561,11 +785,10 @@ impl SyncEngine {
     /// Collect all local .md files under pages/ and journals/ with metadata.
     fn collect_local_files(&self) -> Result<HashMap<String, FileMetadata>> {
         let mut files = HashMap::new();
-        let pages_dir = self.local_root.join("pages");
-        let journals_dir = self.local_root.join("journals");
-
-        self.collect_dir_metadata(&pages_dir, &self.local_root, &mut files)?;
-        self.collect_dir_metadata(&journals_dir, &self.local_root, &mut files)?;
+        let root = self.local_root.clone();
+        self.collect_dir_metadata(&root.join("pages"), &root, true, &mut files)?;
+        self.collect_dir_metadata(&root.join("journals"), &root, true, &mut files)?;
+        self.collect_dir_metadata(&root.join("assets"), &root, false, &mut files)?;
         Ok(files)
     }
 
@@ -573,6 +796,7 @@ impl SyncEngine {
         &self,
         dir: &Path,
         base: &Path,
+        markdown_only: bool,
         out: &mut HashMap<String, FileMetadata>,
     ) -> Result<()> {
         if !dir.exists() {
@@ -582,17 +806,28 @@ impl SyncEngine {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                self.collect_dir_metadata(&path, base, out)?;
-            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                // Skip .conflict backup files (e.g. foo.conflict_20260504_120000.md)
-                if path.to_string_lossy().contains(".conflict_") {
-                    continue;
-                }
+                self.collect_dir_metadata(&path, base, markdown_only, out)?;
+            } else if Self::is_collectable(&path, markdown_only) {
                 let meta = Self::metadata_for_path(&path, base)?;
                 out.insert(meta.rel_path.clone(), meta);
             }
         }
         Ok(())
+    }
+
+    /// Note folders sync only `.md`; `assets/` syncs arbitrary media. Conflict
+    /// copies and atomic-write scratch files are never collected.
+    fn is_collectable(path: &Path, markdown_only: bool) -> bool {
+        if path.to_string_lossy().contains(".conflict_") {
+            return false;
+        }
+        if markdown_only {
+            return path.extension().and_then(|e| e.to_str()) == Some("md");
+        }
+        !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"))
     }
 
     fn metadata_for_path(path: &Path, base: &Path) -> Result<FileMetadata> {
@@ -660,6 +895,30 @@ impl SyncEngine {
 
 /// Generate a conflict filename by inserting .conflict before the extension.
 /// e.g. "pages/foo.md" -> "pages/foo.conflict.md"
+/// True when a line-based merge is meaningful for this file: it must be a
+/// note, and both sides must actually be text.
+fn is_mergeable(rel_path: &str, local: &[u8], remote: &[u8]) -> bool {
+    rel_path.ends_with(".md")
+        && std::str::from_utf8(local).is_ok()
+        && std::str::from_utf8(remote).is_ok()
+}
+
+/// Conflict copy name derived from content rather than wall-clock time, so
+/// both machines produce the same filename and converge instead of each
+/// creating its own timestamped duplicate.
+fn make_content_conflict_path(rel_path: &str, hash: &str) -> String {
+    let short = &hash[..hash.len().min(8)];
+    match rel_path.rfind('.') {
+        Some(dot) => format!(
+            "{}.conflict_{}{}",
+            &rel_path[..dot],
+            short,
+            &rel_path[dot..]
+        ),
+        None => format!("{}.conflict_{}", rel_path, short),
+    }
+}
+
 fn make_conflict_path(rel_path: &str) -> String {
     if let Some(dot_idx) = rel_path.rfind('.') {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
@@ -755,7 +1014,11 @@ mod tests {
         }
 
         fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
-            self.read_file_calls.fetch_add(1, Ordering::SeqCst);
+            // The counters measure note-content transfers. The sync-id marker
+            // is a small fixed metadata read on every sync, so exclude it.
+            if rel_path != SyncEngine::REMOTE_MARKER_PATH {
+                self.read_file_calls.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(self
                 .files
                 .lock()

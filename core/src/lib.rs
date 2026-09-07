@@ -1,12 +1,16 @@
 pub mod ai;
 pub mod assistant;
 pub mod async_util;
+pub mod cancel;
 pub mod db;
 pub mod error;
+pub mod gpu_info;
+pub mod fsutil;
 pub mod graph;
 pub mod import;
 pub mod ink;
 pub mod knowledge;
+pub mod log_tap;
 pub mod media;
 pub mod model_library;
 pub mod models;

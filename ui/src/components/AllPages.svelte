@@ -21,9 +21,10 @@
 
   interface Props {
     onNavigate: (title: string) => void;
+    onPageDeleted?: () => void;
   }
 
-  let { onNavigate }: Props = $props();
+  let { onNavigate, onPageDeleted }: Props = $props();
 
   // Fixed-height virtual list tuned for millions of rows: only the rows in (or
   // near) the viewport are ever in the DOM, and each window is fetched from the
@@ -261,11 +262,30 @@
   }
 
   async function handleDeletePage(page: Page) {
-    await deletePage(page.id);
+    // Deleting a page also removes its .md file from disk and evicts it
+    // from favorites / recent pages — irreversible, so gate on an explicit
+    // confirmation instead of the previous silent one-click delete.
+    const confirmed = window.confirm(
+      `Delete page '${page.title}'? This will remove the .md file from disk `
+      + `and cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await deletePage(page.id);
+    } catch (e) {
+      console.error("Failed to delete page:", e);
+      alert("Failed to delete page.");
+      return;
+    }
     resetWindows();
     await refreshCount();
     if (pageTreeAvailable !== false) void loadPageTree(treeSource);
     window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    // Let App.svelte drop this page from the sidebar's recent list so a
+    // freshly-deleted entry doesn't linger in the "Recent Pages" section
+    // until the next currentPage change.
+    onPageDeleted?.();
   }
 
   function handleKeydown(e: KeyboardEvent) {

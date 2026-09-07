@@ -121,6 +121,30 @@ impl Database {
         Ok(page)
     }
 
+    /// Look up a page by its graph-relative file path. Returns `None` rather
+    /// than an error when no page is indexed for that path.
+    pub fn find_page_by_file_path(&self, file_path: &str) -> Result<Option<Page>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE file_path = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![file_path], |row| {
+            Ok(Page {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        })?;
+        match rows.next() {
+            Some(page) => Ok(Some(page?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_page_by_title_ci(&self, title: &str) -> Result<Page> {
         let conn = self.conn()?;
         get_page_by_title_ci_on_conn(&conn, title)

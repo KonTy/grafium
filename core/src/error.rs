@@ -20,6 +20,9 @@ pub enum CoreError {
     #[error("Parse error: {0}")]
     Parse(String),
 
+    #[error("Cancelled by user")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

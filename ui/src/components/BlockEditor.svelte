@@ -11,6 +11,7 @@
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
+  import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
@@ -25,6 +26,12 @@
      * asset reference (`assets/x.png`) resolves beside the page. */
     assetBaseDir?: string;
     depth?: number;
+    /// Per-ancestor-level flags for drawing the vertical "thread" guide line
+    /// (see `getAncestorGuides` in pageContentVirtualization.ts). Index i
+    /// corresponds to indent level i; true draws a full-height line at that
+    /// level's column, false/undefined draws nothing (that ancestor has no
+    /// more siblings below, so there's nothing to visually connect to).
+    guides?: boolean[];
     focused?: boolean;
     selected?: boolean;
     hasChildren?: boolean;
@@ -46,6 +53,7 @@
     pageTitle = "",
     assetBaseDir = "",
     depth = 0,
+    guides = [],
     focused = false,
     selected = false,
     hasChildren = false,
@@ -113,6 +121,15 @@
   let queryError: string | null = $state(null);
   let queryLoading = $state(false);
   let queryBlockIdCol = $state(-1);
+  // Query results are unbounded — a broad query can return thousands of rows,
+  // each of which renders markdown per cell. Render a page at a time so a
+  // large result set cannot lock up the editor.
+  const QUERY_ROW_PAGE = 100;
+  let queryRowLimit = $state(QUERY_ROW_PAGE);
+  let visibleQueryRows = $derived.by(() => {
+    const rows = queryRows;
+    return rows === null ? null : rows.slice(0, queryRowLimit);
+  });
   let bulletMinHeight = $derived(getBulletMinHeight(block.content));
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
   let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
@@ -136,6 +153,7 @@
         });
       });
       queryRows = rows;
+      queryRowLimit = QUERY_ROW_PAGE;
       queryColumns = rows.length > 0 ? rows[0].map(([col]) => col) : [];
       // Find the block id column (id, block_id, _block_id)
       const lowerCols = queryColumns.map((c) => c.toLowerCase());
@@ -384,13 +402,13 @@
   // Save content on blur
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
-    console.log("[telemetry] savecontext", JSON.stringify(context));
+    telemetry("savecontext", () => (context));
     try {
       const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
       saveError = null;
       pendingSaveContent = null;
       if (changed) {
-        console.log("[telemetry] saveContent", JSON.stringify(context));
+        telemetry("saveContent", () => (context));
       }
       return changed;
     } catch (e) {
@@ -1157,11 +1175,26 @@
   class:selected
   class:code-block={isCodeBlock !== null}
   style="padding-left: {depth * 24}px"
+  data-block-id={block.id}
 >
+  {#if guides.length > 0}
+    <div class="indent-guides" aria-hidden="true">
+      {#each guides as active, level (level)}
+        {#if active}
+          <span class="indent-guide-line" style={`left: ${level * 24 + 10}px`}></span>
+        {/if}
+      {/each}
+    </div>
+  {/if}
   {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== "" && !isQuoteBlock}
     <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
       e.stopPropagation();
-      if (hasChildren) {
+      // A plain click on a bullet with children collapses/expands it (existing
+      // behavior). But shift/ctrl/cmd-click should always select the block for
+      // multi-select — otherwise header/parent blocks (which always have
+      // children) could never be added to a selection, and the "Delete
+      // selected" toolbar button would silently have nothing to act on.
+      if (hasChildren && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
         onToggleCollapse?.(block.id);
       } else {
         onBulletClick?.(block.id, e);
@@ -1224,7 +1257,7 @@
                 </tr>
               </thead>
               <tbody>
-                {#each queryRows as row}
+                {#each visibleQueryRows ?? [] as row}
                   <tr>
                     {#each row as [col, val], i}
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
@@ -1244,6 +1277,15 @@
               </tbody>
             </table>
           </div>
+          {#if queryRows.length > queryRowLimit}
+            <div class="query-more">
+              <span>Showing {queryRowLimit} of {queryRows.length}</span>
+              <button
+                class="query-more-btn"
+                onclick={(e) => { e.stopPropagation(); queryRowLimit += QUERY_ROW_PAGE; }}
+              >Show more</button>
+            </div>
+          {/if}
         {/if}
       </div>
     {:else}
@@ -1278,6 +1320,7 @@
     border-radius: 4px;
     transition: background-color 0.1s;
     scroll-margin: 40px;
+    position: relative;
   }
 
   .block-item.editing {
@@ -1298,6 +1341,27 @@
     justify-content: center;
     flex-shrink: 0;
     cursor: pointer;
+  }
+
+  /* Bullet-threading hierarchy guide lines: a thin vertical line per
+     ancestor indent level, positioned under that ancestor's bullet, running
+     the full height of this row so consecutive sibling/child rows read as a
+     continuous connector (see getAncestorGuides in
+     pageContentVirtualization.ts for which levels get a line). Purely
+     decorative — never intercepts clicks. */
+  .indent-guides {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .indent-guide-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--text-secondary, currentColor);
+    opacity: 0.55;
   }
 
   .bullet {
@@ -1857,6 +1921,30 @@
     padding: 10px 12px;
     color: var(--text-muted);
     font-size: 12px;
+  }
+
+  .query-more {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .query-more-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 10px;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .query-more-btn:hover {
+    background: var(--bg-hover);
   }
 
   .query-error {

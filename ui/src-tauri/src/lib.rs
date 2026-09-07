@@ -25,7 +25,7 @@ pub struct AppState {
 
 #[tauri::command(rename_all = "camelCase")]
 fn debug_log(message: String) {
-    eprintln!("[frontend-debug] {}", message);
+    tracing::debug!("{}", message);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -356,7 +356,7 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 
                 if now_available && !previously_available {
                     // Target just became available!
-                    eprintln!("[sync-monitor] Target '{}' is now available", target.name);
+                    tracing::info!("Target '{}' is now available", target.name);
 
                     // Emit event to frontend
                     let _ = app_handle.emit(
@@ -1260,6 +1260,75 @@ pub(crate) fn mime_for_path(path: &Path) -> &'static str {
     }
 }
 
+/// A `tracing_subscriber::Layer` that forwards every event into
+/// [`grafium_core::log_tap`], so the media / AI code paths can read
+/// back the actual whisper.cpp / GGML / llama.cpp status lines after a
+/// load or generation and surface them to the user (e.g. "Vulkan not
+/// available, falling back to CPU"). Runs alongside the existing
+/// `fmt` layer, so developer stderr logging is unaffected.
+struct LogTapLayer;
+
+impl<S> tracing_subscriber::Layer<S> for LogTapLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        use grafium_core::log_tap::{record, TapLevel};
+
+        struct MessageVisitor {
+            message: String,
+        }
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_debug(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                // The conventional message field is named "message";
+                // other fields get appended as key=value so the tap
+                // still captures useful context (e.g. `n_ctx=8192`).
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                } else if !self.message.is_empty() {
+                    use std::fmt::Write;
+                    let _ = write!(&mut self.message, " {}={:?}", field.name(), value);
+                } else {
+                    self.message = format!("{}={:?}", field.name(), value);
+                }
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = value.to_string();
+                } else if !self.message.is_empty() {
+                    use std::fmt::Write;
+                    let _ = write!(&mut self.message, " {}={}", field.name(), value);
+                } else {
+                    self.message = format!("{}={}", field.name(), value);
+                }
+            }
+        }
+
+        let mut visitor = MessageVisitor {
+            message: String::new(),
+        };
+        event.record(&mut visitor);
+
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => TapLevel::Trace,
+            tracing::Level::DEBUG => TapLevel::Debug,
+            tracing::Level::INFO => TapLevel::Info,
+            tracing::Level::WARN => TapLevel::Warn,
+            tracing::Level::ERROR => TapLevel::Error,
+        };
+
+        record(level, event.metadata().target(), &visitor.message);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Without this, every `tracing::info!`/`tracing::warn!` call throughout
@@ -1268,12 +1337,26 @@ pub fn run() {
     // `RUST_LOG` still overrides the default if set; otherwise `info` is a
     // reasonable default for a desktop app (not so verbose it drowns out
     // the signal, but enough to see lifecycle/AI-provider/page-load events).
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    //
+    // The `log_tap` layer runs *alongside* the fmt layer so every event
+    // continues to hit stderr for developer diagnostics *and* is captured
+    // in an in-memory ring buffer that
+    // `media::transcribe` / `ai::providers::local_llm` can read back after
+    // a load / generation call, so they can surface the actual whisper.cpp
+    // / GGML / llama.cpp status lines (e.g. "no Vulkan device found",
+    // "using Vulkan backend") to the user in the progress UI instead of
+    // leaving them staring at a silent dialog.
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr),
         )
-        .with_writer(std::io::stderr)
+        .with(LogTapLayer)
         .init();
 
     // WebKitGTK on Wayland aborts with "Error 71 (Protocol error)" on some
@@ -1494,17 +1577,17 @@ pub fn run() {
                                     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                                     let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                                    eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+                                    tracing::trace!("key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
                                     // Ctrl+. toggles reference panel
                                     if ctrl && !shift && *keyval == 46 /* period */ {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+. detected, toggling reference panel");
+                                        tracing::trace!("=> Ctrl+. detected, toggling reference panel");
                                         let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
                                         return gtk::glib::Propagation::Stop;
                                     }
 
                                     if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                        tracing::trace!("=> Ctrl+Z detected, calling eval(__handleNativeUndo)");
                                         // Call undo AND capture console output via a self-reporting mechanism
                                         let result = eval_window.eval(r#"
                                             (function() {
@@ -1518,16 +1601,16 @@ pub fn run() {
                                                 }
                                             })();
                                         "#);
-                                        eprintln!("[GTK-WINDOW] => eval result: {:?}", result);
+                                        tracing::trace!("=> eval result: {:?}", result);
                                         return gtk::glib::Propagation::Stop;
                                     }
                                     if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
+                                        tracing::trace!("=> Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
                                         let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                         return gtk::glib::Propagation::Stop;
                                     }
                                     if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Y detected, calling eval(__handleNativeRedo)");
+                                        tracing::trace!("=> Ctrl+Y detected, calling eval(__handleNativeRedo)");
                                         let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                         return gtk::glib::Propagation::Stop;
                                     }
@@ -1537,7 +1620,7 @@ pub fn run() {
                                         } else {
                                             "down"
                                         };
-                                        eprintln!("[GTK-WINDOW] => Shift+Arrow{} detected, calling eval(__handleNativeVerticalArrow)", direction);
+                                        tracing::trace!("=> Shift+Arrow{} detected, calling eval(__handleNativeVerticalArrow)", direction);
                                         let script = format!(
                                             "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
                                             direction
@@ -1562,20 +1645,20 @@ pub fn run() {
                             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                            eprintln!("[GTK-WEBVIEW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+                            tracing::trace!("key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
                             if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                tracing::trace!("=> Ctrl+Z detected, calling eval(__handleNativeUndo)");
                                 let _ = eval_window2.eval("window.__handleNativeUndo && window.__handleNativeUndo()");
                                 return gtk::glib::Propagation::Stop;
                             }
                             if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Shift+Z detected");
+                                tracing::trace!("=> Ctrl+Shift+Z detected");
                                 let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                 return gtk::glib::Propagation::Stop;
                             }
                             if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Y detected");
+                                tracing::trace!("=> Ctrl+Y detected");
                                 let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                 return gtk::glib::Propagation::Stop;
                             }
@@ -1585,7 +1668,7 @@ pub fn run() {
                                 } else {
                                     "down"
                                 };
-                                eprintln!("[GTK-WEBVIEW] => Shift+Arrow{} detected", direction);
+                                tracing::trace!("=> Shift+Arrow{} detected", direction);
                                 let script = format!(
                                     "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
                                     direction
@@ -1714,6 +1797,8 @@ pub fn run() {
             commands::research::research_cancel,
             commands::knowledge::text_wrap_known_terms,
             commands::knowledge::ai_insert_page_summary,
+            commands::knowledge::ai_undo_summary_insert,
+            commands::knowledge::ai_reapply_summary_insert,
             commands::knowledge::ai_ask,
             commands::knowledge::ai_ask_stream,
             commands::knowledge::ai_cancel_stream,
@@ -1728,6 +1813,7 @@ pub fn run() {
             commands::media::media_set_config,
             commands::ui_log,
             commands::model_library::list_local_models,
+            commands::model_library::detect_gpu_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

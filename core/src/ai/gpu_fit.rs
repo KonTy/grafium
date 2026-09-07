@@ -55,6 +55,21 @@ pub fn vram_safety_margin_bytes(model_size_bytes: u64) -> u64 {
     (model_size_bytes / 5).clamp(VRAM_SAFETY_MARGIN_MIN_BYTES, VRAM_SAFETY_MARGIN_MAX_BYTES)
 }
 
+/// Total VRAM a model needs to run fully on the GPU: weights plus the margin.
+///
+/// Derived from the same margin the verdict uses, so the "needs about N GB"
+/// hint and the fits/tight/cpu-only verdict can never contradict each other —
+/// which they did while two independent estimators were shipped side by side.
+///
+/// The thresholds are deliberately the ones calibrated against measured
+/// throughput on a real card (see `large_model_on_16gb_card_is_reported_tight_not_fast`)
+/// rather than a more pessimistic estimate: a 13.6 GB model on a 16 GB card
+/// genuinely does load and run, just badly, and calling that "won't fit"
+/// contradicts the measurement.
+pub fn estimated_vram_needed_bytes(model_size_bytes: u64) -> u64 {
+    model_size_bytes.saturating_add(vram_safety_margin_bytes(model_size_bytes))
+}
+
 /// Pure decision: given the model's on-disk size and the best observed free
 /// VRAM, does full offload fit? Returns `true` when every layer can be
 /// offloaded. Split out from I/O so it can be unit-tested.

@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelInfoPayload {
     pub file_name: String,
@@ -14,6 +16,24 @@ pub struct ModelInfoPayload {
     /// `grafium_core::model_library::ModelKind`, stringified so the
     /// frontend doesn't need to duplicate the enum.
     pub kind: String,
+    /// The GGUF `general.architecture` value, if this file could be
+    /// peeked (see `grafium_core::model_library::ModelInfo::architecture`
+    /// for how/when this is populated).
+    pub architecture: Option<String>,
+    /// Best-effort human-readable summary assembled from whatever GGUF
+    /// metadata the file carries, for the model picker's description pane.
+    pub description: Option<String>,
+    /// `true` if this model's architecture is known to crash the bundled
+    /// llama.cpp — the model picker shows a warning instead of letting the
+    /// user pick it blind.
+    pub unstable_architecture: bool,
+    /// The estimated VRAM (in bytes) needed to run this model with a
+    /// typical context — same number the fit classification uses. Sent
+    /// down so the UI can put "needs ~15 GB" in the description without
+    /// re-deriving it in TypeScript.
+    /// Estimated VRAM this model needs, from the same margin `gpu_fit` uses,
+    /// so the picker's "needs about N GB" can never disagree with its verdict.
+    pub vram_needed_bytes: Option<u64>,
     /// `"fits"`, `"tight"`, `"cpu_only"`, or `"unknown"` — mirrors
     /// `grafium_core::ai::gpu_fit::GpuFit`. Lets the picker warn *before* the
     /// user commits to a model that the loader will quietly demote to CPU.
@@ -54,8 +74,11 @@ impl ModelInfoPayload {
     }
 }
 
-impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
-    fn from(info: grafium_core::model_library::ModelInfo) -> Self {
+impl ModelInfoPayload {
+    fn from_with_vram(
+        info: grafium_core::model_library::ModelInfo,
+        total_vram_bytes: Option<u64>,
+    ) -> Self {
         let kind = match info.kind {
             grafium_core::model_library::ModelKind::Llm => "llm",
             grafium_core::model_library::ModelKind::Whisper => "whisper",
@@ -63,6 +86,14 @@ impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
             grafium_core::model_library::ModelKind::Reranker => "reranker",
             grafium_core::model_library::ModelKind::Unknown => "unknown",
         };
+        // Only chat models get a VRAM-fit annotation — whisper/embedding
+        // are tiny compared to any modern GPU, and unknown-kind files
+        // shouldn't be surfaced as loadable chat models anyway.
+        let is_llm = matches!(info.kind, grafium_core::model_library::ModelKind::Llm);
+        let vram_needed_bytes = is_llm.then(|| {
+            grafium_core::ai::gpu_fit::estimated_vram_needed_bytes(info.size_bytes)
+        });
+        let _ = total_vram_bytes;
         Self {
             file_name: info.file_name,
             size_bytes: info.size_bytes,
@@ -71,7 +102,20 @@ impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
                 .as_str()
                 .to_string(),
             gpu_fit_detail: String::new(),
+            architecture: info.architecture,
+            description: info.description,
+            unstable_architecture: info.unstable_architecture,
+            vram_needed_bytes,
         }
+    }
+}
+
+impl From<grafium_core::model_library::ModelInfo> for ModelInfoPayload {
+    fn from(info: grafium_core::model_library::ModelInfo) -> Self {
+        // Fallback conversion used by callers that don't have a
+        // GpuInfo handy — pretends we don't know the VRAM so the UI
+        // shows no fit annotation, which is the safe default.
+        Self::from_with_vram(info, None)
     }
 }
 
@@ -104,4 +148,15 @@ pub async fn list_local_models(
         .into_iter()
         .map(|m| ModelInfoPayload::from_info(m, free_vram_bytes))
         .collect())
+}
+
+/// Best-effort report of the primary discrete GPU on this machine so
+/// the Settings UI can (a) display which card we detected and how much
+/// VRAM it has, and (b) explain *why* a specific model is or isn't
+/// flagged as slow. Never errors — returns `GpuInfo::default()` (source
+/// = `None`) when no detection path succeeded, and the UI treats that
+/// as "we don't know, don't annotate anything".
+#[tauri::command]
+pub async fn detect_gpu_info() -> Result<grafium_core::gpu_info::GpuInfo, String> {
+    Ok(grafium_core::gpu_info::detect_primary_gpu())
 }

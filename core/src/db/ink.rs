@@ -245,12 +245,18 @@ impl Database {
 
     /// Mark corrections as used in training.
     pub fn mark_corrections_trained(&self, correction_ids: &[String]) -> Result<()> {
-        let conn = self.pool.get()?;
-        let mut stmt =
-            conn.prepare("UPDATE ink_corrections SET used_in_training = 1 WHERE id = ?1")?;
-        for id in correction_ids {
-            stmt.execute(rusqlite::params![id])?;
+        let mut conn = self.pool.get()?;
+        // Single transaction so a partial failure cannot mark only some of a
+        // training batch as consumed.
+        let tx = conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE ink_corrections SET used_in_training = 1 WHERE id = ?1")?;
+            for id in correction_ids {
+                stmt.execute(rusqlite::params![id])?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 

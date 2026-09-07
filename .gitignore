@@ -35,3 +35,7 @@ android/captures/
 
 # Experimental Anki decks
 *.apkg
+
+# Agent skills (vendored via npx skills)
+.agents/
+skills-lock.json

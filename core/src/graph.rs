@@ -566,6 +566,22 @@ impl Graph {
         }
     }
 
+    /// Write `content` to `path` atomically.
+    ///
+    /// `fs::write` truncates the target before writing, so an interruption
+    /// (crash, power loss, full disk) can leave a note truncated or empty.
+    /// These files are the user's only copy, so instead write to a temporary
+    /// file in the same directory, flush and fsync it, then rename over the
+    /// target. Rename is atomic within a filesystem, so a reader sees either
+    /// the old content or the new content, never a partial write.
+    ///
+    /// The temporary file deliberately does not use a `.md` extension: the
+    /// filesystem watcher only reacts to `.md` files, so the scratch file
+    /// cannot trigger a spurious re-index.
+    fn atomic_write(path: &Path, content: &str) -> Result<()> {
+        crate::fsutil::atomic_write(path, content.as_bytes())
+    }
+
     fn content_hash(content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
@@ -970,7 +986,7 @@ impl Graph {
         content: &str,
     ) -> Result<Page> {
         let file_path = self.page_file_path(title, is_journal)?;
-        fs::write(&file_path, content)?;
+        Self::atomic_write(&file_path, content)?;
 
         // Index the file
         self.index_file(&file_path)?;
@@ -1018,13 +1034,71 @@ impl Graph {
     /// creating any parent directories a hierarchical title (e.g.
     /// `"Books/MyCoolBook/Chapter1"`) needs. Shared by every "create a page"
     /// entry point so file-path resolution rules live in exactly one place.
+    /// Resolve a page title to a file path inside the graph, refusing any
+    /// title that would escape it.
+    ///
+    /// Titles legitimately use `/` to express hierarchy
+    /// (`projects/grafium/roadmap` -> `pages/projects/grafium/roadmap.md`),
+    /// so the separator itself must be preserved. But the title reaches this
+    /// point unvalidated and can also arrive from sources the user did not
+    /// type by hand (sync, Anki import), so a `..` segment or an absolute
+    /// path would otherwise write outside the graph directory entirely.
+    fn safe_relative_page_path(title: &str) -> Result<PathBuf> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Other("Page title cannot be empty".into()));
+        }
+
+        // Treat both separators as hierarchy so a Windows-style title cannot
+        // smuggle a traversal segment past a '/'-only check.
+        let mut rel = PathBuf::new();
+        for raw in trimmed.split(['/', '\\']) {
+            let segment = raw.trim();
+            match segment {
+                // Collapse empty and "." segments the way a path walk would.
+                "" | "." => continue,
+                ".." => {
+                    return Err(CoreError::Other(format!(
+                        "Invalid page title '{title}': '..' is not allowed"
+                    )));
+                }
+                _ => {}
+            }
+            // A segment carrying a root or prefix (e.g. "C:") would make the
+            // join absolute and escape the graph.
+            let as_path = Path::new(segment);
+            if as_path.is_absolute() || as_path.components().count() != 1 {
+                return Err(CoreError::Other(format!(
+                    "Invalid page title '{title}': unsupported path segment '{segment}'"
+                )));
+            }
+            rel.push(segment);
+        }
+
+        if rel.as_os_str().is_empty() {
+            return Err(CoreError::Other(format!(
+                "Invalid page title '{title}': no usable name"
+            )));
+        }
+
+        let mut file_name = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        file_name.push_str(".md");
+        rel.set_file_name(file_name);
+
+        Ok(rel)
+    }
+
     fn page_file_path(&self, title: &str, is_journal: bool) -> Result<PathBuf> {
         if is_journal {
             let filename = format!("{}.md", title.replace('/', "_"));
             Ok(self.journals_dir.join(&filename))
         } else {
             // Use folder hierarchy: "Books/MyCoolBook/Chapter1" → pages/Books/MyCoolBook/Chapter1.md
-            let rel_path = format!("{}.md", title);
+            let rel_path = Self::safe_relative_page_path(title)?;
             let full_path = self.pages_dir.join(&rel_path);
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -1596,6 +1670,32 @@ impl Graph {
     }
 
     /// Delete a page: removes the .md file and all DB records.
+    /// Drop a file's rows from the index after it has already gone from disk.
+    ///
+    /// The watcher only ever re-indexes paths that still exist, so a note
+    /// removed by a sync (or by anything outside the app) otherwise stays
+    /// searchable, keeps its backlinks, and keeps its tasks. Unlike
+    /// `delete_page` this touches only the index, because the file is gone.
+    ///
+    /// Returns whether anything was actually indexed for that path.
+    pub fn deindex_file(&self, path: &Path) -> Result<bool> {
+        let rel_path = path
+            .strip_prefix(&self.root_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        let Some(page) = self.db.find_page_by_file_path(&rel_path)? else {
+            self.forget_indexed_content(path);
+            return Ok(false);
+        };
+
+        self.db.delete_blocks_for_page(&page.id)?;
+        self.db.delete_page(&page.id)?;
+        self.forget_indexed_content(path);
+        Ok(true)
+    }
+
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
 
@@ -1693,6 +1793,75 @@ impl Graph {
         })
     }
 
+    /// Insert a new text block immediately after `after_block_id` among
+    /// its siblings (same `parent_id`, at the next order position). Used
+    /// by the "Insert into page" button in `ReferencePanel.svelte` when
+    /// the user has an active caret in the editor — the summary lands
+    /// where they were reading, not always at the top of the page. Only
+    /// the anchor block's own sibling list is renumbered, so nested
+    /// children and unrelated subtrees are untouched.
+    ///
+    /// Returns an error if `after_block_id` doesn't belong to `page_id`,
+    /// so a stale focused-block id from a previous page can't corrupt an
+    /// unrelated page's ordering.
+    pub fn insert_block_after(
+        &self,
+        page_id: &str,
+        after_block_id: &str,
+        content: &str,
+    ) -> Result<Block> {
+        let anchor = self.db.get_block_by_id(after_block_id)?;
+        if anchor.page_id != page_id {
+            return Err(crate::error::CoreError::Other(format!(
+                "insert_block_after: anchor block {} belongs to page {}, not {}",
+                after_block_id, anchor.page_id, page_id
+            )));
+        }
+
+        let sibling_ids: Vec<String> = self
+            .db
+            .list_blocks_for_page(page_id)?
+            .into_iter()
+            .filter(|b| b.parent_id == anchor.parent_id)
+            .map(|b| b.id)
+            .collect();
+
+        let order = self.next_order_index_for_page(page_id)?;
+        let block = self.create_block(
+            page_id,
+            anchor.parent_id.as_deref(),
+            order,
+            content,
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let mut ordered_ids = Vec::with_capacity(sibling_ids.len() + 1);
+        for id in &sibling_ids {
+            ordered_ids.push(id.clone());
+            if id == &anchor.id {
+                ordered_ids.push(block.id.clone());
+            }
+        }
+        // Defensive: if the anchor somehow wasn't found in the sibling
+        // list (shouldn't happen — we just fetched it and filtered by its
+        // own parent_id), append the new block to the end rather than
+        // silently dropping it from the reorder.
+        if !ordered_ids.contains(&block.id) {
+            ordered_ids.push(block.id.clone());
+        }
+        self.reorder_blocks(page_id, &ordered_ids)?;
+
+        let new_index = ordered_ids
+            .iter()
+            .position(|id| id == &block.id)
+            .unwrap_or(0) as i32;
+        Ok(Block {
+            order_index: new_index,
+            ..block
+        })
+    }
+
     // ─── Internal helpers ────────────────────────────────────────────────────────
 
     /// Migrate legacy %2F-encoded flat files to folder hierarchy.
@@ -1759,7 +1928,7 @@ impl Graph {
     }
 
     fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
-        fs::write(&file_path, &content)?;
+        Self::atomic_write(file_path, content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
         // create/modify event instead of treating it as an external change
@@ -2134,6 +2303,80 @@ mod tests {
     }
 
     #[test]
+    fn safe_relative_page_path_preserves_hierarchy() -> Result<()> {
+        // The slash hierarchy feature must keep working exactly as before.
+        assert_eq!(
+            Graph::safe_relative_page_path("projects/grafium/roadmap")?,
+            PathBuf::from("projects").join("grafium").join("roadmap.md")
+        );
+        assert_eq!(
+            Graph::safe_relative_page_path("Simple Page")?,
+            PathBuf::from("Simple Page.md")
+        );
+        // Unicode titles are fine; only traversal is rejected.
+        assert_eq!(
+            Graph::safe_relative_page_path("日本語/ノート")?,
+            PathBuf::from("日本語").join("ノート.md")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn safe_relative_page_path_rejects_traversal() {
+        for title in ["../escape", "a/../../escape", "..", "..\\escape", "", "   "] {
+            assert!(
+                Graph::safe_relative_page_path(title).is_err(),
+                "expected {title:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_relative_page_path_normalizes_leading_separators() -> Result<()> {
+        // A leading separator is stripped rather than rejected: the result is
+        // still safely inside the graph, so this stays a usable title.
+        let rel = Graph::safe_relative_page_path("/etc/passwd")?;
+        assert_eq!(rel, PathBuf::from("etc").join("passwd.md"));
+        assert!(rel.is_relative());
+        Ok(())
+    }
+
+    #[test]
+    fn page_file_path_stays_inside_the_graph() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+
+        let ok = graph.page_file_path("nested/page", false)?;
+        assert!(ok.starts_with(&graph.pages_dir));
+
+        assert!(graph.page_file_path("../../outside", false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_scratch_files() -> Result<()> {
+        let temp = tempdir()?;
+        let dir = temp.path();
+        let target = dir.join("note.md");
+
+        Graph::atomic_write(&target, "- first\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- first\n");
+
+        // Overwriting must fully replace, not append or leave a tail behind.
+        Graph::atomic_write(&target, "- second\n")?;
+        assert_eq!(fs::read_to_string(&target)?, "- second\n");
+
+        // The temp file must be renamed away, never left in the user's graph.
+        let strays: Vec<_> = fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "note.md")
+            .collect();
+        assert!(strays.is_empty(), "unexpected leftover files: {strays:?}");
+        Ok(())
+    }
+
+    #[test]
     fn page_source_update_round_trips_into_block_rows() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
@@ -2164,6 +2407,17 @@ mod tests {
         assert_eq!(blocks[2].parent_id, None);
         assert_eq!(blocks[2].content, "Beta");
 
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_creates_missing_parent_directories() -> Result<()> {
+        let temp = tempdir()?;
+        let target = temp.path().join("nested").join("deep").join("note.md");
+
+        Graph::atomic_write(&target, "- body\n")?;
+
+        assert_eq!(fs::read_to_string(&target)?, "- body\n");
         Ok(())
     }
 
@@ -2515,6 +2769,138 @@ mod tests {
             Some(second_existing.id.as_str())
         );
         assert_eq!(child.order_index, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_places_new_block_after_anchor() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("insert-after-target", false)?;
+
+        // Set up a page with three root blocks (Alpha, Beta, Gamma) and
+        // one nested child under Beta, so we can verify that inserting
+        // after Beta lands the new block between Beta and Gamma, and
+        // that Beta's nested child stays put with the right parent.
+        let first_existing = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&first_existing.id, "Alpha", None)?;
+        let beta = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Beta",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let gamma = graph.create_block(
+            &page.id,
+            None,
+            2,
+            "Gamma",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let beta_child = graph.create_block(
+            &page.id,
+            Some(&beta.id),
+            0,
+            "Beta child",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = graph.insert_block_after(&page.id, &beta.id, "AI summary block")?;
+        assert!(inserted.parent_id.is_none());
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        let mut root_blocks: Vec<_> = blocks.iter().filter(|b| b.parent_id.is_none()).collect();
+        root_blocks.sort_by_key(|b| b.order_index);
+
+        assert_eq!(root_blocks.len(), 4);
+        assert_eq!(root_blocks[0].id, first_existing.id);
+        assert_eq!(root_blocks[1].id, beta.id);
+        assert_eq!(root_blocks[2].id, inserted.id);
+        assert_eq!(root_blocks[2].content, "AI summary block");
+        assert_eq!(root_blocks[3].id, gamma.id);
+
+        // Nested Beta-child stays a child of Beta.
+        let child = blocks.iter().find(|b| b.id == beta_child.id).unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(beta.id.as_str()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_nested_anchor_creates_sibling_child() -> Result<()> {
+        // Anchor is a nested (non-root) block: the new block must land as
+        // its next sibling (same parent), not at page root.
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("insert-after-nested", false)?;
+
+        let parent = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Parent",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child_one = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            0,
+            "Child one",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child_two = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            1,
+            "Child two",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted =
+            graph.insert_block_after(&page.id, &child_one.id, "Summary between children")?;
+        assert_eq!(inserted.parent_id.as_deref(), Some(parent.id.as_str()));
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        let mut children: Vec<_> = blocks
+            .iter()
+            .filter(|b| b.parent_id.as_deref() == Some(parent.id.as_str()))
+            .collect();
+        children.sort_by_key(|b| b.order_index);
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].id, child_one.id);
+        assert_eq!(children[1].id, inserted.id);
+        assert_eq!(children[2].id, child_two.id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_block_after_rejects_cross_page_anchor() -> Result<()> {
+        // A stale focused-block-id from an unrelated page must not be
+        // able to reorder the current page's blocks.
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page_a = graph.create_page("page-a", false)?;
+        let page_b = graph.create_page("page-b", false)?;
+        let stray = graph.create_block(
+            &page_b.id,
+            None,
+            1,
+            "On other page",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let result = graph.insert_block_after(&page_a.id, &stray.id, "Should be rejected");
+        assert!(result.is_err(), "cross-page insert must fail");
 
         Ok(())
     }

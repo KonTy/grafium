@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
-  import { searchFts, searchPageTitles, getPage, type Block, type PageSummary as ApiPageSummary } from "../lib/api";
+  import { searchFts, searchPageTitles, getPage, listBlocks, type Block, type PageSummary as ApiPageSummary } from "../lib/api";
   import {
     aiGenerateReferences,
     aiSearch,
@@ -11,6 +11,7 @@
     aiInsertPageSummary,
     aiSummarizeSelection,
     aiResearchWeb,
+    aiCancelOperation,
     type GeneratedReference,
     type PageReferencesMeta,
     type PageSummary,
@@ -18,6 +19,7 @@
     type SemanticSearchResult,
     type HealthStatus,
   } from "../lib/knowledge";
+  import { pushUndo } from "../lib/undoStack";
   import type { PageNavigationTarget } from "../lib/navigation";
 
   // Props
@@ -27,6 +29,7 @@
     pageTitle = "",
     initialTab,
     focusTrigger = 0,
+    width = 380,
     onClose = () => {},
     onNavigate = (_target: PageNavigationTarget) => {},
   }: {
@@ -35,6 +38,7 @@
     pageTitle?: string;
     initialTab?: "references" | "search" | "ask";
     focusTrigger?: number;
+    width?: number;
     onClose?: () => void;
     onNavigate?: (target: PageNavigationTarget) => void;
   } = $props();
@@ -60,6 +64,34 @@
   let insertedSummary = $state(false);
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
+  // Operation IDs for the three cancellable AI operations. Set to a fresh
+  // UUID for the duration of an in-flight run so the Cancel button can
+  // send it back to the backend, cleared to null when the run ends. We
+  // key state per-operation so the three progress toasts on this panel
+  // can be cancelled independently (they *can* run in parallel, though
+  // the local LLM worker serializes them anyway).
+  let analyzePageOpId = $state<string | null>(null);
+  let analyzeSelectionOpId = $state<string | null>(null);
+  let webResearchOpId = $state<string | null>(null);
+  // Track which operations the user has already asked to cancel so the
+  // button can go disabled/relabelled and we don't spam the backend with
+  // duplicate cancels. Reset each new run.
+  let analyzePageCancelling = $state(false);
+  let analyzeSelectionCancelling = $state(false);
+  let webResearchCancelling = $state(false);
+
+  // Cheap unique-per-operation ID. `crypto.randomUUID()` is available in
+  // WebViews everywhere Tauri runs today (Chromium ≥92, WebView2 recent,
+  // WebKit ≥15.4), and even if it weren't, the backend only compares the
+  // string for equality so any unique-ish value works.
+  function newOpId(): string {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      return `op-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  }
+
   // Jump to the requested tab whenever the parent bumps focusTrigger, e.g.
   // from the toolbar "Search" button or the global Ctrl+K shortcut.
   $effect(() => {
@@ -79,7 +111,41 @@
     tick().then(() => tick()).then(() => searchInputEl?.focus());
   });
 
-  // ─── Analyze Selection (arbitrary drag-selected text, not block-select) ──────
+  // ─── Cursor anchor (for "Insert into page" positioning) ─────────────────────
+  // Id of the block the user had a caret in most recently on the currently
+  // visible page. PageContent.svelte broadcasts `page-content-focus-changed`
+  // whenever focus enters a block, and again with blockId=null whenever the
+  // visible page changes. We remember the id across blur (unlike PageContent's
+  // own `focusedBlockId`) because clicking the "Insert into page" button
+  // itself steals focus from the block, so by the time our onclick runs the
+  // editor no longer has an active caret to query. Anchored inserts fall
+  // back to top-of-page (in the Rust command) if the id is null or stale.
+  let lastFocusedBlockId = $state<string | null>(null);
+
+  $effect(() => {
+    const handleFocusChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string; blockId: string | null }>).detail;
+      if (!detail) return;
+      // Only remember anchors from the page this panel is currently
+      // scoped to — a background page load broadcasting its own reset
+      // shouldn't wipe the anchor the user just chose on the visible one.
+      if (detail.pageId !== pageId) return;
+      lastFocusedBlockId = detail.blockId;
+    };
+    window.addEventListener("page-content-focus-changed", handleFocusChanged);
+    return () => window.removeEventListener("page-content-focus-changed", handleFocusChanged);
+  });
+
+  // Also clear the anchor whenever the panel's page changes, so we don't
+  // carry a stale id from the previous page into the first insert on the
+  // new one before PageContent has had a chance to broadcast.
+  $effect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    pageId;
+    lastFocusedBlockId = null;
+  });
+
+  // ─── Summarize Selection (arbitrary drag-selected text, not block-select) ────
   let hasTextSelection = $state(false);
   let pendingSelectionText = $state("");
   let selectionSummary = $state<PageSummary | null>(null);
@@ -104,6 +170,9 @@
     insertedWebResearch = false;
     webResearchResult = null;
     webResearchProgress = "Starting web research...";
+    const opId = newOpId();
+    webResearchOpId = opId;
+    webResearchCancelling = false;
     const unlisten = await listen<string>("ai-web-research-progress", (e) => {
       webResearchProgress = e.payload;
     });
@@ -112,13 +181,48 @@
       // the seed text is just the title — the LLM plans search queries
       // from the title alone, same as a user typing a topic into a search
       // engine themselves.
-      webResearchResult = await aiResearchWeb(pageTitle, pageTitle);
+      webResearchResult = await aiResearchWeb(pageTitle, pageTitle, opId);
     } catch (e: any) {
       webResearchError = e?.toString() || "Web research failed";
     } finally {
       unlisten();
       isResearchingWeb = false;
       webResearchProgress = "";
+      webResearchOpId = null;
+      webResearchCancelling = false;
+    }
+  }
+
+  // Signal the backend to stop whichever operation just had its Cancel
+  // button pressed. Idempotent: safe to call even if the operation just
+  // finished before the click landed. We deliberately don't wait for the
+  // backend to acknowledge — the running invoke() promise resolves with
+  // an error on its own once the cancel token flips, so the finally
+  // block in the parent function is what actually clears UI state.
+  async function cancelOperation(
+    kind: "analyze-page" | "analyze-selection" | "web-research"
+  ) {
+    let opId: string | null = null;
+    if (kind === "analyze-page") {
+      if (!analyzePageOpId || analyzePageCancelling) return;
+      opId = analyzePageOpId;
+      analyzePageCancelling = true;
+    } else if (kind === "analyze-selection") {
+      if (!analyzeSelectionOpId || analyzeSelectionCancelling) return;
+      opId = analyzeSelectionOpId;
+      analyzeSelectionCancelling = true;
+    } else {
+      if (!webResearchOpId || webResearchCancelling) return;
+      opId = webResearchOpId;
+      webResearchCancelling = true;
+    }
+    try {
+      await aiCancelOperation(opId);
+    } catch (e) {
+      // Cancel failures are almost always "unknown operation id" from a
+      // race where the op finished in the meantime — nothing actionable
+      // for the user, so we just swallow rather than surface an error.
+      console.warn("Cancel failed", e);
     }
   }
 
@@ -158,7 +262,7 @@
 
   // Tracks whether the browser currently has a non-empty text selection
   // anywhere on the page (e.g. the user dragged over prose inside a
-  // block), so the "Analyze Selection" button can enable/disable itself
+  // block), so the "Summarize Selection" button can enable/disable itself
   // without requiring the bullet-click block-selection mechanism.
   $effect(() => {
     if (!visible) return;
@@ -185,27 +289,50 @@
     isAnalyzingSelection = true;
     selectionError = "";
     insertedSelectionSummary = false;
-    selectionProgress = "Analyzing selection...";
+    selectionProgress = "Summarizing selection...";
+    const opId = newOpId();
+    analyzeSelectionOpId = opId;
+    analyzeSelectionCancelling = false;
     const unlisten = await listen<string>("ai-selection-summary-progress", (e) => {
       selectionProgress = e.payload;
     });
     try {
-      selectionSummary = await aiSummarizeSelection(text, pageTitle);
+      selectionSummary = await aiSummarizeSelection(text, pageTitle, opId);
     } catch (e: any) {
-      selectionError = e?.toString() || "Failed to analyze selection";
+      selectionError = e?.toString() || "Failed to summarize selection";
     } finally {
       unlisten();
       isAnalyzingSelection = false;
       selectionProgress = "";
+      analyzeSelectionOpId = null;
+      analyzeSelectionCancelling = false;
     }
   }
 
   /// Shared by both the whole-page summary and the selection summary:
   /// writes title-answer + one heading/paragraph per topic as a new block
-  /// at the top of the page, and wraps each topic's tags in place across
-  /// the page's existing blocks.
+  /// — anchored right after the block the user last had a caret in
+  /// (`lastFocusedBlockId`) so the summary lands where they were reading,
+  /// or at the top of the page as a fallback when there's no cursor to
+  /// anchor to — and wraps each topic's tags in place across the page's
+  /// existing blocks. Pushes a matching entry onto the app undo stack so
+  /// Ctrl-Z reverses both the newly-inserted block AND every wrap edit
+  /// this call caused, without touching other user edits.
   async function writeSummaryIntoPage(summary: PageSummary): Promise<void> {
-    await aiInsertPageSummary(pageId, summary.title_answer, summary.topics ?? []);
+    const result = await aiInsertPageSummary(
+      pageId,
+      summary.title_answer,
+      summary.topics ?? [],
+      lastFocusedBlockId,
+    );
+    pushUndo({
+      type: "insert_summary",
+      pageId,
+      insertedBlockId: result.insertedBlockId,
+      insertedContent: result.insertedContent,
+      insertedAfterBlockId: result.insertedAfterBlockId,
+      wrapChanges: result.wrapChanges,
+    });
     window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId } }));
   }
 
@@ -238,6 +365,9 @@
     error = "";
     insertedSummary = false;
     researchProgress = "Starting analysis...";
+    const opId = newOpId();
+    analyzePageOpId = opId;
+    analyzePageCancelling = false;
     const unlisten = await listen<string>("ai-reference-progress", (e) => {
       // Cap what we keep in memory/DOM — streamed model output can grow
       // unbounded over a multi-minute generation, but only the tail is
@@ -248,22 +378,27 @@
         text.length > MAX_PROGRESS_CHARS ? "…" + text.slice(-MAX_PROGRESS_CHARS) : text;
     });
     try {
-      references = await aiGenerateReferences(pageId);
+      references = await aiGenerateReferences(pageId, opId);
     } catch (e: any) {
       error = e?.toString() || "Failed to generate references";
     } finally {
       unlisten();
       isLoading = false;
       researchProgress = "";
+      analyzePageOpId = null;
+      analyzePageCancelling = false;
     }
   }
 
-  /// Writes the current summary into the actual page: a new block right
-  /// after the title (title-answer + one heading/paragraph per topic),
-  /// plus each topic's tags wrapped in place as `[[wiki-link]]`s across
-  /// the page's existing blocks. Explicit opt-in button rather than
-  /// automatic on every "Research this page" run, so re-running research
-  /// never silently duplicates content on the page.
+  /// Writes the current summary into the actual page as a new block
+  /// (title-answer + one heading/paragraph per topic), plus each topic's
+  /// tags wrapped in place as `[[wiki-link]]`s across the page's existing
+  /// blocks. When the user has an active caret in a block on the page,
+  /// the summary is inserted immediately after that block so it lands
+  /// where they were reading; otherwise it goes to the top of the page.
+  /// Explicit opt-in button rather than automatic on every "Research
+  /// this page" run, so re-running research never silently duplicates
+  /// content on the page.
   async function insertSummaryIntoPage() {
     if (!pageId || !references?.summary || isInsertingSummary) return;
     isInsertingSummary = true;
@@ -432,6 +567,11 @@
 
   // ─── Ask ───────────────────────────────────────────────────────────────────
 
+  // Default the Ask tab to "this page" — the most common intent is "what
+  // does this page say about X" while reading, not a cross-graph query.
+  // Toggle to "All notes" flips it back to the whole-graph semantic search.
+  let askScope = $state<"page" | "graph">("page");
+
   async function doAsk() {
     if (!askQuery.trim()) return;
     isLoading = true;
@@ -440,10 +580,52 @@
     try {
       const result = await aiAsk(askQuery);
       askAnswer = result.answer;
+      if (askScope === "page" && pageId) {
+        // Page-scoped: fetch the page's blocks, inline them as context in
+        // the question itself. Bypasses the semantic search step so the
+        // answer is always grounded in exactly this page's content, even
+        // when the embedder isn't reachable or hasn't been indexed yet.
+        const pageContext = await buildPageContext();
+        const scopedQuestion = pageContext
+          ? `You are looking at the page titled "${pageTitle}". Answer the user's `
+            + `question using ONLY the page content below. If the page doesn't `
+            + `contain enough information, say so plainly.\n\n`
+            + `--- PAGE CONTENT ---\n${pageContext}\n--- END PAGE CONTENT ---\n\n`
+            + `Question: ${askQuery}`
+          : askQuery;
+        askAnswer = (await aiAsk(scopedQuestion)).answer;
+      } else {
+        askAnswer = (await aiAsk(askQuery)).answer;
+      }
     } catch (e: any) {
       error = e?.toString() || "Ask failed";
     } finally {
       isLoading = false;
+    }
+  }
+
+  // Concatenate all blocks on the current page into a single plain-text
+  // prompt context. Preserves outline order (list_blocks is already
+  // depth-first ordered) so the LLM sees the page the way the reader
+  // sees it. Returns an empty string if there are no blocks / the fetch
+  // failed, so the caller can fall back to a graph-wide ask.
+  async function buildPageContext(): Promise<string> {
+    try {
+      const blocks = await listBlocks(pageId);
+      const lines: string[] = [];
+      for (const b of blocks) {
+        const text = (b.content ?? "").trim();
+        if (text) lines.push(text);
+      }
+      // Guardrail: keep context under ~24k chars so we don't accidentally
+      // blow the model's context window on very large pages.
+      const joined = lines.join("\n");
+      const MAX = 24000;
+      return joined.length > MAX
+        ? joined.slice(0, MAX) + "\n[…page truncated for prompt length…]"
+        : joined;
+    } catch {
+      return "";
     }
   }
 
@@ -460,7 +642,7 @@
 </script>
 
 {#if visible}
-  <aside class="reference-panel" class:panel-visible={visible}>
+  <aside class="reference-panel" class:panel-visible={visible} style="width: {width}px;">
     <!-- Header -->
     <div class="panel-header">
       <div class="panel-tabs">
@@ -612,7 +794,7 @@
                 onclick={generateReferences}
                 disabled={isLoading || !pageId}
               >
-                {isLoading ? "Analyzing..." : "Analyze this Page"}
+                {isLoading ? "Summarizing..." : "Summarize this Page"}
               </button>
               <button
                 class="action-btn"
@@ -621,7 +803,7 @@
                 disabled={isAnalyzingSelection || !hasTextSelection || !pageId}
                 title={hasTextSelection ? "Summarize the highlighted text" : "Highlight some text on the page first"}
               >
-                {isAnalyzingSelection ? "Analyzing selection..." : "Analyze Selection"}
+                {isAnalyzingSelection ? "Summarizing selection..." : "Summarize Selection"}
               </button>
               <button
                 class="action-btn"
@@ -644,6 +826,14 @@
               <div class="progress-status">
                 <span class="progress-spinner"></span>
                 <span class="progress-text">{researchProgress}</span>
+                <button
+                  class="cancel-btn"
+                  onclick={() => cancelOperation("analyze-page")}
+                  disabled={analyzePageCancelling}
+                  title="Stop this analysis. The local model will be restarted, so the next run may take a few extra seconds to start."
+                >
+                  {analyzePageCancelling ? "Cancelling…" : "Cancel"}
+                </button>
               </div>
             {/if}
 
@@ -655,6 +845,14 @@
               <div class="progress-status">
                 <span class="progress-spinner"></span>
                 <span class="progress-text">{selectionProgress}</span>
+                <button
+                  class="cancel-btn"
+                  onclick={() => cancelOperation("analyze-selection")}
+                  disabled={analyzeSelectionCancelling}
+                  title="Stop this analysis. The local model will be restarted, so the next run may take a few extra seconds to start."
+                >
+                  {analyzeSelectionCancelling ? "Cancelling…" : "Cancel"}
+                </button>
               </div>
             {/if}
 
@@ -701,6 +899,14 @@
               <div class="progress-status">
                 <span class="progress-spinner"></span>
                 <span class="progress-text">{webResearchProgress}</span>
+                <button
+                  class="cancel-btn"
+                  onclick={() => cancelOperation("web-research")}
+                  disabled={webResearchCancelling}
+                  title="Stop this research. The local model will be restarted, so the next run may take a few extra seconds to start."
+                >
+                  {webResearchCancelling ? "Cancelling…" : "Cancel"}
+                </button>
               </div>
             {/if}
 
@@ -785,6 +991,18 @@
                   {/if}
                 </button>
               </div>
+            {:else if references?.summary_error}
+              <!--
+                Summary generation was *attempted and failed* (bad JSON,
+                broken reasoning-tag training, provider hiccup, ...).
+                Show the reason inline so the user can act on it
+                (usually: pick a saner chat model in Settings) instead
+                of just staring at an empty panel.
+              -->
+              <div class="summary-error-card" role="alert">
+                <div class="summary-error-title">Couldn't produce a summary</div>
+                <div class="summary-error-text">{references.summary_error}</div>
+              </div>
             {/if}
 
             {#if references}
@@ -822,7 +1040,7 @@
               {/if}
             {:else if !isLoading}
               <div class="panel-notice">
-                Click "Analyze this Page" to discover connections.
+                Click "Summarize this Page" to generate a summary and discover connections.
               </div>
             {/if}
           </div>
@@ -830,11 +1048,35 @@
         <!-- Ask Tab -->
         {:else if activeTab === "ask"}
           <div class="tab-content">
+            <div class="ask-scope">
+              <span class="ask-scope-label">Scope:</span>
+              <button
+                type="button"
+                class="scope-btn"
+                class:active={askScope === "page"}
+                onclick={() => (askScope = "page")}
+                disabled={!pageId}
+                title={pageId ? "Ask about the current page only" : "Open a page first to enable page-scoped Ask"}
+              >
+                This page
+              </button>
+              <button
+                type="button"
+                class="scope-btn"
+                class:active={askScope === "graph"}
+                onclick={() => (askScope = "graph")}
+                title="Ask across all pages using semantic search"
+              >
+                All notes
+              </button>
+            </div>
             <form class="search-form" onsubmit={(e) => { e.preventDefault(); doAsk(); }}>
               <input
                 type="text"
                 bind:value={askQuery}
-                placeholder="Ask a question about your knowledge..."
+                placeholder={askScope === "page"
+                  ? "Ask a question about this page..."
+                  : "Ask a question about your knowledge..."}
                 class="search-input"
               />
               <button type="submit" class="action-btn" disabled={isLoading}>
@@ -864,7 +1106,6 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: 380px;
     max-width: 90vw;
     background: var(--bg-secondary, #1e1e2e);
     border-left: 1px solid var(--border-color, #333);
@@ -1034,6 +1275,38 @@
     overflow-y: auto;
     font-family: var(--mono-font, monospace);
     line-height: 1.4;
+    flex: 1;
+  }
+
+  /* Cancel button that shows up next to a running AI operation's
+     progress-text. Kept small and unobtrusive so the streamed model
+     output stays the primary focus, but clearly clickable — the whole
+     point is that the user can bail out any time. Sticks to the top of
+     the row rather than centering so a growing progress-text (as more
+     tokens stream in) doesn't jitter the button around. */
+  .cancel-btn {
+    align-self: flex-start;
+    background: transparent;
+    color: var(--text-secondary, #aaa);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .cancel-btn:hover:not(:disabled) {
+    background: rgba(220, 38, 38, 0.15);
+    border-color: rgba(220, 38, 38, 0.4);
+    color: #f87171;
+  }
+
+  .cancel-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   @keyframes progress-spin {
@@ -1050,6 +1323,29 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .summary-error-card {
+    background: var(--bg-tertiary, #252535);
+    border: 1px solid #b45309;
+    border-left: 3px solid #f59e0b;
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .summary-error-title {
+    color: #f59e0b;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .summary-error-text {
+    color: var(--text-secondary, #b8b8c8);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .summary-card-label {
@@ -1242,6 +1538,45 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .ask-scope {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+
+  .ask-scope-label {
+    color: var(--text-muted, #888);
+    margin-right: 4px;
+  }
+
+  .scope-btn {
+    background: var(--bg-tertiary, #252535);
+    border: 1px solid var(--border-color, #333);
+    color: var(--text-secondary, #ccc);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .scope-btn:hover:not(:disabled) {
+    border-color: var(--accent-color, #7c3aed);
+  }
+
+  .scope-btn.active {
+    background: var(--accent-color, #7c3aed);
+    color: white;
+    border-color: var(--accent-color, #7c3aed);
+  }
+
+  .scope-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .search-input {

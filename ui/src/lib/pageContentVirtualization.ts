@@ -5,6 +5,11 @@ export interface BlockRenderState {
   parentById: Map<string, string | null>;
   childrenByParent: Map<string | null, Block[]>;
   depthById: Map<string, number>;
+  /// Whether a block is the last child among its siblings (last item in
+  /// `childrenByParent.get(parentId)`). Used to decide whether a hierarchy
+  /// "thread" guide line should keep running past this block's row for each
+  /// of its ancestor levels — see `getAncestorGuides`.
+  isLastChildById: Map<string, boolean>;
   visibleIds: Set<string>;
   visibleBlocks: Block[];
   visibleIndexById: Map<string, number>;
@@ -17,6 +22,16 @@ export interface VirtualWindowOptions {
   defaultHeight: number;
   overscanPx: number;
   anchorIndex?: number | null;
+  /// Widens the computed range so it never shrinks below
+  /// `[minStartIndex, minEndIndex)` even if the scroll-position-derived
+  /// window would otherwise be narrower. Used to keep blocks that are part
+  /// of an in-progress native text-selection drag mounted in the DOM —
+  /// unmounting a block that holds the selection's anchor/focus node while
+  /// the browser is auto-scrolling makes the selection visibly snap back
+  /// instead of extending smoothly. Both bounds are optional and clamped to
+  /// valid item indices.
+  minStartIndex?: number | null;
+  minEndIndex?: number | null;
 }
 
 export interface VirtualWindow<T> {
@@ -87,15 +102,47 @@ export function buildBlockRenderState(
     visibleBlocks.push(block);
   }
 
+  const isLastChildById = new Map<string, boolean>();
+  for (const siblings of childrenByParent.values()) {
+    siblings.forEach((sibling, i) => {
+      isLastChildById.set(sibling.id, i === siblings.length - 1);
+    });
+  }
+
   return {
     blockById,
     parentById,
     childrenByParent,
     depthById,
+    isLastChildById,
     visibleIds,
     visibleBlocks,
     visibleIndexById,
   };
+}
+
+/// Computes, for a block, whether a vertical "thread" guide line should be
+/// drawn at each of its ancestor indent levels (index 0 = root level, index
+/// `depth - 1` = the block's immediate parent's level). A level's guide is
+/// drawn (true) as long as the ancestor at that depth still has a later
+/// sibling somewhere in the tree — i.e. more content will appear in that
+/// column further down the page — matching the classic outliner
+/// "bullet-threading" visual (e.g. Logseq's dev-theme bullet threading).
+export function getAncestorGuides(
+  blockId: string,
+  parentById: ReadonlyMap<string, string | null>,
+  depthById: ReadonlyMap<string, number>,
+  isLastChildById: ReadonlyMap<string, boolean>
+): boolean[] {
+  const depth = depthById.get(blockId) ?? 0;
+  const guides = new Array<boolean>(depth);
+  let ancestorId: string | null = blockId;
+  for (let level = depth - 1; level >= 0; level--) {
+    ancestorId = parentById.get(ancestorId ?? "") ?? null;
+    if (ancestorId === null) break;
+    guides[level] = !(isLastChildById.get(ancestorId) ?? false);
+  }
+  return guides;
 }
 
 export function computeVirtualWindow<T extends { id: string }>(
@@ -136,6 +183,15 @@ export function computeVirtualWindow<T extends { id: string }>(
     const anchorHeight = heights[options.anchorIndex];
     const centeredScrollTop = Math.max(0, anchorTop - Math.max(0, (viewportHeight - anchorHeight) / 2));
     range = getWindowRange(prefixHeights, centeredScrollTop, viewportHeight, overscanPx);
+  }
+
+  if (typeof options.minStartIndex === "number" || typeof options.minEndIndex === "number") {
+    const clampedMinStart = Math.max(0, Math.min(items.length - 1, options.minStartIndex ?? range.startIndex));
+    const clampedMinEnd = Math.max(1, Math.min(items.length, options.minEndIndex ?? range.endIndex));
+    range = {
+      startIndex: Math.min(range.startIndex, clampedMinStart),
+      endIndex: Math.max(range.endIndex, clampedMinEnd),
+    };
   }
 
   const totalHeight = prefixHeights[prefixHeights.length - 1];

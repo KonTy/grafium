@@ -4,11 +4,14 @@ use crate::ai::traits::{ChatMessage, CompletionOptions, MessageRole};
 
 pub mod anthropic;
 #[cfg(feature = "llm-local")]
-mod llama_shared;
 #[cfg(feature = "llm-local")]
 pub mod local_embedder;
 #[cfg(feature = "llm-local")]
 pub mod local_llm;
+#[cfg(feature = "llm-local")]
+pub mod local_llm_process;
+#[cfg(feature = "llm-local")]
+mod llama_shared;
 pub mod ollama;
 pub mod openai;
 pub mod openai_compatible;

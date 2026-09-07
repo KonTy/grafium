@@ -259,6 +259,7 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
             }
             Err(e) => {
                 eprintln!("Sync target '{}' failed: {}", target.name, e);
+                results.push(SyncResult::failed(format!("{}: {}", target.name, e)));
             }
         }
     }

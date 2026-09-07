@@ -8,6 +8,11 @@ use std::path::PathBuf;
 use grafium_core::media::{fetch_audio, MediaSource, Transcriber, WhisperTranscriber};
 
 fn main() {
+    if grafium_core::ai::worker::is_worker_invocation() {
+        std::process::exit(grafium_core::ai::worker::run_from_stdio());
+    }
+    grafium_core::ai::worker::configure_current_executable()
+        .expect("failed to configure native AI worker");
     let model_path = std::env::args()
         .nth(1)
         .expect("usage: media_smoke_test <model.bin> <source>");

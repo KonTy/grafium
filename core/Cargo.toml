@@ -21,16 +21,34 @@ notify-debouncer-mini = "0.4"
 sha2 = "0.10"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 urlencoding = { version = "2", optional = true }
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "process", "io-util"] }
+# Only needed by the `grafium-llm-worker` binary (see `llm-local` below), to
+# actually print the `tracing::info!`/`tracing::debug!` instrumentation in
+# `local_llm.rs`/`llama_shared.rs` — without a subscriber installed inside
+# that separate process, its tracing events would be silently dropped, the
+# same way they always were in the `tui` binary before this existed.
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 serde_yaml = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-whisper-rs = { version = "0.16", optional = true }
+whisper-rs = { version = "0.16", optional = true, features = ["tracing_backend"] }
 hound = { version = "3", optional = true }
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler"], optional = true }
 encoding_rs = { version = "0.8", optional = true }
 scraper = "0.27"
 pdf-extract = "0.12"
 url = "2"
+sysinfo = "0.33"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [features]
 default = ["sync"]
@@ -38,7 +56,7 @@ sync = ["urlencoding"]
 # Local video/audio transcription (`media::transcribe`). Optional because it
 # pulls in a C++ build of whisper.cpp — most consumers (e.g. the Android
 # build) don't need it, and it noticeably slows down a clean build.
-media = ["dep:whisper-rs", "dep:hound"]
+media = ["dep:whisper-rs", "dep:hound", "dep:tracing-subscriber"]
 # Same as `media`, but offloads whisper.cpp inference to the GPU via Vulkan
 # (works with just the Vulkan loader + GPU driver already installed — no
 # full CUDA toolkit required).
@@ -53,11 +71,41 @@ media-vulkan = ["media", "whisper-rs/vulkan"]
 # transcribe with Whisper, then summarize with a local LLM). Dynamic
 # linking keeps each engine's GGML copy in its own shared object so they
 # don't collide.
-llm-local = ["dep:llama-cpp-2", "dep:encoding_rs", "llama-cpp-2/dynamic-link"]
+llm-local = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:tracing-subscriber", "llama-cpp-2/dynamic-link"]
 # Same as `llm-local`, but offloads inference to the GPU via Vulkan (no
 # CUDA toolkit required — same rationale as `media-vulkan`).
 llm-local-vulkan = ["llm-local", "llama-cpp-2/vulkan"]
 
+# Standalone worker process for local LLM inference — the same code that
+# ran in-process (LocalLlm) now spawned as a separate child process by
+# `ai::providers::local_llm_process::LocalLlmProcess`, so a native crash in
+# llama.cpp (see that module's docs) only kills this process, not the
+# whole app. Deliberately its own binary target (not folded into the
+# `grafium`/`grafium-tui` binaries) so it stays a small, single-purpose
+# process with nothing else to lose if it crashes.
+[[bin]]
+name = "grafium-llm-worker"
+path = "src/bin/llm_worker.rs"
+required-features = ["llm-local"]
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+# Only needed by the `debug_llm_repro` example, to actually print the
+# `tracing::info!`/`tracing::debug!` instrumentation added to
+# `local_llm::generate`/`load` — without a subscriber installed, tracing
+# events are silently dropped (as they are in the `tui` binary, which
+# never installs one either).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "local_llm_smoke_test"
+required-features = ["llm-local"]
+
+[[example]]
+name = "media_smoke_test"
+required-features = ["media"]
+
+[[example]]
+name = "model_settings_smoke_test"
+required-features = ["media"]
