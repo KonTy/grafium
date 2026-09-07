@@ -25,7 +25,7 @@ pub struct AppState {
 
 #[tauri::command(rename_all = "camelCase")]
 fn debug_log(message: String) {
-    eprintln!("[frontend-debug] {}", message);
+    tracing::debug!("{}", message);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1577,17 +1577,17 @@ pub fn run() {
                                     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                                     let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                                    eprintln!("[GTK-WINDOW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+                                    tracing::trace!("key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
                                     // Ctrl+. toggles reference panel
                                     if ctrl && !shift && *keyval == 46 /* period */ {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+. detected, toggling reference panel");
+                                        tracing::trace!("=> Ctrl+. detected, toggling reference panel");
                                         let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
                                         return gtk::glib::Propagation::Stop;
                                     }
 
                                     if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                        tracing::trace!("=> Ctrl+Z detected, calling eval(__handleNativeUndo)");
                                         // Call undo AND capture console output via a self-reporting mechanism
                                         let result = eval_window.eval(r#"
                                             (function() {
@@ -1601,16 +1601,16 @@ pub fn run() {
                                                 }
                                             })();
                                         "#);
-                                        eprintln!("[GTK-WINDOW] => eval result: {:?}", result);
+                                        tracing::trace!("=> eval result: {:?}", result);
                                         return gtk::glib::Propagation::Stop;
                                     }
                                     if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
+                                        tracing::trace!("=> Ctrl+Shift+Z detected, calling eval(__handleNativeRedo)");
                                         let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                         return gtk::glib::Propagation::Stop;
                                     }
                                     if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                                        eprintln!("[GTK-WINDOW] => Ctrl+Y detected, calling eval(__handleNativeRedo)");
+                                        tracing::trace!("=> Ctrl+Y detected, calling eval(__handleNativeRedo)");
                                         let _ = eval_window.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                         return gtk::glib::Propagation::Stop;
                                     }
@@ -1620,7 +1620,7 @@ pub fn run() {
                                         } else {
                                             "down"
                                         };
-                                        eprintln!("[GTK-WINDOW] => Shift+Arrow{} detected, calling eval(__handleNativeVerticalArrow)", direction);
+                                        tracing::trace!("=> Shift+Arrow{} detected, calling eval(__handleNativeVerticalArrow)", direction);
                                         let script = format!(
                                             "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
                                             direction
