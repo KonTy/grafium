@@ -7,6 +7,24 @@
 //! - `references.rs` — Reference generation from AI analysis
 //! - `config.rs` — AI configuration management
 
+/// Appended to every prompt that produces an answer for the user.
+///
+/// Retrieved material is the user's own, and is routinely not in the language
+/// they are asking in — a bilingual vocabulary note is the ordinary case.
+/// With no explicit rule the model mirrors the language of its context instead
+/// of the language of the question: an English question about setting
+/// something up in a basement came back written entirely in Chinese, because
+/// the top-scoring note was a Chinese-English glossary entry that happened to
+/// gloss "basement" as "地下室".
+///
+/// Applies to the notes arm, the web arm, and the no-notes general arm alike,
+/// since any of them can end up holding foreign-language context.
+pub(crate) const ANSWER_LANGUAGE_RULE: &str =
+    "Always write your answer in the language the user asked their question in, even when the \
+notes or sources you are drawing on are in a different language. Quote foreign-language material \
+verbatim where the exact wording matters, but translate or paraphrase it for the user instead of \
+switching languages yourself.";
+
 pub mod config;
 pub mod embeddings;
 pub mod gpu_fit;

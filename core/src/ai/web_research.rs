@@ -402,7 +402,10 @@ impl<'a> WebResearchEngine<'a> {
         let options = CompletionOptions {
             max_tokens: Some(1400),
             temperature: Some(0.3),
-            system_prompt: Some(RESEARCH_SYNTHESIS_PROMPT.to_string()),
+            system_prompt: Some(format!(
+                "{RESEARCH_SYNTHESIS_PROMPT}\n\n{}",
+                crate::ai::ANSWER_LANGUAGE_RULE
+            )),
             stop: None,
             cancel: None,
         };

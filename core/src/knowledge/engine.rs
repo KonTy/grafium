@@ -2040,7 +2040,8 @@ claim with its [N] marker.\n\
 says \"note saved …; event date unknown\" is not an event date — don't treat it as one.\n\
 - Never invent citations or dates. If these notes don't contain the answer, say so plainly in one \
 sentence and stop — do not guess.\n\n\
-The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
+The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}\n\n{}",
+        crate::ai::ANSWER_LANGUAGE_RULE
     )
 }
 
@@ -2128,7 +2129,7 @@ fn render_web_section(result: &crate::ai::web_research::WebResearchResult) -> St
 fn build_system_prompt(context_block: &str, mode: AnswerMode) -> String {
     let base = "You are Grafium's assistant. You help the user with BOTH questions about their \
 personal knowledge graph (their notes) AND general questions using your own knowledge.";
-    match mode {
+    let body = match mode {
         AnswerMode::General => format!(
             "{base}\n\n\
 No relevant notes were retrieved from the user's graph for this question. Answer from your \
@@ -2162,7 +2163,12 @@ says \"note saved …; event date unknown\" is not an event date — don't treat
 notes. If you don't know, say you don't know.\n\n\
 Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{context_block}"
         ),
-    }
+    };
+    // The rule goes last, after the retrieved notes. Placed before them it is
+    // an instruction the model reads and then immediately buries under a wall
+    // of foreign-language text; placed here it is the final thing it sees
+    // before it starts writing, which is the whole point.
+    format!("{body}\n\n{}", crate::ai::ANSWER_LANGUAGE_RULE)
 }
 
 #[cfg(test)]
@@ -2173,6 +2179,32 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    /// Every arm that produces an answer must carry the language rule, not
+    /// just the one that was reported. Which arm runs depends purely on how
+    /// much the retrieval happened to return, and a single bilingual glossary
+    /// note is enough to flip an entire answer into another language — so a
+    /// rule present on only some arms is a rule that fails intermittently.
+    ///
+    /// It also has to come *last*. Ahead of the retrieved notes it is an
+    /// instruction the model reads and then buries under a wall of
+    /// foreign-language text, which is the position it demonstrably loses in.
+    #[test]
+    fn every_answer_prompt_ends_with_the_language_rule() {
+        for mode in [AnswerMode::General, AnswerMode::Notes, AnswerMode::Blend] {
+            let prompt = build_system_prompt("[1] 地下室笔记", mode);
+            assert!(
+                prompt.trim_end().ends_with(crate::ai::ANSWER_LANGUAGE_RULE),
+                "the {mode:?} prompt must end with the language rule, got:\n{prompt}"
+            );
+        }
+        assert!(
+            build_notes_only_system_prompt("[1] 地下室笔记")
+                .trim_end()
+                .ends_with(crate::ai::ANSWER_LANGUAGE_RULE),
+            "the notes-only prompt must end with the language rule"
+        );
+    }
 
     #[derive(Default)]
     struct MockEmbedderState {
