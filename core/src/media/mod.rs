@@ -37,7 +37,9 @@ pub use config::{MediaConfig, WhisperSettings};
 pub use ingest::{fetch_audio, fetch_audio_with_progress, MediaSource};
 pub use notes::transcript_to_markdown;
 #[cfg(feature = "media")]
-pub use transcribe::{TranscribeProgress, Transcriber, WhisperBackend, WhisperTranscriber};
+pub use transcribe::{
+    TranscribeProgress, Transcriber, WhisperBackend, WhisperTranscriber, WorkerTranscriber,
+};
 pub use types::{Transcript, TranscriptSegment, TranscriptSource};
 
 use crate::error::Result;

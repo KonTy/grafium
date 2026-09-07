@@ -172,7 +172,7 @@ impl LlmProvider for LocalLlm {
                         "native AI worker returned a health result for an LLM request".to_string(),
                     )),
                     #[cfg(feature = "media")]
-                    crate::ai::worker::WorkerOutput::Whisper(_) => Err(CoreError::Other(
+                    _ => Err(CoreError::Other(
                         "native AI worker returned a transcription for an LLM request".to_string(),
                     )),
                 }

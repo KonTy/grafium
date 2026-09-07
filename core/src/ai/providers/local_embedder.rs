@@ -14,7 +14,7 @@
 //! Gated behind the `llm-local` Cargo feature, same as `local_llm`.
 
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -41,37 +41,116 @@ const DEFAULT_CTX_SIZE: u32 = 2048;
 /// trained context (KV cache allocation scales directly with this).
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
+/// Long enough to load a cold model from disk on a slow drive.
+const EMBED_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Indexing sends large batches, and the first one pays the load cost too.
+const EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Runs a GGUF embedding model fully in-process via llama.cpp. Stateless
 /// per call beyond the loaded model, so one instance is reused across many
 /// `embed()` calls — mirrors `LocalLlm` exactly.
 pub struct LocalEmbedder {
-    backend: Arc<LlamaBackend>,
-    model: Arc<LlamaModel>,
+    model_path: PathBuf,
     ctx_size: NonZeroU32,
     dimension: usize,
     name: String,
 }
 
+/// A loaded embedding model, resident in the worker child between requests.
+///
+/// Mirrors `local_llm::LlmSlot`: keeping the model loaded across calls is what
+/// makes indexing bearable, since a re-load per batch would dominate the cost.
+pub(crate) struct EmbedderSlot {
+    model_path: PathBuf,
+    backend: Arc<LlamaBackend>,
+    model: Arc<LlamaModel>,
+    ctx_size: NonZeroU32,
+    dimension: usize,
+}
+
+impl EmbedderSlot {
+    fn matches(&self, model_path: &Path) -> bool {
+        self.model_path == model_path
+    }
+}
+
+fn ensure_slot(slot: &mut Option<EmbedderSlot>, model_path: &Path) -> Result<()> {
+    if slot.as_ref().is_some_and(|c| c.matches(model_path)) {
+        return Ok(());
+    }
+    // Release the previous model's native memory before loading another.
+    *slot = None;
+    let backend = shared_backend();
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(OFFLOAD_ALL_LAYERS);
+    let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+        .map_err(|e| CoreError::Other(format!("failed to load embedding model: {e}")))?;
+    let ctx_size = Some(model.n_ctx_train())
+        .filter(|&n| n > 0)
+        .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
+        .and_then(NonZeroU32::new)
+        .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
+    let dimension = model.n_embd() as usize;
+    *slot = Some(EmbedderSlot {
+        model_path: model_path.to_path_buf(),
+        backend,
+        model: Arc::new(model),
+        ctx_size,
+        dimension,
+    });
+    Ok(())
+}
+
+/// Model metadata, read in the child. Runs only in the worker process.
+pub(crate) fn info_in_process(
+    slot: &mut Option<EmbedderSlot>,
+    model_path: &Path,
+) -> Result<(u32, usize)> {
+    ensure_slot(slot, model_path)?;
+    let slot = slot.as_ref().expect("slot populated by ensure_slot");
+    Ok((slot.ctx_size.get(), slot.dimension))
+}
+
+/// Embed in the child. Runs only in the worker process.
+pub(crate) fn embed_in_process(
+    slot: &mut Option<EmbedderSlot>,
+    model_path: &Path,
+    context_size: u32,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
+    ensure_slot(slot, model_path)?;
+    let slot = slot.as_ref().expect("slot populated by ensure_slot");
+    let ctx_size = NonZeroU32::new(context_size).unwrap_or(slot.ctx_size);
+    embed_all(&slot.model, &slot.backend, ctx_size, texts)
+}
+
 impl LocalEmbedder {
-    /// Loads a GGUF embedding model from `model_path`.
+    /// Prepare a GGUF embedding model for use.
+    ///
+    /// Deliberately does not load anything here. The model lives in the worker
+    /// child, so a fault inside llama.cpp — an allocation failure, a driver
+    /// reset — kills the worker rather than the application. The context
+    /// length and embedding width still have to be known up front to size the
+    /// vector store, so those are read once, in the child, and returned.
     pub fn load(model_path: &Path) -> Result<Self> {
-        let backend = shared_backend();
+        let (context_size, dimension) = match crate::ai::worker::execute(
+            crate::ai::worker::WorkerRequest::EmbedderInfo {
+                model_path: model_path.to_path_buf(),
+            },
+            EMBED_LOAD_TIMEOUT,
+        )? {
+            crate::ai::worker::WorkerOutput::EmbedderInfo {
+                context_size,
+                dimension,
+            } => (context_size, dimension),
+            _ => {
+                return Err(CoreError::Other(
+                    "embedding worker returned an unexpected response".to_string(),
+                ))
+            }
+        };
 
-        // Embedding models are small; always offload every layer when a
-        // GPU backend is compiled in (no separate "gpu_layers" setting
-        // needed — see `LocalEmbeddingSettings`'s doc comment).
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(OFFLOAD_ALL_LAYERS);
-
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
-            .map_err(|e| CoreError::Other(format!("failed to load embedding model: {e}")))?;
-
-        let ctx_size = Some(model.n_ctx_train())
-            .filter(|&n| n > 0)
-            .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
-            .and_then(NonZeroU32::new)
+        let ctx_size = NonZeroU32::new(context_size)
             .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
-
-        let dimension = model.n_embd() as usize;
 
         let name = model_path
             .file_name()
@@ -80,8 +159,7 @@ impl LocalEmbedder {
             .to_string();
 
         Ok(Self {
-            backend,
-            model: Arc::new(model),
+            model_path: model_path.to_path_buf(),
             ctx_size,
             dimension,
             name,
@@ -172,8 +250,7 @@ impl LocalEmbedder {
         texts: Vec<String>,
         prefix: &str,
     ) -> BoxFuture<'_, Result<Vec<Vec<f32>>>> {
-        let model = self.model.clone();
-        let backend = self.backend.clone();
+        let model_path = self.model_path.clone();
         let ctx_size = self.ctx_size;
         let prefix = prefix.to_string();
 
@@ -186,9 +263,25 @@ impl LocalEmbedder {
             } else {
                 texts.into_iter().map(|t| format!("{prefix}{t}")).collect()
             };
-            tokio::task::spawn_blocking(move || embed_all(&model, &backend, ctx_size, &prepared))
-                .await
-                .map_err(|e| CoreError::Other(format!("embedding task panicked: {e}")))?
+            // Blocking IPC, so it goes on the blocking pool: the round trip
+            // covers a whole batch and can take seconds on a cold model.
+            tokio::task::spawn_blocking(move || {
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::Embed {
+                        model_path,
+                        context_size: ctx_size.get(),
+                        texts: prepared,
+                    },
+                    EMBED_TIMEOUT,
+                )? {
+                    crate::ai::worker::WorkerOutput::Embed(vectors) => Ok(vectors),
+                    _ => Err(CoreError::Other(
+                        "embedding worker returned an unexpected response".to_string(),
+                    )),
+                }
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("embedding task panicked: {e}")))?
         })
     }
 }

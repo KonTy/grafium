@@ -53,6 +53,19 @@ pub enum WorkerRequest {
         context_size: u32,
         gpu_layers: u32,
     },
+    #[cfg(feature = "llm-local")]
+    Embed {
+        model_path: PathBuf,
+        context_size: u32,
+        texts: Vec<String>,
+    },
+    /// Context length and embedding width, read from the model in the child.
+    ///
+    /// The parent needs both to size its vector store, and they are only
+    /// knowable from the loaded model — so asking the child is what keeps the
+    /// parent free of native code entirely.
+    #[cfg(feature = "llm-local")]
+    EmbedderInfo { model_path: PathBuf },
     #[cfg(feature = "media")]
     Whisper {
         model_path: PathBuf,
@@ -68,6 +81,10 @@ pub enum WorkerOutput {
     Llm(String),
     #[cfg(feature = "llm-local")]
     Ready,
+    #[cfg(feature = "llm-local")]
+    Embed(Vec<Vec<f32>>),
+    #[cfg(feature = "llm-local")]
+    EmbedderInfo { context_size: u32, dimension: usize },
     #[cfg(feature = "media")]
     Whisper(Transcript),
 }
@@ -76,6 +93,21 @@ pub enum WorkerOutput {
 struct WorkerResponse {
     output: Option<WorkerOutput>,
     error: Option<String>,
+    /// An interim progress report rather than the final answer.
+    ///
+    /// Transcribing an hour of audio takes minutes, and the caller shows a
+    /// live percentage while it runs. A strict one-request-one-response
+    /// protocol would have forced a choice between isolating whisper and
+    /// keeping that feedback, so a request may now be answered by any number
+    /// of progress frames followed by exactly one terminal frame.
+    #[serde(default)]
+    progress: Option<crate::media::TranscribeProgress>,
+}
+
+impl WorkerResponse {
+    fn is_progress(&self) -> bool {
+        self.progress.is_some() && self.output.is_none() && self.error.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +118,8 @@ enum WorkerKey {
         context_size: u32,
         gpu_layers: u32,
     },
+    #[cfg(feature = "llm-local")]
+    Embedder { model_path: PathBuf },
     #[cfg(feature = "media")]
     Whisper {
         model_path: PathBuf,
@@ -112,6 +146,11 @@ impl WorkerKey {
                 context_size: *context_size,
                 gpu_layers: *gpu_layers,
             }),
+            #[cfg(feature = "llm-local")]
+            WorkerRequest::Embed { model_path, .. }
+            | WorkerRequest::EmbedderInfo { model_path } => Ok(Self::Embedder {
+                model_path: model_path.clone(),
+            }),
             #[cfg(feature = "media")]
             WorkerRequest::Whisper {
                 model_path,
@@ -129,6 +168,18 @@ impl WorkerKey {
 }
 
 pub fn execute(request: WorkerRequest, timeout: Duration) -> Result<WorkerOutput> {
+    execute_with_progress(request, timeout, &mut |_| {})
+}
+
+/// As [`execute`], reporting interim progress as the child emits it.
+///
+/// Transcription takes minutes and shows a live percentage, so isolating it
+/// would otherwise have meant losing that feedback.
+pub fn execute_with_progress(
+    request: WorkerRequest,
+    timeout: Duration,
+    on_progress: &mut dyn FnMut(crate::media::TranscribeProgress),
+) -> Result<WorkerOutput> {
     if matches!(request, WorkerRequest::Shutdown) {
         return Err(CoreError::Other(
             "shutdown requests cannot be dispatched by callers".to_string(),
@@ -189,7 +240,7 @@ pub fn execute(request: WorkerRequest, timeout: Duration) -> Result<WorkerOutput
             .expect("worker installed in the pool for check-out")
     };
 
-    let outcome = worker.round_trip(&request, timeout);
+    let outcome = worker.round_trip(&request, timeout, on_progress);
     let now = Instant::now();
 
     let response = match outcome {
@@ -292,6 +343,32 @@ fn estimated_working_set(request: &WorkerRequest) -> Result<u64> {
             },
             0,
         ),
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::Embed {
+            model_path,
+            context_size,
+            texts,
+        } => {
+            // The batch itself counts: indexing sends thousands of chunks, and
+            // ignoring their size is how an admission check passes right
+            // before the allocation it was meant to prevent.
+            let input_bytes = texts.iter().map(|t| t.len() as u64).sum();
+            crate::ai::resources::estimate_worker_working_set(
+                model_path,
+                crate::ai::resources::ModelWorkload::Llm {
+                    context_tokens: *context_size,
+                },
+                input_bytes,
+            )
+        }
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::EmbedderInfo { model_path } => {
+            crate::ai::resources::estimate_worker_working_set(
+                model_path,
+                crate::ai::resources::ModelWorkload::Llm { context_tokens: 0 },
+                0,
+            )
+        }
         #[cfg(feature = "media")]
         WorkerRequest::Whisper {
             model_path,
@@ -361,6 +438,32 @@ fn memory_limit_for_request(request: &WorkerRequest) -> Result<u64> {
             },
             0,
         ),
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::Embed {
+            model_path,
+            context_size,
+            texts,
+        } => {
+            // The batch itself counts: indexing sends thousands of chunks, and
+            // ignoring their size is how an admission check passes right
+            // before the allocation it was meant to prevent.
+            let input_bytes = texts.iter().map(|t| t.len() as u64).sum();
+            crate::ai::resources::estimate_worker_working_set(
+                model_path,
+                crate::ai::resources::ModelWorkload::Llm {
+                    context_tokens: *context_size,
+                },
+                input_bytes,
+            )
+        }
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::EmbedderInfo { model_path } => {
+            crate::ai::resources::estimate_worker_working_set(
+                model_path,
+                crate::ai::resources::ModelWorkload::Llm { context_tokens: 0 },
+                0,
+            )
+        }
         #[cfg(feature = "media")]
         WorkerRequest::Whisper {
             model_path,
@@ -410,10 +513,12 @@ pub fn run_from_stdio() -> i32 {
             Ok(output) => WorkerResponse {
                 output: Some(output),
                 error: None,
+                progress: None,
             },
             Err(error) => WorkerResponse {
                 output: None,
                 error: Some(error.to_string()),
+                progress: None,
             },
         };
         let mut stdout = stdout.lock();
@@ -428,11 +533,28 @@ pub fn run_from_stdio() -> i32 {
 struct ChildState {
     #[cfg(feature = "llm-local")]
     llm: Option<crate::ai::providers::local_llm::LlmSlot>,
-    // Whisper is not run through the worker yet. Transcription still loads
-    // in-process, as it did before: the crash this isolation exists for came
-    // from the chat model, and routing whisper through here as well needs the
-    // transcription layer reworked to expose a resumable slot, which is its
-    // own piece of work rather than a merge.
+    #[cfg(feature = "llm-local")]
+    embedder: Option<crate::ai::providers::local_embedder::EmbedderSlot>,
+    #[cfg(feature = "media")]
+    whisper: Option<crate::media::transcribe::WhisperSlot>,
+}
+
+/// Send an interim progress frame to the parent.
+///
+/// Written directly rather than buffered: the whole point is that the reader
+/// sees a percentage advance during a transcription that takes minutes, and a
+/// buffered report arriving at the end would be worthless.
+#[cfg(feature = "media")]
+fn emit_progress(progress: crate::media::TranscribeProgress) {
+    let frame = WorkerResponse {
+        output: None,
+        error: None,
+        progress: Some(progress),
+    };
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    // Best effort: losing a progress line must never fail the work itself.
+    let _ = write_framed(&mut stdout, &frame);
 }
 
 fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutput> {
@@ -465,10 +587,39 @@ fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutp
             gpu_layers,
         )
         .map(|()| WorkerOutput::Ready),
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::Embed {
+            model_path,
+            context_size,
+            texts,
+        } => crate::ai::providers::local_embedder::embed_in_process(
+            &mut state.embedder,
+            &model_path,
+            context_size,
+            &texts,
+        )
+        .map(WorkerOutput::Embed),
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::EmbedderInfo { model_path } => {
+            crate::ai::providers::local_embedder::info_in_process(&mut state.embedder, &model_path)
+                .map(|(context_size, dimension)| WorkerOutput::EmbedderInfo {
+                    context_size,
+                    dimension,
+                })
+        }
         #[cfg(feature = "media")]
-        WorkerRequest::Whisper { .. } => Err(CoreError::Other(
-            "transcription does not run in the worker process yet".to_string(),
-        )),
+        WorkerRequest::Whisper {
+            model_path,
+            language,
+            wav_path,
+        } => crate::media::transcribe::transcribe_in_process(
+            &mut state.whisper,
+            &model_path,
+            language.as_deref(),
+            &wav_path,
+            &mut |progress| emit_progress(progress),
+        )
+        .map(WorkerOutput::Whisper),
         WorkerRequest::Shutdown => unreachable!("shutdown handled by the caller"),
     }
 }
@@ -580,7 +731,12 @@ impl LiveWorker {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    fn round_trip(&mut self, request: &WorkerRequest, timeout: Duration) -> Result<WorkerResponse> {
+    fn round_trip(
+        &mut self,
+        request: &WorkerRequest,
+        timeout: Duration,
+        on_progress: &mut dyn FnMut(crate::media::TranscribeProgress),
+    ) -> Result<WorkerResponse> {
         let payload = serde_json::to_vec(request)
             .map_err(|e| CoreError::Other(format!("cannot encode native AI request: {e}")))?;
         if (payload.len() as u64) > MAX_REQUEST_BYTES {
@@ -602,20 +758,34 @@ impl LiveWorker {
                 CoreError::Other(format!("cannot send request to native AI worker: {e}"))
             })?;
 
+        loop {
         match self.responses.recv_timeout(timeout) {
-            Ok(Ok(bytes)) => serde_json::from_slice(&bytes).map_err(|e| {
-                CoreError::Other(format!("native AI worker returned invalid data: {e}"))
-            }),
-            Ok(Err(error)) => Err(CoreError::Other(format!(
+            Ok(Ok(bytes)) => {
+                let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
+                    CoreError::Other(format!("native AI worker returned invalid data: {e}"))
+                })?;
+                if response.is_progress() {
+                    if let Some(progress) = response.progress {
+                        on_progress(progress);
+                    }
+                    // Keep waiting: the timeout covers silence, not the whole
+                    // job, so a long transcription that is visibly advancing
+                    // is never cut off.
+                    continue;
+                }
+                return Ok(response);
+            }
+            Ok(Err(error)) => return Err(CoreError::Other(format!(
                 "native AI worker connection failed: {error}"
             ))),
-            Err(RecvTimeoutError::Timeout) => Err(CoreError::Other(format!(
+            Err(RecvTimeoutError::Timeout) => return Err(CoreError::Other(format!(
                 "native AI worker exceeded its {} minute time limit and was stopped",
                 timeout.as_secs() / 60
             ))),
-            Err(RecvTimeoutError::Disconnected) => Err(CoreError::Other(
+            Err(RecvTimeoutError::Disconnected) => return Err(CoreError::Other(
                 "native AI worker exited unexpectedly".to_string(),
             )),
+        }
         }
     }
 }

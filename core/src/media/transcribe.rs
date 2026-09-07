@@ -46,7 +46,7 @@ pub trait Transcriber {
 /// Progress update from a running transcription pass. `percent` is a
 /// best-effort 0-100 completion estimate, and `message` is a
 /// human-readable label the UI can show verbatim.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranscribeProgress {
     pub percent: u8,
     pub message: String,
@@ -98,6 +98,48 @@ impl WhisperBackend {
 /// Runs whisper.cpp locally against a `ggml`/`gguf` Whisper model file.
 /// Stateless per call beyond the loaded model, so one instance can be reused
 /// across many `transcribe()` calls (avoids re-loading the model each time).
+/// A loaded whisper model, resident in the worker child between requests.
+///
+/// Mirrors `local_llm::LlmSlot`. Loading reads a multi-hundred-megabyte file,
+/// so keeping it across imports is what makes a second transcription quick.
+pub(crate) struct WhisperSlot {
+    model_path: std::path::PathBuf,
+    language: Option<String>,
+    transcriber: WhisperTranscriber,
+}
+
+impl WhisperSlot {
+    fn matches(&self, model_path: &Path, language: Option<&str>) -> bool {
+        self.model_path == model_path && self.language.as_deref() == language
+    }
+}
+
+/// Transcribe in the child. Runs only in the worker process.
+///
+/// A fault inside whisper.cpp — an allocation failure, a driver reset — ends
+/// the worker instead of the application.
+pub(crate) fn transcribe_in_process(
+    slot: &mut Option<WhisperSlot>,
+    model_path: &Path,
+    language: Option<&str>,
+    wav_path: &Path,
+    on_progress: &mut dyn FnMut(TranscribeProgress),
+) -> Result<Transcript> {
+    if !slot.as_ref().is_some_and(|c| c.matches(model_path, language)) {
+        // Release the previous model before loading another.
+        *slot = None;
+        *slot = Some(WhisperSlot {
+            model_path: model_path.to_path_buf(),
+            language: language.map(str::to_string),
+            transcriber: WhisperTranscriber::load(model_path, language)?,
+        });
+    }
+    slot.as_ref()
+        .expect("slot populated above")
+        .transcriber
+        .transcribe_with_progress(wav_path, on_progress)
+}
+
 pub struct WhisperTranscriber {
     ctx: WhisperContext,
     language: Option<String>,
@@ -596,6 +638,56 @@ mod backend_detection_tests {
                 assert!(!reason.is_empty(), "reason should not be empty");
             }
             other => panic!("expected CPU fallback, got {other:?}"),
+        }
+    }
+}
+
+/// A [`Transcriber`] that runs whisper in the isolated worker process.
+///
+/// Holds only a path and a language: the model itself is never loaded in this
+/// process, so a fault inside whisper.cpp ends the worker rather than the
+/// application. Progress reports stream back from the child as they happen, so
+/// the live percentage during a long transcription is unchanged — including
+/// the up-front "running on CPU, here is why" warning, which the child emits
+/// as its first progress message.
+pub struct WorkerTranscriber {
+    model_path: std::path::PathBuf,
+    language: Option<String>,
+}
+
+impl WorkerTranscriber {
+    pub fn new(model_path: &Path, language: Option<&str>) -> Self {
+        Self {
+            model_path: model_path.to_path_buf(),
+            language: language.map(str::to_string),
+        }
+    }
+}
+
+impl Transcriber for WorkerTranscriber {
+    fn transcribe_with_progress(
+        &self,
+        wav_path: &Path,
+        on_progress: &mut dyn FnMut(TranscribeProgress),
+    ) -> Result<Transcript> {
+        // Generous, because it bounds silence rather than the whole job: the
+        // child reports progress as it goes and each report restarts the wait,
+        // so a long file that is visibly advancing is never cut off.
+        const WHISPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
+        match crate::ai::worker::execute_with_progress(
+            crate::ai::worker::WorkerRequest::Whisper {
+                model_path: self.model_path.clone(),
+                language: self.language.clone(),
+                wav_path: wav_path.to_path_buf(),
+            },
+            WHISPER_TIMEOUT,
+            on_progress,
+        )? {
+            crate::ai::worker::WorkerOutput::Whisper(transcript) => Ok(transcript),
+            _ => Err(CoreError::Other(
+                "transcription worker returned an unexpected response".to_string(),
+            )),
         }
     }
 }

@@ -87,12 +87,15 @@ pub async fn media_set_config(
 /// re-loading it on every single video import — the cache key is the
 /// *resolved* model path plus language, so it naturally reloads if either
 /// changes (e.g. the user picks a different model in Settings) without
-/// needing an explicit invalidation call.
+/// Resolves which whisper model to use, without loading it.
+///
+/// Loading happens in the worker child and the model stays resident there
+/// between imports, so this side needs nothing but the path and language.
 #[cfg(not(target_os = "android"))]
-fn cached_transcriber(
+fn worker_transcriber(
     config: &MediaConfig,
     data_dir: &std::path::Path,
-) -> Result<Arc<grafium_core::media::WhisperTranscriber>, String> {
+) -> Result<grafium_core::media::WorkerTranscriber, String> {
     use grafium_core::model_library::{self, ModelKind};
 
     let models_dir = config
@@ -111,31 +114,10 @@ fn cached_transcriber(
         resolved = %resolved_path.display(),
         "resolved whisper model"
     );
-    let cache_key = (resolved_path, config.whisper.language.clone());
-
-    static CACHE: OnceLock<
-        Mutex<
-            Option<(
-                (PathBuf, Option<String>),
-                Arc<grafium_core::media::WhisperTranscriber>,
-            )>,
-        >,
-    > = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().map_err(|e| e.to_string())?;
-
-    if let Some((key, transcriber)) = guard.as_ref() {
-        if *key == cache_key {
-            return Ok(transcriber.clone());
-        }
-    }
-
-    let transcriber = Arc::new(
-        grafium_core::media::WhisperTranscriber::from_config(config, data_dir)
-            .map_err(|e| e.to_string())?,
-    );
-    *guard = Some((cache_key, transcriber.clone()));
-    Ok(transcriber)
+    Ok(grafium_core::media::WorkerTranscriber::new(
+        &resolved_path,
+        config.whisper.language.as_deref(),
+    ))
 }
 
 /// Fetches a transcript for `url`: captions first (cheap, no transcription
@@ -168,33 +150,16 @@ fn fetch_transcript_blocking(
             });
     }
 
-    on_progress("Loading Whisper model...");
-    let transcriber = cached_transcriber(media_config, data_dir)?;
-    // Show which backend Whisper actually landed on *before* audio
-    // download/decode starts, so if the user is going to be sitting
-    // through minutes of CPU-only transcription they know that up
-    // front (and can cancel + fix drivers) instead of only finding
-    // out when it takes 10x realtime.
-    match transcriber.backend() {
-        grafium_core::media::WhisperBackend::Vulkan { device } => {
-            let label = device
-                .as_deref()
-                .map(|d| format!("Vulkan GPU ({d})"))
-                .unwrap_or_else(|| "Vulkan GPU".to_string());
-            on_progress(&format!("Whisper loaded on {label}."));
-        }
-        grafium_core::media::WhisperBackend::Cpu { reason } => {
-            on_progress(&format!(
-                "⚠ Whisper GPU unavailable — falling back to CPU. Reason: {reason} \
-                 (transcription will be significantly slower)."
-            ));
-        }
-    }
+    // Runs whisper in the isolated worker: nothing about the model is loaded
+    // in this process, so a fault inside whisper.cpp ends the worker instead of
+    // the app. The "running on CPU, here is why" notice still reaches the user
+    // — the child sends it as its first progress message.
+    let transcriber = worker_transcriber(media_config, data_dir)?;
     grafium_core::media::fetch_transcript_with_progress(
         url,
         workdir,
         lang,
-        transcriber.as_ref(),
+        &transcriber,
         on_progress,
     )
     .map_err(|e| e.to_string())
