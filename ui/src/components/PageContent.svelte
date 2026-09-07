@@ -1,8 +1,9 @@
 <script lang="ts">
   import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
+  import UnifiedPageEditor from "./UnifiedPageEditor.svelte";
   import CollectionMembers from "./CollectionMembers.svelte";
   import PageMenu from "./PageMenu.svelte";
   import { listBlocks, createBlock, deleteBlock, updateBlock, moveBlock, getBacklinks, getPage, getParentPage, getChildPages } from "../lib/api";
@@ -122,6 +123,8 @@
   let selectedBlockIds: Set<string> = $state(new Set());
   let collapsedIds: Set<string> = $state(new Set());
   const pageLoadState = createPageLoadState();
+  const UNIFIED_EDITOR_PROTOTYPE_KEY = "grafium.experimental.unifiedPageEditor";
+  let useUnifiedEditorPrototype = $state(false);
 
   const BLOCK_SHELL_GAP = 2;
   const DEFAULT_BLOCK_HEIGHT = 68;
@@ -151,6 +154,14 @@
     });
   });
   const windowedBlocks = $derived(virtualWindow.items);
+
+  onMount(() => {
+    try {
+      useUnifiedEditorPrototype = localStorage.getItem(UNIFIED_EDITOR_PROTOTYPE_KEY) === "1";
+    } catch {
+      useUnifiedEditorPrototype = false;
+    }
+  });
 
   $effect(() => {
     const activeIds = new Set(blocks.map((block) => block.id));
@@ -318,6 +329,22 @@
 
   function currentPageLoad(): PageLoadRequest {
     return capturePageLoad(pageLoadState, page.id, page.title);
+  }
+
+  function setUnifiedEditorPrototype(enabled: boolean) {
+    useUnifiedEditorPrototype = enabled;
+    try {
+      localStorage.setItem(UNIFIED_EDITOR_PROTOTYPE_KEY, enabled ? "1" : "0");
+    } catch {
+      // Keep the in-memory toggle working if localStorage is unavailable.
+    }
+  }
+
+  async function reloadCurrentPageContent() {
+    const request = currentPageLoad();
+    await loadBlocks(request);
+    await loadBacklinks(request);
+    await loadHierarchy(request);
   }
 
   // Register undo callback for THIS page (supports multiple instances in journal view)
@@ -1205,14 +1232,24 @@
 <div class="page-content" class:compact>
   <div class="page-heading">
     <h1 class="page-title">{page.title}</h1>
-    {#if !compact}
-      <PageMenu
-        {collectionStatus}
-        {collectionKind}
-        busy={collectionBusy}
-        onSetCollection={updateCollection}
-      />
-    {/if}
+    <div class="page-heading-actions">
+      {#if !compact}
+        <PageMenu
+          {collectionStatus}
+          {collectionKind}
+          busy={collectionBusy}
+          onSetCollection={updateCollection}
+        />
+      {/if}
+      <button
+        class="prototype-toggle"
+        type="button"
+        onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
+        title="Try the one-surface editor prototype for cross-block text selection"
+      >
+        {useUnifiedEditorPrototype ? "Classic block editor" : "Unified editor prototype"}
+      </button>
+    </div>
   </div>
 
   {#if !compact && collectionKind !== null}
@@ -1252,49 +1289,58 @@
     {/if}
   {/if}
 
-  <div class="blocks-container" bind:this={blocksViewportEl}>
-    {#if virtualWindow.topSpacer > 0}
-      <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
-    {/if}
-    {#each windowedBlocks as block (block.id)}
-      <div
-        class="block-shell"
-        id={`block-${block.id}`}
-        data-block-id={block.id}
-        use:trackBlockHeight={block.id}
-      >
-        <BlockEditor
-          bind:this={blockRefs[block.id]}
-          {block}
-          pageId={page.id}
-          pageTitle={page.title}
-          {assetBaseDir}
-          guides={getBlockGuides(block.id)}
-          depth={getBlockDepth(block.id)}
-          focused={focusedBlockId === block.id}
-          selected={selectedBlockIds.has(block.id)}
-          hasChildren={hasChildren(block.id)}
-          collapsed={collapsedIds.has(block.id)}
-          onFocus={handleFocus}
-          onBlur={handleBlur}
-          onEnter={handleEnter}
-          onDelete={handleDelete}
-          onNavigate={handleNavigate}
-          onIndent={handleIndent}
-          onBulletClick={handleBulletClick}
-          onPasteBlocks={handlePasteBlocks}
-          onToggleCollapse={toggleCollapse}
-        />
-      </div>
-    {/each}
-    {#if virtualWindow.bottomSpacer > 0}
-      <div class="virtual-spacer" style={`height: ${virtualWindow.bottomSpacer}px;`} aria-hidden="true"></div>
-    {/if}
-  </div>
+  {#if useUnifiedEditorPrototype}
+    <UnifiedPageEditor
+      {page}
+      {compact}
+      onReload={reloadCurrentPageContent}
+      onExitPrototype={() => setUnifiedEditorPrototype(false)}
+    />
+  {:else}
+    <div class="blocks-container" bind:this={blocksViewportEl}>
+      {#if virtualWindow.topSpacer > 0}
+        <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
+      {/if}
+      {#each windowedBlocks as block (block.id)}
+        <div
+          class="block-shell"
+          id={`block-${block.id}`}
+          data-block-id={block.id}
+          use:trackBlockHeight={block.id}
+        >
+          <BlockEditor
+            bind:this={blockRefs[block.id]}
+            {block}
+            pageId={page.id}
+            pageTitle={page.title}
+            {assetBaseDir}
+            guides={getBlockGuides(block.id)}
+            depth={getBlockDepth(block.id)}
+            focused={focusedBlockId === block.id}
+            selected={selectedBlockIds.has(block.id)}
+            hasChildren={hasChildren(block.id)}
+            collapsed={collapsedIds.has(block.id)}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            onEnter={handleEnter}
+            onDelete={handleDelete}
+            onNavigate={handleNavigate}
+            onIndent={handleIndent}
+            onBulletClick={handleBulletClick}
+            onPasteBlocks={handlePasteBlocks}
+            onToggleCollapse={toggleCollapse}
+          />
+        </div>
+      {/each}
+      {#if virtualWindow.bottomSpacer > 0}
+        <div class="virtual-spacer" style={`height: ${virtualWindow.bottomSpacer}px;`} aria-hidden="true"></div>
+      {/if}
+    </div>
 
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="click-below" onclick={handleClickBelow}></div>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="click-below" onclick={handleClickBelow}></div>
+  {/if}
 
   {#if parentPage || childPages.length > 0}
     <div class="hierarchy-section">
@@ -1387,6 +1433,29 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 8px;
+  }
+
+  .page-heading-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .prototype-toggle {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 5px 8px;
+    flex-shrink: 0;
+  }
+
+  .prototype-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   /* Highlights are injected into rendered block HTML, so the selector has to
@@ -1504,6 +1573,11 @@
 
   .compact .page-heading {
     margin-bottom: 4px;
+  }
+
+  .compact .prototype-toggle {
+    font-size: 11px;
+    padding: 3px 6px;
   }
 
   .compact .click-below {

@@ -2,7 +2,13 @@ import "./styles/global.css";
 import "katex/dist/katex.min.css";
 import App from "./App.svelte";
 import { mount } from "svelte";
-import { undo, redo } from "@codemirror/commands";
+import { EditorSelection } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  redo,
+  undo,
+} from "@codemirror/commands";
 
 // === Native undo/redo handlers (called by Rust via eval()) ===
 // These are set as globals so Rust can call them directly
@@ -33,6 +39,80 @@ import { undo, redo } from "@codemirror/commands";
   } else {
     window.dispatchEvent(new CustomEvent("app-redo"));
   }
+};
+
+function getActiveEditorView(): EditorView | null {
+  const globalView = (window as any).__activeEditorView ?? (window as any).__unifiedPageEditorView;
+  if (globalView instanceof EditorView) {
+    return globalView;
+  }
+
+  const active = document.activeElement as HTMLElement | null;
+  if (!active) return null;
+
+  const editorDom = active.closest(".cm-editor") as HTMLElement | null;
+  return EditorView.findFromDOM(active) ?? (editorDom ? EditorView.findFromDOM(editorDom) : null);
+}
+
+function debugLog(message: string) {
+  console.log(message);
+  void invoke("debug_log", { message }).catch((error) => {
+    console.error("[debug_log] failed", error);
+  });
+  (window as any).__keydbg?.(message);
+}
+
+function selectionSummary(view: EditorView): string {
+  const selection = view.state.selection.main;
+  const line = view.state.doc.lineAt(selection.head);
+  return `anchor=${selection.anchor} head=${selection.head} empty=${selection.empty} line=${line.number}/${view.state.doc.lines} doc=${view.state.doc.length} focus=${view.hasFocus}`;
+}
+
+function moveVerticalSelection(view: EditorView, direction: "up" | "down", extend: boolean): boolean {
+  view.focus();
+  const selection = view.state.selection;
+  const range = selection.main;
+  const moved = view.moveVertically(range, direction === "down");
+  const nextRange = extend
+    ? EditorSelection.range(
+        range.anchor,
+        moved.head,
+        moved.goalColumn,
+        moved.bidiLevel ?? undefined,
+        moved.assoc,
+      )
+    : EditorSelection.cursor(
+        moved.head,
+        moved.assoc,
+        moved.bidiLevel ?? undefined,
+        moved.goalColumn,
+      );
+  const nextSelection = selection.replaceRange(nextRange);
+  if (nextSelection.eq(selection, true)) {
+    return false;
+  }
+
+  view.dispatch({
+    selection: nextSelection,
+    scrollIntoView: true,
+    userEvent: extend ? "select.keyboard" : "move.keyboard",
+  });
+  requestAnimationFrame(() => view.focus());
+  return true;
+}
+
+(window as any).__handleNativeVerticalArrow = (direction: "up" | "down", extend: boolean) => {
+  const view = getActiveEditorView();
+  if (!view) {
+    debugLog(`[arrow] native ${direction} extend=${extend} no active CodeMirror view active=${document.activeElement?.tagName ?? "none"}`);
+    return false;
+  }
+
+  const before = selectionSummary(view);
+  const handled = moveVerticalSelection(view, direction, extend);
+  const after = selectionSummary(view);
+  debugLog(`[arrow] native ${direction} extend=${extend} handled=${handled} before ${before} after ${after}`);
+  return handled;
 };
 
 // === Fallback: beforeinput event ===
@@ -66,6 +146,12 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
     console.log("[redo] keydown Ctrl+Y caught");
     e.preventDefault();
     (window as any).__handleNativeRedo();
+  } else if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    const handled = (window as any).__handleNativeVerticalArrow(e.key === "ArrowUp" ? "up" : "down", true);
+    if (handled) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
   }
 }, true); // capture phase
 

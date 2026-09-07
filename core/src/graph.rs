@@ -1609,6 +1609,24 @@ impl Graph {
         Ok(())
     }
 
+    /// Read the markdown source backing a page.
+    pub fn get_page_source(&self, page_id: &str) -> Result<String> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let file_path = self.resolve_page_file_path(&page)?;
+        Ok(fs::read_to_string(file_path)?)
+    }
+
+    /// Replace a page's markdown source and re-index it into block rows.
+    pub fn update_page_source(&self, page_id: &str, content: &str) -> Result<()> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let file_path = self.resolve_page_file_path(&page)?;
+
+        fs::write(&file_path, content)?;
+        self.note_self_write(&file_path);
+        self.forget_indexed_content(&file_path);
+        self.index_file(&file_path)
+    }
+
     /// Reorder blocks for a page, then rewrite the file.
     pub fn reorder_blocks(&self, page_id: &str, block_ids: &[String]) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
@@ -2207,6 +2225,40 @@ mod tests {
             .filter(|n| n != "note.md")
             .collect();
         assert!(strays.is_empty(), "unexpected leftover files: {strays:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn page_source_update_round_trips_into_block_rows() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("source-prototype", false)?;
+
+        assert!(graph.get_page_source(&page.id)?.contains("- "));
+
+        graph.update_page_source(
+            &page.id,
+            concat!(
+                "- Alpha\n",
+                "  id:: alpha-id\n",
+                "  - Child\n",
+                "    id:: child-id\n",
+                "- Beta\n",
+                "  id:: beta-id\n",
+            ),
+        )?;
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].id, "alpha-id");
+        assert_eq!(blocks[0].content, "Alpha");
+        assert_eq!(blocks[1].id, "child-id");
+        assert_eq!(blocks[1].parent_id.as_deref(), Some("alpha-id"));
+        assert_eq!(blocks[1].content, "Child");
+        assert_eq!(blocks[2].id, "beta-id");
+        assert_eq!(blocks[2].parent_id, None);
+        assert_eq!(blocks[2].content, "Beta");
 
         Ok(())
     }

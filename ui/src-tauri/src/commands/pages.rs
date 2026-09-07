@@ -118,6 +118,26 @@ pub fn delete_page(state: State<AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn get_page_source(state: State<AppState>, page_id: String) -> Result<String, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .get_page_source(&page_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_page_source(
+    state: State<AppState>,
+    page_id: String,
+    content: String,
+) -> Result<(), String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .update_page_source(&page_id, &content)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn get_parent_page(state: State<AppState>, title: String) -> Result<Option<Page>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.db.get_parent_page(&title).map_err(|e| e.to_string())
