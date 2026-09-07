@@ -356,7 +356,7 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 
                 if now_available && !previously_available {
                     // Target just became available!
-                    eprintln!("[sync-monitor] Target '{}' is now available", target.name);
+                    tracing::info!("Target '{}' is now available", target.name);
 
                     // Emit event to frontend
                     let _ = app_handle.emit(
@@ -1645,20 +1645,20 @@ pub fn run() {
                             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-                            eprintln!("[GTK-WEBVIEW] key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
+                            tracing::trace!("key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
                             if ctrl && !shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Z detected, calling eval(__handleNativeUndo)");
+                                tracing::trace!("=> Ctrl+Z detected, calling eval(__handleNativeUndo)");
                                 let _ = eval_window2.eval("window.__handleNativeUndo && window.__handleNativeUndo()");
                                 return gtk::glib::Propagation::Stop;
                             }
                             if ctrl && shift && (keyval == gdk::keys::constants::z || keyval == gdk::keys::constants::Z) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Shift+Z detected");
+                                tracing::trace!("=> Ctrl+Shift+Z detected");
                                 let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                 return gtk::glib::Propagation::Stop;
                             }
                             if ctrl && (keyval == gdk::keys::constants::y || keyval == gdk::keys::constants::Y) {
-                                eprintln!("[GTK-WEBVIEW] => Ctrl+Y detected");
+                                tracing::trace!("=> Ctrl+Y detected");
                                 let _ = eval_window2.eval("window.__handleNativeRedo && window.__handleNativeRedo()");
                                 return gtk::glib::Propagation::Stop;
                             }
@@ -1668,7 +1668,7 @@ pub fn run() {
                                 } else {
                                     "down"
                                 };
-                                eprintln!("[GTK-WEBVIEW] => Shift+Arrow{} detected", direction);
+                                tracing::trace!("=> Shift+Arrow{} detected", direction);
                                 let script = format!(
                                     "window.__handleNativeVerticalArrow && window.__handleNativeVerticalArrow('{}', true)",
                                     direction
