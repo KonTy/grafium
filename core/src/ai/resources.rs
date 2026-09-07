@@ -55,16 +55,27 @@ pub fn safe_generated_tokens(requested: Option<u32>) -> Result<u32> {
     Ok(tokens)
 }
 
+/// GPU offload is allowed by default.
+///
+/// This used to refuse any offload unless an environment variable opted in,
+/// on the grounds that portable VRAM admission checks could not reliably
+/// prevent a driver reset from taking the process down. That reasoning was
+/// sound when the model ran inside the application: a reset was fatal and
+/// unrecoverable, so refusing to risk it was the safer trade.
+///
+/// It no longer holds. The model runs in a supervised child process, so a
+/// driver reset ends the worker and the next request starts a fresh one — the
+/// exact failure the refusal existed to avoid is now contained. Keeping it
+/// would mean every model silently running on CPU, roughly forty times slower,
+/// to avoid something that can no longer happen.
+///
+/// `GRAFIUM_DISABLE_GPU_OFFLOAD=1` still forces CPU, for a machine whose
+/// driver is genuinely unstable.
 pub fn safe_gpu_layers(requested: Option<u32>) -> Result<u32> {
     let layers = requested.unwrap_or(0);
-    if layers > 0 && std::env::var_os("GRAFIUM_ALLOW_GPU_OFFLOAD").is_none() {
-        return Err(CoreError::Other(
-            "GPU offload is disabled by Grafium's safe mode because portable VRAM \
-             admission checks are not reliable enough to prevent driver resets. Set \
-             GRAFIUM_ALLOW_GPU_OFFLOAD=1 to explicitly opt in, then choose a conservative \
-             layer count."
-                .to_string(),
-        ));
+    if layers > 0 && std::env::var_os("GRAFIUM_DISABLE_GPU_OFFLOAD").is_some() {
+        tracing::info!("GPU offload disabled by GRAFIUM_DISABLE_GPU_OFFLOAD; running on CPU");
+        return Ok(0);
     }
     Ok(layers)
 }

@@ -56,7 +56,7 @@ sync = ["urlencoding"]
 # Local video/audio transcription (`media::transcribe`). Optional because it
 # pulls in a C++ build of whisper.cpp — most consumers (e.g. the Android
 # build) don't need it, and it noticeably slows down a clean build.
-media = ["dep:whisper-rs", "dep:hound"]
+media = ["dep:whisper-rs", "dep:hound", "dep:tracing-subscriber"]
 # Same as `media`, but offloads whisper.cpp inference to the GPU via Vulkan
 # (works with just the Vulkan loader + GPU driver already installed — no
 # full CUDA toolkit required).

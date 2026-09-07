@@ -229,7 +229,7 @@ impl LlmSlot {
     }
 }
 
-fn install_llm_logging() {
+pub(crate) fn install_llm_logging() {
     static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
     INSTALL_LOGGING.call_once(|| {
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
@@ -388,16 +388,28 @@ fn new_chat_message(role: &str, content: &str) -> Result<LlamaChatMessage> {
 /// Extracted as its own function so it's obvious this is the *only* place
 /// sampling policy is decided — nothing else should construct a
 /// `LlamaSampler` by hand.
-fn build_sampler(options: &CompletionOptions) -> LlamaSampler {
+fn build_sampler(model: &LlamaModel, options: &CompletionOptions) -> LlamaSampler {
     const SEED: u32 = 1234;
+    // Repetition control is applied to *both* chains, greedy included. Without
+    // it, greedy decoding has nothing to break a degenerate attractor: once the
+    // argmax token reproduces its own context, it stays the argmax forever and
+    // generation becomes the same token repeated until max_tokens. That is not
+    // hypothetical — it produced a full screen of "起来" from an English prompt,
+    // because these are Qwen-family models and their degenerate attractors land
+    // on common Chinese tokens.
+    //
+    // llama.cpp's own long-standing defaults: penalize within the last 64
+    // tokens, 1.1x repeat penalty, frequency/presence penalties off.
+    let penalties = || LlamaSampler::penalties(model.n_vocab(), 64, 1.1, 0.0, 0.0);
     match options.temperature {
         Some(t) if t > 0.0 => LlamaSampler::chain_simple([
+            penalties(),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.95, 1),
             LlamaSampler::temp(t),
             LlamaSampler::dist(SEED),
         ]),
-        _ => LlamaSampler::chain_simple([LlamaSampler::greedy()]),
+        _ => LlamaSampler::chain_simple([penalties(), LlamaSampler::greedy()]),
     }
 }
 
@@ -420,6 +432,12 @@ fn generate(
     )?;
     let n_threads = resources::inference_thread_count();
     let ctx_params = LlamaContextParams::default()
+        // n_batch is deliberately left at llama.cpp's default. Raising it to
+        // n_ctx looks like the obvious way to fit a long prompt in one decode,
+        // but llama.cpp derives n_outputs_max from n_batch and sizes the logits
+        // buffer as n_outputs_max * n_vocab * 4 bytes — on a 151936-token vocab
+        // that is ~20 GB at n_batch=32768, and context creation just returns
+        // null. The prompt is chunked to n_batch below instead.
         .with_n_ctx(Some(ctx_size))
         .with_n_threads(n_threads)
         .with_n_threads_batch(n_threads);
@@ -442,21 +460,34 @@ fn generate(
     }
     let max_new_tokens = resources::safe_generated_tokens(options.max_tokens)? as i32;
 
-    let mut batch = LlamaBatch::new(tokens.len().max(512) + 1, 1);
+    // Prefill in chunks of at most n_batch tokens. Decoding the whole prompt in
+    // one batch trips `GGML_ASSERT(n_tokens_all <= cparams.n_batch)` as soon as
+    // the prompt is longer than n_batch (2048 by default, regardless of n_ctx),
+    // and a failed GGML_ASSERT is an abort() — it kills the process rather than
+    // returning an error we can surface. Only the final token needs logits,
+    // since that is the one generation samples from.
+    let n_batch = (ctx.n_batch() as usize).max(1);
     let last_index = tokens.len() as i32 - 1;
-    for (i, token) in tokens.iter().enumerate() {
-        let is_last = i as i32 == last_index;
-        batch
-            .add(*token, i as i32, &[0], is_last)
-            .map_err(|e| CoreError::Other(format!("failed to queue prompt token: {e}")))?;
+    let mut batch = LlamaBatch::new(n_batch.min(tokens.len()).max(1), 1);
+    for chunk_start in (0..tokens.len()).step_by(n_batch) {
+        let chunk_end = (chunk_start + n_batch).min(tokens.len());
+        batch.clear();
+        for (offset, token) in tokens[chunk_start..chunk_end].iter().enumerate() {
+            let i = (chunk_start + offset) as i32;
+            batch
+                .add(*token, i, &[0], i == last_index)
+                .map_err(|e| CoreError::Other(format!("failed to queue prompt token: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| CoreError::Other(format!("llama.cpp decode of the prompt failed: {e}")))?;
     }
-    ctx.decode(&mut batch)
-        .map_err(|e| CoreError::Other(format!("llama.cpp decode of the prompt failed: {e}")))?;
 
-    let mut sampler = build_sampler(options);
+    let mut sampler = build_sampler(model, options);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut output = String::new();
-    let mut n_cur = batch.n_tokens();
+    // Absolute position in the sequence, which after a chunked prefill is the
+    // full prompt length rather than the size of the last batch decoded.
+    let mut n_cur = tokens.len() as i32;
     let stop_at_token = n_cur + max_new_tokens;
 
     while n_cur < stop_at_token && n_cur < n_ctx {

@@ -320,8 +320,30 @@ fn inflight() -> &'static Mutex<()> {
     INFLIGHT.get_or_init(|| Mutex::new(()))
 }
 
+/// Admission check for a request. Returns the address-space cap for the child,
+/// which is always "no cap" — see below.
 fn required_memory_limit(request: &WorkerRequest) -> Result<u64> {
-    memory_limit_for_request(request)
+    // Admission still runs, for every request: this compares the model's
+    // estimated working set against real available memory and refuses loads
+    // that cannot fit, with an error naming the shortfall. That check is
+    // measured against actual free memory, so it is worth keeping.
+    memory_limit_for_request(request)?;
+
+    // The estimate is deliberately not turned into an `RLIMIT_AS` cap.
+    // `RLIMIT_AS` bounds virtual address space, not resident memory, and
+    // llama.cpp's address space bears almost no relation to its working set:
+    // the model file is mmapped in full, compute buffers are reserved up
+    // front, and a GPU driver reserves tens of gigabytes it never touches.
+    // Any working-set-derived cap therefore refuses loads that would have been
+    // perfectly fine, and llama.cpp reports the refusal as nothing more than
+    // "null reference from llama.cpp" — a 639 MB embedding model died this way
+    // on a 1.4 GB cap, and so did every CPU completion, since gpu_layers
+    // defaults to 0 and the CPU path is what most installs get.
+    //
+    // What actually contains a blow-up now is the isolation itself: an
+    // out-of-memory kill or a driver reset ends this child and the next
+    // request starts a fresh one.
+    Ok(u64::MAX)
 }
 
 fn estimated_working_set(request: &WorkerRequest) -> Result<u64> {
@@ -489,7 +511,28 @@ fn memory_limit_for_request(request: &WorkerRequest) -> Result<u64> {
 
 // ─── Child process ───────────────────────────────────────────────────────────
 
+/// Sends the worker's own diagnostics to stderr.
+///
+/// Without this the child has no `tracing` subscriber at all, so everything
+/// llama.cpp reports through `install_llm_logging` — the load progress, the
+/// context parameters, and crucially the reason a context failed to be
+/// created — is formatted and then dropped on the floor. The parent inherits
+/// stderr, so writing there lands the lines in the application log next to
+/// the request that triggered them.
+///
+/// stdout is deliberately untouched: it carries the length-framed response
+/// protocol, and a stray log line written to it would desynchronize framing.
+fn init_worker_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .try_init();
+}
+
 pub fn run_from_stdio() -> i32 {
+    init_worker_logging();
     start_parent_watchdog();
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -843,6 +886,10 @@ impl Drop for LiveWorker {
 fn configure_child(command: &mut Command, memory_limit: u64) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
+    if memory_limit == u64::MAX {
+        // Uncapped on purpose — see `required_memory_limit`.
+        return Ok(());
+    }
     if memory_limit > libc::rlim_t::MAX as u64 {
         return Err(CoreError::Other(
             "native AI worker memory limit is not representable".to_string(),

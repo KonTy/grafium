@@ -80,6 +80,11 @@ fn ensure_slot(slot: &mut Option<EmbedderSlot>, model_path: &Path) -> Result<()>
     }
     // Release the previous model's native memory before loading another.
     *slot = None;
+    // Route llama.cpp's own logging through tracing before touching it. Without
+    // this the load failed with nothing but "null result from llama cpp" and
+    // the actual reason — an allocation refused, no Vulkan device — went
+    // nowhere at all.
+    crate::ai::providers::local_llm::install_llm_logging();
     let backend = shared_backend();
     let model_params = LlamaModelParams::default().with_n_gpu_layers(OFFLOAD_ALL_LAYERS);
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
@@ -365,7 +370,17 @@ fn embed_all(
         ))
     })?;
 
-    let n_ctx = ctx.n_ctx() as i32;
+    // llama.cpp pads n_ctx up to a multiple of 256 *after* fixing n_batch, so
+    // a requested ctx_size that isn't a multiple of 256 comes back with
+    // n_ctx > n_batch. Truncating to n_ctx would then overrun the batch, and
+    // for a non-causal embedding model the ubatch has to hold the whole
+    // sequence too. Take the smallest of the three limits llama.cpp actually
+    // applied — going over any of them is an abort(), not a catchable error.
+    let n_ctx = ctx
+        .n_ctx()
+        .min(ctx.n_batch())
+        .min(ctx.n_ubatch())
+        .max(1) as i32;
     let mut embeddings = Vec::with_capacity(texts.len());
 
     for text in texts {

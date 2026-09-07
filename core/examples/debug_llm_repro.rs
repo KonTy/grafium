@@ -28,6 +28,16 @@ fn vram_snapshot(label: &str) {
 
 #[tokio::main]
 async fn main() {
+    // This harness predates AI process isolation. Completions now run in a
+    // re-exec of this same binary, so it has to both answer worker
+    // invocations and register itself as the worker host — otherwise every
+    // completion fails with "native AI worker is not configured".
+    if grafium_core::ai::worker::is_worker_invocation() {
+        std::process::exit(grafium_core::ai::worker::run_from_stdio());
+    }
+    grafium_core::ai::worker::configure_current_executable()
+        .expect("failed to configure native AI worker");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -49,7 +59,7 @@ async fn main() {
     vram_snapshot("before-load");
     eprintln!("[repro] loading (context_size=None, gpu_layers={gpu_layers:?})...");
     let t0 = Instant::now();
-    let llm = LocalLlm::load(&model_path, None, gpu_layers, None).expect("load failed");
+    let llm = LocalLlm::load(&model_path, None, gpu_layers).expect("load failed");
     eprintln!("[repro] loaded '{}' in {:?}", llm.name(), t0.elapsed());
     vram_snapshot("after-load");
 
