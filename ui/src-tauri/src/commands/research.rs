@@ -2,7 +2,7 @@
 //! configuration, an engine smoke test, and the multi-round research run
 //! itself.
 //!
-//! The configuration lives beside `ai_config.json` in `<app_data>/knowledge`
+//! The configuration lives in the current graph's `knowledge/config/` folder
 //! rather than in `AiConfig`, because it is edited on a different cadence and
 //! by a different person: a student tuning prompts and search engines for one
 //! subject shouldn't risk their provider/model setup, and a malformed research
@@ -14,12 +14,14 @@
 //! code it already has — the difference is how the answer was obtained, not
 //! how it looks.
 
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
+use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::engine::AskStreamEvent;
 use grafium_core::research::{ResearchConfig, ResearchPrompts, SearchEngineDef};
 use grafium_core::scraping::browser::HttpBrowserDriver;
@@ -36,8 +38,19 @@ pub struct SearchResultPayload {
     pub snippet: String,
 }
 
-/// Resolves the directory holding `ai_config.json` / `research_config.json`.
-fn knowledge_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+/// Resolves the graph-portable directory holding `research_config.json`.
+fn graph_knowledge_config_dir(
+    app: &tauri::AppHandle,
+    app_state: &crate::AppState,
+) -> Result<PathBuf, String> {
+    let snapshot = crate::current_graph_snapshot(app, app_state.graph.as_ref())?;
+    let dir = snapshot.root_dir.join("knowledge").join("config");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Legacy machine-local location used before research prompts became graph data.
+fn legacy_app_knowledge_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -47,18 +60,40 @@ fn knowledge_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+fn research_config_dir(
+    app: &tauri::AppHandle,
+    app_state: &crate::AppState,
+) -> Result<PathBuf, String> {
+    let graph_dir = graph_knowledge_config_dir(app, app_state)?;
+    let graph_path = ResearchConfig::config_path(&graph_dir);
+    if graph_path.exists() {
+        return Ok(graph_dir);
+    }
+
+    let legacy_dir = legacy_app_knowledge_dir(app)?;
+    let legacy_path = ResearchConfig::config_path(&legacy_dir);
+    if legacy_path.exists() {
+        std::fs::copy(&legacy_path, &graph_path).map_err(|e| e.to_string())?;
+    }
+    Ok(graph_dir)
+}
+
 #[tauri::command]
-pub async fn research_get_config(app: tauri::AppHandle) -> Result<ResearchConfig, String> {
-    let dir = knowledge_dir(&app)?;
+pub async fn research_get_config(
+    app: tauri::AppHandle,
+    app_state: State<'_, crate::AppState>,
+) -> Result<ResearchConfig, String> {
+    let dir = research_config_dir(&app, &app_state)?;
     ResearchConfig::load_or_create(&dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn research_set_config(
     app: tauri::AppHandle,
+    app_state: State<'_, crate::AppState>,
     payload: ResearchConfig,
 ) -> Result<(), String> {
-    let dir = knowledge_dir(&app)?;
+    let dir = research_config_dir(&app, &app_state)?;
     payload.save(&dir).map_err(|e| e.to_string())
 }
 
@@ -66,8 +101,11 @@ pub async fn research_set_config(
 /// the numeric knobs untouched — a student who has broken one prompt shouldn't
 /// lose the engines they added to get it back.
 #[tauri::command]
-pub async fn research_reset_prompts(app: tauri::AppHandle) -> Result<ResearchConfig, String> {
-    let dir = knowledge_dir(&app)?;
+pub async fn research_reset_prompts(
+    app: tauri::AppHandle,
+    app_state: State<'_, crate::AppState>,
+) -> Result<ResearchConfig, String> {
+    let dir = research_config_dir(&app, &app_state)?;
     let mut config = ResearchConfig::load_or_create(&dir).map_err(|e| e.to_string())?;
     config.prompts = ResearchPrompts::default();
     config.save(&dir).map_err(|e| e.to_string())?;
@@ -115,7 +153,9 @@ pub async fn research_deep(
     question: String,
     request_id: String,
     graph_id: Option<String>,
+    history: Option<Vec<ChatTurn>>,
 ) -> Result<(), String> {
+    let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -129,8 +169,8 @@ pub async fn research_deep(
         );
     }
 
-    let config =
-        ResearchConfig::load_or_create(&knowledge_dir(&app)?).map_err(|e| e.to_string())?;
+    let config_dir = research_config_dir(&app, &app_state)?;
+    let config = ResearchConfig::load_or_create(&config_dir).map_err(|e| e.to_string())?;
 
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
     let resolved_graph_id =
@@ -166,10 +206,12 @@ pub async fn research_deep(
         );
     };
 
+    let effective_question = conversation::resolve_research_followup(&question, &history);
+
     let outcome = engine
         .ask_stream_with_deep_research(
             &graph.db,
-            &question,
+            &effective_question,
             Some(resolved_graph_id.as_str()),
             &config,
             Some(cancel),

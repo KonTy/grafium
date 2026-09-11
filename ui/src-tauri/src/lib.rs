@@ -55,16 +55,23 @@ impl AppState {
             }
         }
 
-        let (pages_dir, journals_dir, self_writes) = {
+        let (pages_dir, journals_dir, knowledge_dir, self_writes) = {
             let graph = self.graph.lock().map_err(|e| e.to_string())?;
             (
                 graph.pages_dir.clone(),
                 graph.journals_dir.clone(),
+                graph.knowledge_dir.clone(),
                 graph.self_write_tracker(),
             )
         };
 
-        let handle = start_graph_watcher(self.graph.clone(), pages_dir, journals_dir, self_writes)?;
+        let handle = start_graph_watcher(
+            self.graph.clone(),
+            pages_dir,
+            journals_dir,
+            knowledge_dir,
+            self_writes,
+        )?;
         let mut guard = self.watcher.lock().map_err(|e| e.to_string())?;
         *guard = Some(handle);
         Ok(())
@@ -113,10 +120,13 @@ fn should_process_event(
     event: &Event,
     pages_dir: &std::path::Path,
     journals_dir: &std::path::Path,
+    knowledge_dir: &std::path::Path,
 ) -> bool {
     event.paths.iter().any(|p| {
         p.extension().and_then(|e| e.to_str()) == Some("md")
-            && (p.starts_with(pages_dir) || p.starts_with(journals_dir))
+            && (p.starts_with(pages_dir)
+                || p.starts_with(journals_dir)
+                || p.starts_with(knowledge_dir))
     })
 }
 
@@ -138,6 +148,7 @@ fn start_graph_watcher(
     graph: Arc<Mutex<Graph>>,
     pages_dir: PathBuf,
     journals_dir: PathBuf,
+    knowledge_dir: PathBuf,
     self_writes: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 ) -> Result<GraphWatcherHandle, String> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -165,6 +176,10 @@ fn start_graph_watcher(
             eprintln!("watch journals dir failed: {}", e);
             return;
         }
+        if let Err(e) = watcher.watch(&knowledge_dir, RecursiveMode::Recursive) {
+            eprintln!("watch knowledge dir failed: {}", e);
+            return;
+        }
 
         let debounce = Duration::from_millis(400);
         let mut pending_files = std::collections::HashSet::<PathBuf>::new();
@@ -177,7 +192,7 @@ fn start_graph_watcher(
 
             match event_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(event)) => {
-                    if !should_process_event(&event, &pages_dir, &journals_dir) {
+                    if !should_process_event(&event, &pages_dir, &journals_dir, &knowledge_dir) {
                         continue;
                     }
 
@@ -1283,11 +1298,7 @@ where
             message: String,
         }
         impl tracing::field::Visit for MessageVisitor {
-            fn record_debug(
-                &mut self,
-                field: &tracing::field::Field,
-                value: &dyn std::fmt::Debug,
-            ) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 // The conventional message field is named "message";
                 // other fields get appended as key=value so the tap
                 // still captures useful context (e.g. `n_ctx=8192`).
@@ -1352,10 +1363,7 @@ pub fn run() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr),
-        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(LogTapLayer)
         .init();
 
@@ -1431,8 +1439,7 @@ pub fn run() {
             // rebuild in the background instead of blocking app initialization.
             // Use a cheap existence probe — a full page listing here would scan
             // the whole table and freeze the UI thread on very large graphs.
-            let page_count = if graph.db.has_any_page().unwrap_or(false) { 1 } else { 0 };
-            if page_count == 0 {
+            if graph.needs_startup_reindex().unwrap_or(true) {
                 let graph_dir_clone = graph_dir.clone();
                 let db_path_clone = db_path.clone();
                 let metadata_dir_clone = metadata_dir.clone();
@@ -1443,9 +1450,9 @@ pub fn run() {
                         &metadata_dir_clone,
                     ) {
                         Ok(g) => {
-                            if let Err(e) = g.reindex_all() {
+                            if let Err(e) = g.reconcile_files_from_disk() {
                                 eprintln!(
-                                    "Warning: background startup reindex failed for '{}': {}",
+                                    "Warning: background startup file reconcile failed for '{}': {}",
                                     graph_dir_clone.display(),
                                     e
                                 );
@@ -1526,6 +1533,7 @@ pub fn run() {
             start_smplos_theme_watcher(theme_app_handle);
 
             app.manage(state);
+            app.manage(commands::jobs::JobsState::new());
 
             // Initialize Knowledge Engine
             let knowledge_state = {
@@ -1698,10 +1706,15 @@ pub fn run() {
             commands::pages::count_pages,
             commands::pages::list_pages_window,
             commands::pages::list_journal_pages,
+            commands::pages::get_note_edit_counts,
+            commands::pages::get_note_edits_for_day,
             commands::pages::get_page,
             commands::pages::create_page,
             commands::pages::update_page_meta,
             commands::pages::delete_page,
+            commands::pages::delete_book_folder,
+            commands::pages::open_page_in_file_browser,
+            commands::pages::open_book_folder_in_file_browser,
             commands::pages::get_page_source,
             commands::pages::update_page_source,
             commands::pages::get_parent_page,
@@ -1712,9 +1725,12 @@ pub fn run() {
             commands::trees::page_set_collection,
             commands::trees::pages_list_collections,
             commands::blocks::list_blocks,
+            commands::blocks::get_block,
             commands::blocks::create_block,
+            commands::blocks::create_blocks,
             commands::blocks::update_block,
             commands::blocks::delete_block,
+            commands::blocks::delete_blocks,
             commands::blocks::move_block,
             commands::blocks::reorder_blocks,
             commands::blocks::get_block_page_title,
@@ -1743,6 +1759,7 @@ pub fn run() {
             commands::flashcards::update_flashcard_review,
             commands::flashcards::grade_flashcard,
             commands::flashcards::import_anki_apkg,
+            commands::books::books_import_directory,
             commands::favorites::add_favorite,
             commands::favorites::remove_favorite,
             commands::favorites::list_favorites,
@@ -1776,9 +1793,12 @@ pub fn run() {
             commands::assets::download_asset,
             commands::assets::list_assets,
             commands::assets::read_asset_data_url,
+            commands::assets::resolve_asset_file_path,
+            commands::assets::save_image_to_path,
             commands::assets::find_orphaned_assets,
             commands::assets::delete_assets,
             commands::knowledge::ai_get_config,
+            commands::knowledge::ai_default_concept_edge_prompt,
             commands::knowledge::ai_set_config,
             commands::knowledge::ai_health_check,
             commands::knowledge::ai_index_page,
@@ -1788,6 +1808,7 @@ pub fn run() {
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_summarize_selection,
+            commands::knowledge::ai_create_concept_edges,
             commands::knowledge::ai_research_web,
             commands::research::research_get_config,
             commands::research::research_set_config,
@@ -1809,6 +1830,9 @@ pub fn run() {
             debug_log,
             commands::knowledge::ai_create_default_schemas,
             commands::media::media_import_video,
+            commands::jobs::jobs_list,
+            commands::jobs::jobs_cancel,
+            commands::jobs::jobs_clear_finished,
             commands::media::media_get_config,
             commands::media::media_set_config,
             commands::ui_log,

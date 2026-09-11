@@ -437,13 +437,16 @@ fn test_book_link_in_journal_keeps_journal_text_in_the_journal() {
 
     let toc_file = tmp.path().join("pages/mybooks/coolbook/toc.md");
     assert!(toc_file.exists(), "writing in the page creates the folder");
-    assert!(std::fs::read_to_string(&toc_file).unwrap().contains("Openings"));
+    assert!(std::fs::read_to_string(&toc_file)
+        .unwrap()
+        .contains("Openings"));
     assert!(
-        !std::fs::read_to_string(&toc_file).unwrap().contains("chapter ordering"),
+        !std::fs::read_to_string(&toc_file)
+            .unwrap()
+            .contains("chapter ordering"),
         "journal text must never land in the book file"
     );
 }
-
 
 // ─── Task completion history ─────────────────────────────────────────────────
 
@@ -478,12 +481,18 @@ fn test_completion_time_is_written_to_the_file_and_survives_reindex() {
     let path = tmp.path().join("pages/work.md");
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(on_disk.contains("DONE Write the report"), "{on_disk}");
-    assert!(on_disk.contains("CLOSED: ["), "completion time must be in the file:\n{on_disk}");
+    assert!(
+        on_disk.contains("CLOSED: ["),
+        "completion time must be in the file:\n{on_disk}"
+    );
     assert!(
         on_disk.contains(r#"* State "DOING" from "TODO""#),
         "the start must be recorded too, or duration is unanswerable:\n{on_disk}"
     );
-    assert!(on_disk.contains(r#"* State "DONE" from "DOING""#), "{on_disk}");
+    assert!(
+        on_disk.contains(r#"* State "DONE" from "DOING""#),
+        "{on_disk}"
+    );
 
     // Re-index from disk, the way a fresh machine or a rebuilt database would.
     graph.index_file(&path).unwrap();
@@ -498,6 +507,33 @@ fn test_completion_time_is_written_to_the_file_and_survives_reindex() {
         fields.closed_at.is_some(),
         "the completion time must survive a re-index: {:?}",
         task_block.content
+    );
+}
+
+#[test]
+fn test_logseq_clock_completion_counts_after_reindex() {
+    let (tmp, graph) = open_graph();
+    let pages = tmp.path().join("pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    let path = pages.join("work.md");
+    std::fs::write(
+        &path,
+        "- DONE Triage all emails\n  :LOGBOOK:\n  CLOCK: [2023-07-20 Thu 10:40:28]--[2023-07-20 Thu 10:40:29] =>  00:00:01\n  CLOCK: [2023-07-20 Thu 13:07:48]--[2023-07-20 Thu 21:01:35] =>  07:53:47\n  :END:\n",
+    )
+    .unwrap();
+
+    graph.index_file(&path).unwrap();
+
+    let completed = graph.db.get_completed_tasks(10_000).unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].1, "DONE Triage all emails\n:LOGBOOK:\nCLOCK: [2023-07-20 Thu 10:40:28]--[2023-07-20 Thu 10:40:29] =>  00:00:01\nCLOCK: [2023-07-20 Thu 13:07:48]--[2023-07-20 Thu 21:01:35] =>  07:53:47\n:END:");
+
+    let counts = graph.db.get_completion_counts(10_000).unwrap();
+    assert!(
+        counts
+            .iter()
+            .any(|(day, count)| day == "2023-07-20" && *count == 1),
+        "Logseq clock completion must feed the heatmap: {counts:?}"
     );
 }
 
@@ -525,7 +561,10 @@ fn test_reopening_a_task_clears_the_completion_time() {
         .unwrap();
 
     let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
-    assert!(!on_disk.contains("CLOSED:"), "a reopened task is not closed:\n{on_disk}");
+    assert!(
+        !on_disk.contains("CLOSED:"),
+        "a reopened task is not closed:\n{on_disk}"
+    );
     assert!(
         on_disk.contains(r#"* State "TODO" from "DONE""#),
         "reopening is itself part of the history:\n{on_disk}"
@@ -558,7 +597,8 @@ fn test_a_long_neglected_task_is_still_listed() {
 
     let open = graph.db.get_open_tasks(182).unwrap();
     assert!(
-        open.iter().any(|(_, content, _, _, _)| content.contains("Renew the domain")),
+        open.iter()
+            .any(|(_, content, _, _, _)| content.contains("Renew the domain")),
         "a neglected task must not disappear from the list: {open:?}"
     );
 }
@@ -588,7 +628,10 @@ fn test_a_repeating_task_reopens_on_its_next_date() {
         on_disk.contains("TODO Water the plants"),
         "a repeating task comes back open, not DONE:\n{on_disk}"
     );
-    assert!(!on_disk.contains("CLOSED:"), "and it is not closed:\n{on_disk}");
+    assert!(
+        !on_disk.contains("CLOSED:"),
+        "and it is not closed:\n{on_disk}"
+    );
     assert!(
         !on_disk.contains("<2026-09-07"),
         "its date must have moved on:\n{on_disk}"
@@ -635,7 +678,10 @@ fn test_flow_stats_measure_real_work() {
     let stats = graph.db.task_flow_stats(8).unwrap();
     assert_eq!(stats.done_count, 2);
     assert_eq!(stats.open_count, 1);
-    assert!(stats.throughput_7d > 0.0, "two completions today should register");
+    assert!(
+        stats.throughput_7d > 0.0,
+        "two completions today should register"
+    );
     assert_eq!(stats.weekly_completions.len(), 8);
     assert_eq!(
         stats.weekly_completions.last().copied(),
@@ -643,7 +689,10 @@ fn test_flow_stats_measure_real_work() {
         "both completions land in the current week"
     );
     assert!(
-        stats.by_page.iter().any(|(title, n)| title == "work" && *n == 2),
+        stats
+            .by_page
+            .iter()
+            .any(|(title, n)| title == "work" && *n == 2),
         "completions are attributed to their page: {:?}",
         stats.by_page
     );
@@ -659,24 +708,46 @@ fn test_on_time_rate_ignores_tasks_without_a_deadline() {
 
     // No deadline at all — must not drag the rate down.
     let plain = graph
-        .create_block(&page.id, None, 0, "TODO No deadline",
-            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO No deadline",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
         .unwrap();
-    graph.update_task_state(&plain.id, &TaskState::Done).unwrap();
+    graph
+        .update_task_state(&plain.id, &TaskState::Done)
+        .unwrap();
     assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, None);
 
     // Finished comfortably before a deadline a long way off.
     let timely = graph
-        .create_block(&page.id, None, 1, "TODO Beat the deadline\nDEADLINE: <2099-01-01 Fri>",
-            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .create_block(
+            &page.id,
+            None,
+            1,
+            "TODO Beat the deadline\nDEADLINE: <2099-01-01 Fri>",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
         .unwrap();
-    graph.update_task_state(&timely.id, &TaskState::Done).unwrap();
+    graph
+        .update_task_state(&timely.id, &TaskState::Done)
+        .unwrap();
     assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(1.0));
 
     // And one finished long after its deadline.
     let late = graph
-        .create_block(&page.id, None, 2, "TODO Missed it\nDEADLINE: <2000-01-01 Sat>",
-            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .create_block(
+            &page.id,
+            None,
+            2,
+            "TODO Missed it\nDEADLINE: <2000-01-01 Sat>",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
         .unwrap();
     graph.update_task_state(&late.id, &TaskState::Done).unwrap();
     assert_eq!(graph.db.task_flow_stats(4).unwrap().on_time_rate, Some(0.5));
@@ -696,43 +767,75 @@ fn test_backfill_writes_missing_completion_times() {
     use grafium_core::models::TaskState;
 
     let block = graph
-        .create_block(&page.id, None, 0, "TODO Old finished thing",
-            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Old finished thing",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
         .unwrap();
-    graph.update_task_state(&block.id, &TaskState::Done).unwrap();
+    graph
+        .update_task_state(&block.id, &TaskState::Done)
+        .unwrap();
 
-    // Strip the CLOSED: line to recreate a task finished before this existed,
-    // leaving its completion event behind in the database.
+    // Strip durable completion history to recreate a task finished before any
+    // markdown timestamp existed, leaving only its event behind in the database.
     let stripped: String = graph
         .db
         .get_block_by_id(&block.id)
         .unwrap()
         .content
         .lines()
-        .filter(|l| !l.trim_start().starts_with("CLOSED:"))
+        .filter(|l| {
+            let trimmed = l.trim_start();
+            !trimmed.starts_with("CLOSED:") && !trimmed.contains(r#"State "DONE""#)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     graph.update_block(&block.id, &stripped, None).unwrap();
-    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+    assert!(!graph
+        .db
+        .get_block_by_id(&block.id)
+        .unwrap()
+        .content
+        .contains("CLOSED:"));
 
     // A dry run reports without writing and without a backup.
     let preview = graph.backfill_task_completions(true).unwrap();
     assert_eq!(preview.tasks_updated, 1);
-    assert!(preview.backup_path.is_none(), "a dry run must not copy anything");
-    assert!(!graph.db.get_block_by_id(&block.id).unwrap().content.contains("CLOSED:"));
+    assert!(
+        preview.backup_path.is_none(),
+        "a dry run must not copy anything"
+    );
+    assert!(!graph
+        .db
+        .get_block_by_id(&block.id)
+        .unwrap()
+        .content
+        .contains("CLOSED:"));
 
     // The real run writes the line and leaves a backup behind.
     let done = graph.backfill_task_completions(false).unwrap();
     assert_eq!(done.tasks_updated, 1);
-    let backup = done.backup_path.expect("a bulk edit must take a backup first");
-    assert!(std::path::Path::new(&backup).exists(), "backup missing at {backup}");
+    let backup = done
+        .backup_path
+        .expect("a bulk edit must take a backup first");
+    assert!(
+        std::path::Path::new(&backup).exists(),
+        "backup missing at {backup}"
+    );
 
     let on_disk = std::fs::read_to_string(tmp.path().join("pages/work.md")).unwrap();
     assert!(on_disk.contains("CLOSED: ["), "{on_disk}");
 
     // Running again must be a no-op rather than a second line.
     let again = graph.backfill_task_completions(true).unwrap();
-    assert_eq!(again.tasks_updated, 0, "already-recorded completions are left alone");
+    assert_eq!(
+        again.tasks_updated, 0,
+        "already-recorded completions are left alone"
+    );
 }
 
 /// A task whose file already records its completion is never rewritten.
@@ -741,15 +844,24 @@ fn test_backfill_leaves_existing_completion_times_alone() {
     let (_tmp, graph) = open_graph();
     let page = graph.create_page("work", false).unwrap();
     let block = graph
-        .create_block(&page.id, None, 0, "TODO Thing",
-            grafium_core::models::BlockType::Text, serde_json::json!({}))
+        .create_block(
+            &page.id,
+            None,
+            0,
+            "TODO Thing",
+            grafium_core::models::BlockType::Text,
+            serde_json::json!({}),
+        )
         .unwrap();
     graph
         .update_task_state(&block.id, &grafium_core::models::TaskState::Done)
         .unwrap();
 
     let before = graph.db.get_block_by_id(&block.id).unwrap().content;
-    assert_eq!(graph.backfill_task_completions(true).unwrap().tasks_updated, 0);
+    assert_eq!(
+        graph.backfill_task_completions(true).unwrap().tasks_updated,
+        0
+    );
     graph.backfill_task_completions(false).unwrap();
     assert_eq!(graph.db.get_block_by_id(&block.id).unwrap().content, before);
 }

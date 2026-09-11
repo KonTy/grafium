@@ -621,6 +621,22 @@ impl Database {
         Ok(rows)
     }
 
+    /// Block markdown with the page file path needed to resolve page-relative
+    /// asset references such as `assets/cover.png`.
+    pub fn get_block_media_reference_contexts(&self) -> Result<Vec<(String, Option<String>)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT b.content, p.file_path
+             FROM blocks b
+             JOIN pages p ON p.id = b.page_id
+             WHERE b.content != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Every stored string that could name a media file.
     ///
     /// Block markdown is the obvious source but not the only one: a recorded

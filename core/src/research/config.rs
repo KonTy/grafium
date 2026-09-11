@@ -205,7 +205,7 @@ impl Default for ResearchConfig {
 }
 
 impl ResearchConfig {
-    /// The on-disk location of the config, next to `ai_config.json`.
+    /// The on-disk location of the graph-portable research config.
     pub fn config_path(data_dir: &Path) -> PathBuf {
         data_dir.join("research_config.json")
     }
@@ -607,9 +607,14 @@ fn default_plan_queries() -> String {
     "You are a research assistant planning how to investigate a question on the web. \
 Given the user's question, produce up to 4 focused, diverse search-engine queries that together \
 would surface authoritative sources answering it. Prefer specific, well-formed queries over broad \
-ones; where the topic is scholarly, include an academic phrasing. Do not answer the question \
-yourself. Reply with ONLY a JSON object of the form {\"queries\": [\"...\", \"...\"]} — no other \
-text, no markdown fences."
+ones; where the topic is scholarly, include an academic phrasing. If the user is asking for \
+recommendations, generate queries that surface concrete candidate names/models, comparisons, owner \
+reports, and tradeoffs — not just generic background criteria. If the requested category appears \
+to conflict with the user's constraints, include at least one broader/better-fit alternative-category \
+query instead of searching only the user's category word. If a term is ambiguous, disambiguate it \
+from the user's constraints (for example, treat bike+MC+repair+fuel as motorcycle, not bicycle). \
+Do not answer the question yourself. Reply with ONLY a JSON object of the form \
+{\"queries\": [\"...\", \"...\"]} — no other text, no markdown fences."
         .to_string()
 }
 
@@ -617,8 +622,11 @@ fn default_select_sources() -> String {
     "You are choosing which search results are worth reading in full to answer a research \
 question. You are given the question and a numbered list of candidate results (title, URL, \
 snippet). Pick the most relevant, credible, and diverse results — avoid near-duplicates and \
-low-quality sources. Reply with ONLY a JSON object of the form {\"picks\": [<indices>]} listing \
-the indices to read, most useful first — no other text, no markdown fences."
+low-quality sources. For recommendation questions, prefer sources that name concrete options/models \
+or compare options against the user's constraints, not generic category overviews. Treat results \
+that match only the category label while ignoring or contradicting hard constraints as low relevance. Reply with ONLY a \
+JSON object of the form {\"picks\": [<indices>]} listing the indices to read, most useful first — no \
+other text, no markdown fences."
         .to_string()
 }
 
@@ -626,7 +634,9 @@ fn default_assess_sufficiency() -> String {
     "You are judging whether the material gathered so far is enough to write a well-supported, \
 cited answer to a research question. You are given the question and excerpts from the sources read \
 so far. Be honest: if key claims are unsupported, sources conflict without resolution, or an \
-important angle is missing, it is NOT sufficient yet. Reply with ONLY a JSON object of the form \
+important angle is missing, it is NOT sufficient yet. For recommendation questions, the material is \
+NOT sufficient unless it includes concrete candidate names/options and enough tradeoff information \
+to rank or compare them against the user's constraints. Reply with ONLY a JSON object of the form \
 {\"sufficient\": true|false, \"missing\": \"one sentence naming what is still needed (empty if \
 sufficient)\"} — no other text, no markdown fences."
         .to_string()
@@ -644,12 +654,33 @@ and get more specific or approach from a different angle. Reply with ONLY a JSON
 fn default_synthesize() -> String {
     "You are a careful research assistant writing the final answer from real, numbered web \
 sources. Use ONLY the numbered sources provided — do not add outside knowledge and do not invent \
-facts. Identify every distinct topic worth reporting. Return a JSON object with:\n\
+facts. For source-dependent practical procedures where exact buying advice, compatibility, \
+product specs, material limits, current facts, or safety constraints matter, name exact items, \
+specs, compatibility limits, and process steps only when numbered sources support them; if the \
+sources are too weak to support a safe procedure, say so. Your first priority is \
+to answer the user's actual question, not to describe how one might \
+answer it. If the user asks for recommendations, options, products, candidates, or what to \
+buy/choose/use, give concrete named recommendations ranked by fit, include a best overall pick when \
+the sources support one, and name important tradeoffs. Do not answer recommendation questions with \
+only criteria, background, a category tour, or a restatement of the constraints. Do the research \
+work for the user: synthesize the sources into an answer, and do NOT tell the user to look at, \
+check, consider researching, or consult categories/sources instead of answering. Source citations \
+are evidence for your answer, not assignments for the user. If the requested category conflicts \
+with the constraints, say so directly and recommend the closest better-fit category or options. \
+Return a JSON object with:\n\
 - \"title_answer\": if the question can be answered directly, one sentence answering it with an \
-inline [n] citation; otherwise null.\n\
-- \"topics\": an array of objects, each with \"topic\" (a short label), \"summary\" (a 2-5 \
-sentence paragraph where EVERY factual claim ends with an inline citation like \"[1]\" or \
-\"[2][4]\"; if sources disagree, say so), and \"tags\" (1-4 key-term objects {\"term\": \"...\"}).\n\
+inline [n] citation; for recommendation questions, name the best overall pick here; otherwise \
+null.\n\
+- \"topics\": an array of objects, each with \"topic\" (a short label; for recommendations, make \
+each topic a named option such as \"Best overall: Model X\" or \"Budget alternative: Model Y\"), \
+\"summary\" (a 2-5 sentence paragraph where EVERY factual claim ends with an inline citation like \
+\"[1]\" or \"[2][4]\"; for recommendations, state what the option is, why it fits the user's \
+constraints, how it compares to the other named options when the sources allow comparison, and the \
+key compromise; if sources disagree, say so; do not recommend a candidate unless sources explicitly \
+support its fit for the relevant hard constraints, and do not infer off-road ability, field \
+repairability, right-to-repair, mod support, or long-trip suitability merely from power, luxury, \
+touring comfort, or brand reputation), and \"tags\" (1-4 key-term \
+objects {\"term\": \"...\"}).\n\
 Return ONLY the JSON object, no other text, no markdown fences."
         .to_string()
 }
@@ -683,6 +714,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing built-in engine {id}"));
             assert!(engine.builtin, "{id} must be marked built-in");
         }
+    }
+
+    #[test]
+    fn default_prompts_force_recommendation_research_to_answer_directly() {
+        let plan = default_plan_queries();
+        assert!(plan.contains("concrete candidate names/models"));
+        assert!(plan.contains("bike+MC+repair+fuel as motorcycle"));
+        assert!(plan.contains("broader/better-fit alternative-category"));
+
+        let select = default_select_sources();
+        assert!(select.contains("not generic category overviews"));
+        assert!(select.contains("ignoring or contradicting hard constraints"));
+
+        let assess = default_assess_sufficiency();
+        assert!(
+            assess.contains("NOT sufficient unless it includes concrete candidate names/options")
+        );
+
+        let synthesize = default_synthesize();
+        assert!(synthesize.contains("concrete named recommendations"));
+        assert!(synthesize.contains("best overall pick"));
+        assert!(synthesize.contains("do NOT tell the user to look at"));
+        assert!(synthesize.contains("Source citations are evidence for your answer"));
+        assert!(synthesize.contains("do not recommend a candidate unless sources explicitly"));
     }
 
     /// A config written before an engine existed must still gain it.

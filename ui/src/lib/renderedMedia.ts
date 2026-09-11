@@ -2,14 +2,14 @@ import { hydrateAssetMedia } from "./markdown";
 
 export type HydrateAssetMediaFn = (
   root: HTMLElement | null | undefined
-) => Promise<void> | void;
+) => (() => void) | Promise<void> | void;
 
 export function queueHydrateAssetMedia(
   root: HTMLElement | null | undefined,
   hydrate: HydrateAssetMediaFn = hydrateAssetMedia
 ): void {
   queueMicrotask(() => {
-    void hydrate(root);
+    hydrate(root);
   });
 }
 
@@ -17,10 +17,22 @@ export function createHydrateRenderedMediaAction(
   hydrate: HydrateAssetMediaFn = hydrateAssetMedia
 ) {
   return (node: HTMLElement, _content?: unknown) => {
-    queueHydrateAssetMedia(node, hydrate);
+    let cleanup: (() => void) | void;
+    queueMicrotask(() => {
+      const result = hydrate(node);
+      if (typeof result === "function") cleanup = result;
+    });
     return {
       update(_nextContent?: unknown) {
-        queueHydrateAssetMedia(node, hydrate);
+        cleanup?.();
+        cleanup = undefined;
+        queueMicrotask(() => {
+          const result = hydrate(node);
+          if (typeof result === "function") cleanup = result;
+        });
+      },
+      destroy() {
+        cleanup?.();
       },
     };
   };

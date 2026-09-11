@@ -139,10 +139,7 @@ pub const KNOWN_UNSTABLE_ARCHITECTURES: &[&str] = &[];
 /// (different quantizations of the same fine-tune, minor filename
 /// tweaks) also get flagged — Q4_K_M of Fable-Fusion is probably fine
 /// but at IQ2_M it's broken; substring matching catches both.
-pub const KNOWN_UNSTABLE_MODEL_FILENAMES: &[&str] = &[
-    "fable-fusion",
-    "fable_fusion",
-];
+pub const KNOWN_UNSTABLE_MODEL_FILENAMES: &[&str] = &["fable-fusion", "fable_fusion"];
 
 /// Case-insensitive substring match of `file_name` against
 /// [`KNOWN_UNSTABLE_MODEL_FILENAMES`]. Broken out as a function (rather
@@ -363,8 +360,7 @@ pub fn scan_models_dir(models_dir: &Path) -> Result<Vec<ModelInfo>> {
         // Only worth introspecting GGUF-shaped chat/embedding models —
         // Whisper checkpoints and unknown files don't have (or don't need)
         // an architecture/description shown in the model picker.
-        let (architecture, description) = if matches!(kind, ModelKind::Llm | ModelKind::Embedding)
-        {
+        let (architecture, description) = if matches!(kind, ModelKind::Llm | ModelKind::Embedding) {
             let info = peek_gguf_info(&path);
             (info.architecture, info.description)
         } else {
@@ -711,9 +707,7 @@ mod tests {
         // But a plain, well-behaved fine-tune must NOT be flagged just
         // because it's from the same base — if we ever match too broadly
         // we'd disable perfectly good models.
-        assert!(!is_known_unstable_filename(
-            "Qwen3-4B-Instruct-Q4_K_M.gguf"
-        ));
+        assert!(!is_known_unstable_filename("Qwen3-4B-Instruct-Q4_K_M.gguf"));
         assert!(!is_known_unstable_filename(
             "mistral-7b-instruct-v0.3.q4_k_m.gguf"
         ));

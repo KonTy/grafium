@@ -254,13 +254,10 @@ pub fn open_graph(
             }
         };
 
-    // Keep graph open instantaneous. Only schedule a background rebuild when
-    // the index is empty (fresh/corrupt-recovered DB).
-    let needs_background_reindex = new_graph
-        .db
-        .list_pages(1, 0)
-        .map(|p| p.is_empty())
-        .unwrap_or(true);
+    // Keep graph open instantaneous, but rebuild in the background when the
+    // on-disk Markdown set changed while Grafium was closed or a different
+    // graph was active.
+    let needs_background_reindex = new_graph.needs_startup_reindex().unwrap_or(true);
 
     // Derive name from folder name
     let name = graph_path
@@ -428,7 +425,7 @@ pub fn create_graph(
     // Create the directory if it doesn't exist
     fs::create_dir_all(&graph_path).map_err(|e| e.to_string())?;
 
-    // Open as a new graph (creates pages/, journals/, and platform index DB)
+    // Open as a new graph (creates pages/, journals/, knowledge/, and platform index DB)
     let db_path = platform_db_path(&app, &graph_path)?;
     let new_graph = Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir)
         .map_err(|e| e.to_string())?;

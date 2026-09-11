@@ -15,7 +15,10 @@ use grafium_core::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, Mess
 
 fn vram_snapshot(label: &str) {
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used,memory.free", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=memory.used,memory.free",
+            "--format=csv,noheader",
+        ])
         .output();
     match out {
         Ok(o) => eprintln!(
@@ -46,11 +49,11 @@ async fn main() {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let model_path = PathBuf::from(args.next().expect("usage: <gguf-path> [chars] [max_tokens] [rounds] [gpu_layers]"));
-    let prompt_chars: usize = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6000);
+    let model_path = PathBuf::from(
+        args.next()
+            .expect("usage: <gguf-path> [chars] [max_tokens] [rounds] [gpu_layers]"),
+    );
+    let prompt_chars: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(6000);
     let max_tokens: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(256);
     let rounds: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let gpu_layers: Option<u32> = args.next().and_then(|s| s.parse().ok());
@@ -72,9 +75,8 @@ async fn main() {
         content.push_str(filler);
     }
     content.truncate(prompt_chars);
-    let prompt = format!(
-        "Summarize the following page content and list 3 key topics:\n\n{content}"
-    );
+    let prompt =
+        format!("Summarize the following page content and list 3 key topics:\n\n{content}");
     eprintln!(
         "[repro] prompt length: {} chars, requesting max_tokens={max_tokens}, rounds={rounds}",
         prompt.len()
@@ -96,10 +98,16 @@ async fn main() {
         match llm.complete(&messages, &options).await {
             Ok(resp) => {
                 eprintln!("[repro] round {round}: completion OK in {:?}", t1.elapsed());
-                println!("--- round {round} response ({} chars) ---\n{resp}", resp.len());
+                println!(
+                    "--- round {round} response ({} chars) ---\n{resp}",
+                    resp.len()
+                );
             }
             Err(e) => {
-                eprintln!("[repro] round {round}: completion FAILED after {:?}: {e}", t1.elapsed());
+                eprintln!(
+                    "[repro] round {round}: completion FAILED after {:?}: {e}",
+                    t1.elapsed()
+                );
                 vram_snapshot(&format!("round-{round}-failed"));
                 std::process::exit(1);
             }

@@ -18,6 +18,10 @@ fn test_validate_structure_valid_graph() {
     assert!(report.is_valid, "Valid graph should pass validation");
     assert!(report.has_pages_dir, "Should have pages dir");
     assert!(report.has_journals_dir, "Should have journals dir");
+    assert!(
+        !report.has_knowledge_dir,
+        "Older valid graphs may not have knowledge dir yet"
+    );
     assert!(report.has_metadata_dir, "Should have .grafium dir");
     assert!(report.has_valid_db, "DB missing is acceptable");
     assert!(
@@ -134,6 +138,10 @@ fn test_validate_structure_nonexistent_path() {
         "Nonexistent path has no journals dir"
     );
     assert!(
+        !report.has_knowledge_dir,
+        "Nonexistent path has no knowledge dir"
+    );
+    assert!(
         !report.has_metadata_dir,
         "Nonexistent path has no .grafium dir"
     );
@@ -183,6 +191,10 @@ fn test_validate_structure_newly_created_graph() {
     assert!(
         report.has_journals_dir,
         "Created graph should have journals dir"
+    );
+    assert!(
+        report.has_knowledge_dir,
+        "Created graph should have knowledge dir"
     );
     assert!(
         report.has_metadata_dir,

@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   bucketFor,
   compareTasks,
+  compareTasksBy,
   effectiveDate,
+  groupOpenTasks,
   groupTasks,
   humanDuration,
   localDateKey,
+  normalizePriority,
   paceTrend,
   type OpenTaskRow,
   type TaskFlowStats,
@@ -82,6 +85,41 @@ describe("compareTasks", () => {
     expect(sorted).toEqual(["A", "B", null]);
   });
 
+  describe("compareTasksBy", () => {
+    it("can sort by date before priority", () => {
+      const sorted = [
+        task({ block_id: "high-later", priority: "A", scheduled_date: "2026-09-20" }),
+        task({ block_id: "low-sooner", priority: "C", scheduled_date: "2026-09-10" }),
+      ]
+        .sort(compareTasksBy("date"))
+        .map((t) => t.block_id);
+
+      expect(sorted).toEqual(["low-sooner", "high-later"]);
+    });
+
+    it("can sort by newest created task first", () => {
+      const sorted = [
+        task({ block_id: "old", created_at: 1000 }),
+        task({ block_id: "new", created_at: 2000 }),
+      ]
+        .sort(compareTasksBy("newest"))
+        .map((t) => t.block_id);
+
+      expect(sorted).toEqual(["new", "old"]);
+    });
+
+    it("can sort by page title", () => {
+      const sorted = [
+        task({ block_id: "z", page_title: "Zebra" }),
+        task({ block_id: "a", page_title: "Android" }),
+      ]
+        .sort(compareTasksBy("page"))
+        .map((t) => t.block_id);
+
+      expect(sorted).toEqual(["a", "z"]);
+    });
+  });
+
   it("sorts by date within the same priority", () => {
     const sorted = [
       task({ block_id: "late", scheduled_date: "2026-09-20" }),
@@ -122,6 +160,68 @@ describe("groupTasks", () => {
     );
     expect(groups.map((g) => g.bucket)).toEqual(["earlier", "today", "later"]);
     expect(groups.map((g) => g.tasks.length)).toEqual([1, 1, 1]);
+  });
+
+  describe("groupOpenTasks", () => {
+    it("groups by priority with unprioritized tasks last", () => {
+      const groups = groupOpenTasks(
+        [
+          task({ block_id: "none" }),
+          task({ block_id: "b", priority: "B" }),
+          task({ block_id: "a", priority: "A" }),
+        ],
+        TODAY,
+        "priority",
+      );
+
+      expect(groups.map((g) => g.label)).toEqual(["Priority A", "Priority B", "No priority"]);
+      expect(groups.map((g) => g.tasks[0].block_id)).toEqual(["a", "b", "none"]);
+    });
+
+    it("normalizes human priority aliases into Logseq A/B/C buckets", () => {
+      expect(normalizePriority("high")).toBe("A");
+      expect(normalizePriority("medium")).toBe("B");
+      expect(normalizePriority("low")).toBe("C");
+    });
+
+    it("groups by task state in action-oriented order", () => {
+      const groups = groupOpenTasks(
+        [
+          task({ block_id: "todo", state: "TODO" }),
+          task({ block_id: "now", state: "NOW" }),
+          task({ block_id: "doing", state: "DOING" }),
+        ],
+        TODAY,
+        "status",
+      );
+
+      expect(groups.map((g) => g.label)).toEqual(["NOW", "DOING", "TODO"]);
+    });
+
+    it("groups by page title alphabetically", () => {
+      const groups = groupOpenTasks(
+        [
+          task({ block_id: "b", page_title: "Work" }),
+          task({ block_id: "a", page_title: "Android" }),
+        ],
+        TODAY,
+        "page",
+      );
+
+      expect(groups.map((g) => g.label)).toEqual(["Android", "Work"]);
+    });
+
+    it("applies the selected sort inside the selected view", () => {
+      const tasks = [
+        task({ block_id: "old-low", priority: "C", created_at: 1000 }),
+        task({ block_id: "new-high", priority: "A", created_at: 2000 }),
+      ];
+
+      expect(groupOpenTasks(tasks, TODAY, "date", "priority")[0].tasks.map((t) => t.block_id))
+        .toEqual(["new-high", "old-low"]);
+      expect(groupOpenTasks(tasks, TODAY, "date", "oldest")[0].tasks.map((t) => t.block_id))
+        .toEqual(["old-low", "new-high"]);
+    });
   });
 
   it("keeps every task", () => {

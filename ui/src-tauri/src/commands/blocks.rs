@@ -1,6 +1,20 @@
 use crate::AppState;
+use grafium_core::graph::{BlockCreateParent, BlockCreateSpec};
 use grafium_core::models::{Block, BlockType};
+use serde::Deserialize;
 use tauri::State;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBlockBatchItem {
+    id: Option<String>,
+    parent_id: Option<String>,
+    parent_index: Option<usize>,
+    order_index: i32,
+    content: String,
+    block_type: Option<String>,
+    properties: Option<serde_json::Value>,
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_blocks(state: State<AppState>, page_id: String) -> Result<Vec<Block>, String> {
@@ -20,6 +34,15 @@ pub fn list_blocks(state: State<AppState>, page_id: String) -> Result<Vec<Block>
         Err(e) => tracing::warn!(page_id = %page_id, error = %e, "list_blocks failed"),
     }
     result
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_block(state: State<AppState>, block_id: String) -> Result<Block, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .get_block_by_id(&block_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -50,6 +73,47 @@ pub fn create_block(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn create_blocks(
+    state: State<AppState>,
+    page_id: String,
+    blocks: Vec<CreateBlockBatchItem>,
+) -> Result<Vec<Block>, String> {
+    let specs = blocks
+        .into_iter()
+        .map(|block| {
+            if block.parent_id.is_some() && block.parent_index.is_some() {
+                return Err("batch block cannot specify both parentId and parentIndex".to_string());
+            }
+
+            let parent = if let Some(index) = block.parent_index {
+                BlockCreateParent::NewBlock(index)
+            } else if let Some(parent_id) = block.parent_id {
+                BlockCreateParent::Existing(parent_id)
+            } else {
+                BlockCreateParent::Root
+            };
+
+            Ok(BlockCreateSpec {
+                id: block.id,
+                parent,
+                order_index: block.order_index,
+                content: block.content,
+                block_type: block
+                    .block_type
+                    .map(|s| BlockType::from_str(&s))
+                    .unwrap_or(BlockType::Text),
+                properties: block.properties.unwrap_or_else(|| serde_json::json!({})),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .create_blocks(&page_id, specs)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn update_block(
     state: State<AppState>,
     id: String,
@@ -66,6 +130,18 @@ pub fn update_block(
 pub fn delete_block(state: State<AppState>, id: String) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.delete_block(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_blocks(
+    state: State<AppState>,
+    page_id: String,
+    ids: Vec<String>,
+) -> Result<Vec<Block>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .delete_blocks(&page_id, &ids)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]

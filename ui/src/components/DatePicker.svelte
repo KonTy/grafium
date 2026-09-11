@@ -199,8 +199,8 @@
   }
 
   .dp-cell.today {
-    background: var(--accent);
-    color: white;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
     font-weight: 600;
   }
 
@@ -229,7 +229,7 @@
 
   .dp-today-btn:hover,
   .dp-clear-btn:hover {
-    background: var(--accent);
-    color: white;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
   }
 </style>

@@ -15,22 +15,24 @@ beforeEach(() => {
 
 describe("mediaImportVideo API wrapper", () => {
   it("calls media_import_video with the url and optional args", async () => {
-    mockInvoke.mockResolvedValue({ id: "1", title: "My Video" });
+    mockInvoke.mockResolvedValue("job-1");
     await mediaImportVideo("https://youtube.com/watch?v=abc", "My Video", "en");
     expect(mockInvoke).toHaveBeenCalledWith("media_import_video", {
       url: "https://youtube.com/watch?v=abc",
       pageTitle: "My Video",
       lang: "en",
+      target: undefined,
     });
   });
 
   it("omits optional args when not provided", async () => {
-    mockInvoke.mockResolvedValue({ id: "1", title: "My Video" });
+    mockInvoke.mockResolvedValue("job-1");
     await mediaImportVideo("https://youtube.com/watch?v=abc");
     expect(mockInvoke).toHaveBeenCalledWith("media_import_video", {
       url: "https://youtube.com/watch?v=abc",
       pageTitle: undefined,
       lang: undefined,
+      target: undefined,
     });
   });
 });

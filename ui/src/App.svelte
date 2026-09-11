@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, onMount } from "svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
@@ -12,18 +12,25 @@
   import Settings from "./components/Settings.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import ReferencePanel from "./components/ReferencePanel.svelte";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, type GraphInfo } from "./lib/api";
+  import JobActivity from "./components/JobActivity.svelte";
+  import JobsView from "./components/JobsView.svelte";
+  import Toaster from "./components/Toaster.svelte";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import type { PageNavigationTarget } from "./lib/navigation";
   import { resolvePageLookup } from "./lib/navigation";
   import { applyTheme, getThemeById } from "./lib/themes";
   import { attachAppUndoRedoListeners } from "./lib/undoEvents";
+  import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
+  import { showToast } from "./lib/toast.svelte";
+  import { uiLog } from "./lib/uiLog";
   import { listen } from "@tauri-apps/api/event";
+  import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
 
   /** Pick a folder using native OS dialog on all platforms */
-  async function pickFolder(): Promise<string | null> {
+  async function pickFolder(title = "Select Folder", defaultPath?: string): Promise<string | null> {
     // Check if Android JS bridge is available
     if ((window as any).FolderPickerBridge) {
       return new Promise<string | null>((resolve) => {
@@ -38,7 +45,8 @@
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Select Folder",
+      title,
+      defaultPath,
     });
     if (selected && typeof selected === "string") {
       return selected;
@@ -46,7 +54,18 @@
     return null;
   }
 
-  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph";
+  async function defaultExternalBookImportFolder(): Promise<string | undefined> {
+    for (const resolveDir of [downloadDir, documentDir, homeDir]) {
+      try {
+        return await resolveDir();
+      } catch {
+        // Try the next standard user directory.
+      }
+    }
+    return undefined;
+  }
+
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs";
 
   let currentView: View = $state("page");
   let currentPage: Page | null = $state(null);
@@ -102,7 +121,7 @@
   const MAIN_CONTENT_MIN_WIDTH = 360;
   const DEFAULT_REFERENCE_PANEL_WIDTH = 380;
   const REFERENCE_PANEL_MIN_WIDTH = 280;
-  const REFERENCE_PANEL_MAX_WIDTH = 720;
+  const REFERENCE_PANEL_VIEWPORT_EDGE_GAP = 24;
   const DEFAULT_UI_ZOOM = 1;
   const MIN_UI_ZOOM = 0.7;
   const MAX_UI_ZOOM = 1.8;
@@ -277,9 +296,12 @@
       if (!raw) return;
       const parsed = Number(raw);
       if (!Number.isFinite(parsed)) return;
+      const maxWidth = typeof window === "undefined"
+        ? parsed
+        : Math.max(REFERENCE_PANEL_MIN_WIDTH, window.innerWidth - REFERENCE_PANEL_VIEWPORT_EDGE_GAP);
       referencePanelWidth = Math.max(
         REFERENCE_PANEL_MIN_WIDTH,
-        Math.min(REFERENCE_PANEL_MAX_WIDTH, parsed)
+        Math.min(maxWidth, parsed)
       );
     } catch {
       // Ignore localStorage failures and keep defaults.
@@ -302,8 +324,7 @@
   function applyReferencePanelWidthFromPointer(clientX: number) {
     if (!appLayoutEl) return;
     const rect = appLayoutEl.getBoundingClientRect();
-    const maxByLayout = Math.max(REFERENCE_PANEL_MIN_WIDTH, rect.width - MAIN_CONTENT_MIN_WIDTH);
-    const maxWidth = Math.min(REFERENCE_PANEL_MAX_WIDTH, maxByLayout);
+    const maxWidth = Math.max(REFERENCE_PANEL_MIN_WIDTH, rect.width - REFERENCE_PANEL_VIEWPORT_EDGE_GAP);
     // The panel is pinned to the right edge, so dragging the handle on its
     // left side means width = distance from the pointer to the right edge.
     const next = rect.right - clientX;
@@ -334,7 +355,50 @@
   }
 
   function logNav(event: string, data: unknown) {
-    console.log(`[nav] ${event} ${JSON.stringify(data)}`);
+    const message = `[nav] ${event} ${JSON.stringify(data)}`;
+    console.log(message);
+    uiLog(message);
+  }
+
+  function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function withNavigationTimeout<T>(
+    promise: Promise<T>,
+    label: string,
+    timeoutMs = 12_000
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`));
+      }, timeoutMs);
+      promise.then(
+        (value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          window.clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  }
+
+  function installFrontendDiagnostics() {
+    const report = (kind: string, value: unknown) => {
+      const message = value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+      uiLog(`[ui] ${kind}: ${message}`);
+    };
+    const onError = (event: ErrorEvent) => report("error", event.error ?? event.message);
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => report("unhandledrejection", event.reason);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
   }
 
   function currentScrollTop(): number {
@@ -365,6 +429,9 @@
     }
     if (currentView === "chat") {
       return { kind: "chat", scrollTop: currentScrollTop() };
+    }
+    if (currentView === "jobs") {
+      return { kind: "jobs", scrollTop: currentScrollTop() };
     }
     return null;
   }
@@ -412,6 +479,16 @@
         const blockEl = mainContentEl.querySelector(`#block-${entry.sourceBlockId}, [data-block-id="${entry.sourceBlockId}"]`) as HTMLElement | null;
         if (blockEl) {
           blockEl.scrollIntoView({ block: "center" });
+          if (entry.kind === "page" && currentPage) {
+            window.dispatchEvent(new CustomEvent("page-content-reveal-block", {
+              detail: {
+                pageId: currentPage.id,
+                blockId: entry.sourceBlockId,
+                align: "center",
+                select: true,
+              },
+            }));
+          }
           logNav("restored block", { sourceBlockId: entry.sourceBlockId, sourcePageTitle: entry.sourcePageTitle, kind: entry.kind, title: entry.title });
           return true;
         }
@@ -421,6 +498,7 @@
               pageId: currentPage.id,
               blockId: entry.sourceBlockId,
               align: "center",
+              select: true,
             },
           }));
         }
@@ -593,6 +671,24 @@
   }
 
   // Register hotkeys
+  function triggerNativeUndo() {
+    const handler = (window as any).__handleNativeUndo;
+    if (typeof handler === "function") {
+      handler();
+    } else {
+      window.dispatchEvent(new CustomEvent("app-undo"));
+    }
+  }
+
+  function triggerNativeRedo() {
+    const handler = (window as any).__handleNativeRedo;
+    if (typeof handler === "function") {
+      handler();
+    } else {
+      window.dispatchEvent(new CustomEvent("app-redo"));
+    }
+  }
+
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
     goHome: () => navigateToJournal(),
@@ -654,8 +750,8 @@
     reindex: () => {
       void runReindex(true);
     },
-    undo: () => {},
-    redo: () => {},
+    undo: triggerNativeUndo,
+    redo: triggerNativeRedo,
     commandPalette: () => {},
   });
 
@@ -806,6 +902,33 @@
     };
   });
 
+  onMount(installFrontendDiagnostics);
+
+  $effect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    initJobs((job) => {
+      void sidebarRef?.refresh();
+      notifyJobFinished(job, (pageId) => {
+        void navigateToPage({ id: pageId });
+      });
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch((e) => {
+        showToast(`Could not initialize background jobs: ${e instanceof Error ? e.message : String(e)}`, "error");
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
   $effect(() => {
     loadUiZoomPreference();
     window.addEventListener("keydown", handleGlobalKeydown, true);
@@ -843,7 +966,12 @@
   $effect(() => {
     if (!hasInitialized) {
       hasInitialized = true;
-      navigateToStartupPage();
+      void navigateToStartupPage().catch((e) => {
+        const message = `Startup navigation failed: ${errorText(e)}`;
+        logNav("startup failed", { error: message });
+        error = message;
+        loading = false;
+      });
       // Initialize theme
       initTheme();
     }
@@ -859,7 +987,7 @@
   type SavedLocation =
     | { kind: "page"; title: string }
     | { kind: "journal" }
-    | { kind: "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" };
+    | { kind: "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
 
   function isJournalDateTitle(title: string | undefined): boolean {
     return !!title && /^\d{4}-\d{2}-\d{2}$/.test(title);
@@ -878,7 +1006,8 @@
         currentView === "statistics" ||
         currentView === "chat" ||
         currentView === "settings" ||
-        currentView === "graph"
+        currentView === "graph" ||
+        currentView === "jobs"
       ) {
         payload = { kind: currentView };
       }
@@ -911,6 +1040,7 @@
     // Prefer whatever the user was looking at when they closed the
     // app last. Journal entries always come back as today's journal.
     const saved = loadLastLocation();
+    logNav("startup", { savedKind: saved?.kind ?? null, savedTitle: saved?.kind === "page" ? saved.title : null });
     if (saved) {
       try {
         if (saved.kind === "journal") {
@@ -946,16 +1076,21 @@
           await navigateToPage("__chat__");
           return;
         }
+        if (saved.kind === "jobs" || saved.kind === "notifications") {
+          await navigateToPage("__jobs__");
+          return;
+        }
         // Deliberately don't auto-open settings — nobody wants to
         // land on the settings screen on every launch.
-      } catch {
+      } catch (e) {
+        logNav("startup restore failed", { saved, error: errorText(e) });
         // Fall through to the legacy defaults if restoring failed.
       }
     }
 
     try {
       // Only open Welcome when it already exists (tutorial graph).
-      await getPage({ title: "Welcome To Grafium" });
+      await withNavigationTimeout(getPage({ title: "Welcome To Grafium" }), "Checking startup page");
       await navigateToPage("Welcome To Grafium");
       return;
     } catch {
@@ -1105,30 +1240,58 @@
       }
       return;
     }
+    if (target === "__jobs__" || target === "__notifications__") {
+      currentView = "jobs";
+      currentPage = null;
+      error = null;
+      loading = false;
+      if (!skipHistory) {
+        pushHistoryEntry({ kind: "jobs", scrollTop: 0 });
+      }
+      await tick();
+      if (restoreEntry) {
+        restoreHistoryState(restoreEntry);
+      }
+      return;
+    }
 
     const pageLookup = resolvePageLookup(target);
 
     loading = true;
     error = null;
+    logNav("navigate start", { pageLookup });
     try {
       // Try to get existing page
-      currentPage = await getPage(pageLookup);
-    } catch (e) {
-      // Create it if it doesn't exist
-      if (!pageLookup.title) {
-        error = `Failed to load page: ${e}`;
-        loading = false;
-        return;
+      currentPage = await withNavigationTimeout(getPage(pageLookup), "Loading page");
+      if (!currentPage.file_path) {
+        currentPage = (await loadLegacyBookIndexPage(pageLookup.title)) ?? currentPage;
       }
-      try {
-        currentPage = await createPage(
-          pageLookup.title,
-          isJournal || /^\d{4}-\d{2}-\d{2}$/.test(pageLookup.title)
-        );
-      } catch (e) {
-        error = `Failed to load page: ${e}`;
-        loading = false;
-        return;
+    } catch (e) {
+      currentPage = await loadLegacyBookIndexPage(pageLookup.title);
+      if (currentPage) {
+        error = null;
+      } else {
+        // Create it if it doesn't exist
+        if (!pageLookup.title) {
+          error = `Failed to load page: ${errorText(e)}`;
+          logNav("navigate failed", { pageLookup, error });
+          loading = false;
+          return;
+        }
+        try {
+          currentPage = await withNavigationTimeout(
+            createPage(
+              pageLookup.title,
+              isJournal || /^\d{4}-\d{2}-\d{2}$/.test(pageLookup.title)
+            ),
+            "Creating page"
+          );
+        } catch (e) {
+          error = `Failed to load page: ${errorText(e)}`;
+          logNav("navigate failed", { pageLookup, error });
+          loading = false;
+          return;
+        }
       }
     }
 
@@ -1138,6 +1301,7 @@
 
     currentView = "page";
     loading = false;
+    logNav("navigate loaded", { pageId: currentPage.id, title: currentPage.title });
     if (!skipHistory) {
       pushHistoryEntry({
         kind: "page",
@@ -1185,7 +1349,52 @@
       openImportMediaDialog("journal");
       return;
     }
+    if (target === "__import_books__") {
+      void openImportBooksDirectory();
+      return;
+    }
+    if (target === "__jobs__" || target === "__notifications__") {
+      navigateToPage("__jobs__");
+      return;
+    }
     navigateToPage(target);
+  }
+
+  async function handleFindLinksForPage(page: Pick<Page, "id">) {
+    pendingHighlight = "";
+    if (currentView !== "page" || currentPage?.id !== page.id) {
+      await navigateToPage({ id: page.id });
+    } else {
+      await tick();
+    }
+    if (currentView !== "page" || currentPage?.id !== page.id) return;
+    window.dispatchEvent(new CustomEvent("page-content-find-links", {
+      detail: { pageId: page.id },
+    }));
+  }
+
+  function legacyBookIndexTitle(title: string | undefined): string | null {
+    if (!title) return null;
+    const parts = title.split("/").filter(Boolean);
+    return parts.length === 2 && parts[0] === "Books" ? `${title}/index` : null;
+  }
+
+  async function loadLegacyBookIndexPage(title: string | undefined): Promise<Page | null> {
+    const legacyIndexTitle = legacyBookIndexTitle(title);
+    if (!legacyIndexTitle) return null;
+    try {
+      const page = await withNavigationTimeout(
+        getPage({ title: legacyIndexTitle }),
+        "Loading book index"
+      );
+      logNav("navigate redirected to legacy book index", {
+        requestedTitle: title,
+        indexTitle: legacyIndexTitle,
+      });
+      return page;
+    } catch {
+      return null;
+    }
   }
 
   function submitNewPage() {
@@ -1206,11 +1415,8 @@
     if (e.key === "Escape") cancelNewPage();
   }
 
-  // Import from media (video/audio -> transcript page): a URL or local file
-  // path, transcribed via captions/Whisper (see `commands::media`) then
-  // opened like any other page. Shares the same dialog styling as "New
-  // Page" so it feels like one consistent affordance rather than a
-  // separate feature bolted on.
+  // Import from media (video/audio -> transcript page): the dialog only starts
+  // the background job; progress and the finished-page link live in Jobs.
   let showImportMediaDialog = $state(false);
   let importMediaUrl = $state("");
   let importMediaBusy = $state(false);
@@ -1239,23 +1445,15 @@
     if (!url || importMediaBusy) return;
     importMediaBusy = true;
     importMediaError = "";
-    importMediaProgress = "Starting import...";
-    const unlisten = await listen<string>("media-import-progress", (e) => {
-      importMediaProgress = e.payload;
-    });
+    importMediaProgress = "Adding media import job...";
     try {
-      const page = await mediaImportVideo(url, undefined, undefined, importMediaTarget);
+      await mediaImportVideo(url, undefined, undefined, importMediaTarget);
       showImportMediaDialog = false;
       importMediaUrl = "";
-      if (importMediaTarget === "journal") {
-        navigateToJournal();
-      } else {
-        navigateToPage(page.title);
-      }
+      showToast("Media import job added", "info");
     } catch (e) {
       importMediaError = e instanceof Error ? e.message : String(e);
     } finally {
-      unlisten();
       importMediaBusy = false;
       importMediaProgress = "";
     }
@@ -1264,6 +1462,27 @@
   function handleImportMediaKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") submitImportMedia();
     if (e.key === "Escape") cancelImportMedia();
+  }
+
+  let importBooksBusy = $state(false);
+
+  async function openImportBooksDirectory() {
+    if (importBooksBusy) return;
+    importBooksBusy = true;
+    try {
+      const defaultPath = await defaultExternalBookImportFolder();
+      const dir = await pickFolder(
+        "Select Folder Containing Book Files",
+        defaultPath
+      );
+      if (!dir) return;
+      await bookImportDirectory(dir);
+      showToast("Book import job added", "info");
+    } catch (e) {
+      showToast(`Could not start book import: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      importBooksBusy = false;
+    }
   }
 
   function toggleMoreMenu() {
@@ -1421,7 +1640,13 @@
   <div class="app-layout" bind:this={appLayoutEl}>
     {#if sidebarVisible && !zenMode}
       <div class="sidebar-container" style={`width: ${sidebarWidth}px;`}>
-        <Sidebar bind:this={sidebarRef} {currentPage} {sidebarWidth} onNavigate={handleNavigate} onGraphChanged={handleGraphChanged} />
+        <Sidebar
+          bind:this={sidebarRef}
+          {currentPage}
+          {sidebarWidth}
+          onNavigate={handleNavigate}
+          onGraphChanged={handleGraphChanged}
+        />
       </div>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -1473,6 +1698,8 @@
       <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
       <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} />
+    {:else if currentView === "jobs"}
+      <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
     {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
@@ -1508,8 +1735,10 @@
         initialTab={referencePanelTab}
         focusTrigger={referencePanelFocusTrigger}
         width={referencePanelWidth}
+        preferFocusedPageForPageScope={currentView === "journal"}
         onClose={() => (referencePanelVisible = false)}
         onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
+        onFindLinks={handleFindLinksForPage}
       />
     {/if}
 
@@ -1570,7 +1799,7 @@
         </svg>
         <span>AI</span>
       </button>
-      <button class="bottom-nav-item" class:active={showMoreMenu || currentView === "settings"} onclick={toggleMoreMenu}>
+      <button class="bottom-nav-item" class:active={showMoreMenu || currentView === "settings" || currentView === "jobs"} onclick={toggleMoreMenu}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="5" r="1"></circle>
           <circle cx="12" cy="12" r="1"></circle>
@@ -1599,6 +1828,13 @@
           </svg>
           <span>Chat</span>
         </button>
+        <button class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__jobs__"); }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+          <span>Jobs</span>
+        </button>
         <button class="more-menu-item" onclick={handleMobileOpenGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -1611,6 +1847,13 @@
             <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
           </svg>
           <span>Import Media</span>
+        </button>
+        <button class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__import_books__"); }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+            <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"></path>
+          </svg>
+          <span>Import Books</span>
         </button>
         <button class="more-menu-item" onclick={handleMobileCreateGraph}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1630,6 +1873,11 @@
     {/if}
   </div>
 </div>
+
+{#if currentView !== "jobs"}
+  <JobActivity />
+{/if}
+<Toaster />
 
 {#if showNewPageDialog}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1891,8 +2139,8 @@
 
   .error-state button {
     padding: 8px 16px;
-    background: var(--accent);
-    color: white;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
     border: none;
     border-radius: 6px;
     cursor: pointer;

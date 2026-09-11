@@ -1,10 +1,23 @@
 use super::Database;
 use crate::error::Result;
 use crate::models::Page;
-use chrono::Utc;
+use chrono::{Local, TimeZone, Utc};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+fn local_day_from_timestamp(timestamp: i64) -> String {
+    Local
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| {
+            Utc.timestamp_millis_opt(timestamp)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "1970-01-01".to_string())
+        })
+}
 
 fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Result<Page> {
     let now = Utc::now().timestamp_millis();
@@ -48,6 +61,13 @@ fn get_page_by_title_ci_on_conn(conn: &Connection, title: &str) -> Result<Page> 
         },
     )?;
     Ok(page)
+}
+
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 impl Database {
@@ -307,6 +327,63 @@ impl Database {
         Ok(pages)
     }
 
+    pub fn list_pages_by_file_path_prefix(&self, prefix: &str) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let like = format!("{}%", escape_like(prefix));
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE file_path = ?1 OR file_path LIKE ?2 ESCAPE '\\'
+             ORDER BY title ASC",
+        )?;
+        let pages = stmt
+            .query_map(params![prefix, like], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
+    }
+
+    pub fn list_pages_by_title_or_file_path_prefix(
+        &self,
+        title: &str,
+        file_path_prefix: &str,
+    ) -> Result<Vec<Page>> {
+        let conn = self.conn()?;
+        let title_like = format!("{}/%", escape_like(title.trim_end_matches('/')));
+        let file_path_like = format!("{}%", escape_like(file_path_prefix));
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE title = ?1
+                OR title LIKE ?2 ESCAPE '\\'
+                OR file_path LIKE ?3 ESCAPE '\\'
+             ORDER BY title ASC",
+        )?;
+        let pages = stmt
+            .query_map(params![title, title_like, file_path_like], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
+    }
+
     pub fn list_journal_pages(&self, limit: i64, offset: i64) -> Result<Vec<Page>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -421,12 +498,197 @@ impl Database {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))?;
         Ok(count)
     }
+
+    pub fn count_file_backed_pages(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE file_path IS NOT NULL AND file_path != ''",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn list_file_backed_page_paths(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path FROM pages WHERE file_path IS NOT NULL AND file_path != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn find_page_by_title(&self, title: &str) -> Result<Option<Page>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE title = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![title], |row| {
+            Ok(Page {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        })?;
+        match rows.next() {
+            Some(page) => Ok(Some(page?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Record that a note was edited on a local calendar day.
+    ///
+    /// The heatmap counts distinct notes per day, not save events. Multiple
+    /// edits to the same page on the same day update `last_edited_at` and bump
+    /// `edit_count`, while still contributing one note to the daily cell.
+    pub fn record_page_edit(&self, page_id: &str, source: &str) -> Result<()> {
+        self.record_page_edit_at(page_id, Utc::now().timestamp_millis(), source)
+    }
+
+    pub fn record_page_edit_at(&self, page_id: &str, timestamp: i64, source: &str) -> Result<()> {
+        let conn = self.conn()?;
+        let day = local_day_from_timestamp(timestamp);
+        conn.execute(
+            "INSERT INTO page_edit_events (
+                page_key, day, page_id, page_title, file_path,
+                first_edited_at, last_edited_at, edit_count, source
+             )
+             SELECT COALESCE(NULLIF(file_path, ''), title), ?2, id, title, file_path, ?3, ?3, 1, ?4
+             FROM pages
+             WHERE id = ?1
+             ON CONFLICT(page_key, day) DO UPDATE SET
+                page_id = excluded.page_id,
+                page_title = excluded.page_title,
+                file_path = excluded.file_path,
+                last_edited_at = MAX(page_edit_events.last_edited_at, excluded.last_edited_at),
+                edit_count = page_edit_events.edit_count + 1,
+                source = excluded.source",
+            params![page_id, day, timestamp, source],
+        )?;
+        Ok(())
+    }
+
+    /// File-backed pages that can seed the edit heatmap from their Markdown mtime.
+    pub(crate) fn list_page_edit_backfill_targets(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path
+             FROM pages
+             WHERE file_path IS NOT NULL AND file_path != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Seed approximate historical edit days from Markdown file modification times.
+    ///
+    /// This replaces the older page-`updated_at` backfill, which collapsed whole
+    /// imported graphs into the day Grafium first indexed them. Seed rows never
+    /// increment existing real app/file edit rows, so the operation is safe to
+    /// run on every startup and after a full reindex.
+    pub(crate) fn seed_page_edit_file_mtimes(&self, edits: &[(String, i64)]) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM page_edit_events WHERE source = 'backfill'", [])?;
+
+        let mut inserted = 0usize;
+        for (page_id, timestamp) in edits {
+            let day = local_day_from_timestamp(*timestamp);
+            inserted += tx.execute(
+                "INSERT INTO page_edit_events (
+                    page_key, day, page_id, page_title, file_path,
+                    first_edited_at, last_edited_at, edit_count, source
+                 )
+                 SELECT COALESCE(NULLIF(file_path, ''), title), ?2, id, title, file_path, ?3, ?3, 1, 'file-mtime'
+                 FROM pages
+                 WHERE id = ?1
+                 ON CONFLICT(page_key, day) DO NOTHING",
+                params![page_id, day, timestamp],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Daily note-edit activity for the heatmap.
+    ///
+    /// Returns local-date strings and the number of distinct notes edited that
+    /// day. Repeated saves of the same note/day are intentionally coalesced.
+    pub fn get_note_edit_counts(&self, days: i64) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
+        let mut stmt = conn.prepare(
+            "SELECT day, COUNT(*) AS notes
+             FROM page_edit_events
+             WHERE last_edited_at >= ?1
+             GROUP BY day
+             ORDER BY day ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Notes edited on one local calendar day, newest edit first.
+    pub fn get_note_edits_for_day(
+        &self,
+        day: &str,
+    ) -> Result<
+        Vec<(
+            Option<String>,
+            String,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            String,
+        )>,
+    > {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT page_id, page_title, file_path, first_edited_at, last_edited_at, edit_count, source
+             FROM page_edit_events
+             WHERE day = ?1
+             ORDER BY last_edited_at DESC, page_title COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![day], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Database;
     use crate::error::Result;
+    use chrono::TimeZone;
 
     #[test]
     fn get_page_titles_batches_ids_and_omits_missing_pages() -> Result<()> {
@@ -468,6 +730,127 @@ mod tests {
         assert!(limited
             .iter()
             .any(|page| page.id == alpha_one.id || page.id == alpha_two.id));
+
+        Ok(())
+    }
+
+    #[test]
+    fn note_edit_counts_coalesce_multiple_edits_to_one_note_per_day() -> Result<()> {
+        let db = Database::in_memory()?;
+        let alpha = db.create_page("Alpha", false)?;
+        let beta = db.create_page("Beta", false)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        db.record_page_edit_at(&alpha.id, now, "app")?;
+        db.record_page_edit_at(&alpha.id, now + 1, "app")?;
+        db.record_page_edit_at(&beta.id, now + 2, "app")?;
+
+        let counts = db.get_note_edit_counts(7)?;
+        assert!(counts
+            .iter()
+            .any(|(day, count)| day == &today && *count == 2));
+
+        let conn = db.conn()?;
+        let edits: i64 = conn.query_row(
+            "SELECT edit_count FROM page_edit_events WHERE page_title = 'Alpha' AND day = ?1",
+            rusqlite::params![today],
+            |row| row.get(0),
+        )?;
+        assert_eq!(edits, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn page_edit_mtime_seed_replaces_legacy_backfill_without_double_counting_real_edits(
+    ) -> Result<()> {
+        let db = Database::in_memory()?;
+        let alpha = db.upsert_page(
+            "Alpha",
+            false,
+            Some("pages/Alpha.md"),
+            &serde_json::json!({}),
+        )?;
+        let beta = db.upsert_page("Beta", false, Some("pages/Beta.md"), &serde_json::json!({}))?;
+        let conn = db.conn()?;
+        conn.execute(
+            "INSERT INTO page_edit_events (
+                page_key, day, page_id, page_title, file_path,
+                first_edited_at, last_edited_at, edit_count, source
+             ) VALUES ('pages/Alpha.md', '2026-09-09', ?1, 'Alpha', 'pages/Alpha.md', 1, 1, 1, 'backfill')",
+            rusqlite::params![alpha.id],
+        )?;
+        drop(conn);
+
+        let real_edit = chrono::DateTime::parse_from_rfc3339("2023-07-12T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        db.record_page_edit_at(&alpha.id, real_edit, "app")?;
+
+        let alpha_mtime = chrono::DateTime::parse_from_rfc3339("2023-07-12T18:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let beta_mtime = chrono::DateTime::parse_from_rfc3339("2024-05-06T18:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        db.seed_page_edit_file_mtimes(&[(alpha.id.clone(), alpha_mtime), (beta.id, beta_mtime)])?;
+
+        let conn = db.conn()?;
+        let legacy_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM page_edit_events WHERE source = 'backfill'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(legacy_count, 0);
+
+        let alpha_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM page_edit_events WHERE page_key = 'pages/Alpha.md'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(alpha_rows, 1);
+
+        let beta_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM page_edit_events WHERE page_key = 'pages/Beta.md'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(beta_rows, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn get_note_edits_for_day_returns_day_entries_newest_first() -> Result<()> {
+        let db = Database::in_memory()?;
+        let alpha = db.upsert_page(
+            "Alpha",
+            false,
+            Some("pages/Alpha.md"),
+            &serde_json::json!({}),
+        )?;
+        let beta = db.upsert_page("Beta", false, Some("pages/Beta.md"), &serde_json::json!({}))?;
+        let alpha_time = chrono::DateTime::parse_from_rfc3339("2026-09-09T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let beta_time = chrono::DateTime::parse_from_rfc3339("2026-09-09T13:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+
+        db.record_page_edit_at(&alpha.id, alpha_time, "app")?;
+        db.record_page_edit_at(&beta.id, beta_time, "file")?;
+
+        let day = chrono::Local
+            .timestamp_millis_opt(beta_time)
+            .single()
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let edits = db.get_note_edits_for_day(&day)?;
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].1, "Beta");
+        assert_eq!(edits[1].1, "Alpha");
 
         Ok(())
     }

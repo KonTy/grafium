@@ -104,12 +104,7 @@ pub fn snapshot_since_targets(since: Instant, target_prefixes: &[&str]) -> Vec<T
     match buffer().lock() {
         Ok(buf) => buf
             .iter()
-            .filter(|e| {
-                e.at >= since
-                    && target_prefixes
-                        .iter()
-                        .any(|p| e.target.starts_with(p))
-            })
+            .filter(|e| e.at >= since && target_prefixes.iter().any(|p| e.target.starts_with(p)))
             .cloned()
             .collect(),
         Err(_) => Vec::new(),

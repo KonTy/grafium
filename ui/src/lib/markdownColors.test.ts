@@ -39,6 +39,15 @@ describe("markdown tag colouring", () => {
     expect(html).not.toContain("external-link");
   });
 
+  it("renders stable heading ids for in-page fragment links", () => {
+    const heading = renderBlock("# THE KABALISTIC TREE OF LIFE");
+    const link = renderBlock("[THE KABALISTIC TREE OF LIFE](#the-kabalistic-tree-of-life)");
+
+    expect(heading).toContain('<h1 id="the-kabalistic-tree-of-life">');
+    expect(link).toContain('href="#the-kabalistic-tree-of-life"');
+    expect(link).not.toContain("external-link");
+  });
+
   it("keeps [[page links]] on the page-link token (unchanged)", () => {
     const html = renderBlock("[[Fresco]]");
     expect(html).toContain('class="page-link"');
@@ -46,10 +55,81 @@ describe("markdown tag colouring", () => {
     expect(html).not.toContain("external-link");
   });
 
+  it("canonicalizes old underscore journal page links to dashed dates", () => {
+    const html = renderBlock("[[2025_09_30]]");
+    expect(html).toContain('class="page-link"');
+    expect(html).toContain('data-page="2025-09-30"');
+    expect(html).toContain(">2025-09-30</a>");
+  });
+
   it("colours tags in assistant (chat) markdown too", () => {
     const html = renderAssistantMarkdown("Filed under #concept today.");
     expect(html).toContain('class="tag"');
     expect(html).toContain(`style="color:${tagColorVar("concept")}"`);
+  });
+
+  it("renders an immediate-complete checkbox before open task markers", () => {
+    const html = renderBlock("TODO [#A] sharpen task UI");
+    expect(html).toContain('class="task-checkbox unchecked todo"');
+    expect(html).toContain('role="checkbox"');
+    expect(html).toContain('aria-checked="false"');
+    expect(html).toContain('data-task-action="done"');
+    expect(html.indexOf("task-checkbox")).toBeLessThan(html.indexOf("task-marker todo"));
+  });
+
+  it("renders stripped Markdown checkbox blocks as Grafium tasks", () => {
+    const html = renderBlock("[ ] Pay bills");
+    expect(html).toContain('class="task-checkbox unchecked todo"');
+    expect(html).toContain('class="task-marker todo"');
+    expect(html).not.toContain("[ ]");
+  });
+
+  it("renders full Markdown checkbox lines as Grafium tasks", () => {
+    const html = renderBlock("- [x] Beer");
+    expect(html).toContain('class="task-checkbox checked done"');
+    expect(html).toContain('class="task-marker done"');
+    expect(html).not.toContain("[x]");
+  });
+
+  it("renders lowercase Logseq priority markers as normalized chips", () => {
+    const html = renderBlock("TODO [#a] sharpen task UI");
+    expect(html).toContain('class="priority priority-A"');
+    expect(html).toContain(">Priority A</span>");
+    expect(html).not.toContain('data-tag="A"');
+    expect(html).not.toContain("[#A]");
+    expect(html).not.toContain("[#a]");
+  });
+
+  it("renders completed task markers with a checked checkbox", () => {
+    const html = renderBlock("DONE ship it");
+    expect(html).toContain('class="task-checkbox checked done"');
+    expect(html).toContain('aria-checked="true"');
+    expect(html).not.toContain('data-task-action="done"');
+  });
+
+  it("hides Logseq closed/logbook metadata in rendered task blocks", () => {
+    const html = renderBlock(
+      [
+        "DONE Logseq",
+        "CLOSED: [2026-09-09 Wed 11:10]",
+        ":LOGBOOK:",
+        'CLOCK: [2025-09-28 Sun 09:10:03]--[2025-09-28 Sun 09:20:03] =>  00:10:00',
+        '* State "DONE" from "DOING" [2026-09-09 Wed 11:10]',
+        ":END:",
+      ].join("\n")
+    );
+    expect(html).toContain('class="task-marker done"');
+    expect(html).toContain("Logseq");
+    expect(html).not.toContain("CLOSED:");
+    expect(html).not.toContain(":LOGBOOK:");
+    expect(html).not.toContain("CLOCK:");
+    expect(html).not.toContain('State "DONE"');
+  });
+
+  it("keeps scheduled and deadline task badges visible", () => {
+    const html = renderBlock("TODO file taxes\nSCHEDULED: <2026-01-15 Thu>\nDEADLINE: <2026-01-31 Sat>");
+    expect(html).toContain('class="task-date scheduled"');
+    expect(html).toContain('class="task-date deadline"');
   });
 });
 
@@ -76,6 +156,14 @@ describe("markdown structure safety (issue #2 — no corruption)", () => {
     const html = renderBlock("~~~\n#work\n~~~");
     expect(html).not.toContain('class="tag"');
     expect(html).toContain("code-block-wrapper");
+  });
+
+  it("normalizes outliner-indented closing fences before rendering", () => {
+    const html = renderBlock("```bash\n#not-a-tag\n\t\t  ```\n#real-tag");
+    expect(html).toContain("code-block-wrapper");
+    expect(html).not.toContain('data-tag="not-a-tag"');
+    expect(html).toContain('data-tag="real-tag"');
+    expect(html).not.toContain("```");
   });
 
   it("leaves #tags inside an indented code block verbatim", () => {

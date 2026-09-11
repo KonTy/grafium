@@ -22,8 +22,8 @@ impl FilesystemBackend {
     }
 
     /// Walk a synced directory. `markdown_only` distinguishes note folders,
-    /// where only `.md` participates, from `assets/`, which holds arbitrary
-    /// binary media.
+    /// where only `.md` participates, from portable support folders such as
+    /// `knowledge/` and `assets/`, which may hold non-Markdown files too.
     fn collect_files(
         &self,
         dir: &Path,
@@ -39,7 +39,7 @@ impl FilesystemBackend {
             let path = entry.path();
             if path.is_dir() {
                 self.collect_files(&path, base, markdown_only, out)?;
-            } else if Self::is_syncable_entry(&path, markdown_only) {
+            } else if Self::is_syncable_entry(&path, base, markdown_only) {
                 let rel = path
                     .strip_prefix(base)
                     .map(|p| p.to_string_lossy().to_string())
@@ -63,13 +63,16 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    fn is_syncable_entry(path: &Path, markdown_only: bool) -> bool {
+    fn is_syncable_entry(path: &Path, base: &Path, markdown_only: bool) -> bool {
         // Conflict copies are written explicitly by the engine; never pick
         // them up as ordinary files to sync.
         if path.to_string_lossy().contains(".conflict_") {
             return false;
         }
-        if markdown_only {
+        let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy();
+        if rel.starts_with("pages/") && rel.contains("/assets/") {
+            true
+        } else if markdown_only {
             path.extension().and_then(|e| e.to_str()) == Some("md")
         } else {
             // Skip the scratch files atomic_write leaves mid-rename.
@@ -94,6 +97,7 @@ impl SyncBackend for FilesystemBackend {
         let mut files = Vec::new();
         self.collect_files(&self.root.join("pages"), &self.root, true, &mut files)?;
         self.collect_files(&self.root.join("journals"), &self.root, true, &mut files)?;
+        self.collect_files(&self.root.join("knowledge"), &self.root, false, &mut files)?;
         // Media referenced by notes lives here; without it a synced note
         // arrives on the other machine with broken image and audio links.
         self.collect_files(&self.root.join("assets"), &self.root, false, &mut files)?;
@@ -143,5 +147,38 @@ impl SyncBackend for FilesystemBackend {
         let path = self.abs_path(rel_path);
         let content = fs::read(&path)?;
         Ok(compute_hash(&content))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::SyncBackend;
+    use tempfile::tempdir;
+
+    #[test]
+    fn lists_portable_knowledge_files() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("knowledge/prompts");
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("web-research.md"), "- prompt:: cite everything\n")?;
+        fs::write(path.join("web-research.json"), "{}\n")?;
+
+        let backend = FilesystemBackend::new(temp.path().to_path_buf(), "local".to_string());
+        let mut paths = backend
+            .list_files()?
+            .into_iter()
+            .map(|file| file.rel_path.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        assert_eq!(
+            paths,
+            vec![
+                "knowledge/prompts/web-research.json".to_string(),
+                "knowledge/prompts/web-research.md".to_string(),
+            ]
+        );
+        Ok(())
     }
 }

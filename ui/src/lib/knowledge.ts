@@ -34,6 +34,9 @@ export interface AiConfig {
     embedding_api_key?: string;
     embedding_base_url?: string;
   };
+  references?: {
+    concept_edge_prompt?: string | null;
+  };
 }
 
 export interface AiConfigPayload {
@@ -59,6 +62,7 @@ export interface AiConfigPayload {
   cloud_embedding_base_url?: string;
   cloud_embedding_api_key?: string;
   cloud_embedding_model?: string;
+  concept_edge_prompt?: string;
 }
 
 export interface StreamChunk {
@@ -270,6 +274,10 @@ export function aiGetConfig(): Promise<AiConfig> {
   return invoke("ai_get_config");
 }
 
+export function aiDefaultConceptEdgePrompt(): Promise<string> {
+  return invoke("ai_default_concept_edge_prompt");
+}
+
 export function aiSetConfig(payload: AiConfigPayload): Promise<void> {
   return invoke("ai_set_config", { payload });
 }
@@ -365,6 +373,12 @@ export function aiSummarizeSelection(
   operationId?: string
 ): Promise<PageSummary> {
   return invoke("ai_summarize_selection", { text, title, operationId });
+}
+
+// Starts a background job that extracts semantic concept edges and writes them
+// into the Suggested links table for review.
+export function aiCreateConceptEdges(pageId: string): Promise<string> {
+  return invoke("ai_create_concept_edges", { pageId });
 }
 
 // Actually researches `title`/`seedText` on the open internet — plans

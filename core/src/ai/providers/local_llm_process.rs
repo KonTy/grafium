@@ -78,10 +78,18 @@ pub enum WorkerResponse {
         #[serde(default)]
         load_seconds: Option<f64>,
     },
-    LoadError { message: String },
-    Token { text: String },
-    Done { text: String },
-    Error { message: String },
+    LoadError {
+        message: String,
+    },
+    Token {
+        text: String,
+    },
+    Done {
+        text: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// A live worker child process plus the pipe handles needed to talk to it.
@@ -233,9 +241,7 @@ impl LocalLlmProcess {
                 "Local LLM loaded on {} ({}) in {:.1}s.",
                 backend, dev, load_seconds
             ),
-            (b, _) => format!(
-                "Local LLM loaded on {b} backend in {load_seconds:.1}s."
-            ),
+            (b, _) => format!("Local LLM loaded on {b} backend in {load_seconds:.1}s."),
         };
         base
     }
@@ -309,7 +315,10 @@ fn set_native_lib_path_env(command: &mut Command, worker_bin: &Path) {
     let Some(dir) = worker_bin.parent() else {
         return;
     };
-    let candidates = [dir.join("bundled-libs"), dir.join("..").join("lib").join("Grafium")];
+    let candidates = [
+        dir.join("bundled-libs"),
+        dir.join("..").join("lib").join("Grafium"),
+    ];
     let Some(lib_dir) = candidates.into_iter().find(|p| p.is_dir()) else {
         return;
     };
@@ -346,7 +355,11 @@ struct WorkerStartup {
 /// fallback to another already-downloaded model — happens *inside* the
 /// worker via its own call to `LocalLlm::from_settings`; this function
 /// only has to relay whichever outcome that produced.
-fn spawn_worker(worker_bin: &Path, models_dir: &Path, settings_json: &str) -> Result<WorkerStartup> {
+fn spawn_worker(
+    worker_bin: &Path,
+    models_dir: &Path,
+    settings_json: &str,
+) -> Result<WorkerStartup> {
     let mut command = Command::new(worker_bin);
     command
         .arg(models_dir)
@@ -360,14 +373,12 @@ fn spawn_worker(worker_bin: &Path, models_dir: &Path, settings_json: &str) -> Re
         // vanish into a pipe nobody reads.
         .stderr(Stdio::inherit());
     set_native_lib_path_env(&mut command, worker_bin);
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            CoreError::Other(format!(
-                "failed to spawn local LLM worker process ({}): {e}",
-                worker_bin.display()
-            ))
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        CoreError::Other(format!(
+            "failed to spawn local LLM worker process ({}): {e}",
+            worker_bin.display()
+        ))
+    })?;
 
     let stdin = child.stdin.take().ok_or_else(|| {
         CoreError::Other("local LLM worker process has no stdin handle".to_string())
@@ -528,8 +539,7 @@ impl Inner {
 
         if guard.is_none() {
             let settings_json = self.compose_settings_json()?;
-            let startup =
-                spawn_worker(&self.worker_bin, &self.models_dir, &settings_json)?;
+            let startup = spawn_worker(&self.worker_bin, &self.models_dir, &settings_json)?;
             *guard = Some(startup.handle);
             // Note: we deliberately don't update the parent's cached
             // `backend`/`load_seconds` fields on a respawn — they
@@ -798,11 +808,7 @@ impl LlmProvider for LocalLlmProcess {
         // `stream_completion`, replaced with `CoreError::Cancelled` so
         // the caller sees "you cancelled this" rather than "the
         // worker crashed mid-generation".
-        let mut guard = self
-            .inner
-            .worker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.inner.worker.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(handle) = guard.as_mut() {
             let _ = handle.child.kill();
             // Deliberately don't `wait()` here: the reader thread will

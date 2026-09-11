@@ -73,6 +73,18 @@ Powered by SQLite FTS5 with Porter stemming. Search across all content instantly
 ### Audio Notes
 Attach audio recordings to pages with transcript storage for searchable voice notes.
 
+### Book Imports
+Import a folder of books recursively into `pages/Books/`. EPUB, HTML, Markdown, text,
+FB2, and PDF text-layer imports generate editable Markdown book pages, extract referenced
+media when available, and keep original book files outside the graph.
+Scanned PDFs can be imported through local OCR when Poppler (`pdfinfo`, `pdftoppm`) and
+Tesseract are installed. PDF imports use positioned text/OCR data to preserve visual
+headings, simple two-column tables of contents, and non-interleaved prose columns. They
+also extract embedded PDF images and, when ImageMagick's `magick` command is available,
+crop obvious non-text figure regions from scanned OCR pages into book assets. Imported
+books are written as one long book page with paragraph blocks nested under detected
+chapter/section headings for smoother reading.
+
 ### Live File Watcher
 Edit your `.md` files in any external editor. Grafium detects changes on disk and re-indexes automatically — no manual sync needed.
 

@@ -108,14 +108,26 @@ mod write_location {
     fn uses_the_folder_the_page_lives_in() {
         let tmp = super::graph();
         let dir = page_asset_dir(tmp.path(), "pages/mybooks/coolbook/toc.md").unwrap();
-        assert_eq!(dir, tmp.path().join("pages/mybooks/coolbook").canonicalize().unwrap());
+        assert_eq!(
+            dir,
+            tmp.path()
+                .join("pages/mybooks/coolbook")
+                .canonicalize()
+                .unwrap()
+        );
     }
 
     #[test]
     fn accepts_windows_separators() {
         let tmp = super::graph();
         let dir = page_asset_dir(tmp.path(), r"pages\mybooks\coolbook\toc.md").unwrap();
-        assert_eq!(dir, tmp.path().join("pages/mybooks/coolbook").canonicalize().unwrap());
+        assert_eq!(
+            dir,
+            tmp.path()
+                .join("pages/mybooks/coolbook")
+                .canonicalize()
+                .unwrap()
+        );
     }
 
     #[test]

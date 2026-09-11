@@ -38,6 +38,19 @@ const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
  * describe all of them. The base directory is a render argument, not state.
  */
 let assetBaseDir = "";
+let imageRenderIndex = 0;
+type ImageSizeHint = { width: number | null; height: number | null };
+let imageSizeHints: ImageSizeHint[] = [];
+
+const MARKDOWN_IMAGE_RE = /(!\[[^\]\n]*\]\(\s*)(<[^>\n]+>|(?:\\.|[^)\s\n])+)((?:\s+["'][^)\n]*["'])?\s*\))(\s*\{:[^}\n]*\})?/g;
+const IMAGE_WIDTH_IN_ATTR_RE = /(?:^|[,\s{]):?width\s+([0-9]{1,5})(?=$|[,\s}])/;
+const IMAGE_HEIGHT_IN_ATTR_RE = /(?:^|[,\s{]):?height\s+([0-9]{1,5})(?=$|[,\s}])/;
+const IMAGE_PIPE_SIZE_RE = /^(.*)\|([0-9]{1,5})(?:x([0-9]{1,5}))?$/;
+const VIDEO_EMBED_BLOCK_RE = /^\s*\{\{video\s+(\S+)(?:\s+([^}]+?))?\}\}\s*$/i;
+const YOUTUBE_HOST_RE = /^(?:www\.|m\.)?(?:youtube\.com|youtube-nocookie\.com)$/i;
+const YOUTU_BE_HOST_RE = /^(?:www\.)?youtu\.be$/i;
+const MIN_IMAGE_SIZE = 40;
+const MAX_IMAGE_SIZE = 3200;
 
 function normalizeBaseDir(dir: string): string {
   return dir.replace(/^\/+|\/+$/g, "");
@@ -106,10 +119,278 @@ function encodePathForUrl(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url.trim());
+}
+
 function extOf(url: string): string {
   const noQuery = url.split(/[?#]/)[0];
   const dot = noQuery.lastIndexOf(".");
   return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : "";
+}
+
+function normalizeImageSize(size: unknown): number | null {
+  const parsed = typeof size === "number" ? size : Number(size);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.max(MIN_IMAGE_SIZE, Math.min(MAX_IMAGE_SIZE, Math.round(parsed)));
+}
+
+function emptyImageSizeHint(): ImageSizeHint {
+  return { width: null, height: null };
+}
+
+function splitMarkdownImageTargetSize(target: string): { target: string; size: ImageSizeHint } {
+  const angleWrapped = target.startsWith("<") && target.endsWith(">") && target.length >= 2;
+  const body = angleWrapped ? target.slice(1, -1) : target;
+  const match = body.match(IMAGE_PIPE_SIZE_RE);
+  if (!match) return { target, size: emptyImageSizeHint() };
+  const cleanBody = match[1];
+  const width = normalizeImageSize(match[2]);
+  const height = normalizeImageSize(match[3]);
+  return {
+    target: angleWrapped ? `<${cleanBody}>` : cleanBody,
+    size: { width, height },
+  };
+}
+
+function parseImageSizeAttributes(attrs: string | undefined): ImageSizeHint {
+  return {
+    width: normalizeImageSize(attrs?.match(IMAGE_WIDTH_IN_ATTR_RE)?.[1]),
+    height: normalizeImageSize(attrs?.match(IMAGE_HEIGHT_IN_ATTR_RE)?.[1]),
+  };
+}
+
+function imageSizeAttributes(size: ImageSizeHint): string {
+  const parts: string[] = [];
+  if (size.width) parts.push(`:width ${size.width}`);
+  if (size.height) parts.push(`:height ${size.height}`);
+  return parts.length > 0 ? `{${parts.join(", ")}}` : "";
+}
+
+function transformMarkdownOutsideCode(content: string, transform: (segment: string) => string): string {
+  const codeRe = /```[\s\S]*?```|`[^`\n]*`/g;
+  let out = "";
+  let last = 0;
+  for (const match of content.matchAll(codeRe)) {
+    const start = match.index ?? 0;
+    out += transform(content.slice(last, start));
+    out += match[0];
+    last = start + match[0].length;
+  }
+  out += transform(content.slice(last));
+  return out;
+}
+
+type ActiveFence = {
+  char: "`" | "~";
+  length: number;
+};
+
+function normalizeIndentedFenceDelimiters(content: string): string {
+  const lines = content.split("\n");
+  let active: ActiveFence | null = null;
+
+  return lines
+    .map((line) => {
+      const cr = line.endsWith("\r") ? "\r" : "";
+      const body = cr ? line.slice(0, -1) : line;
+      const match = /^([ \t]*)(`{3,}|~{3,})(.*)$/.exec(body);
+      if (!match) return line;
+
+      const marker = match[2];
+      const rest = match[3];
+      const char = marker[0] as "`" | "~";
+
+      if (!active) {
+        active = { char, length: marker.length };
+        return `${marker}${rest}${cr}`;
+      }
+
+      if (char === active.char && marker.length >= active.length && rest.trim() === "") {
+        active = null;
+        return `${marker}${cr}`;
+      }
+
+      return line;
+    })
+    .join("\n");
+}
+
+function splitPipeTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+
+  let body = trimmed;
+  if (body.startsWith("|")) body = body.slice(1);
+  if (body.endsWith("|")) body = body.slice(0, -1);
+
+  const cells: string[] = [];
+  let current = "";
+  let escaped = false;
+  for (const ch of body) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current.trim());
+
+  return cells.some((cell) => cell.length > 0) ? cells : null;
+}
+
+function isTableDelimiterCells(cells: readonly string[]): boolean {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isLoosePipeTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return false;
+  const cells = splitPipeTableRow(line);
+  return !!cells && cells.length >= 2 && cells.some((cell) => cell.length > 0);
+}
+
+function fenceMarker(line: string): ActiveFence | null {
+  const match = /^\s*(`{3,}|~{3,})/.exec(line);
+  if (!match) return null;
+  const marker = match[1];
+  return { char: marker[0] as "`" | "~", length: marker.length };
+}
+
+function toggleFenceState(line: string, active: ActiveFence | null): ActiveFence | null {
+  const marker = fenceMarker(line);
+  if (!marker) return active;
+  if (!active) return marker;
+  return marker.char === active.char && marker.length >= active.length ? null : active;
+}
+
+function formatPipeTableDelimiterRow(originalLine: string, cells: readonly string[], columnCount: number): string {
+  const indent = originalLine.match(/^\s*/)?.[0] ?? "";
+  const normalized = cells.slice(0, columnCount);
+  while (normalized.length < columnCount) normalized.push("---");
+  return `${indent}| ${normalized.join(" | ")} |`;
+}
+
+function normalizeLooseMarkdownTables(content: string): string {
+  const lines = content.split("\n");
+  let activeFence: ActiveFence | null = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    activeFence = toggleFenceState(lines[i], activeFence);
+    if (activeFence || i + 1 >= lines.length) continue;
+
+    const headerCells = splitPipeTableRow(lines[i]);
+    const delimiterCells = splitPipeTableRow(lines[i + 1]);
+    if (!headerCells || !delimiterCells || !isTableDelimiterCells(delimiterCells)) continue;
+    if (headerCells.length === delimiterCells.length) continue;
+
+    lines[i + 1] = formatPipeTableDelimiterRow(lines[i + 1], delimiterCells, headerCells.length);
+  }
+
+  activeFence = null;
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    activeFence = toggleFenceState(lines[i], activeFence);
+    if (activeFence) continue;
+
+    const headerCells = splitPipeTableRow(lines[i]);
+    const nextCells = splitPipeTableRow(lines[i + 1]);
+    const previousCells = i > 0 ? splitPipeTableRow(lines[i - 1]) : null;
+    if (
+      !headerCells ||
+      !nextCells ||
+      isTableDelimiterCells(headerCells) ||
+      isTableDelimiterCells(nextCells) ||
+      (previousCells && (isLoosePipeTableRow(lines[i - 1]) || isTableDelimiterCells(previousCells))) ||
+      !isLoosePipeTableRow(lines[i]) ||
+      !isLoosePipeTableRow(lines[i + 1])
+    ) {
+      continue;
+    }
+
+    lines.splice(i + 1, 0, formatPipeTableDelimiterRow(lines[i], [], headerCells.length));
+    i += 1;
+  }
+
+  return lines.join("\n");
+}
+
+function stripImageSizeAttributes(content: string): string {
+  imageSizeHints = [];
+  return transformMarkdownOutsideCode(content, (segment) =>
+    segment.replace(MARKDOWN_IMAGE_RE, (
+      match,
+      prefix: string,
+      target: string,
+      suffix: string,
+      attrs: string | undefined,
+    ) => {
+      const pipe = splitMarkdownImageTargetSize(target);
+      const attr = parseImageSizeAttributes(attrs);
+      imageSizeHints.push({
+        width: pipe.size.width ?? attr.width,
+        height: pipe.size.height ?? attr.height,
+      });
+      return `${prefix}${pipe.target}${suffix}`;
+    })
+  );
+}
+
+export function setMarkdownImageSize(
+  content: string,
+  imageIndex: number,
+  size: { width?: number | null; height?: number | null }
+): string {
+  if (imageIndex < 0) return content;
+  const nextSize: ImageSizeHint = {
+    width: normalizeImageSize(size.width),
+    height: normalizeImageSize(size.height),
+  };
+  if (!nextSize.width && !nextSize.height) return content;
+
+  let currentIndex = 0;
+  return transformMarkdownOutsideCode(content, (segment) =>
+    segment.replace(MARKDOWN_IMAGE_RE, (
+      match,
+      prefix: string,
+      target: string,
+      suffix: string,
+    ) => {
+      if (currentIndex++ !== imageIndex) return match;
+      return `${prefix}${splitMarkdownImageTargetSize(target).target}${suffix}${imageSizeAttributes(nextSize)}`;
+    })
+  );
+}
+
+export function setMarkdownImageWidth(content: string, imageIndex: number, width: number): string {
+  return setMarkdownImageSize(content, imageIndex, { width });
+}
+
+export function clearMarkdownImageWidth(content: string, imageIndex: number): string {
+  if (imageIndex < 0) return content;
+
+  let currentIndex = 0;
+  return transformMarkdownOutsideCode(content, (segment) =>
+    segment.replace(MARKDOWN_IMAGE_RE, (
+      match,
+      prefix: string,
+      target: string,
+      suffix: string,
+    ) => {
+      if (currentIndex++ !== imageIndex) return match;
+      return `${prefix}${splitMarkdownImageTargetSize(target).target}${suffix}`;
+    })
+  );
 }
 
 // Media-aware image renderer: `![alt](path.ext)` becomes an <audio>/<video>/<img>
@@ -125,6 +406,7 @@ renderer.image = function ({ href, title, text }: { href: string; title?: string
   const ext = extOf(href);
   const alt = escapeHtml(text ?? "");
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  const index = imageRenderIndex++;
   if (AUDIO_EXTS.has(ext)) {
     const rel = escapeHtml(cleanAssetPath(href));
     return `<audio class="fc-audio" controls preload="none"${titleAttr} data-asset="${rel}"></audio>`;
@@ -134,7 +416,15 @@ renderer.image = function ({ href, title, text }: { href: string; title?: string
     return `<video class="fc-video" controls preload="metadata"${titleAttr} data-asset="${rel}"></video>`;
   }
   const src = resolveAssetUrl(href);
-  return `<img class="fc-img" loading="lazy" src="${src}" alt="${alt}"${titleAttr}>`;
+  const srcAttr = src.startsWith("grafium-asset:")
+    ? ` data-src="${escapeHtml(src)}"`
+    : ` src="${escapeHtml(src)}"`;
+  const size = imageSizeHints[index] ?? emptyImageSizeHint();
+  const sizeAttrs = size.width
+    ? ` style="width: ${size.width}px; height: auto;" data-image-width="${size.width}"${size.height ? ` data-image-height="${size.height}"` : ""}`
+    : "";
+  const markdownSrcAttr = ` data-markdown-src="${escapeHtml(href)}"`;
+  return `<img class="fc-img" loading="lazy" decoding="async" fetchpriority="low" data-image-index="${index}"${markdownSrcAttr}${srcAttr} alt="${alt}"${titleAttr}${sizeAttrs}>`;
 };
 
 // Render links so external `http(s)` destinations are distinct from internal
@@ -160,6 +450,42 @@ renderer.link = function (
   return `<a href="${escapeHtml(url)}"${titleAttr}>${text}</a>`;
 };
 
+renderer.heading = function (
+  this: any,
+  { tokens, depth }: { tokens: unknown[]; depth: number }
+): string {
+  const text = this.parser.parseInline(tokens);
+  const slug = markdownHeadingSlug(plainTextFromHtml(text));
+  return `<h${depth} id="${escapeHtml(slug)}">${text}</h${depth}>`;
+};
+
+export function markdownHeadingSlug(text: string): string {
+  let slug = "";
+  let lastWasSeparator = false;
+  for (const ch of text.trim().toLowerCase()) {
+    if (/[\p{Letter}\p{Number}]/u.test(ch)) {
+      slug += ch;
+      lastWasSeparator = false;
+    } else if (slug && !lastWasSeparator) {
+      slug += "-";
+      lastWasSeparator = true;
+    }
+  }
+  slug = slug.replace(/-+$/g, "");
+  return slug || "heading";
+}
+
+function plainTextFromHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
@@ -168,13 +494,172 @@ function escapeHtml(str: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function escapeAttr(str: string): string {
+  return escapeHtml(str).replace(/'/g, "&#39;");
+}
+
+function cleanVideoUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (/^(?:www\.youtube\.com|m\.youtube\.com|youtube\.com|youtu\.be)\//i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
+}
+
+function parseYouTubeVideoId(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(cleanVideoUrl(rawUrl));
+  } catch {
+    return null;
+  }
+
+  const host = url.hostname.toLowerCase();
+  let id: string | null = null;
+  if (YOUTU_BE_HOST_RE.test(host)) {
+    id = url.pathname.split("/").filter(Boolean)[0] ?? null;
+  } else if (YOUTUBE_HOST_RE.test(host)) {
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (url.pathname === "/watch") {
+      id = url.searchParams.get("v");
+    } else if (["embed", "shorts", "live"].includes(parts[0] ?? "")) {
+      id = parts[1] ?? null;
+    }
+  }
+
+  return id && /^[A-Za-z0-9_-]{6,64}$/.test(id) ? id : null;
+}
+
+function renderVideoEmbedBlock(content: string): string | null {
+  const match = content.match(VIDEO_EMBED_BLOCK_RE);
+  if (!match) return null;
+
+  const rawUrl = match[1];
+  const title = (match[2]?.trim() || "Embedded video").replace(/^["']|["']$/g, "");
+  const youtubeId = parseYouTubeVideoId(rawUrl);
+  if (youtubeId) {
+    const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(youtubeId)}`;
+    return (
+      `<div class="grafium-video-embed youtube-video">` +
+      `<iframe src="${src}" title="${escapeAttr(title)}" loading="lazy" ` +
+      `allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" ` +
+      `referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>` +
+      `</div>`
+    );
+  }
+
+  const url = cleanVideoUrl(rawUrl);
+  if (VIDEO_EXTS.has(extOf(url))) {
+    if (isHttpUrl(url)) {
+      return `<video class="fc-video grafium-video-file" controls preload="metadata" src="${escapeAttr(url)}"></video>`;
+    }
+    return `<video class="fc-video grafium-video-file" controls preload="metadata" data-asset="${escapeAttr(cleanAssetPath(url))}"></video>`;
+  }
+
+  if (isHttpUrl(url)) {
+    return `<a class="external-link" style="color:var(--accent-cyan)" href="${escapeAttr(url)}">${escapeHtml(url)}<span class="external-link-icon" aria-hidden="true">↗</span></a>`;
+  }
+  return escapeHtml(content);
+}
+
+function taskCheckbox(state: string, checked: boolean): string {
+  const action = checked ? "" : ' data-task-action="done"';
+  const title = checked ? `${state} task` : "Mark done";
+  return (
+    `<span class="task-checkbox ${checked ? "checked" : "unchecked"} ${state.toLowerCase()}"` +
+    ` role="checkbox" aria-checked="${checked}" tabindex="0" data-task-state="${state}"${action}` +
+    ` title="${title}"></span>`
+  );
+}
+
+const TASK_BLOCK_START_RE =
+  /^\s*(?:TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b|^\s*(?:[-*+]\s*)?\[[^\]\n]\]\s*/i;
+const LOGSEQ_LOGBOOK_OPEN_RE = /^\s*:LOGBOOK:\s*$/i;
+const LOGSEQ_LOGBOOK_CLOSE_RE = /^\s*:END:\s*$/i;
+const CLOSED_LINE_RE = /^\s*CLOSED:\s*\[[^\]]+\]\s*$/i;
+const TASK_MARKER_RE = /^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)$/i;
+const MARKDOWN_CHECKBOX_LINE_RE =
+  /(^|\n)([ \t]*)(?:[-*+]\s*)?\[([^\]\n])\]\s*(?:(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b\s*)?/gi;
+
+function hideRenderedTaskMetadata(content: string): string {
+  if (!TASK_BLOCK_START_RE.test(content)) return content;
+
+  const lines = content.split("\n");
+  const visible: string[] = [];
+  let inLogbook = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (LOGSEQ_LOGBOOK_OPEN_RE.test(trimmed)) {
+      inLogbook = true;
+      continue;
+    }
+    if (inLogbook) {
+      if (LOGSEQ_LOGBOOK_CLOSE_RE.test(trimmed)) inLogbook = false;
+      continue;
+    }
+    if (CLOSED_LINE_RE.test(trimmed)) continue;
+    visible.push(line);
+  }
+
+  return visible.join("\n").trimEnd();
+}
+
+function normalizeTaskState(state: string): string {
+  const upper = state.toUpperCase();
+  return upper === "CANCELLED" ? "CANCELED" : upper;
+}
+
+function taskStateFromCheckbox(mark: string, explicitState: string | undefined): string {
+  if (explicitState && TASK_MARKER_RE.test(explicitState)) return normalizeTaskState(explicitState);
+
+  switch (mark) {
+    case "x":
+    case "X":
+      return "DONE";
+    case "-":
+      return "CANCELED";
+    case "/":
+      return "DOING";
+    case ">":
+      return "LATER";
+    case "!":
+      return "NOW";
+    default:
+      return "TODO";
+  }
+}
+
+function isCheckedTaskState(state: string): boolean {
+  return state === "DONE" || state === "CANCELED";
+}
+
+function taskMarker(state: string): string {
+  return `<span class="task-marker ${state.toLowerCase()}">${state}</span>`;
+}
+
+function renderMarkdownCheckboxTasks(content: string): string {
+  return transformMarkdownOutsideCode(content, (segment) =>
+    segment.replace(MARKDOWN_CHECKBOX_LINE_RE, (_, prefix: string, indent: string, mark: string, explicitState?: string) => {
+      const state = taskStateFromCheckbox(mark, explicitState);
+      return `${prefix}${indent}${taskCheckbox(state, isCheckedTaskState(state))}${taskMarker(state)} `;
+    })
+  );
+}
+
 // Canonicalize tag / page hierarchy separators the way the backend does
 // (core/src/parser/links.rs `normalize_title`: `\` → `/`). The navigation
 // target, the displayed text and the colour hash must all use the same
 // canonical form, otherwise a tag like `#test\child` would hash/display one way
 // but click through to (and could create) a different `test\child` page.
 function normalizeHierarchy(name: string): string {
-  return name.replace(/\\/g, "/");
+  const normalized = name
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("/");
+  return normalized.replace(/^(\d{4})[-_](\d{2})[-_](\d{2})$/, "$1-$2-$3");
 }
 
 // Configure marked for block rendering
@@ -215,6 +700,24 @@ const pageLinkExtension = {
   },
 };
 
+const priorityExtension = {
+  name: "priority",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.search(/\[#([ABC])\]/i);
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const m = /^\[#([ABC])\]/i.exec(src);
+    if (!m) return undefined;
+    return { type: "priority", raw: m[0], priority: m[1].toUpperCase() };
+  },
+  renderer(token: { priority: string }) {
+    const priority = escapeHtml(token.priority);
+    return `<span class="priority priority-${priority}" title="Priority ${priority}">Priority ${priority}</span>`;
+  },
+};
+
 const tagExtension = {
   name: "tag",
   level: "inline" as const,
@@ -252,7 +755,7 @@ const blockRefExtension = {
   },
 };
 
-marked.use({ extensions: [pageLinkExtension, tagExtension, blockRefExtension] });
+marked.use({ extensions: [pageLinkExtension, priorityExtension, tagExtension, blockRefExtension] });
 
 // Simple LRU cache to avoid re-parsing unchanged blocks
 const cache = new Map<string, string>();
@@ -286,12 +789,21 @@ function renderMathSegment(text: string): string {
     });
   });
 
-  return withDisplay.replace(/(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_, expr: string) => {
+  return withDisplay.replace(/(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (match: string, expr: string) => {
+    if (!shouldRenderInlineMath(expr)) return match;
     return katex.renderToString(expr.trim(), {
       throwOnError: false,
       displayMode: false,
     });
   });
+}
+
+function shouldRenderInlineMath(expr: string): boolean {
+  const trimmed = expr.trim();
+  if (!trimmed) return false;
+  if (/^\d/.test(trimmed) && /[A-Za-z]/.test(trimmed)) return false;
+  const proseWords = trimmed.match(/[A-Za-z]{2,}/g) ?? [];
+  return proseWords.length < 3;
 }
 
 function renderMathOutsideCodeFences(markdown: string): string {
@@ -330,15 +842,22 @@ export function renderBlock(content: string, baseDir = ""): string {
   // nested render (a callout body renders recursively) cannot leak its
   // directory to whatever called it.
   const previousBaseDir = assetBaseDir;
+  const previousImageRenderIndex = imageRenderIndex;
+  const previousImageSizeHints = imageSizeHints;
   assetBaseDir = dir;
+  imageRenderIndex = 0;
+  imageSizeHints = [];
   let html: string;
   try {
     // A whole-block admonition (`#+BEGIN_TIP` … `#+END_TIP`) renders as a
     // styled callout wrapping the (recursively rendered) body.
     const callout = renderCalloutBlock(content);
-    html = callout !== null ? callout : renderMarkdownContent(content);
+    const videoEmbed = callout === null ? renderVideoEmbedBlock(content) : null;
+    html = callout !== null ? callout : videoEmbed !== null ? videoEmbed : renderMarkdownContent(content);
   } finally {
     assetBaseDir = previousBaseDir;
+    imageRenderIndex = previousImageRenderIndex;
+    imageSizeHints = previousImageSizeHints;
   }
 
   setCache(cacheKey, html);
@@ -442,10 +961,11 @@ function sanitizeAssistantHtml(html: string): string {
       "mphantom", "menclose", "mglyph", "svg", "path", "line",
     ],
     ALLOWED_ATTR: [
-      "class", "style", "href", "src", "alt", "title", "loading",
+      "class", "style", "id", "href", "src", "alt", "title", "loading", "decoding", "fetchpriority",
       "colspan", "rowspan", "start", "type",
       // Data attributes the click delegation in ChatView reads.
-      "data-page-link", "data-tag", "data-block-ref",
+      "data-page-link", "data-tag", "data-block-ref", "data-src", "data-loaded-once",
+      "data-image-index", "data-image-width", "data-image-height", "data-markdown-src",
       // KaTeX/MathML presentation attributes.
       "xmlns", "display", "encoding", "mathvariant", "stretchy", "viewBox",
       "width", "height", "d", "x1", "x2", "y1", "y2", "fill", "stroke",
@@ -454,7 +974,7 @@ function sanitizeAssistantHtml(html: string): string {
     // Only these URL schemes may appear in href/src. `data:` is excluded even
     // for images: a data URL is a script-delivery vector in enough contexts
     // that allowing it here buys nothing an http(s) image doesn't.
-    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|#|\/)/i,
+    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|grafium-asset:|#|\/)/i,
     // Belt and braces: no event handlers survive regardless of the allowlist.
     FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onanimationend"],
     FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button"],
@@ -486,7 +1006,10 @@ function renderCalloutBlock(content: string): string | null {
 
 /** Render arbitrary markdown/outliner content (links, tags, math, tasks). */
 function renderMarkdownContent(content: string): string {
-  let processed = renderMathOutsideCodeFences(content);
+  let processed = normalizeIndentedFenceDelimiters(hideRenderedTaskMetadata(content));
+  processed = normalizeLooseMarkdownTables(processed);
+  processed = renderMathOutsideCodeFences(processed);
+  processed = stripImageSizeAttributes(processed);
 
   // Unescape outline-style backslash escapes before brackets (e.g. \] → ])
   // so that standard markdown links like [text](url) render correctly.
@@ -498,18 +1021,13 @@ function renderMarkdownContent(content: string): string {
   // text tokens — never to link destinations or any code form.
 
   // Handle task markers
-  processed = processed.replace(/^TODO\s+/i, '<span class="task-marker todo">TODO</span> ');
-  processed = processed.replace(/^DOING\s+/i, '<span class="task-marker doing">DOING</span> ');
-  processed = processed.replace(/^DONE\s+/i, '<span class="task-marker done">DONE</span> ');
-  processed = processed.replace(/^LATER\s+/i, '<span class="task-marker later">LATER</span> ');
-  processed = processed.replace(/^NOW\s+/i, '<span class="task-marker now">NOW</span> ');
-  processed = processed.replace(/^CANCELED\s+/i, '<span class="task-marker canceled">CANCELED</span> ');
-
-  // Handle priority markers [#A], [#B], [#C]
-  processed = processed.replace(
-    /\[#([ABC])\]/g,
-    '<span class="priority priority-$1">[#$1]</span>'
-  );
+  processed = renderMarkdownCheckboxTasks(processed);
+  processed = processed.replace(/^TODO\s+/i, `${taskCheckbox("TODO", false)}${taskMarker("TODO")} `);
+  processed = processed.replace(/^DOING\s+/i, `${taskCheckbox("DOING", false)}${taskMarker("DOING")} `);
+  processed = processed.replace(/^DONE\s+/i, `${taskCheckbox("DONE", true)}${taskMarker("DONE")} `);
+  processed = processed.replace(/^LATER\s+/i, `${taskCheckbox("LATER", false)}${taskMarker("LATER")} `);
+  processed = processed.replace(/^NOW\s+/i, `${taskCheckbox("NOW", false)}${taskMarker("NOW")} `);
+  processed = processed.replace(/^CANCELED\s+/i, `${taskCheckbox("CANCELED", true)}${taskMarker("CANCELED")} `);
 
   // Handle SCHEDULED and DEADLINE timestamps (display as badges)
   processed = processed.replace(
@@ -538,32 +1056,106 @@ function renderMarkdownContent(content: string): string {
 // flipping front/back) doesn't re-read the file each time.
 const mediaUrlCache = new Map<string, string>();
 
+let imageObserver: IntersectionObserver | null = null;
+
+function rememberImageIntrinsicSize(img: HTMLImageElement) {
+  if (img.naturalWidth <= 0 || img.naturalHeight <= 0) return;
+  img.setAttribute("width", String(img.naturalWidth));
+  img.setAttribute("height", String(img.naturalHeight));
+}
+
+function lazyImageObserver(): IntersectionObserver | null {
+  if (typeof IntersectionObserver === "undefined") return null;
+  imageObserver ??= new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const img = entry.target as HTMLImageElement;
+        const src = img.dataset.src;
+        if (!src) {
+          imageObserver?.unobserve(img);
+          continue;
+        }
+        if (entry.isIntersecting) {
+          if (img.src !== src) img.src = src;
+          if (img.complete) rememberImageIntrinsicSize(img);
+          img.dataset.loadedOnce = "1";
+        } else if (img.dataset.loadedOnce === "1") {
+          img.removeAttribute("src");
+        }
+      }
+    },
+    { rootMargin: "1400px 0px" }
+  );
+  return imageObserver;
+}
+
+function hydrateLazyImages(root: HTMLElement): () => void {
+  const imgs = Array.from(root.querySelectorAll<HTMLImageElement>("img.fc-img[data-src]"));
+  if (imgs.length === 0) return () => {};
+
+  const observer = lazyImageObserver();
+  const loadListeners: Array<[HTMLImageElement, () => void]> = [];
+  for (const img of imgs) {
+    const onLoad = () => rememberImageIntrinsicSize(img);
+    img.addEventListener("load", onLoad);
+    loadListeners.push([img, onLoad]);
+  }
+
+  if (!observer) {
+    for (const img of imgs) {
+      const src = img.dataset.src;
+      if (src && img.src !== src) img.src = src;
+      if (img.complete) rememberImageIntrinsicSize(img);
+    }
+    return () => {
+      for (const [img, onLoad] of loadListeners) {
+        img.removeEventListener("load", onLoad);
+      }
+    };
+  }
+
+  for (const img of imgs) observer.observe(img);
+  return () => {
+    for (const img of imgs) {
+      observer.unobserve(img);
+      img.removeAttribute("src");
+    }
+    for (const [img, onLoad] of loadListeners) {
+      img.removeEventListener("load", onLoad);
+    }
+  };
+}
+
 /**
- * Load <audio>/<video> media inside a rendered container as in-memory `data:`
- * URLs. WebKitGTK's GStreamer media backend can't fetch from our custom
- * `grafium-asset` scheme, so audio/video are emitted with a `data-asset`
- * attribute (see the image renderer) and their real `src` is filled in here
- * after the HTML is mounted in the DOM.
+ * Hydrate rendered graph-local media after `{@html renderBlock(...)}` mounts.
+ * Audio/video use in-memory `data:` URLs because WebKitGTK's GStreamer backend
+ * can't fetch from our custom scheme. Images are scheme URLs, but they are
+ * assigned lazily and unloaded offscreen so a long scanned book cannot keep
+ * hundreds of large decoded page figures resident while the user reads.
  *
  * Call this after `{@html renderBlock(...)}` has been inserted (e.g. from a
  * Svelte `$effect` keyed to the rendered content).
  */
-export async function hydrateAssetMedia(root: HTMLElement | null | undefined): Promise<void> {
-  if (!root) return;
+export function hydrateAssetMedia(root: HTMLElement | null | undefined): () => void {
+  if (!root) return () => {};
+  const cleanupImages = hydrateLazyImages(root);
   const els = root.querySelectorAll<HTMLMediaElement>("audio[data-asset], video[data-asset]");
-  for (const el of Array.from(els)) {
-    const rel = el.getAttribute("data-asset");
-    if (!rel) continue;
-    el.removeAttribute("data-asset");
-    try {
-      let url = mediaUrlCache.get(rel);
-      if (!url) {
-        url = await invoke<string>("read_asset_data_url", { path: rel });
-        mediaUrlCache.set(rel, url);
+  void (async () => {
+    for (const el of Array.from(els)) {
+      const rel = el.getAttribute("data-asset");
+      if (!rel) continue;
+      el.removeAttribute("data-asset");
+      try {
+        let url = mediaUrlCache.get(rel);
+        if (!url) {
+          url = await invoke<string>("read_asset_data_url", { path: rel });
+          mediaUrlCache.set(rel, url);
+        }
+        el.src = url;
+      } catch (e) {
+        console.error("Failed to load media asset", rel, e);
       }
-      el.src = url;
-    } catch (e) {
-      console.error("Failed to load media asset", rel, e);
     }
-  }
+  })();
+  return cleanupImages;
 }

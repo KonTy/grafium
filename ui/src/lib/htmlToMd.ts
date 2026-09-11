@@ -16,6 +16,79 @@ turndown.addRule("strikethrough", {
   replacement: (content) => `~~${content}~~`,
 });
 
+function elementWithClass(node: Node, className: string): HTMLElement | null {
+  if (node.nodeType !== 1) return null;
+  const element = node as HTMLElement;
+  return element.classList?.contains(className) ? element : null;
+}
+
+function safeWikiTarget(value: string | null, fallback: string): string | null {
+  const target = (value || fallback).trim().replace(/^\[\[|\]\]$/g, "");
+  if (!target || /[\u0000-\u001f\u007f<>\[\]\n\r]/.test(target)) return null;
+  return target.replace(/\\/g, "/");
+}
+
+function safeTagTarget(value: string | null, fallback: string): string | null {
+  const tag = (value || fallback).trim().replace(/^#/, "").replace(/\\/g, "/");
+  return /^[a-zA-Z0-9][a-zA-Z0-9_/-]*$/.test(tag) ? tag : null;
+}
+
+function safeBlockRef(value: string | null, fallback: string): string | null {
+  const ref = (value || fallback).trim().replace(/^\(\(|\)\)$/g, "");
+  return /^[a-f0-9][a-f0-9-]{6,}$/i.test(ref) ? ref : null;
+}
+
+function safeTaskState(value: string | null, fallback: string): string | null {
+  const state = (value || fallback).trim().toUpperCase();
+  return /^(TODO|DOING|DONE|LATER|NOW|CANCELED|CANCELLED)$/.test(state) ? state : null;
+}
+
+function safeCodeLanguage(value: string): string {
+  const lang = value.trim();
+  return /^[a-zA-Z0-9_+.-]{0,64}$/.test(lang) ? lang : "";
+}
+
+turndown.addRule("grafiumPageLink", {
+  filter: (node) => elementWithClass(node, "page-link") !== null,
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const target = safeWikiTarget(element.getAttribute("data-page"), content);
+    return target ? `[[${target}]]` : content;
+  },
+});
+
+turndown.addRule("grafiumTag", {
+  filter: (node) => elementWithClass(node, "tag") !== null,
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const tag = safeTagTarget(element.getAttribute("data-tag"), content);
+    return tag ? `#${tag}` : content;
+  },
+});
+
+turndown.addRule("grafiumBlockRef", {
+  filter: (node) => elementWithClass(node, "block-ref") !== null,
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const ref = safeBlockRef(element.getAttribute("data-ref"), content);
+    return ref ? `((${ref}))` : content;
+  },
+});
+
+turndown.addRule("grafiumTaskCheckbox", {
+  filter: (node) => elementWithClass(node, "task-checkbox") !== null,
+  replacement: () => "",
+});
+
+turndown.addRule("grafiumTaskMarker", {
+  filter: (node) => elementWithClass(node, "task-marker") !== null,
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const state = safeTaskState(element.getAttribute("data-task-state"), content);
+    return state ? `${state} ` : content;
+  },
+});
+
 // Preserve code blocks with language
 turndown.addRule("fencedCodeBlock", {
   filter: (node) => {
@@ -24,7 +97,7 @@ turndown.addRule("fencedCodeBlock", {
   replacement: (_content, node) => {
     const code = (node as HTMLElement).querySelector("code");
     if (!code) return _content;
-    const lang = (code.className.match(/language-(\S+)/) || [])[1] || "";
+    const lang = safeCodeLanguage((code.className.match(/language-(\S+)/) || [])[1] || "");
     const text = code.textContent || "";
     return `\n\`\`\`${lang}\n${text}\n\`\`\`\n`;
   },
@@ -63,6 +136,8 @@ export interface PasteBlock {
   content: string;
   depth: number; // 0 = top level, 1 = child, 2 = grandchild, etc.
 }
+
+const TASK_LINE_RE = /^(?:TODO|DOING|DONE|LATER|NOW|CANCELED|CANCELLED)\b/i;
 
 /**
  * Split markdown into logical blocks with depth info for multi-block paste.
@@ -148,13 +223,31 @@ export function splitMarkdownIntoBlocks(md: string): PasteBlock[] {
       continue;
     }
 
+    if (TASK_LINE_RE.test(trimmed)) {
+      flush();
+      baseIndent = -1;
+      listBaseDepth = 0;
+      currentDepth = 0;
+      current.push(trimmed);
+      lastWasParagraph = false;
+      continue;
+    }
+
     // Plain text paragraph
+    let paragraphLine = line;
+    if (current.length > 0 && baseIndent >= 0) {
+      const relativeDepth = Math.max(0, currentDepth - listBaseDepth);
+      const continuationIndent = baseIndent + relativeDepth * 2 + 2;
+      if (indent >= continuationIndent) {
+        paragraphLine = line.slice(continuationIndent);
+      }
+    }
     if (current.length === 0) {
       // Starting a new paragraph — flush resets
       baseIndent = -1;
       listBaseDepth = 0;
     }
-    current.push(line);
+    current.push(paragraphLine);
     lastWasParagraph = true;
   }
   flush();

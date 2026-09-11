@@ -1,7 +1,16 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
   import PageTree from "./PageTree.svelte";
-  import { countPages, listPagesWindow, createPage, deletePage, getGraphInfo } from "../lib/api";
+  import {
+    countPages,
+    listPagesWindow,
+    createPage,
+    deletePage,
+    deleteBookFolder,
+    getGraphInfo,
+    openBookFolderInFileBrowser,
+    openPageInFileBrowser,
+  } from "../lib/api";
   import {
     getPageTree,
     toPageTreeView,
@@ -18,6 +27,14 @@
     type PageTreeViewNode,
   } from "../lib/pageTreeState";
   import type { Page } from "../lib/api";
+
+  interface PageActionMenu {
+    x: number;
+    y: number;
+    pageId: string | null;
+    title: string;
+    bookTitle: string | null;
+  }
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -66,6 +83,8 @@
   let reloadToken = $state(0); // bump to force a re-fetch of the visible window
 
   let spacerEl: HTMLDivElement | null = $state(null);
+  let actionMenuEl: HTMLDivElement | null = $state(null);
+  let actionMenu: PageActionMenu | null = $state(null);
   let relTop = $state(0); // px of list scrolled above the viewport top
   let visH = $state(0); // viewport height in px
 
@@ -143,6 +162,22 @@
     };
     window.addEventListener("page-tree-refresh", refreshTree);
     return () => window.removeEventListener("page-tree-refresh", refreshTree);
+  });
+
+  $effect(() => {
+    if (!actionMenu) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!actionMenuEl?.contains(event.target as Node)) actionMenu = null;
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") actionMenu = null;
+    };
+    window.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
   });
 
   // Track scroll/resize of the enclosing .main-content scroller.
@@ -261,31 +296,157 @@
     window.dispatchEvent(new CustomEvent("page-tree-refresh"));
   }
 
-  async function handleDeletePage(page: Page) {
+  async function deletePageById(pageId: string, title: string) {
     // Deleting a page also removes its .md file from disk and evicts it
     // from favorites / recent pages — irreversible, so gate on an explicit
     // confirmation instead of the previous silent one-click delete.
     const confirmed = window.confirm(
-      `Delete page '${page.title}'? This will remove the .md file from disk `
+      `Delete page '${title}'? This will remove the .md file from disk `
       + `and cannot be undone.`,
     );
     if (!confirmed) return;
 
     try {
-      await deletePage(page.id);
+      await deletePage(pageId);
     } catch (e) {
       console.error("Failed to delete page:", e);
-      alert("Failed to delete page.");
+      alert(`Failed to delete page: ${errorMessage(e)}`);
       return;
     }
+    await refreshAfterDeletion();
+  }
+
+  function titleFromTreeNode(node: PageTreeViewNode): string {
+    if (node.page_title) return node.page_title;
+    const prefix = `${treeSource}:`;
+    return node.id.startsWith(prefix) ? node.id.slice(prefix.length) : node.label;
+  }
+
+  function bookTitleFromAnyTitle(title: string | null): string | null {
+    if (!title) return null;
+    const parts = title.split("/").filter(Boolean);
+    if (parts[0] !== "Books" || !parts[1]) return null;
+    return `Books/${parts[1]}`;
+  }
+
+  function hasTreeNodeMenu(node: PageTreeViewNode): boolean {
+    const title = titleFromTreeNode(node);
+    return Boolean(node.page_id || bookTitleFromAnyTitle(title));
+  }
+
+  function errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return String(error);
+  }
+
+  function removeBookBranchFromTree(nodes: PageTreeViewNode[], bookTitle: string): PageTreeViewNode[] {
+    const prefix = `${bookTitle}/`;
+    const prune = (node: PageTreeViewNode): PageTreeViewNode | null => {
+      const title = titleFromTreeNode(node);
+      if (title === bookTitle || title.startsWith(prefix)) return null;
+
+      const children = node.children
+        .map(prune)
+        .filter((child): child is PageTreeViewNode => child !== null);
+      if (!node.page_id && children.length === 0) return null;
+
+      const selfCount = node.page_id ? 1 : 0;
+      const count = children.reduce((sum, child) => sum + child.count, selfCount);
+      const updated_at = Math.max(
+        node.page_id ? node.updated_at : 0,
+        ...children.map((child) => child.updated_at),
+      );
+      return { ...node, children, count, updated_at };
+    };
+
+    return nodes
+      .map(prune)
+      .filter((node): node is PageTreeViewNode => node !== null);
+  }
+
+  async function refreshAfterDeletion() {
     resetWindows();
     await refreshCount();
-    if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+    if (pageTreeAvailable !== false) await loadPageTree(treeSource);
     window.dispatchEvent(new CustomEvent("page-tree-refresh"));
-    // Let App.svelte drop this page from the sidebar's recent list so a
-    // freshly-deleted entry doesn't linger in the "Recent Pages" section
-    // until the next currentPage change.
+    // Let App.svelte drop deleted pages from the sidebar's recent list so stale
+    // entries don't linger until the next currentPage change.
     onPageDeleted?.();
+  }
+
+  function menuPosition(event: MouseEvent): { x: number; y: number } {
+    const rect = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+    const rawX = rect ? rect.right - 224 : event.clientX;
+    const rawY = rect ? rect.bottom + 4 : event.clientY;
+    return {
+      x: Math.min(Math.max(8, rawX), Math.max(8, window.innerWidth - 240)),
+      y: Math.min(Math.max(8, rawY), Math.max(8, window.innerHeight - 180)),
+    };
+  }
+
+  function openActionMenu(event: MouseEvent, target: Omit<PageActionMenu, "x" | "y">) {
+    const { x, y } = menuPosition(event);
+    actionMenu = { ...target, x, y };
+  }
+
+  function handleTreeNodeMenu(event: MouseEvent, node: PageTreeViewNode) {
+    const title = titleFromTreeNode(node);
+    openActionMenu(event, {
+      pageId: node.page_id,
+      title,
+      bookTitle: bookTitleFromAnyTitle(title),
+    });
+  }
+
+  function handleListPageMenu(event: MouseEvent, page: Page) {
+    openActionMenu(event, {
+      pageId: page.id,
+      title: page.title,
+      bookTitle: bookTitleFromAnyTitle(page.title),
+    });
+  }
+
+  async function handleOpenInFileBrowser() {
+    const target = actionMenu;
+    if (!target) return;
+    actionMenu = null;
+    try {
+      if (target.bookTitle) {
+        await openBookFolderInFileBrowser(target.bookTitle);
+      } else if (target.pageId) {
+        await openPageInFileBrowser(target.pageId);
+      }
+    } catch (e) {
+      console.error("Failed to open in file browser:", e);
+      alert(`Failed to open in file browser: ${errorMessage(e)}`);
+    }
+  }
+
+  async function handleDeleteActionTarget() {
+    const target = actionMenu;
+    if (!target) return;
+    actionMenu = null;
+
+    if (target.bookTitle) {
+      const confirmed = window.confirm(
+        `Delete imported book '${target.bookTitle}'? This removes the whole folder under pages/Books, including generated Markdown and assets. Original source files outside Grafium are not touched. This cannot be undone.`,
+      );
+      if (!confirmed) return;
+      try {
+        await deleteBookFolder(target.bookTitle);
+      } catch (e) {
+        console.error("Failed to delete book folder:", e);
+        alert(`Failed to delete book folder: ${errorMessage(e)}`);
+        return;
+      }
+      pageTree = removeBookBranchFromTree(pageTree, target.bookTitle);
+      await refreshAfterDeletion();
+      return;
+    }
+
+    if (target.pageId) {
+      await deletePageById(target.pageId, target.title);
+    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -427,6 +588,8 @@
           columns
           revealToken={filterQuery.trim()}
           {onNavigate}
+          onPageContextMenu={treeSource === "namespace" ? handleTreeNodeMenu : undefined}
+          hasPageMenu={treeSource === "namespace" ? hasTreeNodeMenu : undefined}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
           emptyText={treeSource === "namespace"
@@ -448,12 +611,37 @@
               {/if}
             </button>
             <span class="page-date">{fmtDate(page.updated_at)}</span>
-            <button class="btn-delete" onclick={() => handleDeletePage(page)} title="Delete">×</button>
+            <button
+              type="button"
+              class="btn-page-actions"
+              onclick={(event) => handleListPageMenu(event, page)}
+              title="Page actions"
+              aria-label={`Actions for ${page.title}`}
+            >⋯</button>
           {:else}
             <span class="page-link placeholder">…</span>
           {/if}
         </div>
       {/each}
+    </div>
+  {/if}
+
+  {#if actionMenu}
+    <div
+      class="page-action-menu"
+      role="menu"
+      aria-label={`Actions for ${actionMenu.title}`}
+      style={`left: ${actionMenu.x}px; top: ${actionMenu.y}px;`}
+      bind:this={actionMenuEl}
+    >
+      <p class="page-action-title">{actionMenu.bookTitle ?? actionMenu.title}</p>
+      <button type="button" role="menuitem" class="page-action-item" onclick={handleOpenInFileBrowser}>
+        Open in file browser
+      </button>
+      <div class="page-action-separator" role="separator"></div>
+      <button type="button" role="menuitem" class="page-action-item danger" onclick={handleDeleteActionTarget}>
+        {actionMenu.bookTitle ? "Delete whole book folder" : "Delete page"}
+      </button>
     </div>
   {/if}
 </div>
@@ -747,7 +935,7 @@
     white-space: nowrap;
   }
 
-  .btn-delete {
+  .btn-page-actions {
     background: none;
     border: none;
     color: var(--text-muted);
@@ -764,20 +952,78 @@
      on hover only, so a keyboard user used to tab onto a delete control that
      was invisible — focus landed on something they could not see, one keypress
      away from deleting a page. */
-  .page-row:hover .btn-delete,
-  .page-row:focus-within .btn-delete {
+  .page-row:hover .btn-page-actions,
+  .page-row:focus-within .btn-page-actions {
     opacity: 1;
   }
 
-  .btn-delete:hover {
-    background: var(--danger-bg);
+  .btn-page-actions:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .btn-page-actions:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .page-action-menu {
+    position: fixed;
+    z-index: 100;
+    width: 228px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-overlay);
+    box-shadow: 0 10px 28px color-mix(in srgb, var(--bg-primary) 70%, transparent);
+  }
+
+  .page-action-title {
+    margin: 0 0 5px;
+    padding: 5px 7px 7px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .page-action-item {
+    width: 100%;
+    padding: 8px 9px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .page-action-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .page-action-item:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .page-action-item.danger {
     color: var(--danger);
   }
 
-  .btn-delete:focus-visible {
-    opacity: 1;
-    outline: 2px solid var(--danger, var(--accent));
-    outline-offset: 1px;
+  .page-action-item.danger:hover {
+    background: var(--danger-bg);
+  }
+
+  .page-action-separator {
+    height: 1px;
+    margin: 5px 2px;
+    background: var(--border);
   }
 
   .empty-state {

@@ -4,7 +4,7 @@
  * Long AI work no longer belongs to the panel that started it. The backend
  * returns a job id immediately and reports progress on `job://update`; this
  * store mirrors that stream so any part of the UI can show activity, and so a
- * completion notification can be raised even if the user has navigated
+ * completion toast can be raised even if the user has navigated
  * somewhere else entirely.
  */
 
@@ -16,6 +16,7 @@ export type JobStatus = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface JobLink {
   page_id: string;
+  page_title?: string;
   label: string;
 }
 
@@ -28,6 +29,7 @@ export interface Job {
   message: string | null;
   link: JobLink | null;
   error: string | null;
+  details: string | null;
   cancellable: boolean;
   started_at: number;
   finished_at: number | null;
@@ -71,7 +73,7 @@ export function applyJobUpdate(update: Job): { isNewlyFinished: boolean } {
   };
 }
 
-/** The notification text for a job that has just finished. */
+/** The toast text for a job that has just finished. */
 export function describeFinishedJob(job: Job): string | null {
   switch (job.status) {
     case "succeeded":
@@ -124,7 +126,7 @@ export async function initJobs(
 }
 
 /**
- * Default completion handler: notify, and offer a way to reach the result.
+ * Default completion handler: toast, and offer a way to reach the result.
  */
 export function notifyJobFinished(job: Job, openPage?: (pageId: string) => void): void {
   const message = describeFinishedJob(job);

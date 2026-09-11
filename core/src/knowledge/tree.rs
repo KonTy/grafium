@@ -452,17 +452,16 @@ mod collision_tests {
             .map(|n| n.label)
             .collect();
 
-        assert_eq!(labels, vec!["mybooks", "tech", "absorption", "biology", "zebra"]);
+        assert_eq!(
+            labels,
+            vec!["mybooks", "tech", "absorption", "biology", "zebra"]
+        );
     }
 
     /// A page that also has children is structure too, so it leads as well.
     #[test]
     fn a_page_with_children_sorts_with_the_folders() {
-        let pages = vec![
-            page("1", "aaa"),
-            page("2", "tech"),
-            page("3", "tech/linux"),
-        ];
+        let pages = vec![page("1", "aaa"), page("2", "tech"), page("3", "tech/linux")];
 
         let labels: Vec<String> = build_namespace_tree(&pages)
             .into_iter()

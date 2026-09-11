@@ -1,5 +1,6 @@
 <script lang="ts">
   import { discoverLinkCandidates, getGraphData, type GraphData } from "../lib/api";
+  import { fuzzyScore } from "../lib/fuzzy";
   import { assignClusterHues, edgeHue, exceedsDragThreshold } from "../lib/graphColor";
   import type { TagHue } from "../lib/tagColor";
 
@@ -45,6 +46,7 @@
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
   let stats = $state({ nodes: 0, edges: 0, suggested: 0 });
+  let searchMatchCount = $state(0);
   let scanningSuggestions = $state(false);
   let suggestionError = $state<string | null>(null);
 
@@ -106,6 +108,7 @@
       const focus = mode === "local" ? currentPageId || undefined : undefined;
       const data: GraphData = await getGraphData(nodeLimit, focus, showSuggestedEdges);
       buildSimulation(data);
+      updateSearchMatchCount();
       stats = {
         nodes: data.nodes.length,
         edges: data.edges.length,
@@ -245,6 +248,35 @@
     return (3 + rel * 13) * nodeScale;
   }
 
+  function hasActiveSearch(): boolean {
+    return searchText.trim().length > 0;
+  }
+
+  function nodeMatchesSearch(node: SimNode): boolean {
+    return !hasActiveSearch() || fuzzyScore(node.title, searchText) !== null;
+  }
+
+  function visibleNodeIdSet(): Set<string> | null {
+    if (!hasActiveSearch()) return null;
+    const visibleIds = new Set<string>();
+    for (const node of nodes) {
+      if (nodeMatchesSearch(node)) visibleIds.add(node.id);
+    }
+    return visibleIds;
+  }
+
+  function updateSearchMatchCount(): void {
+    if (!hasActiveSearch()) {
+      searchMatchCount = nodes.length;
+      return;
+    }
+    let count = 0;
+    for (const node of nodes) {
+      if (nodeMatchesSearch(node)) count++;
+    }
+    searchMatchCount = count;
+  }
+
   function simulate() {
     const n = nodes.length;
     if (n === 0) return;
@@ -324,7 +356,7 @@
     const edgeColor = themeColor("--border", "#333");
     const nodeColor = themeColor("--accent", "#6ea8fe");
     const textColor = themeColor("--text-secondary", "#aaa");
-    const q = searchText.trim().toLowerCase();
+    const visibleIds = visibleNodeIdSet();
 
     // One `getComputedStyle` per hue per frame instead of one per element.
     huePalette = new Map();
@@ -341,6 +373,9 @@
     // follows the cluster. An edge *between* clusters keeps the neutral border
     // colour, which makes bridges between topics legible as the pale lines.
     for (const e of edges) {
+      if (visibleIds && (!visibleIds.has(e.source.id) || !visibleIds.has(e.target.id))) {
+        continue;
+      }
       const [x1, y1] = toScreen(e.source.x, e.source.y);
       const [x2, y2] = toScreen(e.target.x, e.target.y);
       const rel = e.weight / maxWeight;
@@ -360,9 +395,10 @@
 
     // Nodes
     for (const node of nodes) {
+      if (visibleIds && !visibleIds.has(node.id)) continue;
       const [x, y] = toScreen(node.x, node.y);
       const r = radiusOf(node) * scale;
-      const isMatch = q.length > 0 && node.title.toLowerCase().includes(q);
+      const isMatch = hasActiveSearch();
       const isFocus = node.id === currentPageId;
       const isHover = node === hoverNode;
 
@@ -375,7 +411,7 @@
       if (isFocus) ctx.fillStyle = themeColor("--accent-yellow", "#e0af68");
       else if (isMatch) ctx.fillStyle = themeColor("--accent-green", "#9ece6a");
       else ctx.fillStyle = hueColor(clusterHues.get(node.id) ?? null);
-      ctx.globalAlpha = q.length > 0 && !isMatch && !isFocus ? 0.25 : 1;
+      ctx.globalAlpha = 1;
       ctx.fill();
 
       if (isHover || isFocus) {
@@ -432,6 +468,7 @@
     let best: SimNode | null = null;
     let bestD = Infinity;
     for (const node of nodes) {
+      if (!nodeMatchesSearch(node)) continue;
       const dx = node.x - wx;
       const dy = node.y - wy;
       const d = dx * dx + dy * dy;
@@ -605,6 +642,7 @@
     nodeScale;
     showLabels;
     searchText;
+    updateSearchMatchCount();
     draw();
   });
 
@@ -649,6 +687,10 @@
       <div class="graph-overlay">
         No links to display{mode === "local" ? " for this page" : ""}.
       </div>
+    {:else if searchText.trim() && searchMatchCount === 0}
+      <div class="graph-overlay">
+        No graph nodes match “{searchText.trim()}”.
+      </div>
     {/if}
 
     <!-- Zoom buttons -->
@@ -679,8 +721,14 @@
 
     <label class="ctrl">
       <span>Search</span>
-      <input type="text" placeholder="Highlight nodes…" bind:value={searchText} />
+      <input type="text" placeholder="Filter nodes…" bind:value={searchText} />
     </label>
+
+    {#if searchText.trim()}
+      <div class="focus-label">
+        {searchMatchCount.toLocaleString()} matching node{searchMatchCount === 1 ? "" : "s"}
+      </div>
+    {/if}
 
     <label class="ctrl">
       <span>Max nodes: {nodeLimit}</span>

@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod assistant;
 pub mod blocks;
+pub mod books;
 pub mod favorites;
 pub mod flashcards;
 pub mod graph;

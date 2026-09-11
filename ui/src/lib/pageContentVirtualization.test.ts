@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "./api";
-import { buildBlockRenderState, computeVirtualWindow, getAncestorGuides } from "./pageContentVirtualization";
+import {
+  buildBlockRenderState,
+  computeVirtualWindow,
+  getAncestorGuides,
+  nextProgressiveRenderLimit,
+} from "./pageContentVirtualization";
 
 function makeBlock(
   id: string,
@@ -148,6 +153,17 @@ describe("page content virtual window", () => {
     for (const block of atDragStart.items) {
       expect(afterAutoscroll.items.some((b) => b.id === block.id)).toBe(true);
     }
+  });
+});
+
+describe("progressive render limit", () => {
+  it("grows in bounded batches without exceeding the item count", () => {
+    expect(nextProgressiveRenderLimit(500, 80, 80)).toBe(160);
+    expect(nextProgressiveRenderLimit(500, 480, 80)).toBe(500);
+  });
+
+  it("can force a far-away block into the rendered prefix", () => {
+    expect(nextProgressiveRenderLimit(500, 80, 80, 320)).toBe(321);
   });
 });
 

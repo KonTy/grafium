@@ -8,7 +8,7 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ai::config::ReferenceConfig;
 use crate::ai::traits::{
@@ -212,8 +212,10 @@ impl ReferenceEngine {
             .await
         {
             Ok(per_block_concepts) => {
-                for ((block_id, _), concepts) in
-                    eligible_blocks.iter().copied().zip(per_block_concepts.into_iter())
+                for ((block_id, _), concepts) in eligible_blocks
+                    .iter()
+                    .copied()
+                    .zip(per_block_concepts.into_iter())
                 {
                     for concept in concepts {
                         pending_references.push(PendingReference {
@@ -424,8 +426,6 @@ impl ReferenceEngine {
 
         if blocks.len() == 1 {
             return Ok(vec![
-                self.extract_concepts(blocks[0].1, llm, on_progress, &crate::cancel::CancellationToken::new())
-                    .await?,
                 self.extract_concepts(blocks[0].1, llm, on_progress, cancel)
                     .await?,
             ]);
@@ -522,8 +522,10 @@ impl ReferenceEngine {
             Err(_) => {
                 let mut extracted = Vec::with_capacity(blocks.len());
                 for (_, content) in blocks {
-                    extracted
-                        .push(self.extract_concepts(content, llm, on_progress, cancel).await?);
+                    extracted.push(
+                        self.extract_concepts(content, llm, on_progress, cancel)
+                            .await?,
+                    );
                 }
                 Ok(extracted)
             }
@@ -614,10 +616,8 @@ async fn stream_completion(
     // display-only bookkeeping, not synchronization; the closure runs
     // on the same executor as the select loop, so any consistency
     // requirement beyond "eventually visible" is overkill.
-    let token_count_shared =
-        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let total_chars_shared =
-        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let token_count_shared = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total_chars_shared = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let token_count_closure = token_count_shared.clone();
     let total_chars_closure = total_chars_shared.clone();
 
@@ -665,8 +665,7 @@ async fn stream_completion(
     // makes the heartbeat truly independent of whether tokens are
     // arriving (the original bug: heartbeats going through `on_token`
     // never fired when no tokens ever showed up).
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let progress_tx_token = progress_tx.clone();
 
     let mut on_token = move |piece: &str| {
@@ -674,10 +673,8 @@ async fn stream_completion(
         let total_chars = buffer.chars().count();
         token_count += 1;
         chars_since_flush += piece.chars().count();
-        total_chars_closure
-            .store(total_chars, std::sync::atomic::Ordering::Relaxed);
-        token_count_closure
-            .store(token_count, std::sync::atomic::Ordering::Relaxed);
+        total_chars_closure.store(total_chars, std::sync::atomic::Ordering::Relaxed);
+        token_count_closure.store(token_count, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::Instant::now();
         if chars_since_flush >= FLUSH_CHUNK_CHARS
             || now.duration_since(last_flush) >= MIN_FLUSH_INTERVAL
@@ -691,12 +688,7 @@ async fn stream_completion(
             let tail = if total_chars > PROGRESS_TAIL_CHARS {
                 let skip = total_chars - PROGRESS_TAIL_CHARS;
                 let mut s = String::from("…");
-                s.push_str(
-                    &buffer
-                        .chars()
-                        .skip(skip)
-                        .collect::<String>(),
-                );
+                s.push_str(&buffer.chars().skip(skip).collect::<String>());
                 s
             } else {
                 buffer.clone()
@@ -740,9 +732,7 @@ async fn stream_completion(
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let mut completion = Box::pin(
-            llm.complete_stream(messages, options, &mut on_token),
-        );
+        let mut completion = Box::pin(llm.complete_stream(messages, options, &mut on_token));
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
         heartbeat.tick().await; // consume the immediate first tick
         loop {
@@ -916,9 +906,7 @@ pub async fn generate_page_summary(
             // strictly better than no summary at all. The one-shot
             // retry never repeats, so a genuinely broken model still
             // surfaces a fast, actionable error.
-            on_progress(
-                "Structured summary failed; retrying with plain-text prompt…",
-            );
+            on_progress("Structured summary failed; retrying with plain-text prompt…");
             tracing::debug!(
                 target: "grafium_core::ai::references",
                 "structured summary parse failed, retrying plain-text: {structured_error}"
@@ -1057,6 +1045,45 @@ pub async fn generate_page_summary(
     }
 }
 
+/// Use the LLM to produce reviewable semantic wiki-link candidates for a text
+/// chunk. Unlike [`generate_page_summary`], this is deliberately not a summary
+/// + decorative tag task: each returned item must name a durable graph concept
+/// and provide a verbatim surface phrase the app can later link in place.
+pub async fn generate_concept_edge_tags(
+    title: &str,
+    full_text: &str,
+    custom_prompt: Option<&str>,
+    llm: &dyn LlmProvider,
+    on_progress: &mut (dyn FnMut(&str) + Send),
+    cancel: &crate::cancel::CancellationToken,
+) -> Result<Vec<TagTerm>> {
+    let prompt = concept_edge_prompt(custom_prompt);
+    let messages = vec![
+        ChatMessage {
+            role: MessageRole::System,
+            content: prompt,
+        },
+        ChatMessage {
+            role: MessageRole::User,
+            content: append_no_think_directive(&format!(
+                "Title/context: {title}\n\nText chunk:\n{full_text}"
+            )),
+        },
+    ];
+
+    let response = stream_completion(
+        llm,
+        &messages,
+        &concept_edge_tag_options(),
+        "Finding concept edges: ",
+        on_progress,
+        cancel,
+    )
+    .await?;
+
+    parse_concept_edge_tags_response(&response, full_text)
+}
+
 /// An extracted concept from text.
 #[derive(Debug, Clone)]
 struct ConceptExtraction {
@@ -1104,7 +1131,7 @@ const MAX_CONCEPT_BATCH_INPUT_CHARS: usize = 6000;
 /// already exceeds the budget (rather than dropping/truncating it —
 /// splitting a block would break the "concept text must appear verbatim
 /// in that block's content" contract downstream).
-fn chunk_blocks_by_content_size<'a, 'b>(
+pub fn chunk_blocks_by_content_size<'a, 'b>(
     blocks: &'a [(&'b str, &'b str)],
     max_chars: usize,
 ) -> Vec<Vec<(&'b str, &'b str)>> {
@@ -1130,7 +1157,7 @@ fn chunk_blocks_by_content_size<'a, 'b>(
     chunks
 }
 
-const CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a knowledge extraction system. Given a text block, identify the key concepts, entities, and claims that would benefit from cross-referencing.
+const CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a semantic knowledge-graph extraction system. Given a text block, infer what the passage is actually about, then identify the key concepts, entities, and claims that would help a reader connect this passage to the rest of a knowledge graph.
 
 Return a JSON array of objects with:
 - "text": the exact phrase from the input (must be a substring)
@@ -1138,16 +1165,18 @@ Return a JSON array of objects with:
 
 Rules:
 - Extract 1-5 items maximum
-- Only extract meaningful, referenceable items (not common words)
+- Extract meaning-bearing concepts from the passage, not placeholder categories or generic vocabulary
 - The "text" must appear verbatim in the input
-- Prefer noun phrases and technical terms
+- Prefer complete noun phrases, named entities, traditions, doctrines, methods, frameworks, and claims that capture the passage's actual subject
+- Do NOT choose a vague word just because it appears often. If the passage is about a generic-sounding word, choose the most specific phrase around it that names the idea in context (for example "writing topics", "project planning", "analogical reasoning", not bare "topics", "project", "analogy")
+- A good item should still make sense as a future page title or graph edge after this block is read out of context
 
 Example output:
 [{"text": "machine learning", "type": "concept"}, {"text": "transformer architecture", "type": "term"}]
 
 Return ONLY the JSON array, no other text."#;
 
-const BATCH_CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a knowledge extraction system. Given a JSON array of text blocks, identify the key concepts, entities, and claims in each block that would benefit from cross-referencing.
+const BATCH_CONCEPT_EXTRACTION_PROMPT: &str = r#"You are a semantic knowledge-graph extraction system. Given a JSON array of text blocks, infer what each block is actually about in context, then identify the key concepts, entities, and claims in each block that would help a reader connect it to the rest of a knowledge graph.
 
 Input format:
 [{"block_id": "block-1", "content": "..."}, {"block_id": "block-2", "content": "..."}]
@@ -1161,9 +1190,11 @@ Return a JSON array of objects with:
 Rules:
 - Return one object per input block
 - Extract 0-5 items maximum per block
-- Only extract meaningful, referenceable items (not common words)
+- Extract meaning-bearing concepts, not placeholder categories or generic vocabulary
 - Each "text" must appear verbatim in that block's content
-- Prefer noun phrases and technical terms
+- Prefer complete noun phrases, named entities, traditions, doctrines, methods, frameworks, and claims that capture the block's actual subject
+- Do NOT choose a vague word just because it appears often. If a block is about a generic-sounding word, choose the most specific phrase around it that names the idea in context (for example "writing topics", "project planning", "analogical reasoning", not bare "topics", "project", "analogy")
+- A good item should still make sense as a future page title or graph edge after this block is read out of context
 - If a block has no useful concepts, return an empty "concepts" array for it
 
 Example output:
@@ -1187,23 +1218,106 @@ fn concept_extraction_options() -> CompletionOptions {
     }
 }
 
-const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You are given a title and content (an article, video/podcast transcript, or similar).
+const PAGE_SUMMARY_PROMPT: &str = r##"You are a careful research assistant building a semantic personal knowledge graph. You are given a title and content (a book, chapter, article, video/podcast transcript, or similar).
 
 The content may cover a single subject or many distinct, unrelated subjects — for example a long podcast episode that jumps between many topics over its runtime. Identify EVERY distinct topic discussed. Do not skip minor topics and do not blend separate subjects into one paragraph: this summary may later fully replace the original content, so nothing meaningfully discussed should be lost.
+
+Before choosing tags, infer the meaning of the content at the largest useful scope: the overall book/selection thesis, then chapter/section-level ideas, then specific block-level concepts. Tags are not decorative labels. They become graph edges, so each tag should name a concept a person would intentionally create or connect as a page in a knowledge graph.
 
 Return a JSON object with:
 - "title_answer": if the title poses a question or makes a claim that the content answers or supports/refutes, one sentence directly answering it using the content. If the title is purely descriptive (e.g. a name, a date, "Meeting Notes"), use null.
 - "topics": an array with one object per distinct topic/subject discussed, in the order they're covered (or most-to-least important if a topic recurs throughout). If the content only covers one subject, return a single-element array. Each object has:
-  - "topic": a short label for this specific subject (e.g. "Magnesium and sleep quality"), not the overall title.
+  - "topic": a short semantic label for this specific subject (e.g. "Magnesium and sleep quality", "Kabbalah and freeing the mind"), not the overall title and not a placeholder category like "Concept" or "Topic".
   - "summary": a 2-5 sentence paragraph, in your own words, covering everything meaningful said about THIS topic specifically (not the whole piece).
   - "tags": an array of 1-4 key term objects for this topic. Each object has:
-    - "term": a phrase taken VERBATIM from the content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "magnesium", "insulin_resistance"). Only use a term whose underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary. PREFER the longest already-verbatim phrase that is unambiguous on its own (e.g. use "soil_absorption" as the term if the content literally says "soil absorption"), rather than a short generic word.
-    - "qualified": OPTIONAL. Only set this if "term" is a short, generic word that would be ambiguous or confusing out of context when linked on its own (e.g. bare "absorption" could mean bodily absorption or soil/chemical absorption) AND no longer verbatim phrase already disambiguates it. Give a short 2-3 word disambiguated phrase (e.g. "body absorption"). Omit or use null otherwise — most tags should NOT set this.
+    - "term": a phrase taken VERBATIM from the content (lowercase is fine; use underscores instead of spaces for multi-word terms, no "#" prefix, e.g. "book_of_wisdom", "freeing_the_mind", "kabbalah"). Only use a term whose underlying words actually appear in the content — these are used to highlight/link the matching text in place, not just to label the summary. PREFER the longest already-verbatim phrase that is unambiguous on its own.
+    - "qualified": OPTIONAL. Use this to name the actual concept when the only verbatim surface phrase is too generic, ambiguous, or grammar-dependent. For example, if the content is genuinely about how writers create "topics", use {"term": "topics", "qualified": "writing topics"}; if it is about "analogy" as a reasoning method, use {"term": "analogy", "qualified": "analogical reasoning"}. Omit or use null when the verbatim term already names the concept clearly.
+
+Bad tag choices because they do not encode meaning on their own: "concept", "topic", "project", "idea", "analogy", "section", "chapter", "thing". These words are allowed ONLY when the content is specifically about them and the tag provides a meaningful "qualified" concept label.
 
 Example output (a two-topic segment, with one disambiguated tag):
 {"title_answer": null, "topics": [{"topic": "Magnesium and sleep", "summary": "Magnesium glycinate was discussed as a supplement that can improve sleep onset and quality when taken before bed. The speaker noted most people are mildly deficient due to modern soil depletion and processed diets, and that the body's absorption of magnesium from food has declined.", "tags": [{"term": "magnesium"}, {"term": "sleep"}, {"term": "absorption", "qualified": "body absorption"}]}, {"topic": "Insulin resistance and diet", "summary": "The conversation shifted to insulin resistance, describing it as reduced cellular sensitivity to insulin that drives fat storage and fatigue. Cutting refined carbohydrates and adding resistance training were recommended as the most effective interventions.", "tags": [{"term": "insulin_resistance"}, {"term": "refined_carbohydrates"}]}]}
 
 Return ONLY the JSON object, no other text."##;
+
+pub const DEFAULT_CONCEPT_EDGE_PROMPT: &str = r##"You are choosing reviewable wiki-link suggestions for Grafium, a personal knowledge graph.
+
+Your job is NOT keyword extraction. Your job is to identify durable graph concepts: reusable ideas/entities a person would intentionally create or connect as pages. Good candidates include named systems, technical tools, methods, mechanisms, health concepts, supplements, foods, minerals, compounds, enzymes, vitamins, biomarkers, interventions, protocols, named works, recurring theories, specific claims, and relationships that this text teaches.
+
+Return a JSON array of 0-8 objects. Each object has:
+- "term": the exact visible phrase from the text chunk to anchor the suggestion. Use spaces, not underscores. It must appear verbatim in the text.
+- "qualified": null if the term is already a clear graph page title; otherwise a concise page title that names the actual concept being taught by the surrounding passage.
+
+Rules:
+- Prefer specific multi-word concepts and named relationships over general nouns.
+- Look for aliases, abbreviations, synonyms, spelling variants, and likely typos that refer to the same durable concept. Keep "term" as the exact visible phrase, and put the canonical concept/page title in "qualified".
+- If multiple visible phrases point to the same concept, return each distinct surface phrase as its own object so the app can offer to link every reviewed occurrence.
+- Treat glossary/protocol/list entries and definition lines as strong signals. If a line starts with a bold or leading entity and then explains it, suggest that lead entity even if it appears only once.
+- Preserve meaningful parenthetical forms, abbreviations, and variants when they are part of the entity name or visible lead term, e.g. "Compound Name (active form)" or "Technique Name (ACRONYM)".
+- A good suggestion should still make sense when seen outside this chunk.
+- Reject broad vocabulary unless "qualified" turns it into a specific taught concept.
+- Do not output a word just because it appears often.
+- Do not output dates, quantities, doses, units, OCR fragments, page numbers, isolated headings, image labels, or one-off facts.
+- Do not output generic section labels such as "Uses", "Benefits", "Notes", "Source", or "Protocol" unless the surrounding text is specifically teaching that label as a concept with a qualified target.
+- Strip dosage/amount details out of the concept. For "Magnesium Taurate 126mg", suggest "Magnesium Taurate", not "126mg" or "Magnesium Taurate 126mg".
+- Avoid bare broad terms such as: energy, consciousness, perception, body, matter, light, woman, man, God, Bible, Christianity, concept, topic, idea, project, theme, chapter.
+- Single-word suggestions are allowed only for named traditions, named entities, compounds, vitamins, tools, acronyms, or technical terms that are genuinely central here, such as Kabbalah, Sephirot, Keter, Malkuth, Daat, Chokmah, Binah, Gematria, Niacin, Zinc, TMG, SQLite, CodeMirror.
+- When a broad surface word is the only short phrase available, use a qualified target, e.g. {"term":"Bible","qualified":"Esoteric Interpretation of the Bible"}.
+- Return no more than the strongest 8 suggestions; fewer is better than weak edges.
+
+When a chunk contains a compact list of named entries, prioritize breadth across the lead entries over repeatedly choosing the same already-obvious generic topic. For example, in a protocol list shaped like "**Entity name (variant)** — explanation", return the named entities, not the words "explanation", "source", "support", or "function".
+
+Good examples across domains:
+Good:
+[
+  {"term":"Magnesium Taurate","qualified":null},
+  {"term":"Niacin","qualified":"Niacin (Nicotinic Acid)"},
+  {"term":"Trimethylglycine","qualified":"Trimethylglycine (TMG)"},
+  {"term":"Vitamin D3","qualified":null},
+  {"term":"Vitamin K2 MK-7","qualified":null},
+  {"term":"Zinc","qualified":null},
+  {"term":"insulin resistance","qualified":null},
+  {"term":"resistance training","qualified":null},
+  {"term":"NAS","qualified":"Network Attached Storage"},
+  {"term":"CodeMirror widgets","qualified":null},
+  {"term":"Kabbalistic Tree of Life","qualified":null},
+  {"term":"ten sephirot","qualified":"Sephirot"},
+  {"term":"22 Learning Paths","qualified":"22 Paths of the Tree of Life"},
+  {"term":"Daat","qualified":null},
+  {"term":"Keter","qualified":null},
+  {"term":"Malkuth","qualified":null},
+  {"term":"as above, so below","qualified":"As Above, So Below"},
+  {"term":"macrocosmic and microcosmic","qualified":"Macrocosm and Microcosm"},
+  {"term":"Tree of Personal Life","qualified":null},
+  {"term":"number 10","qualified":"Number 10 in Kabbalah"},
+  {"term":"The Ancient of Days","qualified":"William Blake - The Ancient of Days"},
+  {"term":"Bible","qualified":"Esoteric Interpretation of the Bible"}
+]
+
+Bad:
+["126mg", "50mg", "1g", "1,000IU", "90 mcg", "5.5mg", "2024-06-15", "energy", "consciousness", "perception", "woman", "body", "matter", "light", "God", "Bible", "Christianity", "concept", "topic"]
+
+Return ONLY the JSON array, no prose."##;
+
+const CONCEPT_EDGE_OUTPUT_SCHEMA_PROMPT: &str = r##"
+
+Mandatory output contract, regardless of any custom instructions above:
+- Return ONLY a JSON array, no prose.
+- Return 0-8 objects.
+- Each object must have "term" and "qualified".
+- "term" must be an exact visible phrase from the provided text chunk.
+- "qualified" must be null or a concise graph page title.
+- Do not change the schema."##;
+
+pub fn concept_edge_prompt(custom_prompt: Option<&str>) -> String {
+    let custom = custom_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    let base = custom.unwrap_or(DEFAULT_CONCEPT_EDGE_PROMPT);
+    let mut prompt = base.to_string();
+    prompt.push_str(CONCEPT_EDGE_OUTPUT_SCHEMA_PROMPT);
+    prompt
+}
 
 /// Fallback prompt used when [`PAGE_SUMMARY_PROMPT`]'s strict JSON output
 /// can't be produced by the currently-loaded model — typically because
@@ -1224,6 +1338,14 @@ fn summary_options() -> CompletionOptions {
         // itself is naturally longer (multi-topic summaries).
         max_tokens: Some(4096),
         temperature: Some(0.3),
+        ..Default::default()
+    }
+}
+
+fn concept_edge_tag_options() -> CompletionOptions {
+    CompletionOptions {
+        max_tokens: Some(2048),
+        temperature: Some(0.1),
         ..Default::default()
     }
 }
@@ -1407,33 +1529,59 @@ pub(crate) fn is_substantive_summary_text(text: &str) -> bool {
 }
 
 fn extract_json_array(response: &str) -> Result<&str> {
-    if response.starts_with('[') {
-        return Ok(response);
-    }
-
-    response
-        .find('[')
-        .and_then(|start| {
-            response[start..]
-                .rfind(']')
-                .map(|end| &response[start..=start + end])
-        })
-        .ok_or_else(|| concept_parse_error("missing JSON array in response", response))
+    extract_balanced_json(response, '[', ']', "array")
 }
 
 pub(crate) fn extract_json_object(response: &str) -> Result<&str> {
-    if response.starts_with('{') {
-        return Ok(response);
+    extract_balanced_json(response, '{', '}', "object")
+}
+
+fn extract_balanced_json<'a>(
+    response: &'a str,
+    open: char,
+    close: char,
+    kind: &str,
+) -> Result<&'a str> {
+    let start = response.find(open).ok_or_else(|| {
+        concept_parse_error(&format!("missing JSON {kind} in response"), response)
+    })?;
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, ch) in response[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Ok(&response[start..end]);
+                }
+            }
+            _ => {}
+        }
     }
 
-    response
-        .find('{')
-        .and_then(|start| {
-            response[start..]
-                .rfind('}')
-                .map(|end| &response[start..=start + end])
-        })
-        .ok_or_else(|| concept_parse_error("missing JSON object in response", response))
+    Err(concept_parse_error(
+        &format!("unterminated JSON {kind} in response"),
+        response,
+    ))
 }
 
 /// Accepts either a plain string tag (the old shape, or a model that
@@ -1443,7 +1591,7 @@ pub(crate) fn extract_json_object(response: &str) -> Result<&str> {
 /// [`parse_summary_response`] and [`crate::ai::web_research`]'s synthesis
 /// parsing so both AI-tagging call sites decode the same JSON shape
 /// identically instead of each re-implementing this leniency.
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum TagJson {
     Plain(String),
@@ -1475,6 +1623,48 @@ pub(crate) fn clean_tag_terms(tags: Vec<TagJson>) -> Vec<TagTerm> {
         })
         .filter(|tag| !tag.term.is_empty())
         .collect()
+}
+
+fn parse_concept_edge_tags_response(
+    response: &str,
+    original_content: &str,
+) -> Result<Vec<TagTerm>> {
+    let trimmed = strip_reasoning_block(response.trim());
+    let json_str = extract_json_array(trimmed)?;
+    let parsed: Vec<TagJson> = serde_json::from_str(json_str).map_err(|error| {
+        concept_parse_error(&format!("invalid concept edge JSON: {}", error), trimmed)
+    })?;
+
+    let mut seen = HashSet::new();
+    Ok(clean_tag_terms(parsed)
+        .into_iter()
+        .map(|tag| TagTerm {
+            term: normalize_tag_surface(&tag.term),
+            qualified: tag.qualified.map(|q| normalize_tag_surface(&q)),
+        })
+        .filter(|tag| {
+            !tag.term.is_empty()
+                && content_contains_normalized_phrase(original_content, &tag.term)
+                && seen.insert(format!(
+                    "{}\0{}",
+                    tag.term.trim().to_ascii_lowercase(),
+                    tag.label().trim().to_ascii_lowercase()
+                ))
+        })
+        .collect())
+}
+
+fn normalize_tag_surface(text: &str) -> String {
+    text.replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn content_contains_normalized_phrase(content: &str, phrase: &str) -> bool {
+    let content = content.to_lowercase().replace(['_', '-'], " ");
+    let phrase = phrase.to_lowercase().replace(['_', '-'], " ");
+    content.contains(phrase.trim())
 }
 
 fn parse_summary_response(response: &str) -> Result<PageSummary> {
@@ -1639,6 +1829,13 @@ pub(crate) fn concept_parse_error(reason: &str, response: &str) -> CoreError {
 pub(crate) fn summary_parse_error(reason: &str, response: &str) -> CoreError {
     CoreError::Parse(format!(
         "Failed to parse page summary response ({reason}). Response snippet: {}",
+        truncate_snippet(response, 200)
+    ))
+}
+
+pub(crate) fn research_parse_error(reason: &str, response: &str) -> CoreError {
+    CoreError::Parse(format!(
+        "Failed to parse web research response ({reason}). Response snippet: {}",
         truncate_snippet(response, 200)
     ))
 }
@@ -1869,6 +2066,45 @@ mod tests {
 
         assert!(matches!(error, CoreError::Parse(_)));
         assert!(error.to_string().contains("Response snippet"));
+    }
+
+    #[test]
+    fn extract_json_object_stops_before_trailing_prose() {
+        let response = r#"{"title_answer":null,"topics":[]}
+---
+Extra text the model should not have emitted."#;
+
+        assert_eq!(
+            extract_json_object(response).unwrap(),
+            r#"{"title_answer":null,"topics":[]}"#
+        );
+    }
+
+    #[test]
+    fn extract_json_object_handles_preamble_and_braces_inside_strings() {
+        let response = r#"样例输出：
+{"summary":"brace } and escaped quote \" stay inside the string","nested":{"text":"literal { bracket"}}
+Trailing explanation."#;
+
+        assert_eq!(
+            extract_json_object(response).unwrap(),
+            r#"{"summary":"brace } and escaped quote \" stay inside the string","nested":{"text":"literal { bracket"}}"#
+        );
+    }
+
+    #[test]
+    fn extract_json_array_stops_at_first_balanced_array() {
+        let response = r#"[
+  {"text":"Rust ] inside string"},
+  {"text":"CodeMirror"}
+]
+
+Notes after the JSON."#;
+
+        assert_eq!(
+            extract_json_array(response).unwrap(),
+            "[\n  {\"text\":\"Rust ] inside string\"},\n  {\"text\":\"CodeMirror\"}\n]"
+        );
     }
 
     #[test]
@@ -2149,6 +2385,98 @@ mod tests {
     }
 
     #[test]
+    fn parse_summary_preserves_semantic_label_for_generic_surface_term() -> Result<()> {
+        let summary = parse_summary_response(
+            r#"{"title_answer": null, "topics": [{"topic": "Writing topics", "summary": "The chapter explains how writers choose and refine topics into arguments.", "tags": [{"term": "topics", "qualified": "writing topics"}]}]}"#,
+        )?;
+
+        assert_eq!(summary.topics.len(), 1);
+        assert_eq!(summary.topics[0].tags[0].term, "topics");
+        assert_eq!(
+            summary.topics[0].tags[0].qualified.as_deref(),
+            Some("writing topics")
+        );
+        assert_eq!(summary.all_tags(), vec!["writing topics".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_concept_edge_tags_requires_verbatim_surface_phrase() -> Result<()> {
+        let content =
+            "The Kabbalistic Tree of Life includes ten sephirot and a hidden realm called Daat.";
+        let tags = parse_concept_edge_tags_response(
+            r#"[
+                {"term":"Kabbalistic_Tree_of_Life","qualified":null},
+                {"term":"ten sephirot","qualified":"Sephirot"},
+                {"term":"Tree of Personal Life","qualified":null}
+            ]"#,
+            content,
+        )?;
+
+        assert_eq!(
+            tags.iter().map(TagTerm::label).collect::<Vec<_>>(),
+            vec!["Kabbalistic Tree of Life", "Sephirot"]
+        );
+        assert_eq!(tags[0].term, "Kabbalistic Tree of Life");
+        assert_eq!(tags[1].term, "ten sephirot");
+        assert_eq!(tags[1].qualified.as_deref(), Some("Sephirot"));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_concept_edge_tags_keeps_distinct_alias_terms_for_same_target() -> Result<()> {
+        let content =
+            "Niacin appears once. Nicin appears as a typo. Vitamin B3 appears as an alias.";
+        let tags = parse_concept_edge_tags_response(
+            r#"[
+                {"term":"Niacin","qualified":null},
+                {"term":"Nicin","qualified":"Niacin"},
+                {"term":"Vitamin B3","qualified":"Niacin"},
+                {"term":"Nicin","qualified":"Niacin"}
+            ]"#,
+            content,
+        )?;
+
+        assert_eq!(tags.len(), 3);
+        assert_eq!(
+            tags.iter()
+                .map(|tag| (tag.term.as_str(), tag.label()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Niacin", "Niacin"),
+                ("Nicin", "Niacin"),
+                ("Vitamin B3", "Niacin")
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concept_edge_prompt_appends_fixed_output_contract_to_custom_prompt() {
+        let prompt = concept_edge_prompt(Some("Prefer my own ontology."));
+
+        assert!(prompt.contains("Prefer my own ontology."));
+        assert!(prompt.contains("Mandatory output contract"));
+        assert!(prompt.contains("Return ONLY a JSON array"));
+        assert!(prompt.contains("\"term\" must be an exact visible phrase"));
+    }
+
+    #[test]
+    fn default_concept_edge_prompt_prefers_concepts_over_doses_and_dates() {
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("Magnesium Taurate"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("Vitamin D3"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("Network Attached Storage"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("definition lines"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("bold or leading entity"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("parenthetical forms"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("aliases, abbreviations, synonyms"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("likely typos"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("Uses"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("126mg"));
+        assert!(DEFAULT_CONCEPT_EDGE_PROMPT.contains("2024-06-15"));
+    }
+
+    #[test]
     fn chunk_blocks_by_content_size_keeps_short_pages_in_one_chunk() {
         // Two tiny blocks: their combined content is nowhere near the
         // budget, so they must stay in a single chunk (i.e. one LLM
@@ -2191,13 +2519,23 @@ mod tests {
 
         // Expected shape: [small-a], [huge alone], [small-b].
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec!["small-a"]);
-        assert_eq!(chunks[1].iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec!["huge"]);
-        assert_eq!(chunks[2].iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec!["small-b"]);
+        assert_eq!(
+            chunks[0].iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec!["small-a"]
+        );
+        assert_eq!(
+            chunks[1].iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec!["huge"]
+        );
+        assert_eq!(
+            chunks[2].iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec!["small-b"]
+        );
     }
 
     #[tokio::test]
-    async fn extract_concepts_batch_splits_a_long_transcript_into_multiple_llm_calls() -> Result<()> {
+    async fn extract_concepts_batch_splits_a_long_transcript_into_multiple_llm_calls() -> Result<()>
+    {
         // Simulate an imported YouTube transcript: many short blocks
         // whose combined content overflows the concept-extraction
         // budget. This is the whole reason the chunking exists —
@@ -2225,10 +2563,7 @@ mod tests {
         // responses (valid for the batched schema). If chunking is
         // off, the test will fail on "No mock LLM response queued"
         // (only one response in the queue would be consumed).
-        let (llm, llm_state) = MockLlm::new([
-            "[]".to_string(),
-            "[]".to_string(),
-        ]);
+        let (llm, llm_state) = MockLlm::new(["[]".to_string(), "[]".to_string()]);
 
         let engine = ReferenceEngine::new(ReferenceConfig::default());
         let out = engine
@@ -2263,8 +2598,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_references_still_returns_summary_when_concept_extraction_fails(
-    ) -> Result<()> {
+    async fn extract_concepts_batch_single_block_uses_one_llm_call() -> Result<()> {
+        let blocks = [(
+            "block-1",
+            "Magnesium Taurate supports sleep quality in these notes.",
+        )];
+        let (llm, llm_state) =
+            MockLlm::new([r#"[{"text":"Magnesium Taurate","type":"concept"}]"#.to_string()]);
+
+        let engine = ReferenceEngine::new(ReferenceConfig::default());
+        let out = engine
+            .extract_concepts_batch(
+                &blocks,
+                &llm,
+                &mut |_| {},
+                &crate::cancel::CancellationToken::disabled(),
+            )
+            .await?;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 1);
+        assert_eq!(out[0][0].text, "Magnesium Taurate");
+        assert_eq!(llm_state.lock().unwrap().calls, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generate_references_still_returns_summary_when_concept_extraction_fails() -> Result<()>
+    {
         // The scenario this exists to guard against: a long YouTube
         // transcript triggers a real LLM/context-creation failure
         // during concept extraction (e.g. null-context OOM). Before

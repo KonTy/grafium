@@ -6,8 +6,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelInfoPayload {
     pub file_name: String,
@@ -90,9 +88,8 @@ impl ModelInfoPayload {
         // are tiny compared to any modern GPU, and unknown-kind files
         // shouldn't be surfaced as loadable chat models anyway.
         let is_llm = matches!(info.kind, grafium_core::model_library::ModelKind::Llm);
-        let vram_needed_bytes = is_llm.then(|| {
-            grafium_core::ai::gpu_fit::estimated_vram_needed_bytes(info.size_bytes)
-        });
+        let vram_needed_bytes =
+            is_llm.then(|| grafium_core::ai::gpu_fit::estimated_vram_needed_bytes(info.size_bytes));
         let _ = total_vram_bytes;
         Self {
             file_name: info.file_name,

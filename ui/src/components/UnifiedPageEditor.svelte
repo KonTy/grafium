@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
-  import { EditorSelection, EditorState, Prec, RangeSetBuilder } from "@codemirror/state";
+  import {
+    EditorSelection,
+    EditorState,
+    Compartment,
+    Prec,
+    RangeSetBuilder,
+    StateEffect,
+    StateField,
+    type Transaction,
+  } from "@codemirror/state";
   import {
     Decoration,
     type DecorationSet,
     drawSelection,
     EditorView,
     keymap,
-    ViewPlugin,
-    type ViewUpdate,
     WidgetType,
   } from "@codemirror/view";
   import {
@@ -19,7 +26,28 @@
   import { markdown } from "@codemirror/lang-markdown";
   import type { Page } from "../lib/api";
   import { getPageSource, updatePageSource } from "../lib/api";
-  import { hydrateAssetMedia, renderBlock } from "../lib/markdown";
+  import {
+    assetBaseDirFor,
+    clearMarkdownImageWidth,
+    hydrateAssetMedia,
+    renderBlock,
+    setMarkdownImageWidth,
+  } from "../lib/markdown";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import {
+    formatImageScale,
+    formatScaledImageDimensions,
+    imageIndexFromElement,
+    IMAGE_SIZE_SCALES,
+    renderedImageBaseSize,
+    scaledImageDimensions,
+  } from "../lib/imageSizing";
+  import { EDITOR_UNDO_MIN_DEPTH } from "../lib/editorUndo";
+  import {
+    parsePageSourceMap,
+    sourceBlockContentReplacement,
+    type SourceBlock,
+  } from "../lib/pageSourceMap";
 
   interface Props {
     page: Page;
@@ -39,30 +67,69 @@
   let dirty = $state(false);
   let error: string | null = $state(null);
   let savedMessage = $state("");
+  let assetBaseDir = $derived(assetBaseDirFor(page.file_path));
+
+  interface UnifiedImageMenuDetail {
+    blockId: string | null;
+    blockPreviewFrom: number;
+    blockContent: string;
+    imageIndex: number;
+    clientX: number;
+    clientY: number;
+    baseWidth: number;
+    baseHeight: number;
+  }
+
+  type ImageSizeMenu = UnifiedImageMenuDetail & {
+    x: number;
+    y: number;
+  };
+
+  let imageSizeMenu: ImageSizeMenu | null = $state(null);
+
+  function sourceBlockKey(block: SourceBlock): string {
+    return block.id ?? `pos:${block.previewFrom}`;
+  }
 
   class RenderedBlockWidget extends WidgetType {
-    private indent: string;
+    private blockKey: string;
+    private blockId: string | null;
+    private depth: number;
     private content: string;
     private editPos: number;
+    private previewFrom: number;
+    private assetBaseDir: string;
 
-    constructor(indent: string, content: string, editPos: number) {
+    constructor(block: SourceBlock, assetBaseDir: string) {
       super();
-      this.indent = indent;
-      this.content = content;
-      this.editPos = editPos;
+      this.blockKey = sourceBlockKey(block);
+      this.blockId = block.id;
+      this.depth = block.depth;
+      this.content = block.content;
+      this.editPos = block.contentFrom;
+      this.previewFrom = block.previewFrom;
+      this.assetBaseDir = assetBaseDir;
     }
 
     eq(other: WidgetType): boolean {
       return other instanceof RenderedBlockWidget
-        && other.indent === this.indent
+        && other.blockKey === this.blockKey
+        && other.blockId === this.blockId
+        && other.depth === this.depth
         && other.content === this.content
-        && other.editPos === this.editPos;
+        && other.editPos === this.editPos
+        && other.previewFrom === this.previewFrom
+        && other.assetBaseDir === this.assetBaseDir;
     }
 
     toDOM(view: EditorView): HTMLElement {
       const row = document.createElement("div");
       row.className = "unified-rendered-block";
-      row.style.setProperty("--preview-depth", String(Math.floor(this.indent.length / 2)));
+      row.style.setProperty("--preview-depth", String(this.depth));
+      row.title = "Click to edit this block as raw Markdown";
+      if (this.blockId) {
+        row.dataset.sourceBlockId = this.blockId;
+      }
 
       const bullet = document.createElement("span");
       bullet.className = "unified-rendered-bullet";
@@ -71,27 +138,57 @@
       const content = document.createElement("div");
       content.className = "unified-rendered-content rendered-content";
       if (this.content.trim()) {
-        content.innerHTML = renderBlock(this.content);
+        content.innerHTML = renderBlock(this.content, this.assetBaseDir);
       } else {
         content.appendChild(document.createTextNode("\u00a0"));
       }
 
       row.append(bullet, content);
-      row.addEventListener("mousedown", (event) => {
+      row.addEventListener("click", (event) => {
         if (event.button !== 0) return;
+        if (row.ownerDocument.getSelection()?.toString()) return;
+        row.ownerDocument.getSelection()?.removeAllRanges();
+        event.preventDefault();
+        event.stopPropagation();
         view.dispatch({
           selection: EditorSelection.cursor(this.editPos),
+          effects: activeBlockEffects(this.blockKey),
           scrollIntoView: true,
           userEvent: "select.pointer",
         });
         view.focus();
+      });
+      row.addEventListener("contextmenu", (event) => {
+        const target = event.target as Element | null;
+        const img = target instanceof HTMLImageElement
+          ? target
+          : target?.closest?.("img.fc-img") as HTMLImageElement | null;
+        if (!img?.classList.contains("fc-img")) return;
+        const imageIndex = imageIndexFromElement(img);
+        if (imageIndex === null) return;
+        const baseSize = renderedImageBaseSize(img, content.clientWidth);
+        event.preventDefault();
+        event.stopPropagation();
+        row.dispatchEvent(new CustomEvent<UnifiedImageMenuDetail>("unified-image-context-menu", {
+          bubbles: true,
+          detail: {
+            blockId: this.blockId,
+            blockPreviewFrom: this.previewFrom,
+            blockContent: this.content,
+            imageIndex,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            baseWidth: baseSize.width,
+            baseHeight: baseSize.height,
+          },
+        }));
       });
       queueMicrotask(() => void hydrateAssetMedia(content));
       return row;
     }
 
     ignoreEvent(): boolean {
-      return false;
+      return true;
     }
 
     get estimatedHeight(): number {
@@ -99,58 +196,126 @@
     }
   }
 
-  function isHiddenPropertyLine(text: string): boolean {
-    return /^\s*id::\s+\S+\s*$/.test(text);
+  function sourceLineWithBreakTo(sourceMap: ReturnType<typeof parsePageSourceMap>, lineIndex: number): number {
+    const line = sourceMap.lines[lineIndex];
+    if (!line) return 0;
+    return line.index + 1 < sourceMap.lines.length ? line.to + 1 : line.to;
   }
 
-  function buildBlockPreviewDecorations(view: EditorView): DecorationSet {
+  function blockPreviewWithBreakTo(sourceMap: ReturnType<typeof parsePageSourceMap>, block: SourceBlock): number {
+    const lastLine = block.contentSegments.at(-1)?.line ?? block.line;
+    return sourceLineWithBreakTo(sourceMap, lastLine.index);
+  }
+
+  const activeBlockEffect = StateEffect.define<string | null>();
+
+  const activeBlockField = StateField.define<string | null>({
+    create() {
+      return null;
+    },
+    update(activeBlock, transaction) {
+      for (const effect of transaction.effects) {
+        if (effect.is(activeBlockEffect)) {
+          return effect.value;
+        }
+      }
+      return activeBlock;
+    },
+  });
+
+  const editingModeCompartment = new Compartment();
+
+  function editingModeExtensions(active: boolean) {
+    return [
+      EditorView.editable.of(active),
+      EditorState.readOnly.of(!active),
+    ];
+  }
+
+  function activeBlockEffects(blockKey: string | null) {
+    return [
+      activeBlockEffect.of(blockKey),
+      editingModeCompartment.reconfigure(editingModeExtensions(blockKey !== null)),
+    ];
+  }
+
+  function setActiveBlock(view: EditorView, blockKey: string | null) {
+    if (view.state.field(activeBlockField, false) === blockKey) return;
+    view.dispatch({
+      effects: activeBlockEffects(blockKey),
+    });
+  }
+
+  function transactionChangesActiveBlock(transaction: Transaction): boolean {
+    return transaction.effects.some((effect) => effect.is(activeBlockEffect));
+  }
+
+  function buildBlockPreviewDecorations(state: EditorState): DecorationSet {
     const builder = new RangeSetBuilder<Decoration>();
-    const activeLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+    const sourceMap = parsePageSourceMap(state.doc.toString());
+    const activeBlockKey = state.field(activeBlockField, false);
+    const activeBlock = activeBlockKey
+      ? sourceMap.blocks.find((block) => sourceBlockKey(block) === activeBlockKey) ?? null
+      : null;
+    const activeEditing = activeBlock !== null;
+    const ranges: Array<{ from: number; to: number; decoration: Decoration }> = [];
 
-    for (let lineNo = 1; lineNo <= view.state.doc.lines; lineNo++) {
-      const line = view.state.doc.line(lineNo);
-      const text = line.text;
+    for (const idLine of sourceMap.idLines) {
+      const isActiveIdLine = activeEditing && activeBlock?.idLine === idLine;
+      if (isActiveIdLine) {
+        ranges.push({
+          from: idLine.from,
+          to: idLine.from,
+          decoration: Decoration.line({
+            class: "cm-id-property-line cm-id-property-line-active",
+          }),
+        });
+      } else {
+        ranges.push({
+          from: idLine.from,
+          to: sourceLineWithBreakTo(sourceMap, idLine.line.index),
+          decoration: Decoration.replace({
+            block: true,
+          }),
+        });
+      }
+    }
 
-      if (isHiddenPropertyLine(text)) {
-        builder.add(line.from, line.from, Decoration.line({ class: "cm-hidden-id-line" }));
+    for (const block of sourceMap.blocks) {
+      if (activeEditing && block === activeBlock) {
         continue;
       }
-
-      if (lineNo === activeLine) continue;
-
-      const blockMatch = text.match(/^(\s*)-\s?(.*)$/);
-      if (!blockMatch) continue;
-
-      const indent = blockMatch[1] ?? "";
-      const content = blockMatch[2] ?? "";
-      const contentOffset = indent.length + (text[indent.length + 1] === " " ? 2 : 1);
-      builder.add(
-        line.from,
-        line.to,
-        Decoration.replace({
-          widget: new RenderedBlockWidget(indent, content, line.from + contentOffset),
+      ranges.push({
+        from: block.previewFrom,
+        to: blockPreviewWithBreakTo(sourceMap, block),
+        decoration: Decoration.replace({
+          widget: new RenderedBlockWidget(block, assetBaseDir),
+          block: true,
           inclusive: false,
         }),
-      );
+      });
+    }
+
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    for (const range of ranges) {
+      builder.add(range.from, range.to, range.decoration);
     }
 
     return builder.finish();
   }
 
-  const blockPreviewPlugin = ViewPlugin.fromClass(class {
-    decorations: DecorationSet;
-
-    constructor(view: EditorView) {
-      this.decorations = buildBlockPreviewDecorations(view);
-    }
-
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        this.decorations = buildBlockPreviewDecorations(update.view);
-      }
-    }
-  }, {
-    decorations: (plugin) => plugin.decorations,
+  const blockPreviewField = StateField.define<DecorationSet>({
+    create(state) {
+      return buildBlockPreviewDecorations(state);
+    },
+    update(decorations, transaction) {
+      return transaction.docChanged || transactionChangesActiveBlock(transaction)
+        ? buildBlockPreviewDecorations(transaction.state)
+        : decorations;
+    },
+    provide(field) {
+      return EditorView.decorations.from(field);
+    },
   });
 
   $effect(() => {
@@ -162,8 +327,112 @@
     destroyEditor();
   });
 
+  $effect(() => {
+    const host = editorHost;
+    if (!host) return;
+
+    const handler = (event: Event) => {
+      openImageSizeMenu(event as CustomEvent<UnifiedImageMenuDetail>);
+    };
+    host.addEventListener("unified-image-context-menu", handler);
+    return () => host.removeEventListener("unified-image-context-menu", handler);
+  });
+
+  $effect(() => {
+    if (!imageSizeMenu) return;
+
+    const closeMenu = (event: MouseEvent | PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest?.(".image-size-menu")) return;
+      imageSizeMenu = null;
+    };
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        imageSizeMenu = null;
+      }
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    window.addEventListener("keydown", handleKeydown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+      window.removeEventListener("keydown", handleKeydown);
+    };
+  });
+
   function errorMessage(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
+  }
+
+  function openImageSizeMenu(event: CustomEvent<UnifiedImageMenuDetail>) {
+    const detail = event.detail;
+    if (!detail) return;
+    const pos = contextMenuPositionFromEvent(detail, { width: 236, height: 360 });
+    imageSizeMenu = {
+      ...detail,
+      x: pos.x,
+      y: pos.y,
+    };
+  }
+
+  function imageScaleSizeLabel(scale: number): string {
+    const baseWidth = imageSizeMenu?.baseWidth ?? 240;
+    const baseHeight = imageSizeMenu?.baseHeight ?? 180;
+    return formatScaledImageDimensions(scale, baseWidth, baseHeight);
+  }
+
+  function findImageMenuBlock(menu: ImageSizeMenu): SourceBlock | null {
+    if (!editorView) return null;
+    const map = parsePageSourceMap(editorView.state.doc.toString());
+    return (
+      (menu.blockId ? map.blocks.find((block) => block.id === menu.blockId) : null)
+      ?? map.blocks.find((block) => block.previewFrom === menu.blockPreviewFrom && block.content === menu.blockContent)
+      ?? map.blocks.find((block) => block.content === menu.blockContent)
+      ?? null
+    );
+  }
+
+  function replaceImageMenuBlockContent(menu: ImageSizeMenu, content: string) {
+    if (!editorView) throw new Error("editor is not ready");
+    const block = findImageMenuBlock(menu);
+    if (!block) throw new Error("could not find the image block in page source");
+    if (content === block.content) return;
+
+    const replacement = sourceBlockContentReplacement(block, content);
+    editorView.dispatch({
+      changes: replacement,
+      userEvent: "input.resize-image",
+    });
+    editorView.focus();
+  }
+
+  function chooseImageScale(scale: number) {
+    const menu = imageSizeMenu;
+    if (!menu) return;
+    try {
+      const nextSize = scaledImageDimensions(scale, menu.baseWidth, menu.baseHeight);
+      replaceImageMenuBlockContent(menu, setMarkdownImageWidth(menu.blockContent, menu.imageIndex, nextSize.width));
+      imageSizeMenu = null;
+      error = null;
+    } catch (e) {
+      error = `Failed to resize image: ${errorMessage(e)}`;
+      console.error("Failed to resize image:", e);
+    }
+  }
+
+  function resetImageScale() {
+    const menu = imageSizeMenu;
+    if (!menu) return;
+    try {
+      replaceImageMenuBlockContent(menu, clearMarkdownImageWidth(menu.blockContent, menu.imageIndex));
+      imageSizeMenu = null;
+      error = null;
+    } catch (e) {
+      error = `Failed to reset image size: ${errorMessage(e)}`;
+      console.error("Failed to reset image size:", e);
+    }
   }
 
   function destroyEditor() {
@@ -187,9 +456,11 @@
       doc: content,
       extensions: [
         markdown(),
-        history(),
+        history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
         drawSelection(),
-        blockPreviewPlugin,
+        editingModeCompartment.of(editingModeExtensions(false)),
+        activeBlockField,
+        blockPreviewField,
         Prec.highest(keymap.of([
           {
             key: "Shift-ArrowUp",
@@ -210,6 +481,9 @@
               return true;
             },
           },
+          // TODO(continuous-editor): replace native Enter/Backspace with
+          // block-aware split/merge only after new `id::` line generation is
+          // covered well enough to avoid corrupting source metadata.
           ...defaultKeymap,
           ...historyKeymap,
         ]),
@@ -226,20 +500,26 @@
           },
           pointerdown: (_event, view) => {
             activateEditor(view);
+            const target = _event.target as Element | null;
+            if (!target?.closest(".unified-rendered-block") && !target?.closest(".cm-line")) {
+              setActiveBlock(view, null);
+            }
           },
           blur: (_event, view) => {
             if ((window as any).__activeEditorView === view) {
               (window as any).__activeEditorView = undefined;
             }
+            setActiveBlock(view, null);
           },
         }),
         EditorView.theme({
           "&": {
             fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif",
-            fontSize: compact ? "13px" : "14px",
-            lineHeight: "1.45",
+            fontSize: "16px",
+            lineHeight: "1.3",
             color: "var(--text-primary)",
             background: "transparent",
+            fontWeight: "400",
           },
           "&.cm-editor": {
             border: "1px solid var(--border)",
@@ -250,20 +530,33 @@
             outline: "1px solid var(--accent)",
           },
           ".cm-scroller": {
-            fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
+            fontFamily: "inherit",
             overflow: "visible",
             maxHeight: "none",
           },
           ".cm-content": {
-            padding: "10px 12px",
+            padding: "0",
             caretColor: "var(--text-primary)",
             minHeight: compact ? "120px" : "240px",
+            fontFamily: "inherit",
+            fontSize: "inherit",
+            lineHeight: "inherit",
+            fontWeight: "inherit",
           },
           ".cm-line": {
-            padding: "0 4px",
+            padding: "0",
+            fontFamily: "inherit",
+            fontSize: "inherit",
+            lineHeight: "inherit",
+            fontWeight: "inherit",
           },
-          ".cm-hidden-id-line": {
-            display: "none !important",
+          ".cm-id-property-line": {
+            color: "var(--text-muted)",
+            fontSize: "0.86em",
+            opacity: "0.58",
+          },
+          ".cm-id-property-line-active": {
+            display: "block",
           },
           ".cm-gutters": {
             background: "var(--bg-secondary)",
@@ -285,22 +578,54 @@
           "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
             background: "rgba(124, 58, 237, 0.46) !important",
           },
+          "& ::selection": {
+            background: "color-mix(in srgb, var(--accent, #7c3aed) 42%, transparent)",
+            color: "var(--text-primary)",
+          },
+          "& *::selection": {
+            background: "color-mix(in srgb, var(--accent, #7c3aed) 42%, transparent)",
+            color: "var(--text-primary)",
+          },
           ".unified-rendered-block": {
             display: "grid",
-            gridTemplateColumns: "16px minmax(0, 1fr)",
-            columnGap: "4px",
+            gridTemplateColumns: "20px minmax(0, 1fr)",
+            columnGap: "0",
             alignItems: "baseline",
-            paddingLeft: "calc(var(--preview-depth, 0) * 20px)",
+            minHeight: "21px",
+            marginBottom: "1px",
+            paddingLeft: "calc(var(--preview-depth, 0) * 24px)",
             color: "var(--text-primary)",
-            fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif",
+            fontFamily: "inherit",
+            fontSize: "inherit",
+            lineHeight: "inherit",
+            fontWeight: "inherit",
             whiteSpace: "normal",
+            userSelect: "text",
+            cursor: "text",
           },
           ".unified-rendered-bullet": {
             color: "var(--text-muted)",
+            lineHeight: "inherit",
             userSelect: "none",
           },
           ".unified-rendered-content": {
             minWidth: "0",
+            padding: "0",
+            lineHeight: "inherit",
+            overflowX: "auto",
+            overflowWrap: "break-word",
+            wordBreak: "break-word",
+          },
+          ".unified-rendered-content p, .unified-rendered-content ul, .unified-rendered-content ol, .unified-rendered-content li": {
+            margin: "0",
+            lineHeight: "inherit",
+          },
+          ".unified-rendered-content ul, .unified-rendered-content ol": {
+            paddingLeft: "0",
+            listStylePosition: "inside",
+          },
+          ".unified-rendered-content li > p": {
+            display: "inline",
           },
           ".unified-rendered-content > :first-child": {
             marginTop: "0",
@@ -309,24 +634,88 @@
             marginBottom: "0",
           },
           ".unified-rendered-content h1, .unified-rendered-content h2, .unified-rendered-content h3": {
-            lineHeight: "1.2",
             margin: "0",
           },
-          ".unified-rendered-content a": {
-            color: "var(--accent)",
+          ".unified-rendered-content h1": {
+            "--heading-accent": "var(--accent-yellow)",
+            color: "var(--heading-accent)",
+            fontSize: "1.75em",
+            fontWeight: "800",
+            lineHeight: "1.08",
+            letterSpacing: "0.015em",
+            paddingBottom: "0.08em",
+            borderBottom: "2px solid color-mix(in srgb, var(--heading-accent) 62%, transparent)",
+          },
+          ".unified-rendered-content h2": {
+            "--heading-accent": "var(--accent)",
+            color: "var(--heading-accent)",
+            fontSize: "1.45em",
+            fontWeight: "750",
+            lineHeight: "1.14",
+            letterSpacing: "0.01em",
+            paddingBottom: "0.06em",
+            borderBottom: "1px solid color-mix(in srgb, var(--heading-accent) 52%, transparent)",
+          },
+          ".unified-rendered-content h3": {
+            "--heading-accent": "var(--accent-secondary)",
+            color: "var(--heading-accent)",
+            fontSize: "1.25em",
+            fontWeight: "700",
+            lineHeight: "1.25",
+            paddingLeft: "0.35em",
+            borderLeft: "3px solid color-mix(in srgb, var(--heading-accent) 72%, transparent)",
+          },
+          ".unified-rendered-content h4, .unified-rendered-content h5, .unified-rendered-content h6": {
+            "--heading-accent": "var(--accent-cyan)",
+            color: "var(--heading-accent)",
+            fontSize: "1.08em",
+            fontWeight: "700",
+            lineHeight: "1.25",
+            margin: "0",
+          },
+          ".unified-rendered-content a:not(.page-link):not(.tag)": {
+            color: "var(--text-link)",
+          },
+          ".unified-rendered-content .page-link": {
+            "--link-accent": "var(--accent-yellow)",
+            color: "var(--link-accent)",
+            fontFamily: "inherit",
+            fontSize: "inherit",
+            fontWeight: "inherit",
+            lineHeight: "inherit",
+            textDecoration: "none",
+            border: "1px solid color-mix(in srgb, var(--link-accent) 50%, transparent)",
+            borderRadius: "5px",
+            background: "color-mix(in srgb, var(--link-accent) 10%, transparent)",
+            boxDecorationBreak: "clone",
+            WebkitBoxDecorationBreak: "clone",
+            padding: "0 0.24em",
           },
           ".unified-rendered-content code": {
             borderRadius: "3px",
             background: "var(--bg-primary)",
             padding: "0 3px",
           },
+          ".unified-rendered-content .fc-img": {
+            maxWidth: "100%",
+            height: "auto",
+            borderRadius: "6px",
+            margin: "4px 0",
+            display: "block",
+            cursor: "context-menu",
+          },
+          ".unified-rendered-content .fc-img[data-src]:not([src])": {
+            minHeight: "48px",
+            background: "color-mix(in srgb, var(--text-muted) 8%, transparent)",
+          },
+          ".unified-rendered-content .fc-img[data-image-width], .unified-rendered-content .fc-img[data-image-height]": {
+            maxWidth: "none",
+          },
         }),
       ],
     });
 
     editorView = new EditorView({ state, parent: editorHost });
-    activateEditor(editorView);
-    editorView.focus();
     installVerticalArrowCapture(editorView);
   }
 
@@ -451,8 +840,8 @@
 <div class="unified-page-editor">
   <div class="prototype-banner">
     <div>
-      <strong>Unified editor prototype</strong>
-      <span>One CodeMirror surface for this page source, then re-indexed back into block rows.</span>
+      <strong>Experimental continuous editor</strong>
+      <span>One editor surface for this page/day. Block ids stay in source and saves re-index back into block rows.</span>
     </div>
     <div class="prototype-actions">
       {#if savedMessage}
@@ -473,6 +862,28 @@
   {/if}
 
   <div class="editor-host" class:loading bind:this={editorHost}></div>
+
+  {#if imageSizeMenu}
+    <div
+      class="image-size-menu app-context-menu"
+      style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
+      role="menu"
+      aria-label="Image size menu"
+      onpointerdown={(e) => e.stopPropagation()}
+      oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="image-size-menu-title">Size</div>
+      <button class="image-size-menu-item" type="button" role="menuitem" onclick={resetImageScale}>
+        Original Size
+      </button>
+      {#each IMAGE_SIZE_SCALES as scale}
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => chooseImageScale(scale)}>
+          {formatImageScale(scale)} <span>{imageScaleSizeLabel(scale)}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
 
   {#if loading}
     <div class="prototype-loading">Loading source...</div>
@@ -558,6 +969,50 @@
     color: var(--text-muted);
     font-size: 12px;
     pointer-events: none;
+  }
+
+  .image-size-menu {
+    position: fixed;
+    z-index: 2147483000;
+    min-width: 212px;
+    padding: 6px;
+  }
+
+  .image-size-menu-title {
+    padding: 5px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .image-size-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 8px;
+    text-align: left;
+  }
+
+  .image-size-menu-item span {
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  .image-size-menu-item:hover,
+  .image-size-menu-item:focus-visible {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
   }
 
   @media (max-width: 720px) {

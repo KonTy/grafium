@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toggleWrapText } from "./editorFormat";
+import { toggleWrapText, wrapPageLinkText } from "./editorFormat";
 
 describe("toggleWrapText", () => {
   it("wraps a selection in italic markers, keeping inner text selected", () => {
@@ -100,5 +100,36 @@ describe("toggleWrapText", () => {
     const r = toggleWrapText("hello *world*", 6, 13, "*");
     expect(r.doc).toBe("hello world");
     expect(r.doc.slice(r.selStart, r.selEnd)).toBe("world");
+  });
+});
+
+describe("wrapPageLinkText", () => {
+  it("wraps the selected text in a page link", () => {
+    const r = wrapPageLinkText("take niacin daily", 5, 11);
+
+    expect(r.doc).toBe("take [[niacin]] daily");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("niacin");
+  });
+
+  it("keeps accidental outer whitespace outside the page title", () => {
+    const r = wrapPageLinkText("take niacin daily", 4, 12);
+
+    expect(r.doc).toBe("take [[niacin]] daily");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("niacin");
+  });
+
+  it("does not double-wrap text already inside a page link", () => {
+    const r = wrapPageLinkText("take [[niacin]] daily", 7, 13);
+
+    expect(r.doc).toBe("take [[niacin]] daily");
+    expect(r.doc.slice(r.selStart, r.selEnd)).toBe("niacin");
+  });
+
+  it("inserts an empty page link pair when there is no selection", () => {
+    const r = wrapPageLinkText("take ", 5, 5);
+
+    expect(r.doc).toBe("take [[]]");
+    expect(r.selStart).toBe(7);
+    expect(r.selEnd).toBe(7);
   });
 });

@@ -10,32 +10,50 @@ pub enum ExtractedLink {
 }
 
 impl ExtractedLink {
-    /// Normalize page/tag titles by replacing backslashes with forward slashes
-    /// so [[test/page]] and [[test\page]] are treated as the same hierarchy.
+    /// Normalize page/tag titles so hierarchy separators are consistent.
     fn normalize_title(title: &str) -> String {
-        title.replace('\\', "/")
+        title
+            .replace('\\', "/")
+            .split('/')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
     }
 }
 
 static PAGE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9_/\\\-]+)").unwrap());
+static TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9][a-zA-Z0-9_/\\\-]*)").unwrap());
 static BLOCK_REF_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(\(([a-f0-9\-]+)\)\)").unwrap());
+static DATE_TITLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})[-_](\d{2})[-_](\d{2})$").unwrap());
 
 pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
 
     for cap in PAGE_LINK_RE.captures_iter(content) {
-        let title = ExtractedLink::normalize_title(&cap[1]);
-        links.push(ExtractedLink::Page(title));
+        let title = canonical_date_title(&ExtractedLink::normalize_title(&cap[1]));
+        if !title.is_empty() && !is_template_placeholder(&title) {
+            links.push(ExtractedLink::Page(title));
+        }
     }
 
     for cap in TAG_RE.captures_iter(content) {
+        if cap
+            .get(0)
+            .is_some_and(|m| is_url_fragment_hash(content, m.start()))
+        {
+            continue;
+        }
         let tag = &cap[1];
         // Don't capture #flashcard as a tag link — it's a special marker
         if tag != "flashcard" {
             let normalized = ExtractedLink::normalize_title(tag);
-            links.push(ExtractedLink::Tag(normalized));
+            if !normalized.is_empty() {
+                links.push(ExtractedLink::Tag(normalized));
+            }
         }
     }
 
@@ -44,6 +62,37 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     }
 
     links
+}
+
+fn is_url_fragment_hash(content: &str, hash_start: usize) -> bool {
+    let prefix = &content[..hash_start];
+    let previous = prefix.chars().next_back();
+    let Some(previous) = previous else {
+        return false;
+    };
+    if previous.is_whitespace() || matches!(previous, '(' | '[' | '{') {
+        return false;
+    }
+
+    let token_start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '<' | '"' | '\''))
+        .map(|(idx, c)| idx + c.len_utf8())
+        .unwrap_or(0);
+    let token = &content[token_start..hash_start];
+    token.contains("://") || token.contains('.') || token.ends_with('/')
+}
+
+fn is_template_placeholder(title: &str) -> bool {
+    title.starts_with("<%") && title.ends_with("%>")
+}
+
+fn canonical_date_title(title: &str) -> String {
+    DATE_TITLE_RE
+        .captures(title)
+        .map(|cap| format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]))
+        .unwrap_or_else(|| title.to_string())
 }
 
 /// A key term to find verbatim in text and wrap as a `[[wiki-link]]`.
@@ -268,14 +317,24 @@ mod tests {
 
     #[test]
     fn test_extract_hierarchical_page_links() {
-        let links = extract_links("See [[test/page]] and [[test\\child]]");
+        let links = extract_links(
+            "See [[test/page]] and [[test\\child]] and [[A / B/ C ]] and [[2025_09_30]]",
+        );
         assert_eq!(
             links,
             vec![
                 ExtractedLink::Page("test/page".to_string()),
                 ExtractedLink::Page("test/child".to_string()),
+                ExtractedLink::Page("A/B/C".to_string()),
+                ExtractedLink::Page("2025-09-30".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn test_extract_page_links_ignores_template_placeholders() {
+        let links = extract_links("### [[<% cursor %>]] and [[Real Page]]");
+        assert_eq!(links, vec![ExtractedLink::Page("Real Page".to_string())]);
     }
 
     #[test]
@@ -300,6 +359,31 @@ mod tests {
                 ExtractedLink::Tag("test/other".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn test_extract_tags_ignores_url_fragments() {
+        let links =
+            extract_links("See [post](https://app.example.com/#/users/u/name/posts) and #real/tag");
+        assert_eq!(links, vec![ExtractedLink::Tag("real/tag".to_string())]);
+    }
+
+    #[test]
+    fn test_extract_tags_handles_unicode_whitespace_before_hash() {
+        let links = extract_links("See https://example.com/\u{00a0}section#fragment and #real");
+        assert_eq!(
+            links,
+            vec![
+                ExtractedLink::Tag("fragment".to_string()),
+                ExtractedLink::Tag("real".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_tags_ignores_logseq_routes() {
+        let links = extract_links(r##"#+BEGIN_QUERY {:query "#/page/Some Page"} #real"##);
+        assert_eq!(links, vec![ExtractedLink::Tag("real".to_string())]);
     }
 
     #[test]
@@ -391,6 +475,21 @@ mod tests {
         assert_eq!(
             out,
             "The gut's [[body absorption]] of magnesium was studied."
+        );
+    }
+
+    #[test]
+    fn test_wrap_known_terms_uses_semantic_label_for_generic_surface_term() {
+        let out = wrap_known_terms_as_links(
+            "The chapter explains how writers turn topics into an argument.",
+            &[TagTerm {
+                term: "topics".to_string(),
+                qualified: Some("writing topics".to_string()),
+            }],
+        );
+        assert_eq!(
+            out,
+            "The chapter explains how writers turn [[writing topics]] into an argument."
         );
     }
 

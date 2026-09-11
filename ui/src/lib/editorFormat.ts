@@ -76,3 +76,36 @@ export function toggleWrapText(
   const newDoc = doc.slice(0, from) + marker + selected + marker + doc.slice(to);
   return { doc: newDoc, selStart: from + mlen, selEnd: to + mlen };
 }
+
+/**
+ * Wrap the selected text in a Grafium page link (`[[...]]`).
+ *
+ * Outer whitespace is preserved outside the link so accidentally selecting a
+ * trailing space does not create a page title with hidden whitespace.
+ */
+export function wrapPageLinkText(doc: string, from: number, to: number): WrapResult {
+  if (from === to) {
+    const newDoc = doc.slice(0, from) + "[[]]" + doc.slice(from);
+    const cursor = from + 2;
+    return { doc: newDoc, selStart: cursor, selEnd: cursor };
+  }
+
+  const selected = doc.slice(from, to);
+  const leading = selected.match(/^\s*/)?.[0] ?? "";
+  const trailing = selected.match(/\s*$/)?.[0] ?? "";
+  const coreStart = from + leading.length;
+  const coreEnd = to - trailing.length;
+  const core = doc.slice(coreStart, coreEnd);
+
+  if (core.startsWith("[[") && core.endsWith("]]")) {
+    return { doc, selStart: coreStart + 2, selEnd: coreEnd - 2 };
+  }
+
+  if (doc.slice(coreStart - 2, coreStart) === "[[" && doc.slice(coreEnd, coreEnd + 2) === "]]") {
+    return { doc, selStart: coreStart, selEnd: coreEnd };
+  }
+
+  const linked = `[[${core}]]`;
+  const newDoc = doc.slice(0, coreStart) + linked + doc.slice(coreEnd);
+  return { doc: newDoc, selStart: coreStart + 2, selEnd: coreStart + 2 + core.length };
+}

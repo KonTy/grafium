@@ -1,3 +1,5 @@
+import { contrastRatio } from "./contrast";
+
 // Theme definitions derived from smplOS colors.toml files.
 // Each theme maps smplos color tokens to Grafium CSS variable values.
 
@@ -90,6 +92,12 @@ export interface AccentPalette {
   red: string;
 }
 
+function readableTextOn(background: string): string {
+  return contrastRatio("#000000", background) >= contrastRatio("#ffffff", background)
+    ? "#000000"
+    : "#ffffff";
+}
+
 function normalizeThemeId(value: string): string {
   return value
     .trim()
@@ -129,7 +137,7 @@ function dark(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim:
     btnBg: bgLighter,
     btnBgHover: bgLighter,
     btnPrimaryBg: accent,
-    btnPrimaryFg: bg,
+    btnPrimaryFg: readableTextOn(accent),
     btnPrimaryHover: accent,
     surfaceRaised: bgLighter,
     surfaceOverlay: bgLight,
@@ -175,7 +183,7 @@ function light(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim
     btnBg: bgLighter,
     btnBgHover: bgLighter,
     btnPrimaryBg: accent,
-    btnPrimaryFg: bg,
+    btnPrimaryFg: readableTextOn(accent),
     btnPrimaryHover: accent,
     surfaceRaised: bgLight,
     surfaceOverlay: bg,
@@ -252,16 +260,15 @@ export const themes: Theme[] = [
       { orange: "#ffa066", magenta: "#d27e99", green: "#98bb6c", yellow: "#e6c384", blue: "#7e9cd8", cyan: "#7fb4ca", purple: "#9e8abe", red: "#e56e7b" }),
   },
   {
-    // Monochrome phosphor-green terminal look. Keeps green as the *primary*
-    // accent/link identity, but the accent palette below is genuinely multi-hue
-    // (slightly desaturated to curb halation on pure black) so tags, refs and
-    // external links differentiate instead of blurring into one hue.
+    // Monochrome phosphor-green terminal look. Uses a plain system programmer
+    // font stack instead of Syphi's display font, scanline overlay and glow
+    // effects, keeping big real graphs crisp and cheaper to repaint.
     id: "matrix",
     name: "Matrix",
     colors: {
       ...dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#FF9900", "#FF9900", "#00FF00", "#FFCC33",
         { orange: "#efae58", magenta: "#f383c6", green: "#5def74", yellow: "#efd65d", blue: "#6bc3f0", cyan: "#5defca", purple: "#caa4f6", red: "#f27878" }),
-      fx: "syphi",
+      fx: "terminal",
     },
   },
   {

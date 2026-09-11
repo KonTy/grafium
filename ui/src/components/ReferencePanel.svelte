@@ -2,7 +2,8 @@
   import { tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
-  import { searchFts, searchPageTitles, getPage, listBlocks, type Block, type PageSummary as ApiPageSummary } from "../lib/api";
+  import ChatMessageBubble from "./ChatMessageBubble.svelte";
+  import { searchFts, searchPageTitles, getPage, listBlocks, updateBlock, type Block, type PageSummary as ApiPageSummary } from "../lib/api";
   import {
     aiGenerateReferences,
     aiSearch,
@@ -16,11 +17,18 @@
     type PageReferencesMeta,
     type PageSummary,
     type WebResearchResult,
+    type WebSource,
     type SemanticSearchResult,
     type HealthStatus,
   } from "../lib/knowledge";
+  import type { ChatMessageModel, ChatThinkingTone } from "../lib/chatMessage";
   import { pushUndo } from "../lib/undoStack";
   import type { PageNavigationTarget } from "../lib/navigation";
+  import {
+    getCurrentBlockAnchor,
+    getLatestCurrentBlockAnchor,
+    type CurrentBlockAnchor,
+  } from "../lib/currentBlockAnchor";
 
   // Props
   let {
@@ -30,8 +38,10 @@
     initialTab,
     focusTrigger = 0,
     width = 380,
+    preferFocusedPageForPageScope = false,
     onClose = () => {},
     onNavigate = (_target: PageNavigationTarget) => {},
+    onFindLinks = (_page: { id: string; title: string }) => {},
   }: {
     visible?: boolean;
     pageId?: string;
@@ -39,8 +49,10 @@
     initialTab?: "references" | "search" | "ask";
     focusTrigger?: number;
     width?: number;
+    preferFocusedPageForPageScope?: boolean;
     onClose?: () => void;
     onNavigate?: (target: PageNavigationTarget) => void;
+    onFindLinks?: (page: { id: string; title: string }) => void;
   } = $props();
 
   // State
@@ -63,6 +75,32 @@
   let isInsertingSummary = $state(false);
   let insertedSummary = $state(false);
   let searchInputEl = $state<HTMLInputElement | null>(null);
+  let askWebResearchResult = $state<WebResearchResult | null>(null);
+  let askWebResearchProgress = $state("");
+  let askMessages = $state<ChatMessageModel[]>([]);
+  let askPendingAssistantIndex = $state<number | null>(null);
+  let askThreadGeneration = 0;
+  let activeAskGeneration: number | null = null;
+  let askThinkingLabel = $state("Thinking…");
+  let askThinkingTone = $state<ChatThinkingTone>("thinking");
+  let askScrollEl = $state<HTMLDivElement | null>(null);
+  type AskTurn = {
+    id: string;
+    scope: AskScope;
+    question: string;
+    answer: string;
+    pageTitle?: string;
+    blockId?: string;
+    webResearchResult?: WebResearchResult;
+  };
+  let askTurns = $state<AskTurn[]>([]);
+  let askThreadSummary = $state("");
+  let isSummarizingAskThread = $state(false);
+  let improvedBlockDraft = $state("");
+  let improvedBlockContext = $state<CurrentBlockContext | null>(null);
+  let isImprovingBlock = $state(false);
+  let isApplyingBlockDraft = $state(false);
+  let blockDraftStatus = $state("");
 
   // Operation IDs for the three cancellable AI operations. Set to a fresh
   // UUID for the duration of an in-flight run so the Cancel button can
@@ -121,28 +159,33 @@
   // editor no longer has an active caret to query. Anchored inserts fall
   // back to top-of-page (in the Rust command) if the id is null or stale.
   let lastFocusedBlockId = $state<string | null>(null);
+  let askBlockAnchor = $state<CurrentBlockAnchor | null>(null);
 
   $effect(() => {
     const handleFocusChanged = (event: Event) => {
       const detail = (event as CustomEvent<{ pageId: string; blockId: string | null }>).detail;
       if (!detail) return;
-      // Only remember anchors from the page this panel is currently
-      // scoped to — a background page load broadcasting its own reset
-      // shouldn't wipe the anchor the user just chose on the visible one.
-      if (detail.pageId !== pageId) return;
-      lastFocusedBlockId = detail.blockId;
+      if (detail.blockId) {
+        askBlockAnchor = { pageId: detail.pageId, blockId: detail.blockId };
+      } else if (askBlockAnchor?.pageId === detail.pageId) {
+        askBlockAnchor = null;
+      }
+      // Summary insertion still anchors only within the panel's current page.
+      if (detail.pageId === pageId) {
+        lastFocusedBlockId = detail.blockId;
+      }
     };
     window.addEventListener("page-content-focus-changed", handleFocusChanged);
     return () => window.removeEventListener("page-content-focus-changed", handleFocusChanged);
   });
 
-  // Also clear the anchor whenever the panel's page changes, so we don't
-  // carry a stale id from the previous page into the first insert on the
-  // new one before PageContent has had a chance to broadcast.
+  // Restore the last clicked/focused block when the panel mounts after the
+  // user picked a block while the right panel was closed.
   $effect(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     pageId;
-    lastFocusedBlockId = null;
+    askBlockAnchor = getLatestCurrentBlockAnchor();
+    lastFocusedBlockId = pageId ? getCurrentBlockAnchor(pageId) : null;
   });
 
   // ─── Summarize Selection (arbitrary drag-selected text, not block-select) ────
@@ -258,6 +301,10 @@
 
   function openCitation(url: string) {
     openExternal(url).catch(() => {});
+  }
+
+  function openChatWebSource(source: WebSource) {
+    openCitation(source.url);
   }
 
   // Tracks whether the browser currently has a non-empty text selection
@@ -388,6 +435,11 @@
       analyzePageOpId = null;
       analyzePageCancelling = false;
     }
+  }
+
+  function findLinksForCurrentPage() {
+    if (!pageId) return;
+    onFindLinks({ id: pageId, title: pageTitle });
   }
 
   /// Writes the current summary into the actual page as a new block
@@ -567,41 +619,359 @@
 
   // ─── Ask ───────────────────────────────────────────────────────────────────
 
-  // Default the Ask tab to "this page" — the most common intent is "what
-  // does this page say about X" while reading, not a cross-graph query.
-  // Toggle to "All notes" flips it back to the whole-graph semantic search.
-  let askScope = $state<"page" | "graph">("page");
+  // Default Ask to the user's current block. That's the safest scope in a
+  // block outliner and avoids accidental huge prompts from journal feeds.
+  type AskScope = "block" | "page" | "graph";
+  let askScope = $state<AskScope>("block");
+
+  function shouldUseWebResearchForBlock(question: string): boolean {
+    return /\b(check|fact[- ]?check|verify|validate|source|sources|citation|citations|research|web|internet|look up|accurate|accuracy|true|claim|claims)\b/i.test(question);
+  }
+
+  function webResearchAnswerText(result: WebResearchResult): string {
+    const parts: string[] = [];
+    if (result.title_answer) parts.push(result.title_answer);
+    for (const topic of result.topics) {
+      const tags = topic.tags?.length
+        ? `\n\nTags: ${topic.tags.map((tag) => `#${tag.qualified ?? tag.term}`).join(" ")}`
+        : "";
+      parts.push(`### ${topic.topic}\n\n${topic.summary}${tags}`);
+    }
+    return parts.join("\n\n");
+  }
+
+  function webSourcesFromResearch(result: WebResearchResult): WebSource[] {
+    return result.citations.map((citation) => ({
+      number: citation.number,
+      title: citation.title,
+      url: citation.url,
+    }));
+  }
+
+  function formatAskThreadForPrompt(maxChars = 14000): string {
+    if (askTurns.length === 0) return "";
+    const text = askTurns
+      .slice(-8)
+      .map((turn, index) =>
+        `Turn ${index + 1} (${turn.scope}${turn.pageTitle ? `, ${turn.pageTitle}` : ""})\n`
+        + `Q: ${turn.question}\nA: ${turn.answer}`
+        + (turn.webResearchResult?.citations.length
+          ? `\nSources: ${turn.webResearchResult.citations.map((c) => `[${c.number}] ${c.title} (${c.url})`).join("; ")}`
+          : "")
+      )
+      .join("\n\n");
+    return text.length > maxChars
+      ? text.slice(text.length - maxChars) + "\n[…earlier Ask thread truncated…]"
+      : text;
+  }
+
+  function addAskTurn(turn: Omit<AskTurn, "id">) {
+    askTurns = [...askTurns, { ...turn, id: newOpId() }];
+  }
+
+  async function scrollAskToBottom() {
+    await tick();
+    if (askScrollEl) {
+      askScrollEl.scrollTop = askScrollEl.scrollHeight;
+    }
+  }
+
+  function beginAskMessage(question: string, webResearch = false): number {
+    const assistantIndex = askMessages.length + 1;
+    askMessages = [
+      ...askMessages,
+      { role: "user", content: question },
+      { role: "assistant", content: "", webResearch },
+    ];
+    askPendingAssistantIndex = assistantIndex;
+    askThinkingTone = webResearch ? "web" : "thinking";
+    askThinkingLabel = webResearch ? "Starting web research…" : "Thinking…";
+    void scrollAskToBottom();
+    return assistantIndex;
+  }
+
+  function updateAskAssistant(
+    assistantIndex: number,
+    content: string,
+    extras: Partial<ChatMessageModel> = {},
+  ) {
+    askMessages = askMessages.map((message, index) =>
+      index === assistantIndex
+        ? { ...message, ...extras, role: "assistant", content }
+        : message,
+    );
+    void scrollAskToBottom();
+  }
+
+  function finishAskMessage(
+    assistantIndex: number,
+    content: string,
+    extras: Partial<ChatMessageModel> = {},
+  ) {
+    updateAskAssistant(assistantIndex, content, extras);
+    if (askPendingAssistantIndex === assistantIndex) {
+      askPendingAssistantIndex = null;
+    }
+  }
+
+  function setAskThinking(label: string, tone: ChatThinkingTone = "thinking") {
+    askThinkingLabel = label || (tone === "web" ? "Researching web…" : "Thinking…");
+    askThinkingTone = tone;
+    void scrollAskToBottom();
+  }
+
+  function handleAskKeydown(e: KeyboardEvent) {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    e.preventDefault();
+    void doAsk();
+  }
 
   async function doAsk() {
-    if (!askQuery.trim()) return;
+    if (isLoading) return;
+    const question = askQuery.trim();
+    if (!question) return;
+    askThreadGeneration += 1;
+    const generation = askThreadGeneration;
+    activeAskGeneration = generation;
+    const willUseWebResearch = askScope === "block" && shouldUseWebResearchForBlock(question);
+    const assistantIndex = beginAskMessage(question, willUseWebResearch);
     isLoading = true;
     error = "";
     askAnswer = "";
+    askWebResearchResult = null;
+    askWebResearchProgress = "";
+    blockDraftStatus = "";
+    askQuery = "";
     try {
-      const result = await aiAsk(askQuery);
-      askAnswer = result.answer;
-      if (askScope === "page" && pageId) {
+      if (askScope === "block") {
+        if (willUseWebResearch) {
+          const { result, context } = await runCurrentBlockWebResearch(question);
+          if (generation !== askThreadGeneration) return;
+          const answer = webResearchAnswerText(result);
+          askAnswer = answer;
+          finishAskMessage(assistantIndex, answer, {
+            webResearch: true,
+            webSources: webSourcesFromResearch(result),
+          });
+          addAskTurn({
+            scope: "block",
+            question,
+            answer,
+            pageTitle: context.pageTitle,
+            blockId: context.blockId,
+            webResearchResult: result,
+          });
+          return;
+        }
+        const blockContext = await buildCurrentBlockContext(question);
+        const thread = formatAskThreadForPrompt();
+        const scopedQuestion =
+          `You are looking at the page titled "${blockContext.pageTitle}". Answer the user's question using ONLY `
+          + `the current block context below and the prior Ask thread when it is relevant. If the block and thread `
+          + `do not contain enough information, say so plainly.\n\n`
+          + `--- CURRENT BLOCK CONTEXT ---\n${blockContext.text}\n--- END CURRENT BLOCK CONTEXT ---\n\n`
+          + (thread ? `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\n` : "")
+          + `Question: ${question}`;
+        const result = await aiAsk(scopedQuestion);
+        if (generation !== askThreadGeneration) return;
+        const answer = result.answer;
+        askAnswer = answer;
+        finishAskMessage(assistantIndex, answer, { sources: result.sources });
+        addAskTurn({
+          scope: "block",
+          question,
+          answer,
+          pageTitle: blockContext.pageTitle,
+          blockId: blockContext.blockId,
+        });
+      } else if (askScope === "page" && pageId) {
         // Page-scoped: fetch the page's blocks, inline them as context in
         // the question itself. Bypasses the semantic search step so the
         // answer is always grounded in exactly this page's content, even
         // when the embedder isn't reachable or hasn't been indexed yet.
-        const pageContext = await buildPageContext();
-        const scopedQuestion = pageContext
-          ? `You are looking at the page titled "${pageTitle}". Answer the user's `
-            + `question using ONLY the page content below. If the page doesn't `
+        const pageContext = await buildPageContextForAsk();
+        const thread = formatAskThreadForPrompt();
+        const scopedQuestion = pageContext.text
+          ? `You are looking at the page titled "${pageContext.pageTitle}". Answer the user's `
+            + `question using ONLY the page content below plus the prior Ask thread when relevant. If the page and thread don't `
             + `contain enough information, say so plainly.\n\n`
-            + `--- PAGE CONTENT ---\n${pageContext}\n--- END PAGE CONTENT ---\n\n`
-            + `Question: ${askQuery}`
-          : askQuery;
-        askAnswer = (await aiAsk(scopedQuestion)).answer;
+            + `--- PAGE CONTENT ---\n${pageContext.text}\n--- END PAGE CONTENT ---\n\n`
+            + (thread ? `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\n` : "")
+            + `Question: ${question}`
+          : question;
+        const result = await aiAsk(scopedQuestion);
+        if (generation !== askThreadGeneration) return;
+        const answer = result.answer;
+        askAnswer = answer;
+        finishAskMessage(assistantIndex, answer, { sources: result.sources });
+        addAskTurn({ scope: "page", question, answer, pageTitle: pageContext.pageTitle });
       } else {
-        askAnswer = (await aiAsk(askQuery)).answer;
+        const thread = formatAskThreadForPrompt();
+        const prompt = thread
+          ? `Use the prior Ask thread below as conversation context, then answer the follow-up question across my notes.\n\n`
+            + `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\nQuestion: ${question}`
+          : question;
+        const result = await aiAsk(prompt);
+        if (generation !== askThreadGeneration) return;
+        const answer = result.answer;
+        askAnswer = answer;
+        finishAskMessage(assistantIndex, answer, { sources: result.sources });
+        addAskTurn({ scope: "graph", question, answer });
       }
     } catch (e: any) {
-      error = e?.toString() || "Ask failed";
+      if (generation !== askThreadGeneration) return;
+      const message = e?.toString() || "Ask failed";
+      error = message;
+      finishAskMessage(assistantIndex, `**Error:** ${message}`);
     } finally {
-      isLoading = false;
+      if (generation === askThreadGeneration && askPendingAssistantIndex === assistantIndex) {
+        askPendingAssistantIndex = null;
+      }
+      if (activeAskGeneration === generation) {
+        activeAskGeneration = null;
+        isLoading = false;
+      }
     }
+  }
+
+  async function runCurrentBlockWebResearch(focusQuestion: string): Promise<{ result: WebResearchResult; context: CurrentBlockContext }> {
+    if (isResearchingWeb) {
+      throw new Error("Another web research run is already in progress.");
+    }
+    const blockContext = await buildCurrentBlockContext(focusQuestion);
+    const focus = focusQuestion.trim();
+    const thread = formatAskThreadForPrompt();
+    const opId = newOpId();
+    isResearchingWeb = true;
+    webResearchOpId = opId;
+    webResearchCancelling = false;
+    askWebResearchProgress = "Starting block fact-check...";
+    setAskThinking(askWebResearchProgress, "web");
+    webResearchProgress = askWebResearchProgress;
+    const unlisten = await listen<string>("ai-web-research-progress", (e) => {
+      askWebResearchProgress = e.payload;
+      setAskThinking(askWebResearchProgress, "web");
+      webResearchProgress = e.payload;
+    });
+    try {
+      const result = await aiResearchWeb(
+        focus ? `Fact-check: ${focus}` : `Fact-check: ${blockContext.pageTitle}`,
+        `Current page: ${blockContext.pageTitle}\n\nCurrent block and nested children:\n${blockContext.text}\n\n`
+          + (thread ? `Prior Ask thread:\n${thread}\n\n` : "")
+          + `Research focus: ${focus || "Fact-check the factual claims in this block. If a claim cannot be verified from reliable web sources, say so plainly."}`,
+        opId,
+      );
+      askWebResearchResult = result;
+      return { result, context: blockContext };
+    } finally {
+      unlisten();
+      askWebResearchProgress = "";
+      webResearchProgress = "";
+      webResearchOpId = null;
+      isResearchingWeb = false;
+      webResearchCancelling = false;
+    }
+  }
+
+  async function summarizeAskThread() {
+    if (askTurns.length === 0 || isSummarizingAskThread || isLoading) return;
+    isSummarizingAskThread = true;
+    error = "";
+    blockDraftStatus = "";
+    try {
+      const prompt =
+        `Summarize this Ask thread into a concise, useful answer. Keep factual details, unresolved uncertainties, `
+        + `and source references like [1] when present. Do not invent anything beyond the thread.\n\n`
+        + `--- ASK THREAD ---\n${formatAskThreadForPrompt(18000)}\n--- END ASK THREAD ---`;
+      askThreadSummary = (await aiAsk(prompt)).answer;
+    } catch (e: any) {
+      error = e?.toString() || "Failed to summarize answers";
+    } finally {
+      isSummarizingAskThread = false;
+    }
+  }
+
+  function cleanImprovedBlockDraft(raw: string): string {
+    let text = raw.trim();
+    const fenced = text.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+    if (fenced) text = fenced[1].trim();
+    return text
+      .replace(/^(?:updated|improved|rewritten)\s+block\s*:\s*/i, "")
+      .trim();
+  }
+
+  async function draftImprovedCurrentBlock() {
+    if (askTurns.length === 0 || isImprovingBlock || isLoading) return;
+    isImprovingBlock = true;
+    error = "";
+    improvedBlockDraft = "";
+    improvedBlockContext = null;
+    blockDraftStatus = "";
+    try {
+      const context = await buildCurrentBlockContext(askQuery);
+      const prompt =
+        `Act like a careful code-edit assistant, but for a Markdown knowledge block. Draft the exact replacement `
+        + `for the current block root by merging the useful answer(s) from the Ask thread into the original block. `
+        + `Preserve the user's intent, voice, links, tags, task markers, dates, and any personal notes unless the Ask thread `
+        + `directly corrects them. Keep the result concise and readable. Do not add unsupported claims; when a claim is uncertain, `
+        + `word it as uncertain instead of presenting it as fact. If citations are useful, keep citation markers like [1]. `
+        + `Return ONLY the replacement Markdown for the current block root, not commentary and not a fenced code block.\n\n`
+        + `--- ORIGINAL CURRENT BLOCK ROOT ---\n${context.rootContent}\n--- END ORIGINAL CURRENT BLOCK ROOT ---\n\n`
+        + `--- CURRENT BLOCK WITH CHILD CONTEXT ---\n${context.text}\n--- END CURRENT BLOCK WITH CHILD CONTEXT ---\n\n`
+        + `--- ASK THREAD ---\n${formatAskThreadForPrompt(18000)}\n--- END ASK THREAD ---`;
+      improvedBlockDraft = cleanImprovedBlockDraft((await aiAsk(prompt)).answer);
+      improvedBlockContext = context;
+    } catch (e: any) {
+      error = e?.toString() || "Failed to improve current block";
+    } finally {
+      isImprovingBlock = false;
+    }
+  }
+
+  async function replaceCurrentBlockWithDraft() {
+    const context = improvedBlockContext;
+    const draft = improvedBlockDraft;
+    if (!draft.trim() || !context || isApplyingBlockDraft) return;
+    isApplyingBlockDraft = true;
+    error = "";
+    blockDraftStatus = "";
+    try {
+      const blocks = await listBlocks(context.pageId);
+      const current = blocks.find((b) => b.id === context.blockId);
+      if (!current) throw new Error("The current block no longer exists. Click the block again and retry.");
+      if (current.content === draft) {
+        blockDraftStatus = "Current block already matches the draft.";
+        return;
+      }
+      await updateBlock(context.blockId, draft);
+      pushUndo({
+        type: "update_block",
+        pageId: context.pageId,
+        blockId: context.blockId,
+        beforeContent: current.content,
+        afterContent: draft,
+      });
+      window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId: context.pageId } }));
+      blockDraftStatus = "Updated current block.";
+    } catch (e: any) {
+      error = e?.toString() || "Failed to replace current block";
+    } finally {
+      isApplyingBlockDraft = false;
+    }
+  }
+
+  function clearAskThread() {
+    askThreadGeneration += 1;
+    askTurns = [];
+    askMessages = [];
+    askPendingAssistantIndex = null;
+    askAnswer = "";
+    askWebResearchResult = null;
+    askThreadSummary = "";
+    improvedBlockDraft = "";
+    improvedBlockContext = null;
+    blockDraftStatus = "";
+    error = "";
   }
 
   // Concatenate all blocks on the current page into a single plain-text
@@ -609,9 +979,34 @@
   // depth-first ordered) so the LLM sees the page the way the reader
   // sees it. Returns an empty string if there are no blocks / the fetch
   // failed, so the caller can fall back to a graph-wide ask.
-  async function buildPageContext(): Promise<string> {
+  type AskPageContext = {
+    pageId: string;
+    pageTitle: string;
+    text: string;
+  };
+
+  async function resolvePageContextTarget(): Promise<{ pageId: string; pageTitle: string }> {
+    const focusedAnchor = preferFocusedPageForPageScope
+      ? askBlockAnchor ?? getLatestCurrentBlockAnchor()
+      : null;
+    const contextPageId = focusedAnchor?.pageId ?? pageId;
+    if (!contextPageId) return { pageId: "", pageTitle };
+    if (contextPageId === pageId) return { pageId: contextPageId, pageTitle };
+    const focusedPage = await getPage({ id: contextPageId }).catch(() => null);
+    return { pageId: contextPageId, pageTitle: focusedPage?.title ?? pageTitle };
+  }
+
+  async function buildPageContextForAsk(): Promise<AskPageContext> {
+    const target = await resolvePageContextTarget();
+    return {
+      ...target,
+      text: target.pageId ? await buildPageContext(target.pageId) : "",
+    };
+  }
+
+  async function buildPageContext(contextPageId = pageId): Promise<string> {
     try {
-      const blocks = await listBlocks(pageId);
+      const blocks = await listBlocks(contextPageId);
       const lines: string[] = [];
       for (const b of blocks) {
         const text = (b.content ?? "").trim();
@@ -627,6 +1022,146 @@
     } catch {
       return "";
     }
+  }
+
+  type CurrentBlockContext = {
+    pageId: string;
+    pageTitle: string;
+    blockId: string;
+    rootContent: string;
+    text: string;
+  };
+
+  function visibleBlockAnchorFromQuestion(question: string): CurrentBlockAnchor | null {
+    if (typeof document === "undefined") return null;
+    const terms = question
+      .toLowerCase()
+      .match(/[a-z0-9][a-z0-9_-]{2,}/g)
+      ?.filter((term) => !["about", "block", "check", "these", "this", "that", "please", "with", "from", "what", "when", "where"].includes(term))
+      ?? [];
+    if (terms.length === 0) return null;
+
+    let best: { score: number; anchor: CurrentBlockAnchor } | null = null;
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>(".block-item[data-block-id][data-page-id]"))) {
+      const text = (el.textContent ?? "").toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (text.includes(term)) score += term.length;
+      }
+      if (score > (best?.score ?? 0)) {
+        best = {
+          score,
+          anchor: {
+            pageId: el.dataset.pageId ?? pageId,
+            blockId: el.dataset.blockId ?? null,
+          },
+        };
+      }
+    }
+    return best?.score ? best.anchor : null;
+  }
+
+  function askQuestionTerms(question: string): string[] {
+    return question
+      .toLowerCase()
+      .match(/[a-z0-9][a-z0-9_-]{2,}/g)
+      ?.filter((term) => !["about", "block", "check", "these", "this", "that", "please", "with", "from", "what", "when", "where", "better", "give", "tell"].includes(term))
+      ?? [];
+  }
+
+  function scoreTextAgainstTerms(text: string, terms: string[]): number {
+    const lower = text.toLowerCase();
+    return terms.reduce((score, term) => lower.includes(term) ? score + term.length : score, 0);
+  }
+
+  async function searchedBlockAnchorFromQuestion(question: string): Promise<CurrentBlockAnchor | null> {
+    const terms = askQuestionTerms(question);
+    if (terms.length === 0) return null;
+    try {
+      const results = await searchFts(terms.slice(0, 6).join(" "), 20);
+      let best: { score: number; block: Block } | null = null;
+      for (const block of results) {
+        const score = scoreTextAgainstTerms(block.content ?? "", terms);
+        if (score > (best?.score ?? 0)) {
+          best = { score, block };
+        }
+      }
+      return best?.score
+        ? { pageId: best.block.page_id, blockId: best.block.id }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveAskBlockAnchor(question: string): CurrentBlockAnchor | null {
+    return askBlockAnchor
+      ?? getLatestCurrentBlockAnchor()
+      ?? visibleBlockAnchorFromQuestion(question);
+  }
+
+  async function buildCurrentBlockContext(question = ""): Promise<CurrentBlockContext> {
+    let anchor = resolveAskBlockAnchor(question);
+    if (!anchor?.blockId) {
+      anchor = await searchedBlockAnchorFromQuestion(question);
+    }
+    if (!anchor?.pageId) {
+      throw new Error("Open a page first to use current-block Ask.");
+    }
+    if (!anchor.blockId) {
+      throw new Error("Click into a block first, then use Current block.");
+    }
+
+    askBlockAnchor = anchor;
+    if (anchor.pageId === pageId) {
+      lastFocusedBlockId = anchor.blockId;
+    }
+
+    const blocks = await listBlocks(anchor.pageId);
+    const root = blocks.find((b) => b.id === anchor.blockId);
+    if (!root) {
+      throw new Error("The last focused block is no longer on this page. Click the block again and retry.");
+    }
+    const contextPageTitle = anchor.pageId === pageId
+      ? pageTitle
+      : (await getPage({ id: anchor.pageId }).catch(() => null))?.title ?? "Current block page";
+
+    const childrenByParent = new Map<string, Block[]>();
+    for (const block of blocks) {
+      if (!block.parent_id) continue;
+      const siblings = childrenByParent.get(block.parent_id) ?? [];
+      siblings.push(block);
+      childrenByParent.set(block.parent_id, siblings);
+    }
+    for (const siblings of childrenByParent.values()) {
+      siblings.sort((a, b) => a.order_index - b.order_index);
+    }
+
+    const lines: string[] = [];
+    const visit = (block: Block, depth: number) => {
+      const text = (block.content ?? "").trim();
+      if (text) lines.push(`${"  ".repeat(depth)}- ${text}`);
+      for (const child of childrenByParent.get(block.id) ?? []) {
+        visit(child, depth + 1);
+      }
+    };
+    visit(root, 0);
+
+    if (lines.length === 0) {
+      throw new Error("The current block is empty.");
+    }
+    const joined = lines.join("\n");
+    const MAX = 12000;
+    const text = joined.length > MAX
+      ? joined.slice(0, MAX) + "\n[…block context truncated for prompt length…]"
+      : joined;
+    return {
+      pageId: anchor.pageId,
+      pageTitle: contextPageTitle,
+      blockId: anchor.blockId,
+      rootContent: root.content ?? "",
+      text,
+    };
   }
 
   function formatScore(score: number): string {
@@ -789,6 +1324,14 @@
         {#if activeTab === "references"}
           <div class="tab-content">
             <div class="tab-actions">
+              <button
+                class="action-btn"
+                onclick={findLinksForCurrentPage}
+                disabled={!pageId}
+                title={pageId ? `Find reviewable link suggestions for ${pageTitle || "this page"}` : "Open a page to find links"}
+              >
+                Find links
+              </button>
               <button
                 class="action-btn"
                 onclick={generateReferences}
@@ -1047,52 +1590,165 @@
 
         <!-- Ask Tab -->
         {:else if activeTab === "ask"}
-          <div class="tab-content">
-            <div class="ask-scope">
-              <span class="ask-scope-label">Scope:</span>
-              <button
-                type="button"
-                class="scope-btn"
-                class:active={askScope === "page"}
-                onclick={() => (askScope = "page")}
-                disabled={!pageId}
-                title={pageId ? "Ask about the current page only" : "Open a page first to enable page-scoped Ask"}
-              >
-                This page
-              </button>
-              <button
-                type="button"
-                class="scope-btn"
-                class:active={askScope === "graph"}
-                onclick={() => (askScope = "graph")}
-                title="Ask across all pages using semantic search"
-              >
-                All notes
-              </button>
+          <div class="tab-content ask-tab">
+            <div class="ask-scroll" bind:this={askScrollEl}>
+              {#if askTurns.length > 0}
+                <div class="ask-thread-actions">
+                  <button
+                    type="button"
+                    class="scope-btn"
+                    onclick={summarizeAskThread}
+                    disabled={isLoading || isSummarizingAskThread}
+                  >
+                    {isSummarizingAskThread ? "Summarizing..." : "Summarize answers"}
+                  </button>
+                  {#if askScope === "block"}
+                    <button
+                      type="button"
+                      class="scope-btn"
+                      onclick={draftImprovedCurrentBlock}
+                      disabled={isLoading || isImprovingBlock}
+                      title="Draft a replacement by merging the AI answer with the current block"
+                    >
+                      {isImprovingBlock ? "Merging..." : "Merge answer with block"}
+                    </button>
+                  {/if}
+                  <button type="button" class="scope-btn" onclick={clearAskThread} disabled={isLoading}>
+                    Clear thread
+                  </button>
+                </div>
+              {/if}
+
+              {#if error}
+                <div class="error-msg">{error}</div>
+              {/if}
+
+              {#if isLoading && askWebResearchProgress}
+                <div class="progress-status">
+                  <span class="progress-spinner"></span>
+                  <span class="progress-text">{askWebResearchProgress}</span>
+                  <button
+                    class="cancel-btn"
+                    onclick={() => cancelOperation("web-research")}
+                    disabled={webResearchCancelling}
+                    title="Stop this web fact-check. The local model will be restarted, so the next run may take a few extra seconds to start."
+                  >
+                    {webResearchCancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                </div>
+              {/if}
+
+              {#if askThreadSummary}
+                <div class="summary-card">
+                  <div class="summary-card-label">Answer summary</div>
+                  <div class="summary-text">{askThreadSummary}</div>
+                </div>
+              {/if}
+
+              {#if improvedBlockDraft}
+                <div class="summary-card">
+                  <div class="summary-card-label">Merged block draft</div>
+                  <pre class="block-draft">{improvedBlockDraft}</pre>
+                  <button
+                    type="button"
+                    class="insert-summary-btn"
+                    onclick={replaceCurrentBlockWithDraft}
+                    disabled={isApplyingBlockDraft}
+                  >
+                    {isApplyingBlockDraft ? "Replacing..." : "Replace current block"}
+                  </button>
+                  {#if blockDraftStatus}
+                    <div class="scope-hint">{blockDraftStatus}</div>
+                  {/if}
+                </div>
+              {/if}
+
+              {#if askMessages.length > 0}
+                <div class="ask-thread">
+                  {#each askMessages as message, index}
+                    <ChatMessageBubble
+                      {message}
+                      {index}
+                      streaming={askPendingAssistantIndex === index}
+                      animateCursor={askPendingAssistantIndex === index}
+                      thinkingLabel={askPendingAssistantIndex === index ? askThinkingLabel : ""}
+                      thinkingTone={askThinkingTone}
+                      onOpenWebSource={openChatWebSource}
+                    />
+                  {/each}
+                </div>
+              {:else if !error && !isLoading}
+                <div class="panel-notice ask-empty">
+                  Ask a question, then keep asking follow-ups. The input stays pinned here.
+                </div>
+              {/if}
             </div>
-            <form class="search-form" onsubmit={(e) => { e.preventDefault(); doAsk(); }}>
-              <input
-                type="text"
-                bind:value={askQuery}
-                placeholder={askScope === "page"
-                  ? "Ask a question about this page..."
-                  : "Ask a question about your knowledge..."}
-                class="search-input"
-              />
-              <button type="submit" class="action-btn" disabled={isLoading}>
-                {isLoading ? "Thinking..." : "Ask"}
-              </button>
-            </form>
 
-            {#if error}
-              <div class="error-msg">{error}</div>
-            {/if}
-
-            {#if askAnswer}
-              <div class="ask-answer">
-                {askAnswer}
+            <div class="ask-composer">
+              <div class="ask-scope">
+                <span class="ask-scope-label">Scope:</span>
+                <button
+                  type="button"
+                  class="scope-btn"
+                  class:active={askScope === "block"}
+                  onclick={() => (askScope = "block")}
+                  disabled={!pageId}
+                  title={lastFocusedBlockId ? "Ask about the block you last clicked or edited" : "Click into a block first to enable current-block Ask"}
+                >
+                  Current block
+                </button>
+                <button
+                  type="button"
+                  class="scope-btn"
+                  class:active={askScope === "page"}
+                  onclick={() => (askScope = "page")}
+                  disabled={!pageId}
+                  title={pageId ? "Ask about the current page only" : "Open a page first to enable page-scoped Ask"}
+                >
+                  This page
+                </button>
+                <button
+                  type="button"
+                  class="scope-btn"
+                  class:active={askScope === "graph"}
+                  onclick={() => (askScope = "graph")}
+                  title="Ask across all pages using semantic search"
+                >
+                  All notes
+                </button>
               </div>
-            {/if}
+              {#if askScope === "block"}
+                <div class="scope-hint" class:warning={!askBlockAnchor?.blockId}>
+                  {askBlockAnchor?.blockId
+                    ? "Using the block you last clicked or edited, including nested children."
+                    : "Click a block first, or mention the visible block title in your question."}
+                </div>
+              {:else if askScope === "page" && preferFocusedPageForPageScope}
+                <div class="scope-hint">
+                  Using the journal day where your cursor/current block is, not the whole journal feed.
+                </div>
+              {/if}
+              <form class="search-form ask-form" onsubmit={(e) => { e.preventDefault(); doAsk(); }}>
+                <textarea
+                  bind:value={askQuery}
+                  placeholder={askScope === "block"
+                    ? "Ask about or fact-check the current block..."
+                    : askScope === "page"
+                      ? "Ask a question about this page..."
+                      : "Ask a question about your knowledge..."}
+                  class="search-input ask-input"
+                  rows="2"
+                  onkeydown={handleAskKeydown}
+                ></textarea>
+                <button
+                  type="submit"
+                  class="action-btn"
+                  disabled={isLoading || (askScope === "block" && !pageId)}
+                >
+                  {isLoading ? "Thinking..." : "Ask"}
+                </button>
+              </form>
+            </div>
           </div>
         {/if}
       {/if}
@@ -1106,7 +1762,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    max-width: 90vw;
+    max-width: calc(100vw - 24px);
     background: var(--bg-secondary, #1e1e2e);
     border-left: 1px solid var(--border-color, #333);
     display: flex;
@@ -1170,8 +1826,11 @@
 
   .panel-content {
     flex: 1;
-    overflow-y: auto;
+    min-height: 0;
+    overflow: hidden;
     padding: 12px;
+    display: flex;
+    flex-direction: column;
   }
 
   .panel-notice {
@@ -1202,6 +1861,35 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .tab-content:not(.ask-tab) {
+    overflow-y: auto;
+  }
+
+  .ask-tab {
+    gap: 0;
+  }
+
+  .ask-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-bottom: 12px;
+  }
+
+  .ask-composer {
+    flex-shrink: 0;
+    margin: 0 -12px -12px;
+    padding: 10px 12px 12px;
+    background: var(--bg-secondary, #1e1e2e);
+    border-top: 1px solid var(--border-color, #333);
+    box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.16);
   }
 
   .tab-actions {
@@ -1212,8 +1900,8 @@
   }
 
   .action-btn {
-    background: var(--accent-color, #7c3aed);
-    color: white;
+    background: var(--btn-primary-bg, var(--accent-color, #7c3aed));
+    color: var(--btn-primary-fg, var(--bg-primary));
     border: none;
     padding: 8px 16px;
     border-radius: 6px;
@@ -1224,6 +1912,12 @@
 
   .action-btn:hover:not(:disabled) {
     opacity: 0.9;
+  }
+
+  .action-btn.secondary {
+    background: var(--bg-tertiary, #252535);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border-color, #333);
   }
 
   .action-btn:disabled {
@@ -1436,8 +2130,8 @@
     align-self: flex-start;
     margin-top: 4px;
     font-size: 11px;
-    color: var(--text-primary, #fff);
-    background: var(--accent-color, #7c3aed);
+    color: var(--btn-primary-fg, var(--bg-primary));
+    background: var(--btn-primary-bg, var(--accent-color, #7c3aed));
     border: none;
     border-radius: 4px;
     padding: 5px 10px;
@@ -1540,9 +2234,15 @@
     flex-wrap: wrap;
   }
 
+  .ask-form {
+    align-items: flex-end;
+    flex-wrap: nowrap;
+  }
+
   .ask-scope {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     margin-bottom: 8px;
     font-size: 12px;
@@ -1551,6 +2251,17 @@
   .ask-scope-label {
     color: var(--text-muted, #888);
     margin-right: 4px;
+  }
+
+  .scope-hint {
+    color: var(--text-muted, #888);
+    font-size: 11px;
+    line-height: 1.4;
+    margin: -2px 0 8px;
+  }
+
+  .scope-hint.warning {
+    color: var(--warning-color, #f59e0b);
   }
 
   .scope-btn {
@@ -1569,9 +2280,9 @@
   }
 
   .scope-btn.active {
-    background: var(--accent-color, #7c3aed);
-    color: white;
-    border-color: var(--accent-color, #7c3aed);
+    background: var(--btn-primary-bg, var(--accent-color, #7c3aed));
+    color: var(--btn-primary-fg, var(--bg-primary));
+    border-color: var(--btn-primary-bg, var(--accent-color, #7c3aed));
   }
 
   .scope-btn:disabled {
@@ -1592,6 +2303,14 @@
 
   .search-input:focus {
     border-color: var(--accent-color, #7c3aed);
+  }
+
+  .ask-input {
+    min-height: 44px;
+    max-height: 160px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.4;
   }
 
   .search-result {
@@ -1664,14 +2383,28 @@
     justify-content: flex-start;
   }
 
-  .ask-answer {
-    background: var(--bg-tertiary, #252535);
+  .ask-thread-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .ask-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .block-draft {
+    margin: 0;
+    padding: 10px;
+    background: var(--bg-secondary, #1a1a24);
     border: 1px solid var(--border-color, #333);
-    border-radius: 8px;
-    padding: 12px;
-    font-size: 13px;
+    border-radius: 6px;
     color: var(--text-primary, #fff);
-    line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    line-height: 1.5;
     white-space: pre-wrap;
   }
 

@@ -26,12 +26,17 @@ pub fn update_task_state(
     state: State<AppState>,
     block_id: String,
     new_state: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let task_state = TaskState::from_str(&new_state)
         .ok_or_else(|| format!("Invalid task state: {}", new_state))?;
     graph
         .update_task_state(&block_id, &task_state)
+        .map_err(|e| e.to_string())?;
+    graph
+        .db
+        .get_block_by_id(&block_id)
+        .map(|block| block.content)
         .map_err(|e| e.to_string())
 }
 

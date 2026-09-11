@@ -59,6 +59,11 @@ fn bundle_native_libs() {
         return;
     };
     let dest = profile_dir.join("bundled-libs");
+    let resource_dest = profile_dir
+        .parent()
+        .map(|target_dir| target_dir.join("release").join("bundled-libs"))
+        .unwrap_or_else(|| dest.clone());
+    ensure_tauri_resource_glob_dir(&resource_dest);
 
     let Ok(entries) = fs::read_dir(build_dir) else {
         return;
@@ -88,6 +93,9 @@ fn bundle_native_libs() {
             // to `libggml.so.0.13.1`) so the bundler copies a real file.
             if let Ok(real_path) = path.canonicalize() {
                 if fs::copy(&real_path, dest.join(file_name)).is_ok() {
+                    if resource_dest != dest {
+                        let _ = fs::copy(&real_path, resource_dest.join(file_name));
+                    }
                     copied_any = true;
                 }
             }
@@ -115,6 +123,19 @@ fn bundle_native_libs() {
         // for *all* dependency resolution, transitively — exactly what's
         // needed here. Verified against an actual built `.deb` with `ldd`.
         println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib/Grafium");
+    }
+}
+
+fn ensure_tauri_resource_glob_dir(dir: &Path) {
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
+
+    let has_entries = fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !has_entries {
+        let _ = fs::write(dir.join("copilot-dev-placeholder"), "");
     }
 }
 

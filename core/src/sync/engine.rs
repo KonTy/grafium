@@ -46,7 +46,8 @@ impl SyncResult {
         result
     }
 
-    pub fn is_clean(&self) -> bool {        self.pushed.is_empty()
+    pub fn is_clean(&self) -> bool {
+        self.pushed.is_empty()
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
             && self.merged.is_empty()
@@ -120,10 +121,10 @@ impl SyncEngine {
     /// apart from "these files were genuinely deleted on the other machine".
     const REMOTE_MARKER_PATH: &'static str = ".grafium-sync-id";
 
-    /// Graph directories that participate in sync. `assets/` carries the media
-    /// that notes reference, so omitting it leaves broken links on the other
-    /// machine.
-    const SYNCED_DIRS: [&'static str; 3] = ["pages/", "journals/", "assets/"];
+    /// Graph directories that participate in sync. `knowledge/` carries
+    /// portable AI/rule/prompt knowledge, and `assets/` carries the media that
+    /// notes reference, so omitting either leaves the other machine incomplete.
+    const SYNCED_DIRS: [&'static str; 4] = ["pages/", "journals/", "knowledge/", "assets/"];
 
     /// Only files under the graph's note directories participate in sync. This
     /// also keeps the marker file out of the synced set.
@@ -140,6 +141,15 @@ impl SyncEngine {
             return false;
         }
         if Path::new(rel_path).is_absolute() {
+            return false;
+        }
+        if rel_path.starts_with("pages/")
+            && !rel_path.ends_with(".md")
+            && !rel_path.contains("/assets/")
+        {
+            return false;
+        }
+        if rel_path.starts_with("journals/") && !rel_path.ends_with(".md") {
             return false;
         }
         rel_path
@@ -222,7 +232,8 @@ impl SyncEngine {
     }
 
     /// Run a full bidirectional sync against the given backend.
-    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {        if !backend.is_available() {
+    pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {
+        if !backend.is_available() {
             return Err(crate::error::CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 format!("Sync target '{}' is not available", backend.name()),
@@ -621,9 +632,19 @@ impl SyncEngine {
         let remote_hash = compute_hash(remote_content);
 
         let (winner, winner_hash, loser, loser_hash) = if local_hash <= remote_hash {
-            (local_content, local_hash.clone(), remote_content, remote_hash.clone())
+            (
+                local_content,
+                local_hash.clone(),
+                remote_content,
+                remote_hash.clone(),
+            )
         } else {
-            (remote_content, remote_hash.clone(), local_content, local_hash.clone())
+            (
+                remote_content,
+                remote_hash.clone(),
+                local_content,
+                local_hash.clone(),
+            )
         };
 
         let loser_path = make_content_conflict_path(rel_path, &loser_hash);
@@ -782,12 +803,13 @@ impl SyncEngine {
         }
     }
 
-    /// Collect all local .md files under pages/ and journals/ with metadata.
+    /// Collect all local graph files with metadata.
     fn collect_local_files(&self) -> Result<HashMap<String, FileMetadata>> {
         let mut files = HashMap::new();
         let root = self.local_root.clone();
         self.collect_dir_metadata(&root.join("pages"), &root, true, &mut files)?;
         self.collect_dir_metadata(&root.join("journals"), &root, true, &mut files)?;
+        self.collect_dir_metadata(&root.join("knowledge"), &root, false, &mut files)?;
         self.collect_dir_metadata(&root.join("assets"), &root, false, &mut files)?;
         Ok(files)
     }
@@ -807,7 +829,7 @@ impl SyncEngine {
             let path = entry.path();
             if path.is_dir() {
                 self.collect_dir_metadata(&path, base, markdown_only, out)?;
-            } else if Self::is_collectable(&path, markdown_only) {
+            } else if Self::is_collectable(&path, base, markdown_only) {
                 let meta = Self::metadata_for_path(&path, base)?;
                 out.insert(meta.rel_path.clone(), meta);
             }
@@ -815,11 +837,16 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Note folders sync only `.md`; `assets/` syncs arbitrary media. Conflict
-    /// copies and atomic-write scratch files are never collected.
-    fn is_collectable(path: &Path, markdown_only: bool) -> bool {
+    /// Note folders sync only `.md`; `knowledge/` and `assets/` sync arbitrary
+    /// supporting files. Conflict copies and atomic-write scratch files are
+    /// never collected.
+    fn is_collectable(path: &Path, base: &Path, markdown_only: bool) -> bool {
         if path.to_string_lossy().contains(".conflict_") {
             return false;
+        }
+        let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy();
+        if rel.starts_with("pages/") && rel.contains("/assets/") {
+            return true;
         }
         if markdown_only {
             return path.extension().and_then(|e| e.to_str()) == Some("md");
@@ -1052,6 +1079,38 @@ mod tests {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, content)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sync_pushes_portable_knowledge_files() -> Result<()> {
+        let temp = tempdir()?;
+        let rel_path = "knowledge/prompts/web-research.md";
+        write_local_markdown(temp.path(), rel_path, "- prompt:: cite everything\n")?;
+
+        let backend = MockBackend::default();
+        let engine = SyncEngine::new(temp.path().to_path_buf());
+        let result = engine.sync(&backend)?;
+
+        assert_eq!(result.pushed, vec![rel_path.to_string()]);
+        assert_eq!(
+            backend.file_bytes(rel_path),
+            b"- prompt:: cite everything\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_accepts_remote_knowledge_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let rel_path = "knowledge/rules/links.yaml";
+        let backend = MockBackend::with_files(vec![(rel_path, b"rules: []\n", 42)]);
+        let engine = SyncEngine::new(temp.path().to_path_buf());
+
+        let result = engine.sync(&backend)?;
+
+        assert_eq!(result.pulled, vec![rel_path.to_string()]);
+        assert_eq!(fs::read(temp.path().join(rel_path))?, b"rules: []\n");
         Ok(())
     }
 

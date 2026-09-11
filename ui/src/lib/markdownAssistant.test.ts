@@ -64,6 +64,16 @@ describe("renderAssistantMarkdown", () => {
     expect(() => renderAssistantMarkdown("Look at [[Half writt")).not.toThrow();
   });
 
+  it("does not render prose between currency amounts as KaTeX math", () => {
+    const html = renderAssistantMarkdown(
+      "Budget bikes are under $500 and mid-range bikes run from $500 to $1500."
+    );
+
+    expect(html).toContain("$500");
+    expect(html).toContain("$1500");
+    expect(html).not.toContain("katex");
+  });
+
   it("leaves HTML-looking text inside code spans verbatim (escaped, not executed)", () => {
     const html = renderAssistantMarkdown("Use `<script>` carefully");
     // Inside inline code marked escapes it; either way it must not be a live tag.

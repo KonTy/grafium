@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 // Raw import (typed by vite/client's `*?raw`) so we can assert on the component
 // source without compiling it.
 import chatViewSource from "../components/ChatView.svelte?raw";
+import chatMessageBubbleSource from "../components/ChatMessageBubble.svelte?raw";
 
 // WHY: status/error/warning/thinking colours must come from the theme palette
 // (var(--accent-*)), which themeContrast.test.ts guarantees is WCAG-AA on every
@@ -16,6 +17,7 @@ describe("ChatView status colours stay themed", () => {
   for (const hex of BANNED) {
     it(`does not hardcode ${hex}`, () => {
       expect(chatViewSource.toLowerCase().includes(hex)).toBe(false);
+      expect(chatMessageBubbleSource.toLowerCase().includes(hex)).toBe(false);
     });
   }
 });

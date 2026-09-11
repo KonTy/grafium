@@ -2,6 +2,7 @@
   import PageContent from "./PageContent.svelte";
   import { listJournalPages, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
 
   interface Props {
     restorePageTitle?: string;
@@ -44,6 +45,19 @@
   }
 
   let contextMenu: ContextMenu | null = $state(null);
+
+  function pagesChanged(a: Page[], b: Page[]): boolean {
+    if (a.length !== b.length) return true;
+    return a.some((page, index) => {
+      const other = b[index];
+      return !other
+        || page.id !== other.id
+        || page.title !== other.title
+        || page.file_path !== other.file_path
+        || page.updated_at !== other.updated_at
+        || page.is_journal !== other.is_journal;
+    });
+  }
 
   function getLocalDate(): string {
     const now = new Date();
@@ -146,7 +160,7 @@
 
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { x: e.clientX, y: e.clientY, page };
+    contextMenu = { ...contextMenuPositionFromEvent(e, { width: 190, height: 100 }), page };
   }
 
   async function handleDeletePage() {
@@ -227,7 +241,7 @@
     try {
       // Refresh currently visible slice; preserves scroll and picks up external edits/newer pages.
       const fresh = await listJournalPages(journalPages.length, 0);
-      if (fresh.length > 0) {
+      if (fresh.length > 0 && pagesChanged(journalPages, fresh)) {
         journalPages = fresh;
       }
 
@@ -270,7 +284,7 @@
     {#if contextMenu}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div
-        class="context-menu"
+        class="context-menu app-context-menu"
         style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
         onclick={(e) => e.stopPropagation()}
       >
@@ -292,13 +306,33 @@
   }
 
   .journal-entry {
-    margin-bottom: 0;
+    margin: 0 0 4px;
+  }
+
+  .journal-entry :global(.page-content.compact .page-heading) {
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+  }
+
+  .journal-entry :global(.page-content.compact .page-title) {
+    color: var(--accent);
+    font-size: clamp(26px, 3.8vw, 42px);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: 0.04em;
   }
 
   .journal-divider {
     border: none;
-    border-top: 1px solid var(--border);
-    margin: 12px 0;
+    height: 2px;
+    margin: 22px 0 18px;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 72%, transparent),
+      color-mix(in srgb, var(--border) 82%, transparent) 42%,
+      transparent 100%
+    );
+    box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .loading, .loading-more {
@@ -329,12 +363,8 @@
 
   .context-menu {
     position: fixed;
-    z-index: 1000;
+    z-index: 2147483000;
     min-width: 150px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     padding: 6px;
   }
 

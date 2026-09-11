@@ -647,8 +647,7 @@ pub(crate) fn context_creation_error_message(
     let cutoff = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(30))
         .unwrap_or_else(std::time::Instant::now);
-    let backend_log =
-        crate::log_tap::snapshot_since_targets(cutoff, &["llama", "ggml"]);
+    let backend_log = crate::log_tap::snapshot_since_targets(cutoff, &["llama", "ggml"]);
     let details = if backend_log.is_empty() {
         String::new()
     } else {

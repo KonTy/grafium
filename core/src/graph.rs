@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub struct Graph {
@@ -26,6 +26,7 @@ pub struct Graph {
     pub root_dir: PathBuf,
     pub pages_dir: PathBuf,
     pub journals_dir: PathBuf,
+    pub knowledge_dir: PathBuf,
     /// Absolute paths the app itself wrote to disk, with the instant of the
     /// write. The filesystem watcher consults this to ignore self-inflicted
     /// events, preventing a write → watch → re-index feedback loop.
@@ -40,19 +41,49 @@ pub struct Graph {
     canonical_content_hashes: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
+#[derive(Debug, Clone)]
+pub enum BlockCreateParent {
+    Root,
+    Existing(String),
+    NewBlock(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockCreateSpec {
+    pub id: Option<String>,
+    pub parent: BlockCreateParent,
+    pub order_index: i32,
+    pub content: String,
+    pub block_type: BlockType,
+    pub properties: serde_json::Value,
+}
+
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
 
-fn wrap_link_candidate_anchor(content: &str, start: i64, end: i64) -> Option<String> {
+fn wrap_link_candidate_anchor(
+    content: &str,
+    start: i64,
+    end: i64,
+    link_label: &str,
+) -> Option<String> {
     let start = usize::try_from(start).ok()?;
     let end = usize::try_from(end).ok()?;
-    let anchor = content.get(start..end)?;
+    content.get(start..end)?;
     let mut wrapped = String::with_capacity(content.len() + 4);
     wrapped.push_str(&content[..start]);
     wrapped.push_str("[[");
-    wrapped.push_str(anchor);
+    wrapped.push_str(link_label);
     wrapped.push_str("]]");
     wrapped.push_str(&content[end..]);
     Some(wrapped)
+}
+
+fn link_candidate_target_label<'a>(candidate: &'a LinkCandidate, anchor: &'a str) -> &'a str {
+    if candidate.source == crate::db::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT {
+        candidate.to_page_title.as_str()
+    } else {
+        anchor
+    }
 }
 
 /// Validation report for a graph directory structure.
@@ -65,6 +96,9 @@ pub struct GraphValidationReport {
     pub has_pages_dir: bool,
     /// Whether journals/ directory exists
     pub has_journals_dir: bool,
+    /// Whether knowledge/ directory exists. Older graphs may be missing this;
+    /// opening the graph creates it automatically.
+    pub has_knowledge_dir: bool,
     /// Whether app metadata directory exists
     pub has_metadata_dir: bool,
     /// Whether metadata/index.db exists and is valid
@@ -220,6 +254,16 @@ pub fn resolve_asset_path(root: &Path, rel: &str) -> Option<PathBuf> {
         let target = root.join(candidate).canonicalize().ok()?;
         (target.starts_with(&canon_root) && target.is_file()).then_some(target)
     })
+}
+
+fn is_safe_single_path_component(component: &str) -> bool {
+    !component.is_empty()
+        && component != "."
+        && component != ".."
+        && !component.contains(['/', '\\', '\0'])
+        && Path::new(component)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
 /// What a completion backfill did, or would do.
@@ -391,6 +435,7 @@ impl Graph {
     /// A valid graph must have:
     /// - `pages/` directory
     /// - `journals/` directory
+    /// - optional `knowledge/` directory for portable AI/rule/prompt knowledge
     /// - app metadata directory (with optional index.db)
     ///
     /// Note: This validates **structure only**. It does not require `index.db` to exist
@@ -406,11 +451,13 @@ impl Graph {
     ) -> GraphValidationReport {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
+        let knowledge_dir = root_dir.join("knowledge");
         let metadata_dir = root_dir.join(metadata_dir_name);
         let db_path = metadata_dir.join("index.db");
 
         let has_pages_dir = pages_dir.is_dir();
         let has_journals_dir = journals_dir.is_dir();
+        let has_knowledge_dir = knowledge_dir.is_dir();
         let has_metadata_dir = metadata_dir.is_dir();
 
         // Cheap sanity check only; avoid opening SQLite during validation because
@@ -427,7 +474,9 @@ impl Graph {
         let has_no_nested_graph_roots =
             Self::find_nested_graph_root_with_metadata_dir(root_dir, metadata_dir_name).is_none();
 
-        // A valid graph has all three directories and no nested-graph ambiguity.
+        // A valid graph has the original required directories and no
+        // nested-graph ambiguity. `knowledge/` is intentionally optional here
+        // so older graphs open normally; opening them creates the folder.
         // A corrupted DB is recoverable and should not block opening.
         let is_valid = has_pages_dir
             && has_journals_dir
@@ -491,6 +540,7 @@ impl Graph {
             is_valid,
             has_pages_dir,
             has_journals_dir,
+            has_knowledge_dir,
             has_metadata_dir,
             has_valid_db,
             not_nested_in_another_graph,
@@ -500,7 +550,7 @@ impl Graph {
     }
 
     /// Open or create a graph rooted at `root_dir`.
-    /// Creates pages/ and journals/ subdirectories if needed.
+    /// Creates pages/, journals/, and knowledge/ subdirectories if needed.
     /// SQLite index is stored at root_dir/<metadata>/index.db
     pub fn open(root_dir: &Path) -> Result<Self> {
         let db_path = root_dir
@@ -527,10 +577,12 @@ impl Graph {
     ) -> Result<Self> {
         let pages_dir = root_dir.join("pages");
         let journals_dir = root_dir.join("journals");
+        let knowledge_dir = root_dir.join("knowledge");
         let metadata_dir = root_dir.join(metadata_dir_name);
 
         fs::create_dir_all(&pages_dir)?;
         fs::create_dir_all(&journals_dir)?;
+        fs::create_dir_all(&knowledge_dir)?;
         fs::create_dir_all(&metadata_dir)?;
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
@@ -538,15 +590,18 @@ impl Graph {
 
         let db = Database::new(db_path)?;
 
-        Ok(Self {
+        let graph = Self {
             db,
             root_dir: root_dir.to_path_buf(),
             pages_dir,
             journals_dir,
+            knowledge_dir,
             self_writes: Arc::new(Mutex::new(HashMap::new())),
             indexed_content_hashes: Arc::new(Mutex::new(HashMap::new())),
             canonical_content_hashes: Arc::new(Mutex::new(HashMap::new())),
-        })
+        };
+        let _ = graph.seed_page_edit_history_from_file_mtimes();
+        Ok(graph)
     }
 
     /// Shared handle to the set of paths the app has recently written itself.
@@ -643,8 +698,109 @@ impl Graph {
         self.index_directory(&self.pages_dir)?;
         // Index journals/ directory
         self.index_directory(&self.journals_dir)?;
+        // Index knowledge/ directory. This is portable graph knowledge such as
+        // learned link rules, aliases, and concept relationships.
+        self.index_directory(&self.knowledge_dir)?;
+        self.seed_page_edit_history_from_file_mtimes()?;
 
         Ok(())
+    }
+
+    /// Non-destructively reconcile on-disk Markdown with the existing index.
+    ///
+    /// This is used at startup when files changed while Grafium was closed. A
+    /// full `reindex_all()` clears user-owned metadata tables such as favorites
+    /// and flashcard review state; startup only needs to add/update/delete
+    /// file-backed note rows, so handle each file through the incremental index
+    /// path and de-index rows whose backing file disappeared.
+    pub fn reconcile_files_from_disk(&self) -> Result<()> {
+        // Keep the legacy filename migration behavior, but do not clear tables.
+        let _ = self.migrate_percent_encoded_to_folders();
+
+        let files = self.markdown_files()?;
+        let file_set: HashSet<String> = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&self.root_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        for path in files {
+            self.index_file_impl(&path)?;
+        }
+
+        for (_page_id, rel_path) in self.db.list_file_backed_page_paths()? {
+            if !file_set.contains(&rel_path) {
+                self.deindex_file(&self.root_dir.join(&rel_path))?;
+            }
+        }
+
+        self.seed_page_edit_history_from_file_mtimes()?;
+        Ok(())
+    }
+
+    fn seed_page_edit_history_from_file_mtimes(&self) -> Result<usize> {
+        let mut edits = Vec::new();
+        for (page_id, rel_path) in self.db.list_page_edit_backfill_targets()? {
+            let path = self.root_dir.join(rel_path);
+            let Ok(metadata) = fs::metadata(path) else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH) else {
+                continue;
+            };
+            let timestamp = since_epoch.as_millis().min(i64::MAX as u128) as i64;
+            edits.push((page_id, timestamp));
+        }
+        self.db.seed_page_edit_file_mtimes(&edits)
+    }
+
+    /// True when the on-disk Markdown set cannot match the SQLite page index.
+    ///
+    /// Startup intentionally avoids a blocking full reindex for large graphs, but
+    /// it still needs to catch bulk file changes made while Grafium was closed
+    /// (imports, sync tools, manual folder moves). Counting files is cheap and
+    /// catches those missing/stale-index cases without parsing every page on the
+    /// UI thread.
+    pub fn needs_startup_reindex(&self) -> Result<bool> {
+        Ok(self.db.count_file_backed_pages()? != self.markdown_file_count()? as i64)
+    }
+
+    fn markdown_file_count(&self) -> Result<usize> {
+        Ok(self.markdown_files()?.len())
+    }
+
+    fn markdown_files(&self) -> Result<Vec<PathBuf>> {
+        fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(err) => return Err(err.into()),
+            };
+
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    collect_dir(&path, out)?;
+                } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    out.push(path);
+                }
+            }
+            Ok(())
+        }
+
+        let mut files = Vec::new();
+        collect_dir(&self.pages_dir, &mut files)?;
+        collect_dir(&self.journals_dir, &mut files)?;
+        collect_dir(&self.knowledge_dir, &mut files)?;
+        Ok(files)
     }
 
     fn index_directory(&self, dir: &Path) -> Result<()> {
@@ -691,6 +847,7 @@ impl Graph {
     pub fn index_file(&self, path: &Path) -> Result<()> {
         if let Some(page_id) = self.index_file_impl(path)? {
             self.mark_page_dirty(&page_id);
+            self.record_page_edit(&page_id, "file");
         }
         Ok(())
     }
@@ -711,25 +868,33 @@ impl Graph {
             .and_then(|n| n.to_str())
             .unwrap_or("untitled.md");
 
-        let is_journal = path.starts_with(&self.journals_dir);
         let parsed = parser::parse_page(&content, filename);
+        let in_journals_dir = path.starts_with(&self.journals_dir);
+        let in_knowledge_dir = path.starts_with(&self.knowledge_dir);
+        let is_journal = in_journals_dir && parsed.is_journal;
+        let canonical_journal_title = if is_journal {
+            parser::canonical_journal_title(filename)
+        } else {
+            None
+        };
 
         // Derive title from relative path within pages/ or journals/ dir
         // e.g. pages/Books/MyCoolBook/Chapter1.md → "Books/MyCoolBook/Chapter1"
-        let title = parsed.title.unwrap_or_else(|| {
-            let base_dir = if is_journal {
-                &self.journals_dir
-            } else {
-                &self.pages_dir
-            };
-            if let Ok(rel) = path.strip_prefix(base_dir) {
-                let rel_str = rel.to_string_lossy();
-                let without_ext = rel_str.trim_end_matches(".md");
-                decode_legacy_title_path(without_ext)
-            } else {
-                decode_legacy_title_path(filename.trim_end_matches(".md"))
-            }
-        });
+        let title = if in_knowledge_dir {
+            format!(
+                "Knowledge/{}",
+                Self::title_from_file_path(&self.knowledge_dir, path, filename)
+            )
+        } else {
+            canonical_journal_title.or(parsed.title).unwrap_or_else(|| {
+                let base_dir = if in_journals_dir {
+                    &self.journals_dir
+                } else {
+                    &self.pages_dir
+                };
+                Self::title_from_file_path(base_dir, path, filename)
+            })
+        };
 
         // Compute relative path from root_dir
         let rel_path = path
@@ -737,6 +902,20 @@ impl Graph {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
+        if let Some(existing) = self.db.find_page_by_title(&title)? {
+            if existing
+                .file_path
+                .as_deref()
+                .is_some_and(|existing_path| existing_path != rel_path)
+            {
+                return Err(CoreError::Other(format!(
+                    "Cannot index '{}' as '{}' because '{}' already uses that page title",
+                    rel_path,
+                    title,
+                    existing.file_path.as_deref().unwrap_or("a virtual page")
+                )));
+            }
+        }
 
         let mut conn = self.db.conn()?;
         let tx = conn.transaction()?;
@@ -921,13 +1100,13 @@ impl Graph {
             // makes a completion time written on another machine — or by hand
             // in another editor — land in the table rather than being ignored.
             let fields = crate::parser::task::parse_fields(&block.content);
-            self.db.sync_task_from_content_in_connection(
-                conn,
-                block_id,
-                "",
-                &fields,
-                fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
-            )?;
+            let closed_at = if matches!(state, TaskState::Done | TaskState::Canceled) {
+                fields.closed_at.map(|at| at.and_utc().timestamp_millis())
+            } else {
+                None
+            };
+            self.db
+                .sync_task_from_content_in_connection(conn, block_id, "", &fields, closed_at)?;
         } else {
             self.db.delete_task_in_connection(conn, block_id)?;
         }
@@ -1107,6 +1286,16 @@ impl Graph {
         }
     }
 
+    fn title_from_file_path(base_dir: &Path, path: &Path, filename: &str) -> String {
+        if let Ok(rel) = path.strip_prefix(base_dir) {
+            let rel_str = rel.to_string_lossy();
+            let without_ext = rel_str.trim_end_matches(".md");
+            decode_legacy_title_path(without_ext)
+        } else {
+            decode_legacy_title_path(filename.trim_end_matches(".md"))
+        }
+    }
+
     /// Write completion times that exist only in the database into the files.
     ///
     /// Completions recorded before they were written to disk live only in
@@ -1223,12 +1412,26 @@ impl Graph {
                 .map(|t| t.date.to_string())
                 .as_deref(),
         )?;
-        self.db.sync_task_from_content(
-            block_id,
-            &marker,
-            &fields,
-            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
-        )
+        let closed_at = if matches!(state, TaskState::Done | TaskState::Canceled) {
+            fields.closed_at.map(|at| at.and_utc().timestamp_millis())
+        } else {
+            None
+        };
+        self.db
+            .sync_task_from_content(block_id, &marker, &fields, closed_at)
+    }
+
+    fn cleanup_removed_local_images(
+        &self,
+        _page: &Page,
+        _before: &str,
+        _after: &str,
+    ) -> Result<()> {
+        // Ordinary edits, cut/delete, and undo all mutate Markdown first. Deleting
+        // media here makes those operations irreversible because undo snapshots
+        // only restore text. Leave eventual garbage collection to an explicit,
+        // user-visible cleanup command.
+        Ok(())
     }
 
     pub fn discover_link_candidates(
@@ -1290,6 +1493,7 @@ impl Graph {
             &block.content,
             candidate.anchor_start,
             candidate.anchor_end,
+            link_candidate_target_label(&candidate, current_anchor),
         )
         .ok_or_else(|| {
             CoreError::Other("Link suggestion has an invalid anchor range".to_string())
@@ -1318,6 +1522,7 @@ impl Graph {
             &previous_content,
             candidate.anchor_start,
             candidate.anchor_end,
+            link_candidate_target_label(&candidate, &candidate.anchor_text),
         )
         .ok_or_else(|| {
             CoreError::Other("Link suggestion has an invalid anchor range".to_string())
@@ -1390,6 +1595,81 @@ impl Graph {
         })
     }
 
+    /// Create multiple blocks, updating indexes for each block and serializing
+    /// the page once at the end. This keeps large multi-block paste from doing
+    /// a full markdown rewrite per pasted line.
+    pub fn create_blocks(&self, page_id: &str, specs: Vec<BlockCreateSpec>) -> Result<Vec<Block>> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let page = self.db.get_page_by_id(page_id)?;
+        let ids: Vec<String> = specs
+            .iter()
+            .map(|spec| {
+                spec.id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string())
+            })
+            .collect();
+        let now = Utc::now().timestamp_millis();
+        let mut blocks = Vec::with_capacity(specs.len());
+
+        for (index, spec) in specs.into_iter().enumerate() {
+            let parent_id = match spec.parent {
+                BlockCreateParent::Root => None,
+                BlockCreateParent::Existing(id) => Some(id),
+                BlockCreateParent::NewBlock(parent_index) => {
+                    if parent_index >= index {
+                        return Err(CoreError::Other(format!(
+                            "batch block parent index {parent_index} must reference an earlier block than {index}"
+                        )));
+                    }
+                    let Some(parent_id) = ids.get(parent_index) else {
+                        return Err(CoreError::Other(format!(
+                            "batch block parent index {parent_index} is out of range"
+                        )));
+                    };
+                    Some(parent_id.clone())
+                }
+            };
+            let block_id = ids[index].clone();
+
+            self.db.insert_block_raw(
+                &block_id,
+                page_id,
+                parent_id.as_deref(),
+                spec.order_index,
+                &spec.content,
+                spec.block_type.clone(),
+                &spec.properties,
+            )?;
+
+            let links = parser::extract_links(&spec.content);
+            for link in links {
+                let (target, link_type) = self.resolve_link_target(link)?;
+                self.db.insert_link(&block_id, &target, link_type)?;
+            }
+
+            self.sync_task_row(&block_id, &spec.content)?;
+
+            blocks.push(Block {
+                id: block_id,
+                page_id: page_id.to_string(),
+                parent_id,
+                order_index: spec.order_index,
+                content: spec.content,
+                block_type: spec.block_type,
+                properties: spec.properties,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+
+        self.write_page_to_disk(&page)?;
+        Ok(blocks)
+    }
+
     /// Update a block's content: updates DB, then writes .md file.
     pub fn update_block(
         &self,
@@ -1421,19 +1701,22 @@ impl Graph {
         // …and the task row, for the same reason: editing a line into or out
         // of being a task must be visible on the Tasks page straight away.
         self.sync_task_row(block_id, content)?;
+        if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, content) {
+            eprintln!("Warning: could not clean up removed local images: {e}");
+        }
 
         Ok(())
     }
 
     /// Cycle a task's state (TODO→DOING→DONE→TODO), updating the block content,
     /// the tasks table, the .md file on disk, and logging the event.
-    /// Returns the new state string.
+    /// Returns the updated block content.
     pub fn cycle_task_state(&self, block_id: &str) -> Result<String> {
         let before = self.db.get_block_by_id(block_id)?;
         let from_state = crate::parser::task::current_marker(&before.content);
         let new_state = self.db.cycle_task_state(block_id)?;
         self.write_state_change(block_id, &from_state, &new_state)?;
-        Ok(new_state)
+        Ok(self.db.get_block_by_id(block_id)?.content)
     }
 
     /// Rewrite a task block for a state change and persist it to disk.
@@ -1470,12 +1753,11 @@ impl Graph {
         // task lands back on TODO here, which is what the table must reflect.
         let fields = task::parse_fields(&new_content);
         let marker = task::current_marker(&new_content);
-        self.db.sync_task_from_content(
-            block_id,
-            &marker,
-            &fields,
-            fields.closed_at.map(|at| at.and_utc().timestamp_millis()),
-        )?;
+        let closed_at = TaskState::from_str(&marker)
+            .filter(|state| matches!(state, TaskState::Done | TaskState::Canceled))
+            .and_then(|_| fields.closed_at.map(|at| at.and_utc().timestamp_millis()));
+        self.db
+            .sync_task_from_content(block_id, &marker, &fields, closed_at)?;
         Ok(())
     }
 
@@ -1530,12 +1812,11 @@ impl Graph {
         let scheduled = sched_re.captures(&new_content).map(|c| c[1].to_string());
         let deadline = dead_re.captures(&new_content).map(|c| c[1].to_string());
 
-        // Get or derive task state from content
-        let task_re = regex::Regex::new(r"^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s").unwrap();
-        let state = task_re
-            .captures(&new_content)
-            .and_then(|c| crate::models::TaskState::from_str(&c[1]))
-            .unwrap_or(crate::models::TaskState::Todo);
+        // Get or derive task state from content, including imported `[ ]`
+        // checklist blocks whose structural bullet has already been stripped.
+        let marker = crate::parser::task::current_marker(&new_content);
+        let state =
+            crate::models::TaskState::from_str(&marker).unwrap_or(crate::models::TaskState::Todo);
 
         self.db
             .upsert_task(block_id, &state, scheduled.as_deref(), deadline.as_deref())?;
@@ -1642,12 +1923,112 @@ impl Graph {
     pub fn delete_block(&self, block_id: &str) -> Result<()> {
         let block = self.db.get_block_by_id(block_id)?;
         let page = self.db.get_page_by_id(&block.page_id)?;
+        let deleted_blocks =
+            self.collect_blocks_with_descendants(&block.page_id, &[block_id.to_string()])?;
 
-        self.db.delete_block(block_id)?;
+        for block in deleted_blocks.iter().rev() {
+            self.db.delete_block(&block.id)?;
+        }
 
         // Re-serialize to disk
         self.write_page_to_disk(&page)?;
+        for block in &deleted_blocks {
+            if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, "") {
+                eprintln!("Warning: could not clean up removed local images: {e}");
+            }
+        }
 
+        Ok(())
+    }
+
+    /// Delete multiple blocks from one page and serialize once. Used by undoing
+    /// a large multi-block paste, where rewriting the markdown file per deleted
+    /// block makes Ctrl-Z feel like the app froze.
+    pub fn delete_blocks(&self, page_id: &str, block_ids: &[String]) -> Result<Vec<Block>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let page = self.db.get_page_by_id(page_id)?;
+        let deleted_blocks = self.collect_blocks_with_descendants(page_id, block_ids)?;
+
+        for block in deleted_blocks.iter().rev() {
+            self.db.delete_block(&block.id)?;
+        }
+
+        self.write_page_to_disk(&page)?;
+        for block in &deleted_blocks {
+            if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, "") {
+                eprintln!("Warning: could not clean up removed local images: {e}");
+            }
+        }
+
+        Ok(deleted_blocks)
+    }
+
+    fn collect_blocks_with_descendants(
+        &self,
+        page_id: &str,
+        block_ids: &[String],
+    ) -> Result<Vec<Block>> {
+        let mut requested = HashMap::new();
+        for block_id in block_ids {
+            let block = self.db.get_block_by_id(block_id)?;
+            if block.page_id != page_id {
+                return Err(CoreError::Other(format!(
+                    "block {block_id} belongs to page {}, not {page_id}",
+                    block.page_id
+                )));
+            }
+            requested.insert(block_id.clone(), block);
+        }
+
+        let requested_ids: HashSet<String> = requested.keys().cloned().collect();
+        let mut roots = Vec::with_capacity(requested_ids.len());
+        let mut queued = HashSet::new();
+
+        for block in self.db.list_blocks_for_page(page_id)? {
+            if requested_ids.contains(&block.id) && queued.insert(block.id.clone()) {
+                roots.push(block);
+            }
+        }
+        for block_id in block_ids {
+            if queued.insert(block_id.clone()) {
+                if let Some(block) = requested.get(block_id) {
+                    roots.push(block.clone());
+                }
+            }
+        }
+
+        let mut collected = Vec::new();
+        let mut seen = HashSet::new();
+        for root in roots {
+            self.collect_block_subtree(page_id, root, &mut seen, &mut collected)?;
+        }
+        Ok(collected)
+    }
+
+    fn collect_block_subtree(
+        &self,
+        page_id: &str,
+        block: Block,
+        seen: &mut HashSet<String>,
+        collected: &mut Vec<Block>,
+    ) -> Result<()> {
+        if !seen.insert(block.id.clone()) {
+            return Ok(());
+        }
+
+        collected.push(block.clone());
+        for child in self.db.list_child_blocks(&block.id)? {
+            if child.page_id != page_id {
+                return Err(CoreError::Other(format!(
+                    "child block {} belongs to page {}, not {page_id}",
+                    child.id, child.page_id
+                )));
+            }
+            self.collect_block_subtree(page_id, child, seen, collected)?;
+        }
         Ok(())
     }
 
@@ -1730,6 +2111,126 @@ impl Graph {
         Ok(())
     }
 
+    pub fn page_filesystem_path(&self, page_id: &str) -> Result<PathBuf> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let path = self.resolve_page_file_path(&page)?;
+        self.ensure_path_inside_graph(&path)?;
+        Ok(path)
+    }
+
+    pub fn imported_book_folder_for_title(&self, title: &str) -> Result<PathBuf> {
+        let folder = self.imported_book_folder_path_for_title(title)?;
+        if !folder.is_dir() {
+            return Err(CoreError::Other(format!(
+                "'{}' is not an imported book folder",
+                folder.display()
+            )));
+        }
+        Ok(folder)
+    }
+
+    fn imported_book_folder_path_for_title(&self, title: &str) -> Result<PathBuf> {
+        let mut parts = title
+            .trim_matches('/')
+            .split('/')
+            .filter(|part| !part.trim().is_empty());
+        let Some(root) = parts.next() else {
+            return Err(CoreError::Other("Book title cannot be empty".to_string()));
+        };
+        if root != "Books" {
+            return Err(CoreError::Other(
+                "Only pages under Books can be treated as imported books".to_string(),
+            ));
+        }
+        let Some(book_folder) = parts.next() else {
+            return Err(CoreError::Other(
+                "Select a specific book folder".to_string(),
+            ));
+        };
+        if !is_safe_single_path_component(book_folder) {
+            return Err(CoreError::Other(format!(
+                "Invalid book folder name '{book_folder}'"
+            )));
+        }
+        let folder = self.pages_dir.join("Books").join(book_folder);
+        self.ensure_path_inside_pages(&folder)?;
+        Ok(folder)
+    }
+
+    pub fn imported_book_folder_for_page(&self, page_id: &str) -> Result<Option<PathBuf>> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let path = self.resolve_page_file_path(&page)?;
+        self.ensure_path_inside_pages(&path)?;
+        let Some(book_title) = self.book_title_from_page_path(&path)? else {
+            return Ok(None);
+        };
+        self.imported_book_folder_for_title(&book_title).map(Some)
+    }
+
+    pub fn delete_imported_book_folder(&self, title: &str) -> Result<usize> {
+        let folder = self.imported_book_folder_path_for_title(title)?;
+        let rel_prefix = folder
+            .strip_prefix(&self.root_dir)
+            .map_err(|_| CoreError::Other("Book folder is outside the graph".to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root_index_rel_path = folder
+            .strip_prefix(&self.pages_dir)
+            .map_err(|_| CoreError::Other("Book folder is outside pages".to_string()))?
+            .with_extension("md")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root_index_file_path = self.pages_dir.join(&root_index_rel_path);
+        let root_index_rel_graph_path = root_index_file_path
+            .strip_prefix(&self.root_dir)
+            .map_err(|_| CoreError::Other("Book index is outside the graph".to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let title_prefix = folder
+            .strip_prefix(&self.pages_dir)
+            .map_err(|_| CoreError::Other("Book folder is outside pages".to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut pages = self
+            .db
+            .list_pages_by_title_or_file_path_prefix(&title_prefix, &format!("{rel_prefix}/"))?;
+        if let Ok(page) = self.db.get_page_by_title(&title_prefix) {
+            if page.file_path.as_deref().is_some_and(|path| {
+                path == root_index_rel_path || path == root_index_rel_graph_path
+            }) && !pages.iter().any(|existing| existing.id == page.id)
+            {
+                pages.push(page);
+            }
+        }
+
+        if folder.exists() {
+            if !folder.is_dir() {
+                return Err(CoreError::Other(format!(
+                    "'{}' exists but is not a folder",
+                    folder.display()
+                )));
+            }
+            fs::remove_dir_all(&folder)?;
+        }
+        if root_index_file_path.exists() {
+            fs::remove_file(&root_index_file_path)?;
+        } else if pages.is_empty() {
+            return Err(CoreError::Other(format!(
+                "No imported book pages found for {title_prefix}"
+            )));
+        }
+
+        for page in &pages {
+            self.db.delete_blocks_for_page(&page.id)?;
+            self.db.delete_page(&page.id)?;
+            if let Some(file_path) = &page.file_path {
+                self.forget_indexed_content(&self.root_dir.join(file_path));
+            }
+            self.mark_page_dirty(&page.id);
+        }
+        Ok(pages.len())
+    }
+
     /// Read the markdown source backing a page.
     pub fn get_page_source(&self, page_id: &str) -> Result<String> {
         let page = self.db.get_page_by_id(page_id)?;
@@ -1742,7 +2243,7 @@ impl Graph {
         let page = self.db.get_page_by_id(page_id)?;
         let file_path = self.resolve_page_file_path(&page)?;
 
-        fs::write(&file_path, content)?;
+        Self::atomic_write(&file_path, content)?;
         self.note_self_write(&file_path);
         self.forget_indexed_content(&file_path);
         self.index_file(&file_path)
@@ -1927,6 +2428,63 @@ impl Graph {
         Ok(file_path)
     }
 
+    fn ensure_path_inside_graph(&self, path: &Path) -> Result<()> {
+        let root = self.root_dir.canonicalize()?;
+        let target = if path.exists() {
+            path.canonicalize()?
+        } else {
+            path.parent()
+                .ok_or_else(|| CoreError::Other("Path has no parent directory".to_string()))?
+                .canonicalize()?
+        };
+        if !target.starts_with(&root) {
+            return Err(CoreError::Other("Path escapes the graph".to_string()));
+        }
+        Ok(())
+    }
+
+    fn ensure_path_inside_pages(&self, path: &Path) -> Result<()> {
+        let pages = self.pages_dir.canonicalize()?;
+        let mut anchor = if path.exists() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .ok_or_else(|| CoreError::Other("Path has no parent directory".to_string()))?
+                .to_path_buf()
+        };
+        while !anchor.exists() {
+            if !anchor.pop() {
+                return Err(CoreError::Other(
+                    "Path has no existing parent directory".to_string(),
+                ));
+            }
+        }
+        let target = anchor.canonicalize()?;
+        if !target.starts_with(&pages) {
+            return Err(CoreError::Other(
+                "Path escapes the pages directory".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn book_title_from_page_path(&self, path: &Path) -> Result<Option<String>> {
+        let rel = path
+            .strip_prefix(&self.pages_dir)
+            .map_err(|_| CoreError::Other("Page is outside pages".to_string()))?;
+        let mut parts = rel.components().filter_map(|component| {
+            if let std::path::Component::Normal(part) = component {
+                part.to_str()
+            } else {
+                None
+            }
+        });
+        match (parts.next(), parts.next()) {
+            (Some("Books"), Some(book_folder)) => Ok(Some(format!("Books/{book_folder}"))),
+            _ => Ok(None),
+        }
+    }
+
     fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
         Self::atomic_write(file_path, content)?;
 
@@ -2030,6 +2588,7 @@ impl Graph {
         // incremental single-block patch writes straight to disk, so mark the
         // page dirty here too or a fast-path edit would slip past auto-index.
         self.mark_page_dirty(&page.id);
+        self.record_page_edit(&page.id, "app");
 
         Ok(PageWriteStrategy::IncrementalPatch)
     }
@@ -2062,6 +2621,7 @@ impl Graph {
         // reorder blocks, task and flashcard mutations all rewrite the page
         // through here): flag the page so its vectors get refreshed.
         self.mark_page_dirty(&page.id);
+        self.record_page_edit(&page.id, "app");
         Ok(())
     }
 
@@ -2073,6 +2633,12 @@ impl Graph {
     fn mark_page_dirty(&self, page_id: &str) {
         if let Err(e) = self.db.mark_page_pending_reindex(page_id) {
             eprintln!("Warning: could not mark page '{page_id}' for reindex: {e}");
+        }
+    }
+
+    fn record_page_edit(&self, page_id: &str, source: &str) {
+        if let Err(e) = self.db.record_page_edit(page_id, source) {
+            eprintln!("Warning: could not record page edit for '{page_id}': {e}");
         }
     }
 }
@@ -2153,6 +2719,65 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_files_from_disk_preserves_user_state_and_updates_file_index() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let keep = graph.create_page_with_content(
+            "Keep",
+            false,
+            "- Capital of France :: Paris #flashcard\n",
+        )?;
+        graph.db.add_favorite(&keep.id)?;
+        let flashcard = graph.db.list_flashcards(10, 0)?.remove(0);
+        graph
+            .db
+            .update_flashcard_review(&flashcard.id, 2.7, 5, 123_456)?;
+        let gone = graph.create_page("Gone", false)?;
+
+        fs::write(graph.pages_dir.join("Added.md"), "- Added from disk\n")?;
+        fs::remove_file(graph.pages_dir.join("Gone.md"))?;
+
+        graph.reconcile_files_from_disk()?;
+
+        assert_eq!(graph.db.list_favorites()?.len(), 1);
+        let reviewed = graph.db.list_flashcards(10, 0)?.remove(0);
+        assert_eq!(reviewed.block_id, flashcard.block_id);
+        assert_eq!(reviewed.review_count, 1);
+        assert_eq!(reviewed.next_review_at, Some(123_456));
+        assert!(graph.db.get_page_by_title("Added").is_ok());
+        assert!(graph.db.get_page_by_id(&gone.id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn index_file_rejects_knowledge_page_title_collision() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let ordinary = graph.create_page_with_content(
+            "Knowledge/rules/linking",
+            false,
+            "- Ordinary page\n",
+        )?;
+        let knowledge_path = graph.knowledge_dir.join("rules/linking.md");
+        fs::create_dir_all(knowledge_path.parent().unwrap())?;
+        fs::write(&knowledge_path, "- Knowledge rule\n")?;
+
+        let result = graph.index_file(&knowledge_path);
+
+        assert!(
+            result.is_err(),
+            "colliding knowledge path must not overwrite ordinary page"
+        );
+        let page = graph.db.get_page_by_title("Knowledge/rules/linking")?;
+        assert_eq!(page.id, ordinary.id);
+        assert_eq!(
+            page.file_path.as_deref(),
+            Some("pages/Knowledge/rules/linking.md")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn editing_a_block_marks_only_its_page_dirty() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
@@ -2212,6 +2837,77 @@ mod tests {
     }
 
     #[test]
+    fn deleting_imported_book_folder_removes_child_pages_and_assets() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let index = graph.create_page_with_content("Books/My Book", false, "- Index\n")?;
+        let chapter =
+            graph.create_page_with_content("Books/My Book/001-intro", false, "- Intro\n")?;
+        let other = graph.create_page_with_content("Books/Other/index", false, "- Other\n")?;
+        let asset_dir = graph.pages_dir.join("Books/My Book/assets");
+        fs::create_dir_all(&asset_dir)?;
+        fs::write(asset_dir.join("cover.png"), b"cover")?;
+        clear_pending(&graph)?;
+
+        let deleted = graph.delete_imported_book_folder("Books/My Book")?;
+
+        assert_eq!(deleted, 2);
+        assert!(!graph.pages_dir.join("Books/My Book").exists());
+        assert!(!graph.pages_dir.join("Books/My Book.md").exists());
+        assert!(graph.pages_dir.join("Books/Other/index.md").exists());
+        assert!(graph.db.get_page_by_id(&index.id).is_err());
+        assert!(graph.db.get_page_by_id(&chapter.id).is_err());
+        assert!(graph.db.get_page_by_id(&other.id).is_ok());
+
+        let mut expected = vec![index.id, chapter.id];
+        expected.sort();
+        assert_eq!(pending_page_ids(&graph)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_imported_book_folder_removes_legacy_rows_without_file_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let legacy_page = graph.db.create_page("Books/Legacy Book/index", false)?;
+        clear_pending(&graph)?;
+
+        let deleted = graph.delete_imported_book_folder("Books/Legacy Book")?;
+
+        assert_eq!(deleted, 1);
+        assert!(graph.db.get_page_by_id(&legacy_page.id).is_err());
+        assert_eq!(pending_page_ids(&graph)?, vec![legacy_page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_imported_book_folder_removes_exact_ghost_book_page() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let legacy_page = graph.db.create_page("Books/Legacy Book", false)?;
+        clear_pending(&graph)?;
+
+        let deleted = graph.delete_imported_book_folder("Books/Legacy Book")?;
+
+        assert_eq!(deleted, 1);
+        assert!(graph.db.get_page_by_id(&legacy_page.id).is_err());
+        assert_eq!(pending_page_ids(&graph)?, vec![legacy_page.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn imported_book_folder_rejects_parent_traversal() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        graph.create_page_with_content("Keep Me", false, "- Safe\n")?;
+
+        assert!(graph.imported_book_folder_for_title("Books/..").is_err());
+        assert!(graph.pages_dir.exists());
+        assert!(graph.pages_dir.join("Keep Me.md").exists());
+        Ok(())
+    }
+
+    #[test]
     fn reindex_all_does_not_flood_the_pending_set() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
@@ -2229,6 +2925,89 @@ mod tests {
         // whole DB and resets the dirty set.
         graph.reindex_all()?;
         assert_eq!(graph.db.count_pending_reindex()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_reindex_check_counts_only_file_backed_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        fs::write(
+            graph.pages_dir.join("linked.md"),
+            "- [[Virtual Target]] #virtual-tag\n",
+        )?;
+
+        assert!(graph.needs_startup_reindex()?);
+        graph.reindex_all()?;
+        assert!(!graph.needs_startup_reindex()?);
+        assert!(graph.db.count_pages()? > graph.db.count_file_backed_pages()?);
+
+        fs::write(graph.pages_dir.join("added-while-closed.md"), "- later\n")?;
+        assert!(graph.needs_startup_reindex()?);
+        Ok(())
+    }
+
+    #[test]
+    fn non_date_files_in_journals_dir_are_regular_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        fs::write(
+            graph.journals_dir.join("Daily.md"),
+            "- Imported daily index\n",
+        )?;
+        fs::write(
+            graph.journals_dir.join("2025_09_30.md"),
+            "- Old format journal\n",
+        )?;
+        fs::write(graph.journals_dir.join("2026-09-09.md"), "- Real journal\n")?;
+
+        graph.reindex_all()?;
+
+        let daily = graph.db.get_page_by_title("Daily")?;
+        let old_format_journal = graph.db.get_page_by_title("2025-09-30")?;
+        let journal = graph.db.get_page_by_title("2026-09-09")?;
+        assert!(!daily.is_journal);
+        assert_eq!(daily.file_path.as_deref(), Some("journals/Daily.md"));
+        assert!(old_format_journal.is_journal);
+        assert_eq!(
+            old_format_journal.file_path.as_deref(),
+            Some("journals/2025_09_30.md")
+        );
+        assert!(journal.is_journal);
+        assert_eq!(
+            graph
+                .db
+                .list_journal_pages(10, 0)?
+                .into_iter()
+                .map(|page| page.title)
+                .collect::<Vec<_>>(),
+            vec!["2026-09-09".to_string(), "2025-09-30".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn knowledge_markdown_indexes_under_knowledge_namespace() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        assert!(graph.knowledge_dir.exists());
+
+        fs::create_dir_all(graph.knowledge_dir.join("rules"))?;
+        fs::write(
+            graph.knowledge_dir.join("rules/linking.md"),
+            "title:: User editable title\n- never-link:: health -> [[Health]]\n",
+        )?;
+
+        assert!(graph.needs_startup_reindex()?);
+        graph.reindex_all()?;
+        assert!(!graph.needs_startup_reindex()?);
+
+        let page = graph.db.get_page_by_title("Knowledge/rules/linking")?;
+        assert_eq!(
+            page.file_path.as_deref(),
+            Some("knowledge/rules/linking.md")
+        );
+        assert!(!page.is_journal);
         Ok(())
     }
 
@@ -2276,6 +3055,121 @@ mod tests {
     }
 
     #[test]
+    fn removing_last_markdown_image_reference_preserves_asset_file() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Image Cleanup/index",
+            false,
+            "- ![Figure](assets/figure.png)\n",
+        )?;
+        let asset_path = graph
+            .pages_dir
+            .join("Books/Image Cleanup/assets/figure.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&block.id, "No image here", None)?;
+
+        assert!(asset_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn resizing_markdown_image_persists_width_and_keeps_asset_file() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Image Resize/index",
+            false,
+            "- ![Figure](assets/figure.png)\n",
+        )?;
+        let asset_path = graph.pages_dir.join("Books/Image Resize/assets/figure.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&block.id, "![Figure](assets/figure.png){:width 640}", None)?;
+
+        let updated = graph.db.get_block_by_id(&block.id)?;
+        assert_eq!(updated.content, "![Figure](assets/figure.png){:width 640}");
+        let page_content = fs::read_to_string(graph.pages_dir.join("Books/Image Resize/index.md"))?;
+        assert!(page_content.contains("- ![Figure](assets/figure.png){:width 640}"));
+        let parsed = crate::parser::parse_page(&page_content, "index.md");
+        assert_eq!(
+            parsed.blocks[0].content,
+            "![Figure](assets/figure.png){:width 640}"
+        );
+        assert!(asset_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn removing_pipe_sized_markdown_image_reference_preserves_asset_file() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Pipe Image Cleanup/index",
+            false,
+            "- ![Figure](assets/figure.png|640x480)\n",
+        )?;
+        let asset_path = graph
+            .pages_dir
+            .join("Books/Pipe Image Cleanup/assets/figure.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&block.id, "No image here", None)?;
+
+        assert!(asset_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn removing_markdown_image_reference_preserves_shared_asset_file() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Shared Image/index",
+            false,
+            "- ![One](assets/shared.png)\n- ![Two](assets/shared.png)\n",
+        )?;
+        let asset_path = graph.pages_dir.join("Books/Shared Image/assets/shared.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+
+        graph.update_block(&blocks[0].id, "First without image", None)?;
+
+        assert!(asset_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_block_with_last_markdown_image_reference_preserves_asset_file() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Delete Image/index",
+            false,
+            "- ![Figure](assets/delete-me.png)\n- Keep me\n",
+        )?;
+        let asset_path = graph
+            .pages_dir
+            .join("Books/Delete Image/assets/delete-me.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+
+        graph.delete_block(&blocks[0].id)?;
+
+        assert!(asset_path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn accepting_link_candidate_wraps_markdown_and_undo_restores_it() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
@@ -2299,6 +3193,40 @@ mod tests {
             "magnesium helps"
         );
         assert!(graph.db.get_backlinks(&target.id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn accepting_semantic_link_candidate_wraps_to_ai_target_page() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source =
+            graph.create_page_with_content("Writing notes", false, "- A topic matters\n")?;
+        let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
+        graph.db.discover_semantic_concept_candidates(
+            &source.id,
+            &[crate::parser::TagTerm {
+                term: "topic".to_string(),
+                qualified: Some("writing topics".to_string()),
+            }],
+            10,
+        )?;
+        let candidates = graph.db.list_link_candidates(
+            Some(&source.id),
+            Some(LinkCandidateStatus::Pending),
+            10,
+        )?;
+        assert_eq!(candidates.len(), 1);
+
+        let accepted = graph.accept_link_candidate(&candidates[0].id)?;
+
+        assert_eq!(accepted.status, LinkCandidateStatus::Accepted);
+        assert_eq!(
+            graph.db.get_block_by_id(&block.id)?.content,
+            "A [[writing topics]] matters"
+        );
+        let target = graph.db.get_page_by_title_ci("writing topics")?;
+        assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
         Ok(())
     }
 
@@ -2406,6 +3334,23 @@ mod tests {
         assert_eq!(blocks[2].id, "beta-id");
         assert_eq!(blocks[2].parent_id, None);
         assert_eq!(blocks[2].content, "Beta");
+
+        Ok(())
+    }
+
+    #[test]
+    fn page_source_update_reuses_existing_slot_id_without_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("source-slot-reuse", false)?;
+        let original_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_page_source(&page.id, "- Edited without explicit id\n")?;
+
+        let blocks = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id, original_block.id);
+        assert_eq!(blocks[0].content, "Edited without explicit id");
 
         Ok(())
     }
@@ -2902,6 +3847,190 @@ mod tests {
         let result = graph.insert_block_after(&page_a.id, &stray.id, "Should be rejected");
         assert!(result.is_err(), "cross-page insert must fail");
 
+        Ok(())
+    }
+
+    #[test]
+    fn batch_create_and_delete_blocks_preserves_new_parent_refs() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("batch-paste", false)?;
+        let anchor = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&anchor.id, "Anchor [[Target]]", None)?;
+
+        let created = graph.create_blocks(
+            &page.id,
+            vec![
+                BlockCreateSpec {
+                    id: None,
+                    parent: BlockCreateParent::Root,
+                    order_index: 1,
+                    content: "Pasted parent #tag".to_string(),
+                    block_type: BlockType::Text,
+                    properties: serde_json::json!({}),
+                },
+                BlockCreateSpec {
+                    id: None,
+                    parent: BlockCreateParent::NewBlock(0),
+                    order_index: 0,
+                    content: "TODO Pasted child".to_string(),
+                    block_type: BlockType::Text,
+                    properties: serde_json::json!({}),
+                },
+            ],
+        )?;
+
+        assert_eq!(created.len(), 2);
+        assert_eq!(
+            created[1].parent_id.as_deref(),
+            Some(created[0].id.as_str())
+        );
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM links WHERE from_block_id = ?1",
+                &created[0].id,
+            )?,
+            1
+        );
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM tasks WHERE block_id = ?1",
+                &created[1].id,
+            )?,
+            1
+        );
+
+        let ids = created
+            .iter()
+            .map(|block| block.id.clone())
+            .collect::<Vec<_>>();
+        let deleted = graph.delete_blocks(&page.id, &ids)?;
+        assert_eq!(deleted.len(), 2);
+        let remaining = graph.db.list_blocks_for_page(&page.id)?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, anchor.id);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_create_blocks_preserves_explicit_ids_for_undo_restore() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("restore-ids", false)?;
+
+        let created = graph.create_blocks(
+            &page.id,
+            vec![
+                BlockCreateSpec {
+                    id: Some("restore-parent".to_string()),
+                    parent: BlockCreateParent::Root,
+                    order_index: 1,
+                    content: "Restored parent".to_string(),
+                    block_type: BlockType::Text,
+                    properties: serde_json::json!({}),
+                },
+                BlockCreateSpec {
+                    id: Some("restore-child".to_string()),
+                    parent: BlockCreateParent::NewBlock(0),
+                    order_index: 0,
+                    content: "Restored child".to_string(),
+                    block_type: BlockType::Text,
+                    properties: serde_json::json!({}),
+                },
+            ],
+        )?;
+
+        assert_eq!(created[0].id, "restore-parent");
+        assert_eq!(created[1].id, "restore-child");
+        assert_eq!(created[1].parent_id.as_deref(), Some("restore-parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_parent_block_deletes_descendant_subtree() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("delete-subtree", false)?;
+        let anchor = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&anchor.id, "Anchor", None)?;
+
+        let parent = graph.create_block(
+            &page.id,
+            None,
+            1,
+            "Parent",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let child = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            0,
+            "Child",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        graph.create_block(
+            &page.id,
+            Some(&child.id),
+            0,
+            "Grandchild",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        graph.delete_block(&parent.id)?;
+
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM blocks WHERE page_id = ?1",
+                &page.id,
+            )?,
+            1
+        );
+        let content = fs::read_to_string(graph.pages_dir.join("delete-subtree.md"))?;
+        assert!(content.contains("- Anchor\n"));
+        assert!(!content.contains("Parent"));
+        assert!(!content.contains("Child"));
+        Ok(())
+    }
+
+    #[test]
+    fn batch_delete_parent_returns_descendants_in_restore_order() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page("batch-delete-subtree", false)?;
+        let parent = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        graph.update_block(&parent.id, "Parent", None)?;
+        let child = graph.create_block(
+            &page.id,
+            Some(&parent.id),
+            0,
+            "Child",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let deleted = graph.delete_blocks(&page.id, &[parent.id.clone()])?;
+
+        assert_eq!(
+            deleted
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![parent.id.as_str(), child.id.as_str()]
+        );
+        assert_eq!(
+            count_with_param(
+                &graph,
+                "SELECT COUNT(*) FROM blocks WHERE page_id = ?1",
+                &page.id,
+            )?,
+            0
+        );
         Ok(())
     }
 

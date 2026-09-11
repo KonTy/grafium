@@ -3,6 +3,7 @@
   import {
     aiGetConfig,
     aiSetConfig,
+    aiDefaultConceptEdgePrompt,
     aiHealthCheck,
     aiIndexAllPages,
     aiCreateDefaultSchemas,
@@ -40,6 +41,9 @@
   let cloudEmbeddingBaseUrl = $state("");
   let cloudEmbeddingApiKey = $state("");
   let cloudEmbeddingModel = $state("text-embedding-3-small");
+  let conceptEdgePrompt = $state("");
+  let defaultConceptEdgePrompt = $state("");
+  let promptAdvancedOpen = $state(false);
 
   // Whisper transcription (video/audio import fallback) — independent of
   // the chat/search config above, since it's used by "Import Video" rather
@@ -171,6 +175,7 @@
   async function loadConfig() {
     isLoading = true;
     try {
+      defaultConceptEdgePrompt = await aiDefaultConceptEdgePrompt();
       config = await aiGetConfig();
       if (config) {
         enabled = config.enabled;
@@ -200,6 +205,8 @@
           cloudEmbeddingApiKey = config.cloud.embedding_api_key || "";
           cloudEmbeddingModel = config.cloud.embedding_model || "text-embedding-3-small";
         }
+        conceptEdgePrompt =
+          config.references?.concept_edge_prompt || defaultConceptEdgePrompt;
       }
       health = await aiHealthCheck();
     } catch (e: any) {
@@ -231,6 +238,10 @@
         cloud_embedding_base_url: cloudEmbeddingBaseUrl || undefined,
         cloud_embedding_api_key: cloudEmbeddingApiKey || undefined,
         cloud_embedding_model: cloudEmbeddingModel,
+        concept_edge_prompt:
+          conceptEdgePrompt.trim() && conceptEdgePrompt.trim() !== defaultConceptEdgePrompt.trim()
+            ? conceptEdgePrompt
+            : undefined,
       };
       await aiSetConfig(payload);
       health = await aiHealthCheck();
@@ -305,6 +316,10 @@
     message = msg;
     messageType = type;
     setTimeout(() => (message = ""), 4000);
+  }
+
+  function resetConceptEdgePrompt() {
+    conceptEdgePrompt = defaultConceptEdgePrompt;
   }
 
   const MODE_DESCRIPTIONS: Record<string, string> = {
@@ -516,6 +531,43 @@
       {/if}
 
 
+      <div class="settings-section">
+        <button
+          class="advanced-toggle"
+          type="button"
+          onclick={() => (promptAdvancedOpen = !promptAdvancedOpen)}
+          aria-expanded={promptAdvancedOpen}
+        >
+          <span>Advanced concept-edge prompt</span>
+          <span>{promptAdvancedOpen ? "Hide" : "Edit"}</span>
+        </button>
+        <p class="field-hint">
+          Controls what AI edges consider worth linking. Grafium still enforces the
+          fixed JSON schema, so change the selection criteria here, not the output format.
+        </p>
+        {#if promptAdvancedOpen}
+          <div class="field-group">
+            <div class="prompt-header">
+              <label class="field-label" for="concept-edge-prompt">Concept edge prompt</label>
+              <button type="button" class="browse-btn" onclick={resetConceptEdgePrompt}>
+                Reset to default
+              </button>
+            </div>
+            <textarea
+              id="concept-edge-prompt"
+              class="field-input prompt-textarea"
+              bind:value={conceptEdgePrompt}
+              spellcheck="false"
+            ></textarea>
+            <p class="field-hint warning">
+              Advanced: weak or schema-breaking instructions can reduce edge quality. Keep the
+              prompt focused on durable graph concepts; the backend will append the required
+              {`{ term, qualified }[]`} output contract.
+            </p>
+          </div>
+        {/if}
+      </div>
+
       <!-- Actions -->
       <div class="actions-section">
         <button class="action-btn primary" onclick={saveConfig} disabled={isSaving}>
@@ -714,6 +766,43 @@
 
   .field-hint.warning {
     color: #fbbf24;
+  }
+
+  .advanced-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-primary, #fff);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0;
+    text-align: left;
+  }
+
+  .advanced-toggle span:last-child {
+    color: var(--text-muted, #888);
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  .prompt-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .prompt-textarea {
+    min-height: 260px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    line-height: 1.45;
+    white-space: pre-wrap;
   }
 
   /* Speed verdict for the selected chat model. Escalates in weight with the

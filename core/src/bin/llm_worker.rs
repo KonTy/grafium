@@ -80,10 +80,7 @@ struct LlmBackendInfo {
 /// llama.cpp doesn't return this via any Rust-side API — we have to
 /// read what it printed to its own log.
 fn detect_llm_backend(load_start: std::time::Instant) -> LlmBackendInfo {
-    let events = grafium_core::log_tap::snapshot_since_targets(
-        load_start,
-        &["llama", "ggml"],
-    );
+    let events = grafium_core::log_tap::snapshot_since_targets(load_start, &["llama", "ggml"]);
     let mut saw_vulkan = false;
     let mut saw_cuda = false;
     let mut saw_metal = false;
@@ -203,11 +200,7 @@ fn main() {
             use grafium_core::log_tap::{record, TapLevel};
             struct V(String);
             impl tracing::field::Visit for V {
-                fn record_debug(
-                    &mut self,
-                    f: &tracing::field::Field,
-                    v: &dyn std::fmt::Debug,
-                ) {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
                     if f.name() == "message" {
                         self.0 = format!("{v:?}");
                     }

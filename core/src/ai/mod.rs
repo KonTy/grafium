@@ -7,7 +7,7 @@
 //! - `references.rs` — Reference generation from AI analysis
 //! - `config.rs` — AI configuration management
 
-/// Appended to every prompt that produces an answer for the user.
+/// Appended to every system prompt that produces an answer for the user.
 ///
 /// Retrieved material is the user's own, and is routinely not in the language
 /// they are asking in — a bilingual vocabulary note is the ordinary case.
@@ -25,14 +25,85 @@ notes or sources you are drawing on are in a different language. Quote foreign-l
 verbatim where the exact wording matters, but translate or paraphrase it for the user instead of \
 switching languages yourself.";
 
+const ENGLISH_QUESTION_LANGUAGE_RULE: &str =
+    "The current user question is in English. Write the answer in English only. Do not translate \
+the answer into Chinese or any other language unless the user explicitly asks for translation.";
+
+pub(crate) fn answer_language_rule_for_question(question: &str) -> &'static str {
+    if looks_like_english_question(question) {
+        ENGLISH_QUESTION_LANGUAGE_RULE
+    } else {
+        ANSWER_LANGUAGE_RULE
+    }
+}
+
+pub(crate) fn question_with_answer_language_rule(question: &str) -> String {
+    let rule = answer_language_rule_for_question(question);
+    format!("{question}\n\nLanguage instruction: {rule}")
+}
+
+fn looks_like_english_question(question: &str) -> bool {
+    let mut english_markers = 0usize;
+    for raw in question.split(|ch: char| !ch.is_alphabetic() && ch != '\'') {
+        let word = raw.trim_matches('\'').to_ascii_lowercase();
+        if word.is_empty() {
+            continue;
+        }
+        if matches!(
+            word.as_str(),
+            "a" | "an"
+                | "and"
+                | "are"
+                | "as"
+                | "be"
+                | "can"
+                | "do"
+                | "does"
+                | "for"
+                | "from"
+                | "good"
+                | "have"
+                | "how"
+                | "i"
+                | "in"
+                | "is"
+                | "it"
+                | "me"
+                | "my"
+                | "need"
+                | "of"
+                | "on"
+                | "please"
+                | "should"
+                | "that"
+                | "the"
+                | "this"
+                | "to"
+                | "want"
+                | "what"
+                | "when"
+                | "where"
+                | "which"
+                | "with"
+                | "you"
+        ) {
+            english_markers += 1;
+            if english_markers >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub mod config;
 pub mod embeddings;
 pub mod gpu_fit;
 pub mod providers;
 pub mod reasoning;
-pub mod text;
 pub mod references;
 pub mod resources;
+pub mod text;
 pub mod traits;
 pub mod web_research;
 #[cfg(any(feature = "llm-local", feature = "media"))]
@@ -68,4 +139,28 @@ pub(crate) fn suffix_to_char_boundary(text: &str, max_bytes: usize) -> &str {
         start -= 1;
     }
     &text[start..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_questions_get_explicit_english_instruction() {
+        let prompt = question_with_answer_language_rule(
+            "what is a good cruiser bike that is easy to fix and reliable?",
+        );
+
+        assert!(prompt.contains("Language instruction: The current user question is in English."));
+        assert!(prompt.contains("Write the answer in English only."));
+        assert!(prompt.contains("Do not translate the answer into Chinese"));
+    }
+
+    #[test]
+    fn non_english_questions_keep_same_language_rule() {
+        let prompt = question_with_answer_language_rule("地下室是什么意思？");
+
+        assert!(prompt.contains(ANSWER_LANGUAGE_RULE));
+        assert!(!prompt.contains("Write the answer in English only."));
+    }
 }

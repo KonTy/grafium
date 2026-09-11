@@ -1,7 +1,7 @@
 <script lang="ts">
   import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
-  import { onMount, tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import BlockEditor from "./BlockEditor.svelte";
   import UnifiedPageEditor from "./UnifiedPageEditor.svelte";
   import CollectionMembers from "./CollectionMembers.svelte";
@@ -9,9 +9,11 @@
   import {
     listBlocks,
     createBlock,
-    deleteBlock,
+    createBlocks,
+    deleteBlocks,
     updateBlock,
     moveBlock,
+    reorderBlocks,
     getBacklinks,
     getPage,
     getParentPage,
@@ -24,14 +26,17 @@
     undoLinkCandidateAccept,
     type LinkCandidate,
   } from "../lib/api";
-  import { persistBlockContentIfChanged } from "../lib/persistence";
   import { planIndentSelection } from "../lib/blockIndent";
   import {
     buildBlockRenderState,
     computeVirtualWindow,
     getAncestorGuides,
+    nextProgressiveRenderLimit,
   } from "../lib/pageContentVirtualization";
-  import { renderBlock, assetBaseDirFor } from "../lib/markdown";
+  import { renderBlock, assetBaseDirFor, markdownHeadingSlug } from "../lib/markdown";
+  import { wrapPageLinkText } from "../lib/editorFormat";
+  import { bulletToTodoContent, isTaskContent, taskToBulletContent } from "../lib/taskSyntax";
+  import { formatBlocksAsOutlineMarkdown, formatBlocksAsPlainText } from "../lib/blockClipboard";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
     applyIfCurrentPageLoad,
@@ -41,10 +46,17 @@
     isCurrentPageLoad,
     type PageLoadRequest,
   } from "../lib/pageContentLoad";
-  import type { BacklinkResult, Block, Page } from "../lib/api";
-  import { pushUndo, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
-  import type { UndoAction } from "../lib/undoStack";
-  import { aiSummarizeSelection, wrapKnownTermsInText, type TagTerm } from "../lib/knowledge";
+  import type { BacklinkResult, Block, CreateBlockBatchItem, Page } from "../lib/api";
+  import { pushUndo, removeUndoActions, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
+  import type { BlockContentChange, UndoAction } from "../lib/undoStack";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { jobs, isTerminal } from "../lib/jobs.svelte";
+  import {
+    aiCreateConceptEdges,
+    aiSummarizeSelection,
+    wrapKnownTermsInText,
+    type TagTerm,
+  } from "../lib/knowledge";
   import {
     collectionMembersFromBlocks,
     getCollectionKind,
@@ -53,6 +65,7 @@
     pageSetCollection,
     withMissingCommandFallback,
   } from "../lib/pageTree";
+  import { setCurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import { listen } from "@tauri-apps/api/event";
 
   interface Props {
@@ -106,6 +119,18 @@
     return () => cancelAnimationFrame(handle);
   });
   let focusedBlockId: string | null = $state(null);
+  function emitFocusChanged(blockId: string | null) {
+    setCurrentBlockAnchor(page.id, blockId);
+  }
+  function handleBlockAnchor(blockId: string) {
+    emitFocusChanged(blockId);
+  }
+  onDestroy(() => {
+    emitFocusChanged(null);
+    if (linkCandidateRevealTimer !== undefined) {
+      window.clearTimeout(linkCandidateRevealTimer);
+    }
+  });
   let navigatingBlock = false;
   // Imperative handles to each BlockEditor, keyed by block id, for deterministic
   // cross-block Arrow Up/Down caret movement.
@@ -129,14 +154,38 @@
   // user expand incrementally, same idea as Logseq's linked-references UX.
   const BACKLINKS_PAGE_SIZE = 50;
   let backlinksRenderLimit = $state(BACKLINKS_PAGE_SIZE);
+  const LINK_CANDIDATE_REVIEW_LIMIT = 1000;
   let linkCandidates: LinkCandidate[] = $state([]);
   let linkCandidatesLoading = $state(false);
   let linkCandidatesError = $state("");
+  interface LinkCandidateGroup {
+    key: string;
+    candidates: LinkCandidate[];
+    primary: LinkCandidate;
+    occurrenceCount: number;
+    anchorTexts: string[];
+    sources: string[];
+    canFixSpelling: boolean;
+    hasCanonicalTarget: boolean;
+  }
+  interface LinkCandidateContextPreview {
+    candidate: LinkCandidate;
+    before: string;
+    anchor: string;
+    after: string;
+    leadingEllipsis: boolean;
+    trailingEllipsis: boolean;
+    blockLabel: string;
+  }
   type LinkCandidateUndo =
-    | { kind: "accepted"; candidate: LinkCandidate }
-    | { kind: "dismissed"; candidate: LinkCandidate };
+    | { kind: "accepted"; candidates: LinkCandidate[] }
+    | { kind: "dismissed"; candidates: LinkCandidate[] };
   let lastLinkCandidateAction: LinkCandidateUndo | null = $state(null);
-  const autoScannedLinkCandidatePages = new Set<string>();
+  let linkCandidatesRevealed = $state(false);
+  const linkCandidateGroups = $derived.by(() => groupLinkCandidates(linkCandidates));
+  const linkCandidateOccurrenceTotal = $derived.by(() =>
+    linkCandidateGroups.reduce((total, group) => total + group.occurrenceCount, 0)
+  );
   let parentPage: Page | null = $state(null);
   let childPages: Page[] = $state([]);
   let collectionKind: string | null = $state(null);
@@ -146,6 +195,36 @@
   let collectionRequest = 0;
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
+  type SelectionMakeLinkAction = {
+    blockId: string;
+    from: number | null;
+    to: number | null;
+    text: string;
+  };
+  const SELECTION_MAKE_LINK_CACHE_MS = 30_000;
+  let lastSelectionMakeLinkAction: (SelectionMakeLinkAction & { capturedAt: number }) | null = $state(null);
+  let selectionMenu: {
+    x: number;
+    y: number;
+    blockIds: string[];
+    blockCount: number;
+    canTurnTasksToBullets: boolean;
+    canTurnBulletsToTodos: boolean;
+    makeLink?: SelectionMakeLinkAction;
+  } | null = $state(null);
+  let selectionCopyMessage = $state("");
+  let selectionCopyTimer: number | undefined;
+  let promotedSelectionCopyText: string | null = $state(null);
+  let blockSelectionDrag: {
+    pointerId: number;
+    startBlockId: string;
+    started: boolean;
+    startX: number;
+    startY: number;
+  } | null = null;
+  let revealedBlockId: string | null = $state(null);
+  let revealedBlockTimer: number | undefined;
+  let linkCandidateRevealTimer: number | undefined;
   let collapsedIds: Set<string> = $state(new Set());
   const pageLoadState = createPageLoadState();
   const UNIFIED_EDITOR_PROTOTYPE_KEY = "grafium.experimental.unifiedPageEditor";
@@ -154,17 +233,110 @@
   const BLOCK_SHELL_GAP = 2;
   const DEFAULT_BLOCK_HEIGHT = 68;
   const BLOCK_WINDOW_OVERSCAN_PX = 720;
+  const BOOK_INITIAL_RENDER_COUNT = 32;
+  const BOOK_RENDER_BATCH_COUNT = 48;
+  const BOOK_LOAD_AHEAD_PX = 800;
 
   let blockHeights = new SvelteMap<string, number>();
+  let pageContentEl: HTMLDivElement | null = $state(null);
   let blocksViewportEl: HTMLDivElement | null = $state(null);
   let blocksRelTop = $state(0);
   let blocksViewportHeight = $state(800);
   let windowAnchorBlockId: string | null = $state(null);
+  let progressiveBookRenderLimit = $state(BOOK_INITIAL_RENDER_COUNT);
+  const isImportedBookPage = $derived.by(() => {
+    const filePath = (page.file_path ?? materializedFilePath ?? "").replace(/\\/g, "/");
+    return page.title.startsWith("Books/") || filePath.startsWith("pages/Books/");
+  });
+  const displayPageTitle = $derived(
+    isImportedBookPage
+      ? page.title.replace(/^Books\//, "")
+      : page.is_journal
+        ? page.title.replace(/_/g, "-")
+        : page.title
+  );
+  const blockSelectionOwnerId = `page-content-${Math.random().toString(36).slice(2)}`;
+
+  function claimBlockSelectionOwner() {
+    (globalThis as any).__grafiumBlockSelectionOwner = blockSelectionOwnerId;
+  }
+
+  function releaseBlockSelectionOwner() {
+    if ((globalThis as any).__grafiumBlockSelectionOwner === blockSelectionOwnerId) {
+      delete (globalThis as any).__grafiumBlockSelectionOwner;
+    }
+  }
+
+  function isBlockSelectionOwner(): boolean {
+    return (globalThis as any).__grafiumBlockSelectionOwner === blockSelectionOwnerId;
+  }
+
+  function clearBlockSelection() {
+    selectedBlockIds = new Set();
+    promotedSelectionCopyText = null;
+    selectionMenu = null;
+    lastSelectionMakeLinkAction = null;
+    releaseBlockSelectionOwner();
+  }
+
+  function editableTargetOutsideThisPage(event: Event): boolean {
+    const target = event.target as Element | null;
+    const editable = target?.closest?.("input, textarea, select, [contenteditable='true'], .cm-editor");
+    return !!editable && !pageContentEl?.contains(editable);
+  }
+
+  function nativeSelectionOutsideThisPage(): boolean {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+    const nodes = [selection.anchorNode, selection.focusNode].filter(Boolean) as Node[];
+    return nodes.some((node) => !pageContentEl?.contains(node));
+  }
+
+  function canHandleBlockSelectionEvent(event: Event): boolean {
+    return selectedBlockIds.size > 0
+      && isBlockSelectionOwner()
+      && !editableTargetOutsideThisPage(event)
+      && !nativeSelectionOutsideThisPage();
+  }
 
   const blockRenderState = $derived.by(() => buildBlockRenderState(blocks, collapsedIds));
   const visibleBlocks = $derived(blockRenderState.visibleBlocks);
+  const shouldVirtualizeBlocks = $derived(!isImportedBookPage && visibleBlocks.length > 500);
+  const shouldProgressivelyRenderBook = $derived(
+    isImportedBookPage && visibleBlocks.length > BOOK_INITIAL_RENDER_COUNT
+  );
+  const visibleRenderedBlockCount = $derived(
+    shouldProgressivelyRenderBook
+      ? Math.min(visibleBlocks.length, progressiveBookRenderLimit)
+      : visibleBlocks.length
+  );
+  const renderedAllVisibleBlocks = $derived(visibleRenderedBlockCount >= visibleBlocks.length);
+  const showBelowPageSections = $derived(!shouldProgressivelyRenderBook || renderedAllVisibleBlocks);
+  const showHierarchySection = $derived(!isImportedBookPage && showBelowPageSections);
   const collectionMembers = $derived(collectionMembersFromBlocks(blocks));
   const virtualWindow = $derived.by(() => {
+    if (shouldProgressivelyRenderBook) {
+      return {
+        startIndex: 0,
+        endIndex: visibleRenderedBlockCount,
+        topSpacer: 0,
+        bottomSpacer: 0,
+        totalHeight: 0,
+        items: visibleBlocks.slice(0, visibleRenderedBlockCount),
+      };
+    }
+
+    if (!shouldVirtualizeBlocks) {
+      return {
+        startIndex: 0,
+        endIndex: visibleBlocks.length,
+        topSpacer: 0,
+        bottomSpacer: 0,
+        totalHeight: 0,
+        items: visibleBlocks,
+      };
+    }
+
     const anchorIndex = windowAnchorBlockId
       ? blockRenderState.visibleIndexById.get(windowAnchorBlockId) ?? null
       : null;
@@ -180,11 +352,26 @@
   });
   const windowedBlocks = $derived(virtualWindow.items);
 
-  onMount(() => {
+  function unifiedEditorPrototypeKey(pageId: string): string {
+    return `${UNIFIED_EDITOR_PROTOTYPE_KEY}:${pageId}`;
+  }
+
+  let unifiedEditorPrototypePageId: string | null = null;
+
+  $effect(() => {
+    const pageId = page.id;
+    if (unifiedEditorPrototypePageId === pageId) return;
+    unifiedEditorPrototypePageId = pageId;
     try {
-      useUnifiedEditorPrototype = localStorage.getItem(UNIFIED_EDITOR_PROTOTYPE_KEY) === "1";
+      useUnifiedEditorPrototype = localStorage.getItem(unifiedEditorPrototypeKey(pageId)) === "1";
     } catch {
       useUnifiedEditorPrototype = false;
+    }
+  });
+
+  onDestroy(() => {
+    if (revealedBlockTimer !== undefined) {
+      window.clearTimeout(revealedBlockTimer);
     }
   });
 
@@ -202,22 +389,27 @@
     const parent = blocksViewportEl.closest(".main-content") as HTMLElement | null;
     if (!parent) return;
 
-    const update = () => {
+    const updateLayout = () => {
       const parentRect = parent.getBoundingClientRect();
       const viewportRect = blocksViewportEl!.getBoundingClientRect();
       blocksRelTop = Math.max(0, parentRect.top - viewportRect.top);
       blocksViewportHeight = parent.clientHeight;
     };
 
-    update();
-    parent.addEventListener("scroll", update, { passive: true });
+    const handleScroll = () => {
+      updateLayout();
+      maybeGrowProgressiveBookRenderWindow(parent);
+    };
 
-    const resizeObserver = new ResizeObserver(update);
+    updateLayout();
+    parent.addEventListener("scroll", handleScroll, { passive: true });
+
+    const resizeObserver = new ResizeObserver(updateLayout);
     resizeObserver.observe(parent);
     resizeObserver.observe(blocksViewportEl);
 
     return () => {
-      parent.removeEventListener("scroll", update);
+      parent.removeEventListener("scroll", handleScroll);
       resizeObserver.disconnect();
     };
   });
@@ -225,13 +417,42 @@
   $effect(() => {
     const pageId = page.id;
     const handleRevealBlock = (event: Event) => {
-      const detail = (event as CustomEvent<{ pageId: string; blockId: string; align?: ScrollLogicalPosition }>).detail;
+      const detail = (event as CustomEvent<{ pageId: string; blockId: string; align?: ScrollLogicalPosition; select?: boolean }>).detail;
       if (!detail || detail.pageId !== pageId) return;
-      void revealBlock(detail.blockId, detail.align ?? "center");
+      void revealBlock(detail.blockId, detail.align ?? "center").then((revealed) => {
+        if (revealed && detail.select !== false) {
+          selectRevealedBlock(detail.blockId);
+        }
+      });
     };
 
     window.addEventListener("page-content-reveal-block", handleRevealBlock);
     return () => window.removeEventListener("page-content-reveal-block", handleRevealBlock);
+  });
+
+  $effect(() => {
+    const pageId = page.id;
+    const handleRevealFragment = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string; fragment: string | string[] }>).detail;
+      if (!detail || detail.pageId !== pageId) return;
+      const fragments = Array.isArray(detail.fragment) ? detail.fragment : [detail.fragment];
+      void revealHeadingFragments(fragments);
+    };
+
+    window.addEventListener("page-content-reveal-fragment", handleRevealFragment);
+    return () => window.removeEventListener("page-content-reveal-fragment", handleRevealFragment);
+  });
+
+  $effect(() => {
+    const pageId = page.id;
+    const handleFindLinksRequest = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string }>).detail;
+      if (!detail || detail.pageId !== pageId || compact) return;
+      void handleSuggestLinks();
+    };
+
+    window.addEventListener("page-content-find-links", handleFindLinksRequest);
+    return () => window.removeEventListener("page-content-find-links", handleFindLinksRequest);
   });
 
   // Fired by ReferencePanel's "Insert into page" action, which writes
@@ -261,6 +482,54 @@
 
   function isBlockVisible(blockId: string): boolean {
     return blockRenderState.visibleIds.has(blockId);
+  }
+
+  function expandAncestors(blockId: string): boolean {
+    let parentId = blockRenderState.parentById.get(blockId) ?? null;
+    let nextCollapsed: Set<string> | null = null;
+    const seen = new Set<string>();
+
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      if (collapsedIds.has(parentId)) {
+        nextCollapsed ??= new Set(collapsedIds);
+        nextCollapsed.delete(parentId);
+      }
+      parentId = blockRenderState.parentById.get(parentId) ?? null;
+    }
+
+    if (!nextCollapsed) return false;
+    collapsedIds = nextCollapsed;
+    return true;
+  }
+
+  function selectRevealedBlock(blockId: string) {
+    if (!blockRenderState.blockById.has(blockId)) return;
+
+    selectedBlockIds = new Set([blockId]);
+    claimBlockSelectionOwner();
+    focusedBlockId = null;
+    emitFocusChanged(blockId);
+    promotedSelectionCopyText = null;
+    selectionMenu = null;
+
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
+    }
+
+    if (revealedBlockTimer !== undefined) {
+      window.clearTimeout(revealedBlockTimer);
+    }
+    revealedBlockId = null;
+    requestAnimationFrame(() => {
+      revealedBlockId = blockId;
+      revealedBlockTimer = window.setTimeout(() => {
+        if (revealedBlockId === blockId) {
+          revealedBlockId = null;
+        }
+      }, 2200);
+    });
   }
 
   // Shared empty array for the disabled and depth-0 cases, so rendering a
@@ -309,8 +578,37 @@
     return document.querySelector(`[data-block-id="${blockId}"]`) as HTMLElement | null;
   }
 
+  function growProgressiveBookRenderWindow(forceIndex?: number | null): boolean {
+    if (!shouldProgressivelyRenderBook || renderedAllVisibleBlocks) return false;
+    const next = nextProgressiveRenderLimit(
+      visibleBlocks.length,
+      progressiveBookRenderLimit,
+      BOOK_RENDER_BATCH_COUNT,
+      forceIndex,
+    );
+    if (next === progressiveBookRenderLimit) return false;
+    progressiveBookRenderLimit = next;
+    return true;
+  }
+
+  function maybeGrowProgressiveBookRenderWindow(scroller: HTMLElement | null) {
+    if (!scroller || !shouldProgressivelyRenderBook || renderedAllVisibleBlocks) return;
+    const distanceToRenderedEnd = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+    if (distanceToRenderedEnd > BOOK_LOAD_AHEAD_PX) return;
+    growProgressiveBookRenderWindow();
+  }
+
   async function ensureBlockRendered(blockId: string): Promise<boolean> {
     if (!isBlockVisible(blockId)) return false;
+    const visibleIndex = blockRenderState.visibleIndexById.get(blockId);
+    if (
+      shouldProgressivelyRenderBook &&
+      visibleIndex !== undefined &&
+      visibleIndex >= visibleRenderedBlockCount
+    ) {
+      growProgressiveBookRenderWindow(visibleIndex);
+      await tick();
+    }
     if (getRenderedBlockEl(blockId)) return true;
 
     windowAnchorBlockId = blockId;
@@ -322,6 +620,9 @@
     blockId: string,
     align: ScrollLogicalPosition = "nearest"
   ): Promise<boolean> {
+    if (!isBlockVisible(blockId) && expandAncestors(blockId)) {
+      await tick();
+    }
     const rendered = await ensureBlockRendered(blockId);
     const blockEl = getRenderedBlockEl(blockId);
     if (!rendered || !blockEl) {
@@ -342,6 +643,56 @@
     return true;
   }
 
+  function headingFragmentForBlock(block: Block): string | null {
+    const match = block.content.trim().match(/^#{1,6}\s+(.+)$/);
+    return match ? markdownHeadingSlug(match[1]) : null;
+  }
+
+  function blockStartsWithFragment(block: Block, fragment: string): boolean {
+    const text = block.content
+      .trim()
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^\|.*$/ms, "")
+      .trim();
+    if (!text) return false;
+    const blockFragment = markdownHeadingSlug(text.slice(0, 160));
+    return blockFragment === fragment || blockFragment.startsWith(`${fragment}-`);
+  }
+
+  async function revealHeadingFragments(fragments: string[]) {
+    const seen = new Set<string>();
+    for (const fragment of fragments) {
+      const normalized = fragment.trim().replace(/^#/, "");
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      if (await revealHeadingFragment(normalized)) return;
+    }
+  }
+
+  async function revealHeadingFragment(fragment: string): Promise<boolean> {
+    const targetFragment = fragment.trim().replace(/^#/, "");
+    if (!targetFragment) return false;
+
+    const targetBlock = blocks.find(
+      (block) =>
+        headingFragmentForBlock(block) === targetFragment ||
+        blockStartsWithFragment(block, targetFragment)
+    );
+    if (targetBlock) {
+      await revealBlock(targetBlock.id, "start");
+      await tick();
+    }
+
+    const target =
+      blocksViewportEl?.querySelector(`[id="${CSS.escape(targetFragment)}"]`) ??
+      document.getElementById(targetFragment);
+    if (target instanceof HTMLElement) {
+      target.scrollIntoView({ block: "start" });
+      return true;
+    }
+    return targetBlock !== undefined;
+  }
+
   function toggleCollapse(blockId: string) {
     const newSet = new Set(collapsedIds);
     if (newSet.has(blockId)) {
@@ -359,17 +710,20 @@
   function setUnifiedEditorPrototype(enabled: boolean) {
     useUnifiedEditorPrototype = enabled;
     try {
-      localStorage.setItem(UNIFIED_EDITOR_PROTOTYPE_KEY, enabled ? "1" : "0");
+      localStorage.setItem(unifiedEditorPrototypeKey(page.id), enabled ? "1" : "0");
     } catch {
       // Keep the in-memory toggle working if localStorage is unavailable.
     }
   }
 
-  async function reloadCurrentPageContent() {
+  async function reloadCurrentPageContent(options: { loadCandidates?: boolean } = {}) {
     const request = currentPageLoad();
+    const shouldLoadCandidates = options.loadCandidates ?? linkCandidatesRevealed;
     await loadBlocks(request);
     await loadBacklinks(request);
-    await loadLinkCandidates(request);
+    if (shouldLoadCandidates) {
+      await loadLinkCandidates(request);
+    }
     await loadHierarchy(request);
   }
 
@@ -377,6 +731,9 @@
   $effect(() => {
     if (page?.id) {
       setUndoCallback(page.id, (_action: UndoAction) => {
+        if (_action.type === "accept_link_candidates") {
+          lastLinkCandidateAction = null;
+        }
         void loadBlocks(currentPageLoad());
         refreshCollectionAfterMutation();
         refreshPageTrees();
@@ -393,10 +750,16 @@
     const pageTitle = page?.title;
     if (pageId) {
       const request = beginPageLoad(pageLoadState, pageId, pageTitle ?? "");
+      linkCandidates = [];
+      linkCandidatesError = "";
+      linkCandidatesLoading = false;
+      linkCandidatesRevealed = false;
+      lastLinkCandidateAction = null;
+      clearBlockSelection();
+      focusedBlockId = null;
+      emitFocusChanged(null);
       void loadBlocks(request);
       void loadBacklinks(request);
-      void loadLinkCandidates(request);
-      scheduleLinkCandidateScan(request);
       void loadHierarchy(request);
     }
   });
@@ -487,6 +850,7 @@
         windowAnchorBlockId = null;
         blockHeights.clear();
         materializedFilePath = null;
+        progressiveBookRenderLimit = BOOK_INITIAL_RENDER_COUNT;
       }
 
       const loadedBlocks = await listBlocks(request.pageId);
@@ -519,18 +883,6 @@
     }
   }
 
-  function scheduleLinkCandidateScan(request: PageLoadRequest) {
-    if (compact || autoScannedLinkCandidatePages.has(request.pageId) || typeof window === "undefined") {
-      return;
-    }
-    autoScannedLinkCandidatePages.add(request.pageId);
-    window.setTimeout(() => {
-      if (isCurrentPageLoad(pageLoadState, request)) {
-        void loadLinkCandidates(request, true);
-      }
-    }, 800);
-  }
-
   async function loadLinkCandidates(
     request: PageLoadRequest = currentPageLoad(),
     scan = false
@@ -546,8 +898,8 @@
     linkCandidatesError = "";
     try {
       const candidates = scan
-        ? await discoverLinkCandidates(request.pageId, 50)
-        : await listLinkCandidates(request.pageId, "pending", 50);
+        ? await discoverLinkCandidates(request.pageId, LINK_CANDIDATE_REVIEW_LIMIT)
+        : await listLinkCandidates(request.pageId, "pending", LINK_CANDIDATE_REVIEW_LIMIT);
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       linkCandidates = candidates;
     } catch (e: any) {
@@ -560,27 +912,304 @@
     }
   }
 
-  async function handleAcceptLinkCandidate(candidate: LinkCandidate) {
+  async function handleFindLinks() {
+    if (linkCandidatesLoading || conceptEdgeBusy) return;
+    linkCandidatesRevealed = true;
+    await loadLinkCandidates(currentPageLoad(), true);
+  }
+
+  async function handleSuggestLinks() {
+    if (linkCandidatesLoading || conceptEdgeBusy) return;
+    const request = currentPageLoad();
+    linkCandidatesRevealed = true;
+    if (blocks.length === 0) {
+      await loadBlocks(request);
+      if (!isCurrentPageLoad(pageLoadState, request) || blocks.length === 0) return;
+    }
+    if (!isImportedBookPage) {
+      await loadLinkCandidates(request, true);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+    }
+    await handleCreateConceptEdges();
+  }
+
+  const LINK_CANDIDATE_CONTEXT_CHARS = 180;
+  const utf8TextEncoder = new TextEncoder();
+
+  function normalizedLinkCandidateText(text: string): string {
+    return text.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function normalizedSpellingText(text: string): string {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
+  function editDistance(a: string, b: string): number {
+    if (a === b) return 0;
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+
+    const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    const current = Array.from({ length: b.length + 1 }, () => 0);
+
+    for (let i = 1; i <= a.length; i += 1) {
+      current[0] = i;
+      for (let j = 1; j <= b.length; j += 1) {
+        const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
+        current[j] = Math.min(
+          previous[j] + 1,
+          current[j - 1] + 1,
+          previous[j - 1] + substitutionCost
+        );
+      }
+      for (let j = 0; j <= b.length; j += 1) {
+        previous[j] = current[j];
+      }
+    }
+
+    return previous[b.length];
+  }
+
+  function looksLikeSpellingCorrection(candidate: LinkCandidate): boolean {
+    if (candidate.source !== "semantic_concept") return false;
+    const anchor = normalizedSpellingText(candidate.anchor_text);
+    const target = normalizedSpellingText(candidate.to_page_title);
+    if (!anchor || !target || anchor === target) return false;
+    if (anchor[0] !== target[0]) return false;
+
+    const distance = editDistance(anchor, target);
+    const maxDistance = Math.max(1, Math.floor(Math.max(anchor.length, target.length) * 0.18));
+    return distance <= Math.min(maxDistance, 3);
+  }
+
+  function usesCanonicalTarget(candidate: LinkCandidate): boolean {
+    return candidate.source === "semantic_concept"
+      && normalizedLinkCandidateText(candidate.anchor_text) !== normalizedLinkCandidateText(candidate.to_page_title);
+  }
+
+  function utf8ByteOffsetToStringIndex(text: string, byteOffset: number): number {
+    const target = Math.max(0, byteOffset);
+    let bytes = 0;
+    for (let index = 0; index < text.length;) {
+      if (bytes >= target) return index;
+      const codePoint = text.codePointAt(index);
+      if (codePoint === undefined) return text.length;
+      const char = String.fromCodePoint(codePoint);
+      const nextBytes = bytes + utf8TextEncoder.encode(char).length;
+      if (nextBytes > target) return index;
+      bytes = nextBytes;
+      index += char.length;
+    }
+    return text.length;
+  }
+
+  function candidateRangeInContent(candidate: LinkCandidate, content: string): { start: number; end: number } | null {
+    const start = utf8ByteOffsetToStringIndex(content, candidate.anchor_start);
+    const end = utf8ByteOffsetToStringIndex(content, candidate.anchor_end);
+    if (start <= end && content.slice(start, end) === candidate.anchor_text) {
+      return { start, end };
+    }
+
+    const fallbackStart = content.toLowerCase().indexOf(candidate.anchor_text.toLowerCase());
+    if (fallbackStart >= 0) {
+      return { start: fallbackStart, end: fallbackStart + candidate.anchor_text.length };
+    }
+    return null;
+  }
+
+  function normalizeContextText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  function candidateDocumentPosition(candidate: LinkCandidate): { blockIndex: number; anchorStart: number } {
+    const visibleIndex = blockRenderState.visibleIndexById.get(candidate.from_block_id);
+    const blockIndex = visibleIndex ?? blocks.findIndex((block) => block.id === candidate.from_block_id);
+    return {
+      blockIndex: blockIndex < 0 ? Number.MAX_SAFE_INTEGER : blockIndex,
+      anchorStart: candidate.anchor_start,
+    };
+  }
+
+  function firstCandidateForReview(group: LinkCandidateGroup): LinkCandidate {
+    return uniqueOccurrenceCandidates(group.candidates)
+      .sort((a, b) => {
+        const aPos = candidateDocumentPosition(a);
+        const bPos = candidateDocumentPosition(b);
+        if (aPos.blockIndex !== bPos.blockIndex) return aPos.blockIndex - bPos.blockIndex;
+        return aPos.anchorStart - bPos.anchorStart;
+      })[0] ?? group.primary;
+  }
+
+  function linkCandidateContextPreview(group: LinkCandidateGroup): LinkCandidateContextPreview | null {
+    const candidate = firstCandidateForReview(group);
+    const block = blockRenderState.blockById.get(candidate.from_block_id)
+      ?? blocks.find((item) => item.id === candidate.from_block_id);
+    if (!block) return null;
+
+    const range = candidateRangeInContent(candidate, block.content);
+    if (!range) {
+      const blockIndex = blocks.findIndex((item) => item.id === candidate.from_block_id);
+      return {
+        candidate,
+        before: normalizeContextText(block.content.slice(0, LINK_CANDIDATE_CONTEXT_CHARS * 2)),
+        anchor: candidate.anchor_text,
+        after: "",
+        leadingEllipsis: false,
+        trailingEllipsis: block.content.length > LINK_CANDIDATE_CONTEXT_CHARS * 2,
+        blockLabel: blockIndex >= 0 ? `Block ${blockIndex + 1}` : "Matching block",
+      };
+    }
+
+    const previewStart = Math.max(0, range.start - LINK_CANDIDATE_CONTEXT_CHARS);
+    const previewEnd = Math.min(block.content.length, range.end + LINK_CANDIDATE_CONTEXT_CHARS);
+    const blockIndex = blocks.findIndex((item) => item.id === candidate.from_block_id);
+    return {
+      candidate,
+      before: normalizeContextText(block.content.slice(previewStart, range.start)),
+      anchor: normalizeContextText(block.content.slice(range.start, range.end)) || candidate.anchor_text,
+      after: normalizeContextText(block.content.slice(range.end, previewEnd)),
+      leadingEllipsis: previewStart > 0,
+      trailingEllipsis: previewEnd < block.content.length,
+      blockLabel: blockIndex >= 0 ? `Block ${blockIndex + 1}` : "Matching block",
+    };
+  }
+
+  async function handleRevealLinkCandidateGroup(group: LinkCandidateGroup) {
+    await revealLinkCandidateOccurrence(firstCandidateForReview(group));
+  }
+
+  async function revealLinkCandidateOccurrence(candidate: LinkCandidate) {
     linkCandidatesError = "";
+    if (linkCandidateRevealTimer !== undefined) {
+      window.clearTimeout(linkCandidateRevealTimer);
+      linkCandidateRevealTimer = undefined;
+    }
+
+    const revealed = await revealBlock(candidate.from_block_id, "center");
+    if (!revealed) {
+      linkCandidatesError = "Could not reveal this occurrence; refresh suggestions and try again.";
+      linkCandidatesRevealed = true;
+      return;
+    }
+
+    selectRevealedBlock(candidate.from_block_id);
+    await tick();
+
+    const blockEl = getRenderedBlockEl(candidate.from_block_id);
+    if (!blockEl) return;
+    const firstMatch = highlightTerm(blockEl, candidate.anchor_text);
+    firstMatch?.scrollIntoView({ block: "center", behavior: "smooth" });
+    linkCandidateRevealTimer = window.setTimeout(() => {
+      const currentBlockEl = getRenderedBlockEl(candidate.from_block_id);
+      if (currentBlockEl) clearHighlights(currentBlockEl);
+      linkCandidateRevealTimer = undefined;
+    }, 4500);
+  }
+
+  function linkCandidateOccurrenceKey(candidate: LinkCandidate): string {
+    return `${candidate.from_block_id}:${candidate.to_page_id}:${candidate.anchor_start}:${candidate.anchor_end}`;
+  }
+
+  function uniqueOccurrenceCandidates(candidates: LinkCandidate[]): LinkCandidate[] {
+    const seen = new Set<string>();
+    const unique: LinkCandidate[] = [];
+    for (const candidate of candidates) {
+      const key = linkCandidateOccurrenceKey(candidate);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(candidate);
+    }
+    return unique;
+  }
+
+  function sortedCandidatesForAccept(candidates: LinkCandidate[]): LinkCandidate[] {
+    return uniqueOccurrenceCandidates(candidates).sort((a, b) => {
+      if (a.from_block_id !== b.from_block_id) {
+        return a.from_block_id.localeCompare(b.from_block_id);
+      }
+      return b.anchor_start - a.anchor_start;
+    });
+  }
+
+  function groupLinkCandidates(candidates: LinkCandidate[]): LinkCandidateGroup[] {
+    const groups = new Map<string, LinkCandidateGroup>();
+
+    for (const candidate of candidates) {
+      const key = `${candidate.from_page_id}:${candidate.to_page_id}`;
+      const group = groups.get(key);
+      if (group) {
+        group.candidates.push(candidate);
+        if (!group.sources.includes(candidate.source)) group.sources.push(candidate.source);
+        if (!group.anchorTexts.some((text) => normalizedLinkCandidateText(text) === normalizedLinkCandidateText(candidate.anchor_text))) {
+          group.anchorTexts.push(candidate.anchor_text);
+        }
+        group.canFixSpelling = group.canFixSpelling || looksLikeSpellingCorrection(candidate);
+        group.hasCanonicalTarget = group.hasCanonicalTarget || usesCanonicalTarget(candidate);
+      } else {
+        groups.set(key, {
+          key,
+          candidates: [candidate],
+          primary: candidate,
+          occurrenceCount: 1,
+          anchorTexts: [candidate.anchor_text],
+          sources: [candidate.source],
+          canFixSpelling: looksLikeSpellingCorrection(candidate),
+          hasCanonicalTarget: usesCanonicalTarget(candidate),
+        });
+      }
+    }
+
+    for (const group of groups.values()) {
+      group.occurrenceCount = uniqueOccurrenceCandidates(group.candidates).length;
+      group.candidates.sort((a, b) => b.updated_at - a.updated_at);
+      group.primary = group.candidates[0] ?? group.primary;
+    }
+
+    return Array.from(groups.values()).sort((a, b) => b.primary.updated_at - a.primary.updated_at);
+  }
+
+  async function handleAcceptLinkCandidateGroup(group: LinkCandidateGroup) {
+    linkCandidatesError = "";
+    const accepted: LinkCandidate[] = [];
     try {
-      const accepted = await acceptLinkCandidate(candidate.id);
-      lastLinkCandidateAction = { kind: "accepted", candidate: accepted };
-      await reloadCurrentPageContent();
+      const candidatesToAccept = sortedCandidatesForAccept(group.candidates);
+      for (const candidate of candidatesToAccept) {
+        accepted.push(await acceptLinkCandidate(candidate.id));
+      }
+      const acceptedIds = new Set(accepted.map((candidate) => candidate.id));
+      const duplicateCandidates = group.candidates.filter((candidate) => !acceptedIds.has(candidate.id));
+      await Promise.all(duplicateCandidates.map((candidate) => dismissLinkCandidate(candidate.id)));
+      lastLinkCandidateAction = { kind: "accepted", candidates: accepted };
+      if (accepted.length > 0) {
+        pushUndo({
+          type: "accept_link_candidates",
+          pageId: page.id,
+          candidateIds: accepted.map((candidate) => candidate.id),
+        });
+      }
+      linkCandidatesRevealed = true;
+      await reloadCurrentPageContent({ loadCandidates: true });
       refreshPageTrees();
     } catch (e: any) {
+      if (accepted.length > 0) {
+        lastLinkCandidateAction = { kind: "accepted", candidates: accepted };
+      }
       linkCandidatesError = e?.toString() || "Failed to link suggestion";
+      linkCandidatesRevealed = true;
       await loadLinkCandidates(currentPageLoad(), true);
     }
   }
 
-  async function handleDismissLinkCandidate(candidate: LinkCandidate) {
+  async function handleDismissLinkCandidateGroup(group: LinkCandidateGroup) {
     linkCandidatesError = "";
     try {
-      const dismissed = await dismissLinkCandidate(candidate.id);
-      lastLinkCandidateAction = { kind: "dismissed", candidate: dismissed };
-      linkCandidates = linkCandidates.filter((item) => item.id !== candidate.id);
+      const dismissed = await Promise.all(group.candidates.map((candidate) => dismissLinkCandidate(candidate.id)));
+      lastLinkCandidateAction = { kind: "dismissed", candidates: dismissed };
+      const dismissedIds = new Set(dismissed.map((candidate) => candidate.id));
+      linkCandidates = linkCandidates.filter((item) => !dismissedIds.has(item.id));
     } catch (e: any) {
       linkCandidatesError = e?.toString() || "Failed to dismiss suggestion";
+      linkCandidatesRevealed = true;
       await loadLinkCandidates(currentPageLoad(), true);
     }
   }
@@ -591,10 +1220,20 @@
     linkCandidatesError = "";
     try {
       if (action.kind === "accepted") {
-        await undoLinkCandidateAccept(action.candidate.id);
-        await reloadCurrentPageContent();
+        for (const candidate of [...action.candidates].reverse()) {
+          await undoLinkCandidateAccept(candidate.id);
+        }
+        const undoneIds = new Set(action.candidates.map((candidate) => candidate.id));
+        removeUndoActions((undo) =>
+          undo.type === "accept_link_candidates" &&
+          undo.candidateIds.length === undoneIds.size &&
+          undo.candidateIds.every((id) => undoneIds.has(id))
+        );
+        linkCandidatesRevealed = true;
+        await reloadCurrentPageContent({ loadCandidates: true });
       } else {
-        await restoreLinkCandidate(action.candidate.id);
+        await Promise.all(action.candidates.map((candidate) => restoreLinkCandidate(candidate.id)));
+        linkCandidatesRevealed = true;
         await loadLinkCandidates();
       }
       lastLinkCandidateAction = null;
@@ -606,6 +1245,22 @@
 
   function navigateToCandidateTarget(candidate: LinkCandidate) {
     window.dispatchEvent(new CustomEvent("navigate-page", { detail: candidate.to_page_title }));
+  }
+
+  function linkCandidateSourceLabel(candidate: LinkCandidate): string {
+    return candidate.source === "semantic_concept" ? "AI concept" : "Exact mention";
+  }
+
+  function linkCandidateGroupSourceLabel(group: LinkCandidateGroup): string {
+    if (group.hasCanonicalTarget) return "Alias match";
+    if (group.sources.length > 1) return "Mixed";
+    return linkCandidateSourceLabel(group.primary);
+  }
+
+  function linkCandidateAnchorSummary(group: LinkCandidateGroup): string {
+    const quoted = group.anchorTexts.slice(0, 3).map((text) => `"${text}"`);
+    const extra = group.anchorTexts.length > 3 ? ` +${group.anchorTexts.length - 3} more` : "";
+    return `${quoted.join(", ")}${extra}`;
   }
 
   async function loadHierarchy(request: PageLoadRequest = currentPageLoad()) {
@@ -761,7 +1416,8 @@
 
   function handleFocus(blockId: string) {
     focusedBlockId = blockId;
-    selectedBlockIds = new Set();
+    emitFocusChanged(blockId);
+    clearBlockSelection();
     // Snapshot the block content before the user edits it
     const block = blockRenderState.blockById.get(blockId);
     if (block) {
@@ -788,6 +1444,119 @@
     preEditSnapshots.delete(blockId);
   }
 
+  function snapshotBlock(block: Block): Block {
+    return {
+      ...block,
+      properties: JSON.parse(JSON.stringify(block.properties ?? {})),
+    };
+  }
+
+  function blocksInTreeOrder(input: readonly Block[]): Block[] {
+    const arrayIndex = new Map(input.map((block, index) => [block.id, index]));
+    const childrenByParent = new Map<string | null, Block[]>();
+    for (const block of input) {
+      const siblings = childrenByParent.get(block.parent_id) ?? [];
+      siblings.push(block);
+      childrenByParent.set(block.parent_id, siblings);
+    }
+    for (const siblings of childrenByParent.values()) {
+      siblings.sort((a, b) => {
+        const orderDelta = a.order_index - b.order_index;
+        return orderDelta || (arrayIndex.get(a.id) ?? 0) - (arrayIndex.get(b.id) ?? 0);
+      });
+    }
+
+    const ordered: Block[] = [];
+    const seen = new Set<string>();
+    const visit = (parentId: string | null) => {
+      for (const child of childrenByParent.get(parentId) ?? []) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        ordered.push(child);
+        visit(child.id);
+      }
+    };
+    visit(null);
+    for (const block of input) {
+      if (!seen.has(block.id)) ordered.push(block);
+    }
+    return ordered;
+  }
+
+  function blocksWithDescendantsInDocumentOrder(rootIds: ReadonlySet<string>): Block[] {
+    const selectedOrDescendant = new Set<string>();
+    const orderedBlocks = blocksInTreeOrder(blocks);
+    const subtreeBlocks: Block[] = [];
+
+    for (const block of orderedBlocks) {
+      if (rootIds.has(block.id) || (block.parent_id && selectedOrDescendant.has(block.parent_id))) {
+        selectedOrDescendant.add(block.id);
+        subtreeBlocks.push(block);
+      }
+    }
+
+    return subtreeBlocks;
+  }
+
+  function undoSnapshotsForBlocks(sourceBlocks: readonly Block[]): Block[] {
+    return sourceBlocks.map((block) => snapshotBlock(preEditSnapshots.get(block.id) ?? block));
+  }
+
+  function pushBlockContentUndo(pageId: string, changes: BlockContentChange[]) {
+    const effective = changes.filter((change) => change.beforeContent !== change.afterContent);
+    if (effective.length === 0) return;
+    if (effective.length === 1) {
+      const change = effective[0];
+      pushUndo({
+        type: "update_block",
+        pageId,
+        blockId: change.blockId,
+        beforeContent: change.beforeContent,
+        afterContent: change.afterContent,
+      });
+      return;
+    }
+
+    pushUndo({
+      type: "update_blocks",
+      pageId,
+      changes: effective,
+    });
+  }
+
+  function reflectCurrentPageContentChanges(changes: BlockContentChange[]) {
+    const contentById = new Map(changes.map((change) => [change.blockId, change.afterContent]));
+    blocks = blocks.map((block) => {
+      const content = contentById.get(block.id);
+      return content === undefined ? block : { ...block, content };
+    });
+    refreshCollectionAfterMutation();
+    if (changes.some((change) => pageTreeReferencesChanged(change.beforeContent, change.afterContent))) {
+      refreshPageTrees();
+    }
+  }
+
+  async function applyCurrentPageContentChanges(changes: BlockContentChange[]): Promise<boolean> {
+    const effective = changes.filter((change) => change.beforeContent !== change.afterContent);
+    if (effective.length === 0) return false;
+
+    for (const change of effective) {
+      await updateBlock(change.blockId, change.afterContent);
+    }
+
+    pushBlockContentUndo(page.id, effective);
+    reflectCurrentPageContentChanges(effective);
+    return true;
+  }
+
+  function handleBlockContentChange(changedPageId: string, change: BlockContentChange) {
+    if (change.beforeContent === change.afterContent) return;
+    pushBlockContentUndo(changedPageId, [change]);
+    if (changedPageId === page.id) {
+      reflectCurrentPageContentChanges([change]);
+    }
+  }
+
   async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean) {
     try {
       const block = blocks.find((b) => b.id === blockId);
@@ -796,11 +1565,11 @@
       // Persist the current block content before any structural operation
       // (create/move), otherwise write-page operations can serialize stale empty text.
       if (block.content !== content) {
-        const referencesChanged = pageTreeReferencesChanged(block.content, content);
-        await updateBlock(blockId, content);
-        block.content = content;
-        blocks = [...blocks];
-        if (referencesChanged) refreshPageTrees();
+        await applyCurrentPageContentChanges([{
+          blockId,
+          beforeContent: block.content,
+          afterContent: content,
+        }]);
       }
 
       // Enter at the very start of a block inserts an empty sibling above it.
@@ -871,41 +1640,91 @@
     }
   }
 
-  async function handlePasteBlocks(blockId: string, pasteBlocks: import("../lib/htmlToMd").PasteBlock[]) {
+  async function handlePasteBlocks(
+    blockId: string,
+    pasteBlocks: import("../lib/htmlToMd").PasteBlock[],
+    anchorEdit?: { beforeContent: string; afterContent: string },
+  ) {
     try {
       const idx = blocks.findIndex((b) => b.id === blockId);
       const block = blocks[idx];
       if (!block) return;
 
+      const anchorBeforeContent = anchorEdit?.beforeContent ?? preEditSnapshots.get(blockId)?.content ?? block.content;
+      const anchorAfterContent = anchorEdit?.afterContent ?? block.content;
       const baseParentId = block.parent_id;
-      const newBlocks: Block[] = [];
+      const batch: CreateBlockBatchItem[] = [];
+      type ParentRef = { kind: "existing"; id: string | null } | { kind: "new"; index: number };
       // Track parent at each depth level. depth 0 siblings share baseParentId,
-      // depth 1+ items are children of the last block at depth-1.
-      const parentAtDepth: (string | null)[] = [baseParentId];
-      const orderAtDepth: number[] = [0];
+      // depth 1 items are children of the current block because the first pasted
+      // chunk is inserted into it, and deeper items attach to newly-created
+      // parents from the batch.
+      const parentAtDepth: ParentRef[] = [{ kind: "existing", id: baseParentId }, { kind: "existing", id: blockId }];
+      const orderAtDepth: number[] = [
+        block.order_index + 1,
+        blocks.filter((candidate) => candidate.parent_id === blockId).length,
+      ];
 
       for (const pb of pasteBlocks) {
         const depth = pb.depth;
+        const fallbackParentRef: ParentRef = { kind: "existing", id: baseParentId };
         // Determine parent: if depth > 0, parent is the last block at depth-1
-        const parentId = depth > 0 ? (parentAtDepth[depth] ?? parentAtDepth[parentAtDepth.length - 1] ?? baseParentId) : baseParentId;
+        const parentRef: ParentRef =
+          depth > 0
+            ? (parentAtDepth[depth] ?? parentAtDepth[parentAtDepth.length - 1] ?? fallbackParentRef)
+            : fallbackParentRef;
 
         // Get order index for this depth
         if (!orderAtDepth[depth]) orderAtDepth[depth] = 0;
         const order = orderAtDepth[depth]!;
         orderAtDepth[depth] = order + 1;
 
-        const newBlock = await createBlock(page.id, parentId, order, pb.content);
-        newBlocks.push(newBlock);
+        const batchIndex = batch.length;
+        batch.push({
+          parentId: parentRef.kind === "existing" ? parentRef.id : undefined,
+          parentIndex: parentRef.kind === "new" ? parentRef.index : undefined,
+          orderIndex: order,
+          content: pb.content,
+        });
 
         // This block can be a parent for deeper items
-        parentAtDepth[depth + 1] = newBlock.id;
+        parentAtDepth[depth + 1] = { kind: "new", index: batchIndex };
         // Reset child order counters for deeper levels
         for (let d = depth + 1; d < orderAtDepth.length; d++) {
           orderAtDepth[d] = 0;
         }
       }
-      // Insert all new blocks after the current block
-      blocks = [...blocks.slice(0, idx + 1), ...newBlocks, ...blocks.slice(idx + 1)];
+      let newBlocks = await createBlocks(page.id, batch);
+      const siblingInsertCount = pasteBlocks.filter((pb) => pb.depth === 0).length;
+      if (siblingInsertCount > 0) {
+        const pastedSiblingIds = newBlocks
+          .filter((newBlock) => newBlock.parent_id === baseParentId)
+          .sort((a, b) => a.order_index - b.order_index)
+          .map((newBlock) => newBlock.id);
+        const finalSiblingIds = blocks
+          .filter((candidate) => candidate.parent_id === baseParentId)
+          .sort((a, b) => a.order_index - b.order_index)
+          .flatMap((candidate) => candidate.id === blockId ? [candidate.id, ...pastedSiblingIds] : [candidate.id]);
+        await reorderBlocks(page.id, finalSiblingIds);
+        const orderById = new Map(finalSiblingIds.map((id, order) => [id, order]));
+        blocks = blocks.map((existing) => {
+          const order = orderById.get(existing.id);
+          return order === undefined ? existing : { ...existing, order_index: order };
+        });
+        newBlocks = newBlocks.map((created) => {
+          const order = orderById.get(created.id);
+          return order === undefined ? created : { ...created, order_index: order };
+        });
+      }
+      pushUndo({
+        type: "insert_blocks",
+        pageId: page.id,
+        anchorBlockId: blockId,
+        beforeContent: anchorBeforeContent,
+        afterContent: anchorAfterContent,
+        insertedBlocks: newBlocks.map(snapshotBlock),
+      });
+      blocks = blocksInTreeOrder([...blocks, ...newBlocks]);
       refreshCollectionAfterMutation();
       if (pasteBlocks.some((block) => pageTreeReferencesChanged("", block.content))) {
         refreshPageTrees();
@@ -944,21 +1763,30 @@
   async function handleDelete(blockId: string) {
     console.log("[DELETE] handleDelete called, blockId:", blockId, "total blocks:", blocks.length);
     if (blocks.length <= 1) { console.log("[DELETE] skipping - only 1 block left"); return; }
-    const block = blocks.find((b) => b.id === blockId);
+    const subtree = blocksWithDescendantsInDocumentOrder(new Set([blockId]));
+    const block = subtree[0];
     if (block) {
-      // Use pre-edit snapshot if available (has original content before clearing)
-      const snapshot = preEditSnapshots.get(blockId) || block;
-      console.log("[DELETE] pushing to undo stack, content:", snapshot.content.substring(0, 40));
-      pushUndo({ type: "delete_blocks", blocks: [snapshot], pageId: page.id });
-      preEditSnapshots.delete(blockId);
+      const undoBlocks = undoSnapshotsForBlocks(subtree);
+      console.log("[DELETE] pushing to undo stack, content:", undoBlocks[0].content.substring(0, 40));
+      await deleteBlocks(page.id, undoBlocks.map((snapshot) => snapshot.id));
+      pushUndo({ type: "delete_blocks", blocks: undoBlocks, pageId: page.id });
+      for (const snapshot of undoBlocks) {
+        preEditSnapshots.delete(snapshot.id);
+      }
     } else {
       console.log("[DELETE] block not found!");
+      return;
     }
-    await deleteBlock(blockId);
     const idx = blocks.findIndex((b) => b.id === blockId);
-    blocks = blocks.filter((b) => b.id !== blockId);
+    const deletedIds = new Set(subtree.map((item) => item.id));
+    const remaining = blocks.filter((b) => !deletedIds.has(b.id));
+    if (remaining.length === 0) {
+      blocks = [await createBlock(page.id, null, 0, "")];
+    } else {
+      blocks = remaining;
+    }
     refreshCollectionAfterMutation();
-    if (block && pageTreeReferencesChanged(block.content, "")) refreshPageTrees();
+    if (subtree.some((item) => pageTreeReferencesChanged(item.content, ""))) refreshPageTrees();
     // Focus previous block
     const prevIdx = Math.max(0, idx - 1);
     if (blocks[prevIdx]) {
@@ -970,6 +1798,17 @@
         }
       });
     }
+  }
+
+  function focusBlockForEditing(blockId: string) {
+    requestAnimationFrame(() => {
+      focusedBlockId = blockId;
+      const el = document.querySelector(`[data-block-id="${blockId}"] .block-content`);
+      if (el) {
+        el.scrollIntoView({ block: "nearest" });
+        (el as HTMLElement).click();
+      }
+    });
   }
 
   function handleNavigate(blockId: string, direction: "up" | "down", caretX?: number) {
@@ -996,9 +1835,11 @@
     // Persist latest editor text before structural move. This avoids
     // move/write operations serializing stale empty content from DB.
     if (typeof currentContent === "string" && currentContent !== block.content) {
-      await persistBlockContentIfChanged(block, currentContent, (id, value) => updateBlock(id, value));
-      blocks = [...blocks];
-      refreshCollectionAfterMutation();
+      await applyCurrentPageContentChanges([{
+        blockId: block.id,
+        beforeContent: block.content,
+        afterContent: currentContent,
+      }]);
     }
 
     console.log("[telemetry] indent start", JSON.stringify({
@@ -1071,6 +1912,7 @@
    */
   async function handleIndentSelection(direction: "in" | "out") {
     if (selectedBlockIds.size === 0) return;
+    promotedSelectionCopyText = null;
     const plan = planIndentSelection(blocks, selectedBlockIds, direction);
     if (plan.moves.length === 0) return; // nothing movable — silent no-op
 
@@ -1088,6 +1930,7 @@
   }
 
   function handleBulletClick(blockId: string, event: MouseEvent) {
+    promotedSelectionCopyText = null;
     if (event.shiftKey && selectedBlockIds.size > 0) {
       // Range select from last selected to this block
       const lastSelected = [...selectedBlockIds].pop()!;
@@ -1109,6 +1952,11 @@
       }
       selectedBlockIds = newSelection;
     }
+    if (selectedBlockIds.size > 0) {
+      claimBlockSelectionOwner();
+    } else {
+      releaseBlockSelectionOwner();
+    }
     // Clear any active editor focus AND actively blur the DOM so subsequent
     // keydowns (Tab, etc.) reach the window handler instead of a stale
     // CodeMirror editor that our `focusedBlockId` reset alone doesn't
@@ -1124,34 +1972,113 @@
 
   async function handleDeleteSelected() {
     if (selectedBlockIds.size === 0) return;
-    const toDelete = [...selectedBlockIds];
+    const selectedIds = new Set(selectedBlockIds);
+    const blocksToDelete = blocksWithDescendantsInDocumentOrder(selectedIds);
+    if (blocksToDelete.length === 0) return;
+    const deletedIds = new Set(blocksToDelete.map((block) => block.id));
+    const firstDeletedIdx = blocks.findIndex((b) => deletedIds.has(b.id));
 
     // Save deleted blocks for undo
-    const deletedBlocks = blocks.filter((b) => selectedBlockIds.has(b.id));
+    const deletedBlocks = undoSnapshotsForBlocks(blocksToDelete);
+    await deleteBlocks(page.id, deletedBlocks.map((block) => block.id));
     pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
 
-    for (const id of toDelete) {
-      await deleteBlock(id);
+    for (const block of deletedBlocks) {
+      preEditSnapshots.delete(block.id);
     }
 
-    const remaining = blocks.filter((b) => !selectedBlockIds.has(b.id));
+    let focusAfterDelete: Block | null = null;
+    const remaining = blocks.filter((b) => !deletedIds.has(b.id));
     if (remaining.length === 0) {
       // All blocks deleted — create a fresh empty block
       const newBlock = await createBlock(page.id, null, 0, "");
       blocks = [newBlock];
+      focusAfterDelete = newBlock;
     } else {
       blocks = remaining;
+      focusAfterDelete =
+        remaining[Math.min(Math.max(firstDeletedIdx, 0), remaining.length - 1)] ??
+        remaining[remaining.length - 1] ??
+        null;
     }
-    selectedBlockIds = new Set();
+    clearBlockSelection();
     refreshCollectionAfterMutation();
     if (deletedBlocks.some((block) => pageTreeReferencesChanged(block.content, ""))) {
       refreshPageTrees();
+    }
+    if (focusAfterDelete) {
+      focusBlockForEditing(focusAfterDelete.id);
     }
   }
 
   let analyzingSelection = $state(false);
   let analyzeSelectionError = $state("");
   let analyzeSelectionProgress = $state("");
+  let startingConceptEdges = $state(false);
+  let conceptEdgesError = $state("");
+  let conceptEdgesMessage = $state("");
+  let seenFinishedConceptEdgeJobs = new Set<string>();
+  const conceptEdgeJob = $derived.by(() =>
+    jobs.find(
+      (job) =>
+        job.kind === "ai_concept_edges" &&
+        job.link?.page_id === page.id &&
+        job.status === "running"
+    )
+  );
+  const conceptEdgeBusy = $derived(startingConceptEdges || !!conceptEdgeJob);
+  const conceptEdgeProgress = $derived(
+    conceptEdgeJob?.message ?? (startingConceptEdges ? "Starting concept edge job..." : "")
+  );
+  const suggestLinksButtonLabel = $derived(
+    linkCandidatesLoading ? "Scanning..." : conceptEdgeBusy ? "Finding..." : "Suggest links"
+  );
+
+  $effect(() => {
+    const pageId = page.id;
+    for (const job of jobs) {
+      if (
+        job.kind !== "ai_concept_edges" ||
+        job.link?.page_id !== pageId ||
+        !isTerminal(job.status) ||
+        seenFinishedConceptEdgeJobs.has(job.id)
+      ) {
+        continue;
+      }
+
+      seenFinishedConceptEdgeJobs.add(job.id);
+      if (job.status === "succeeded") {
+        conceptEdgesError = "";
+        conceptEdgesMessage = job.message ?? "Concept edge discovery finished.";
+        linkCandidatesRevealed = true;
+        void loadLinkCandidates(currentPageLoad());
+        refreshPageTrees();
+      } else if (job.status === "failed") {
+        conceptEdgesError = job.error ?? "Concept edge discovery failed.";
+      }
+    }
+  });
+
+  async function handleCreateConceptEdges() {
+    if (conceptEdgeBusy || linkCandidatesLoading) return;
+    const request = currentPageLoad();
+    startingConceptEdges = true;
+    linkCandidatesRevealed = true;
+    conceptEdgesError = "";
+    conceptEdgesMessage = "Starting concept edge job...";
+    try {
+      await aiCreateConceptEdges(request.pageId);
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      conceptEdgesMessage = "Concept edge job started. Watch Jobs for progress.";
+    } catch (e) {
+      if (!isCurrentPageLoad(pageLoadState, request)) return;
+      conceptEdgesError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (isCurrentPageLoad(pageLoadState, request)) {
+        startingConceptEdges = false;
+      }
+    }
+  }
 
   /// Summarizes the selected blocks' content, in-place wraps the AI's
   /// identified key terms as `[[wiki-link]]`s wherever they verbatim occur
@@ -1193,13 +2120,18 @@
 
       if (allTags.length) {
         analyzeSelectionProgress = "Linking key terms...";
+        const wrapChanges: BlockContentChange[] = [];
         for (const block of selected) {
           const wrapped = await wrapKnownTermsInText(block.content, allTags);
           if (wrapped !== block.content) {
-            await updateBlock(block.id, wrapped);
-            blocks = blocks.map((b) => (b.id === block.id ? { ...b, content: wrapped } : b));
+            wrapChanges.push({
+              blockId: block.id,
+              beforeContent: block.content,
+              afterContent: wrapped,
+            });
           }
         }
+        await applyCurrentPageContentChanges(wrapChanges);
       }
 
       const lastBlock = selected[selected.length - 1];
@@ -1233,7 +2165,15 @@
 
       const insertAt = blocks.findIndex((b) => b.id === lastBlock.id);
       blocks = [...blocks.slice(0, insertAt + 1), ...created, ...blocks.slice(insertAt + 1)];
-      selectedBlockIds = new Set();
+      pushUndo({
+        type: "insert_blocks",
+        pageId: page.id,
+        anchorBlockId: null,
+        beforeContent: null,
+        afterContent: null,
+        insertedBlocks: created.map(snapshotBlock),
+      });
+      clearBlockSelection();
       refreshCollectionAfterMutation();
       refreshPageTrees();
     } catch (e) {
@@ -1243,6 +2183,350 @@
       analyzingSelection = false;
       analyzeSelectionProgress = "";
     }
+  }
+
+  function selectedBlocksInDocumentOrder(): Block[] {
+    return blocks.filter((block) => selectedBlockIds.has(block.id));
+  }
+
+  function blocksForSelectionIds(ids: readonly string[]): Block[] {
+    const selected = new Set(ids);
+    return blocks.filter((block) => selected.has(block.id));
+  }
+
+  function contextMenuBlocks(): Block[] {
+    return selectionMenu ? blocksForSelectionIds(selectionMenu.blockIds) : selectedBlocksInDocumentOrder();
+  }
+
+  function selectedBlocksWithDescendantsInDocumentOrder(): Block[] {
+    return blocksWithDescendantsInDocumentOrder(selectedBlockIds);
+  }
+
+  function selectedClipboardBlocks() {
+    return selectedBlocksWithDescendantsInDocumentOrder().map((block) => ({
+      content: block.content,
+      depth: getBlockDepth(block.id),
+    }));
+  }
+
+  function selectedClipboardPayload(): { markdown: string; plainText: string } {
+    const clipboardBlocks = selectedClipboardBlocks();
+    const markdown = formatBlocksAsOutlineMarkdown(clipboardBlocks);
+    const selectedText = promotedSelectionCopyText?.trim();
+    const plainText = selectedText || formatBlocksAsPlainText(clipboardBlocks) || markdown;
+    return { markdown, plainText };
+  }
+
+  function selectedBlockMarkdown(): string {
+    return selectedClipboardPayload().markdown;
+  }
+
+  function selectedBlockPlainText(): string {
+    return selectedClipboardPayload().plainText;
+  }
+
+  function countOccurrences(text: string, needle: string): number {
+    if (!needle) return 0;
+    let count = 0;
+    let index = text.indexOf(needle);
+    while (index !== -1) {
+      count += 1;
+      index = text.indexOf(needle, index + needle.length);
+    }
+    return count;
+  }
+
+  function nthIndexOf(text: string, needle: string, occurrence: number): number {
+    let remaining = Math.max(0, occurrence);
+    let index = text.indexOf(needle);
+    while (index !== -1 && remaining > 0) {
+      remaining -= 1;
+      index = text.indexOf(needle, index + needle.length);
+    }
+    return index;
+  }
+
+  function renderedSelectionPrefix(range: Range): string {
+    const startEl = range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    const renderedRoot = startEl?.closest?.(".rendered-content");
+    if (!renderedRoot) return "";
+
+    const prefixRange = document.createRange();
+    prefixRange.selectNodeContents(renderedRoot);
+    prefixRange.setEnd(range.startContainer, range.startOffset);
+    const prefix = prefixRange.toString();
+    prefixRange.detach();
+    return prefix.replace(/\u00a0/g, " ");
+  }
+
+  function nativeSelectionMakeLinkAction(): SelectionMakeLinkAction | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+
+    const range = selection.getRangeAt(0);
+    const startBlockId = blockIdFromNode(range.startContainer);
+    const endBlockId = blockIdFromNode(range.endContainer);
+    if (!startBlockId || startBlockId !== endBlockId) return null;
+
+    const text = selection.toString().replace(/\u00a0/g, " ").trim();
+    if (!text || text.includes("\n")) return null;
+
+    const block = blockRenderState.blockById.get(startBlockId);
+    if (!block) return null;
+
+    const occurrence = countOccurrences(renderedSelectionPrefix(range), text);
+    const from = nthIndexOf(block.content, text, occurrence);
+
+    return {
+      blockId: startBlockId,
+      from: from >= 0 ? from : null,
+      to: from >= 0 ? from + text.length : null,
+      text,
+    };
+  }
+
+  function captureNativeSelectionMakeLinkAction(): SelectionMakeLinkAction | null {
+    const action = nativeSelectionMakeLinkAction();
+    if (action) {
+      lastSelectionMakeLinkAction = { ...action, capturedAt: Date.now() };
+    }
+    return action;
+  }
+
+  function cachedSelectionMakeLinkAction(blockId: string): SelectionMakeLinkAction | null {
+    const action = lastSelectionMakeLinkAction;
+    if (!action || action.blockId !== blockId) return null;
+    if (Date.now() - action.capturedAt > SELECTION_MAKE_LINK_CACHE_MS) {
+      lastSelectionMakeLinkAction = null;
+      return null;
+    }
+    const { capturedAt: _capturedAt, ...makeLink } = action;
+    return makeLink;
+  }
+
+  function currentMakeLinkRange(action: SelectionMakeLinkAction, content: string): { from: number; to: number } | null {
+    if (
+      action.from !== null &&
+      action.to !== null &&
+      content.slice(action.from, action.to) === action.text
+    ) {
+      return { from: action.from, to: action.to };
+    }
+    const fallback = content.indexOf(action.text);
+    return fallback < 0 ? null : { from: fallback, to: fallback + action.text.length };
+  }
+
+  async function makeSelectionLink() {
+    const action = selectionMenu?.makeLink;
+    if (!action) return;
+
+    const block = blockRenderState.blockById.get(action.blockId);
+    if (!block) {
+      showSelectionCopyMessage("Block changed; select the text again");
+      selectionMenu = null;
+      return;
+    }
+
+    const range = currentMakeLinkRange(action, block.content);
+    if (!range) {
+      showSelectionCopyMessage("Text changed; select it again");
+      selectionMenu = null;
+      return;
+    }
+
+    const linked = wrapPageLinkText(block.content, range.from, range.to);
+    await applyCurrentPageContentChanges([{
+      blockId: action.blockId,
+      beforeContent: block.content,
+      afterContent: linked.doc,
+    }]);
+    clearBlockSelection();
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function selectedBlocksContainTask(): boolean {
+    return contextMenuBlocks().some((block) => isTaskContent(block.content));
+  }
+
+  function selectedBlocksContainPlainBullet(): boolean {
+    return contextMenuBlocks().some((block) => !isTaskContent(block.content));
+  }
+
+  async function convertSelectedBlocks(kind: "task-to-bullet" | "bullet-to-todo") {
+    const selected = contextMenuBlocks();
+    if (selected.length === 0) {
+      selectionMenu = null;
+      showSelectionCopyMessage("Block changed; select it again");
+      return;
+    }
+
+    const updates: BlockContentChange[] = [];
+    for (const block of selected) {
+      const nextContent =
+        kind === "task-to-bullet"
+          ? taskToBulletContent(block.content)
+          : bulletToTodoContent(block.content);
+      if (nextContent !== block.content) {
+        updates.push({
+          blockId: block.id,
+          beforeContent: block.content,
+          afterContent: nextContent,
+        });
+      }
+    }
+
+    if (updates.length === 0) {
+      selectionMenu = null;
+      return;
+    }
+
+    await applyCurrentPageContentChanges(updates);
+    promotedSelectionCopyText = null;
+    selectionMenu = null;
+  }
+
+  function showSelectionCopyMessage(message: string) {
+    selectionCopyMessage = message;
+    if (selectionCopyTimer !== undefined) {
+      window.clearTimeout(selectionCopyTimer);
+    }
+    selectionCopyTimer = window.setTimeout(() => {
+      selectionCopyMessage = "";
+      selectionCopyTimer = undefined;
+    }, 1600);
+  }
+
+  async function writeClipboardText(text: string) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch {
+      // WebKitGTK can reject the async Clipboard API even from a user gesture.
+    }
+
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.style.position = "fixed";
+    scratch.style.left = "-9999px";
+    scratch.style.opacity = "0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    const copied = document.execCommand("copy");
+    scratch.remove();
+    if (!copied) {
+      throw new Error("clipboard text API is unavailable");
+    }
+  }
+
+  async function copySelectedBlocks() {
+    const { markdown } = selectedClipboardPayload();
+    if (!markdown) return;
+    try {
+      await writeClipboardText(markdown);
+      selectionMenu = null;
+      showSelectionCopyMessage("Copied");
+    } catch (e) {
+      showSelectionCopyMessage(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function cutSelectedBlocks() {
+    const { markdown } = selectedClipboardPayload();
+    if (!markdown) return;
+    try {
+      await writeClipboardText(markdown);
+      await handleDeleteSelected();
+      showSelectionCopyMessage("Cut");
+    } catch (e) {
+      showSelectionCopyMessage(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function handleCopySelection(e: ClipboardEvent) {
+    if (!canHandleBlockSelectionEvent(e)) return;
+    const { markdown, plainText } = selectedClipboardPayload();
+    if (!markdown || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", plainText);
+    e.clipboardData.setData("text/markdown", markdown);
+    selectionMenu = null;
+    showSelectionCopyMessage("Copied");
+  }
+
+  function handleCutSelection(e: ClipboardEvent) {
+    if (!canHandleBlockSelectionEvent(e)) return;
+    const { markdown, plainText } = selectedClipboardPayload();
+    if (!markdown || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", plainText);
+    e.clipboardData.setData("text/markdown", markdown);
+    selectionMenu = null;
+    void (async () => {
+      try {
+        await handleDeleteSelected();
+        showSelectionCopyMessage("Cut");
+      } catch (error) {
+        showSelectionCopyMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }
+
+  function handleSelectionContextMenu(e: MouseEvent) {
+    const blockId = blockIdFromNode(e.target as Node | null);
+    if (!blockId) return;
+
+    const clickedBlock = blockRenderState.blockById.get(blockId);
+    const makeLink = clickedBlock
+      ? captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId)
+      : null;
+    // Journal/backlink views can mount multiple PageContent instances, and
+    // every one receives the same window-level contextmenu event. Only the
+    // instance that owns the clicked block may prevent the native menu or render
+    // the Grafium menu; otherwise a sibling page can swallow right-click and
+    // leave no menu at all.
+    if (!clickedBlock && !makeLink) return;
+
+    const currentSelectedBlocks = selectedBlocksInDocumentOrder();
+    const selectionIncludesClickedBlock =
+      selectedBlockIds.has(blockId) && currentSelectedBlocks.some((block) => block.id === blockId);
+    const menuBlocks = selectionIncludesClickedBlock
+      ? currentSelectedBlocks
+      : clickedBlock
+        ? [clickedBlock]
+        : [];
+    const menuBlockIds = menuBlocks.map((block) => block.id);
+
+    if (menuBlocks.length === 0 && !makeLink) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if (!selectionIncludesClickedBlock && clickedBlock) {
+      selectedBlockIds = new Set([blockId]);
+      claimBlockSelectionOwner();
+      promotedSelectionCopyText = null;
+    }
+    selectionMenu = {
+      ...contextMenuPositionFromEvent(e, {
+        width: 230,
+        height: 92
+          + (makeLink ? 42 : 0)
+          + (menuBlocks.some((block) => isTaskContent(block.content)) ? 42 : 0)
+          + (menuBlocks.some((block) => !isTaskContent(block.content)) ? 42 : 0),
+      }),
+      blockIds: menuBlockIds,
+      blockCount: menuBlocks.length,
+      canTurnTasksToBullets: menuBlocks.some((block) => isTaskContent(block.content)),
+      canTurnBulletsToTodos: menuBlocks.some((block) => !isTaskContent(block.content)),
+      ...(makeLink ? { makeLink } : {}),
+    };
+  }
+
+  function closeSelectionMenu() {
+    selectionMenu = null;
   }
 
   /**
@@ -1289,8 +2573,11 @@
       next.add(blocks[i].id);
     }
 
+    promotedSelectionCopyText = sel.toString().trim() || null;
     selectedBlockIds = next;
+    claimBlockSelectionOwner();
     focusedBlockId = null;
+    lastSelectionMakeLinkAction = null;
     sel.removeAllRanges();
     const active = document.activeElement as HTMLElement | null;
     if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
@@ -1300,7 +2587,81 @@
 
   function handleSelectionMouseUp() {
     // Defer so the browser has committed the final range for this drag.
-    setTimeout(promoteTextSelectionToBlocks, 0);
+    setTimeout(() => {
+      captureNativeSelectionMakeLinkAction();
+      promoteTextSelectionToBlocks();
+    }, 0);
+  }
+
+  function blockIdAtPoint(x: number, y: number): string | null {
+    const node = document.elementFromPoint(x, y);
+    return blockIdFromNode(node);
+  }
+
+  function setDraggedBlockSelection(startId: string, endId: string) {
+    const startIdx = blocks.findIndex((block) => block.id === startId);
+    const endIdx = blocks.findIndex((block) => block.id === endId);
+    if (startIdx === -1 || endIdx === -1) return;
+
+    const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+    const next = new Set<string>();
+    for (let i = from; i <= to; i++) {
+      next.add(blocks[i].id);
+    }
+
+    promotedSelectionCopyText = null;
+    selectedBlockIds = next;
+    claimBlockSelectionOwner();
+    focusedBlockId = null;
+    selectionMenu = null;
+    lastSelectionMakeLinkAction = null;
+    window.getSelection()?.removeAllRanges();
+
+    const active = document.activeElement as HTMLElement | null;
+    if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
+      active.blur();
+    }
+  }
+
+  function handleBlockSelectionPointerDown(e: PointerEvent) {
+    if (useUnifiedEditorPrototype || e.button !== 0) return;
+    lastSelectionMakeLinkAction = null;
+    const startBlockId = blockIdFromNode(e.target as Node | null);
+    if (!startBlockId) return;
+    blockSelectionDrag = {
+      pointerId: e.pointerId,
+      startBlockId,
+      started: false,
+      startX: e.clientX,
+      startY: e.clientY,
+    };
+  }
+
+  function handleBlockSelectionPointerMove(e: PointerEvent) {
+    const drag = blockSelectionDrag;
+    if (!drag || drag.pointerId !== e.pointerId || (e.buttons & 1) === 0) return;
+    if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 4) return;
+
+    const endBlockId = blockIdAtPoint(e.clientX, e.clientY);
+    if (!endBlockId || endBlockId === drag.startBlockId) return;
+
+    drag.started = true;
+    setDraggedBlockSelection(drag.startBlockId, endBlockId);
+    e.preventDefault();
+  }
+
+  function handleBlockSelectionPointerUp(e: PointerEvent) {
+    if (blockSelectionDrag?.pointerId !== e.pointerId) return;
+    if (blockSelectionDrag.started) {
+      e.preventDefault();
+    }
+    blockSelectionDrag = null;
+  }
+
+  function handleBlockSelectionPointerCancel(e: PointerEvent) {
+    if (blockSelectionDrag?.pointerId === e.pointerId) {
+      blockSelectionDrag = null;
+    }
   }
 
   /**
@@ -1316,7 +2677,7 @@
   }
 
   function handleKeydownForSelection(e: KeyboardEvent) {
-    if (selectedBlockIds.size === 0) return;
+    if (!canHandleBlockSelectionEvent(e)) return;
     if (isTabKey(e)) {
       // Selection presence is the intent signal — no need to consult
       // document.activeElement. Multi-block Tab always takes precedence over
@@ -1324,11 +2685,14 @@
       // let the browser move focus and clear the selection).
       e.preventDefault();
       void handleIndentSelection(e.shiftKey ? "out" : "in");
+    } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "x") {
+      e.preventDefault();
+      void cutSelectedBlocks();
     } else if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       handleDeleteSelected();
     } else if (e.key === "Escape") {
-      selectedBlockIds = new Set();
+      clearBlockSelection();
     }
   }
 
@@ -1344,11 +2708,21 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydownForSelection} onmouseup={handleSelectionMouseUp} />
+<svelte:window
+  onkeydown={handleKeydownForSelection}
+  onpointermove={handleBlockSelectionPointerMove}
+  onpointerup={handleBlockSelectionPointerUp}
+  onpointercancel={handleBlockSelectionPointerCancel}
+  onmouseup={handleSelectionMouseUp}
+  oncopy={handleCopySelection}
+  oncut={handleCutSelection}
+  oncontextmenu={handleSelectionContextMenu}
+  onclick={closeSelectionMenu}
+/>
 
-<div class="page-content" class:compact>
+<div class="page-content" bind:this={pageContentEl} class:compact class:bookPage={isImportedBookPage}>
   <div class="page-heading">
-    <h1 class="page-title">{page.title}</h1>
+    <h1 class="page-title">{displayPageTitle}</h1>
     <div class="page-heading-actions">
       {#if !compact}
         <PageMenu
@@ -1360,23 +2734,29 @@
         <button
           class="prototype-toggle"
           type="button"
-          onclick={() => loadLinkCandidates(currentPageLoad(), true)}
-          disabled={linkCandidatesLoading}
-          title="Scan this page for plain mentions that can become real links"
+          onclick={handleSuggestLinks}
+          disabled={linkCandidatesLoading || conceptEdgeBusy || blocks.length === 0}
+          title="Find reviewable link suggestions: exact page-title mentions and AI concept edges"
         >
-          {linkCandidatesLoading ? "Scanning..." : "Find links"}
+          {suggestLinksButtonLabel}
         </button>
       {/if}
       <button
         class="prototype-toggle"
         type="button"
         onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
-        title="Try the one-surface editor prototype for cross-block text selection"
+        title="Try the experimental one-surface editor for cross-block text selection on this page/day"
       >
-        {useUnifiedEditorPrototype ? "Classic block editor" : "Unified editor prototype"}
+        {useUnifiedEditorPrototype ? "Classic block editor" : "Experimental continuous editor"}
       </button>
     </div>
   </div>
+
+  {#if !compact && (conceptEdgeBusy || conceptEdgesError || conceptEdgesMessage)}
+    <div class="concept-edge-status" class:error={!!conceptEdgesError} role="status">
+      {conceptEdgesError || conceptEdgeProgress || conceptEdgesMessage || "Finding concept edges..."}
+    </div>
+  {/if}
 
   {#if !compact && collectionKind !== null}
     <CollectionMembers
@@ -1403,33 +2783,103 @@
       >
         {analyzingSelection ? (analyzeSelectionProgress || "Analyzing…") : "Analyze Selected"}
       </button>
+      <button class="selection-toolbar-btn" onclick={copySelectedBlocks} disabled={analyzingSelection}>
+        Copy
+      </button>
       <button class="selection-toolbar-btn danger" onclick={handleDeleteSelected} disabled={analyzingSelection}>
         Delete
       </button>
-      <button class="selection-toolbar-btn" onclick={() => { selectedBlockIds = new Set(); }} disabled={analyzingSelection}>
+      <button
+        class="selection-toolbar-btn"
+        onclick={clearBlockSelection}
+        disabled={analyzingSelection}
+      >
         Clear
       </button>
+      {#if selectionCopyMessage}
+        <span class="selection-copy-status">{selectionCopyMessage}</span>
+      {/if}
     </div>
     {#if analyzeSelectionError}
       <div class="selection-toolbar-error">{analyzeSelectionError}</div>
     {/if}
   {/if}
 
-  {#if !compact && (linkCandidates.length > 0 || linkCandidatesLoading || linkCandidatesError || lastLinkCandidateAction)}
+  {#if selectionMenu}
+    <div
+      class="selection-context-menu app-context-menu"
+      style={`left: ${selectionMenu.x}px; top: ${selectionMenu.y}px;`}
+      role="menu"
+      tabindex="-1"
+      onpointerdown={(e) => e.stopPropagation()}
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => { if (e.key === "Escape") selectionMenu = null; }}
+    >
+      {#if selectionMenu.makeLink}
+        <button
+          type="button"
+          role="menuitem"
+          onclick={() => void makeSelectionLink()}
+        >
+          Make link
+        </button>
+      {/if}
+      {#if selectionMenu.canTurnTasksToBullets}
+       <button
+         type="button"
+         role="menuitem"
+         onclick={() => void convertSelectedBlocks("task-to-bullet")}
+       >
+         {selectionMenu.blockCount > 1 ? "Turn tasks into bullets" : "Turn task into bullet"}
+       </button>
+      {/if}
+      {#if selectionMenu.canTurnBulletsToTodos}
+       <button
+         type="button"
+         role="menuitem"
+         onclick={() => void convertSelectedBlocks("bullet-to-todo")}
+       >
+         {selectionMenu.blockCount > 1 ? "Turn bullets into TODOs" : "Turn bullet into TODO"}
+       </button>
+      {/if}
+      <button type="button" role="menuitem" onclick={copySelectedBlocks}>Copy selection</button>
+      <button
+        type="button"
+        role="menuitem"
+        onclick={clearBlockSelection}
+      >
+        Clear selection
+      </button>
+    </div>
+  {/if}
+
+  {#if !compact && (linkCandidatesRevealed || linkCandidates.length > 0 || linkCandidatesLoading || linkCandidatesError || lastLinkCandidateAction)}
     <div class="link-candidates-panel">
       <div class="link-candidates-head">
         <div>
           <div class="link-candidates-title">Suggested links</div>
-          <div class="link-candidates-subtitle">Plain mentions that could become real graph edges.</div>
+          <div class="link-candidates-subtitle">Review exact page mentions and AI-discovered semantic concept edges before linking them.</div>
         </div>
-        <button
-          class="link-candidates-refresh"
-          type="button"
-          onclick={() => loadLinkCandidates()}
-          disabled={linkCandidatesLoading}
-        >
-          {linkCandidatesLoading ? "Scanning..." : "Refresh"}
-        </button>
+        <div class="link-candidates-actions">
+          <button
+            class="link-candidates-refresh concept-edge-panel-button"
+            type="button"
+            onclick={handleCreateConceptEdges}
+            disabled={conceptEdgeBusy || linkCandidatesLoading || blocks.length === 0}
+            title="Use AI to extract semantic concepts into reviewable edge suggestions"
+          >
+            {conceptEdgeBusy ? "Finding AI concept edges..." : "Find AI concept edges"}
+          </button>
+          <button
+            class="link-candidates-refresh"
+            type="button"
+            onclick={handleFindLinks}
+            disabled={linkCandidatesLoading || conceptEdgeBusy}
+            title="Scan this page for exact mentions of existing page titles"
+          >
+            {linkCandidatesLoading ? "Scanning exact mentions..." : "Scan exact mentions"}
+          </button>
+        </div>
       </div>
 
       {#if linkCandidatesError}
@@ -1438,41 +2888,90 @@
 
       {#if lastLinkCandidateAction}
         <div class="link-candidates-undo">
-          {lastLinkCandidateAction.kind === "accepted" ? "Linked suggestion." : "Dismissed suggestion."}
+          {lastLinkCandidateAction.kind === "accepted" ? "Linked" : "Dismissed"}
+          {lastLinkCandidateAction.candidates.length}
+          occurrence{lastLinkCandidateAction.candidates.length === 1 ? "" : "s"}.
           <button type="button" onclick={undoLastLinkCandidateAction}>Undo</button>
         </div>
       {/if}
 
-      {#if linkCandidates.length > 0}
+      {#if linkCandidateGroups.length > 0}
+        <div class="link-candidates-summary">
+          Reviewing {linkCandidateOccurrenceTotal} occurrence{linkCandidateOccurrenceTotal === 1 ? "" : "s"} grouped into {linkCandidateGroups.length} concept{linkCandidateGroups.length === 1 ? "" : "s"}.
+        </div>
         <div class="link-candidates-list">
-          {#each linkCandidates.slice(0, 8) as candidate (candidate.id)}
+          {#each linkCandidateGroups as group (group.key)}
+            {@const context = linkCandidateContextPreview(group)}
             <div class="link-candidate-row">
-              <div class="link-candidate-copy">
-                <span class="link-candidate-anchor">"{candidate.anchor_text}"</span>
-                <span class="link-candidate-arrow">-></span>
-                <button
-                  class="link-candidate-target"
-                  type="button"
-                  onclick={() => navigateToCandidateTarget(candidate)}
-                  title="Open suggested target page"
-                >
-                  {candidate.to_page_title}
-                </button>
+              <span
+                class="link-candidate-source"
+                class:semantic={group.sources.includes("semantic_concept")}
+              >
+                {linkCandidateGroupSourceLabel(group)}
+              </span>
+              <div class="link-candidate-copy-wrap">
+                <div class="link-candidate-copy">
+                  <button
+                    class="link-candidate-anchor"
+                    type="button"
+                    onclick={() => handleRevealLinkCandidateGroup(group)}
+                    title="Jump to the first occurrence on this page"
+                  >
+                    {linkCandidateAnchorSummary(group)}
+                  </button>
+                  <span class="link-candidate-arrow">-&gt;</span>
+                  <button
+                    class="link-candidate-target"
+                    type="button"
+                    onclick={() => navigateToCandidateTarget(group.primary)}
+                    title="Open suggested target page"
+                  >
+                    {group.primary.to_page_title}
+                  </button>
+                </div>
+                <div class="link-candidate-meta">
+                  {group.occurrenceCount} occurrence{group.occurrenceCount === 1 ? "" : "s"} on this page
+                  {#if group.canFixSpelling}
+                    <span class="link-candidate-correction">likely spelling fix</span>
+                  {:else if group.hasCanonicalTarget}
+                    <span class="link-candidate-correction">alias / canonical target</span>
+                  {/if}
+                </div>
+                {#if context}
+                  <button
+                    class="link-candidate-context"
+                    type="button"
+                    onclick={() => revealLinkCandidateOccurrence(context.candidate)}
+                    title="Jump to this occurrence"
+                  >
+                    <span class="link-candidate-context-label">{context.blockLabel}</span>
+                    <span class="link-candidate-context-text">
+                      {#if context.leadingEllipsis}<span class="link-candidate-ellipsis">...</span>{/if}
+                      {#if context.before}<span>{context.before} </span>{/if}
+                      <mark>{context.anchor}</mark>
+                      {#if context.after}<span> {context.after}</span>{/if}
+                      {#if context.trailingEllipsis}<span class="link-candidate-ellipsis">...</span>{/if}
+                    </span>
+                  </button>
+                {/if}
               </div>
               <div class="link-candidate-actions">
-                <button type="button" onclick={() => handleAcceptLinkCandidate(candidate)}>Link</button>
-                <button type="button" onclick={() => handleDismissLinkCandidate(candidate)}>Not an edge</button>
+                <button type="button" onclick={() => handleAcceptLinkCandidateGroup(group)}>
+                  {group.hasCanonicalTarget ? "Fix + link" : group.occurrenceCount > 1 ? "Link all" : "Link"}
+                </button>
+                <button type="button" onclick={() => handleDismissLinkCandidateGroup(group)}>Not an edge</button>
               </div>
             </div>
           {/each}
         </div>
-        {#if linkCandidates.length > 8}
-          <div class="link-candidates-more">
-            Showing 8 of {linkCandidates.length}. Use Refresh after reviewing these.
-          </div>
-        {/if}
       {:else if linkCandidatesLoading}
         <div class="link-candidates-empty">Scanning for unlinked page mentions...</div>
+      {:else if conceptEdgeBusy}
+        <div class="link-candidates-empty">{conceptEdgeProgress || "Finding concept edges..."}</div>
+      {:else if isImportedBookPage}
+        <div class="link-candidates-empty">Automatic exact-title scanning is skipped for large book pages. Use AI concept edges for semantic suggestions, or scan exact mentions manually.</div>
+      {:else if linkCandidatesRevealed}
+        <div class="link-candidates-empty">No pending link suggestions.</div>
       {/if}
     </div>
   {/if}
@@ -1485,13 +2984,14 @@
       onExitPrototype={() => setUnifiedEditorPrototype(false)}
     />
   {:else}
-    <div class="blocks-container" bind:this={blocksViewportEl}>
+    <div class="blocks-container" bind:this={blocksViewportEl} onpointerdown={handleBlockSelectionPointerDown}>
       {#if virtualWindow.topSpacer > 0}
         <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
       {/if}
       {#each windowedBlocks as block (block.id)}
         <div
           class="block-shell"
+          class:revealed={revealedBlockId === block.id}
           id={`block-${block.id}`}
           data-block-id={block.id}
           use:trackBlockHeight={block.id}
@@ -1502,6 +3002,7 @@
             pageId={page.id}
             pageTitle={page.title}
             {assetBaseDir}
+            bookMode={isImportedBookPage}
             guides={getBlockGuides(block.id)}
             depth={getBlockDepth(block.id)}
             focused={focusedBlockId === block.id}
@@ -1513,24 +3014,36 @@
             onEnter={handleEnter}
             onDelete={handleDelete}
             onNavigate={handleNavigate}
+            onAnchor={handleBlockAnchor}
             onIndent={handleIndent}
             onBulletClick={handleBulletClick}
             onPasteBlocks={handlePasteBlocks}
             onToggleCollapse={toggleCollapse}
+            onContentChange={handleBlockContentChange}
           />
         </div>
       {/each}
+      {#if shouldProgressivelyRenderBook && !renderedAllVisibleBlocks}
+        <div class="book-progressive-loader" aria-live="polite">
+          <span>Showing {visibleRenderedBlockCount} of {visibleBlocks.length} blocks</span>
+          <button type="button" onclick={() => growProgressiveBookRenderWindow()}>
+            Load more
+          </button>
+        </div>
+      {/if}
       {#if virtualWindow.bottomSpacer > 0}
         <div class="virtual-spacer" style={`height: ${virtualWindow.bottomSpacer}px;`} aria-hidden="true"></div>
       {/if}
     </div>
 
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="click-below" onclick={handleClickBelow}></div>
+    {#if !shouldProgressivelyRenderBook || renderedAllVisibleBlocks}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="click-below" onclick={handleClickBelow}></div>
+    {/if}
   {/if}
 
-  {#if parentPage || childPages.length > 0}
+  {#if showHierarchySection && (parentPage || childPages.length > 0)}
     <div class="hierarchy-section">
       <h3 class="hierarchy-title">Hierarchy</h3>
       {#if parentPage}
@@ -1555,7 +3068,7 @@
     </div>
   {/if}
 
-  {#if backlinks.length > 0}
+  {#if showBelowPageSections && backlinks.length > 0}
     <div class="backlinks-section">
       <h3 class="backlinks-title">{backlinks.length} Linked Reference{backlinks.length > 1 ? "s" : ""}</h3>
       <div class="backlinks-list">
@@ -1606,6 +3119,10 @@
     padding: 0;
   }
 
+  .page-content.bookPage {
+    padding-bottom: 48px;
+  }
+
   .page-title {
     font-size: 32px;
     font-weight: 700;
@@ -1621,6 +3138,21 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 8px;
+  }
+
+  .page-content.bookPage .page-heading {
+    max-width: 820px;
+    margin: 0 auto 22px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+    align-items: flex-start;
+  }
+
+  .page-content.bookPage .page-title {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: clamp(26px, 4vw, 42px);
+    line-height: 1.12;
+    text-align: center;
   }
 
   .page-heading-actions {
@@ -1651,6 +3183,22 @@
     opacity: 0.65;
   }
 
+  .concept-edge-status {
+    margin: -2px 0 10px;
+    padding: 6px 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .concept-edge-status.error {
+    border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--danger);
+  }
+
   /* Highlights are injected into rendered block HTML, so the selector has to
      be :global — and the colour comes from the theme's accent set rather than
      a fixed yellow, which is invisible on the amber themes and illegible on
@@ -1668,6 +3216,33 @@
   .blocks-container {
     display: flex;
     flex-direction: column;
+  }
+
+  .block-shell.revealed :global(.block-item) {
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--accent-yellow) 78%, transparent),
+      0 0 18px color-mix(in srgb, var(--accent-yellow) 34%, transparent);
+    animation: target-block-pulse 2.2s ease-out;
+  }
+
+  @keyframes target-block-pulse {
+    0% {
+      transform: translateX(-2px);
+      box-shadow:
+        0 0 0 3px color-mix(in srgb, var(--accent-yellow) 95%, transparent),
+        0 0 26px color-mix(in srgb, var(--accent-yellow) 55%, transparent);
+    }
+    100% {
+      transform: translateX(0);
+      box-shadow:
+        0 0 0 2px color-mix(in srgb, var(--accent-yellow) 78%, transparent),
+        0 0 18px color-mix(in srgb, var(--accent-yellow) 34%, transparent);
+    }
+  }
+
+  .page-content.bookPage .blocks-container {
+    max-width: 760px;
+    margin: 0 auto;
   }
 
   .load-error {
@@ -1724,6 +3299,35 @@
     color: var(--danger);
   }
 
+  .selection-copy-status {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .selection-context-menu {
+    position: fixed;
+    z-index: 2147483000;
+    min-width: 150px;
+    padding: 4px;
+  }
+
+  .selection-context-menu button {
+    display: block;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .selection-context-menu button:hover {
+    background: var(--bg-tertiary);
+  }
+
   .selection-toolbar-error {
     font-size: 12px;
     color: var(--danger);
@@ -1745,6 +3349,13 @@
     gap: 12px;
   }
 
+  .link-candidates-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
   .link-candidates-title {
     font-size: 13px;
     font-weight: 600;
@@ -1753,7 +3364,8 @@
 
   .link-candidates-subtitle,
   .link-candidates-empty,
-  .link-candidates-more {
+  .link-candidates-summary,
+  .link-candidate-meta {
     font-size: 12px;
     color: var(--text-secondary);
   }
@@ -1781,6 +3393,11 @@
     cursor: default;
   }
 
+  .concept-edge-panel-button {
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+    color: var(--accent);
+  }
+
   .link-candidates-error {
     margin-top: 8px;
     color: var(--danger);
@@ -1801,6 +3418,9 @@
     flex-direction: column;
     gap: 6px;
     margin-top: 10px;
+    max-height: min(420px, 45vh);
+    overflow-y: auto;
+    padding-right: 4px;
   }
 
   .link-candidate-row {
@@ -1813,6 +3433,23 @@
     background: var(--bg-primary);
   }
 
+  .link-candidate-source {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  .link-candidate-source.semantic {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    color: var(--accent);
+  }
+
   .link-candidate-copy {
     display: flex;
     align-items: center;
@@ -1821,15 +3458,89 @@
     font-size: 12px;
   }
 
+  .link-candidate-copy-wrap {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
   .link-candidate-anchor {
+    border: none;
+    background: none;
     color: var(--text-primary);
+    cursor: pointer;
+    padding: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 220px;
+    font: inherit;
+    text-align: left;
+  }
+
+  .link-candidate-anchor:hover,
+  .link-candidate-anchor:focus-visible {
+    color: var(--text-link);
+    text-decoration: underline;
   }
 
   .link-candidate-arrow {
+    color: var(--text-muted);
+  }
+
+  .link-candidate-correction {
+    margin-left: 8px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .link-candidate-context {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--bg-secondary) 58%, transparent);
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 6px;
+    font-size: 11px;
+    line-height: 1.35;
+    text-align: left;
+  }
+
+  .link-candidate-context:hover,
+  .link-candidate-context:focus-visible {
+    border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+    color: var(--text-primary);
+  }
+
+  .link-candidate-context-label {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .link-candidate-context-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .link-candidate-context mark {
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--accent-yellow) 36%, transparent);
+    color: inherit;
+    padding: 0 2px;
+    box-shadow: inset 0 -2px 0 var(--accent-yellow);
+  }
+
+  .link-candidate-ellipsis {
     color: var(--text-muted);
   }
 
@@ -1854,11 +3565,13 @@
   }
 
   .link-candidates-empty,
-  .link-candidates-more {
+  .link-candidates-summary {
     margin-top: 8px;
   }
 
   .block-shell {
+    position: relative;
+    z-index: 0;
     padding-bottom: 2px;
     box-sizing: border-box;
     /*
@@ -1874,9 +3587,44 @@
     contain: layout style;
   }
 
+  .page-content.bookPage .block-shell {
+    padding-bottom: 0;
+  }
+
+  .block-shell.image-menu-shell,
+  .block-shell:has(:global(.image-menu-open)) {
+    z-index: 3000;
+    contain: none;
+    overflow: visible;
+  }
+
   .virtual-spacer {
     width: 100%;
     pointer-events: none;
+  }
+
+  .book-progressive-loader {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    padding: 18px 0 24px;
+  }
+
+  .book-progressive-loader button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+
+  .book-progressive-loader button:hover {
+    border-color: var(--accent);
   }
 
   .click-below {

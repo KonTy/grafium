@@ -125,7 +125,10 @@ pub(crate) fn transcribe_in_process(
     wav_path: &Path,
     on_progress: &mut dyn FnMut(TranscribeProgress),
 ) -> Result<Transcript> {
-    if !slot.as_ref().is_some_and(|c| c.matches(model_path, language)) {
+    if !slot
+        .as_ref()
+        .is_some_and(|c| c.matches(model_path, language))
+    {
         // Release the previous model before loading another.
         *slot = None;
         *slot = Some(WhisperSlot {
@@ -202,31 +205,29 @@ impl WhisperTranscriber {
         // from before this instant aren't ours to interpret.
         let load_start = std::time::Instant::now();
 
-        let ctx = WhisperContext::new_with_params(
-            &*model_path.to_string_lossy(),
-            params,
-        )
-        .map_err(|e| {
-            // Include any whisper/GGML log lines from *this* load so
-            // the surface error carries the actual cause — e.g.
-            // "ggml_vulkan: no supported devices found" — instead of
-            // just a generic "Failed to create a new whisper context".
-            let init_log = format_tap_events(&crate::log_tap::snapshot_since_targets(
-                load_start,
-                &["whisper", "ggml"],
-            ));
-            let details = if init_log.is_empty() {
-                String::new()
-            } else {
-                format!("\n\nWhisper/GGML log:\n{init_log}")
-            };
-            CoreError::Other(format!(
-                "failed to load whisper model at {}: {e} — check the log for the underlying \
+        let ctx = WhisperContext::new_with_params(&*model_path.to_string_lossy(), params).map_err(
+            |e| {
+                // Include any whisper/GGML log lines from *this* load so
+                // the surface error carries the actual cause — e.g.
+                // "ggml_vulkan: no supported devices found" — instead of
+                // just a generic "Failed to create a new whisper context".
+                let init_log = format_tap_events(&crate::log_tap::snapshot_since_targets(
+                    load_start,
+                    &["whisper", "ggml"],
+                ));
+                let details = if init_log.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nWhisper/GGML log:\n{init_log}")
+                };
+                CoreError::Other(format!(
+                    "failed to load whisper model at {}: {e} — check the log for the underlying \
                  whisper.cpp/GGML error message (e.g. Vulkan device init failure, invalid \
                  GGUF file, or out-of-memory){details}",
-                model_path.display()
-            ))
-        })?;
+                    model_path.display()
+                ))
+            },
+        )?;
 
         let backend = detect_backend_from_log(&crate::log_tap::snapshot_since_targets(
             load_start,
@@ -597,7 +598,10 @@ mod backend_detection_tests {
         let backend = detect_backend_from_log(&events);
         match backend {
             WhisperBackend::Vulkan { device } => {
-                assert_eq!(device.as_deref(), Some("AMD Radeon RX 7900 XTX (RADV NAVI31)"));
+                assert_eq!(
+                    device.as_deref(),
+                    Some("AMD Radeon RX 7900 XTX (RADV NAVI31)")
+                );
             }
             other => panic!("expected Vulkan backend, got {other:?}"),
         }

@@ -1,15 +1,13 @@
+use crate::commands::jobs::{JobLink, JobsState};
 use crate::commands::knowledge::KnowledgeState;
-use crate::AppState;
+use crate::{current_graph_snapshot, open_graph_snapshot, AppState};
 use grafium_core::media::{fetch_metadata, transcript_to_markdown, MediaConfig};
-use grafium_core::models::Page;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 
 #[cfg(not(target_os = "android"))]
 use grafium_core::media::{Transcript, TranscriptSource};
-#[cfg(not(target_os = "android"))]
-use std::sync::{Arc, Mutex, OnceLock};
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -129,7 +127,7 @@ fn worker_transcriber(
 ///
 /// `on_progress` is called with a human-readable status line (e.g.
 /// "Downloading audio via yt-dlp...") at each stage, so the caller can
-/// forward it straight to the UI as a `media-import-progress` event.
+/// forward it straight to the shared Jobs registry.
 #[cfg(not(target_os = "android"))]
 fn fetch_transcript_blocking(
     url: &str,
@@ -209,96 +207,208 @@ pub async fn media_import_video(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     knowledge_state: State<'_, KnowledgeState>,
+    jobs: State<'_, JobsState>,
     url: String,
     page_title: Option<String>,
     lang: Option<String>,
     target: Option<String>,
-) -> Result<Page, String> {
+) -> Result<String, String> {
+    let handle = jobs
+        .registry
+        .start(app.clone(), "media_import", "Import media", true)?;
+    let job_id = handle.id().to_string();
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        handle.failed("Media import URL is empty");
+        return Ok(job_id);
+    }
+
     let insert_into_journal = target.as_deref() == Some("journal");
     let lang = lang.unwrap_or_else(|| "en".to_string());
     let workdir = std::env::temp_dir();
-    let media_config = load_media_config(&app)?;
+    let media_config = match load_media_config(&app) {
+        Ok(config) => config,
+        Err(err) => {
+            handle.failed_with_details("Could not start media import", Some(err));
+            return Ok(job_id);
+        }
+    };
     // Shared root for the "leave Models Directory blank" default — the same
     // folder the embedded LLM (AI Settings) falls back to, so a user who
     // drops files into one shared models folder doesn't have to guess which
     // feature-specific subfolder each setting secretly expects.
-    let models_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
-
-    let progress_app = app.clone();
-    let emit_progress = move |message: &str| {
-        let _ = progress_app.emit("media-import-progress", message);
-    };
-
-    let url_for_blocking = url.clone();
-    let lang_for_blocking = lang.clone();
-    let workdir_for_blocking = workdir.clone();
-    let (metadata, transcript_result) = tauri::async_runtime::spawn_blocking(move || {
-        let mut emit_progress = emit_progress;
-        emit_progress("Fetching video info...");
-        let metadata = fetch_metadata(&url_for_blocking).unwrap_or_default();
-        let transcript_result = fetch_transcript_blocking(
-            &url_for_blocking,
-            &workdir_for_blocking,
-            &lang_for_blocking,
-            &media_config,
-            &models_root,
-            &mut emit_progress,
-        );
-        (metadata, transcript_result)
-    })
-    .await
-    .map_err(|e| format!("Import task failed: {}", e))?;
-
-    let (transcript, source) = transcript_result?;
-
-    let title = page_title
-        .filter(|t| !t.trim().is_empty())
-        .or_else(|| metadata.title.clone())
-        .unwrap_or_else(|| url.clone());
-
-    let mut emit_summary_progress = {
-        let progress_app = app.clone();
-        move |message: &str| {
-            let _ = progress_app.emit("media-import-progress", message);
+    let models_root = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            handle.failed_with_details("Could not start media import", Some(err.to_string()));
+            return Ok(job_id);
         }
     };
-    let summary = {
-        let guard = knowledge_state.engine.read().await;
-        match guard.as_ref() {
-            Some(engine) if engine.is_llm_ready() => {
-                emit_summary_progress("Summarizing transcript...");
-                match engine
-                    .summarize_text(
-                        &title,
-                        &transcript.full_text,
-                        &mut emit_summary_progress,
-                    )
-                    .await
-                {
-                    Ok(summary) => Some(summary),
-                    Err(error) => {
-                        emit_summary_progress(&format!("Could not generate a summary: {error}"));
-                        None
+    let snapshot = match current_graph_snapshot(&app, &state.graph) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            handle.failed_with_details("Could not inspect current graph", Some(err));
+            return Ok(job_id);
+        }
+    };
+
+    let engine = knowledge_state.engine.clone();
+    tauri::async_runtime::spawn(async move {
+        handle.progress(0, 0, "Fetching media info...");
+
+        let progress_handle = handle.clone();
+        let url_for_blocking = url.clone();
+        let lang_for_blocking = lang.clone();
+        let workdir_for_blocking = workdir.clone();
+        let blocking_result = tauri::async_runtime::spawn_blocking(move || {
+            let mut emit_progress =
+                |message: &str| progress_handle.progress(0, 0, message.to_string());
+            emit_progress("Fetching media info...");
+            let metadata = fetch_metadata(&url_for_blocking).unwrap_or_default();
+            let transcript_result = fetch_transcript_blocking(
+                &url_for_blocking,
+                &workdir_for_blocking,
+                &lang_for_blocking,
+                &media_config,
+                &models_root,
+                &mut emit_progress,
+            );
+            (metadata, transcript_result)
+        })
+        .await;
+
+        let (metadata, transcript_result) = match blocking_result {
+            Ok(result) => result,
+            Err(err) => {
+                handle.failed(format!("Import task failed: {err}"));
+                return;
+            }
+        };
+        if handle.is_cancelled() {
+            handle.cancelled();
+            return;
+        }
+
+        let (transcript, source) = match transcript_result {
+            Ok(result) => result,
+            Err(err) => {
+                handle.failed_with_details("Could not import media", Some(err));
+                return;
+            }
+        };
+
+        let title = page_title
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| metadata.title.clone())
+            .unwrap_or_else(|| url.clone());
+
+        let summary = {
+            let guard = engine.read().await;
+            match guard.as_ref() {
+                Some(engine) if engine.is_llm_ready() => {
+                    handle.progress(0, 0, "Summarizing transcript...");
+                    let mut emit_summary_progress =
+                        |message: &str| handle.progress(0, 0, message.to_string());
+                    match engine
+                        .summarize_text(&title, &transcript.full_text, &mut emit_summary_progress)
+                        .await
+                    {
+                        Ok(summary) => Some(summary),
+                        Err(error) => {
+                            handle.progress(0, 0, format!("Could not generate a summary: {error}"));
+                            None
+                        }
                     }
                 }
+                _ => None,
             }
-            _ => None,
+        };
+        if handle.is_cancelled() {
+            handle.cancelled();
+            return;
         }
-    };
 
-    let content = transcript_to_markdown(&url, &metadata, &transcript, source, summary.as_ref());
+        handle.progress(0, 0, "Writing imported media page...");
+        let content =
+            transcript_to_markdown(&url, &metadata, &transcript, source, summary.as_ref());
+        let graph = match open_graph_snapshot(&snapshot) {
+            Ok(graph) => graph,
+            Err(err) => {
+                handle.failed_with_details("Could not open current graph", Some(err));
+                return;
+            }
+        };
+        let page_result = if insert_into_journal {
+            graph
+                .get_or_create_today_journal()
+                .and_then(|page| graph.append_content_to_page(&page.id, &content))
+        } else {
+            graph.create_page_with_content(&title, false, &content)
+        };
 
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    if insert_into_journal {
-        let journal_page = graph
-            .get_or_create_today_journal()
-            .map_err(|e| e.to_string())?;
-        graph
-            .append_content_to_page(&journal_page.id, &content)
-            .map_err(|e| e.to_string())
-    } else {
-        graph
-            .create_page_with_content(&title, false, &content)
-            .map_err(|e| e.to_string())
+        match page_result {
+            Ok(page) => {
+                let message = if insert_into_journal {
+                    format!("Added media to {}", page.title)
+                } else {
+                    format!("Imported media as {}", page.title)
+                };
+                let details = media_job_details(
+                    &url,
+                    metadata.title.as_deref(),
+                    source.label(),
+                    transcript.segments.len(),
+                    transcript.full_text.len(),
+                    summary.is_some(),
+                    insert_into_journal,
+                );
+                handle.succeeded_with_details(
+                    message,
+                    Some(JobLink {
+                        page_id: page.id.clone(),
+                        page_title: Some(page.title.clone()),
+                        label: if insert_into_journal {
+                            "journal".to_string()
+                        } else {
+                            page.title
+                        },
+                    }),
+                    Some(details),
+                );
+            }
+            Err(err) => {
+                handle.failed_with_details(
+                    "Could not write imported media page",
+                    Some(err.to_string()),
+                );
+            }
+        }
+    });
+
+    Ok(job_id)
+}
+
+fn media_job_details(
+    url: &str,
+    title: Option<&str>,
+    transcript_source: &str,
+    segment_count: usize,
+    text_len: usize,
+    summarized: bool,
+    insert_into_journal: bool,
+) -> String {
+    let mut out = format!(
+        "Source: {url}\nTarget: {}\nTranscript source: {transcript_source}\nTranscript segments: {segment_count}\nTranscript characters: {text_len}\nSummary: {}",
+        if insert_into_journal {
+            "today's journal"
+        } else {
+            "new page"
+        },
+        if summarized { "generated" } else { "not generated" }
+    );
+    if let Some(title) = title {
+        out.push_str("\nMedia title: ");
+        out.push_str(title);
     }
+    out
 }

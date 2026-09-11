@@ -1,6 +1,19 @@
 use crate::AppState;
-use std::fs;
+use std::{fs, path::PathBuf};
 use tauri::State;
+
+fn graph_asset_path(state: &State<AppState>, path: &str) -> Result<PathBuf, String> {
+    let rel = path.trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+        return Err("invalid asset path".into());
+    }
+
+    let root = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph.root_dir.clone()
+    };
+    grafium_core::graph::resolve_asset_path(&root, rel).ok_or_else(|| "asset not found".into())
+}
 
 /// Read a graph-local asset and return it as a `data:` URL (base64).
 ///
@@ -12,20 +25,53 @@ use tauri::State;
 pub fn read_asset_data_url(state: State<AppState>, path: String) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    let rel = path.trim_start_matches('/');
-    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
-        return Err("invalid asset path".into());
-    }
-
-    let root = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        graph.root_dir.clone()
-    };
-    let canon_target = grafium_core::graph::resolve_asset_path(&root, rel).ok_or("asset not found")?;
-
+    let canon_target = graph_asset_path(&state, &path)?;
     let bytes = fs::read(&canon_target).map_err(|e| e.to_string())?;
     let mime = crate::mime_for_path(&canon_target);
     Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&bytes)))
+}
+
+/// Return the absolute filesystem path for a graph-local asset so the shell
+/// plugin can open it with the OS default image viewer.
+#[tauri::command(rename_all = "camelCase")]
+pub fn resolve_asset_file_path(state: State<AppState>, path: String) -> Result<String, String> {
+    Ok(graph_asset_path(&state, &path)?
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Save a graph-local or remote image to an explicit destination chosen by the
+/// user through the frontend save dialog.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_image_to_path(
+    state: State<'_, AppState>,
+    source: String,
+    destination: String,
+) -> Result<(), String> {
+    let destination = PathBuf::from(destination);
+    if destination.as_os_str().is_empty() || destination.is_dir() {
+        return Err("invalid save destination".into());
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = reqwest::get(&source)
+            .await
+            .map_err(|e| format!("Download failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Read failed: {e}"))?;
+        fs::write(&destination, &bytes).map_err(|e| format!("Write failed: {e}"))?;
+        return Ok(());
+    }
+
+    let source_path = graph_asset_path(&state, &source)?;
+    fs::copy(&source_path, &destination)
+        .map(|_| ())
+        .map_err(|e| format!("Copy failed: {e}"))
 }
 
 /// Download a remote image and save it to the graph's assets/ directory.
@@ -249,4 +295,3 @@ fn chrono_timestamp() -> String {
         .as_secs();
     format!("{}", secs)
 }
-

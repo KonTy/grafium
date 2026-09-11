@@ -308,24 +308,44 @@ impl Database {
     }
 
     /// Get daily completion counts for the heatmap.
-    /// Uses task_events if available, falls back to tasks table updated_at.
+    ///
+    /// The markdown-backed `closed_at` column is the durable source of truth.
+    /// Event/update timestamps are only legacy fallbacks for old rows that have
+    /// not yet been rewritten with a `CLOSED:`/Logseq completion timestamp.
     pub fn get_completion_counts(&self, days: i64) -> Result<Vec<(String, i64)>> {
         let conn = self.conn()?;
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
-            "SELECT day, SUM(cnt) as total FROM (
-                SELECT date(te.timestamp / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
-                FROM task_events te
-                JOIN blocks b ON b.id = te.block_id
-                WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
-                GROUP BY day
-              UNION ALL
-                SELECT date(t.updated_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+            "SELECT date(ts / 1000, 'unixepoch', 'localtime') AS day, COUNT(*) AS total
+             FROM (
+                SELECT t.closed_at AS ts
                 FROM tasks t
-                WHERE t.state = 'DONE' AND t.updated_at >= ?1
-                  AND NOT EXISTS (SELECT 1 FROM task_events te WHERE te.block_id = t.block_id AND te.to_state = 'DONE')
-                GROUP BY day
-             ) GROUP BY day ORDER BY day ASC"
+                JOIN blocks b ON b.id = t.block_id
+                WHERE t.state = 'DONE' AND t.closed_at IS NOT NULL AND t.closed_at >= ?1
+              UNION ALL
+                SELECT MAX(te.timestamp) AS ts
+                FROM tasks t
+                JOIN task_events te ON te.block_id = t.block_id
+                JOIN blocks b ON b.id = t.block_id
+                WHERE t.state = 'DONE'
+                  AND t.closed_at IS NULL
+                  AND te.to_state = 'DONE'
+                  AND te.timestamp >= ?1
+                GROUP BY t.block_id
+              UNION ALL
+                SELECT t.updated_at AS ts
+                FROM tasks t
+                JOIN blocks b ON b.id = t.block_id
+                WHERE t.state = 'DONE'
+                  AND t.closed_at IS NULL
+                  AND t.updated_at >= ?1
+                  AND NOT EXISTS (
+                    SELECT 1 FROM task_events te
+                    WHERE te.block_id = t.block_id AND te.to_state = 'DONE'
+                  )
+             )
+             GROUP BY day
+             ORDER BY day ASC",
         )?;
         let rows = stmt
             .query_map(params![cutoff], |row| {
@@ -373,29 +393,42 @@ impl Database {
     /// Get completed tasks with their completion timestamp, block content, and page title.
     /// Completed tasks in the last `days`, newest first.
     ///
-    /// A completion event outlives the block it refers to, so these joins are
-    /// inner rather than outer on purpose: a `task_events` row whose block has
+    /// `closed_at` is mirrored from the markdown and wins over event/update
+    /// time. The fallback joins are inner on purpose: a row whose block has
     /// since been deleted has no text and no page to return to, and rendering it
-    /// produced a row showing nothing but a timestamp that could not be clicked.
-    /// The daily counts apply the same filter, so the heat map never claims
-    /// completions the list is unable to show.
+    /// produced a timestamp that could not be clicked.
     pub fn get_completed_tasks(&self, days: i64) -> Result<Vec<(i64, String, String, String)>> {
         let conn = self.conn()?;
         let cutoff = Utc::now().timestamp_millis() - (days * 24 * 60 * 60 * 1000);
         let mut stmt = conn.prepare(
             "SELECT ts, content, title, block_id FROM (
-                SELECT te.timestamp as ts, COALESCE(b.content, '') as content,
-                       COALESCE(p.title, '') as title, te.block_id as block_id
-                FROM task_events te
-                JOIN blocks b ON b.id = te.block_id
-                JOIN pages p ON p.id = b.page_id
-                WHERE te.to_state = 'DONE' AND te.timestamp >= ?1
-              UNION ALL
-                SELECT t.updated_at as ts, b.content, p.title, t.block_id
+                SELECT t.closed_at AS ts, COALESCE(b.content, '') AS content,
+                       COALESCE(p.title, '') AS title, t.block_id AS block_id
                 FROM tasks t
                 JOIN blocks b ON b.id = t.block_id
                 JOIN pages p ON p.id = b.page_id
-                WHERE t.state = 'DONE' AND t.updated_at >= ?1
+                WHERE t.state = 'DONE' AND t.closed_at IS NOT NULL AND t.closed_at >= ?1
+              UNION ALL
+                SELECT MAX(te.timestamp) AS ts, COALESCE(b.content, '') AS content,
+                       COALESCE(p.title, '') AS title, t.block_id AS block_id
+                FROM tasks t
+                JOIN task_events te ON te.block_id = t.block_id
+                JOIN blocks b ON b.id = t.block_id
+                JOIN pages p ON p.id = b.page_id
+                WHERE t.state = 'DONE'
+                  AND t.closed_at IS NULL
+                  AND te.to_state = 'DONE'
+                  AND te.timestamp >= ?1
+                GROUP BY t.block_id, b.content, p.title
+              UNION ALL
+                SELECT t.updated_at AS ts, COALESCE(b.content, '') AS content,
+                       COALESCE(p.title, '') AS title, t.block_id AS block_id
+                FROM tasks t
+                JOIN blocks b ON b.id = t.block_id
+                JOIN pages p ON p.id = b.page_id
+                WHERE t.state = 'DONE'
+                  AND t.closed_at IS NULL
+                  AND t.updated_at >= ?1
                   AND NOT EXISTS (SELECT 1 FROM task_events te WHERE te.block_id = t.block_id AND te.to_state = 'DONE')
              ) ORDER BY ts DESC"
         )?;
@@ -687,7 +720,10 @@ impl Database {
 
         let mut weekly_completions = Vec::new();
         for w in (0..weeks).rev() {
-            weekly_completions.push(count_done_between(now - (w + 1) * 7 * day, now - w * 7 * day)?);
+            weekly_completions.push(count_done_between(
+                now - (w + 1) * 7 * day,
+                now - w * 7 * day,
+            )?);
         }
 
         // Cycle time: first move into active work, through to completion.
@@ -745,11 +781,10 @@ impl Database {
             [],
             |r| r.get(0),
         )?;
-        let done_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE state = 'DONE'",
-            [],
-            |r| r.get(0),
-        )?;
+        let done_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tasks WHERE state = 'DONE'", [], |r| {
+                r.get(0)
+            })?;
 
         let mut page_stmt = conn.prepare(
             "SELECT COALESCE(p.title, ''), COUNT(*) as n
@@ -762,7 +797,9 @@ impl Database {
              LIMIT 8",
         )?;
         let by_page: Vec<(String, i64)> = page_stmt
-            .query_map(params![now - weeks * 7 * day], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map(params![now - weeks * 7 * day], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(TaskFlowStats {

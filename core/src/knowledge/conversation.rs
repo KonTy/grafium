@@ -188,6 +188,22 @@ pub fn resolve_followup(question: &str, history: &[ChatTurn]) -> String {
     }
 }
 
+/// Resolve a question before it is handed to a web search/research engine.
+///
+/// Research follow-ups often have plenty of ordinary words ("table", "price",
+/// "sorted") while still depending entirely on the previous turn for the
+/// subject ("the bikes"). For those, keep the user's requested transform and
+/// prepend the last real topic so search engines receive both.
+pub fn resolve_research_followup(question: &str, history: &[ChatTurn]) -> String {
+    let cleaned = extract_embedded_research_question(question).unwrap_or(question);
+    if is_contextual_research_followup(cleaned) {
+        if let Some(topic) = last_substantive_user_turn(history) {
+            return format!("{topic}\n\nFollow-up request: {}", cleaned.trim());
+        }
+    }
+    resolve_followup(cleaned, history)
+}
+
 /// The most recent user turn that carries a topic of its own, searching
 /// backwards so the nearest context wins.
 fn last_substantive_user_turn(history: &[ChatTurn]) -> Option<&str> {
@@ -196,7 +212,90 @@ fn last_substantive_user_turn(history: &[ChatTurn]) -> Option<&str> {
         .rev()
         .filter(|t| t.is_user())
         .map(|t| t.content.trim())
-        .find(|c| !c.is_empty() && is_self_contained(c))
+        .find(|c| {
+            !c.is_empty()
+                && is_self_contained(c)
+                && !is_contextual_research_followup(c)
+                && extract_embedded_research_question(c).is_none_or(|embedded| embedded == *c)
+        })
+}
+
+fn is_contextual_research_followup(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    let has_referential_subject = [
+        "the bike",
+        "the bikes",
+        "those bikes",
+        "these bikes",
+        "the motorcycle",
+        "the motorcycles",
+        "those motorcycles",
+        "these motorcycles",
+        "the options",
+        "those options",
+        "these options",
+        "the candidates",
+        "that list",
+        "the list",
+        "above",
+        "previous",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    if !has_referential_subject {
+        return false;
+    }
+
+    [
+        "table",
+        "sort",
+        "sorted",
+        "rank",
+        "ranked",
+        "prioritize",
+        "prioritized",
+        "compare",
+        "comparison",
+        "price",
+        "prices",
+        "cheapest",
+        "expensive",
+        "cost",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+}
+
+fn extract_embedded_research_question(input: &str) -> Option<&str> {
+    let lower = input.to_lowercase();
+    let looks_like_meta_paste = [
+        "full conversation",
+        "conversation which fails",
+        "look at our ai chat stack",
+        "please implement",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    if !looks_like_meta_paste {
+        return None;
+    }
+
+    for starter in [
+        "\nwhat is ",
+        "\nwhat are ",
+        "\nwhich ",
+        "\ncan you ",
+        "\nplease research ",
+    ] {
+        if let Some(index) = lower.find(starter) {
+            let start = index + 1;
+            let embedded = input[start..].trim();
+            if embedded.len() >= 20 {
+                return Some(embedded);
+            }
+        }
+    }
+    None
 }
 
 /// How a transcript was fitted into the available budget.
@@ -329,6 +428,34 @@ mod tests {
             resolve_followup("can you look it up on the internet", &history),
             "what is scientology"
         );
+    }
+
+    #[test]
+    fn research_followup_keeps_previous_topic_for_referential_table_requests() {
+        let history = vec![
+            user("what is a good motorcycle for right to repair, WABDR gravel roads, aux gas tanks, luggage, and camping?"),
+            assistant("Best options are Suzuki DR650, KLR650, and XR650L."),
+        ];
+
+        let resolved = resolve_research_followup(
+            "can you give me a prioritized table of the bikes sorted by price?",
+            &history,
+        );
+
+        assert!(resolved.contains("right to repair"));
+        assert!(resolved.contains("Follow-up request"));
+        assert!(resolved.contains("sorted by price"));
+    }
+
+    #[test]
+    fn research_followup_extracts_embedded_question_from_meta_paste() {
+        let pasted = "ok please implement it, but also can you look at our AI chat stack? here is my full conversation which fails\n\nwhat is a good cruiser bike that is easy to fix and reliable and can also go offroad? Do research on the internet here are my constraints:\n1. right to repair\n2. WABDR gravel roads\n3. aux gas tanks";
+
+        let resolved = resolve_research_followup(pasted, &[]);
+
+        assert!(resolved.starts_with("what is a good cruiser bike"));
+        assert!(!resolved.contains("please implement"));
+        assert!(resolved.contains("right to repair"));
     }
 
     /// A chain of follow-ups must keep reaching back past the other

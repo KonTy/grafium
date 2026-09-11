@@ -1,4 +1,4 @@
-/* Locally bundled futuristic fonts for the Syphi / Matrix themes. These are
+/* Locally bundled futuristic fonts for the Syphi theme. These are
    embedded in the app bundle so the tool never contacts the network for fonts,
    preserving the offline / privacy-first guarantee. Orbitron covers both
    weights (500/700) via a single latin variable file. */
@@ -121,6 +121,37 @@ body {
   overflow: hidden;
 }
 
+.app-context-menu {
+  position: fixed;
+  z-index: 2147483000 !important;
+  max-width: min(340px, calc(100vw - 16px));
+  max-height: min(70vh, calc(100vh - 16px));
+  overflow: auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 72%, var(--border)) !important;
+  border-radius: 10px;
+  background: var(--surface-overlay, var(--bg-secondary)) !important;
+  color: var(--text-primary);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.58),
+    0 0 0 1px color-mix(in srgb, var(--text-primary) 12%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 9%, transparent) !important;
+  opacity: 1 !important;
+  isolation: isolate;
+  pointer-events: auto;
+  backdrop-filter: none;
+  text-shadow: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.app-context-menu button,
+.app-context-menu [role="menuitem"] {
+  min-height: 30px;
+  text-shadow: none;
+  white-space: nowrap;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
@@ -191,8 +222,19 @@ body {
   margin: 0 !important;
 }
 
+/* Plain terminal typography for Matrix. Uses installed programmer fonts first
+   and deliberately avoids global overlays, glow, and display fonts so large
+   journal pages stay crisp and cheap to repaint. */
+.theme-fx-terminal body,
+.theme-fx-terminal {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Source Code Pro",
+    "IBM Plex Mono", "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono",
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0;
+}
+
 /* ============================================================
-   Syphi — experimental futuristic / matrix visual-effects layer.
+   Syphi — experimental futuristic visual-effects layer.
    Activated by applyTheme() adding `.theme-fx-syphi` to <html>.
    Only styling; no layout changes. Everything is scoped so it never
    affects the other themes.
@@ -238,15 +280,16 @@ body {
   font-family: "Orbitron", "Share Tech Mono", ui-monospace, monospace;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  color: var(--accent);
-  text-shadow: 0 0 4px var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--heading-accent, var(--accent));
+  text-shadow: 0 0 4px var(--heading-accent, var(--accent)),
+    0 0 12px color-mix(in srgb, var(--heading-accent, var(--accent)) 55%, transparent);
 }
 
 /* Glowing links. */
 .theme-fx-syphi a,
 .theme-fx-syphi .page-link {
-  color: var(--accent-secondary);
-  text-shadow: 0 0 6px color-mix(in srgb, var(--accent-secondary) 60%, transparent);
+  color: var(--link-accent, var(--accent-secondary));
+  text-shadow: 0 0 6px color-mix(in srgb, var(--link-accent, var(--accent-secondary)) 60%, transparent);
 }
 
 /* Neon-framed surfaces: sidebar, inputs, code, cards. */
@@ -357,4 +400,137 @@ body {
   vertical-align: baseline;
   text-decoration: none;
   line-height: 1;
+}
+
+.rendered-content .task-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.08em;
+  height: 1.08em;
+  margin-right: 0.42em;
+  border: 2px solid color-mix(in srgb, var(--accent) 82%, var(--text-primary));
+  border-radius: 0.28em;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--bg-primary);
+  cursor: pointer;
+  line-height: 1;
+  vertical-align: -0.15em;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-primary) 34%, transparent);
+}
+
+.rendered-content .task-checkbox.unchecked:hover,
+.rendered-content .task-checkbox.unchecked:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+  outline: none;
+}
+
+.rendered-content .task-checkbox.checked {
+  border-color: var(--accent-secondary);
+  background: var(--accent-secondary);
+  color: var(--bg-primary);
+  cursor: default;
+}
+
+.rendered-content .task-checkbox.checked::after {
+  content: "✓";
+  font-size: 0.82em;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.rendered-content .task-checkbox.canceled {
+  border-color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+.rendered-content .task-marker,
+.rendered-content .priority {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0.03em;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.rendered-content .task-marker {
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+
+.rendered-content .task-marker:hover {
+  opacity: 0.78;
+}
+
+.rendered-content .task-marker.todo {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.rendered-content .task-marker.doing,
+.rendered-content .task-marker.now {
+  color: var(--accent-secondary);
+  background: color-mix(in srgb, var(--accent-secondary) 15%, transparent);
+}
+
+.rendered-content .task-marker.done {
+  color: var(--task-done-fg);
+  background: var(--task-done-bg);
+}
+
+.rendered-content .task-marker.later {
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+}
+
+.rendered-content .task-marker.canceled {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 16%, transparent);
+  text-decoration: line-through;
+}
+
+.rendered-content .priority-A {
+  color: var(--danger, #f85149);
+  background: color-mix(in srgb, var(--danger, #f85149) 14%, transparent);
+}
+
+.rendered-content .priority-B {
+  color: var(--accent-yellow);
+  background: color-mix(in srgb, var(--accent-yellow) 14%, transparent);
+}
+
+.rendered-content .priority-C {
+  color: var(--accent-cyan);
+  background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
+}
+
+.rendered-content .task-date {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1.25;
+  margin: 2px 4px 0 0;
+  vertical-align: 1px;
+}
+
+.rendered-content .task-date.scheduled {
+  background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
+  color: var(--text-secondary);
+}
+
+.rendered-content .task-date.deadline {
+  background: color-mix(in srgb, var(--danger, #f85149) 12%, transparent);
+  color: var(--danger, #f85149);
 }

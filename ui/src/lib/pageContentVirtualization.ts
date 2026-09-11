@@ -43,6 +43,24 @@ export interface VirtualWindow<T> {
   items: T[];
 }
 
+export function nextProgressiveRenderLimit(
+  itemCount: number,
+  currentLimit: number,
+  batchCount: number,
+  forceIndex?: number | null
+): number {
+  const safeItemCount = Math.max(0, Math.floor(itemCount));
+  if (safeItemCount === 0) return 0;
+
+  const safeBatch = Math.max(1, Math.floor(batchCount));
+  const safeCurrent = Math.max(1, Math.floor(currentLimit));
+  const target = typeof forceIndex === "number" && Number.isFinite(forceIndex)
+    ? Math.floor(forceIndex) + 1
+    : safeCurrent + safeBatch;
+
+  return Math.min(safeItemCount, Math.max(safeCurrent, target));
+}
+
 export function buildBlockRenderState(
   blocks: readonly Block[],
   collapsedIds: ReadonlySet<string>

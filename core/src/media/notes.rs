@@ -93,7 +93,10 @@ pub fn transcript_to_markdown(
     out.push_str(&bullet_child(&format!("Source: {url}"), 1));
     out.push_str("\n\n");
     if let Some(uploader) = &metadata.uploader {
-        out.push_str(&bullet_child(&format!("Uploader: {}", single_line(uploader)), 1));
+        out.push_str(&bullet_child(
+            &format!("Uploader: {}", single_line(uploader)),
+            1,
+        ));
         out.push_str("\n\n");
     }
     if let Some(duration) = metadata.duration_seconds {
@@ -103,7 +106,10 @@ pub fn transcript_to_markdown(
         ));
         out.push_str("\n\n");
     }
-    out.push_str(&bullet_child(&format!("Transcript source: {}", source.label()), 1));
+    out.push_str(&bullet_child(
+        &format!("Transcript source: {}", source.label()),
+        1,
+    ));
     out.push_str("\n\n");
     out.push_str(&bullet_child(
         &format!("Imported: {}", chrono::Utc::now().to_rfc3339()),
@@ -373,9 +379,7 @@ mod tests {
         assert!(md.contains("## Summary"));
         assert!(md.contains("**Yes, magnesium helps with sleep.**"));
         assert!(md.contains("### Magnesium and sleep"));
-        assert!(md.contains(
-            "The video covers magnesium's role in sleep and insulin sensitivity."
-        ));
+        assert!(md.contains("The video covers magnesium's role in sleep and insulin sensitivity."));
         assert!(md.contains("#magnesium #insulin_resistance"));
         // Summary must come before the transcript body.
         assert!(md.find("## Summary").unwrap() < md.find("## Transcript").unwrap());
@@ -488,7 +492,10 @@ mod tests {
 
         let title_block = &parsed.blocks[0];
         assert!(
-            title_block.children.iter().any(|c| c.content.contains("Source:")),
+            title_block
+                .children
+                .iter()
+                .any(|c| c.content.contains("Source:")),
             "expected 'Source: ...' to be a child of the title block, got children: {:?}",
             title_block.children
         );
@@ -512,15 +519,17 @@ mod tests {
             .find(|c| c.content.starts_with("### Magnesium and sleep"))
             .expect("expected the topic heading to be a child of ## Summary");
         assert!(
-            topic_block
-                .children
-                .iter()
-                .any(|c| c.content.contains("Magnesium glycinate can improve sleep onset.")),
+            topic_block.children.iter().any(|c| c
+                .content
+                .contains("Magnesium glycinate can improve sleep onset.")),
             "expected the topic's paragraph to be a child of its own heading, got: {:?}",
             topic_block.children
         );
         assert!(
-            topic_block.children.iter().any(|c| c.content.contains("#magnesium")),
+            topic_block
+                .children
+                .iter()
+                .any(|c| c.content.contains("#magnesium")),
             "expected the topic's hashtags to be a child of its own heading, got: {:?}",
             topic_block.children
         );

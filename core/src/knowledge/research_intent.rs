@@ -448,6 +448,126 @@ pub fn wants_general_knowledge(question: &str) -> bool {
         .any(|phrase| low.contains(phrase))
 }
 
+/// Whether the shape of the user's requested answer needs source-backed
+/// evidence before Chat answers.
+///
+/// This intentionally does **not** enumerate subjects or specific brands. It
+/// looks for the kind of request that tends to go wrong from memory alone:
+/// "tell me what to buy / what exact process to follow" combined with named
+/// products, model-like tokens, compatibility, or irreversible physical
+/// actions. The model classifier still handles semantic judgement; this rule
+/// catches the obvious "don't improvise a shopping/process answer" shape
+/// without baking in one-off topics.
+pub fn should_research_before_answer(question: &str) -> bool {
+    let norm = normalize_ws(question);
+    let low: String = norm.chars().map(|c| c.to_ascii_lowercase()).collect();
+
+    let asks_for_specific_action = asks_for_buying_or_parts(&low)
+        || asks_for_process_or_steps(&low)
+        || mentions_irreversible_action(&low)
+        || asks_for_compatibility_or_fit(&low);
+    if !asks_for_specific_action {
+        return false;
+    }
+
+    asks_for_buying_or_parts(&low)
+        || asks_for_compatibility_or_fit(&low)
+        || (mentions_irreversible_action(&low) && contains_named_product_or_model(&norm))
+        || (asks_for_process_or_steps(&low) && contains_named_product_or_model(&norm))
+}
+
+fn asks_for_buying_or_parts(low: &str) -> bool {
+    [
+        "what do i need to buy",
+        "what should i buy",
+        "what to buy",
+        "what would i need",
+        "which one should i buy",
+        "which should i buy",
+        "parts do i need",
+        "tools do i need",
+    ]
+    .iter()
+    .any(|phrase| low.contains(phrase))
+}
+
+fn asks_for_process_or_steps(low: &str) -> bool {
+    [
+        "what is the process",
+        "what the process",
+        "what process",
+        "step by step",
+        "walk me through",
+    ]
+    .iter()
+    .any(|phrase| low.contains(phrase))
+}
+
+fn asks_for_compatibility_or_fit(low: &str) -> bool {
+    [
+        "compatible",
+        "compatibility",
+        "will it fit",
+        "would it fit",
+        "make it fit",
+        "rated for",
+        "safe to use",
+        "safe with",
+        "right size",
+        "what size",
+        "which size",
+        "what spec",
+        "which spec",
+    ]
+    .iter()
+    .any(|phrase| low.contains(phrase))
+}
+
+fn mentions_irreversible_action(low: &str) -> bool {
+    [
+        "cut", "drill", "grind", "install", "modify", "mod", "repair", "replace", "solder", "wire",
+        "weld",
+    ]
+    .iter()
+    .any(|word| contains_word(low, word))
+}
+
+fn contains_named_product_or_model(question: &str) -> bool {
+    question
+        .split_whitespace()
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            (!token.is_empty()).then_some((index, token))
+        })
+        .any(|(index, token)| {
+            is_model_like_token(token) || is_mid_sentence_proper_name(index, token)
+        })
+}
+
+fn is_model_like_token(token: &str) -> bool {
+    let has_alpha = token.chars().any(|ch| ch.is_ascii_alphabetic());
+    let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+    if has_alpha && has_digit {
+        return true;
+    }
+
+    token.len() >= 2
+        && token.chars().all(|ch| ch.is_ascii_uppercase())
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn is_mid_sentence_proper_name(index: usize, token: &str) -> bool {
+    if index == 0 || token.len() < 3 {
+        return false;
+    }
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase() && chars.any(|ch| ch.is_ascii_lowercase())
+}
+
 /// Detect whether `question` is asking Chat to research on the web, returning
 /// the question with the trigger phrase stripped when so. Returns `None` for
 /// ordinary questions (the common case) — including ones that merely *mention*
@@ -1460,6 +1580,35 @@ mod tests {
         let intent = detect_research_intent("what is rust — search the web").unwrap();
         assert_eq!(intent.cleaned_question, "what is rust");
     }
+
+    #[test]
+    fn risky_practical_procedures_force_research_before_answering() {
+        assert!(should_research_before_answer(
+            "if I wanted to cut an A17 insert to make it smaller and mod my Acme MultiTool, what do I need to buy for my ToolX2 and what is the process?"
+        ));
+        assert!(should_research_before_answer(
+            "how should I wire an HX200 module into my TrailBox?"
+        ));
+        assert!(should_research_before_answer(
+            "what should I buy to replace the lines on a TrailMaster 400?"
+        ));
+    }
+
+    #[test]
+    fn ordinary_low_risk_questions_do_not_force_research() {
+        for input in [
+            "explain what A17 material is",
+            "how do I write a Rust enum",
+            "how do I build a career plan",
+            "help me draft a packing list",
+            "what is a monad",
+        ] {
+            assert!(
+                !should_research_before_answer(input),
+                "should stay local: {input:?}"
+            );
+        }
+    }
 }
 
 /// Whether the rules are confident enough to *veto* a web search, so the
@@ -1553,9 +1702,15 @@ events, recent news or prices, someone's latest work or publications, product \
 releases, anything time-sensitive, or when the user asks you to look \
 something up online (even if they misspell it).
 
+Reply WEB for concrete real-world purchase, compatibility, repair, modification, \
+tooling, material, or safety procedures where a good answer depends on current \
+source evidence, manufacturer limits, product specs, or safety constraints. \
+When the user asks what to buy or what exact process to follow for named \
+products/materials, route to WEB instead of improvising from memory.
+
 Reply LOCAL for everything else: questions about the user's own notes, \
 journal or past ('when did I', 'what did I write'), and general knowledge you \
-already have (explanations, definitions, maths, writing tasks, how things \
-work).
+already have (explanations, definitions, maths, writing tasks, low-risk how \
+things work).
 
 Reply with only WEB or LOCAL.";

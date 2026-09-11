@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
-  import { renderAssistantMarkdown } from "../lib/markdown";
+  import ChatMessageBubble from "./ChatMessageBubble.svelte";
   import {
     aiAskStream,
     aiCancelStream,
@@ -10,14 +10,13 @@
     aiIndexStatus,
     aiIndexAllPages,
     aiRetryLlmOnGpu,
-    formatSourceLabel,
-    formatWebSourceLabel,
     shouldShowIndexBanner,
     type AcceleratorStatus,
     type ChatSource,
     type ChatTurn,
     type WebSource,
   } from "../lib/knowledge";
+  import type { ChatMessageModel, ChatThinkingTone } from "../lib/chatMessage";
   import { researchDeep, researchCancel, type ResearchStreamHandlers } from "../lib/research";
   import { selectionIntersectsTranscript } from "../lib/transcriptSelection";
   import {
@@ -35,15 +34,7 @@
 
   let { onOpenSettings = () => {} }: Props = $props();
 
-  type ChatMessage = {
-    role: "user" | "assistant";
-    content: string;
-    sources?: ChatSource[];
-    /** Web citations for a research answer's "From the web" section. */
-    webSources?: WebSource[];
-    /** True once this answer engaged web research — drives the "Web research" badge. */
-    webResearch?: boolean;
-  };
+  type ChatMessage = ChatMessageModel;
 
   const greeting: ChatMessage = {
     role: "assistant",
@@ -157,18 +148,11 @@
       void refreshIndexStatus();
     });
 
-    // Delegated click handling for links inside rendered assistant markdown.
-    // Attached programmatically (rather than an inline handler on the div) so
-    // a container-level listener doesn't trip the a11y lints meant for
-    // interactive elements.
-    chatScroll?.addEventListener("click", handleRenderedClick);
-
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
       mq.removeEventListener("change", onMotionChange);
       document.removeEventListener("mousedown", onDocumentPointerDown);
       document.removeEventListener("mouseup", onDocumentPointerUp);
-      chatScroll?.removeEventListener("click", handleRenderedClick);
       // A run outlives the component's UI listeners: without this the backend
       // keeps working and the wrapper's stream listeners + this closure stay
       // alive until the run finishes on its own. Bump the generation so any
@@ -285,48 +269,6 @@
   function openWebSource(source: WebSource) {
     if (/^https?:\/\//i.test(source.url)) {
       openExternal(source.url).catch(() => {});
-    }
-  }
-
-  // Delegated handler for links inside rendered assistant markdown. Mirrors
-  // PageContent/BlockEditor: `[[page]]`/`#tag` anchors (emitted by
-  // `renderAssistantMarkdown` as `<a class="page-link" data-page>` /
-  // `<a class="tag" data-tag>`) dispatch the existing `navigate-page` event;
-  // external `http(s)` links open in the system browser via the shell plugin
-  // instead of navigating the webview away from the app. Everything else is
-  // swallowed (preventDefault) so an unexpected/blocked scheme can't navigate.
-  function handleRenderedClick(e: MouseEvent) {
-    const anchor = (e.target as HTMLElement).closest("a");
-    if (!anchor) return;
-
-    if (anchor.classList.contains("page-link")) {
-      e.preventDefault();
-      const pageName = anchor.dataset.page;
-      if (pageName) {
-        window.dispatchEvent(
-          new CustomEvent("navigate-page", { detail: { pageName } })
-        );
-      }
-      return;
-    }
-
-    if (anchor.classList.contains("tag")) {
-      e.preventDefault();
-      const tag = anchor.dataset.tag;
-      if (tag) {
-        window.dispatchEvent(
-          new CustomEvent("navigate-page", { detail: { pageName: tag } })
-        );
-      }
-      return;
-    }
-
-    // Any other anchor is an ordinary markdown link. Never let it navigate
-    // the webview; open real web links externally.
-    e.preventDefault();
-    const href = anchor.getAttribute("href") ?? "";
-    if (/^https?:\/\//i.test(href)) {
-      openExternal(href).catch(() => {});
     }
   }
 
@@ -511,54 +453,10 @@
     };
 
     if (forceResearch) {
-      // Single-shot by contract: research_deep takes no history, so priorTurns
-      // is intentionally omitted. A missing backend command rejects the invoke,
-      // which surfaces through onError rather than crashing the pane.
-      await researchDeep(trimmed, handlers);
+      await researchDeep(trimmed, handlers, undefined, undefined, priorTurns);
     } else {
       await aiAskStream(trimmed, handlers, undefined, priorTurns);
     }
-  }
-
-  let copiedIndex = $state<number | null>(null);
-  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /**
-   * Copies an answer as Markdown rather than as rendered text, because the
-   * destination is the user's own notes: headings, lists and links should
-   * survive the round trip instead of arriving as flattened prose. Sources are
-   * appended as a reference list so a pasted research answer stays verifiable
-   * once it's separated from the chat that produced it.
-   */
-  async function copyMessage(m: ChatMessage, index: number) {
-    let out = m.content.trim();
-
-    const graphRefs = (m.sources ?? []).map(
-      (s) => `- [${s.index}] ${s.page_title}${s.date ? ` (${s.date})` : ""}`,
-    );
-    const webRefs = (m.webSources ?? []).map((s) => `- [${s.number}] [${s.title}](${s.url})`);
-    if (graphRefs.length || webRefs.length) {
-      out += "\n\n**Sources**\n" + [...graphRefs, ...webRefs].join("\n");
-    }
-
-    try {
-      await navigator.clipboard.writeText(out);
-    } catch {
-      // WebKitGTK denies the async clipboard API outside a user-gesture
-      // context in some configurations; the textarea fallback always works.
-      const scratch = document.createElement("textarea");
-      scratch.value = out;
-      scratch.style.position = "fixed";
-      scratch.style.opacity = "0";
-      document.body.appendChild(scratch);
-      scratch.select();
-      document.execCommand("copy");
-      scratch.remove();
-    }
-
-    copiedIndex = index;
-    if (copiedTimer) clearTimeout(copiedTimer);
-    copiedTimer = setTimeout(() => (copiedIndex = null), 1500);
   }
 
   // Starts a fresh thread. Chat otherwise remembers everything for the life
@@ -626,6 +524,13 @@
     if (chatScroll) {
       chatScroll.scrollTop = chatScroll.scrollHeight;
     }
+  }
+
+  function currentThinkingTone(): ChatThinkingTone {
+    if (status.kind === "stalled") return "stalled";
+    if (status.phase === "searching_web" || status.phase === "reading_sources") return "web";
+    if (status.phase === "thinking") return "thinking";
+    return "working";
   }
 </script>
 
@@ -728,72 +633,16 @@
     {#each messages as m, i}
       {@const streamingThis =
         isStreaming && m.role === "assistant" && i === messages.length - 1}
-      <div class="msg" class:user={m.role === "user"}>
-        <div class="msg-role">
-          {m.role === "user" ? "You" : "Grafium AI"}
-          {#if m.role === "assistant" && m.webResearch}
-            <span class="research-badge" title="This answer includes live web research">
-              <span class="research-badge-dot" aria-hidden="true"></span>Web research
-            </span>
-          {/if}
-          {#if m.role === "assistant" && !streamingThis && m.content.trim()}
-            <button
-              class="copy-btn"
-              onclick={() => copyMessage(m, i)}
-              title="Copy this answer as Markdown, with its sources"
-            >
-              {copiedIndex === i ? "Copied" : "Copy"}
-            </button>
-          {/if}
-        </div>
-        {#if m.role === "assistant" && !streamingThis}
-          <!-- Completed assistant answers render as markdown (bold, lists,
-               code, KaTeX, clickable [[links]]/#tags). User input and the
-               in-flight streaming bubble stay plain text — rendering partial
-               markdown per token would reparse on every delta and could show
-               broken half-syntax. -->
-          <div class="msg-content markdown">{@html renderAssistantMarkdown(m.content)}</div>
-        {:else}
-          <div class="msg-content">{m.content}{#if streamingThis}<span
-                class="type-cursor"
-                class:animate={status.animate}
-                aria-hidden="true"
-              ></span>{/if}</div>
-        {/if}
-        {#if m.role === "assistant" && m.sources && m.sources.length > 0}
-          <div class="msg-sources">
-            {#each m.sources as source}
-              <button
-                class="source-chip"
-                onclick={() => openSource(source)}
-                title={`Open ${formatSourceLabel(source)}`}
-              >
-                <span class="source-index">[{source.index}]</span>
-                <span class="source-title">{source.page_title}</span>
-                {#if source.date}<span class="source-date">{source.date}</span>{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-        {#if m.role === "assistant" && m.webSources && m.webSources.length > 0}
-          <!-- Web citations for the "From the web" section. Rendered distinctly
-               from graph chips (external-link styling + ↗) and opened in the
-               system browser, never in the webview. -->
-          <div class="msg-sources web">
-            {#each m.webSources as source}
-              <button
-                class="source-chip web-source-chip"
-                onclick={() => openWebSource(source)}
-                title={`Open ${source.url}`}
-              >
-                <span class="source-index">[{source.number}]</span>
-                <span class="source-title">{formatWebSourceLabel(source).replace(/^\[\d+\]\s*/, "")}</span>
-                <span class="source-ext" aria-hidden="true">↗</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <ChatMessageBubble
+        message={m}
+        index={i}
+        streaming={streamingThis}
+        animateCursor={status.animate}
+        thinkingLabel={streamingThis ? status.announce : ""}
+        thinkingTone={currentThinkingTone()}
+        onOpenSource={openSource}
+        onOpenWebSource={openWebSource}
+      />
     {/each}
   </div>
 
@@ -949,265 +798,6 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
-  .msg {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 10px;
-    background: var(--bg-primary);
-  }
-
-  .msg.user {
-    border-color: var(--accent);
-  }
-
-  .msg-role {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-bottom: 4px;
-  }
-
-  .msg-content {
-    white-space: pre-wrap;
-    word-break: break-word;
-    line-height: 1.45;
-  }
-
-  /* Rendered assistant markdown: block layout instead of pre-wrap, plus the
-     same link/code/list styling page content uses (scoped via :global since
-     the HTML is injected with {@html}). */
-  .msg-content.markdown {
-    white-space: normal;
-  }
-
-  .msg-content.markdown :global(p) {
-    margin: 0 0 8px;
-  }
-
-  .msg-content.markdown :global(p:last-child) {
-    margin-bottom: 0;
-  }
-
-  .msg-content.markdown :global(ul),
-  .msg-content.markdown :global(ol) {
-    margin: 4px 0 8px;
-    padding-left: 22px;
-  }
-
-  .msg-content.markdown :global(li) {
-    margin: 2px 0;
-  }
-
-  .msg-content.markdown :global(h1),
-  .msg-content.markdown :global(h2),
-  .msg-content.markdown :global(h3),
-  .msg-content.markdown :global(h4) {
-    margin: 12px 0 6px;
-    line-height: 1.3;
-  }
-
-  .msg-content.markdown :global(blockquote) {
-    margin: 6px 0;
-    padding-left: 12px;
-    border-left: 3px solid var(--border);
-    color: var(--text-secondary);
-  }
-
-  .msg-content.markdown :global(code) {
-    background: var(--bg-code);
-    padding: 1px 4px;
-    border-radius: 4px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 0.9em;
-  }
-
-  .msg-content.markdown :global(.code-block-wrapper) {
-    position: relative;
-    background: var(--bg-code);
-    border-radius: 6px;
-    margin: 6px 0;
-    overflow: hidden;
-  }
-
-  .msg-content.markdown :global(.code-lang) {
-    position: absolute;
-    top: 4px;
-    right: 8px;
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .msg-content.markdown :global(.code-block-pre) {
-    margin: 0;
-    padding: 10px 12px;
-    background: none;
-    overflow-x: auto;
-    counter-reset: codeline;
-  }
-
-  .msg-content.markdown :global(.code-block-pre code) {
-    background: none;
-    padding: 0;
-    font-size: 13px;
-    line-height: 1.5;
-  }
-
-  .msg-content.markdown :global(.code-line) {
-    display: block;
-    counter-increment: codeline;
-  }
-
-  .msg-content.markdown :global(.code-line)::before {
-    content: counter(codeline);
-    display: inline-block;
-    width: 2em;
-    margin-right: 1em;
-    text-align: right;
-    color: var(--text-muted);
-    user-select: none;
-  }
-
-  .msg-content.markdown :global(.page-link),
-  .msg-content.markdown :global(a) {
-    color: var(--text-link);
-    cursor: pointer;
-    text-decoration: none;
-    border-bottom: 1px solid transparent;
-  }
-
-  .msg-content.markdown :global(.page-link:hover),
-  .msg-content.markdown :global(a:hover) {
-    color: var(--text-link-hover);
-    border-bottom-color: var(--text-link-hover);
-  }
-
-  .msg-content.markdown :global(.tag) {
-    color: var(--accent-secondary);
-    cursor: pointer;
-    text-decoration: none;
-  }
-
-  .msg-content.markdown :global(img) {
-    max-width: 100%;
-    height: auto;
-    border-radius: 6px;
-  }
-
-  .msg-sources {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 8px;
-  }
-
-  .source-chip {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 6px;
-    padding: 3px 8px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 11px;
-    max-width: 100%;
-  }
-
-  .source-chip:hover {
-    border-color: var(--accent);
-    color: var(--text-primary);
-  }
-
-  .source-index {
-    color: var(--text-muted);
-    font-weight: 600;
-  }
-
-  .source-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 220px;
-  }
-
-  .source-date {
-    color: var(--text-muted);
-  }
-
-  /* Web-research affordances share the external-link visual language: the
-     --accent-cyan token and an outbound ↗ arrow, so a web citation reads as
-     "leaves the app" and is clearly distinct from a graph page chip. */
-  .copy-btn {
-    margin-left: auto;
-    padding: 1px 8px;
-    font-size: 10px;
-    border: 1px solid var(--border-color, #333);
-    border-radius: 5px;
-    background: transparent;
-    color: var(--text-muted, #888);
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.12s ease;
-  }
-
-  /* Revealed on hover so it doesn't clutter a long transcript, but kept
-     focusable so it's reachable without a pointer. */
-  .msg:hover .copy-btn,
-  .copy-btn:focus-visible {
-    opacity: 1;
-  }
-
-  .copy-btn:hover {
-    color: var(--text-primary, #eee);
-    border-color: var(--text-muted, #777);
-  }
-
-  .research-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    margin-left: 8px;
-    padding: 1px 7px;
-    border: 1px solid color-mix(in srgb, var(--accent-cyan) 45%, transparent);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
-    color: var(--accent-cyan);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    vertical-align: middle;
-  }
-
-  .research-badge-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--accent-cyan);
-  }
-
-  .web-source-chip {
-    border-color: color-mix(in srgb, var(--accent-cyan) 40%, var(--border));
-    color: var(--accent-cyan);
-  }
-
-  .web-source-chip:hover {
-    border-color: var(--accent-cyan);
-    color: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, var(--bg-secondary));
-  }
-
-  .web-source-chip .source-index {
-    color: color-mix(in srgb, var(--accent-cyan) 70%, var(--text-muted));
-  }
-
-  .source-ext {
-    color: var(--accent-cyan);
-    font-size: 10px;
-  }
-
   .chat-status-note {
     color: var(--text-muted);
     font-size: 11px;
@@ -1346,36 +936,9 @@
     }
   }
 
-  /* A subtle "typing" cursor at the end of the streaming answer, so tokens
-     appearing feel live. Static (just visible) unless animation is warranted. */
-  .type-cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    margin-left: 1px;
-    vertical-align: text-bottom;
-    background: var(--text-secondary);
-    opacity: 0.5;
-  }
-
-  .type-cursor.animate {
-    animation: chat-cursor-blink 1s steps(2, start) infinite;
-  }
-
-  @keyframes chat-cursor-blink {
-    0%,
-    100% {
-      opacity: 0.15;
-    }
-    50% {
-      opacity: 0.85;
-    }
-  }
-
   /* Backstop: honour reduced-motion even if a class slips through. */
   @media (prefers-reduced-motion: reduce) {
-    .chat-status-dot.animate,
-    .type-cursor.animate {
+    .chat-status-dot.animate {
       animation: none;
     }
   }

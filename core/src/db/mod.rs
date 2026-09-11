@@ -19,6 +19,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 
 pub(crate) use blocks::chat_salient_terms;
+pub(crate) use links::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT;
 pub use retrieval::BlockPageMeta;
 
 struct FunctionCustomizer;
@@ -182,7 +183,6 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_tasks_closed ON tasks(closed_at) WHERE closed_at IS NOT NULL;
              CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE priority IS NOT NULL;",
         );
-
         // Backfill normalized properties if tables are empty but JSON blobs have data
         let prop_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM page_properties", [], |row| row.get(0))

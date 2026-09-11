@@ -20,6 +20,10 @@ export interface PageSummary {
   is_journal: boolean;
 }
 
+export interface DeleteBookFolderResult {
+  deleted_pages: number;
+}
+
 export interface Block {
   id: string;
   page_id: string;
@@ -79,6 +83,24 @@ export function listJournalPages(limit = 20, offset = 0): Promise<Page[]> {
   return invoke("list_journal_pages", { limit, offset });
 }
 
+export function getNoteEditCounts(days?: number): Promise<[string, number][]> {
+  return invoke("get_note_edit_counts", { days });
+}
+
+export interface NoteEditDayEntry {
+  page_id: string | null;
+  page_title: string;
+  file_path: string | null;
+  first_edited_at: number;
+  last_edited_at: number;
+  edit_count: number;
+  source: string;
+}
+
+export function getNoteEditsForDay(day: string): Promise<NoteEditDayEntry[]> {
+  return invoke("get_note_edits_for_day", { day });
+}
+
 export function getPage(opts: { id?: string; title?: string }): Promise<Page> {
   return invoke("get_page", opts);
 }
@@ -93,6 +115,18 @@ export function updatePageMeta(id: string, title?: string, properties?: Record<s
 
 export function deletePage(id: string): Promise<void> {
   return invoke("delete_page", { id });
+}
+
+export function deleteBookFolder(bookTitle: string): Promise<DeleteBookFolderResult> {
+  return invoke("delete_book_folder", { bookTitle });
+}
+
+export function openPageInFileBrowser(id: string): Promise<void> {
+  return invoke("open_page_in_file_browser", { id });
+}
+
+export function openBookFolderInFileBrowser(bookTitle: string): Promise<void> {
+  return invoke("open_book_folder_in_file_browser", { bookTitle });
 }
 
 export function getPageSource(pageId: string): Promise<string> {
@@ -120,6 +154,10 @@ export function listBlocks(pageId: string): Promise<Block[]> {
   return invoke("list_blocks", { pageId });
 }
 
+export function getBlock(blockId: string): Promise<Block> {
+  return invoke("get_block", { blockId });
+}
+
 export function createBlock(
   pageId: string,
   parentId: string | null,
@@ -131,12 +169,30 @@ export function createBlock(
   return invoke("create_block", { pageId, parentId, orderIndex, content, blockType, properties });
 }
 
+export interface CreateBlockBatchItem {
+  id?: string;
+  parentId?: string | null;
+  parentIndex?: number;
+  orderIndex: number;
+  content: string;
+  blockType?: string;
+  properties?: Record<string, unknown>;
+}
+
+export function createBlocks(pageId: string, blocks: CreateBlockBatchItem[]): Promise<Block[]> {
+  return invoke("create_blocks", { pageId, blocks });
+}
+
 export function updateBlock(id: string, content: string, properties?: Record<string, unknown>): Promise<void> {
   return invoke("update_block", { id, content, properties });
 }
 
 export function deleteBlock(id: string): Promise<void> {
   return invoke("delete_block", { id });
+}
+
+export function deleteBlocks(pageId: string, ids: string[]): Promise<Block[]> {
+  return invoke("delete_blocks", { pageId, ids });
 }
 
 export function moveBlock(id: string, newParentId: string | null, orderIndex: number): Promise<void> {
@@ -189,7 +245,7 @@ export function listTasks(taskState?: string): Promise<unknown[]> {
   return invoke("list_tasks", { taskState });
 }
 
-export function updateTaskState(blockId: string, newState: string): Promise<void> {
+export function updateTaskState(blockId: string, newState: string): Promise<string> {
   return invoke("update_task_state", { blockId, newState });
 }
 
@@ -367,6 +423,7 @@ export interface GraphValidationReport {
   is_valid: boolean;
   has_pages_dir: boolean;
   has_journals_dir: boolean;
+  has_knowledge_dir: boolean;
   has_metadata_dir: boolean;
   has_valid_db: boolean;
   not_nested_in_another_graph: boolean;
@@ -475,6 +532,18 @@ export function downloadAsset(url: string, pageId?: string): Promise<string> {
   return invoke("download_asset", { url, pageId });
 }
 
+export function readAssetDataUrl(path: string): Promise<string> {
+  return invoke("read_asset_data_url", { path });
+}
+
+export function resolveAssetFilePath(path: string): Promise<string> {
+  return invoke("resolve_asset_file_path", { path });
+}
+
+export function saveImageToPath(source: string, destination: string): Promise<void> {
+  return invoke("save_image_to_path", { source, destination });
+}
+
 export function listAssets(): Promise<string[]> {
   return invoke("list_assets", {});
 }
@@ -496,7 +565,7 @@ export function deleteAssets(filenames: string[]): Promise<number> {
   return invoke("delete_assets", { filenames });
 }
 
-// Media import (video/audio transcript -> page, or appended to today's journal)
+// Media import (video/audio transcript -> background job)
 export type MediaImportTarget = "new_page" | "journal";
 
 export function mediaImportVideo(
@@ -504,8 +573,13 @@ export function mediaImportVideo(
   pageTitle?: string,
   lang?: string,
   target?: MediaImportTarget,
-): Promise<Page> {
+): Promise<string> {
   return invoke("media_import_video", { url, pageTitle, lang, target });
+}
+
+// Book import (recursive directory -> pages/Books/<Book>/...)
+export function bookImportDirectory(sourceDir: string): Promise<string> {
+  return invoke("books_import_directory", { sourceDir });
 }
 
 // Media / Whisper transcription settings

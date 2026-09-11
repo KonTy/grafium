@@ -1,6 +1,8 @@
 use crate::AppState;
 use grafium_core::models::Page;
 use serde::Serialize;
+use std::path::Path;
+use std::process::Command;
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Clone, Serialize)]
@@ -8,6 +10,11 @@ pub struct PageSummary {
     pub id: String,
     pub title: String,
     pub is_journal: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteBookFolderResult {
+    pub deleted_pages: usize,
 }
 
 impl From<Page> for PageSummary {
@@ -67,6 +74,64 @@ pub fn list_journal_pages(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn get_note_edit_counts(
+    state: State<AppState>,
+    days: Option<i64>,
+) -> Result<Vec<(String, i64)>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .get_note_edit_counts(days.unwrap_or(182))
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteEditDayEntry {
+    pub page_id: Option<String>,
+    pub page_title: String,
+    pub file_path: Option<String>,
+    pub first_edited_at: i64,
+    pub last_edited_at: i64,
+    pub edit_count: i64,
+    pub source: String,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_note_edits_for_day(
+    state: State<AppState>,
+    day: String,
+) -> Result<Vec<NoteEditDayEntry>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .get_note_edits_for_day(&day)
+        .map(|rows| {
+            rows.into_iter()
+                .map(
+                    |(
+                        page_id,
+                        page_title,
+                        file_path,
+                        first_edited_at,
+                        last_edited_at,
+                        edit_count,
+                        source,
+                    )| NoteEditDayEntry {
+                        page_id,
+                        page_title,
+                        file_path,
+                        first_edited_at,
+                        last_edited_at,
+                        edit_count,
+                        source,
+                    },
+                )
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn get_page(
     state: State<AppState>,
     id: Option<String>,
@@ -118,11 +183,90 @@ pub fn delete_page(state: State<AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn delete_book_folder(
+    state: State<AppState>,
+    book_title: String,
+) -> Result<DeleteBookFolderResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let deleted_pages = graph
+        .delete_imported_book_folder(&book_title)
+        .map_err(|e| e.to_string())?;
+    Ok(DeleteBookFolderResult { deleted_pages })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_page_in_file_browser(state: State<AppState>, id: String) -> Result<(), String> {
+    let path = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph.page_filesystem_path(&id).map_err(|e| e.to_string())?
+    };
+    open_path_in_file_browser(&path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_book_folder_in_file_browser(
+    state: State<AppState>,
+    book_title: String,
+) -> Result<(), String> {
+    let path = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph
+            .imported_book_folder_for_title(&book_title)
+            .map_err(|e| e.to_string())?
+    };
+    open_path_in_file_browser(&path)
+}
+
+fn open_path_in_file_browser(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        if path.is_dir() {
+            command.arg(path);
+        } else {
+            command.arg(format!("/select,{}", path.display()));
+        }
+        command.spawn().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        if path.is_dir() {
+            command.arg(path);
+        } else {
+            command.arg("-R").arg(path);
+        }
+        command.spawn().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        Err("Opening in a system file browser is not supported on Android".to_string())
+    }
+
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent()
+                .ok_or_else(|| "Page path has no parent folder".to_string())?
+        };
+        Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn get_page_source(state: State<AppState>, page_id: String) -> Result<String, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph
-        .get_page_source(&page_id)
-        .map_err(|e| e.to_string())
+    graph.get_page_source(&page_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]

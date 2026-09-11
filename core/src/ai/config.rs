@@ -290,6 +290,11 @@ pub struct ReferenceConfig {
     pub staleness_days: u32,
     /// Whether to include cross-graph references.
     pub cross_graph: bool,
+    /// Optional advanced override for concept-edge extraction instructions.
+    /// The backend still appends/enforces the fixed JSON schema; this lets a
+    /// graph tune what counts as a good edge without changing the result shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concept_edge_prompt: Option<String>,
 }
 
 impl Default for ReferenceConfig {
@@ -299,6 +304,7 @@ impl Default for ReferenceConfig {
             min_similarity_score: 0.6,
             staleness_days: 7,
             cross_graph: true,
+            concept_edge_prompt: None,
         }
     }
 }
@@ -366,5 +372,33 @@ mod tests {
         config.embedding.batch_size = 0;
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn reference_config_custom_concept_edge_prompt_round_trips() {
+        let mut config = AiConfig::default();
+        config.references.concept_edge_prompt =
+            Some("Prefer named symbolic systems over broad nouns.".to_string());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AiConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed.references.concept_edge_prompt.as_deref(),
+            Some("Prefer named symbolic systems over broad nouns.")
+        );
+    }
+
+    #[test]
+    fn reference_config_missing_concept_edge_prompt_deserializes_to_none() {
+        let json = r#"{
+            "max_refs_per_paragraph": 5,
+            "min_similarity_score": 0.6,
+            "staleness_days": 7,
+            "cross_graph": true
+        }"#;
+        let parsed: ReferenceConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.concept_edge_prompt, None);
     }
 }

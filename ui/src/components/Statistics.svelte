@@ -5,17 +5,24 @@
     listOpenTaskRows,
     taskFlowStats,
     cycleTaskState,
+    getBlock,
+    updateTaskState,
+    getNoteEditCounts,
+    getNoteEditsForDay,
   } from "../lib/api";
   import {
-    groupTasks,
+    groupOpenTasks,
     humanDuration,
     paceTrend,
+    type OpenTaskSort,
     type OpenTaskRow,
+    type OpenTaskView,
     type TaskFlowStats,
   } from "../lib/taskBoard";
   import { renderBlock } from "../lib/markdown";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
-  import type { CompletedTask } from "../lib/api";
+  import { pushUndo } from "../lib/undoStack";
+  import type { CompletedTask, NoteEditDayEntry } from "../lib/api";
 
   interface Props {
     onNavigate?: (title: string) => void;
@@ -24,19 +31,43 @@
   let { onNavigate }: Props = $props();
 
   let completionMap = $state<Map<string, number>>(new Map());
+  let noteEditMap = $state<Map<string, number>>(new Map());
   let completedTasks = $state<CompletedTask[]>([]);
   let openTasks = $state<OpenTaskRow[]>([]);
   let flow = $state<TaskFlowStats | null>(null);
   // Recomputed each load rather than continuously: the buckets only move when
   // the day does, and a task drifting between groups mid-read is disorienting.
   let today = $state(new Date());
-  let groups = $derived(groupTasks(openTasks, today));
+  let openTaskView = $state<OpenTaskView>("date");
+  let openTaskSort = $state<OpenTaskSort>("smart");
+  let groups = $derived.by(() => groupOpenTasks(openTasks, today, openTaskView, openTaskSort));
   let loading = $state(true);
   let totalCompleted = $state(0);
-  let hoveredDay: { date: string; count: number; x: number; y: number } | null = $state(null);
+  let totalEditedNotes = $state(0);
+  let hoveredDay: { date: string; count: number; x: number; y: number; label: string } | null = $state(null);
+  type HeatmapKind = "task" | "note";
+  let selectedDay: { kind: HeatmapKind; date: string; count: number } | null = $state(null);
+  let noteEditsForSelectedDay = $state<NoteEditDayEntry[]>([]);
+  let noteEditsLoading = $state(false);
 
-  const WEEKS = 26;
-  const DAYS = WEEKS * 7;
+  const MIN_WEEKS = 26;
+  const HISTORY_DAYS = 365 * 10;
+  const OPEN_TASK_VIEW_OPTIONS: Array<{ value: OpenTaskView; label: string }> = [
+    { value: "date", label: "By date" },
+    { value: "priority", label: "By priority" },
+    { value: "status", label: "By status" },
+    { value: "page", label: "By page" },
+  ];
+  const OPEN_TASK_SORT_OPTIONS: Array<{ value: OpenTaskSort; label: string }> = [
+    { value: "smart", label: "Smart" },
+    { value: "priority", label: "Priority" },
+    { value: "date", label: "Date" },
+    { value: "oldest", label: "Oldest" },
+    { value: "newest", label: "Newest" },
+    { value: "page", label: "Page" },
+  ];
+  const OPEN_TASK_VIEWS = new Set<OpenTaskView>(OPEN_TASK_VIEW_OPTIONS.map((option) => option.value));
+  const OPEN_TASK_SORTS = new Set<OpenTaskSort>(OPEN_TASK_SORT_OPTIONS.map((option) => option.value));
 
   $effect(() => {
     loadStats();
@@ -45,11 +76,12 @@
   async function loadStats() {
     loading = true;
     try {
-      const [counts, tasks, open, stats] = await Promise.all([
-        getCompletionCounts(DAYS),
-        getCompletedTasks(DAYS),
+      const [counts, tasks, open, stats, noteCounts] = await Promise.all([
+        getCompletionCounts(HISTORY_DAYS),
+        getCompletedTasks(HISTORY_DAYS),
         listOpenTaskRows(),
         taskFlowStats(12),
+        getNoteEditCounts(HISTORY_DAYS),
       ]);
       today = new Date();
       flow = stats;
@@ -60,9 +92,17 @@
         total += count;
       }
       completionMap = map;
+      const edits = new Map<string, number>();
+      let editedTotal = 0;
+      for (const [date, count] of noteCounts) {
+        edits.set(date, count);
+        editedTotal += count;
+      }
+      noteEditMap = edits;
       completedTasks = tasks;
       openTasks = open;
       totalCompleted = total;
+      totalEditedNotes = editedTotal;
     } catch (e) {
       console.error("Failed to load stats:", e);
     } finally {
@@ -79,28 +119,83 @@
     return "var(--heatmap-l4)";
   }
 
-  function generateGrid(): { date: string; count: number; col: number; row: number }[] {
-    const today = new Date();
-    const todayDow = today.getDay(); // 0=Sun
+  function getNoteEditColor(count: number): string {
+    if (count === 0) return "var(--heatmap-empty)";
+    if (count === 1) return "var(--note-heatmap-l1)";
+    if (count <= 3) return "var(--note-heatmap-l2)";
+    if (count <= 5) return "var(--note-heatmap-l3)";
+    return "var(--note-heatmap-l4)";
+  }
+
+  interface GridRange {
+    start: Date;
+    today: Date;
+    weeks: number;
+  }
+
+  function startOfDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+
+  function addDays(date: Date, days: number): Date {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
+  function daysBetween(start: Date, end: Date): number {
+    return Math.round((startOfDay(end).getTime() - startOfDay(start).getTime()) / 86_400_000);
+  }
+
+  function dateFromKey(key: string): Date | null {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+    if (!match) return null;
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  function dateKey(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function earliestActivityDate(...maps: Map<string, number>[]): Date | null {
+    let earliest: Date | null = null;
+    for (const map of maps) {
+      for (const [key, count] of map) {
+        if (count <= 0) continue;
+        const date = dateFromKey(key);
+        if (!date) continue;
+        if (!earliest || date < earliest) earliest = date;
+      }
+    }
+    return earliest;
+  }
+
+  function getGridRange(taskCounts: Map<string, number>, noteCounts: Map<string, number>): GridRange {
+    const today = startOfDay(new Date());
+    const currentWeekEnd = addDays(today, 6 - today.getDay());
+    const defaultStart = addDays(currentWeekEnd, -(MIN_WEEKS * 7) + 1);
+    const firstActivity = earliestActivityDate(taskCounts, noteCounts);
+    const start = firstActivity && firstActivity < defaultStart
+      ? addDays(firstActivity, -firstActivity.getDay())
+      : defaultStart;
+    const weeks = Math.max(MIN_WEEKS, Math.ceil((daysBetween(start, currentWeekEnd) + 1) / 7));
+    return { start, today, weeks };
+  }
+
+  function generateGrid(counts: Map<string, number>, range: GridRange): { date: string; count: number; col: number; row: number }[] {
     const cells: { date: string; count: number; col: number; row: number }[] = [];
 
-    // We want WEEKS columns. Last column ends on today's day-of-week row.
-    // Total cells = WEEKS * 7, but we only fill up to today.
-    const totalCells = WEEKS * 7;
-    const startDate = new Date(today);
-    startDate.setDate(startDate.getDate() - totalCells + 1 + (6 - todayDow));
-    // Adjust: the grid starts on a Sunday
-    startDate.setDate(startDate.getDate() - startDate.getDay());
-
-    for (let col = 0; col < WEEKS; col++) {
+    for (let col = 0; col < range.weeks; col++) {
       for (let row = 0; row < 7; row++) {
-        const d = new Date(startDate);
-        d.setDate(d.getDate() + col * 7 + row);
-        if (d > today) continue;
-        const key = d.toISOString().split("T")[0];
+        const d = addDays(range.start, col * 7 + row);
+        if (d > range.today) continue;
+        const key = dateKey(d);
         cells.push({
           date: key,
-          count: completionMap.get(key) ?? 0,
+          count: counts.get(key) ?? 0,
           col,
           row,
         });
@@ -109,20 +204,13 @@
     return cells;
   }
 
-  function getMonthLabels(): { label: string; col: number }[] {
-    const today = new Date();
-    const totalCells = WEEKS * 7;
-    const startDate = new Date(today);
-    startDate.setDate(startDate.getDate() - totalCells + 1 + (6 - today.getDay()));
-    startDate.setDate(startDate.getDate() - startDate.getDay());
-
+  function getMonthLabels(range: GridRange): { label: string; col: number }[] {
     const labels: { label: string; col: number }[] = [];
     const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let lastMonth = -1;
 
-    for (let col = 0; col < WEEKS; col++) {
-      const d = new Date(startDate);
-      d.setDate(d.getDate() + col * 7);
+    for (let col = 0; col < range.weeks; col++) {
+      const d = addDays(range.start, col * 7);
       const m = d.getMonth();
       if (m !== lastMonth) {
         labels.push({ label: months[m], col });
@@ -136,7 +224,7 @@
     const map = new Map<string, CompletedTask[]>();
     for (const t of tasks) {
       const d = new Date(t.timestamp);
-      const key = d.toISOString().split("T")[0];
+      const key = dateKey(d);
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
     }
@@ -152,13 +240,96 @@
     return new Date(ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   }
 
-  function stripTaskMarker(content: string): string {
-    return content.replace(/^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s+/, "");
+  function sourceLabel(source: string): string {
+    switch (source) {
+      case "app":
+        return "edited in Grafium";
+      case "file":
+        return "changed on disk";
+      case "file-mtime":
+        return "file modified";
+      case "backfill":
+        return "backfilled";
+      default:
+        return source;
+    }
   }
 
-  function handleCellHover(e: MouseEvent, date: string, count: number) {
+  function noteEditMeta(edit: NoteEditDayEntry): string {
+    const count = edit.edit_count === 1 ? "1 edit" : `${edit.edit_count} edits`;
+    return `${count} · ${sourceLabel(edit.source)} · ${formatTime(edit.last_edited_at)}`;
+  }
+
+  function isSelectedCell(kind: HeatmapKind, date: string): boolean {
+    return selectedDay?.kind === kind && selectedDay.date === date;
+  }
+
+  function heatmapCellLabel(kind: HeatmapKind, date: string, count: number): string {
+    const noun = kind === "note" ? "note edit" : "task completion";
+    return `${formatDate(date)}: ${count} ${noun}${count === 1 ? "" : "s"}`;
+  }
+
+  async function selectHeatmapDay(kind: HeatmapKind, date: string, count: number) {
+    selectedDay = { kind, date, count };
+    if (kind !== "note") {
+      noteEditsForSelectedDay = [];
+      noteEditsLoading = false;
+      return;
+    }
+
+    noteEditsLoading = true;
+    try {
+      const edits = await getNoteEditsForDay(date);
+      if (selectedDay?.kind === "note" && selectedDay.date === date) {
+        noteEditsForSelectedDay = edits;
+      }
+    } catch (e) {
+      console.error("Failed to load note edits:", e);
+      if (selectedDay?.kind === "note" && selectedDay.date === date) {
+        noteEditsForSelectedDay = [];
+      }
+    } finally {
+      if (selectedDay?.kind === "note" && selectedDay.date === date) {
+        noteEditsLoading = false;
+      }
+    }
+  }
+
+  function clearSelectedDay() {
+    selectedDay = null;
+    noteEditsForSelectedDay = [];
+    noteEditsLoading = false;
+  }
+
+  function handleOpenTaskViewChange(event: Event) {
+    const next = (event.currentTarget as HTMLSelectElement).value as OpenTaskView;
+    if (OPEN_TASK_VIEWS.has(next)) openTaskView = next;
+  }
+
+  function handleOpenTaskSortChange(event: Event) {
+    const next = (event.currentTarget as HTMLSelectElement).value as OpenTaskSort;
+    if (OPEN_TASK_SORTS.has(next)) openTaskSort = next;
+  }
+
+  function pushTaskContentUndo(
+    pageId: string,
+    blockId: string,
+    beforeContent: string,
+    afterContent: string,
+  ) {
+    if (beforeContent === afterContent) return;
+    pushUndo({
+      type: "update_block",
+      pageId,
+      blockId,
+      beforeContent,
+      afterContent,
+    });
+  }
+
+  function handleCellHover(e: MouseEvent, date: string, count: number, label: string) {
     const rect = (e.target as HTMLElement).getBoundingClientRect();
-    hoveredDay = { date, count, x: rect.left + rect.width / 2, y: rect.top };
+    hoveredDay = { date, count, x: rect.left + rect.width / 2, y: rect.top, label };
   }
 
   function handleCellLeave() {
@@ -167,7 +338,9 @@
 
   async function uncompleteTask(blockId: string) {
     try {
-      await cycleTaskState(blockId); // DONE → TODO
+      const before = await getBlock(blockId);
+      const afterContent = await cycleTaskState(blockId); // DONE → TODO
+      pushTaskContentUndo(before.page_id, blockId, before.content, afterContent);
       await loadStats();
     } catch (e) {
       console.error("Failed to uncomplete task:", e);
@@ -175,28 +348,78 @@
   }
 
   async function completeTask(blockId: string) {
-    // Cycle forward until we reach DONE. TODO → DOING → DONE requires two clicks,
-    // so loop up to 3 times defensively.
     try {
-      for (let i = 0; i < 3; i++) {
-        const next = await cycleTaskState(blockId);
-        if (next === "DONE") break;
-      }
+      const before = await getBlock(blockId);
+      const afterContent = await updateTaskState(blockId, "DONE");
+      pushTaskContentUndo(before.page_id, blockId, before.content, afterContent);
       await loadStats();
     } catch (e) {
       console.error("Failed to complete task:", e);
     }
   }
 
+  function openTaskSource(pageTitle: string, blockId: string) {
+    window.dispatchEvent(
+      new CustomEvent("navigate-page", {
+        detail: { pageName: pageTitle, targetBlockId: blockId },
+      })
+    );
+  }
+
+  async function handleRenderedTaskClick(event: MouseEvent, blockId: string, pageTitle: string) {
+    const target = event.target instanceof Element ? event.target : null;
+    const checkbox = target?.closest(".task-checkbox");
+    const marker = target?.closest(".task-marker");
+    const pageLink = target?.closest(".page-link");
+    const tag = target?.closest(".tag");
+    if (checkbox instanceof HTMLElement && checkbox.dataset.taskAction === "done") {
+      event.preventDefault();
+      event.stopPropagation();
+      await completeTask(blockId);
+      return;
+    }
+    if (marker) {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const before = await getBlock(blockId);
+        const afterContent = await cycleTaskState(blockId);
+        pushTaskContentUndo(before.page_id, blockId, before.content, afterContent);
+        await loadStats();
+      } catch (e) {
+        console.error("Failed to cycle task:", e);
+      }
+      return;
+    }
+    if (pageLink instanceof HTMLElement && pageLink.dataset.page) {
+      event.preventDefault();
+      event.stopPropagation();
+      onNavigate?.(pageLink.dataset.page);
+      return;
+    }
+    if (tag instanceof HTMLElement && tag.dataset.tag) {
+      event.preventDefault();
+      event.stopPropagation();
+      onNavigate?.(tag.dataset.tag);
+      return;
+    }
+    openTaskSource(pageTitle, blockId);
+  }
+
   $effect(() => {
     // dummy read to trigger reactivity
     completionMap;
+    noteEditMap;
   });
 
-  let grid = $derived(generateGrid());
-  let monthLabels = $derived(getMonthLabels());
+  let gridRange = $derived(getGridRange(completionMap, noteEditMap));
+  let heatmapColumnsStyle = $derived(`grid-template-columns: repeat(${gridRange.weeks}, var(--heatmap-cell, 11px));`);
+  let taskGrid = $derived(generateGrid(completionMap, gridRange));
+  let noteEditGrid = $derived(generateGrid(noteEditMap, gridRange));
+  let monthLabels = $derived(getMonthLabels(gridRange));
   let tasksByDate = $derived(groupByDate(completedTasks));
   let sortedDates = $derived([...tasksByDate.keys()].sort((a, b) => b.localeCompare(a)));
+  let selectedCompletedTasks = $derived(selectedDay?.kind === "task" ? (tasksByDate.get(selectedDay.date) ?? []) : []);
   const dayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
 </script>
 
@@ -213,43 +436,92 @@
       <div class="heatmap-row">
         <!-- Heatmap -->
         <div class="heatmap-container">
-          <!-- Month labels -->
-          <div class="month-labels">
-            <span class="day-spacer"></span>
-            {#each monthLabels as ml}
-              <span class="month-label" style="grid-column: {ml.col + 2};">{ml.label}</span>
-            {/each}
-          </div>
-          <div class="heatmap-grid-area">
-            <!-- Day labels -->
-            <div class="day-labels">
-              {#each dayLabels as label}
-                <span class="day-label">{label}</span>
-              {/each}
+          <div class="activity-heatmaps">
+            <div class="activity-heatmap-panel">
+              <div class="heatmap-title-row">
+                <h2>Task completions</h2>
+                <span>{totalCompleted} done</span>
+              </div>
+              <div class="month-labels" style={heatmapColumnsStyle}>
+                {#each monthLabels as ml}
+                  <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
+                {/each}
+              </div>
+              <div class="heatmap-grid-area">
+                <div class="day-labels">
+                  {#each dayLabels as label}
+                    <span class="day-label">{label}</span>
+                  {/each}
+                </div>
+                <div class="heatmap-grid" style={heatmapColumnsStyle}>
+                  {#each taskGrid as cell}
+                    <button
+                      type="button"
+                      class="heatmap-cell"
+                      class:selected={isSelectedCell("task", cell.date)}
+                      style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getColor(cell.count)};"
+                      aria-label={heatmapCellLabel("task", cell.date, cell.count)}
+                      title={heatmapCellLabel("task", cell.date, cell.count)}
+                      onclick={() => void selectHeatmapDay("task", cell.date, cell.count)}
+                      onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "task")}
+                      onmouseleave={handleCellLeave}
+                    ></button>
+                  {/each}
+                </div>
+              </div>
+              <div class="heatmap-legend">
+                <span class="legend-label">Less</span>
+                <div class="legend-cell" style="background: var(--heatmap-empty);"></div>
+                <div class="legend-cell" style="background: var(--heatmap-l1);"></div>
+                <div class="legend-cell" style="background: var(--heatmap-l2);"></div>
+                <div class="legend-cell" style="background: var(--heatmap-l3);"></div>
+                <div class="legend-cell" style="background: var(--heatmap-l4);"></div>
+                <span class="legend-label">More</span>
+              </div>
             </div>
-            <!-- Grid -->
-            <div class="heatmap-grid">
-              {#each grid as cell}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="heatmap-cell"
-                  style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getColor(cell.count)};"
-                  onmouseenter={(e) => handleCellHover(e, cell.date, cell.count)}
-                  onmouseleave={handleCellLeave}
-                ></div>
-              {/each}
-            </div>
-          </div>
 
-          <!-- Legend -->
-          <div class="heatmap-legend">
-            <span class="legend-label">Less</span>
-            <div class="legend-cell" style="background: var(--heatmap-empty);"></div>
-            <div class="legend-cell" style="background: var(--heatmap-l1);"></div>
-            <div class="legend-cell" style="background: var(--heatmap-l2);"></div>
-            <div class="legend-cell" style="background: var(--heatmap-l3);"></div>
-            <div class="legend-cell" style="background: var(--heatmap-l4);"></div>
-            <span class="legend-label">More</span>
+            <div class="activity-heatmap-panel note-edit-heatmap">
+              <div class="heatmap-title-row">
+                <h2>Note edits</h2>
+                <span>{totalEditedNotes} note-day{totalEditedNotes === 1 ? "" : "s"}</span>
+              </div>
+              <div class="month-labels" style={heatmapColumnsStyle}>
+                {#each monthLabels as ml}
+                  <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
+                {/each}
+              </div>
+              <div class="heatmap-grid-area">
+                <div class="day-labels">
+                  {#each dayLabels as label}
+                    <span class="day-label">{label}</span>
+                  {/each}
+                </div>
+                <div class="heatmap-grid" style={heatmapColumnsStyle}>
+                  {#each noteEditGrid as cell}
+                    <button
+                      type="button"
+                      class="heatmap-cell"
+                      class:selected={isSelectedCell("note", cell.date)}
+                      style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getNoteEditColor(cell.count)};"
+                      aria-label={heatmapCellLabel("note", cell.date, cell.count)}
+                      title={heatmapCellLabel("note", cell.date, cell.count)}
+                      onclick={() => void selectHeatmapDay("note", cell.date, cell.count)}
+                      onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "note")}
+                      onmouseleave={handleCellLeave}
+                    ></button>
+                  {/each}
+                </div>
+              </div>
+              <div class="heatmap-legend">
+                <span class="legend-label">Less</span>
+                <div class="legend-cell" style="background: var(--heatmap-empty);"></div>
+                <div class="legend-cell" style="background: var(--note-heatmap-l1);"></div>
+                <div class="legend-cell" style="background: var(--note-heatmap-l2);"></div>
+                <div class="legend-cell" style="background: var(--note-heatmap-l3);"></div>
+                <div class="legend-cell" style="background: var(--note-heatmap-l4);"></div>
+                <span class="legend-label">More</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -296,9 +568,79 @@
     <!-- Tooltip -->
     {#if hoveredDay}
       <div class="heatmap-tooltip" style="left: {hoveredDay.x}px; top: {hoveredDay.y - 8}px;">
-        <strong>{hoveredDay.count}</strong> task{hoveredDay.count !== 1 ? "s" : ""} completed
+        {#if hoveredDay.label === "note"}
+          <strong>{hoveredDay.count}</strong> note{hoveredDay.count !== 1 ? "s" : ""} edited
+        {:else}
+          <strong>{hoveredDay.count}</strong> task{hoveredDay.count !== 1 ? "s" : ""} completed
+        {/if}
         <br><span class="tooltip-date">{formatDate(hoveredDay.date)}</span>
       </div>
+    {/if}
+
+    {#if selectedDay}
+      <section class="day-detail" aria-live="polite">
+        <div class="day-detail-header">
+          <div>
+            <h2 class="section-heading">
+              {selectedDay.kind === "note" ? "Edited notes" : "Completed tasks"}
+            </h2>
+            <p>{formatDate(selectedDay.date)}</p>
+          </div>
+          <button type="button" class="day-detail-close" onclick={clearSelectedDay} aria-label="Close day details">×</button>
+        </div>
+
+        {#if selectedDay.kind === "note"}
+          {#if noteEditsLoading}
+            <div class="empty-state compact">Loading edited notes...</div>
+          {:else if noteEditsForSelectedDay.length === 0}
+            <div class="empty-state compact">No note edits recorded for this day.</div>
+          {:else}
+            <div class="note-edit-list">
+              {#each noteEditsForSelectedDay as edit (`${edit.page_id ?? ""}:${edit.file_path ?? edit.page_title}`)}
+                <button
+                  type="button"
+                  class="note-edit-row"
+                  onclick={() => onNavigate?.(edit.page_title)}
+                  title={`Open ${edit.page_title}`}
+                >
+                  <span class="note-edit-title">{edit.page_title}</span>
+                  <span class="note-edit-meta">{noteEditMeta(edit)}</span>
+                  {#if edit.file_path}
+                    <span class="note-edit-path">{edit.file_path}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {:else if selectedCompletedTasks.length === 0}
+          <div class="empty-state compact">No completed tasks recorded for this day.</div>
+        {:else}
+          <div class="task-list">
+            {#each selectedCompletedTasks as task (task.block_id)}
+              <div class="task-item">
+                <div class="task-body">
+                  <button
+                    class="task-content task-open"
+                    onclick={(event) => handleRenderedTaskClick(event, task.block_id, task.page_title)}
+                    title={`Open ${task.page_title}`}
+                  >
+                    <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
+                  </button>
+                  <span class="task-meta">
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <span
+                      class="task-page"
+                      onclick={() => openTaskSource(task.page_title, task.block_id)}
+                    >{task.page_title}</span>
+                    <span class="task-time">{formatTime(task.timestamp)}</span>
+                  </span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
     {/if}
 
     <!-- Open tasks, grouped by when they need a decision.
@@ -307,10 +649,30 @@
          than action. The oldest-task line below says the same thing in terms
          of time, which is something you can act on. -->
     <div class="open-tasks">
-      <h2 class="section-heading">
-        Open
-        <span class="section-count">{openTasks.length}</span>
-      </h2>
+      <div class="section-heading-row">
+        <h2 class="section-heading">
+          Open
+          <span class="section-count">{openTasks.length}</span>
+        </h2>
+        <div class="task-controls" aria-label="Open task display options">
+          <label>
+            <span>View</span>
+            <select value={openTaskView} onchange={handleOpenTaskViewChange}>
+              {#each OPEN_TASK_VIEW_OPTIONS as option}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            <span>Sort</span>
+            <select value={openTaskSort} onchange={handleOpenTaskSortChange}>
+              {#each OPEN_TASK_SORT_OPTIONS as option}
+                <option value={option.value}>{option.label}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+      </div>
 
       {#if flow?.oldest_open_days != null && flow.oldest_open_days > 14}
         <p class="oldest-note">
@@ -323,7 +685,7 @@
           <p>Nothing open. Add a task with a <code>- TODO ...</code> block.</p>
         </div>
       {:else}
-        {#each groups as group (group.bucket)}
+        {#each groups as group (`${openTaskView}:${openTaskSort}:${group.id}`)}
           <div class="task-group">
             <div class="date-header">
               <span class="date-text">{group.label}</span>
@@ -332,31 +694,20 @@
             <div class="task-list">
               {#each group.tasks as task (task.block_id)}
                 <div class="task-item open">
-                  <!-- svelte-ignore a11y_click_events_have_key_events -->
-                  <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <div
-                    class="task-check open"
-                    title="Mark done"
-                    onclick={() => completeTask(task.block_id)}
-                  >&#9633;</div>
                   <div class="task-body">
                     <button
                       class="task-content task-open"
-                      onclick={() => onNavigate?.(task.page_title)}
+                      onclick={(event) => handleRenderedTaskClick(event, task.block_id, task.page_title)}
                       title={`Open ${task.page_title}`}
                     >
-                      {#if task.priority}
-                        <span class="task-priority priority-{task.priority}">[#{task.priority}]</span>
-                      {/if}
-                      <span class="task-state task-state-{task.state.toLowerCase()}">{task.state}</span>
-                      <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                      <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
                     </button>
                     <span class="task-meta">
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_static_element_interactions -->
                       <span
                         class="task-page"
-                        onclick={() => onNavigate?.(task.page_title)}
+                        onclick={() => openTaskSource(task.page_title, task.block_id)}
                       >{task.page_title}</span>
                       {#if task.deadline_date}
                         <span class="task-time">due {task.deadline_date}</span>
@@ -408,21 +759,20 @@
             <div class="task-list">
               {#each tasksByDate.get(date) ?? [] as task}
                 <div class="task-item">
-                  <div class="task-check">&#10003;</div>
                   <div class="task-body">
                     <button
                       class="task-content task-open"
-                      onclick={() => onNavigate?.(task.page_title)}
+                      onclick={(event) => handleRenderedTaskClick(event, task.block_id, task.page_title)}
                       title={`Open ${task.page_title}`}
                     >
-                      <span use:hydrateRenderedMedia={task.content}>{@html renderBlock(stripTaskMarker(task.content))}</span>
+                      <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
                     </button>
                     <span class="task-meta">
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_static_element_interactions -->
                       <span
                         class="task-page"
-                        onclick={() => onNavigate?.(task.page_title)}
+                        onclick={() => openTaskSource(task.page_title, task.block_id)}
                       >{task.page_title}</span>
                       <span class="task-time">{formatTime(task.timestamp)}</span>
                     </span>
@@ -444,6 +794,10 @@
     --heatmap-l2: #006d32;
     --heatmap-l3: #26a641;
     --heatmap-l4: #39d353;
+    --note-heatmap-l1: color-mix(in srgb, var(--accent-blue, #60a5fa) 34%, var(--heatmap-empty));
+    --note-heatmap-l2: color-mix(in srgb, var(--accent-blue, #60a5fa) 52%, var(--heatmap-empty));
+    --note-heatmap-l3: color-mix(in srgb, var(--accent-blue, #60a5fa) 74%, var(--heatmap-empty));
+    --note-heatmap-l4: var(--accent-cyan, #94e2d5);
     position: relative;
     height: 100%;
     overflow-y: auto;
@@ -528,23 +882,6 @@
     margin-bottom: 18px;
   }
 
-  .task-priority {
-    font-weight: 700;
-    margin-right: 6px;
-  }
-
-  .task-priority.priority-A {
-    color: var(--danger, #f85149);
-  }
-
-  .task-priority.priority-B {
-    color: var(--warning, #d29922);
-  }
-
-  .task-priority.priority-C {
-    color: var(--text-muted);
-  }
-
   .by-page {
     margin-top: 28px;
   }
@@ -623,25 +960,64 @@
   /* Keeps the calendar to its natural size instead of filling the row, so the
      summary cards sit beside it rather than being pushed to the far edge. */
   .heatmap-container {
-    flex: 0 0 auto;
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
-    flex: 1;
     min-width: 0;
+  }
+
+  .activity-heatmaps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .activity-heatmap-panel {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
+    overflow-x: auto;
+  }
+
+  .note-edit-heatmap {
+    border-color: color-mix(in srgb, var(--accent-blue, var(--accent)) 36%, var(--border));
+  }
+
+  .heatmap-title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+
+  .heatmap-title-row h2 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .heatmap-title-row span {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
 
   .month-labels {
     display: grid;
-    grid-template-columns: 24px repeat(26, 1fr);
+    column-gap: 2px;
+    width: max-content;
+    margin-left: 24px;
     font-size: 0.65rem;
     color: var(--text-muted);
     margin-bottom: 2px;
     height: 14px;
-  }
-
-  .day-spacer {
-    /* empty cell to align with day-labels column */
   }
 
   .month-label {
@@ -652,7 +1028,8 @@
   .heatmap-grid-area {
     display: flex;
     gap: 0;
-    overflow: hidden;
+    width: max-content;
+    overflow: visible;
   }
 
   .day-labels {
@@ -682,13 +1059,14 @@
   .heatmap-grid {
     display: grid;
     grid-template-rows: repeat(7, var(--heatmap-cell, 11px));
-    grid-auto-columns: var(--heatmap-cell, 11px);
-    grid-auto-flow: column;
     gap: 2px;
     min-width: 0;
   }
 
   .heatmap-cell {
+    border: none;
+    padding: 0;
+    appearance: none;
     border-radius: 2px;
     width: 100%;
     height: 100%;
@@ -696,8 +1074,14 @@
     transition: outline 0.1s;
   }
 
+  .heatmap-cell:focus-visible,
   .heatmap-cell:hover {
     outline: 2px solid var(--text-secondary);
+    outline-offset: -1px;
+  }
+
+  .heatmap-cell.selected {
+    outline: 2px solid var(--text-primary);
     outline-offset: -1px;
   }
 
@@ -741,9 +1125,159 @@
     font-size: 0.7rem;
   }
 
+  .day-detail {
+    margin: 16px 24px 0;
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+  }
+
+  .day-detail-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .day-detail-header .section-heading {
+    margin: 0;
+  }
+
+  .day-detail-header p {
+    margin: 3px 0 0;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+
+  .day-detail-close {
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .day-detail-close:hover,
+  .day-detail-close:focus-visible {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .empty-state.compact {
+    padding: 14px;
+    font-size: 0.82rem;
+  }
+
+  .note-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .note-edit-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 3px 12px;
+    align-items: baseline;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .note-edit-row:hover,
+  .note-edit-row:focus-visible {
+    background: var(--bg-hover, var(--bg-primary));
+    outline: none;
+  }
+
+  .note-edit-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-link);
+    font-weight: 600;
+  }
+
+  .note-edit-meta {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+
+  .note-edit-path {
+    grid-column: 1 / -1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+  }
+
   /* Open tasks section */
   .open-tasks {
     padding: 24px 24px 0;
+  }
+
+  .section-heading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .section-heading-row .section-heading {
+    margin: 0;
+  }
+
+  .task-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .task-controls label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .task-controls select {
+    min-height: 30px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.78rem;
+    line-height: 1.2;
+    padding: 4px 28px 4px 9px;
+    text-transform: none;
+    cursor: pointer;
+  }
+
+  .task-controls select:hover,
+  .task-controls select:focus {
+    border-color: var(--accent);
   }
 
   .section-count {
@@ -755,35 +1289,6 @@
     margin-left: 8px;
     font-weight: 500;
   }
-
-  .task-item.open .task-check.open {
-    color: var(--text-muted);
-    font-size: 1.05rem;
-    cursor: pointer;
-    transition: color 0.15s;
-  }
-
-  .task-item.open .task-check.open:hover {
-    color: var(--accent-secondary);
-  }
-
-  .task-state {
-    display: inline-block;
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    margin-right: 6px;
-    background: var(--bg-secondary);
-    color: var(--text-muted);
-    vertical-align: 1px;
-  }
-
-  .task-state-todo { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
-  .task-state-doing { color: var(--accent-secondary); background: color-mix(in srgb, var(--accent-secondary) 15%, transparent); }
-  .task-state-now { color: var(--text-link); background: color-mix(in srgb, var(--text-link) 15%, transparent); }
-  .task-state-later { color: var(--text-muted); }
 
   /* Completed tasks */
   .completed-tasks {
@@ -848,19 +1353,6 @@
 
   .task-item:hover {
     background: var(--bg-secondary);
-  }
-
-  .task-check {
-    color: var(--accent-secondary);
-    font-size: 0.85rem;
-    font-weight: 700;
-    flex-shrink: 0;
-    width: 20px;
-    height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-top: 1px;
   }
 
   .task-body {
@@ -938,6 +1430,10 @@
   @media (max-width: 900px) {
     .heatmap-row {
       flex-direction: column;
+    }
+
+    .activity-heatmaps {
+      width: 100%;
     }
 
     .summary-cards {

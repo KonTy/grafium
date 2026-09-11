@@ -474,6 +474,10 @@
     margin: 8px auto;
     display: block;
   }
+  .face :global(.fc-img[data-src]:not([src])) {
+    min-height: 48px;
+    background: color-mix(in srgb, var(--text-muted, #6b7280) 8%, transparent);
+  }
   .face :global(.fc-audio) {
     width: 100%;
     max-width: 320px;
@@ -494,8 +498,8 @@
     justify-content: center;
   }
   button.primary {
-    background: var(--accent, #2563eb);
-    color: #fff;
+    background: var(--btn-primary-bg, var(--accent, #2563eb));
+    color: var(--btn-primary-fg, var(--bg-primary));
     border: none;
     border-radius: 10px;
     padding: 14px 28px;

@@ -53,7 +53,10 @@ mod tests {
         for filler in [0usize, 1, 2, 3, 7, 100] {
             let text = format!("{}{}", "a".repeat(filler), "反".repeat(200));
             let start = char_boundary_tail_start(&text, 240);
-            assert!(text.is_char_boundary(start), "filler {filler} gave a bad offset");
+            assert!(
+                text.is_char_boundary(start),
+                "filler {filler} gave a bad offset"
+            );
             let _ = &text[start..]; // must not panic
         }
     }

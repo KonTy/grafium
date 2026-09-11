@@ -376,11 +376,7 @@ fn embed_all(
     // for a non-causal embedding model the ubatch has to hold the whole
     // sequence too. Take the smallest of the three limits llama.cpp actually
     // applied — going over any of them is an abort(), not a catchable error.
-    let n_ctx = ctx
-        .n_ctx()
-        .min(ctx.n_batch())
-        .min(ctx.n_ubatch())
-        .max(1) as i32;
+    let n_ctx = ctx.n_ctx().min(ctx.n_batch()).min(ctx.n_ubatch()).max(1) as i32;
     let mut embeddings = Vec::with_capacity(texts.len());
 
     for text in texts {

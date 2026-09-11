@@ -145,7 +145,11 @@ pub struct TaskTimestamp {
 
 impl TaskTimestamp {
     pub fn from_date(date: NaiveDate) -> Self {
-        Self { date, time: None, repeater: None }
+        Self {
+            date,
+            time: None,
+            repeater: None,
+        }
     }
 
     fn at(&self) -> NaiveDateTime {
@@ -264,13 +268,31 @@ static CLOSED_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
-static PRIORITY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[#([ABC])\]").unwrap());
+static LOGSEQ_STATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?m)^\s*\*\s+State\s+"(?P<to>[^"]+)"\s+from\s+"[^"]*"\s+\[(?P<date>\d{4}-\d{2}-\d{2})(?:\s+[A-Za-z]{3,})?(?:\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?\s*\]"#,
+    )
+    .unwrap()
+});
+static CLOCK_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*CLOCK:\s*(?P<body>.*)$").unwrap());
+static INACTIVE_TS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\[(?P<date>\d{4}-\d{2}-\d{2})(?:\s+[A-Za-z]{3,})?(?:\s+(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?\s*\]",
+    )
+    .unwrap()
+});
+static PRIORITY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\[#([abc])\]").unwrap());
 static REPEATER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?P<prefix>\.\+|\+\+|\+)(?P<n>\d+)(?P<unit>[hdwmy])$").unwrap());
 
 /// GitHub-flavoured checkbox: `- [ ] thing` / `* [x] thing`.
+///
+/// The bullet is optional because Grafium's outliner parser has already removed
+/// the structural `- ` by the time block content is indexed or edited, leaving
+/// imported Markdown tasks as `[ ] thing`.
 static CHECKBOX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*[-*+]\s*\[(?P<mark>[^\]])\]\s*").unwrap());
+    LazyLock::new(|| Regex::new(r"^(?P<prefix>\s*)(?:[-*+]\s*)?\[(?P<mark>[^\]])\]\s*").unwrap());
 
 /// Obsidian Tasks emoji fields. Read-only: Grafium writes the Logseq form.
 static OBSIDIAN_DUE_RE: LazyLock<Regex> =
@@ -306,18 +328,51 @@ pub fn parse_timestamp(s: &str) -> Option<TaskTimestamp> {
     })
 }
 
-fn parse_closed(content: &str) -> Option<NaiveDateTime> {
-    let caps = CLOSED_RE.captures(content)?;
-    let date = NaiveDate::parse_from_str(&caps["date"], "%Y-%m-%d").ok()?;
-    let time = caps
-        .name("time")
-        .and_then(|m| {
-            NaiveTime::parse_from_str(m.as_str(), "%H:%M:%S")
-                .or_else(|_| NaiveTime::parse_from_str(m.as_str(), "%H:%M"))
+fn parse_inactive_datetime(date: &str, time: Option<&str>) -> Option<NaiveDateTime> {
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let time = time
+        .and_then(|raw| {
+            NaiveTime::parse_from_str(raw, "%H:%M:%S")
+                .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M"))
                 .ok()
         })
         .unwrap_or(NaiveTime::MIN);
     Some(date.and_time(time))
+}
+
+fn parse_inactive_match(caps: &regex::Captures<'_>) -> Option<NaiveDateTime> {
+    parse_inactive_datetime(&caps["date"], caps.name("time").map(|m| m.as_str()))
+}
+
+fn parse_closed(content: &str) -> Option<NaiveDateTime> {
+    CLOSED_RE
+        .captures(content)
+        .and_then(|caps| parse_inactive_match(&caps))
+}
+
+fn latest_logseq_state_completion(content: &str) -> Option<NaiveDateTime> {
+    LOGSEQ_STATE_RE
+        .captures_iter(content)
+        .filter(|caps| is_closing(caps.name("to").map(|m| m.as_str()).unwrap_or_default()))
+        .filter_map(|caps| parse_inactive_match(&caps))
+        .max()
+}
+
+fn latest_logseq_clock_timestamp(content: &str) -> Option<NaiveDateTime> {
+    CLOCK_LINE_RE
+        .captures_iter(content)
+        .flat_map(|line| {
+            let body = line
+                .name("body")
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string();
+            INACTIVE_TS_RE
+                .captures_iter(&body)
+                .filter_map(|caps| parse_inactive_match(&caps))
+                .collect::<Vec<_>>()
+        })
+        .max()
 }
 
 /// Everything the task fields on a block amount to.
@@ -353,12 +408,15 @@ pub fn parse_fields(content: &str) -> TaskFields {
             .and_then(|c| Priority::from_str(&c[1])),
         scheduled: logseq_scheduled.or_else(|| obsidian(&OBSIDIAN_SCHEDULED_RE)),
         deadline: logseq_deadline.or_else(|| obsidian(&OBSIDIAN_DUE_RE)),
-        closed_at: parse_closed(content).or_else(|| {
-            OBSIDIAN_DONE_RE
-                .captures(content)
-                .and_then(|c| NaiveDate::parse_from_str(&c[1], "%Y-%m-%d").ok())
-                .map(|d| d.and_time(NaiveTime::MIN))
-        }),
+        closed_at: parse_closed(content)
+            .or_else(|| latest_logseq_state_completion(content))
+            .or_else(|| {
+                OBSIDIAN_DONE_RE
+                    .captures(content)
+                    .and_then(|c| NaiveDate::parse_from_str(&c[1], "%Y-%m-%d").ok())
+                    .map(|d| d.and_time(NaiveTime::MIN))
+            })
+            .or_else(|| latest_logseq_clock_timestamp(content)),
     }
 }
 
@@ -493,18 +551,26 @@ fn is_closing(state: &str) -> bool {
     matches!(state, "DONE" | "CANCELED" | "CANCELLED")
 }
 
-static MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b\s*").unwrap()
-});
+static MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b\s*").unwrap());
 
 /// The task marker a block currently carries, or "" if it has none.
 pub fn current_marker(content: &str) -> String {
-    content
-        .lines()
-        .next()
-        .and_then(|line| MARKER_RE.find(line.trim_start()))
-        .map(|m| m.as_str().trim().to_string())
+    let Some(line) = content.lines().next() else {
+        return String::new();
+    };
+    if let Some(marker) = MARKER_RE.find(line.trim_start()) {
+        return marker.as_str().trim().to_string();
+    }
+
+    parse_checkbox(line)
+        .map(|(state, _)| match state {
+            CheckboxState::Open => "TODO",
+            CheckboxState::Done => "DONE",
+            CheckboxState::Cancelled => "CANCELED",
+        })
         .unwrap_or_default()
+        .to_string()
 }
 
 /// Rewrite a task block for a state change, recording it in the markdown.
@@ -525,6 +591,18 @@ pub fn apply_state_change(content: &str, from: &str, to: &str, at: NaiveDateTime
         MARKER_RE
             .replace(&parts.marker_line, format!("{to} "))
             .to_string()
+    } else if let Some(caps) = CHECKBOX_RE.captures(&parts.marker_line) {
+        let prefix = caps.name("prefix").map(|m| m.as_str()).unwrap_or_default();
+        let rest = caps
+            .get(0)
+            .map(|m| &parts.marker_line[m.end()..])
+            .unwrap_or_default()
+            .trim_start();
+        if rest.is_empty() {
+            format!("{prefix}{to}")
+        } else {
+            format!("{prefix}{to} {rest}")
+        }
     } else {
         format!("{to} {}", parts.marker_line)
     };
@@ -685,21 +763,37 @@ mod tests {
     fn a_month_step_clamps_to_a_shorter_month() {
         // The 31st plus a month must not spill into the 1st.
         let ts = parse_timestamp("<2026-01-31 Sat +1m>").unwrap();
-        assert_eq!(ts.next_occurrence(dt("2026-01-31 12:00")).unwrap().date, d("2026-02-28"));
+        assert_eq!(
+            ts.next_occurrence(dt("2026-01-31 12:00")).unwrap().date,
+            d("2026-02-28")
+        );
     }
 
     #[test]
     fn a_year_step_clamps_across_a_leap_day() {
         let ts = parse_timestamp("<2028-02-29 Tue +1y>").unwrap();
-        assert_eq!(ts.next_occurrence(dt("2028-02-29 12:00")).unwrap().date, d("2029-02-28"));
+        assert_eq!(
+            ts.next_occurrence(dt("2028-02-29 12:00")).unwrap().date,
+            d("2029-02-28")
+        );
     }
 
     #[test]
     fn a_repeating_time_is_kept_and_a_dateless_one_is_not_invented() {
         let timed = parse_timestamp("<2026-09-07 Mon 07:00 .+1d>").unwrap();
-        assert!(timed.next_occurrence(dt("2026-09-07 20:00")).unwrap().time.is_some());
+        assert!(timed
+            .next_occurrence(dt("2026-09-07 20:00"))
+            .unwrap()
+            .time
+            .is_some());
         let untimed = parse_timestamp("<2026-09-07 Mon .+1d>").unwrap();
-        assert_eq!(untimed.next_occurrence(dt("2026-09-07 20:00")).unwrap().time, None);
+        assert_eq!(
+            untimed
+                .next_occurrence(dt("2026-09-07 20:00"))
+                .unwrap()
+                .time,
+            None
+        );
     }
 
     #[test]
@@ -731,6 +825,12 @@ mod tests {
     }
 
     #[test]
+    fn reads_lowercase_logseq_priority() {
+        let fields = parse_fields("TODO [#a] Ship the release");
+        assert_eq!(fields.priority, Some(Priority::A));
+    }
+
+    #[test]
     fn reads_a_completion_timestamp() {
         let fields = parse_fields("DONE Write report\nCLOSED: [2026-09-06 Sun 11:42]");
         assert_eq!(fields.closed_at, Some(dt("2026-09-06 11:42")));
@@ -740,6 +840,37 @@ mod tests {
     fn reads_a_completion_timestamp_with_seconds() {
         let fields = parse_fields("DONE x\nCLOSED: [2026-09-06 Sun 11:42:07]");
         assert_eq!(fields.closed_at.unwrap().date(), d("2026-09-06"));
+    }
+
+    #[test]
+    fn reads_a_logseq_done_state_as_completion() {
+        let fields = parse_fields(
+            "DONE x\n\
+             :LOGBOOK:\n\
+             * State \"DOING\" from \"TODO\" [2023-12-29 Fri 10:29]\n\
+             * State \"DONE\" from \"DOING\" [2023-12-30 Sat 17:31]\n\
+             :END:",
+        );
+        assert_eq!(fields.closed_at, Some(dt("2023-12-30 17:31")));
+    }
+
+    #[test]
+    fn reads_latest_logseq_clock_as_done_completion_fallback() {
+        let fields = parse_fields(
+            "DONE Triage all emails\n\
+             :LOGBOOK:\n\
+             CLOCK: [2023-07-20 Thu 10:40:28]--[2023-07-20 Thu 10:40:29] =>  00:00:01\n\
+             CLOCK: [2023-07-20 Thu 13:07:48]--[2023-07-20 Thu 21:01:35] =>  07:53:47\n\
+             :END:",
+        );
+        assert_eq!(
+            fields.closed_at,
+            Some(
+                d("2023-07-20")
+                    .and_hms_opt(21, 1, 35)
+                    .expect("valid test timestamp")
+            )
+        );
     }
 
     #[test]
@@ -774,16 +905,23 @@ mod tests {
     #[test]
     fn reads_github_checkboxes() {
         assert_eq!(parse_checkbox("- [ ] open").unwrap().0, CheckboxState::Open);
+        assert_eq!(parse_checkbox("[ ] open").unwrap().0, CheckboxState::Open);
         assert_eq!(parse_checkbox("- [x] done").unwrap().0, CheckboxState::Done);
         assert_eq!(parse_checkbox("* [X] done").unwrap().0, CheckboxState::Done);
-        assert_eq!(parse_checkbox("+ [-] dropped").unwrap().0, CheckboxState::Cancelled);
+        assert_eq!(
+            parse_checkbox("+ [-] dropped").unwrap().0,
+            CheckboxState::Cancelled
+        );
     }
 
     #[test]
     fn an_unknown_checkbox_character_stays_an_open_task() {
         // Obsidian's custom statuses (`[/]` in progress, `[?]` question) must
         // not make a task disappear.
-        assert_eq!(parse_checkbox("- [/] in progress").unwrap().0, CheckboxState::Open);
+        assert_eq!(
+            parse_checkbox("- [/] in progress").unwrap().0,
+            CheckboxState::Open
+        );
     }
 
     #[test]
@@ -800,6 +938,12 @@ mod tests {
         assert_eq!(&line[end..], "Pay invoice");
     }
 
+    #[test]
+    fn current_marker_reads_stripped_markdown_checkboxes() {
+        assert_eq!(current_marker("[ ] Pay invoice"), "TODO");
+        assert_eq!(current_marker("[x] Pay invoice"), "DONE");
+        assert_eq!(current_marker("[-] Pay invoice"), "CANCELED");
+    }
 
     // ─── Editing a task block ────────────────────────────────────────────────
 
@@ -807,14 +951,22 @@ mod tests {
     fn completing_a_task_records_when() {
         // The point of the whole feature: this line is what survives a
         // re-index, a fresh database, or moving to another machine.
-        let out = apply_state_change("DOING Write report", "DOING", "DONE", dt("2026-09-06 11:42"));
+        let out = apply_state_change(
+            "DOING Write report",
+            "DOING",
+            "DONE",
+            dt("2026-09-06 11:42"),
+        );
         assert_eq!(
             out,
-            ["DONE Write report",
-             "CLOSED: [2026-09-06 Sun 11:42]",
-             ":LOGBOOK:",
-             "* State \"DONE\" from \"DOING\" [2026-09-06 Sun 11:42]",
-             ":END:"].join("\n")
+            [
+                "DONE Write report",
+                "CLOSED: [2026-09-06 Sun 11:42]",
+                ":LOGBOOK:",
+                "* State \"DONE\" from \"DOING\" [2026-09-06 Sun 11:42]",
+                ":END:"
+            ]
+            .join("\n")
         );
     }
 
@@ -822,7 +974,10 @@ mod tests {
     fn reopening_a_task_drops_the_completion_line() {
         let done = apply_state_change("TODO x", "TODO", "DONE", dt("2026-09-06 11:00"));
         let reopened = apply_state_change(&done, "DONE", "TODO", dt("2026-09-06 12:00"));
-        assert!(!reopened.contains("CLOSED:"), "a reopened task is not closed:\n{reopened}");
+        assert!(
+            !reopened.contains("CLOSED:"),
+            "a reopened task is not closed:\n{reopened}"
+        );
         assert!(reopened.starts_with("TODO x"));
     }
 
@@ -834,7 +989,11 @@ mod tests {
         let b = apply_state_change(&a, "DOING", "DONE", dt("2026-09-06 11:30"));
         assert!(b.contains("* State \"DOING\" from \"TODO\" [2026-09-06 Sun 09:00]"));
         assert!(b.contains("* State \"DONE\" from \"DOING\" [2026-09-06 Sun 11:30]"));
-        assert_eq!(b.matches(":LOGBOOK:").count(), 1, "one drawer, not one per change");
+        assert_eq!(
+            b.matches(":LOGBOOK:").count(),
+            1,
+            "one drawer, not one per change"
+        );
         assert_eq!(b.matches(":END:").count(), 1);
     }
 
@@ -846,7 +1005,10 @@ mod tests {
         assert!(out.contains("DEADLINE: <2026-09-10 Thu>"));
         assert!(out.contains("some notes about the release"));
         assert!(out.contains("more notes"));
-        assert!(out.contains("[#A]"), "priority must not be eaten by the marker rewrite");
+        assert!(
+            out.contains("[#A]"),
+            "priority must not be eaten by the marker rewrite"
+        );
     }
 
     #[test]
@@ -870,6 +1032,14 @@ mod tests {
     }
 
     #[test]
+    fn a_markdown_checkbox_is_rewritten_as_a_logseq_task() {
+        let out = apply_state_change("[ ] Pay invoice", "TODO", "DONE", dt("2026-09-06 11:00"));
+        assert!(out.starts_with("DONE Pay invoice"), "{out}");
+        assert!(!out.contains("[ ]"), "{out}");
+        assert!(out.contains("CLOSED: [2026-09-06 Sun 11:00]"));
+    }
+
+    #[test]
     fn a_cancelled_task_is_also_closed() {
         let out = apply_state_change("TODO x", "TODO", "CANCELED", dt("2026-09-06 11:00"));
         assert!(out.contains("CLOSED: [2026-09-06 Sun 11:00]"));
@@ -889,7 +1059,6 @@ mod tests {
         assert!(fields.scheduled.unwrap().repeater.is_some());
     }
 
-
     // ─── Recurrence ──────────────────────────────────────────────────────────
 
     #[test]
@@ -900,7 +1069,10 @@ mod tests {
         let out = apply_recurrence(&content, "TODO", dt("2026-09-08 18:00")).unwrap();
         assert!(out.starts_with("TODO Water the plants"), "{out}");
         assert!(out.contains("SCHEDULED: <2026-09-11 Fri .+3d>"), "{out}");
-        assert!(!out.contains("CLOSED:"), "a recurring task is not closed:\n{out}");
+        assert!(
+            !out.contains("CLOSED:"),
+            "a recurring task is not closed:\n{out}"
+        );
         assert_eq!(out.matches("SCHEDULED:").count(), 1);
     }
 
@@ -941,7 +1113,10 @@ mod tests {
         let content = ["TODO Water", "SCHEDULED: <2026-09-07 Mon .+3d>"].join("\n");
         let once = apply_recurrence(&content, "TODO", dt("2026-09-08 18:00")).unwrap();
         let twice = apply_recurrence(&once, "TODO", dt("2026-09-12 18:00")).unwrap();
-        assert!(twice.contains("SCHEDULED: <2026-09-15 Tue .+3d>"), "{twice}");
+        assert!(
+            twice.contains("SCHEDULED: <2026-09-15 Tue .+3d>"),
+            "{twice}"
+        );
         assert_eq!(twice.matches(":LOGBOOK:").count(), 1);
     }
 

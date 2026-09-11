@@ -46,6 +46,8 @@ impl JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobLink {
     pub page_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
     pub label: String,
 }
 
@@ -63,6 +65,7 @@ pub struct Job {
     pub message: Option<String>,
     pub link: Option<JobLink>,
     pub error: Option<String>,
+    pub details: Option<String>,
     pub cancellable: bool,
     pub started_at: i64,
     pub finished_at: Option<i64>,
@@ -99,6 +102,17 @@ impl JobRegistry {
         title: impl Into<String>,
         cancellable: bool,
     ) -> Result<JobHandle, String> {
+        self.start_with_link(app, kind, title, cancellable, None)
+    }
+
+    pub fn start_with_link(
+        self: &Arc<Self>,
+        app: tauri::AppHandle,
+        kind: impl Into<String>,
+        title: impl Into<String>,
+        cancellable: bool,
+        link: Option<JobLink>,
+    ) -> Result<JobHandle, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let job = Job {
@@ -108,8 +122,9 @@ impl JobRegistry {
             status: JobStatus::Running,
             progress: None,
             message: None,
-            link: None,
+            link,
             error: None,
+            details: None,
             cancellable,
             started_at: now_ms(),
             finished_at: None,
@@ -123,7 +138,7 @@ impl JobRegistry {
                 .count();
             if running >= MAX_RUNNING_JOBS {
                 return Err(format!(
-                    "Grafium is already running {running} background AI jobs. \
+                    "Grafium is already running {running} background jobs. \
                      Wait for one to finish or cancel it before starting another."
                 ));
             }
@@ -133,6 +148,9 @@ impl JobRegistry {
                 })
             {
                 return Err("A full AI index is already running".to_string());
+            }
+            if is_duplicate_concept_edge_job(&job, &entries) {
+                return Err("Concept edge discovery is already running for this page".to_string());
             }
             entries.push(JobEntry {
                 job: job.clone(),
@@ -200,6 +218,19 @@ impl JobRegistry {
     }
 }
 
+fn is_duplicate_concept_edge_job(job: &Job, entries: &[JobEntry]) -> bool {
+    if job.kind != "ai_concept_edges" {
+        return false;
+    }
+    let page_id = job.link.as_ref().map(|link| link.page_id.as_str());
+    page_id.is_some()
+        && entries.iter().any(|entry| {
+            entry.job.status == JobStatus::Running
+                && entry.job.kind == "ai_concept_edges"
+                && entry.job.link.as_ref().map(|link| link.page_id.as_str()) == page_id
+        })
+}
+
 fn evict_old_finished(entries: &mut Vec<JobEntry>) {
     while entries.len() > MAX_RETAINED_JOBS {
         match entries.iter().position(|e| e.job.status.is_terminal()) {
@@ -214,6 +245,7 @@ fn evict_old_finished(entries: &mut Vec<JobEntry>) {
 
 /// Worker-side handle. Reporting through this is the only way a job's state
 /// changes, so every transition emits exactly one event.
+#[derive(Clone)]
 pub struct JobHandle {
     id: String,
     app: tauri::AppHandle,
@@ -233,34 +265,59 @@ impl JobHandle {
     }
 
     pub fn progress(&self, done: usize, total: usize, message: impl Into<String>) {
+        self.progress_with_details(done, total, message, None::<String>);
+    }
+
+    pub fn progress_with_details(
+        &self,
+        done: usize,
+        total: usize,
+        message: impl Into<String>,
+        details: Option<impl Into<String>>,
+    ) {
         let fraction = if total == 0 {
             None
         } else {
             Some((done as f32 / total as f32).clamp(0.0, 1.0))
         };
         let message = message.into();
+        let details = details.map(Into::into);
         self.emit(|job| {
             job.progress = fraction;
             job.message = Some(message);
+            job.details = details;
         });
     }
 
-    pub fn succeeded(self, message: impl Into<String>, link: Option<JobLink>) {
+    pub fn succeeded_with_details(
+        self,
+        message: impl Into<String>,
+        link: Option<JobLink>,
+        details: Option<impl Into<String>>,
+    ) {
         let message = message.into();
+        let details = details.map(Into::into);
         self.emit(|job| {
             job.status = JobStatus::Succeeded;
             job.progress = Some(1.0);
             job.message = Some(message);
             job.link = link;
+            job.details = details;
             job.finished_at = Some(now_ms());
         });
     }
 
     pub fn failed(self, error: impl Into<String>) {
+        self.failed_with_details(error, None::<String>);
+    }
+
+    pub fn failed_with_details(self, error: impl Into<String>, details: Option<impl Into<String>>) {
         let error = error.into();
+        let details = details.map(Into::into);
         self.emit(|job| {
             job.status = JobStatus::Failed;
             job.error = Some(error);
+            job.details = details;
             job.finished_at = Some(now_ms());
         });
     }
@@ -306,7 +363,7 @@ pub async fn jobs_list(state: State<'_, JobsState>) -> Result<Vec<Job>, String> 
     Ok(state.registry.list())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn jobs_cancel(state: State<'_, JobsState>, job_id: String) -> Result<bool, String> {
     Ok(state.registry.request_cancel(&job_id))
 }
@@ -332,6 +389,7 @@ mod tests {
                 message: None,
                 link: None,
                 error: None,
+                details: None,
                 cancellable: true,
                 started_at: 0,
                 finished_at: None,
@@ -437,5 +495,38 @@ mod tests {
             entries.push(entry("a", JobStatus::Succeeded));
         }
         assert!(!registry.request_cancel("a"));
+    }
+
+    #[test]
+    fn duplicate_concept_edge_job_for_same_page_is_rejected() {
+        let mut entries = Vec::new();
+        let mut first = entry("first", JobStatus::Running);
+        first.job.kind = "ai_concept_edges".to_string();
+        first.job.link = Some(JobLink {
+            page_id: "page-1".to_string(),
+            page_title: Some("Book".to_string()),
+            label: "Book".to_string(),
+        });
+        entries.push(first);
+        let candidate = Job {
+            id: "second".to_string(),
+            kind: "ai_concept_edges".to_string(),
+            title: "Find concept edges: Book".to_string(),
+            status: JobStatus::Running,
+            progress: None,
+            message: None,
+            link: Some(JobLink {
+                page_id: "page-1".to_string(),
+                page_title: Some("Book".to_string()),
+                label: "Book".to_string(),
+            }),
+            error: None,
+            details: None,
+            cancellable: true,
+            started_at: 0,
+            finished_at: None,
+        };
+
+        assert!(is_duplicate_concept_edge_job(&candidate, &entries));
     }
 }

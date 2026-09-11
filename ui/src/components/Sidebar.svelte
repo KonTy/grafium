@@ -6,6 +6,7 @@
     getCollectionKind,
     withMissingCommandFallback,
   } from "../lib/pageTree";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
@@ -19,7 +20,12 @@
     sidebarWidth?: number;
   }
 
-  let { currentPage = null, onNavigate, onGraphChanged = () => {}, sidebarWidth = 260 }: Props = $props();
+  let {
+    currentPage = null,
+    onNavigate,
+    onGraphChanged = () => {},
+    sidebarWidth = 260,
+  }: Props = $props();
 
   const COMPACT_SIDEBAR_WIDTH = 220;
   let compactSidebar = $derived(sidebarWidth < COMPACT_SIDEBAR_WIDTH);
@@ -87,9 +93,10 @@
   function handlePageRightClick(e: MouseEvent, page: Pick<Page, "id" | "title">) {
     e.preventDefault();
     e.stopPropagation();
+    const position = contextMenuPositionFromEvent(e, { width: 230, height: 100 });
     contextMenu = {
-      x: e.clientX,
-      y: e.clientY,
+      x: position.x,
+      y: position.y,
       page,
       isFav: favSet().has(page.id),
       collectionStatus: "loading",
@@ -300,6 +307,7 @@
     clearSearch(true);
     onNavigate(page.title);
   }
+
 </script>
 
 <aside class="sidebar" bind:this={rootEl}>
@@ -394,6 +402,13 @@
       </svg>
       <span>Chat</span>
     </button>
+    <button class="nav-item" onclick={() => onNavigate("__jobs__")}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+      </svg>
+      <span>Jobs</span>
+    </button>
     <button class="nav-item" onclick={() => onNavigate("__settings__")}>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"></circle>
@@ -457,12 +472,21 @@
         <span>Import Media</span>
       {/if}
     </button>
+    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__import_books__") } title="Import PDF/ebook files from a folder you choose">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+        <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"></path>
+      </svg>
+      {#if !compactSidebar}
+        <span>Import Books</span>
+      {/if}
+    </button>
   </div>
 
   {#if contextMenu}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div
-      class="context-menu"
+      class="context-menu app-context-menu"
       style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
       onclick={(e) => e.stopPropagation()}
     >
@@ -702,6 +726,17 @@
     border-color: var(--accent);
   }
 
+  .create-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .create-btn:disabled:hover {
+    background: var(--btn-bg);
+    color: var(--text-secondary);
+    border-color: var(--border);
+  }
+
   .create-btn.compact {
     width: 24px;
     height: 24px;
@@ -719,6 +754,12 @@
     border: none;
   }
 
+  .create-btn.compact:disabled:hover {
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+  }
+
   .fav-icon {
     color: var(--accent);
     flex-shrink: 0;
@@ -727,11 +768,8 @@
 
   .context-menu {
     position: fixed;
-    z-index: 9999;
-    background: var(--bg-sidebar);
-    border: 1px solid var(--border);
+    z-index: 2147483000;
     border-radius: 6px;
-    box-shadow: 0 4px 16px color-mix(in srgb, var(--bg-primary) 72%, transparent);
     padding: 4px;
     min-width: 170px;
   }

@@ -141,6 +141,19 @@ describe("callout title/background compositions meet WCAG AA", () => {
   });
 });
 
+describe("primary button foregrounds meet WCAG AA", () => {
+  for (const theme of themes) {
+    it(`${theme.id}: primary button text is readable`, () => {
+      const c = theme.colors;
+      const ratio = contrastRatio(c.btnPrimaryFg, c.btnPrimaryBg);
+      expect(
+        ratio,
+        `${theme.id} --btn-primary-fg (${c.btnPrimaryFg}) on --btn-primary-bg (${c.btnPrimaryBg}) = ${ratio.toFixed(2)}:1`
+      ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+    });
+  }
+});
+
 // ── Guard 3: OLED control borders clear the 3:1 non-text contrast minimum
 // True-black surfaces are the point of the OLED theme, but a near-black border
 // (~1.1:1) makes inputs/cards dissolve into the void. A dedicated mid-grey

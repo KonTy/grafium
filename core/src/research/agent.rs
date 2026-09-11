@@ -56,10 +56,14 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::ai::reasoning::{strip_think_blocks, ThinkStripResult};
-use crate::ai::references::{clean_tag_terms, concept_parse_error, extract_json_object, TagJson};
+use crate::ai::references::{
+    clean_tag_terms, concept_parse_error, extract_json_object, research_parse_error, TagJson,
+};
 use crate::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::ai::web_research::{
-    cancelled_error, is_cancelled, truncate, Citation, ResearchTopic, WebResearchResult,
+    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries,
+    rerank_research_candidates, research_domain_instruction, truncate, Citation, ResearchTopic,
+    WebResearchResult,
 };
 use crate::error::{CoreError, Result};
 use crate::research::config::ResearchConfig;
@@ -89,6 +93,10 @@ const ASSESS_EXCERPT_CHARS: usize = 1200;
 /// Per-source excerpt length shown to the synthesis step — the biggest budget,
 /// since this is where claims are actually written and cited.
 const SYNTH_EXCERPT_CHARS: usize = 2800;
+/// Final answers are often longer than the machine-readable planning steps; a
+/// 1400-token cap can truncate otherwise-good synthesis JSON.
+const SYNTHESIS_MAX_TOKENS: u32 = 4096;
+const SYNTHESIS_FALLBACK_MAX_TOKENS: u32 = 1800;
 
 /// Most of a source's text kept in memory once read.
 ///
@@ -208,6 +216,7 @@ impl<'a> DeepResearchEngine<'a> {
             .plan_queries(question, cancel.clone())
             .await
             .unwrap_or_default();
+        queries = normalize_research_queries(queries, question, question, 4);
         if queries.is_empty() {
             queries = vec![question.trim().to_string()];
         }
@@ -277,6 +286,8 @@ impl<'a> DeepResearchEngine<'a> {
                 }
                 tried_queries.push(query.clone());
             }
+            filter_wrong_domain_candidates(&mut candidates, question, question);
+            rerank_research_candidates(&mut candidates, question, question);
             candidates.truncate(MAX_CANDIDATES_TO_RANK);
 
             // ── Select + read ───────────────────────────────────────────────
@@ -361,6 +372,7 @@ impl<'a> DeepResearchEngine<'a> {
                     )
                     .await
                     .unwrap_or_default();
+                queries = normalize_research_queries(queries, question, question, 4);
                 if queries.is_empty() {
                     queries = vec![question.trim().to_string()];
                 }
@@ -394,6 +406,7 @@ impl<'a> DeepResearchEngine<'a> {
                 .refine_queries(question, &titles, &missing, &tried_queries, cancel.clone())
                 .await
                 .unwrap_or_default();
+            queries = normalize_research_queries(queries, question, question, 4);
             if queries.is_empty() {
                 // Even a failed refine must not stall the loop.
                 queries = vec![question.trim().to_string()];
@@ -485,7 +498,11 @@ impl<'a> DeepResearchEngine<'a> {
         question: &str,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<String>> {
-        let user = format!("Question: {}", truncate(question, QUESTION_CHARS));
+        let mut user = format!("Question: {}", truncate(question, QUESTION_CHARS));
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push_str("\n\n");
+            user.push_str(instruction);
+        }
         let raw = self
             .complete(&self.config.prompts.plan_queries, &user, 200, 0.2, cancel)
             .await?;
@@ -515,6 +532,10 @@ impl<'a> DeepResearchEngine<'a> {
                 candidate.url,
                 truncate(&candidate.snippet, SELECT_SNIPPET_CHARS),
             ));
+        }
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push('\n');
+            user.push_str(instruction);
         }
 
         let raw = self
@@ -558,6 +579,10 @@ impl<'a> DeepResearchEngine<'a> {
                 truncate(text, ASSESS_EXCERPT_CHARS)
             ));
         }
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push_str(instruction);
+            user.push('\n');
+        }
 
         let raw = self
             .complete(
@@ -599,6 +624,10 @@ impl<'a> DeepResearchEngine<'a> {
             for query in tried {
                 user.push_str(&format!("- {query}\n"));
             }
+        }
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push('\n');
+            user.push_str(instruction);
         }
 
         let raw = self
@@ -646,16 +675,32 @@ impl<'a> DeepResearchEngine<'a> {
                 truncate(text, SYNTH_EXCERPT_CHARS)
             ));
         }
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push_str(instruction);
+            user.push('\n');
+        }
+        user.push_str(&format!(
+            "\nLanguage instruction: {}\n",
+            crate::ai::answer_language_rule_for_question(question)
+        ));
 
         let raw = self
-            .complete(&self.config.prompts.synthesize, &user, 1400, 0.3, cancel)
+            .complete(
+                &self.config.prompts.synthesize,
+                &user,
+                SYNTHESIS_MAX_TOKENS,
+                0.3,
+                cancel.clone(),
+            )
             .await?;
-        let cleaned = strip_reasoning(&raw);
-        let trimmed = cleaned.trim();
-        let json = extract_json_object(trimmed)?;
-        let parsed: SynthesisJson = serde_json::from_str(json).map_err(|e| {
-            concept_parse_error(&format!("invalid research synthesis JSON: {e}"), trimmed)
-        })?;
+        let parsed: SynthesisJson = match parse_synthesis_response(&raw) {
+            Ok(parsed) => parsed,
+            Err(_error) => {
+                return self
+                    .synthesize_text_fallback(question, excerpts, cancel)
+                    .await
+            }
+        };
 
         let topics = parsed
             .topics
@@ -673,6 +718,62 @@ impl<'a> DeepResearchEngine<'a> {
                 .title_answer
                 .filter(|answer| !answer.trim().is_empty()),
             topics,
+        ))
+    }
+
+    async fn synthesize_text_fallback(
+        &self,
+        question: &str,
+        excerpts: &[(usize, String)],
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(Option<String>, Vec<ResearchTopic>)> {
+        let mut user = format!("Question: {}\n\n", truncate(question, QUESTION_CHARS));
+        user.push_str("Sources (numbered — cite these numbers as [n] in your answer):\n");
+        for (number, text) in excerpts {
+            user.push_str(&format!(
+                "[{number}]:\n{}\n\n",
+                truncate(text, SYNTH_EXCERPT_CHARS)
+            ));
+        }
+        user.push_str(
+            "\nThe structured JSON answer was invalid. Write the answer as concise Markdown \
+instead. Use ONLY the numbered sources above, and put an inline citation like [1] or [2][4] \
+after every factual claim. Do not write JSON, markdown fences, chain-of-thought, or any note \
+about the failed JSON.",
+        );
+        if let Some(instruction) = research_domain_instruction(question, question) {
+            user.push_str("\n\n");
+            user.push_str(instruction);
+        }
+        user.push_str(&format!(
+            "\n\nLanguage instruction: {}\n",
+            crate::ai::answer_language_rule_for_question(question)
+        ));
+
+        let raw = self
+            .complete(
+                "You are a careful research assistant writing a cited answer from real, numbered \
+sources. Return only the user-facing answer text.",
+                &user,
+                SYNTHESIS_FALLBACK_MAX_TOKENS,
+                0.2,
+                cancel,
+            )
+            .await?;
+        let answer = strip_reasoning(&raw).trim().to_string();
+        if answer.is_empty() {
+            return Err(CoreError::Parse(
+                "research synthesis JSON failed and fallback answer was empty".to_string(),
+            ));
+        }
+
+        Ok((
+            None,
+            vec![ResearchTopic {
+                topic: "Research synthesis".to_string(),
+                summary: answer,
+                tags: Vec::new(),
+            }],
         ))
     }
 
@@ -737,6 +838,18 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
         // are consumed, not in the wording of a prompt someone can rewrite.
         .take(MAX_QUERIES_PER_ROUND)
         .collect())
+}
+
+fn parse_synthesis_response<T>(raw: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let cleaned = strip_reasoning(raw);
+    let trimmed = cleaned.trim();
+    let json = extract_json_object(trimmed)
+        .map_err(|_| research_parse_error("missing or unterminated synthesis JSON", trimmed))?;
+    serde_json::from_str(json)
+        .map_err(|e| research_parse_error(&format!("invalid synthesis JSON: {e}"), trimmed))
 }
 
 /// Strip `<think>…</think>` from a completed response before parsing it as
@@ -934,6 +1047,36 @@ mod tests {
         let result = engine.research("q?", &mut |_| {}).await.unwrap();
         assert_eq!(result.citations.len(), 1);
         assert_eq!(result.citations[0].url, "https://doc.test");
+    }
+
+    #[tokio::test]
+    async fn synthesis_falls_back_to_cited_text_when_json_is_truncated() {
+        let mut pages = HashMap::new();
+        pages.insert(
+            query_url("q1"),
+            search_results(&[("https://doc.test", "Doc", "s")]),
+        );
+        pages.insert(
+            "https://doc.test".to_string(),
+            article("https://doc.test", "Doc", "A reliable source finding."),
+        );
+        let browser = MockBrowserDriver { pages };
+        let config = config_with(vec![test_engine()], 1);
+
+        let llm = StubLlm::new([
+            r#"{"queries": ["q1"]}"#,
+            r#"{"picks": [0]}"#,
+            r#"{"title_answer": null, "topics": [{"topic": "Reliability", "summary": "The source"#,
+            "The source provides a reliable finding for the answer[1].",
+        ]);
+
+        let engine = DeepResearchEngine::new(&llm, &browser, &config);
+        let result = engine.research("q?", &mut |_| {}).await.unwrap();
+
+        assert_eq!(result.topics.len(), 1);
+        assert_eq!(result.topics[0].topic, "Research synthesis");
+        assert!(result.topics[0].summary.contains("reliable finding"));
+        assert!(result.topics[0].summary.contains("[1]"));
     }
 
     #[tokio::test]

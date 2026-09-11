@@ -918,15 +918,15 @@
   }
 
   .sync-btn-run {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    border-color: var(--btn-primary-bg);
   }
 
   .sync-btn-run:hover {
     opacity: 0.9;
-    background: var(--accent);
-    color: #fff;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
   }
 
   .sync-btn-remove {
@@ -998,9 +998,9 @@
   }
 
   .sync-type-btn.active {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    border-color: var(--btn-primary-bg);
   }
 
   .sync-form-fields {
@@ -1055,15 +1055,15 @@
   }
 
   .sync-btn-save {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    border-color: var(--btn-primary-bg);
   }
 
   .sync-btn-save:hover {
     opacity: 0.9;
-    background: var(--accent);
-    color: #fff;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
   }
 
   /* Keymap */

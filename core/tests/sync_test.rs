@@ -758,7 +758,9 @@ fn sync_target_with_a_different_marker_is_rejected() {
     let usb_b = MockBackend::new("usb-b");
     usb_b.set_file(".grafium-sync-id", b"11111111-2222-3333-4444-555555555555");
 
-    let err = engine.sync(&usb_b).expect_err("must reject a foreign target");
+    let err = engine
+        .sync(&usb_b)
+        .expect_err("must reject a foreign target");
     assert!(
         err.to_string().contains("different sync location"),
         "unexpected error: {}",
@@ -785,7 +787,8 @@ fn unmounted_usb_mount_point_does_not_wipe_the_graph() {
     // The automount directory exists but the drive behind it is not mounted,
     // so it is simply an empty directory. is_available() still returns true.
     let bare_mount_point = tempfile::tempdir().unwrap();
-    let unmounted = FilesystemBackend::new(bare_mount_point.path().to_path_buf(), "USB".to_string());
+    let unmounted =
+        FilesystemBackend::new(bare_mount_point.path().to_path_buf(), "USB".to_string());
     assert!(
         unmounted.is_available(),
         "an empty mount point still looks available"
@@ -858,6 +861,12 @@ fn assets_are_synced_alongside_notes() {
     fs::write(local.path().join("assets/pic.png"), &png).unwrap();
     fs::create_dir_all(local.path().join("assets/audio")).unwrap();
     fs::write(local.path().join("assets/audio/note.mp3"), fake_png(2)).unwrap();
+    fs::create_dir_all(local.path().join("pages/Books/My Book/assets")).unwrap();
+    fs::write(
+        local.path().join("pages/Books/My Book/assets/cover.png"),
+        fake_png(3),
+    )
+    .unwrap();
 
     let backend = MockBackend::new("usb");
     let engine = SyncEngine::new(local.path().to_path_buf());
@@ -871,6 +880,12 @@ fn assets_are_synced_alongside_notes() {
     assert!(
         r.pushed.contains(&"assets/audio/note.mp3".to_string()),
         "nested asset was not pushed: {:?}",
+        r.pushed
+    );
+    assert!(
+        r.pushed
+            .contains(&"pages/Books/My Book/assets/cover.png".to_string()),
+        "imported book asset was not pushed: {:?}",
         r.pushed
     );
     assert_eq!(

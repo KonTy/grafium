@@ -236,6 +236,22 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_task_events_block ON task_events(block_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(timestamp DESC);
 
+        CREATE TABLE IF NOT EXISTS page_edit_events (
+            page_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            page_id TEXT,
+            page_title TEXT NOT NULL,
+            file_path TEXT,
+            first_edited_at INTEGER NOT NULL,
+            last_edited_at INTEGER NOT NULL,
+            edit_count INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'app',
+            PRIMARY KEY (page_key, day)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_page_edit_events_day ON page_edit_events(day);
+        CREATE INDEX IF NOT EXISTS idx_page_edit_events_last ON page_edit_events(last_edited_at DESC);
+
         CREATE TABLE IF NOT EXISTS favorites (
             id TEXT PRIMARY KEY,
             page_id TEXT NOT NULL UNIQUE,

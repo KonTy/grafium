@@ -425,7 +425,10 @@ fn test_media_references_cover_more_than_block_text() {
     let refs = db.get_all_media_references().unwrap();
     let mentions = |needle: &str| refs.iter().any(|r| r.contains(needle));
 
-    assert!(mentions("recorded a thought"), "block text is still included");
+    assert!(
+        mentions("recorded a thought"),
+        "block text is still included"
+    );
     assert!(
         mentions("voice-note-2025.wav"),
         "an audio note's file must count as referenced: {refs:?}"
@@ -484,7 +487,11 @@ fn test_task_columns_are_added_to_an_older_database() {
     }
 
     let kept: i64 = conn
-        .query_row("SELECT count(*) FROM tasks WHERE block_id = 'b1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM tasks WHERE block_id = 'b1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(kept, 1, "the existing task must survive the migration");
 

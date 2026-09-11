@@ -87,15 +87,17 @@ impl WebDavBackend {
                 continue;
             }
 
-            // Notes sync as markdown only; assets/ carries the media that
-            // notes reference, and may be any file type.
-            let is_note_dir =
-                rel_path.starts_with("pages/") || rel_path.starts_with("journals/");
+            // Notes sync as markdown only; knowledge/ and assets/ carry
+            // portable support files and may be any file type.
+            let is_book_asset = rel_path.starts_with("pages/") && rel_path.contains("/assets/");
+            let is_note_dir = !is_book_asset
+                && (rel_path.starts_with("pages/") || rel_path.starts_with("journals/"));
+            let is_knowledge = rel_path.starts_with("knowledge/");
             let is_asset = rel_path.starts_with("assets/");
             if is_note_dir && !rel_path.ends_with(".md") {
                 continue;
             }
-            if !is_note_dir && !is_asset {
+            if !is_note_dir && !is_knowledge && !is_asset && !is_book_asset {
                 continue;
             }
             // Conflict copies are written explicitly by the engine.
@@ -128,11 +130,17 @@ impl WebDavBackend {
         // We need to extract "pages/foo.md"
         let decoded = urlencoding::decode(href).unwrap_or_default().to_string();
 
-        // Try to find pages/ or journals/ in the path
+        // Try to find a synced graph folder in the path.
         if let Some(idx) = decoded.find("pages/") {
             return decoded[idx..].to_string();
         }
         if let Some(idx) = decoded.find("journals/") {
+            return decoded[idx..].to_string();
+        }
+        if let Some(idx) = decoded.find("knowledge/") {
+            return decoded[idx..].to_string();
+        }
+        if let Some(idx) = decoded.find("assets/") {
             return decoded[idx..].to_string();
         }
         String::new()
@@ -160,11 +168,11 @@ impl SyncBackend for WebDavBackend {
     }
 
     fn list_files(&self) -> Result<Vec<FileMetadata>> {
-        // PROPFIND with Depth: infinity to list all files
-        // Most servers limit this, so we do two requests: pages/ and journals/
+        // PROPFIND with Depth: infinity to list all files. Most servers limit
+        // this, so request each synced top-level folder separately.
         let mut all_files = Vec::new();
 
-        for subdir in &["pages", "journals"] {
+        for subdir in &["pages", "journals", "knowledge", "assets"] {
             let url = format!("{}/{}", self.base_url, subdir);
             let response = self
                 .client
@@ -425,6 +433,26 @@ mod tests {
         assert_eq!(
             backend.file_url("pages/sub/foo.md"),
             "https://dav.example.com/notes/pages/sub/foo.md"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn href_to_rel_path_recognizes_portable_knowledge_folder() -> Result<()> {
+        let backend = WebDavBackend::new(
+            "https://dav.example.com/notes".to_string(),
+            "user".to_string(),
+            "pw".to_string(),
+            "webdav".to_string(),
+        )?;
+
+        assert_eq!(
+            backend.href_to_rel_path("/remote.php/dav/files/user/Notes/knowledge/rules/linking.md"),
+            "knowledge/rules/linking.md"
+        );
+        assert_eq!(
+            backend.href_to_rel_path("/remote.php/dav/files/user/Notes/assets/image.png"),
+            "assets/image.png"
         );
         Ok(())
     }

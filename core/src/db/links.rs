@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::models::{
     Block, BlockType, GraphEdgeRow, Link, LinkCandidate, LinkCandidateStatus, LinkType, Page,
 };
+use crate::parser::TagTerm;
 use chrono::Utc;
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,8 +17,55 @@ static CANDIDATE_MARKDOWN_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[[^\]]+\]\([^)]+\)").unwrap());
 static CANDIDATE_URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:https?://|mailto:)[^\s<>)\]]+").unwrap());
+static CANDIDATE_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9][a-zA-Z0-9_/\\\-]*)").unwrap());
 
 const LINK_CANDIDATE_SOURCE_EXACT_TITLE: &str = "exact_title";
+pub(crate) const LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT: &str = "semantic_concept";
+const SEMANTIC_CONCEPT_CANDIDATE_CONFIDENCE: f32 = 0.82;
+const LOW_SIGNAL_EXACT_TITLE_WORDS: &[&str] = &[
+    "analogy",
+    "analogies",
+    "chapter",
+    "chapters",
+    "concept",
+    "concepts",
+    "date",
+    "dates",
+    "dose",
+    "doses",
+    "dosage",
+    "example",
+    "examples",
+    "idea",
+    "ideas",
+    "item",
+    "items",
+    "name",
+    "names",
+    "object",
+    "objects",
+    "project",
+    "projects",
+    "section",
+    "sections",
+    "subject",
+    "subjects",
+    "term",
+    "terms",
+    "theme",
+    "themes",
+    "thing",
+    "things",
+    "topic",
+    "topics",
+    "type",
+    "types",
+    "unit",
+    "units",
+    "word",
+    "words",
+];
 
 fn insert_link_on_conn(
     conn: &Connection,
@@ -81,7 +129,9 @@ fn link_candidate_select_sql() -> &'static str {
 
 fn candidate_title_allowed(title: &str) -> bool {
     let title = title.trim();
-    if title.chars().count() < 4 || !title.chars().any(|c| c.is_alphabetic()) {
+    if (title.chars().count() < 4 && !is_short_acronym_title(title))
+        || !title.chars().any(|c| c.is_alphabetic())
+    {
         return false;
     }
     if title
@@ -90,22 +140,161 @@ fn candidate_title_allowed(title: &str) -> bool {
     {
         return false;
     }
+    if is_date_like_title(title) || contains_measurement_noise(title) {
+        return false;
+    }
 
     !matches!(
         title.to_ascii_lowercase().as_str(),
         "home" | "index" | "notes" | "todo" | "tasks" | "daily" | "journal"
-    )
+    ) && low_signal_exact_title_word(title).is_none()
 }
 
-fn existing_explicit_page_targets(content: &str) -> HashSet<String> {
-    crate::parser::extract_links(content)
-        .into_iter()
-        .filter_map(|link| match link {
-            crate::parser::links::ExtractedLink::Page(title)
-            | crate::parser::links::ExtractedLink::Tag(title) => Some(title.to_lowercase()),
-            crate::parser::links::ExtractedLink::BlockRef(_) => None,
+fn low_signal_exact_title_word(title: &str) -> Option<String> {
+    let mut words = title
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .filter(|word| !word.is_empty());
+    let word = words.next()?;
+    if words.next().is_some() {
+        return None;
+    }
+    let normalized = word.trim_matches('_').to_ascii_lowercase();
+    LOW_SIGNAL_EXACT_TITLE_WORDS
+        .contains(&normalized.as_str())
+        .then_some(normalized)
+}
+
+fn is_short_acronym_title(title: &str) -> bool {
+    let title = title.trim();
+    let char_count = title.chars().count();
+    if !(2..=8).contains(&char_count) {
+        return false;
+    }
+    let mut letter_count = 0usize;
+    for ch in title.chars() {
+        if ch.is_ascii_alphabetic() {
+            letter_count += 1;
+            if !ch.is_ascii_uppercase() {
+                return false;
+            }
+        } else if !(ch.is_ascii_digit() || ch == '-' || ch == '_') {
+            return false;
+        }
+    }
+    letter_count >= 2
+}
+
+const QUANTITY_UNITS: &[&str] = &[
+    "mcg", "ug", "mg", "kg", "g", "iu", "ml", "l", "oz", "lb", "lbs", "mm", "cm", "km", "m", "bpm",
+    "hz", "khz", "mhz", "ghz", "kb", "mb", "gb", "tb",
+];
+
+fn normalize_measurement_token(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | '*'
+                    | '#'
+                    | ':'
+                    | ';'
+                    | ','
+                    | '.'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+            )
         })
-        .collect()
+        .replace(',', "")
+        .replace(['\u{00B5}', '\u{03BC}'], "u")
+        .to_ascii_lowercase()
+}
+
+fn is_numeric_measurement_token(raw: &str) -> bool {
+    let token = normalize_measurement_token(raw);
+    let token = token
+        .trim_start_matches(|c| c == '+' || c == '-')
+        .trim_end_matches('%');
+    let mut digits = 0usize;
+    let mut dots = 0usize;
+    for ch in token.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else if ch == '.' {
+            dots += 1;
+            if dots > 1 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    digits > 0
+}
+
+fn is_measurement_unit_token(raw: &str) -> bool {
+    let token = normalize_measurement_token(raw);
+    QUANTITY_UNITS.contains(&token.as_str())
+}
+
+fn is_quantity_unit_token(raw: &str) -> bool {
+    let token = normalize_measurement_token(raw);
+    if token.is_empty() {
+        return false;
+    }
+    for unit in QUANTITY_UNITS {
+        if let Some(number) = token.strip_suffix(unit) {
+            if is_numeric_measurement_token(number) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_date_like_title(text: &str) -> bool {
+    fn all_digits(part: &str) -> bool {
+        !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())
+    }
+
+    let trimmed = text.trim();
+    let dash_parts = trimmed.split('-').collect::<Vec<_>>();
+    if dash_parts.len() == 3
+        && dash_parts[0].len() == 4
+        && (1..=2).contains(&dash_parts[1].len())
+        && (1..=2).contains(&dash_parts[2].len())
+        && dash_parts.iter().all(|part| all_digits(part))
+    {
+        return true;
+    }
+
+    let slash_parts = trimmed.split('/').collect::<Vec<_>>();
+    slash_parts.len() == 3
+        && slash_parts.iter().all(|part| all_digits(part))
+        && slash_parts.iter().all(|part| part.len() <= 4)
+}
+
+fn contains_measurement_noise(text: &str) -> bool {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    if tokens.iter().any(|token| is_quantity_unit_token(token)) {
+        return true;
+    }
+    tokens
+        .windows(2)
+        .any(|pair| is_numeric_measurement_token(pair[0]) && is_measurement_unit_token(pair[1]))
+}
+
+fn exact_title_candidate_visible(source: &str, to_page_title: &str) -> bool {
+    source != LINK_CANDIDATE_SOURCE_EXACT_TITLE || candidate_title_allowed(to_page_title)
 }
 
 fn protected_spans(content: &str) -> Vec<(usize, usize)> {
@@ -117,6 +306,7 @@ fn protected_spans(content: &str) -> Vec<(usize, usize)> {
         .find_iter(content)
         .chain(CANDIDATE_MARKDOWN_LINK_RE.find_iter(content))
         .chain(CANDIDATE_URL_RE.find_iter(content))
+        .chain(CANDIDATE_TAG_RE.find_iter(content))
         .map(|m| (m.start(), m.end()))
         .collect();
 
@@ -209,6 +399,164 @@ fn find_unlinked_title_matches(content: &str, title: &str) -> Vec<(usize, usize,
     out
 }
 
+fn normalized_semantic_candidate_text(text: &str) -> String {
+    text.replace(['_', '-'], " ").trim().to_string()
+}
+
+fn semantic_alias_key(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parenthetical_alias_surfaces(text: &str) -> Vec<String> {
+    let text = text.trim();
+    let Some(open) = text.find('(') else {
+        return Vec::new();
+    };
+    let Some(close_offset) = text[open + 1..].find(')') else {
+        return Vec::new();
+    };
+    let close = open + 1 + close_offset;
+    let head = text[..open].trim();
+    let inner = text[open + 1..close].trim();
+    let mut surfaces = Vec::new();
+    if !head.is_empty() {
+        surfaces.push(head.to_string());
+    }
+    if !inner.is_empty() {
+        surfaces.push(inner.to_string());
+    }
+    surfaces
+}
+
+fn semantic_alias_surfaces(term: &str, target_title: &str) -> Vec<String> {
+    let mut surfaces = Vec::new();
+    for surface in [term, target_title] {
+        let surface = surface.trim();
+        if !surface.is_empty() {
+            surfaces.push(surface.to_string());
+        }
+        surfaces.extend(parenthetical_alias_surfaces(surface));
+    }
+    surfaces
+}
+
+fn semantic_target_alias_surfaces(target_title: &str) -> Vec<String> {
+    let mut surfaces = Vec::new();
+    let target_title = target_title.trim();
+    if !target_title.is_empty() {
+        surfaces.push(target_title.to_string());
+    }
+    surfaces.extend(parenthetical_alias_surfaces(target_title));
+    surfaces
+}
+
+fn edit_distance_chars(a: &str, b: &str) -> usize {
+    if a == b {
+        return 0;
+    }
+    if a.is_empty() {
+        return b.chars().count();
+    }
+    if b.is_empty() {
+        return a.chars().count();
+    }
+
+    let a_chars = a.chars().collect::<Vec<_>>();
+    let b_chars = b.chars().collect::<Vec<_>>();
+    let mut previous = (0..=b_chars.len()).collect::<Vec<_>>();
+    let mut current = vec![0usize; b_chars.len() + 1];
+
+    for (i, a_ch) in a_chars.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, b_ch) in b_chars.iter().enumerate() {
+            let substitution = usize::from(a_ch != b_ch);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + substitution);
+        }
+        previous.copy_from_slice(&current);
+    }
+
+    previous[b_chars.len()]
+}
+
+fn is_likely_spelling_alias(a: &str, b: &str) -> bool {
+    let a = semantic_alias_key(a);
+    let b = semantic_alias_key(b);
+    if a == b {
+        return true;
+    }
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+    if a_len < 4 || b_len < 4 || a.chars().next() != b.chars().next() {
+        return false;
+    }
+
+    let max_len = a_len.max(b_len);
+    let distance = edit_distance_chars(&a, &b);
+    let max_distance = if max_len <= 6 {
+        1
+    } else if max_len <= 12 {
+        2
+    } else {
+        3
+    };
+    distance <= max_distance && distance * 5 <= max_len
+}
+
+fn likely_existing_semantic_alias_page<'a>(
+    term: &str,
+    target_title: &str,
+    existing_pages: &'a [(String, String)],
+) -> Option<&'a (String, String)> {
+    let target_surfaces = semantic_target_alias_surfaces(target_title);
+    let spelling_surfaces = if semantic_alias_key(term) == semantic_alias_key(target_title) {
+        semantic_alias_surfaces(term, target_title)
+    } else {
+        target_surfaces.clone()
+    };
+    existing_pages
+        .iter()
+        .filter(|(_, title)| candidate_title_allowed(title))
+        .filter_map(|page| {
+            let title = page.1.trim();
+            let title_surfaces = semantic_target_alias_surfaces(title);
+            let full_title_match = semantic_alias_key(target_title) == semantic_alias_key(title);
+            let exact_surface = target_surfaces.iter().any(|target_surface| {
+                title_surfaces.iter().any(|title_surface| {
+                    semantic_alias_key(target_surface) == semantic_alias_key(title_surface)
+                })
+            });
+            let spelling_surface = spelling_surfaces.iter().any(|target_surface| {
+                title_surfaces
+                    .iter()
+                    .any(|title_surface| is_likely_spelling_alias(target_surface, title_surface))
+            });
+            if full_title_match {
+                Some((3usize, title.chars().count(), page))
+            } else if exact_surface {
+                Some((2usize, title.chars().count(), page))
+            } else if spelling_surface {
+                Some((1usize, title.chars().count(), page))
+            } else {
+                None
+            }
+        })
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
+        .map(|(_, _, page)| page)
+}
+
 impl Database {
     pub fn insert_link(
         &self,
@@ -239,7 +587,8 @@ impl Database {
         limit: i64,
     ) -> Result<Vec<LinkCandidate>> {
         let conn = self.conn()?;
-        let limit = limit.clamp(1, 500);
+        let limit = limit.clamp(1, 1_000);
+        let query_limit = (limit * 10).clamp(limit, 5_000);
         let status_text = status.as_ref().map(LinkCandidateStatus::as_str);
         let sql = format!(
             "{} WHERE (?1 IS NULL OR c.from_page_id = ?1)
@@ -250,8 +599,17 @@ impl Database {
         );
         let candidates = conn
             .prepare(&sql)?
-            .query_map(params![page_id, status_text, limit], row_to_link_candidate)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map(
+                params![page_id, status_text, query_limit],
+                row_to_link_candidate,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|candidate| {
+                exact_title_candidate_visible(&candidate.source, &candidate.to_page_title)
+            })
+            .take(limit as usize)
+            .collect();
         Ok(candidates)
     }
 
@@ -334,10 +692,8 @@ impl Database {
 
         let mut inserted = 0i64;
         'blocks: for (block_id, from_page_id, _from_title, content) in &blocks {
-            let explicit_targets = existing_explicit_page_targets(content);
             for (to_page_id, to_title) in &pages {
-                if from_page_id == to_page_id || explicit_targets.contains(&to_title.to_lowercase())
-                {
+                if from_page_id == to_page_id {
                     continue;
                 }
 
@@ -375,6 +731,137 @@ impl Database {
         drop(conn);
 
         self.list_link_candidates(page_id, Some(LinkCandidateStatus::Pending), limit)
+    }
+
+    pub fn discover_semantic_concept_candidates(
+        &self,
+        page_id: &str,
+        tags: &[TagTerm],
+        limit: i64,
+    ) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let limit = limit.clamp(1, 1_000) as usize;
+        let now = Utc::now().timestamp_millis();
+
+        let blocks: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, content
+                 FROM blocks
+                 WHERE page_id = ?1
+                 ORDER BY order_index ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![page_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let existing_pages: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title
+                 FROM pages
+                 WHERE is_journal = 0",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM link_candidates
+             WHERE from_page_id = ?1 AND source = ?2 AND status = 'pending'",
+            params![page_id, LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT],
+        )?;
+
+        let mut reviewed_exists = tx.prepare(
+            "SELECT 1
+             FROM link_candidates
+             WHERE from_page_id = ?1
+               AND to_page_id = ?2
+               AND source = ?3
+               AND status = 'dismissed'
+             LIMIT 1",
+        )?;
+        let mut insert = tx.prepare(
+            "INSERT OR IGNORE INTO link_candidates
+                (id, from_block_id, from_page_id, to_page_id, anchor_text, anchor_start, anchor_end,
+                 status, source, confidence, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?10)",
+        )?;
+
+        let mut inserted = 0usize;
+        for tag in tags {
+            if inserted >= limit {
+                break;
+            }
+
+            let term = normalized_semantic_candidate_text(&tag.term);
+            let target_title = normalized_semantic_candidate_text(tag.label());
+            if term.is_empty() || target_title.is_empty() {
+                continue;
+            }
+            if is_date_like_title(&term)
+                || contains_measurement_noise(&term)
+                || is_numeric_measurement_token(&term)
+                || is_measurement_unit_token(&term)
+                || !term.chars().any(|c| c.is_alphabetic())
+                || !candidate_title_allowed(&target_title)
+            {
+                continue;
+            }
+
+            let mut matches_for_tag = Vec::new();
+            for (block_id, content) in &blocks {
+                for (start, end, anchor_text) in find_unlinked_title_matches(content, &term) {
+                    matches_for_tag.push((block_id, start, end, anchor_text));
+                }
+            }
+
+            if matches_for_tag.is_empty() {
+                continue;
+            };
+            let target_page_id = if let Some((target_page_id, _)) =
+                likely_existing_semantic_alias_page(&term, &target_title, &existing_pages)
+            {
+                target_page_id.clone()
+            } else {
+                self.get_or_create_page_in_connection(&tx, &target_title, false)?
+                    .id
+            };
+            if reviewed_exists.exists(params![
+                page_id,
+                target_page_id,
+                LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT
+            ])? {
+                continue;
+            }
+
+            for (block_id, start, end, anchor_text) in matches_for_tag {
+                if inserted >= limit {
+                    break;
+                }
+
+                inserted += insert.execute(params![
+                    Uuid::new_v4().to_string(),
+                    block_id,
+                    page_id,
+                    target_page_id,
+                    anchor_text,
+                    start as i64,
+                    end as i64,
+                    LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT,
+                    SEMANTIC_CONCEPT_CANDIDATE_CONFIDENCE,
+                    now
+                ])?;
+            }
+        }
+
+        drop(insert);
+        drop(reviewed_exists);
+        tx.commit()?;
+        Ok(inserted)
     }
 
     pub fn dismiss_link_candidate(&self, id: &str) -> Result<()> {
@@ -858,46 +1345,95 @@ impl Database {
     ) -> Result<Vec<String>> {
         let conn = self.conn()?;
         let limit = node_limit.clamp(1, 2000);
+        let query_limit = (limit * 10).clamp(limit, 20_000);
         if let Some(focus) = focus_page_id {
             let mut stmt = conn.prepare(
-                "SELECT page_id
+                "SELECT page_id, to_page_title, source
                  FROM (
-                    SELECT DISTINCT to_page_id AS page_id
-                    FROM link_candidates
-                    WHERE status = 'pending' AND from_page_id = ?1
-                    UNION
-                    SELECT DISTINCT from_page_id AS page_id
-                    FROM link_candidates
-                    WHERE status = 'pending' AND to_page_id = ?1
+                   SELECT DISTINCT c.to_page_id AS page_id,
+                          target_page.title AS to_page_title,
+                          c.source AS source
+                   FROM link_candidates c
+                   JOIN pages target_page ON target_page.id = c.to_page_id
+                   WHERE c.status = 'pending' AND c.from_page_id = ?1
+                   UNION
+                   SELECT DISTINCT c.from_page_id AS page_id,
+                          target_page.title AS to_page_title,
+                          c.source AS source
+                   FROM link_candidates c
+                   JOIN pages target_page ON target_page.id = c.to_page_id
+                   WHERE c.status = 'pending' AND c.to_page_id = ?1
                  )
                  LIMIT ?2",
             )?;
             let ids = stmt
-                .query_map(params![focus, limit], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+                .query_map(params![focus, query_limit], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter({
+                    let mut seen = HashSet::new();
+                    move |(page_id, to_page_title, source)| {
+                        seen.insert(page_id.clone())
+                            && exact_title_candidate_visible(source, to_page_title)
+                    }
+                })
+                .map(|(page_id, _, _)| page_id)
+                .take(limit as usize)
+                .collect();
             return Ok(ids);
         }
 
         let mut stmt = conn.prepare(
-            "SELECT page_id
+            "SELECT page_id, to_page_title, source
              FROM (
-                SELECT from_page_id AS page_id, COUNT(*) AS c
-                FROM link_candidates
-                WHERE status = 'pending'
-                GROUP BY from_page_id
+                SELECT c.from_page_id AS page_id,
+                      target_page.title AS to_page_title,
+                      c.source AS source,
+                      COUNT(*) AS c
+                FROM link_candidates c
+                JOIN pages target_page ON target_page.id = c.to_page_id
+                WHERE c.status = 'pending'
+                GROUP BY c.from_page_id, target_page.title, c.source
                 UNION ALL
-                SELECT to_page_id AS page_id, COUNT(*) AS c
-                FROM link_candidates
-                WHERE status = 'pending'
-                GROUP BY to_page_id
+                SELECT c.to_page_id AS page_id,
+                      target_page.title AS to_page_title,
+                      c.source AS source,
+                      COUNT(*) AS c
+                FROM link_candidates c
+                JOIN pages target_page ON target_page.id = c.to_page_id
+                WHERE c.status = 'pending'
+                GROUP BY c.to_page_id, target_page.title, c.source
              )
-             GROUP BY page_id
+             GROUP BY page_id, to_page_title, source
              ORDER BY SUM(c) DESC
              LIMIT ?1",
         )?;
         let ids = stmt
-            .query_map(params![limit], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map(params![query_limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter({
+                let mut seen = HashSet::new();
+                move |(page_id, to_page_title, source)| {
+                    seen.insert(page_id.clone())
+                        && exact_title_candidate_visible(source, to_page_title)
+                }
+            })
+            .map(|(page_id, _, _)| page_id)
+            .take(limit as usize)
+            .collect();
         Ok(ids)
     }
 
@@ -909,13 +1445,19 @@ impl Database {
         let conn = self.conn()?;
         let placeholders = node_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT from_page_id, to_page_id, COUNT(*) AS weight, AVG(confidence) AS confidence
-             FROM link_candidates
-             WHERE status = 'pending'
-               AND from_page_id IN ({ph})
-               AND to_page_id IN ({ph})
-               AND from_page_id <> to_page_id
-             GROUP BY from_page_id, to_page_id",
+            "SELECT c.from_page_id,
+                    c.to_page_id,
+                    COUNT(*) AS weight,
+                    AVG(c.confidence) AS confidence,
+                    c.source,
+                    target_page.title AS to_page_title
+             FROM link_candidates c
+             JOIN pages target_page ON target_page.id = c.to_page_id
+             WHERE c.status = 'pending'
+               AND c.from_page_id IN ({ph})
+               AND c.to_page_id IN ({ph})
+               AND c.from_page_id <> c.to_page_id
+             GROUP BY c.from_page_id, c.to_page_id, c.source, target_page.title",
             ph = placeholders
         );
         let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(node_ids.len() * 2);
@@ -929,15 +1471,25 @@ impl Database {
         let edges = conn
             .prepare(&sql)?
             .query_map(bind.as_slice(), |row| {
-                Ok(GraphEdgeRow {
-                    source: row.get(0)?,
-                    target: row.get(1)?,
-                    weight: row.get(2)?,
-                    suggested: true,
-                    confidence: row.get::<_, f64>(3)? as f32,
-                })
+                Ok((
+                    GraphEdgeRow {
+                        source: row.get(0)?,
+                        target: row.get(1)?,
+                        weight: row.get(2)?,
+                        suggested: true,
+                        confidence: row.get::<_, f64>(3)? as f32,
+                    },
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, source, to_page_title)| {
+                exact_title_candidate_visible(source, to_page_title)
+            })
+            .map(|(edge, _, _)| edge)
+            .collect();
         Ok(edges)
     }
 
@@ -1033,6 +1585,10 @@ mod tests {
     use super::Database;
     use crate::error::Result;
     use crate::models::{BlockType, LinkCandidateStatus, LinkType};
+    use crate::parser::TagTerm;
+    use chrono::Utc;
+    use rusqlite::params;
+    use std::collections::HashSet;
 
     #[test]
     fn list_tag_pages_returns_only_tag_link_targets() -> Result<()> {
@@ -1108,6 +1664,343 @@ mod tests {
         assert_eq!(candidates[0].anchor_text, "magnesium");
         assert_eq!(candidates[0].status, LinkCandidateStatus::Pending);
         assert!(db.get_links_from_page(&source.id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn discover_link_candidates_finds_repeated_unlinked_mentions_but_not_tags() -> Result<()> {
+        let db = Database::in_memory()?;
+        let target = db.create_page("Magnesium", false)?;
+        let source = db.create_page("Sleep notes", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "Magnesium helped. [[Magnesium]] is already linked. magnesium helped again. #Magnesium",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let candidates = db.discover_link_candidates(Some(&source.id), 10)?;
+
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.from_block_id == block.id
+                && candidate.to_page_id == target.id));
+        let anchors: HashSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.anchor_text.as_str())
+            .collect();
+        assert_eq!(anchors, HashSet::from(["Magnesium", "magnesium"]));
+        Ok(())
+    }
+
+    #[test]
+    fn discover_link_candidates_ignores_low_signal_exact_titles() -> Result<()> {
+        let db = Database::in_memory()?;
+        for title in [
+            "concept",
+            "topic",
+            "analogy",
+            "project",
+            "NAME",
+            "126mg",
+            "1,000IU",
+            "90\u{00B5}g",
+            "2024-06-15",
+        ] {
+            db.create_page(title, false)?;
+        }
+        let kabbalah = db.create_page("Kabbalah", false)?;
+        let freeing_the_mind = db.create_page("freeing the mind", false)?;
+        let source = db.create_page("Book notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "This concept is not the topic. The analogy supports the project. Ignore 126mg, 1,000IU, 90\u{00B5}g, and 2024-06-15, but Kabbalah and freeing the mind are real themes.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let candidates = db.discover_link_candidates(Some(&source.id), 10)?;
+        let targets: HashSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.to_page_id.as_str())
+            .collect();
+
+        assert_eq!(candidates.len(), 2);
+        assert!(targets.contains(kabbalah.id.as_str()));
+        assert!(targets.contains(freeing_the_mind.id.as_str()));
+        assert!(candidates.iter().all(|candidate| !matches!(
+            candidate.to_page_title.as_str(),
+            "concept"
+                | "topic"
+                | "analogy"
+                | "project"
+                | "NAME"
+                | "126mg"
+                | "1,000IU"
+                | "90\u{00B5}g"
+                | "2024-06-15"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn list_link_candidates_hides_stale_low_signal_exact_title_rows() -> Result<()> {
+        let db = Database::in_memory()?;
+        let concept = db.create_page("concept", false)?;
+        let kabbalah = db.create_page("Kabbalah", false)?;
+        let source = db.create_page("Book notes", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "This concept points at Kabbalah.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let now = Utc::now().timestamp_millis();
+        let conn = db.conn()?;
+        conn.execute(
+            "INSERT INTO link_candidates
+                (id, from_block_id, from_page_id, to_page_id, anchor_text, anchor_start, anchor_end,
+                 status, source, confidence, created_at, updated_at)
+             VALUES
+                ('stale-concept', ?1, ?2, ?3, 'concept', 5, 12, 'pending', 'exact_title', 1.0, ?5, ?5),
+                ('fresh-kabbalah', ?1, ?2, ?4, 'Kabbalah', 23, 31, 'pending', 'exact_title', 1.0, ?5, ?5)",
+            params![block.id, source.id, concept.id, kabbalah.id, now],
+        )?;
+        drop(conn);
+
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].to_page_title, "Kabbalah");
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_creates_reviewable_suggestions() -> Result<()> {
+        let db = Database::in_memory()?;
+        let source = db.create_page("Book notes", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "The Book of Wisdom describes Kabbalah as freeing the mind.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = db.discover_semantic_concept_candidates(
+            &source.id,
+            &[TagTerm {
+                term: "Book of Wisdom".to_string(),
+                qualified: None,
+            }],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(inserted, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source, "semantic_concept");
+        assert_eq!(candidates[0].from_block_id, block.id);
+        assert_eq!(candidates[0].to_page_title, "Book of Wisdom");
+        assert_eq!(candidates[0].anchor_text, "Book of Wisdom");
+        assert!(db.get_page_by_title_ci("Book of Wisdom").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_creates_all_unlinked_occurrences() -> Result<()> {
+        let db = Database::in_memory()?;
+        let source = db.create_page("Supplement notes", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "Magnesium Taurate helped sleep. Later, magnesium taurate helped again. #Magnesium",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = db.discover_semantic_concept_candidates(
+            &source.id,
+            &[TagTerm {
+                term: "Magnesium Taurate".to_string(),
+                qualified: None,
+            }],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(inserted, 2);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.from_block_id == block.id));
+        let anchors: HashSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.anchor_text.as_str())
+            .collect();
+        assert_eq!(
+            anchors,
+            HashSet::from(["Magnesium Taurate", "magnesium taurate"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_can_target_qualified_labels() -> Result<()> {
+        let db = Database::in_memory()?;
+        let source = db.create_page("Writing notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "A topic can become a reusable writing unit.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        db.discover_semantic_concept_candidates(
+            &source.id,
+            &[TagTerm {
+                term: "topic".to_string(),
+                qualified: Some("writing topics".to_string()),
+            }],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].anchor_text, "topic");
+        assert_eq!(candidates[0].to_page_title, "writing topics");
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_reuses_existing_page_for_likely_typo() -> Result<()> {
+        let db = Database::in_memory()?;
+        db.create_page("Niacin", false)?;
+        let source = db.create_page("Supplement notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "Nicin is probably a misspelled supplement name.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        db.discover_semantic_concept_candidates(
+            &source.id,
+            &[TagTerm {
+                term: "Nicin".to_string(),
+                qualified: Some("Niacin".to_string()),
+            }],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].anchor_text, "Nicin");
+        assert_eq!(candidates[0].to_page_title, "Niacin");
+        assert!(db.get_page_by_title_ci("Nicin").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_reuses_parenthetical_alias_page() -> Result<()> {
+        let db = Database::in_memory()?;
+        db.create_page("Niacin (Vitamin B3)", false)?;
+        let source = db.create_page("Supplement notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "Nicin is probably a typo. Vitamin B3 is the same nutrient.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = db.discover_semantic_concept_candidates(
+            &source.id,
+            &[
+                TagTerm {
+                    term: "Nicin".to_string(),
+                    qualified: Some("Niacin".to_string()),
+                },
+                TagTerm {
+                    term: "Vitamin B3".to_string(),
+                    qualified: Some("Niacin".to_string()),
+                },
+            ],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(inserted, 2);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.to_page_title == "Niacin (Vitamin B3)"));
+        assert!(db.get_page_by_title_ci("Niacin").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn discover_semantic_concept_candidates_rejects_dates_and_doses() -> Result<()> {
+        let db = Database::in_memory()?;
+        let source = db.create_page("Supplement notes", false)?;
+        db.create_block(
+            &source.id,
+            None,
+            0,
+            "Magnesium Taurate 126mg was next to Vitamin D3 1,000IU on 2024-06-15.",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+
+        let inserted = db.discover_semantic_concept_candidates(
+            &source.id,
+            &[
+                TagTerm {
+                    term: "Magnesium Taurate".to_string(),
+                    qualified: None,
+                },
+                TagTerm {
+                    term: "126mg".to_string(),
+                    qualified: None,
+                },
+                TagTerm {
+                    term: "Vitamin D3 1,000IU".to_string(),
+                    qualified: None,
+                },
+                TagTerm {
+                    term: "2024-06-15".to_string(),
+                    qualified: None,
+                },
+            ],
+            10,
+        )?;
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+
+        assert_eq!(inserted, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].anchor_text, "Magnesium Taurate");
+        assert_eq!(candidates[0].to_page_title, "Magnesium Taurate");
         Ok(())
     }
 

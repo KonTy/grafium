@@ -41,6 +41,8 @@ export interface TaskFlowStats {
  * decision first.
  */
 export type TaskBucket = "earlier" | "today" | "tomorrow" | "week" | "later" | "someday";
+export type OpenTaskView = "date" | "priority" | "status" | "page";
+export type OpenTaskSort = "smart" | "priority" | "date" | "oldest" | "newest" | "page";
 
 export const BUCKET_ORDER: TaskBucket[] = [
   "earlier",
@@ -99,7 +101,42 @@ export function bucketFor(task: OpenTaskRow, today: Date): TaskBucket {
   return "later";
 }
 
-const PRIORITY_RANK: Record<string, number> = { A: 0, B: 1, C: 2 };
+const PRIORITY_ALIASES: Record<string, "A" | "B" | "C"> = {
+  A: "A",
+  URGENT: "A",
+  HIGH: "A",
+  B: "B",
+  MEDIUM: "B",
+  MED: "B",
+  C: "C",
+  LOW: "C",
+};
+
+const PRIORITY_RANK: Record<"A" | "B" | "C", number> = { A: 0, B: 1, C: 2 };
+const STATUS_ORDER: Record<string, number> = { NOW: 0, DOING: 1, TODO: 2, LATER: 3 };
+
+export function normalizePriority(priority: string | null | undefined): "A" | "B" | "C" | null {
+  if (!priority) return null;
+  return PRIORITY_ALIASES[priority.trim().toUpperCase()] ?? null;
+}
+
+export function priorityRank(priority: string | null | undefined): number {
+  const normalized = normalizePriority(priority);
+  return normalized ? PRIORITY_RANK[normalized] : 3;
+}
+
+function compareEffectiveDate(a: OpenTaskRow, b: OpenTaskRow): number {
+  const da = effectiveDate(a);
+  const db = effectiveDate(b);
+  if (da && db && da !== db) return da < db ? -1 : 1;
+  if (da && !db) return -1;
+  if (!da && db) return 1;
+  return 0;
+}
+
+function comparePage(a: OpenTaskRow, b: OpenTaskRow): number {
+  return a.page_title.localeCompare(b.page_title, undefined, { sensitivity: "base" });
+}
 
 /**
  * Order within a bucket: priority first, then by date, then oldest first.
@@ -108,17 +145,35 @@ const PRIORITY_RANK: Record<string, number> = { A: 0, B: 1, C: 2 };
  * that has been waiting longest should not be at the bottom.
  */
 export function compareTasks(a: OpenTaskRow, b: OpenTaskRow): number {
-  const pa = PRIORITY_RANK[a.priority?.toUpperCase() ?? ""] ?? 3;
-  const pb = PRIORITY_RANK[b.priority?.toUpperCase() ?? ""] ?? 3;
+  const pa = priorityRank(a.priority);
+  const pb = priorityRank(b.priority);
   if (pa !== pb) return pa - pb;
 
-  const da = effectiveDate(a);
-  const db = effectiveDate(b);
-  if (da && db && da !== db) return da < db ? -1 : 1;
-  if (da && !db) return -1;
-  if (!da && db) return 1;
+  const dateOrder = compareEffectiveDate(a, b);
+  if (dateOrder !== 0) return dateOrder;
 
   return a.created_at - b.created_at;
+}
+
+export function compareTasksBy(sort: OpenTaskSort): (a: OpenTaskRow, b: OpenTaskRow) => number {
+  return (a, b) => {
+    switch (sort) {
+      case "date": {
+        const dateOrder = compareEffectiveDate(a, b);
+        if (dateOrder !== 0) return dateOrder;
+        return compareTasks(a, b);
+      }
+      case "oldest":
+        return a.created_at - b.created_at || compareTasks(a, b);
+      case "newest":
+        return b.created_at - a.created_at || compareTasks(a, b);
+      case "page":
+        return comparePage(a, b) || compareTasks(a, b);
+      case "priority":
+      case "smart":
+        return compareTasks(a, b);
+    }
+  };
 }
 
 export interface TaskGroup {
@@ -128,7 +183,7 @@ export interface TaskGroup {
 }
 
 /** Group open tasks for display, dropping buckets that would be empty. */
-export function groupTasks(tasks: readonly OpenTaskRow[], today: Date): TaskGroup[] {
+export function groupTasks(tasks: readonly OpenTaskRow[], today: Date, sort: OpenTaskSort = "smart"): TaskGroup[] {
   const byBucket = new Map<TaskBucket, OpenTaskRow[]>();
   for (const task of tasks) {
     const bucket = bucketFor(task, today);
@@ -140,8 +195,70 @@ export function groupTasks(tasks: readonly OpenTaskRow[], today: Date): TaskGrou
   return BUCKET_ORDER.filter((bucket) => byBucket.has(bucket)).map((bucket) => ({
     bucket,
     label: BUCKET_LABEL[bucket],
-    tasks: byBucket.get(bucket)!.sort(compareTasks),
+    tasks: byBucket.get(bucket)!.sort(compareTasksBy(sort)),
   }));
+}
+
+export interface OpenTaskGroup {
+  id: string;
+  label: string;
+  tasks: OpenTaskRow[];
+}
+
+function collectGroups(
+  tasks: readonly OpenTaskRow[],
+  keys: readonly string[],
+  keyFor: (task: OpenTaskRow) => string,
+  labelFor: (key: string) => string,
+  sort: OpenTaskSort,
+): OpenTaskGroup[] {
+  const byKey = new Map<string, OpenTaskRow[]>();
+  for (const task of tasks) {
+    const key = keyFor(task);
+    const list = byKey.get(key);
+    if (list) list.push(task);
+    else byKey.set(key, [task]);
+  }
+  return keys.filter((key) => byKey.has(key)).map((key) => ({
+    id: key,
+    label: labelFor(key),
+    tasks: byKey.get(key)!.sort(compareTasksBy(sort)),
+  }));
+}
+
+export function groupOpenTasks(
+  tasks: readonly OpenTaskRow[],
+  today: Date,
+  view: OpenTaskView,
+  sort: OpenTaskSort = "smart",
+): OpenTaskGroup[] {
+  if (view === "date") {
+    return groupTasks(tasks, today, sort).map((group) => ({
+      id: group.bucket,
+      label: group.label,
+      tasks: group.tasks,
+    }));
+  }
+
+  if (view === "priority") {
+    return collectGroups(
+      tasks,
+      ["A", "B", "C", "none"],
+      (task) => normalizePriority(task.priority) ?? "none",
+      (key) => key === "none" ? "No priority" : `Priority ${key}`,
+      sort,
+    );
+  }
+
+  if (view === "status") {
+    const statuses = [...new Set(tasks.map((task) => task.state.toUpperCase()))]
+      .sort((a, b) => (STATUS_ORDER[a] ?? 9) - (STATUS_ORDER[b] ?? 9) || a.localeCompare(b));
+    return collectGroups(tasks, statuses, (task) => task.state.toUpperCase(), (key) => key, sort);
+  }
+
+  const pages = [...new Set(tasks.map((task) => task.page_title))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  return collectGroups(tasks, pages, (task) => task.page_title, (key) => key, sort);
 }
 
 /** A duration, said the way a person would say it. */

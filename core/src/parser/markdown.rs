@@ -15,6 +15,8 @@ static DEADLINE_RE: LazyLock<Regex> =
 static FLASHCARD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#flashcard").unwrap());
 static FLASHCARD_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*::\s*").unwrap());
 static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{query\s+(.+?)\}\}").unwrap());
+static JOURNAL_FILENAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})[-_](\d{2})[-_](\d{2})$").unwrap());
 
 static ADMONITION_BEGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^#\+BEGIN_(TIP|NOTE|IMPORTANT|CAUTION|PINNED|WARNING)$").unwrap()
@@ -67,7 +69,7 @@ pub struct ParsedPage {
 
 pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
     let lines: Vec<&str> = content.lines().collect();
-    let is_journal = is_journal_filename(filename);
+    let is_journal = canonical_journal_title(filename).is_some();
 
     let mut page_title: Option<String> = None;
     let mut page_properties = serde_json::Map::new();
@@ -194,6 +196,18 @@ fn first_line_trimmed(content: &str) -> &str {
     content.lines().next().unwrap_or("").trim()
 }
 
+fn is_pipe_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return false;
+    }
+    let body = trimmed.trim_matches('|');
+    body.split('|')
+        .filter(|cell| !cell.trim().is_empty())
+        .count()
+        >= 2
+}
+
 fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let line = lines[start];
     let indent_level = count_indent(line);
@@ -302,6 +316,17 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
             }
         }
 
+        if next_indent == indent_level
+            && !next_trimmed.starts_with("- ")
+            && is_pipe_table_row(full_content.lines().last().unwrap_or(""))
+            && is_pipe_table_row(next_trimmed)
+        {
+            full_content.push('\n');
+            full_content.push_str(next_trimmed);
+            consumed += 1;
+            continue;
+        }
+
         // Property lines for this block (indented, key:: value)
         if next_indent > indent_level && !next_trimmed.starts_with("- ") {
             if let Some(cap) = PROPERTY_RE.captures(next_trimmed) {
@@ -330,7 +355,14 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     // Detect task
     let task_state = TASK_RE
         .captures(&full_content)
-        .and_then(|cap| TaskState::from_str(&cap[1]));
+        .and_then(|cap| TaskState::from_str(&cap[1]))
+        .or_else(|| {
+            crate::parser::task::parse_checkbox(&full_content).and_then(|(state, _)| match state {
+                crate::parser::task::CheckboxState::Open => Some(TaskState::Todo),
+                crate::parser::task::CheckboxState::Done => Some(TaskState::Done),
+                crate::parser::task::CheckboxState::Cancelled => Some(TaskState::Canceled),
+            })
+        });
 
     // Detect scheduled/deadline
     let scheduled_date = SCHEDULED_RE
@@ -405,9 +437,25 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
 }
 
 fn count_indent(line: &str) -> u32 {
-    let spaces = line.len() - line.trim_start().len();
-    // org-style uses 2 spaces or tab per indent level
-    (spaces / 2) as u32
+    let mut depth = 0u32;
+    let mut spaces = 0u32;
+    for byte in line.bytes() {
+        match byte {
+            b'\t' => {
+                depth += 1;
+                spaces = 0;
+            }
+            b' ' => {
+                spaces += 1;
+                if spaces == 2 {
+                    depth += 1;
+                    spaces = 0;
+                }
+            }
+            _ => break,
+        }
+    }
+    depth
 }
 
 fn strip_bullet(line: &str) -> &str {
@@ -421,26 +469,35 @@ fn strip_bullet(line: &str) -> &str {
 fn strip_continuation(line: &str, min_depth: u32) -> &str {
     let mut idx = 0usize;
     let bytes = line.as_bytes();
-    let mut spaces = 0usize;
-    let min_spaces = (min_depth as usize) * 2;
+    let mut depth = 0u32;
+    let mut spaces = 0u32;
 
-    while idx < bytes.len() && spaces < min_spaces {
-        if bytes[idx] == b' ' {
-            idx += 1;
-            spaces += 1;
-        } else {
-            break;
+    while idx < bytes.len() && depth < min_depth {
+        match bytes[idx] {
+            b'\t' => {
+                idx += 1;
+                depth += 1;
+                spaces = 0;
+            }
+            b' ' => {
+                idx += 1;
+                spaces += 1;
+                if spaces == 2 {
+                    depth += 1;
+                    spaces = 0;
+                }
+            }
+            _ => break,
         }
     }
 
     &line[idx..]
 }
 
-fn is_journal_filename(filename: &str) -> bool {
+pub fn canonical_journal_title(filename: &str) -> Option<String> {
     let name = filename.trim_end_matches(".md");
-    // Match patterns like 2024_01_01 or 2024-01-01
-    let re = Regex::new(r"^\d{4}[-_]\d{2}[-_]\d{2}$").unwrap();
-    re.is_match(name)
+    let cap = JOURNAL_FILENAME_RE.captures(name)?;
+    Some(format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]))
 }
 
 #[cfg(test)]
@@ -458,6 +515,32 @@ mod tests {
     }
 
     #[test]
+    fn test_logseq_tab_indented_children() {
+        let content = "- [[Tech/Android/Backup]]\n\t- TODO Stocks\n\t- DOING GPS Tracks\n\t  :LOGBOOK:\n\t  CLOCK: [2025-09-28 Sun 09:10:03]\n\t  :END:\n- Sibling\n";
+        let parsed = parse_page(content, "2025_09_28.md");
+
+        assert_eq!(parsed.blocks.len(), 2);
+        assert_eq!(parsed.blocks[0].content, "[[Tech/Android/Backup]]");
+        assert_eq!(parsed.blocks[0].children.len(), 2);
+        assert_eq!(parsed.blocks[0].children[0].content, "TODO Stocks");
+        assert_eq!(
+            parsed.blocks[0].children[1].content,
+            "DOING GPS Tracks\n:LOGBOOK:\nCLOCK: [2025-09-28 Sun 09:10:03]\n:END:"
+        );
+        assert_eq!(parsed.blocks[1].content, "Sibling");
+    }
+
+    #[test]
+    fn test_mixed_tab_space_indent_levels() {
+        assert_eq!(count_indent("- Root"), 0);
+        assert_eq!(count_indent("\t- Child"), 1);
+        assert_eq!(count_indent("  - Child"), 1);
+        assert_eq!(count_indent("\t\t- Grandchild"), 2);
+        assert_eq!(count_indent("\t  :LOGBOOK:"), 2);
+        assert_eq!(strip_continuation("\t  :LOGBOOK:", 2), ":LOGBOOK:");
+    }
+
+    #[test]
     fn test_task_parsing() {
         let content = "- TODO Buy groceries\n  SCHEDULED: <2024-01-15>";
         let parsed = parse_page(content, "test.md");
@@ -469,10 +552,27 @@ mod tests {
     }
 
     #[test]
+    fn test_markdown_checkbox_task_parsing() {
+        let content = "- [ ] Pay bills\n- [x] Beer";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks[0].content, "[ ] Pay bills");
+        assert_eq!(parsed.blocks[0].task_state, Some(TaskState::Todo));
+        assert_eq!(parsed.blocks[1].content, "[x] Beer");
+        assert_eq!(parsed.blocks[1].task_state, Some(TaskState::Done));
+    }
+
+    #[test]
     fn test_journal_detection() {
-        assert!(is_journal_filename("2024_01_15.md"));
-        assert!(is_journal_filename("2024-01-15.md"));
-        assert!(!is_journal_filename("my_page.md"));
+        assert_eq!(
+            canonical_journal_title("2024_01_15.md").as_deref(),
+            Some("2024-01-15")
+        );
+        assert_eq!(
+            canonical_journal_title("2024-01-15.md").as_deref(),
+            Some("2024-01-15")
+        );
+        assert_eq!(canonical_journal_title("my_page.md"), None);
     }
 
     #[test]
@@ -547,6 +647,19 @@ mod tests {
             "```mermaid\nsequenceDiagram\nparticipant U as User\nparticipant S as Server\n```"
         );
         assert_eq!(parsed.blocks[1].content, "next");
+    }
+
+    #[test]
+    fn test_same_indent_pipe_table_rows_continue_previous_table_block() {
+        let content = "- # Taurine #taurine #protocol #Bioavailability\n  - | Food Source | Taurine Content (per 100g) | Bioavailability |\n  | **Animal Organs (Heart)** | 400-600 mg | High |\n  | **Seafood (Fish)** | 200-400 mg | High |\n  | **Plant-Based Sources** | Negligible to Trace Amounts | Low |";
+        let parsed = parse_page(content, "test.md");
+
+        assert_eq!(parsed.blocks.len(), 1);
+        assert_eq!(parsed.blocks[0].children.len(), 1);
+        assert_eq!(
+            parsed.blocks[0].children[0].content,
+            "| Food Source | Taurine Content (per 100g) | Bioavailability |\n| **Animal Organs (Heart)** | 400-600 mg | High |\n| **Seafood (Fish)** | 200-400 mg | High |\n| **Plant-Based Sources** | Negligible to Trace Amounts | Low |"
+        );
     }
 
     #[test]

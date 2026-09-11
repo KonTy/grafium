@@ -9,13 +9,25 @@ import {
   redo,
   undo,
 } from "@codemirror/commands";
+import { canRedo, canUndo } from "./lib/undoStack";
+
+function activeEditorView(): EditorView | null {
+  const view = (window as any).__activeEditorView;
+  return view instanceof EditorView ? view : null;
+}
+
+function editorHasDomFocus(view: EditorView): boolean {
+  const active = document.activeElement;
+  return view.hasFocus || (!!active && view.dom.contains(active));
+}
 
 // === Native undo/redo handlers (called by Rust via eval()) ===
 // These are set as globals so Rust can call them directly
 (window as any).__handleNativeUndo = () => {
-  console.log("[undo] native handler called, activeView:", !!(window as any).__activeEditorView);
-  const view = (window as any).__activeEditorView;
-  if (view) {
+  const view = activeEditorView();
+  const editorFocused = view ? editorHasDomFocus(view) : false;
+  console.log("[undo] native handler called, activeView:", !!view, "editorFocused:", editorFocused);
+  if (view && editorFocused) {
     // Try CodeMirror undo first. If it returns false, nothing was undone
     // in the text editor, so fall through to app-level undo
     const didUndo = undo(view);
@@ -23,22 +35,40 @@ import {
     if (!didUndo) {
       window.dispatchEvent(new CustomEvent("app-undo"));
     }
-  } else {
-    window.dispatchEvent(new CustomEvent("app-undo"));
+    return;
   }
+  if (canUndo()) {
+    window.dispatchEvent(new CustomEvent("app-undo"));
+    return;
+  }
+  if (view) {
+    const didUndo = undo(view);
+    console.log("[undo] unfocused CodeMirror undo fallback result:", didUndo);
+    if (didUndo) return;
+  }
+  window.dispatchEvent(new CustomEvent("app-undo"));
 };
 
 (window as any).__handleNativeRedo = () => {
-  console.log("[redo] native handler called");
-  const view = (window as any).__activeEditorView;
-  if (view) {
+  const view = activeEditorView();
+  const editorFocused = view ? editorHasDomFocus(view) : false;
+  console.log("[redo] native handler called, activeView:", !!view, "editorFocused:", editorFocused);
+  if (view && editorFocused) {
     const didRedo = redo(view);
     if (!didRedo) {
       window.dispatchEvent(new CustomEvent("app-redo"));
     }
-  } else {
-    window.dispatchEvent(new CustomEvent("app-redo"));
+    return;
   }
+  if (canRedo()) {
+    window.dispatchEvent(new CustomEvent("app-redo"));
+    return;
+  }
+  if (view) {
+    const didRedo = redo(view);
+    if (didRedo) return;
+  }
+  window.dispatchEvent(new CustomEvent("app-redo"));
 };
 
 function getActiveEditorView(): EditorView | null {

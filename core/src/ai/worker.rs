@@ -65,7 +65,9 @@ pub enum WorkerRequest {
     /// knowable from the loaded model — so asking the child is what keeps the
     /// parent free of native code entirely.
     #[cfg(feature = "llm-local")]
-    EmbedderInfo { model_path: PathBuf },
+    EmbedderInfo {
+        model_path: PathBuf,
+    },
     #[cfg(feature = "media")]
     Whisper {
         model_path: PathBuf,
@@ -802,33 +804,39 @@ impl LiveWorker {
             })?;
 
         loop {
-        match self.responses.recv_timeout(timeout) {
-            Ok(Ok(bytes)) => {
-                let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
-                    CoreError::Other(format!("native AI worker returned invalid data: {e}"))
-                })?;
-                if response.is_progress() {
-                    if let Some(progress) = response.progress {
-                        on_progress(progress);
+            match self.responses.recv_timeout(timeout) {
+                Ok(Ok(bytes)) => {
+                    let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
+                        CoreError::Other(format!("native AI worker returned invalid data: {e}"))
+                    })?;
+                    if response.is_progress() {
+                        if let Some(progress) = response.progress {
+                            on_progress(progress);
+                        }
+                        // Keep waiting: the timeout covers silence, not the whole
+                        // job, so a long transcription that is visibly advancing
+                        // is never cut off.
+                        continue;
                     }
-                    // Keep waiting: the timeout covers silence, not the whole
-                    // job, so a long transcription that is visibly advancing
-                    // is never cut off.
-                    continue;
+                    return Ok(response);
                 }
-                return Ok(response);
+                Ok(Err(error)) => {
+                    return Err(CoreError::Other(format!(
+                        "native AI worker connection failed: {error}"
+                    )))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(CoreError::Other(format!(
+                        "native AI worker exceeded its {} minute time limit and was stopped",
+                        timeout.as_secs() / 60
+                    )))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(CoreError::Other(
+                        "native AI worker exited unexpectedly".to_string(),
+                    ))
+                }
             }
-            Ok(Err(error)) => return Err(CoreError::Other(format!(
-                "native AI worker connection failed: {error}"
-            ))),
-            Err(RecvTimeoutError::Timeout) => return Err(CoreError::Other(format!(
-                "native AI worker exceeded its {} minute time limit and was stopped",
-                timeout.as_secs() / 60
-            ))),
-            Err(RecvTimeoutError::Disconnected) => return Err(CoreError::Other(
-                "native AI worker exited unexpectedly".to_string(),
-            )),
-        }
         }
     }
 }

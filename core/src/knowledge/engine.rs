@@ -22,6 +22,7 @@ use crate::knowledge::research_intent;
 use crate::knowledge::retrieval::{self, ContextEntry, RetrievedHit};
 use crate::knowledge::vector_store::SqliteVectorStore;
 use crate::models::{Block, Page};
+use crate::parser::TagTerm;
 
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
 pub struct KnowledgeEngine {
@@ -922,7 +923,34 @@ impl KnowledgeEngine {
             on_progress,
             &crate::cancel::CancellationToken::new(),
         )
-            .await
+        .await
+    }
+
+    /// Extract durable semantic concept-edge candidates from arbitrary text.
+    /// This intentionally uses a stricter prompt than `summarize_text` because
+    /// reviewable graph edges need page-title quality concepts, not loose
+    /// summary tags or frequent keywords.
+    pub async fn concept_edge_tags(
+        &self,
+        title: &str,
+        full_text: &str,
+        on_progress: &mut (dyn FnMut(&str) + Send),
+        cancel: &crate::cancel::CancellationToken,
+    ) -> Result<Vec<TagTerm>> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
+
+        crate::ai::references::generate_concept_edge_tags(
+            title,
+            full_text,
+            self.config.references.concept_edge_prompt.as_deref(),
+            llm.as_ref(),
+            on_progress,
+            cancel,
+        )
+        .await
     }
 
     /// Actually researches `title`/`seed_text` on the open internet — plans
@@ -1230,12 +1258,15 @@ impl KnowledgeEngine {
                 let mut phase = AskPhase::ProcessingPrompt;
                 {
                     let mut on_token = |piece: &str| match filter.push(piece) {
-                        crate::ai::reasoning::StreamStep::Answer(delta) => {
+                        crate::ai::reasoning::StreamStep::Answer(_delta) => {
                             if phase != AskPhase::Generating {
                                 phase = AskPhase::Generating;
                                 on_event(AskStreamEvent::Phase(AskPhase::Generating));
                             }
-                            on_event(AskStreamEvent::Delta(&delta));
+                            // The notes arm is a supporting section in a web
+                            // research answer. Buffer it so capability
+                            // disclaimers ("I can't browse the web") can be
+                            // replaced before they reach the transcript.
                         }
                         crate::ai::reasoning::StreamStep::Thinking => {
                             if phase != AskPhase::Thinking {
@@ -1250,6 +1281,10 @@ impl KnowledgeEngine {
                 }
                 match filter.finish() {
                     crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
+                        let answer = sanitize_notes_research_answer(question, &answer);
+                        if !answer.is_empty() {
+                            on_event(AskStreamEvent::Delta(&answer));
+                        }
                         notes_sources = build_sources(&request.entries, &answer);
                     }
                     // Reasoning models can burn their whole budget thinking; show
@@ -1466,7 +1501,7 @@ impl KnowledgeEngine {
         }
         messages.push(crate::ai::traits::ChatMessage {
             role: crate::ai::traits::MessageRole::User,
-            content: question.to_string(),
+            content: crate::ai::question_with_answer_language_rule(question),
         });
 
         Ok(AskRequest {
@@ -1522,7 +1557,7 @@ impl KnowledgeEngine {
             },
             crate::ai::traits::ChatMessage {
                 role: crate::ai::traits::MessageRole::User,
-                content: question.to_string(),
+                content: crate::ai::question_with_answer_language_rule(question),
             },
         ];
 
@@ -2036,13 +2071,77 @@ fn build_notes_only_system_prompt(context_block: &str) -> String {
 personal writing and journal entries. Use ONLY these notes; do NOT add anything from your general \
 knowledge in this section (a separate web-research section handles outside information). Cite each \
 claim with its [N] marker.\n\
+- This section is ONLY for relevant facts found in the user's notes. Do not discuss your abilities, \
+limitations, lack of tools, inability to browse, inability to implement code, or what the separate \
+web-research section can/cannot do.\n\
 - For \"when\" / temporal questions, use only explicit dates from the cited notes. A line that \
 says \"note saved …; event date unknown\" is not an event date — don't treat it as one.\n\
-- Never invent citations or dates. If these notes don't contain the answer, say so plainly in one \
-sentence and stop — do not guess.\n\n\
+- Never invent citations or dates. If these notes don't contain concrete facts that answer the \
+user's domain question, say exactly: \"I didn't find an answer in your notes.\" and stop — do not \
+guess.\n\n\
 The user's notes (each prefixed with its [N] citation marker and date):\n\n{context_block}\n\n{}",
         crate::ai::ANSWER_LANGUAGE_RULE
     )
+}
+
+fn sanitize_notes_research_answer(question: &str, answer: &str) -> String {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed == "I didn't find an answer in your notes." {
+        return trimmed.to_string();
+    }
+    if looks_like_notes_capability_refusal(trimmed)
+        || trimmed.to_lowercase().contains("[n]")
+        || parse_cited_indices(trimmed).is_empty()
+        || (crate::ai::answer_language_rule_for_question(question)
+            .contains("Write the answer in English only")
+            && contains_cjk_text(trimmed))
+    {
+        "I didn't find an answer in your notes.".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn looks_like_notes_capability_refusal(answer: &str) -> bool {
+    let lower = answer.to_lowercase();
+    let limitation = [
+        "cannot",
+        "can't",
+        "do not have access",
+        "don't have access",
+        "outside the scope",
+        "limited strictly",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    limitation
+        && [
+            "external research",
+            "external tools",
+            "web",
+            "internet",
+            "implement",
+            "current function",
+            "current role",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn contains_cjk_text(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{3040}'..='\u{30FF}'
+                | '\u{AC00}'..='\u{D7AF}'
+        )
+    })
 }
 
 /// Turns a web-research failure into something the user can act on.
@@ -2168,8 +2267,18 @@ Retrieved notes (each prefixed with its [N] citation marker and date):\n\n{conte
     // an instruction the model reads and then immediately buries under a wall
     // of foreign-language text; placed here it is the final thing it sees
     // before it starts writing, which is the whole point.
-    format!("{body}\n\n{}", crate::ai::ANSWER_LANGUAGE_RULE)
+    format!(
+        "{body}\n\n{}\n\n{}",
+        PRACTICAL_SAFETY_RESEARCH_RULE,
+        crate::ai::ANSWER_LANGUAGE_RULE
+    )
 }
+
+const PRACTICAL_SAFETY_RESEARCH_RULE: &str = "For concrete real-world procedures where exact \
+buying advice, compatibility, product specs, material limits, current facts, or safety constraints \
+matter, do not invent definitive buying lists or step-by-step instructions from unsupported memory. \
+If the answer is not backed by retrieved notes or web sources, give only high-level caution, say the \
+task needs source-specific research, and avoid precise procedural claims.";
 
 #[cfg(test)]
 mod tests {
@@ -2180,15 +2289,17 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// Every arm that produces an answer must carry the language rule, not
+    /// Every system prompt that produces an answer must carry the language rule, not
     /// just the one that was reported. Which arm runs depends purely on how
     /// much the retrieval happened to return, and a single bilingual glossary
     /// note is enough to flip an entire answer into another language — so a
     /// rule present on only some arms is a rule that fails intermittently.
     ///
-    /// It also has to come *last*. Ahead of the retrieved notes it is an
+    /// It also has to come *last within the system prompt*. Ahead of the retrieved notes it is an
     /// instruction the model reads and then buries under a wall of
     /// foreign-language text, which is the position it demonstrably loses in.
+    /// The final user turn carries an even more explicit per-question language
+    /// instruction via `question_with_answer_language_rule`.
     #[test]
     fn every_answer_prompt_ends_with_the_language_rule() {
         for mode in [AnswerMode::General, AnswerMode::Notes, AnswerMode::Blend] {
@@ -3454,6 +3565,117 @@ mod tests {
         assert_eq!(outcome.sources[0].page_title, "Creatine notes");
         assert_eq!(outcome.web_citations.len(), 2, "two web sources read");
         assert_eq!(outcome.web_citations[0].url, "https://a.example/x");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_stream_with_web_replaces_notes_capability_refusals() -> Result<()> {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let db = Database::in_memory()?;
+        let page = db.create_page("Motorcycle notes", false)?;
+        db.create_block(
+            &page.id,
+            None,
+            0,
+            "I have been comparing reliable motorcycles for gravel roads.",
+            BlockType::Text,
+            json!({}),
+        )?;
+
+        let llm = QueueLlm::new([
+            "I cannot access external research tools or implement anything from my current function.",
+            r#"{"queries": ["reliable adventure motorcycle"]}"#,
+            r#"{"picks": [0]}"#,
+            r#"{"title_answer": "The test source recommends a simple motorcycle[1].", "topics": []}"#,
+        ]);
+        let engine = test_engine_with_llm(Box::new(llm))?;
+        let browser = CannedBrowser {
+            search_html: r#"<html><body><div class="snippet" data-type="web"><a href="https://m.example/a"><div class="title">Motorcycle</div></a><div class="generic-snippet"><div class="content">s</div></div></div></body></html>"#.to_string(),
+            pages: HashMap::from([(
+                "https://m.example/a".to_string(),
+                stub_page_html("Motorcycle", "A simple motorcycle is recommended."),
+            )]),
+        };
+
+        let mut answer = String::new();
+        let outcome = engine
+            .ask_stream_with_web_using(
+                &db,
+                "what motorcycle should I choose",
+                None,
+                &browser,
+                None,
+                &mut |ev| {
+                    if let AskStreamEvent::Delta(d) = ev {
+                        answer.push_str(d);
+                    }
+                },
+            )
+            .await?;
+
+        assert!(answer.contains("I didn't find an answer in your notes."));
+        assert!(!answer.contains("external research tools"));
+        assert!(answer.contains("The test source recommends a simple motorcycle"));
+        assert!(outcome.sources.is_empty());
+        assert_eq!(outcome.web_citations.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_stream_with_web_replaces_uncited_foreign_language_notes_boilerplate() -> Result<()>
+    {
+        use crate::db::Database;
+        use crate::models::BlockType;
+
+        let db = Database::in_memory()?;
+        let page = db.create_page("Motorcycle notes", false)?;
+        db.create_block(
+            &page.id,
+            None,
+            0,
+            "I have been comparing reliable motorcycles for gravel roads.",
+            BlockType::Text,
+            json!({}),
+        )?;
+
+        let llm = QueueLlm::new([
+            "起来，我需要查看您的AI聊天堆栈。在您的笔记中，并没有提到关于 cruiser bike 的信息。[N]\n\n不过，我可以告诉您，根据您的需求，一个好的 cruiser bike 应该具备以下特点。",
+            r#"{"queries": ["reliable adventure motorcycle"]}"#,
+            r#"{"picks": [0]}"#,
+            r#"{"title_answer": "The test source recommends a simple motorcycle[1].", "topics": []}"#,
+        ]);
+        let engine = test_engine_with_llm(Box::new(llm))?;
+        let browser = CannedBrowser {
+            search_html: r#"<html><body><div class="snippet" data-type="web"><a href="https://m.example/a"><div class="title">Motorcycle</div></a><div class="generic-snippet"><div class="content">s</div></div></div></body></html>"#.to_string(),
+            pages: HashMap::from([(
+                "https://m.example/a".to_string(),
+                stub_page_html("Motorcycle", "A simple motorcycle is recommended."),
+            )]),
+        };
+
+        let mut answer = String::new();
+        let outcome = engine
+            .ask_stream_with_web_using(
+                &db,
+                "what is a good cruiser motorcycle that is easy to fix",
+                None,
+                &browser,
+                None,
+                &mut |ev| {
+                    if let AskStreamEvent::Delta(d) = ev {
+                        answer.push_str(d);
+                    }
+                },
+            )
+            .await?;
+
+        assert!(answer.contains("I didn't find an answer in your notes."));
+        assert!(!answer.contains("起来"));
+        assert!(!answer.contains("具备以下特点"));
+        assert!(outcome.sources.is_empty());
+        assert_eq!(outcome.web_citations.len(), 1);
         Ok(())
     }
 

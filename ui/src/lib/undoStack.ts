@@ -1,5 +1,11 @@
-import type { Block } from "./api";
-import { createBlock, deleteBlock } from "./api";
+import type { Block, CreateBlockBatchItem } from "./api";
+import {
+  acceptLinkCandidate,
+  createBlocks,
+  deleteBlocks,
+  undoLinkCandidateAccept,
+  updateBlock,
+} from "./api";
 import {
   aiUndoSummaryInsert,
   aiReapplySummaryInsert,
@@ -16,6 +22,20 @@ import {
 //      restores each block whose text was rewrapped with `[[wiki-link]]`s
 //      during the same operation; redo recreates the summary block and
 //      reapplies the wraps.
+//   - `update_block` / `update_blocks`: a user-visible command changed block
+//      text outside CodeMirror's own keystroke history; undo restores the
+//      original text and redo reapplies the rewrite.
+//   - `insert_blocks`: a structural insert/paste added blocks and optionally
+//      changed an existing anchor block; undo removes the inserted blocks and
+//      restores the anchor, redo recreates the blocks.
+//   - `accept_link_candidates`: accepting reviewable link suggestions changed
+//      one or more blocks; undo delegates to the candidate snapshot backend.
+export interface BlockContentChange {
+  blockId: string;
+  beforeContent: string;
+  afterContent: string;
+}
+
 export type UndoAction =
   | {
       type: "delete_blocks";
@@ -29,6 +49,31 @@ export type UndoAction =
       insertedContent: string;
       insertedAfterBlockId: string | null;
       wrapChanges: SummaryWrapChange[];
+    }
+  | {
+      type: "update_block";
+      pageId: string;
+      blockId: string;
+      beforeContent: string;
+      afterContent: string;
+    }
+  | {
+      type: "update_blocks";
+      pageId: string;
+      changes: BlockContentChange[];
+    }
+  | {
+      type: "insert_blocks";
+      pageId: string;
+      anchorBlockId: string | null;
+      beforeContent: string | null;
+      afterContent: string | null;
+      insertedBlocks: Block[];
+    }
+  | {
+      type: "accept_link_candidates";
+      pageId: string;
+      candidateIds: string[];
     };
 
 // Store on window to guarantee single instance across all module imports
@@ -39,7 +84,7 @@ if (!w.__redoStack) w.__redoStack = [];
 function getUndoStack(): UndoAction[] { return w.__undoStack; }
 function getRedoStack(): UndoAction[] { return w.__redoStack; }
 
-const MAX_UNDO = 50;
+export const APP_UNDO_LIMIT = 50;
 
 // Per-page callbacks so journal view (multiple PageContent instances) works
 const undoCallbacks: Map<string, (action: UndoAction) => void> = new Map();
@@ -60,15 +105,81 @@ function actionSummary(action: UndoAction): string {
       return `delete_blocks blocks: ${action.blocks.length}`;
     case "insert_summary":
       return `insert_summary block: ${action.insertedBlockId} wraps: ${action.wrapChanges.length}`;
+    case "update_block":
+      return `update_block block: ${action.blockId}`;
+    case "update_blocks":
+      return `update_blocks blocks: ${action.changes.length}`;
+    case "insert_blocks":
+      return `insert_blocks blocks: ${action.insertedBlocks.length} anchor: ${action.anchorBlockId ?? "none"}`;
+    case "accept_link_candidates":
+      return `accept_link_candidates candidates: ${action.candidateIds.length}`;
   }
+}
+
+function depthOfBlock(block: Block, byId: Map<string, Block>): number {
+  let depth = 0;
+  let parentId = block.parent_id;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    depth += 1;
+    parentId = parent.parent_id;
+  }
+  return depth;
+}
+
+function deepestBlocksFirst(blocks: readonly Block[]): Block[] {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  return [...blocks].sort((a, b) => {
+    const depthDelta = depthOfBlock(b, byId) - depthOfBlock(a, byId);
+    return depthDelta || b.order_index - a.order_index;
+  });
+}
+
+function shallowestBlocksFirst(blocks: readonly Block[]): Block[] {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  return [...blocks].sort((a, b) => {
+    const depthDelta = depthOfBlock(a, byId) - depthOfBlock(b, byId);
+    return depthDelta || a.order_index - b.order_index;
+  });
+}
+
+function batchItemsForInsertedBlocks(blocks: readonly Block[]): CreateBlockBatchItem[] {
+  const insertedIndexById = new Map(blocks.map((block, index) => [block.id, index]));
+  return blocks.map((block) => {
+    const parentIndex = block.parent_id ? insertedIndexById.get(block.parent_id) : undefined;
+    return {
+      id: block.id,
+      parentId: parentIndex === undefined ? block.parent_id : undefined,
+      parentIndex,
+      orderIndex: block.order_index,
+      content: block.content,
+      blockType: block.block_type,
+      properties: block.properties,
+    };
+  });
 }
 
 export function pushUndo(action: UndoAction) {
   const stack = getUndoStack();
   stack.push(action);
-  if (stack.length > MAX_UNDO) stack.shift();
+  if (stack.length > APP_UNDO_LIMIT) stack.shift();
   getRedoStack().length = 0;
   console.log("[undoStack] PUSH:", actionSummary(action), "stack now:", stack.length);
+}
+
+export function removeUndoActions(predicate: (action: UndoAction) => boolean): number {
+  const stack = getUndoStack();
+  let removed = 0;
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    if (predicate(stack[index])) {
+      stack.splice(index, 1);
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 // Invoked internally when a redo pushes an "insert_summary" back onto
@@ -77,15 +188,22 @@ export function pushUndo(action: UndoAction) {
 function pushUndoWithoutClearingRedo(action: UndoAction) {
   const stack = getUndoStack();
   stack.push(action);
-  if (stack.length > MAX_UNDO) stack.shift();
+  if (stack.length > APP_UNDO_LIMIT) stack.shift();
   console.log("[undoStack] PUSH (redo-flip):", actionSummary(action), "stack now:", stack.length);
 }
 
 function pushRedo(action: UndoAction) {
   const stack = getRedoStack();
   stack.push(action);
-  if (stack.length > MAX_UNDO) stack.shift();
+  if (stack.length > APP_UNDO_LIMIT) stack.shift();
   console.log("[undoStack] REDO PUSH:", actionSummary(action), "stack now:", stack.length);
+}
+
+function notifyBlockContentReplaced(pageId: string, blockId: string, content: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("grafium-block-content-replaced", {
+    detail: { pageId, blockId, content },
+  }));
 }
 
 export async function performUndo(): Promise<boolean> {
@@ -94,21 +212,16 @@ export async function performUndo(): Promise<boolean> {
   if (!action) return false;
 
   if (action.type === "delete_blocks") {
-    const restoredBlocks: Block[] = [];
-    for (const block of action.blocks) {
-      try {
-        const restored = await createBlock(
-          block.page_id,
-          block.parent_id,
-          block.order_index,
-          block.content,
-          block.block_type,
-          block.properties
-        );
-        restoredBlocks.push(restored);
-      } catch (e) {
-        console.error("[undoStack] failed to restore block:", e);
-      }
+    let restoredBlocks: Block[];
+    try {
+      restoredBlocks = await createBlocks(
+        action.pageId,
+        batchItemsForInsertedBlocks(shallowestBlocksFirst(action.blocks))
+      );
+    } catch (e) {
+      console.error("[undoStack] delete_blocks undo failed:", e);
+      stack.push(action);
+      return false;
     }
     pushRedo({
       type: "delete_blocks",
@@ -145,6 +258,80 @@ export async function performUndo(): Promise<boolean> {
     return true;
   }
 
+  if (action.type === "update_block") {
+    try {
+      await updateBlock(action.blockId, action.beforeContent);
+      notifyBlockContentReplaced(action.pageId, action.blockId, action.beforeContent);
+    } catch (e) {
+      console.error("[undoStack] update_block undo failed:", e);
+      stack.push(action);
+      return false;
+    }
+    pushRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "update_blocks") {
+    try {
+      for (const change of action.changes) {
+        await updateBlock(change.blockId, change.beforeContent);
+        notifyBlockContentReplaced(action.pageId, change.blockId, change.beforeContent);
+      }
+    } catch (e) {
+      console.error("[undoStack] update_blocks undo failed:", e);
+      stack.push(action);
+      return false;
+    }
+    pushRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "insert_blocks") {
+    try {
+      await deleteBlocks(action.pageId, deepestBlocksFirst(action.insertedBlocks).map((block) => block.id));
+      if (action.anchorBlockId && action.beforeContent !== null) {
+        await updateBlock(action.anchorBlockId, action.beforeContent);
+        notifyBlockContentReplaced(action.pageId, action.anchorBlockId, action.beforeContent);
+      }
+    } catch (e) {
+      console.error("[undoStack] insert_blocks undo failed:", e);
+      stack.push(action);
+      return false;
+    }
+    pushRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "accept_link_candidates") {
+    try {
+      for (const candidateId of [...action.candidateIds].reverse()) {
+        await undoLinkCandidateAccept(candidateId);
+      }
+    } catch (e) {
+      console.error("[undoStack] accept_link_candidates undo failed:", e);
+      stack.push(action);
+      return false;
+    }
+    pushRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
   return true;
 }
 
@@ -154,13 +341,22 @@ export async function performRedo(): Promise<boolean> {
   if (!action) return false;
 
   if (action.type === "delete_blocks") {
-    for (const block of action.blocks) {
-      await deleteBlock(block.id);
+    let deletedBlocks: Block[];
+    try {
+      deletedBlocks = await deleteBlocks(
+        action.pageId,
+        deepestBlocksFirst(action.blocks).map((block) => block.id)
+      );
+    } catch (e) {
+      console.error("[undoStack] delete_blocks redo failed:", e);
+      redoStack.push(action);
+      return false;
     }
-    getUndoStack().push(action);
+    const redoAction = { ...action, blocks: deletedBlocks.length ? deletedBlocks : action.blocks };
+    pushUndoWithoutClearingRedo(redoAction);
     const cb = undoCallbacks.get(action.pageId);
     if (cb) {
-      cb(action);
+      cb(redoAction);
     }
     return true;
   }
@@ -188,6 +384,84 @@ export async function performRedo(): Promise<boolean> {
       redoStack.push(action);
       return false;
     }
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "update_block") {
+    try {
+      await updateBlock(action.blockId, action.afterContent);
+      notifyBlockContentReplaced(action.pageId, action.blockId, action.afterContent);
+    } catch (e) {
+      console.error("[undoStack] update_block redo failed:", e);
+      redoStack.push(action);
+      return false;
+    }
+    pushUndoWithoutClearingRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "update_blocks") {
+    try {
+      for (const change of action.changes) {
+        await updateBlock(change.blockId, change.afterContent);
+        notifyBlockContentReplaced(action.pageId, change.blockId, change.afterContent);
+      }
+    } catch (e) {
+      console.error("[undoStack] update_blocks redo failed:", e);
+      redoStack.push(action);
+      return false;
+    }
+    pushUndoWithoutClearingRedo(action);
+    const cb = undoCallbacks.get(action.pageId);
+    if (cb) {
+      cb(action);
+    }
+    return true;
+  }
+
+  if (action.type === "insert_blocks") {
+    try {
+      if (action.anchorBlockId && action.afterContent !== null) {
+        await updateBlock(action.anchorBlockId, action.afterContent);
+        notifyBlockContentReplaced(action.pageId, action.anchorBlockId, action.afterContent);
+      }
+
+      const createdBlocks = await createBlocks(action.pageId, batchItemsForInsertedBlocks(action.insertedBlocks));
+      pushUndoWithoutClearingRedo({
+        ...action,
+        insertedBlocks: createdBlocks,
+      });
+      const cb = undoCallbacks.get(action.pageId);
+      if (cb) {
+        cb({ ...action, insertedBlocks: createdBlocks });
+      }
+    } catch (e) {
+      console.error("[undoStack] insert_blocks redo failed:", e);
+      redoStack.push(action);
+      return false;
+    }
+    return true;
+  }
+
+  if (action.type === "accept_link_candidates") {
+    try {
+      for (const candidateId of action.candidateIds) {
+        await acceptLinkCandidate(candidateId);
+      }
+    } catch (e) {
+      console.error("[undoStack] accept_link_candidates redo failed:", e);
+      redoStack.push(action);
+      return false;
+    }
+    pushUndoWithoutClearingRedo(action);
     const cb = undoCallbacks.get(action.pageId);
     if (cb) {
       cb(action);

@@ -1,21 +1,58 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
-  import { EditorState, EditorSelection } from "@codemirror/state";
+  import { EditorState, EditorSelection, Transaction } from "@codemirror/state";
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
-  import { renderBlock, hydrateAssetMedia, assetBaseDirFor } from "../lib/markdown";
-  import { updateBlock, createBlock, deleteBlock, runQuery, cycleTaskState, getBlockPageTitle, setTaskDate, downloadAsset } from "../lib/api";
+  import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+  import { open as openExternal } from "@tauri-apps/plugin-shell";
+  import {
+    clearMarkdownImageWidth,
+    renderBlock,
+    hydrateAssetMedia,
+    assetBaseDirFor,
+    markdownHeadingSlug,
+    setMarkdownImageWidth,
+  } from "../lib/markdown";
+  import {
+    updateBlock,
+    createBlock,
+    deleteBlock,
+    runQuery,
+    cycleTaskState,
+    updateTaskState,
+    getBlock,
+    getBlockPageTitle,
+    setTaskDate,
+    downloadAsset,
+    readAssetDataUrl,
+    resolveAssetFilePath,
+    saveImageToPath,
+  } from "../lib/api";
   import type { QueryRow } from "../lib/api";
+  import type { BlockContentChange } from "../lib/undoStack";
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
+  import { EDITOR_UNDO_MIN_DEPTH } from "../lib/editorUndo";
   import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
-  import { toggleWrapText } from "../lib/editorFormat";
+  import { toggleWrapText, wrapPageLinkText } from "../lib/editorFormat";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import {
+    assetPathFromImageUrl,
+    formatImageScale,
+    formatScaledImageDimensions,
+    imageIndexFromElement,
+    IMAGE_SIZE_SCALES,
+    imageSourceUrl,
+    renderedImageBaseSize,
+    scaledImageDimensions,
+  } from "../lib/imageSizing";
+  import { isTaskContent } from "../lib/taskSyntax";
   import DatePicker from "./DatePicker.svelte";
 
   interface Props {
@@ -25,6 +62,7 @@
     /** Graph-relative directory of the page's markdown file, so a page-relative
      * asset reference (`assets/x.png`) resolves beside the page. */
     assetBaseDir?: string;
+    bookMode?: boolean;
     depth?: number;
     /// Per-ancestor-level flags for drawing the vertical "thread" guide line
     /// (see `getAncestorGuides` in pageContentVirtualization.ts). Index i
@@ -42,9 +80,15 @@
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
+    onAnchor?: (blockId: string) => void;
     onBulletClick?: (blockId: string, event: MouseEvent) => void;
-    onPasteBlocks?: (blockId: string, blocks: PasteBlock[]) => void | Promise<void>;
+    onPasteBlocks?: (
+      blockId: string,
+      blocks: PasteBlock[],
+      anchorEdit?: { beforeContent: string; afterContent: string },
+    ) => void | Promise<void>;
     onToggleCollapse?: (blockId: string) => void;
+    onContentChange?: (pageId: string, change: BlockContentChange) => void;
   }
 
   let {
@@ -52,6 +96,7 @@
     pageId,
     pageTitle = "",
     assetBaseDir = "",
+    bookMode = false,
     depth = 0,
     guides = [],
     focused = false,
@@ -64,9 +109,11 @@
     onDelete,
     onIndent,
     onNavigate,
+    onAnchor,
     onBulletClick,
     onPasteBlocks,
     onToggleCollapse,
+    onContentChange,
   }: Props = $props();
 
   let editorContainer: HTMLDivElement;
@@ -77,6 +124,7 @@
   let isEditing = $state(false);
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
+  let isTableBlock = $derived(renderedHtml.includes("<table"));
 
   /**
    * Base directory for one query result row.
@@ -93,8 +141,38 @@
     return typeof filePath === "string" ? assetBaseDirFor(filePath) : "";
   }
   let saveError = $state<string | null>(null);
+  let imageMenuMessage = $state<string | null>(null);
+  let imageMenuMessageTimer: number | undefined;
   let pendingSaveContent = $state<string | null>(null);
   let finishEditingPromise: Promise<boolean> | null = null;
+  type ImageSizeMenu = {
+    index: number;
+    x: number;
+    y: number;
+    baseWidth: number;
+    baseHeight: number;
+    sourceUrl: string;
+    markdownSrc: string;
+    assetPath: string | null;
+    altText: string;
+  };
+  type TextLinkRange = {
+    from: number;
+    to: number;
+    text: string;
+  };
+  type MakeLinkMenu = {
+    x: number;
+    y: number;
+    from: number;
+    to: number;
+    text: string;
+  };
+  const EDITOR_MAKE_LINK_CACHE_MS = 30_000;
+  let imageSizeMenu: ImageSizeMenu | null = $state(null);
+  let makeLinkMenu: MakeLinkMenu | null = $state(null);
+  let lastEditorPageLinkRange: (TextLinkRange & { capturedAt: number }) | null = null;
+  let blockContentEl = $state<HTMLElement | null>(null);
 
   // Rendered-content container, used to hydrate <audio>/<video> media that
   // WebKitGTK can't load from the custom asset scheme.
@@ -102,7 +180,92 @@
   $effect(() => {
     void renderedHtml;
     const el = renderedEl;
-    queueMicrotask(() => hydrateAssetMedia(el));
+    if (!el) return;
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      cleanup = hydrateAssetMedia(el);
+    });
+
+    $effect(() => {
+      if (!imageSizeMenu) return;
+      const closeMenu = (event: MouseEvent | PointerEvent) => {
+        const target = event.target as Element | null;
+        if (target?.closest?.(".image-size-menu")) return;
+        imageSizeMenu = null;
+      };
+      const handleKeydown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") {
+          imageSizeMenu = null;
+        }
+      };
+      window.addEventListener("pointerdown", closeMenu);
+      window.addEventListener("contextmenu", closeMenu);
+      window.addEventListener("keydown", handleKeydown);
+      return () => {
+        window.removeEventListener("pointerdown", closeMenu);
+        window.removeEventListener("contextmenu", closeMenu);
+        window.removeEventListener("keydown", handleKeydown);
+      };
+    });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  });
+
+  $effect(() => {
+    if (!makeLinkMenu) return;
+    const closeMenu = (event: MouseEvent | PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest?.(".make-link-menu")) return;
+      makeLinkMenu = null;
+    };
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        makeLinkMenu = null;
+      }
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("contextmenu", closeMenu);
+    window.addEventListener("keydown", handleKeydown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("contextmenu", closeMenu);
+      window.removeEventListener("keydown", handleKeydown);
+    };
+  });
+
+  $effect(() => {
+    const handleReplacement = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string; blockId: string; content: string }>).detail;
+      if (!detail || detail.pageId !== pageId || detail.blockId !== block.id) return;
+      block.content = detail.content;
+      const view = editorView;
+      if (!view) return;
+      const current = view.state.doc.toString();
+      if (current === detail.content) return;
+      view.dispatch({
+        changes: { from: 0, to: current.length, insert: detail.content },
+        annotations: Transaction.addToHistory.of(false),
+      });
+    };
+    window.addEventListener("grafium-block-content-replaced", handleReplacement);
+    return () => window.removeEventListener("grafium-block-content-replaced", handleReplacement);
+  });
+
+  $effect(() => {
+    const shell = blockContentEl?.closest(".block-shell");
+    if (!shell) return;
+    if (!imageSizeMenu) {
+      shell.classList.remove("image-menu-shell");
+      return;
+    }
+    shell.classList.add("image-menu-shell");
+    return () => {
+      shell.classList.remove("image-menu-shell");
+    };
   });
 
   // Date picker state
@@ -133,6 +296,18 @@
   let bulletMinHeight = $derived(getBulletMinHeight(block.content));
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
   let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
+  let isVisuallyEmpty = $derived(isVisuallyEmptyBlock(block.content));
+  let suppressBullet = $derived(
+    getHeadingLevel(block.content) > 0 || isTaskContent(block.content) || isTableBlock
+  );
+  let showBlockMarker = $derived(
+    !bookMode &&
+      !block.content.trim().startsWith("```") &&
+      !queryExpression &&
+      !isVisuallyEmpty &&
+      !isQuoteBlock &&
+      (hasChildren || !suppressBullet)
+  );
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -251,12 +426,27 @@
       apply: "[#A] ",
     },
     {
+      label: "/A",
+      detail: "Set priority A (highest)",
+      apply: "[#A] ",
+    },
+    {
       label: "/Priority B",
       detail: "Set priority B (medium)",
       apply: "[#B] ",
     },
     {
+      label: "/B",
+      detail: "Set priority B (medium)",
+      apply: "[#B] ",
+    },
+    {
       label: "/Priority C",
+      detail: "Set priority C (low)",
+      apply: "[#C] ",
+    },
+    {
+      label: "/C",
       detail: "Set priority C (low)",
       apply: "[#C] ",
     },
@@ -286,11 +476,16 @@
     // Match a `/` optionally followed by word chars at the current position
     const match = context.matchBefore(/\/[^\s]*/);
     if (!match) return null;
+    const typed = match.text.toLowerCase();
+    const commands = typed === "/"
+      ? SLASH_COMMANDS
+      : SLASH_COMMANDS.filter((cmd) => cmd.label.toLowerCase().startsWith(typed));
+    if (commands.length === 0) return null;
 
     return {
       from: match.from,
       filter: false,
-      options: SLASH_COMMANDS.map((cmd) => ({
+      options: commands.map((cmd) => ({
         label: cmd.label,
         detail: cmd.detail,
         apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
@@ -369,6 +564,11 @@
     return match ? match[1].length : 0;
   }
 
+  function isVisuallyEmptyBlock(content: string): boolean {
+    const normalized = content.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+    return normalized === "" || /^[-*+]$/.test(normalized);
+  }
+
   function getBulletMinHeight(content: string): string {
     switch (getHeadingLevel(content)) {
       case 1:
@@ -403,11 +603,17 @@
   async function saveContent(content: string) {
     const context = buildSaveContext(block.id, pageId, block.content, content);
     telemetry("savecontext", () => (context));
+    const beforeContent = block.content;
     try {
       const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
       saveError = null;
       pendingSaveContent = null;
       if (changed) {
+        onContentChange?.(pageId, {
+          blockId: block.id,
+          beforeContent,
+          afterContent: content,
+        });
         telemetry("saveContent", () => (context));
       }
       return changed;
@@ -416,6 +622,350 @@
       saveError = `Failed to save changes: ${e instanceof Error ? e.message : String(e)}`;
       console.error("Failed to save block content:", e);
       throw e;
+    }
+  }
+
+  function recordPersistedContentChange(
+    changedPageId: string,
+    blockId: string,
+    beforeContent: string,
+    afterContent: string,
+  ) {
+    if (beforeContent === afterContent) return;
+    if (blockId === block.id) {
+      block.content = afterContent;
+    }
+    onContentChange?.(changedPageId, {
+      blockId,
+      beforeContent,
+      afterContent,
+    });
+  }
+
+  function imageFilename(menu: ImageSizeMenu): string {
+    const source = menu.assetPath || menu.markdownSrc || menu.sourceUrl;
+    try {
+      const url = new URL(source);
+      const name = decodeURIComponent(url.pathname.split("/").pop() || "");
+      return name || "image";
+    } catch {
+      const clean = source.split(/[?#]/)[0].replace(/\\/g, "/");
+      return clean.split("/").pop() || "image";
+    }
+  }
+
+  function markdownImageText(menu: ImageSizeMenu): string {
+    const alt = menu.altText.replace(/]/g, "\\]");
+    return `![${alt}](${menu.markdownSrc || menu.sourceUrl})`;
+  }
+
+  function openImageSizeMenu(event: MouseEvent, img: HTMLImageElement) {
+    const index = imageIndexFromElement(img);
+    if (index === null) return;
+    const pos = contextMenuPositionFromEvent(event, { width: 236, height: 560 });
+    const baseSize = renderedImageBaseSize(img, renderedEl?.clientWidth);
+    const sourceUrl = imageSourceUrl(img);
+    const assetPath = assetPathFromImageUrl(sourceUrl) ?? assetPathFromImageUrl(img.dataset.src);
+    imageSizeMenu = {
+      index,
+      x: pos.x,
+      y: pos.y,
+      baseWidth: baseSize.width,
+      baseHeight: baseSize.height,
+      sourceUrl,
+      markdownSrc: img.dataset.markdownSrc || assetPath || sourceUrl,
+      assetPath,
+      altText: img.alt || "",
+    };
+  }
+
+  function selectedPageLinkRange(view: EditorView): TextLinkRange | null {
+    const selection = view.state.selection.main;
+    if (selection.empty) return null;
+    const selected = view.state.doc.sliceString(selection.from, selection.to);
+    if (!selected.trim() || selected.includes("\n")) return null;
+    return { from: selection.from, to: selection.to, text: selected };
+  }
+
+  function rememberEditorPageLinkRange(view: EditorView): TextLinkRange | null {
+    const range = selectedPageLinkRange(view);
+    if (range) {
+      lastEditorPageLinkRange = { ...range, capturedAt: Date.now() };
+    }
+    return range;
+  }
+
+  function cachedEditorPageLinkRange(view: EditorView): TextLinkRange | null {
+    const range = lastEditorPageLinkRange;
+    if (!range || Date.now() - range.capturedAt > EDITOR_MAKE_LINK_CACHE_MS) {
+      lastEditorPageLinkRange = null;
+      return null;
+    }
+
+    const doc = view.state.doc.toString();
+    if (doc.slice(range.from, range.to) === range.text) {
+      const { capturedAt: _capturedAt, ...cached } = range;
+      return cached;
+    }
+    const fallback = doc.indexOf(range.text);
+    if (fallback < 0) {
+      lastEditorPageLinkRange = null;
+      return null;
+    }
+    return { from: fallback, to: fallback + range.text.length, text: range.text };
+  }
+
+  function countOccurrences(text: string, needle: string): number {
+    if (!needle) return 0;
+    let count = 0;
+    let index = text.indexOf(needle);
+    while (index !== -1) {
+      count += 1;
+      index = text.indexOf(needle, index + needle.length);
+    }
+    return count;
+  }
+
+  function nthIndexOf(text: string, needle: string, occurrence: number): number {
+    let remaining = Math.max(0, occurrence);
+    let index = text.indexOf(needle);
+    while (index !== -1 && remaining > 0) {
+      remaining -= 1;
+      index = text.indexOf(needle, index + needle.length);
+    }
+    return index;
+  }
+
+  function renderedSelectionPrefix(range: Range): string {
+    if (!renderedEl) return "";
+    const prefixRange = document.createRange();
+    prefixRange.selectNodeContents(renderedEl);
+    prefixRange.setEnd(range.startContainer, range.startOffset);
+    const prefix = prefixRange.toString();
+    prefixRange.detach();
+    return prefix.replace(/\u00a0/g, " ");
+  }
+
+  function selectedRenderedPageLinkRange(): TextLinkRange | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !renderedEl) return null;
+
+    const range = selection.getRangeAt(0);
+    if (!renderedEl.contains(range.startContainer) || !renderedEl.contains(range.endContainer)) {
+      return null;
+    }
+
+    const selected = selection.toString().replace(/\u00a0/g, " ").trim();
+    if (!selected || selected.includes("\n")) return null;
+
+    const occurrence = countOccurrences(renderedSelectionPrefix(range), selected);
+    const from = nthIndexOf(block.content, selected, occurrence);
+    if (from < 0) return null;
+
+    return { from, to: from + selected.length, text: selected };
+  }
+
+  function openMakeLinkMenuForRange(event: MouseEvent, range: TextLinkRange | null) {
+    if (!range) return false;
+    const pos = contextMenuPositionFromEvent(event, { width: 160, height: 48 });
+    imageSizeMenu = null;
+    makeLinkMenu = {
+      x: pos.x,
+      y: pos.y,
+      ...range,
+    };
+    return true;
+  }
+
+  function openEditorMakeLinkMenu(event: MouseEvent, view: EditorView) {
+    return openMakeLinkMenuForRange(event, rememberEditorPageLinkRange(view) ?? cachedEditorPageLinkRange(view));
+  }
+
+  function openRenderedMakeLinkMenu(event: MouseEvent) {
+    return openMakeLinkMenuForRange(event, selectedRenderedPageLinkRange());
+  }
+
+  async function makeSelectedTextLink() {
+    const menu = makeLinkMenu;
+    const view = editorView;
+    if (!menu) return;
+
+    const doc = view?.state.doc.toString() ?? block.content;
+    let from = Math.max(0, Math.min(menu.from, doc.length));
+    let to = Math.max(from, Math.min(menu.to, doc.length));
+    if (doc.slice(from, to) !== menu.text) {
+      const fallback = doc.indexOf(menu.text);
+      if (fallback < 0) {
+        makeLinkMenu = null;
+        return;
+      }
+      from = fallback;
+      to = fallback + menu.text.length;
+    }
+    const result = wrapPageLinkText(doc, from, to);
+    if (view) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: result.doc },
+        selection:
+          result.selStart === result.selEnd
+            ? EditorSelection.cursor(result.selStart)
+            : EditorSelection.range(result.selStart, result.selEnd),
+      });
+    } else {
+      try {
+        await saveContent(result.doc);
+      } catch {
+        // saveContent already surfaces the error state.
+      }
+    }
+    makeLinkMenu = null;
+    lastEditorPageLinkRange = null;
+    window.getSelection()?.removeAllRanges();
+    view?.focus();
+  }
+
+  async function withImageMenuAction(label: string, action: (menu: ImageSizeMenu) => Promise<void>) {
+    const menu = imageSizeMenu;
+    if (!menu) return;
+    try {
+      await action(menu);
+      imageSizeMenu = null;
+      saveError = null;
+      showImageMenuMessage(`${label[0].toUpperCase()}${label.slice(1)} complete`);
+    } catch (e) {
+      saveError = `Failed to ${label}: ${e instanceof Error ? e.message : String(e)}`;
+      console.error(`Failed to ${label}:`, e);
+    }
+  }
+
+  function showImageMenuMessage(message: string) {
+    imageMenuMessage = message;
+    if (imageMenuMessageTimer) clearTimeout(imageMenuMessageTimer);
+    imageMenuMessageTimer = window.setTimeout(() => {
+      imageMenuMessage = null;
+      imageMenuMessageTimer = undefined;
+    }, 1800);
+  }
+
+  async function writeClipboardText(text: string) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch {
+      // Fall back below; WebKitGTK can reject async clipboard despite a click.
+    }
+
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.style.position = "fixed";
+    scratch.style.left = "-9999px";
+    scratch.style.opacity = "0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    const copied = document.execCommand("copy");
+    scratch.remove();
+    if (!copied) {
+      throw new Error("clipboard text API is unavailable");
+    }
+  }
+
+  async function copyImageAddress() {
+    await withImageMenuAction("copy image address", async (menu) => {
+      await writeClipboardText(menu.markdownSrc || menu.sourceUrl);
+    });
+  }
+
+  async function copyMarkdownImage() {
+    await withImageMenuAction("copy Markdown image", async (menu) => {
+      await writeClipboardText(markdownImageText(menu));
+    });
+  }
+
+  async function copyImage() {
+    await withImageMenuAction("copy image", async (menu) => {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+        await writeClipboardText(menu.markdownSrc || menu.sourceUrl);
+        return;
+      }
+      const source = menu.assetPath ? await readAssetDataUrl(menu.assetPath) : menu.sourceUrl;
+      if (!source) throw new Error("image source is unavailable");
+      const response = await fetch(source);
+      if (!response.ok) throw new Error(`could not read image (${response.status})`);
+      const blob = await response.blob();
+      if (!blob.type.startsWith("image/")) {
+        throw new Error(`unsupported image type ${blob.type || "unknown"}`);
+      }
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    });
+  }
+
+  async function openImageExternally() {
+    await withImageMenuAction("open image", async (menu) => {
+      if (menu.assetPath) {
+        await openExternal(await resolveAssetFilePath(menu.assetPath));
+        return;
+      }
+      if (!menu.sourceUrl) throw new Error("image source is unavailable");
+      await openExternal(menu.sourceUrl);
+    });
+  }
+
+  async function saveImageAs() {
+    await withImageMenuAction("save image", async (menu) => {
+      const destination = await saveDialog({
+        title: "Save Image As",
+        defaultPath: imageFilename(menu),
+        filters: [
+          { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"] },
+        ],
+      });
+      if (!destination) return;
+      const source = menu.assetPath || menu.sourceUrl;
+      if (!source) throw new Error("image source is unavailable");
+      await saveImageToPath(source, destination);
+    });
+  }
+
+  async function commitImageWidth(index: number, width: number) {
+    const nextContent = setMarkdownImageWidth(block.content, index, width);
+    if (nextContent === block.content) return;
+    await saveContent(nextContent);
+  }
+
+  async function clearImageWidth(index: number) {
+    const nextContent = clearMarkdownImageWidth(block.content, index);
+    if (nextContent === block.content) return;
+    await saveContent(nextContent);
+  }
+
+  function imageScaleSizeLabel(scale: number): string {
+    const baseWidth = imageSizeMenu?.baseWidth ?? 240;
+    const baseHeight = imageSizeMenu?.baseHeight ?? 180;
+    return formatScaledImageDimensions(scale, baseWidth, baseHeight);
+  }
+
+  async function chooseImageScale(scale: number) {
+    const menu = imageSizeMenu;
+    if (!menu) return;
+    try {
+      const next = scaledImageDimensions(scale, menu.baseWidth, menu.baseHeight);
+      await commitImageWidth(menu.index, next.width);
+      imageSizeMenu = null;
+    } catch {
+      // saveContent already surfaced the error on the block.
+    }
+  }
+
+  async function resetImageScale() {
+    const menu = imageSizeMenu;
+    if (!menu) return;
+    try {
+      await clearImageWidth(menu.index);
+      imageSizeMenu = null;
+    } catch {
+      // saveContent already surfaced the error on the block.
     }
   }
 
@@ -429,6 +979,7 @@
       editorView = undefined;
     }
     isEditing = false;
+    makeLinkMenu = null;
     keymap_manager.isEditing = false;
     if (notifyBlur) {
       onBlur?.(block.id);
@@ -537,6 +1088,8 @@
 
   function startEditing() {
     if (isEditing) return;
+    imageSizeMenu = null;
+    makeLinkMenu = null;
     isEditing = true;
     keymap_manager.isEditing = true;
     onFocus?.(block.id);
@@ -564,6 +1117,18 @@
     });
   }
 
+  function clipboardMarkdown(data: DataTransfer | null): string | null {
+    if (!data) return null;
+    const markdown = data.getData("text/markdown").trim();
+    if (markdown) return markdown;
+
+    const html = data.getData("text/html");
+    if (html.trim()) return htmlToMarkdown(html);
+
+    const text = data.getData("text/plain").trim();
+    return text || null;
+  }
+
   function initEditor() {
       // Reuse saved state if content hasn't changed externally
       let state: EditorState;
@@ -574,7 +1139,7 @@
         doc: block.content,
         extensions: [
           markdown(),
-          history(),
+          history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
             override: [slashCompletionSource, angleCompletionSource],
             activateOnTyping: false,
@@ -766,6 +1331,7 @@
           }),
           EditorView.updateListener.of((update) => {
             if (!update.view.hasFocus) return;
+            rememberEditorPageLinkRange(update.view);
             const sel = update.state.selection.main;
             if (!sel.empty) return;
 
@@ -797,11 +1363,16 @@
             keyup: (event) => {
               if (event.key === "Shift") shiftHeld = false;
             },
-            paste: (event, view) => {
-              const html = event.clipboardData?.getData("text/html");
-              if (!html) return false;
+            contextmenu: (event, view) => {
+              if (!openEditorMakeLinkMenu(event, view)) return false;
               event.preventDefault();
-              const md = htmlToMarkdown(html);
+              event.stopPropagation();
+              return true;
+            },
+            paste: (event, view) => {
+              const md = clipboardMarkdown(event.clipboardData);
+              if (!md) return false;
+              event.preventDefault();
 
               if (shiftHeld || !onPasteBlocks) {
                 // Ctrl+Shift+V: paste everything into this one block
@@ -826,6 +1397,7 @@
               } else {
                 // Ctrl+V: split into separate blocks with hierarchy
                 const chunks = splitMarkdownIntoBlocks(md);
+                const beforePasteContent = view.state.doc.toString();
                 // First chunk goes into the current block at cursor
                 const { from, to } = view.state.selection.main;
                 view.dispatch({
@@ -838,7 +1410,10 @@
                   void (async () => {
                     try {
                       await saveContent(content);
-                      await onPasteBlocks?.(block.id, chunks.slice(1));
+                      await onPasteBlocks?.(block.id, chunks.slice(1), {
+                        beforeContent: beforePasteContent,
+                        afterContent: content,
+                      });
                     } catch {
                       // saveContent already surfaces the error state
                     }
@@ -1023,23 +1598,62 @@
     }
   }
 
+  function markCurrentBlock() {
+    onAnchor?.(block.id);
+  }
+
   async function handleTaskCycle() {
     try {
-      const newState = await cycleTaskState(block.id);
-      // Backend already updated block content + .md file;
-      // update local state to match
-      const taskRe = /^(TODO|DOING|DONE|NOW|LATER|CANCELED)\s/;
-      const newContent = block.content.replace(taskRe, newState + " ");
-      if (newContent !== block.content) {
-        block.content = newContent;
-      }
+      const beforeContent = block.content;
+      const newContent = await cycleTaskState(block.id);
+      recordPersistedContentChange(pageId, block.id, beforeContent, newContent);
     } catch (e) {
       console.error("Failed to cycle task state:", e);
     }
   }
 
+  async function handleTaskComplete() {
+    try {
+      const beforeContent = block.content;
+      const newContent = await updateTaskState(block.id, "DONE");
+      recordPersistedContentChange(pageId, block.id, beforeContent, newContent);
+    } catch (e) {
+      console.error("Failed to complete task:", e);
+    }
+  }
+
+  function clickedTaskCheckbox(target: HTMLElement): HTMLElement | null {
+    return target.closest(".task-checkbox") as HTMLElement | null;
+  }
+
   async function handleQueryResultClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
+
+    const checkbox = clickedTaskCheckbox(target);
+    if (checkbox) {
+      e.stopPropagation();
+      e.preventDefault();
+      if (checkbox.dataset.taskAction !== "done" || queryBlockIdCol < 0) return;
+      const row = checkbox.closest("tr");
+      if (!row) return;
+      const tbody = row.closest("tbody");
+      if (!tbody) return;
+      const rowIdx = Array.from(tbody.children).indexOf(row);
+      if (rowIdx < 0 || !queryRows || rowIdx >= queryRows.length) return;
+      const blockId = String(queryRows[rowIdx][queryBlockIdCol][1] ?? "");
+      if (!blockId) return;
+      try {
+        const before = await getBlock(blockId);
+        const newContent = await updateTaskState(blockId, "DONE");
+        recordPersistedContentChange(before.page_id, blockId, before.content, newContent);
+        if (queryExpression) {
+          await runQueryBlock(queryExpression);
+        }
+      } catch (err) {
+        console.error("Failed to complete task in query result:", err);
+      }
+      return;
+    }
 
     // Handle task-marker clicks inside query results
     if (target.classList.contains("task-marker")) {
@@ -1056,7 +1670,9 @@
       const blockId = String(queryRows[rowIdx][queryBlockIdCol][1] ?? "");
       if (!blockId) return;
       try {
-        await cycleTaskState(blockId);
+        const before = await getBlock(blockId);
+        const newContent = await cycleTaskState(blockId);
+        recordPersistedContentChange(before.page_id, blockId, before.content, newContent);
         // Re-run the query to refresh results
         if (queryExpression) {
           await runQueryBlock(queryExpression);
@@ -1112,11 +1728,62 @@
   function handleRenderedClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
 
+    if (target instanceof HTMLImageElement && target.classList.contains("fc-img")) {
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+
+    const checkbox = clickedTaskCheckbox(target);
+    if (checkbox) {
+      e.stopPropagation();
+      e.preventDefault();
+      if (checkbox.dataset.taskAction === "done") {
+        void handleTaskComplete();
+      }
+      return;
+    }
+
     // Handle task marker clicks — cycle state
     if (target.classList.contains("task-marker")) {
       e.stopPropagation();
       e.preventDefault();
       handleTaskCycle();
+      return;
+    }
+
+    const samePageAnchor = target.closest("a[href^='#']") as HTMLAnchorElement | null;
+    if (samePageAnchor) {
+      e.stopPropagation();
+      e.preventDefault();
+      const rawFragment = samePageAnchor.getAttribute("href")?.slice(1) ?? "";
+      const fragment = (() => {
+        try {
+          return decodeURIComponent(rawFragment);
+        } catch {
+          return rawFragment;
+        }
+      })();
+      if (fragment) {
+        const fallbackFragment = bookChapterTextFragment(samePageAnchor);
+        const fragments = fallbackFragment && fallbackFragment !== fragment
+          ? [fragment, fallbackFragment]
+          : [fragment];
+        window.dispatchEvent(new CustomEvent("page-content-reveal-fragment", {
+          detail: { pageId, fragment: fragments },
+        }));
+      }
+      return;
+    }
+
+    const bookChapterAnchor = target.closest("a[href]") as HTMLAnchorElement | null;
+    const bookChapterFragment = bookLocalChapterFragment(bookChapterAnchor);
+    if (bookChapterFragment) {
+      e.stopPropagation();
+      e.preventDefault();
+      window.dispatchEvent(new CustomEvent("page-content-reveal-fragment", {
+        detail: { pageId, fragment: bookChapterFragment },
+      }));
       return;
     }
 
@@ -1147,9 +1814,67 @@
     startEditing();
   }
 
+  function bookLocalChapterFragment(anchor: HTMLAnchorElement | null): string | null {
+    if (!anchor || !pageTitle.startsWith("Books/")) return null;
+    const href = anchor.getAttribute("href")?.trim() ?? "";
+    if (!href || href.startsWith("#") || isExternalHref(href)) return null;
+    if (!looksLikeBookLocalHref(href)) return null;
+
+    return bookChapterTextFragment(anchor) ?? bookHrefFragment(href);
+  }
+
+  function bookChapterTextFragment(anchor: HTMLAnchorElement): string | null {
+    if (!pageTitle.startsWith("Books/")) return null;
+    const targetText = [cleanInlineText(anchor.textContent ?? "")]
+      .find((candidate) => looksLikeChapterLinkText(candidate));
+    return targetText ? markdownHeadingSlug(targetText) : null;
+  }
+
+  function bookHrefFragment(href: string): string | null {
+    const targetText = [bookHrefLabel(href)].find((candidate) => looksLikeChapterLinkText(candidate));
+    return targetText ? markdownHeadingSlug(targetText) : null;
+  }
+
+  function isExternalHref(href: string): boolean {
+    return /^(?:https?:|mailto:|tel:|data:|blob:|grafium-asset:)/i.test(href.trim());
+  }
+
+  function looksLikeBookLocalHref(href: string): boolean {
+    const cleaned = href.split(/[?#]/, 1)[0].trim().replace(/\\/g, "/");
+    if (!cleaned || cleaned.startsWith("/")) return false;
+    return /\.(?:x?html?|xml)$/i.test(cleaned) || cleaned.includes("/");
+  }
+
+  function bookHrefLabel(href: string): string {
+    const cleaned = href.split(/[?#]/, 1)[0].trim().replace(/\\/g, "/");
+    const leaf = cleaned.split("/").filter(Boolean).pop() ?? "";
+    return leaf.replace(/\.(?:x?html?|xml)$/i, "").replace(/[_-]+/g, " ");
+  }
+
+  function cleanInlineText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  function looksLikeChapterLinkText(text: string): boolean {
+    const cleaned = cleanInlineText(text);
+    const letterCount = Array.from(cleaned).filter((ch) => /\p{Letter}/u.test(ch)).length;
+    return letterCount >= 3 && cleaned.length <= 140;
+  }
+
+  function handleRenderedContextMenu(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (!(target instanceof HTMLImageElement) || !target.classList.contains("fc-img")) {
+      return;
+    }
+    e.stopPropagation();
+    e.preventDefault();
+    openImageSizeMenu(e, target);
+  }
+
   async function handleDateSelect(date: string) {
     showDatePicker = false;
     try {
+      const beforeContent = block.content;
       const newContent = await setTaskDate(block.id, datePickerKind, date || null);
       // Update the editor if open
       if (editorView) {
@@ -1157,11 +1882,20 @@
           changes: { from: 0, to: editorView.state.doc.length, insert: newContent },
         });
       }
-      // Update the block reactive data
-      block.content = newContent;
+      recordPersistedContentChange(pageId, block.id, beforeContent, newContent);
     } catch (e) {
       console.error("Failed to set task date:", e);
     }
+  }
+
+  function handleRenderedKeydown(e: KeyboardEvent) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const target = e.target as HTMLElement;
+    const checkbox = clickedTaskCheckbox(target);
+    if (!checkbox || checkbox.dataset.taskAction !== "done") return;
+    e.stopPropagation();
+    e.preventDefault();
+    void handleTaskComplete();
   }
 
   function handleDateCancel() {
@@ -1169,15 +1903,28 @@
   }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="block-item"
+  class:bookMode
   class:editing={isEditing}
   class:selected
   class:code-block={isCodeBlock !== null}
-  style="padding-left: {depth * 24}px"
+  class:image-menu-open={imageSizeMenu !== null}
+  class:h1={editorStyleClass === "h1"}
+  class:h2={editorStyleClass === "h2"}
+  class:h3={editorStyleClass === "h3"}
+  class:h4={editorStyleClass === "h4"}
+  class:h5={editorStyleClass === "h5"}
+  class:h6={editorStyleClass === "h6"}
+  class:table-block={isTableBlock && !isEditing}
+  style="padding-left: {bookMode ? 0 : depth * 24}px"
   data-block-id={block.id}
+  data-page-id={pageId}
+  data-depth={depth}
+  onpointerdown={markCurrentBlock}
 >
-  {#if guides.length > 0}
+  {#if !bookMode && guides.length > 0}
     <div class="indent-guides" aria-hidden="true">
       {#each guides as active, level (level)}
         {#if active}
@@ -1186,7 +1933,7 @@
       {/each}
     </div>
   {/if}
-  {#if !block.content.trim().startsWith("```") && !queryExpression && block.content.trim() !== "" && !isQuoteBlock}
+  {#if showBlockMarker}
     <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
       e.stopPropagation();
       // A plain click on a bullet with children collapses/expands it (existing
@@ -1202,16 +1949,21 @@
     }}>
       {#if hasChildren}
         <span class="collapse-arrow" class:collapsed>
-          {#if collapsed}▶{:else}
+          {#if collapsed || suppressBullet}{collapsed ? "▶" : "▼"}{:else}
             <span class="arrow-hover">▼</span><span class="bullet-default">•</span>
           {/if}
         </span>
-      {:else}
+      {:else if !suppressBullet}
         <span class="bullet">•</span>
       {/if}
     </div>
   {/if}
-  <div class="block-content" class:quote-block={isQuoteBlock && !isEditing} onclick={handleClick}>
+  <div
+    class="block-content"
+    class:quote-block={isQuoteBlock && !isEditing}
+    onclick={handleClick}
+    bind:this={blockContentEl}
+  >
     {#if isEditing}
       <div class="editor-shell">
         <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
@@ -1291,12 +2043,80 @@
     {:else}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="rendered-content" onclick={handleRenderedClick} bind:this={renderedEl}>
-        {#if block.content.trim() === ""}
+      <div
+        class="rendered-content"
+        onclick={handleRenderedClick}
+        onkeydown={handleRenderedKeydown}
+        oncontextmenu={handleRenderedContextMenu}
+        bind:this={renderedEl}
+      >
+        {#if isVisuallyEmpty}
           <span class="placeholder">&nbsp;</span>
         {:else}
           {@html renderedHtml}
         {/if}
+      </div>
+      {#if saveError || imageMenuMessage}
+        <div class="save-error rendered-action-message" role="status">
+          <span>{saveError ?? imageMenuMessage}</span>
+        </div>
+      {/if}
+    {/if}
+    {#if imageSizeMenu}
+      <div
+        class="image-size-menu app-context-menu"
+        style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
+        role="menu"
+        aria-label="Image menu"
+        tabindex="-1"
+        onpointerdown={(e) => e.stopPropagation()}
+        oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => { if (e.key === "Escape") imageSizeMenu = null; }}
+      >
+        <div class="image-size-menu-title">Image</div>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyImage()}>
+          Copy Image
+        </button>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyImageAddress()}>
+          Copy Image Address
+        </button>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyMarkdownImage()}>
+          Copy Markdown Image
+        </button>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => openImageExternally()}>
+          Open Image
+        </button>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => saveImageAs()}>
+          Save Image As...
+        </button>
+        <div class="image-size-menu-separator"></div>
+        <div class="image-size-menu-title">Size</div>
+        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => resetImageScale()}>
+          Original Size
+        </button>
+        {#each IMAGE_SIZE_SCALES as scale}
+          <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => chooseImageScale(scale)}>
+            {formatImageScale(scale)} <span>{imageScaleSizeLabel(scale)}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    {#if makeLinkMenu}
+      <div
+        class="make-link-menu app-context-menu"
+        style={`left: ${makeLinkMenu.x}px; top: ${makeLinkMenu.y}px;`}
+        role="menu"
+        aria-label="Text selection menu"
+        tabindex="-1"
+        onpointerdown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+        oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => { if (e.key === "Escape") makeLinkMenu = null; }}
+      >
+        <button class="make-link-menu-item" type="button" role="menuitem" onclick={() => void makeSelectedTextLink()}>
+          Make link
+        </button>
       </div>
     {/if}
   </div>
@@ -1323,6 +2143,10 @@
     position: relative;
   }
 
+  .block-item.image-menu-open {
+    z-index: 2000;
+  }
+
   .block-item.editing {
     background: transparent;
     align-items: center;
@@ -1333,6 +2157,31 @@
     background: color-mix(in srgb, var(--accent, #7c3aed) 20%, transparent);
   }
 
+  .block-item.bookMode {
+    min-height: 0;
+    border-radius: 0;
+    transition: none;
+  }
+
+  .block-item.bookMode:not(.editing) {
+    margin: 0.24rem 0;
+  }
+
+  .block-item.bookMode.h1:not(.editing) {
+    margin: 2.2rem 0 0.95rem;
+  }
+
+  .block-item.bookMode.h2:not(.editing) {
+    margin: 1.65rem 0 0.65rem;
+  }
+
+  .block-item.bookMode.h3:not(.editing),
+  .block-item.bookMode.h4:not(.editing),
+  .block-item.bookMode.h5:not(.editing),
+  .block-item.bookMode.h6:not(.editing) {
+    margin: 1.25rem 0 0.45rem;
+  }
+
   .bullet-container {
     width: 20px;
     min-height: 24px;
@@ -1341,6 +2190,7 @@
     justify-content: center;
     flex-shrink: 0;
     cursor: pointer;
+    font-size: 15px;
   }
 
   /* Bullet-threading hierarchy guide lines: a thin vertical line per
@@ -1359,30 +2209,67 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 1px;
-    background: var(--text-secondary, currentColor);
-    opacity: 0.55;
+    width: 2px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 42%, var(--text-secondary, currentColor));
+    opacity: 0.72;
   }
 
   .bullet {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--text-secondary);
+    background: color-mix(in srgb, var(--text-secondary) 78%, var(--accent));
     display: block;
     font-size: 0;
   }
 
   .collapse-arrow {
-    font-size: 10px;
+    font-size: 1em;
     color: var(--text-muted);
     user-select: none;
     line-height: 1;
+    font-weight: 700;
+  }
+
+  .bullet-container.has-children .collapse-arrow {
+    color: var(--accent);
+    text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+
+  .block-item.h1 .bullet-container {
+    font-size: 1.75em;
+  }
+
+  .block-item.h1 .bullet-container.has-children .collapse-arrow {
+    color: var(--accent-yellow);
+  }
+
+  .block-item.h2 .bullet-container {
+    font-size: 1.45em;
+  }
+
+  .block-item.h2 .bullet-container.has-children .collapse-arrow {
+    color: var(--accent);
+  }
+
+  .block-item.h3 .bullet-container {
+    font-size: 1.25em;
+  }
+
+  .block-item.h3 .bullet-container.has-children .collapse-arrow {
+    color: var(--accent-secondary);
+  }
+
+  .block-item.h4 .bullet-container,
+  .block-item.h5 .bullet-container,
+  .block-item.h6 .bullet-container {
+    font-size: 1.08em;
   }
 
   .collapse-arrow .arrow-hover {
     display: none;
-    font-size: 10px;
+    font-size: 1em;
   }
 
   .collapse-arrow .bullet-default {
@@ -1400,7 +2287,7 @@
   }
 
   .collapse-arrow.collapsed {
-    font-size: 10px;
+    font-size: 1em;
     color: var(--text-secondary);
   }
 
@@ -1413,6 +2300,15 @@
     cursor: text;
     line-height: 1.45;
     overflow: hidden;
+  }
+
+  .block-item.bookMode .block-content {
+    min-height: 0;
+    overflow: visible;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.72;
+    color: var(--text-primary);
   }
 
   .block-item.editing .block-content {
@@ -1498,40 +2394,57 @@
   }
 
   .editor-wrapper.h1 :global(.cm-editor) {
-    font-size: 1.45em;
-    line-height: 1.2;
-    font-weight: 700;
+    color: var(--accent-yellow);
+    font-size: 1.75em;
+    line-height: 1.08;
+    font-weight: 800;
   }
 
   .editor-wrapper.h2 :global(.cm-editor) {
-    font-size: 1.25em;
-    line-height: 1.2;
-    font-weight: 600;
+    color: var(--accent);
+    font-size: 1.45em;
+    line-height: 1.14;
+    font-weight: 750;
   }
 
   .editor-wrapper.h3 :global(.cm-editor) {
-    font-size: 1.12em;
+    color: var(--accent-secondary);
+    font-size: 1.25em;
     line-height: 1.25;
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .editor-wrapper.h4 :global(.cm-editor),
   .editor-wrapper.h5 :global(.cm-editor),
   .editor-wrapper.h6 :global(.cm-editor) {
-    font-size: 1em;
+    color: var(--accent-cyan);
+    font-size: 1.08em;
     line-height: 1.25;
-    font-weight: 600;
+    font-weight: 700;
   }
 
   .rendered-content {
+    position: relative;
     width: 100%;
     min-width: 0;
     padding: 0;
+    overflow-x: auto;
     overflow-wrap: break-word;
     word-break: break-word;
   }
 
+  .block-item.bookMode .rendered-content {
+    overflow-x: visible;
+    overflow-wrap: break-word;
+    word-break: normal;
+    hyphens: auto;
+  }
+
   .rendered-content :global(p) {
+    margin: 0;
+  }
+
+  .block-item.bookMode .rendered-content :global(p) {
     margin: 0;
   }
 
@@ -1541,15 +2454,25 @@
   }
 
   .rendered-content :global(.page-link) {
-    color: var(--text-link);
+    --link-accent: var(--accent-yellow);
+    color: var(--link-accent);
     cursor: pointer;
     text-decoration: none;
-    border-bottom: 1px solid transparent;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    border: 1px solid color-mix(in srgb, var(--link-accent) 50%, transparent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--link-accent) 10%, transparent);
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    padding: 0 0.24em;
   }
 
   .rendered-content :global(.page-link:hover) {
     color: var(--text-link-hover);
-    border-bottom-color: var(--text-link-hover);
+    border-color: var(--text-link-hover);
   }
 
   .rendered-content :global(.tag) {
@@ -1565,91 +2488,104 @@
   }
 
   .rendered-content :global(.task-marker) {
-    font-weight: 700;
-    font-size: 12px;
-    padding: 1px 4px;
-    border-radius: 3px;
-    margin-right: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 8px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    line-height: 1.25;
+    letter-spacing: 0.03em;
+    margin-right: 6px;
+    vertical-align: 1px;
     cursor: pointer;
     user-select: none;
-    transition: opacity 0.15s;
+    transition: opacity 0.15s, background-color 0.15s, box-shadow 0.15s;
   }
 
   .rendered-content :global(.task-marker:hover) {
-    opacity: 0.7;
+    opacity: 0.78;
   }
 
   .rendered-content :global(.task-marker.todo) {
-    background: var(--task-todo-bg);
-    color: var(--task-todo-fg);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
 
-  .rendered-content :global(.task-marker.doing) {
-    background: var(--task-doing-bg);
-    color: var(--task-doing-fg);
+  .rendered-content :global(.task-marker.doing),
+  .rendered-content :global(.task-marker.now) {
+    color: var(--accent-secondary);
+    background: color-mix(in srgb, var(--accent-secondary) 15%, transparent);
   }
 
   .rendered-content :global(.task-marker.done) {
-    background: var(--task-done-bg);
     color: var(--task-done-fg);
+    background: var(--task-done-bg);
   }
 
   .rendered-content :global(.task-marker.later) {
-    background: var(--task-later-bg);
-    color: var(--task-later-fg);
-  }
-
-  .rendered-content :global(.task-marker.now) {
-    background: var(--task-doing-bg);
-    color: var(--task-doing-fg);
+    color: var(--text-muted);
+    background: var(--bg-secondary);
   }
 
   .rendered-content :global(.task-marker.canceled) {
-    background: rgba(150, 150, 150, 0.15);
     color: var(--text-muted);
+    background: color-mix(in srgb, var(--text-muted) 16%, transparent);
     text-decoration: line-through;
   }
 
   .rendered-content :global(.priority) {
-    font-size: 0.75rem;
-    font-weight: 700;
-    padding: 1px 4px;
-    border-radius: 3px;
-    margin-right: 2px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 8px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    line-height: 1.25;
+    letter-spacing: 0.03em;
+    margin-right: 6px;
+    vertical-align: 1px;
   }
 
   .rendered-content :global(.priority-A) {
-    background: rgba(255, 80, 80, 0.15);
-    color: #ff5050;
+    color: var(--danger, #f85149);
+    background: color-mix(in srgb, var(--danger, #f85149) 14%, transparent);
   }
 
   .rendered-content :global(.priority-B) {
-    background: rgba(255, 170, 0, 0.15);
-    color: #ffaa00;
+    color: var(--accent-yellow);
+    background: color-mix(in srgb, var(--accent-yellow) 14%, transparent);
   }
 
   .rendered-content :global(.priority-C) {
-    background: rgba(100, 180, 255, 0.15);
-    color: #64b4ff;
+    color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
   }
 
   .rendered-content :global(.task-date) {
-    display: inline-block;
-    font-size: 0.75rem;
-    padding: 1px 6px;
-    border-radius: 4px;
-    margin-left: 4px;
-    vertical-align: middle;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 650;
+    line-height: 1.25;
+    margin: 2px 4px 0 0;
+    vertical-align: 1px;
   }
 
   .rendered-content :global(.task-date.scheduled) {
-    background: rgba(100, 180, 255, 0.1);
+    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
     color: var(--text-secondary);
   }
 
   .rendered-content :global(.task-date.deadline) {
-    background: rgba(255, 100, 100, 0.1);
-    color: #ff6464;
+    background: color-mix(in srgb, var(--danger, #f85149) 12%, transparent);
+    color: var(--danger, #f85149);
   }
 
   .rendered-content :global(code) {
@@ -1673,33 +2609,81 @@
   }
 
   .rendered-content :global(h1) {
-    font-size: 1.45em;
-    font-weight: 700;
-    line-height: 1.2;
+    --heading-accent: var(--accent-yellow);
+    color: var(--heading-accent);
+    font-size: 1.75em;
+    font-weight: 800;
+    line-height: 1.08;
+    letter-spacing: 0.015em;
     margin: 0;
+    padding-bottom: 0.08em;
+    border-bottom: 2px solid color-mix(in srgb, var(--heading-accent) 62%, transparent);
+  }
+
+  .block-item.bookMode .rendered-content :global(h1) {
+    font-size: clamp(1.75rem, 4vw, 2.6rem);
+    font-weight: 700;
+    line-height: 1.12;
+    margin: 0;
+    text-align: center;
   }
 
   .rendered-content :global(h2) {
-    font-size: 1.25em;
-    font-weight: 600;
-    line-height: 1.2;
+    --heading-accent: var(--accent);
+    color: var(--heading-accent);
+    font-size: 1.45em;
+    font-weight: 750;
+    line-height: 1.14;
+    letter-spacing: 0.01em;
     margin: 0;
+    padding-bottom: 0.06em;
+    border-bottom: 1px solid color-mix(in srgb, var(--heading-accent) 52%, transparent);
+  }
+
+  .block-item.bookMode .rendered-content :global(h2) {
+    font-size: 1.65rem;
+    font-weight: 700;
+    line-height: 1.18;
+    margin: 0;
+    text-align: center;
   }
 
   .rendered-content :global(h3) {
-    font-size: 1.12em;
-    font-weight: 600;
+    --heading-accent: var(--accent-secondary);
+    color: var(--heading-accent);
+    font-size: 1.25em;
+    font-weight: 700;
     line-height: 1.25;
     margin: 0;
+  }
+
+  .block-item.bookMode .rendered-content :global(h3) {
+    font-size: 1.3rem;
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0;
+    text-align: center;
   }
 
   .rendered-content :global(h4),
   .rendered-content :global(h5),
   .rendered-content :global(h6) {
-    font-size: 1em;
-    font-weight: 600;
+    --heading-accent: var(--accent-cyan);
+    color: var(--heading-accent);
+    font-size: 1.08em;
+    font-weight: 700;
     line-height: 1.25;
     margin: 0;
+  }
+
+  .block-item.bookMode .rendered-content :global(h4),
+  .block-item.bookMode .rendered-content :global(h5),
+  .block-item.bookMode .rendered-content :global(h6) {
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.3;
+    margin: 0;
+    text-align: center;
   }
 
   .rendered-content :global(blockquote) {
@@ -1786,11 +2770,86 @@
 
   .rendered-content :global(.fc-img) {
     max-width: 100%;
-    max-height: 360px;
     height: auto;
     border-radius: 6px;
     margin: 4px 0;
     display: block;
+    cursor: pointer;
+  }
+
+  .rendered-content :global(.fc-img[data-src]:not([src])) {
+    min-height: 48px;
+    background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  }
+
+  .rendered-content :global(.fc-img[data-image-width]),
+  .rendered-content :global(.fc-img[data-image-height]) {
+    max-width: none;
+  }
+
+  .rendered-action-message {
+    margin-top: 4px;
+  }
+
+  .image-size-menu,
+  .make-link-menu {
+    position: fixed;
+    z-index: 2147483000;
+    padding: 6px;
+  }
+
+  .image-size-menu {
+    min-width: 212px;
+  }
+
+  .make-link-menu {
+    min-width: 150px;
+  }
+
+  .image-size-menu-title {
+    padding: 5px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .image-size-menu-separator {
+    height: 1px;
+    margin: 5px 2px;
+    background: var(--border);
+  }
+
+  .image-size-menu-item,
+  .make-link-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 8px;
+    text-align: left;
+  }
+
+  .image-size-menu-item span {
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  .image-size-menu-item:hover,
+  .image-size-menu-item:focus-visible,
+  .make-link-menu-item:hover,
+  .make-link-menu-item:focus-visible {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
   }
 
   .rendered-content :global(.fc-audio) {
@@ -1806,6 +2865,23 @@
     max-height: 360px;
     border-radius: 6px;
     margin: 4px 0;
+    display: block;
+  }
+
+  .rendered-content :global(.grafium-video-embed) {
+    width: min(100%, 760px);
+    aspect-ratio: 16 / 9;
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-secondary);
+  }
+
+  .rendered-content :global(.grafium-video-embed iframe) {
+    width: 100%;
+    height: 100%;
+    border: 0;
     display: block;
   }
 

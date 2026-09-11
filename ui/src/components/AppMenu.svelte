@@ -366,8 +366,8 @@
   }
 
   .btn-primary {
-    background: var(--accent);
-    color: #fff;
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
   }
 
   .btn-primary:hover {
