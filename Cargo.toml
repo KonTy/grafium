@@ -3,7 +3,7 @@ members = ["core", "ui/src-tauri", "tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.121"
+version = "0.0.122"
 edition = "2021"
 license = "MIT"
 
