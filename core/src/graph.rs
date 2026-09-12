@@ -58,6 +58,43 @@ pub struct BlockCreateSpec {
     pub properties: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenamedPage {
+    pub id: String,
+    pub old_title: String,
+    pub new_title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedRename {
+    pub id: Option<String>,
+    pub old_title: String,
+    pub new_title: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergedPage {
+    pub source_id: String,
+    pub dest_id: String,
+    pub old_title: String,
+    pub new_title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BulkRenameResult {
+    pub renamed: Vec<RenamedPage>,
+    pub merged: Vec<MergedPage>,
+    pub skipped: Vec<SkippedRename>,
+    pub links_updated: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletePageResult {
+    pub deleted_pages: usize,
+    pub deleted_assets: usize,
+}
+
 pub const DEFAULT_METADATA_DIR_NAME: &str = ".grafium";
 
 fn wrap_link_candidate_anchor(
@@ -182,6 +219,102 @@ pub fn collect_asset_files(root: &Path) -> Vec<String> {
     walk(root, root, false, &mut out);
     out.sort();
     out
+}
+
+fn collect_files_recursive(dir: &Path, out: &mut HashSet<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => collect_files_recursive(&path, out),
+            Ok(kind) if kind.is_file() => {
+                out.insert(path);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_media_refs(content: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let angled = j < bytes.len() && bytes[j] == b'<';
+            if angled {
+                j += 1;
+            }
+            let start = j;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if angled && c == b'>' {
+                    break;
+                }
+                if !angled && matches!(c, b')' | b' ' | 0x22 | 0x27 | b'\n') {
+                    break;
+                }
+                j += 1;
+            }
+            if let Ok(path) = std::str::from_utf8(&bytes[start..j]) {
+                push_media_ref(path, &mut refs);
+            }
+            i = j.saturating_add(1);
+            continue;
+        }
+        i += 1;
+    }
+
+    let lower = content.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find("src=") {
+        let abs = search_from + rel + 4;
+        let rest = content.get(abs..).unwrap_or("").trim_start();
+        let quote = rest.as_bytes().first().copied();
+        if quote == Some(0x22) || quote == Some(0x27) {
+            let q = char::from(quote.unwrap());
+            if let Some(end) = rest[1..].find(q) {
+                push_media_ref(&rest[1..1 + end], &mut refs);
+            }
+        }
+        search_from = abs + 1;
+    }
+    refs
+}
+
+fn push_media_ref(raw: &str, out: &mut Vec<String>) {
+    let path = raw.trim().trim_matches(['<', '>']).trim();
+    let path = path.split(['?', '#']).next().unwrap_or(path).trim();
+    if path.is_empty() {
+        return;
+    }
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("//")
+        || lower.starts_with("data:")
+        || lower.starts_with("mailto:")
+        || lower.starts_with('#')
+        || lower.starts_with("grafium-asset:")
+    {
+        return;
+    }
+    let is_media = lower.contains("assets/")
+        || [
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif", ".ico", ".mp3",
+            ".wav", ".ogg", ".m4a", ".mp4", ".webm", ".mov", ".pdf",
+        ]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    if is_media {
+        out.push(path.to_string());
+    }
 }
 
 /// Directory that should hold media for the page whose markdown file is at
@@ -2077,11 +2210,154 @@ impl Graph {
         Ok(true)
     }
 
-    pub fn delete_page(&self, page_id: &str) -> Result<()> {
+    /// Delete a page, every namespaced subpage (`Title/...`), and media that
+    /// nothing remaining still references.
+    pub fn delete_page(&self, page_id: &str) -> Result<DeletePageResult> {
         let page = self.db.get_page_by_id(page_id)?;
+        if page.is_journal {
+            return self.delete_page_records(vec![page]);
+        }
+        self.delete_namespace(&page.title)
+    }
 
-        // Delete the file from disk first.
-        // Prefer the persisted file path, but fall back to canonical location when missing.
+    /// Delete every page titled `title` or living under `title/`, even when
+    /// the folder itself has no page row.
+    pub fn delete_namespace(&self, title: &str) -> Result<DeletePageResult> {
+        let title = parser::normalize_page_title(title);
+        let title = title.trim_end_matches('/');
+        if title.is_empty() {
+            return Err(CoreError::Other("Folder title cannot be empty".to_string()));
+        }
+        if let Ok(page) = self.db.get_page_by_title_ci(title) {
+            if page.is_journal {
+                return self.delete_page_records(vec![page]);
+            }
+        }
+        let pages = self.db.list_pages_for_title_rewrite(title)?;
+        if pages.is_empty() {
+            return Err(CoreError::Other(format!("No pages under '{title}'")));
+        }
+        self.delete_page_records(pages)
+    }
+
+    fn delete_page_records(&self, mut pages: Vec<Page>) -> Result<DeletePageResult> {
+        let mut seen = HashSet::new();
+        pages.retain(|item| seen.insert(item.id.clone()));
+
+        let mut media = HashSet::new();
+        for item in &pages {
+            self.collect_page_media_files(item, &mut media);
+        }
+
+        for item in &pages {
+            self.remove_page_file(item)?;
+            self.db.delete_blocks_for_page(&item.id)?;
+            self.db.delete_page(&item.id)?;
+            self.mark_page_dirty(&item.id);
+        }
+
+        let mut deleted_assets = 0usize;
+        for path in media {
+            if !path.is_file() || self.media_still_referenced(&path)? {
+                continue;
+            }
+            self.note_self_write(&path);
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    deleted_assets += 1;
+                    if let Some(parent) = path.parent() {
+                        self.remove_empty_dirs_up(parent.to_path_buf());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(DeletePageResult {
+            deleted_pages: pages.len(),
+            deleted_assets,
+        })
+    }
+
+    fn collect_page_media_files(&self, page: &Page, out: &mut HashSet<PathBuf>) {
+        if let Some(file_path) = page.file_path.as_deref() {
+            if let Some(dir) = page_asset_dir(&self.root_dir, file_path) {
+                let assets = dir.join("assets");
+                if assets.is_dir() {
+                    collect_files_recursive(&assets, out);
+                }
+            }
+        }
+        if let Ok(blocks) = self.db.list_blocks_for_page(&page.id) {
+            for block in blocks {
+                for raw in extract_media_refs(&block.content) {
+                    if let Some(path) = self.resolve_media_file(page, &raw) {
+                        out.insert(path);
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_media_file(&self, page: &Page, raw: &str) -> Option<PathBuf> {
+        let raw = raw.split(['?', '#']).next()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let lower = raw.to_ascii_lowercase();
+        if lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("//")
+            || lower.starts_with("data:")
+            || lower.starts_with("mailto:")
+            || lower.starts_with('#')
+        {
+            return None;
+        }
+        let page_dir = page
+            .file_path
+            .as_deref()
+            .and_then(|fp| Path::new(fp).parent())
+            .map(|parent| self.root_dir.join(parent))
+            .unwrap_or_else(|| self.root_dir.clone());
+        let joined = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            page_dir.join(raw)
+        };
+        let canon = joined.canonicalize().ok()?;
+        let root = self.root_dir.canonicalize().ok()?;
+        (canon.starts_with(&root) && canon.is_file()).then_some(canon)
+    }
+
+    fn media_still_referenced(&self, path: &Path) -> Result<bool> {
+        let rel = path
+            .strip_prefix(&self.root_dir)
+            .ok()
+            .map(|item| item.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let mut needles = Vec::new();
+        if !rel.is_empty() {
+            needles.push(rel.clone());
+        }
+        if let Some(idx) = rel.rfind("assets/") {
+            needles.push(rel[idx..].to_string());
+        }
+        needles.sort();
+        needles.dedup();
+        for needle in needles {
+            if needle.len() < 4 {
+                continue;
+            }
+            if !self.db.list_blocks_containing(&needle)?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn remove_page_file(&self, page: &Page) -> Result<()> {
         let full_path = if let Some(ref file_path) = page.file_path {
             self.root_dir.join(file_path)
         } else if page.is_journal {
@@ -2091,24 +2367,351 @@ impl Graph {
             self.pages_dir.join(format!("{}.md", page.title))
         };
 
+        self.note_self_write(&full_path);
         if let Err(e) = fs::remove_file(&full_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e.into());
             }
         }
-
-        // Delete from DB
-        self.db.delete_blocks_for_page(page_id)?;
-        self.db.delete_page(page_id)?;
         self.forget_indexed_content(&full_path);
-
-        // Flag for the drainer to purge this page's vectors. The page no
-        // longer exists in the DB, so the drainer treats a pending id it can't
-        // load as a removal and deletes the stored vectors — otherwise a
-        // deleted page would keep surfacing phantom citations in Chat.
-        self.mark_page_dirty(page_id);
-
+        if let Some(parent) = full_path.parent() {
+            self.remove_empty_dirs_up(parent.to_path_buf());
+        }
         Ok(())
+    }
+
+    /// Append `source_id`'s blocks onto `dest_id`, rewrite wiki links from the
+    /// source title to the destination title, then drop the source page.
+    pub fn merge_page(&self, source_id: &str, dest_id: &str) -> Result<Page> {
+        if source_id == dest_id {
+            return self.db.get_page_by_id(dest_id);
+        }
+        let source = self.db.get_page_by_id(source_id)?;
+        let dest = self.db.get_page_by_id(dest_id)?;
+        if source.is_journal || dest.is_journal {
+            return Err(CoreError::Other(
+                "Journal pages cannot be merged".to_string(),
+            ));
+        }
+
+        let old_title = source.title.clone();
+        let new_title = dest.title.clone();
+        self.db.rehome_page_into(source_id, dest_id)?;
+        self.remove_page_file(&source)?;
+        self.db.delete_page(source_id)?;
+        self.mark_page_dirty(source_id);
+
+        self.rewrite_wiki_links_in_graph(&old_title, |target| {
+            if target.eq_ignore_ascii_case(&old_title) {
+                Some(new_title.clone())
+            } else {
+                None
+            }
+        })?;
+
+        let dest = self.db.get_page_by_id(dest_id)?;
+        self.write_page_to_disk(&dest)?;
+        Ok(dest)
+    }
+
+    /// Rename one page: update the title, move its markdown file, and rewrite
+    /// `[[old title]]` wiki links (including `[[old|alias]]`) across the graph.
+    pub fn rename_page(&self, page_id: &str, new_title: &str) -> Result<Page> {
+        let page = self.db.get_page_by_id(page_id)?;
+        if page.is_journal {
+            return Err(CoreError::Other(
+                "Journal pages cannot be renamed".to_string(),
+            ));
+        }
+        let new_title = parser::normalize_page_title(new_title);
+        if new_title.is_empty() {
+            return Err(CoreError::Other("Page title cannot be empty".to_string()));
+        }
+        let _ = self.page_file_path(&new_title, false)?;
+        if new_title == page.title {
+            return Ok(page);
+        }
+        if let Ok(existing) = self.db.get_page_by_title_ci(&new_title) {
+            if existing.id != page.id {
+                return self.merge_page(&page.id, &existing.id);
+            }
+        }
+
+        let old_title = page.title.clone();
+        self.relocate_page_file(&page, &new_title)?;
+        self.db.update_page(page_id, Some(&new_title), None)?;
+        self.rewrite_wiki_links_in_graph(&old_title, |target| {
+            if target.eq_ignore_ascii_case(&old_title) {
+                Some(new_title.clone())
+            } else {
+                None
+            }
+        })?;
+
+        self.db.get_page_by_id(page_id)
+    }
+
+    /// Bulk title find/replace, e.g. `from = "self/"` and `to = ""`.
+    ///
+    /// `dry_run` reports what would change and writes nothing. Collisions
+    /// with an existing title are merged into that page.
+    pub fn bulk_rename_pages(
+        &self,
+        from: &str,
+        to: &str,
+        dry_run: bool,
+    ) -> Result<BulkRenameResult> {
+        let from = from.trim();
+        if from.is_empty() {
+            return Err(CoreError::Other(
+                "Find text cannot be empty".to_string(),
+            ));
+        }
+        let to = to.trim();
+        let candidates = self.db.list_pages_for_title_rewrite(from)?;
+        let mut result = BulkRenameResult::default();
+        let mut planned: Vec<(Page, String)> = Vec::new();
+
+        for page in candidates {
+            match parser::apply_title_prefix_replace(&page.title, from, to) {
+                Some(new_title) => planned.push((page, new_title)),
+                None => {
+                    result.skipped.push(SkippedRename {
+                        id: Some(page.id.clone()),
+                        old_title: page.title,
+                        new_title: String::new(),
+                        reason: "new title would be empty".to_string(),
+                    });
+                }
+            }
+        }
+
+        let planned_ids: HashSet<String> = planned.iter().map(|(page, _)| page.id.clone()).collect();
+        let mut title_owner: HashMap<String, (String, String)> = HashMap::new();
+        let mut accepted: Vec<(Page, String)> = Vec::new();
+        let mut merges: Vec<(Page, String, String)> = Vec::new();
+
+        for (page, new_title) in planned {
+            let key = new_title.to_lowercase();
+            if let Some((owner_id, owner_title)) = title_owner.get(&key) {
+                if owner_id != &page.id {
+                    merges.push((page, owner_id.clone(), owner_title.clone()));
+                }
+                continue;
+            }
+            if let Ok(existing) = self.db.get_page_by_title_ci(&new_title) {
+                if existing.id != page.id && !planned_ids.contains(&existing.id) {
+                    title_owner.insert(key, (existing.id.clone(), existing.title.clone()));
+                    merges.push((page, existing.id, existing.title));
+                    continue;
+                }
+            }
+            title_owner.insert(key, (page.id.clone(), new_title.clone()));
+            accepted.push((page, new_title));
+        }
+
+        result.renamed = accepted
+            .iter()
+            .map(|(page, new_title)| RenamedPage {
+                id: page.id.clone(),
+                old_title: page.title.clone(),
+                new_title: new_title.clone(),
+            })
+            .collect();
+        result.merged = merges
+            .iter()
+            .map(|(page, dest_id, dest_title)| MergedPage {
+                source_id: page.id.clone(),
+                dest_id: dest_id.clone(),
+                old_title: page.title.clone(),
+                new_title: dest_title.clone(),
+            })
+            .collect();
+
+        if dry_run || (accepted.is_empty() && merges.is_empty()) {
+            return Ok(result);
+        }
+
+        let mut maps: HashMap<String, String> = HashMap::new();
+        let mut applied: Vec<RenamedPage> = Vec::new();
+        for (page, new_title) in accepted {
+            match self.relocate_page_file(&page, &new_title) {
+                Ok(()) => {
+                    if let Err(err) = self.db.update_page(&page.id, Some(&new_title), None) {
+                        result.skipped.push(SkippedRename {
+                            id: Some(page.id.clone()),
+                            old_title: page.title.clone(),
+                            new_title: new_title.clone(),
+                            reason: err.to_string(),
+                        });
+                        continue;
+                    }
+                    maps.insert(page.title.to_lowercase(), new_title.clone());
+                    applied.push(RenamedPage {
+                        id: page.id,
+                        old_title: page.title,
+                        new_title,
+                    });
+                }
+                Err(err) => {
+                    result.skipped.push(SkippedRename {
+                        id: Some(page.id.clone()),
+                        old_title: page.title,
+                        new_title,
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        }
+        result.renamed = applied;
+
+        let mut applied_merges: Vec<MergedPage> = Vec::new();
+        for (page, dest_id, dest_title) in merges {
+            match self.merge_page(&page.id, &dest_id) {
+                Ok(dest) => {
+                    maps.insert(page.title.to_lowercase(), dest.title.clone());
+                    applied_merges.push(MergedPage {
+                        source_id: page.id,
+                        dest_id: dest.id,
+                        old_title: page.title,
+                        new_title: dest_title,
+                    });
+                }
+                Err(err) => {
+                    result.skipped.push(SkippedRename {
+                        id: Some(page.id.clone()),
+                        old_title: page.title.clone(),
+                        new_title: dest_title,
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        }
+        result.merged = applied_merges;
+
+        let from_owned = from.to_string();
+        let to_owned = to.to_string();
+        result.links_updated = self.rewrite_wiki_links_in_graph(from, |target| {
+            if let Some(new_title) = maps.get(&target.to_lowercase()) {
+                if new_title != target {
+                    return Some(new_title.clone());
+                }
+            }
+            parser::apply_title_prefix_replace(target, &from_owned, &to_owned)
+        })?;
+
+        Ok(result)
+    }
+
+    fn relocate_page_file(&self, page: &Page, new_title: &str) -> Result<()> {
+        let new_path = self.page_file_path(new_title, page.is_journal)?;
+        let Some(rel) = page.file_path.as_deref() else {
+            return Ok(());
+        };
+        let old_path = self.root_dir.join(rel);
+        if !old_path.exists() {
+            self.db
+                .set_page_file_path(&page.id, &self.relative_graph_path(&new_path))?;
+            return Ok(());
+        }
+        if Self::same_existing_path(&old_path, &new_path) {
+            self.db
+                .set_page_file_path(&page.id, &self.relative_graph_path(&new_path))?;
+            return Ok(());
+        }
+        if new_path.exists() {
+            return Err(CoreError::Other(format!(
+                "A file already exists at {}",
+                new_path.display()
+            )));
+        }
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        self.note_self_write(&old_path);
+        self.note_self_write(&new_path);
+        fs::rename(&old_path, &new_path)?;
+        self.retarget_indexed_content(&old_path, &new_path);
+        if let Some(parent) = old_path.parent() {
+            self.remove_empty_dirs_up(parent.to_path_buf());
+        }
+        self.db
+            .set_page_file_path(&page.id, &self.relative_graph_path(&new_path))?;
+        Ok(())
+    }
+
+    fn relative_graph_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn same_existing_path(a: &Path, b: &Path) -> bool {
+        if a == b {
+            return true;
+        }
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
+    }
+
+    fn retarget_indexed_content(&self, old_path: &Path, new_path: &Path) {
+        if let Ok(mut map) = self.indexed_content_hashes.lock() {
+            if let Some(hash) = map.remove(old_path) {
+                map.insert(new_path.to_path_buf(), hash);
+            }
+        }
+        if let Ok(mut map) = self.canonical_content_hashes.lock() {
+            if let Some(hash) = map.remove(old_path) {
+                map.insert(new_path.to_path_buf(), hash);
+            }
+        }
+    }
+
+    fn remove_empty_dirs_up(&self, mut dir: PathBuf) {
+        while dir.starts_with(&self.pages_dir) && dir != self.pages_dir {
+            match fs::remove_dir(&dir) {
+                Ok(()) => {
+                    dir.pop();
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn rewrite_wiki_links_in_graph(
+        &self,
+        needle: &str,
+        rewrite: impl Fn(&str) -> Option<String>,
+    ) -> Result<u32> {
+        if needle.is_empty() {
+            return Ok(0);
+        }
+        let blocks = self.db.list_blocks_containing(needle)?;
+        let mut changed_pages: HashSet<String> = HashSet::new();
+        let mut count = 0u32;
+        for block in blocks {
+            let new_content = parser::rewrite_wiki_link_targets(&block.content, &rewrite);
+            if new_content == block.content {
+                continue;
+            }
+            self.db.update_block(&block.id, &new_content, None)?;
+            self.db.delete_links_from_block(&block.id)?;
+            for link in parser::extract_links(&new_content) {
+                let (target, link_type) = self.resolve_link_target(link)?;
+                self.db.insert_link(&block.id, &target, link_type)?;
+            }
+            changed_pages.insert(block.page_id);
+            count += 1;
+        }
+        for page_id in changed_pages {
+            if let Ok(page) = self.db.get_page_by_id(&page_id) {
+                self.write_page_to_disk(&page)?;
+            }
+        }
+        Ok(count)
     }
 
     pub fn page_filesystem_path(&self, page_id: &str) -> Result<PathBuf> {
@@ -2116,6 +2719,18 @@ impl Graph {
         let path = self.resolve_page_file_path(&page)?;
         self.ensure_path_inside_graph(&path)?;
         Ok(path)
+    }
+
+    pub fn namespace_filesystem_path(&self, title: &str) -> Result<PathBuf> {
+        let relative = Self::safe_relative_page_path(title)?.with_extension("");
+        let folder = self.pages_dir.join(relative);
+        self.ensure_path_inside_pages(&folder)?;
+        if !folder.is_dir() {
+            return Err(CoreError::Other(format!(
+                "Folder '{title}' does not exist on disk"
+            )));
+        }
+        Ok(folder)
     }
 
     pub fn imported_book_folder_for_title(&self, title: &str) -> Result<PathBuf> {
@@ -2837,6 +3452,124 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_page_removes_descendants_and_unused_media() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let root = graph.create_page_with_content(
+            "Joplin",
+            false,
+            "- Root ![shared](../assets/shared.png)\n",
+        )?;
+        let tips = graph.create_page_with_content(
+            "Joplin/4. Tips",
+            false,
+            "- ![local](assets/tips.png)\n",
+        )?;
+        let theme = graph.create_page_with_content("Joplin/Theme", false, "- Theme notes\n")?;
+        let sibling = graph.create_page_with_content("Joplin Notes", false, "- Unrelated\n")?;
+        let other = graph.create_page_with_content(
+            "Keep",
+            false,
+            "- Still uses ![shared](../assets/shared.png)\n",
+        )?;
+
+        let local_dir = graph.pages_dir.join("Joplin/assets");
+        fs::create_dir_all(&local_dir)?;
+        fs::write(local_dir.join("tips.png"), b"tips")?;
+        fs::write(local_dir.join("orphan.gif"), b"orphan")?;
+        let shared_dir = graph.root_dir.join("assets");
+        fs::create_dir_all(&shared_dir)?;
+        fs::write(shared_dir.join("shared.png"), b"shared")?;
+        fs::write(shared_dir.join("unrelated.png"), b"unrelated")?;
+        clear_pending(&graph)?;
+
+        let result = graph.delete_page(&root.id)?;
+
+        assert_eq!(result.deleted_pages, 3);
+        assert!(result.deleted_assets >= 2);
+        assert!(graph.db.get_page_by_id(&root.id).is_err());
+        assert!(graph.db.get_page_by_id(&tips.id).is_err());
+        assert!(graph.db.get_page_by_id(&theme.id).is_err());
+        assert!(graph.db.get_page_by_id(&sibling.id).is_ok());
+        assert!(graph.db.get_page_by_id(&other.id).is_ok());
+        assert!(!local_dir.join("tips.png").exists());
+        assert!(!local_dir.join("orphan.gif").exists());
+        assert!(shared_dir.join("shared.png").exists());
+        assert!(shared_dir.join("unrelated.png").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_filesystem_path_resolves_folders_without_parent_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        graph.create_page_with_content("Joplin/Archive.v1/Tips", false, "- Tips\n")?;
+
+        assert!(graph.db.get_page_by_title_ci("Joplin").is_err());
+        assert_eq!(
+            graph.namespace_filesystem_path("Joplin")?,
+            graph.pages_dir.join("Joplin")
+        );
+        assert_eq!(
+            graph.namespace_filesystem_path("Joplin/Archive.v1")?,
+            graph.pages_dir.join("Joplin/Archive.v1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_filesystem_path_does_not_create_missing_folders() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        graph.db.create_page("Virtual/Child", false)?;
+
+        assert!(graph.namespace_filesystem_path("Virtual").is_err());
+        assert!(!graph.pages_dir.join("Virtual").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_filesystem_path_rejects_invalid_titles() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        for title in ["", "/", ".", "..", "../outside", "Joplin/../../outside", r"..\outside"] {
+            assert!(graph.namespace_filesystem_path(title).is_err(), "{title}");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_filesystem_path_rejects_symlinks_outside_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let outside = tempdir()?;
+        std::os::unix::fs::symlink(outside.path(), graph.pages_dir.join("Outside"))?;
+
+        assert!(graph.namespace_filesystem_path("Outside").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_namespace_without_parent_page_removes_children() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let tips = graph.create_page_with_content("Joplin/4. Tips", false, "- Tips\n")?;
+        let theme = graph.create_page_with_content("Joplin/Theme", false, "- Theme\n")?;
+        let sibling = graph.create_page_with_content("Joplin Notes", false, "- Unrelated\n")?;
+        clear_pending(&graph)?;
+
+        assert!(graph.db.get_page_by_title_ci("Joplin").is_err());
+        let result = graph.delete_namespace("Joplin")?;
+
+        assert_eq!(result.deleted_pages, 2);
+        assert!(graph.db.get_page_by_id(&tips.id).is_err());
+        assert!(graph.db.get_page_by_id(&theme.id).is_err());
+        assert!(graph.db.get_page_by_id(&sibling.id).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn deleting_imported_book_folder_removes_child_pages_and_assets() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
@@ -3458,6 +4191,121 @@ mod tests {
         assert_eq!(fs::read_to_string(&file_path)?, "- \n");
         assert_eq!(graph.db.list_blocks_for_page(&page.id)?.len(), 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn rename_page_moves_file_and_rewrites_wiki_links() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content("Self/Health", false, "- Body\n")?;
+        let other = graph.create_page_with_content(
+            "Notes",
+            false,
+            "- See [[Self/Health]] and [[self/health|vitamins]]\n",
+        )?;
+
+        let renamed = graph.rename_page(&page.id, "Health")?;
+        assert_eq!(renamed.title, "Health");
+        assert!(graph.pages_dir.join("Health.md").exists());
+        assert!(!graph.pages_dir.join("Self/Health.md").exists());
+
+        let blocks = graph.db.list_blocks_for_page(&other.id)?;
+        assert_eq!(
+            blocks[0].content,
+            "See [[Health]] and [[Health|vitamins]]"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rename_page_merges_into_existing_title() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source = graph.create_page_with_content("Self/Health", false, "- Source note\n")?;
+        let dest = graph.create_page_with_content("Health", false, "- Dest note\n")?;
+        graph.create_page_with_content("Inbox", false, "- See [[Self/Health]]\n")?;
+
+        let merged = graph.rename_page(&source.id, "Health")?;
+        assert_eq!(merged.id, dest.id);
+        assert!(graph.db.get_page_by_id(&source.id).is_err());
+
+        let blocks = graph.db.list_blocks_for_page(&dest.id)?;
+        let contents: Vec<&str> = blocks.iter().map(|block| block.content.as_str()).collect();
+        assert!(contents.contains(&"Dest note"));
+        assert!(contents.contains(&"Source note"));
+
+        let inbox = graph.db.get_page_by_title("Inbox")?;
+        assert_eq!(
+            graph.db.list_blocks_for_page(&inbox.id)?[0].content,
+            "See [[Health]]"
+        );
+        assert!(!graph.pages_dir.join("Self/Health.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bulk_rename_pages_strips_prefix_and_supports_dry_run() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let parent = graph.create_page("Self/Health", false)?;
+        let child = graph.create_page("Self/Health/X", false)?;
+        graph.create_page_with_content("Inbox", false, "- [[Self/Health/X]]\n")?;
+
+        let preview = graph.bulk_rename_pages("self/", "", true)?;
+        assert_eq!(preview.renamed.len(), 2);
+        assert_eq!(graph.db.get_page_by_id(&parent.id)?.title, "Self/Health");
+
+        let applied = graph.bulk_rename_pages("self/", "", false)?;
+        assert_eq!(applied.renamed.len(), 2);
+        assert_eq!(graph.db.get_page_by_id(&parent.id)?.title, "Health");
+        assert_eq!(graph.db.get_page_by_id(&child.id)?.title, "Health/X");
+        assert!(graph.pages_dir.join("Health.md").exists());
+        assert!(graph.pages_dir.join("Health/X.md").exists());
+
+        let inbox = graph.db.get_page_by_title("Inbox")?;
+        let blocks = graph.db.list_blocks_for_page(&inbox.id)?;
+        assert_eq!(blocks[0].content, "[[Health/X]]");
+        Ok(())
+    }
+
+    #[test]
+    fn bulk_rename_pages_merges_when_target_exists() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source =
+            graph.create_page_with_content("Self/Health/Blood Tests", false, "- New labs\n")?;
+        let dest =
+            graph.create_page_with_content("Health/Blood Tests", false, "- Existing labs\n")?;
+        graph.create_page_with_content("Inbox", false, "- [[Self/Health/Blood Tests]]\n")?;
+
+        let preview = graph.bulk_rename_pages("self/", "", true)?;
+        assert_eq!(
+            preview.merged.len(),
+            1,
+            "renamed={:?} merged={:?} skipped={:?}",
+            preview.renamed,
+            preview.merged,
+            preview.skipped
+        );
+        assert_eq!(preview.merged[0].old_title, "Self/Health/Blood Tests");
+        assert_eq!(preview.merged[0].new_title, "Health/Blood Tests");
+        assert_eq!(graph.db.get_page_by_id(&source.id)?.title, "Self/Health/Blood Tests");
+
+        let applied = graph.bulk_rename_pages("self/", "", false)?;
+        assert_eq!(applied.merged.len(), 1);
+        assert!(graph.db.get_page_by_id(&source.id).is_err());
+
+        let blocks = graph.db.list_blocks_for_page(&dest.id)?;
+        let contents: Vec<&str> = blocks.iter().map(|block| block.content.as_str()).collect();
+        assert!(contents.contains(&"Existing labs"));
+        assert!(contents.contains(&"New labs"));
+
+        let inbox = graph.db.get_page_by_title("Inbox")?;
+        assert_eq!(
+            graph.db.list_blocks_for_page(&inbox.id)?[0].content,
+            "[[Health/Blood Tests]]"
+        );
         Ok(())
     }
 

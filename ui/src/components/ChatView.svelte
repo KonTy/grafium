@@ -18,6 +18,7 @@
   } from "../lib/knowledge";
   import type { ChatMessageModel, ChatThinkingTone } from "../lib/chatMessage";
   import { researchDeep, researchCancel, type ResearchStreamHandlers } from "../lib/research";
+  import { loadChatPreferences, saveChatPreferences, type ChatScope } from "../lib/chatScope";
   import { selectionIntersectsTranscript } from "../lib/transcriptSelection";
   import {
     initialState,
@@ -55,23 +56,29 @@
   let runSeq = 0;
   let error = $state<string | null>(null);
 
-  // Research toggle: forces the full multi-round workflow for the next send,
-  // bypassing the intent classifier. Persisted across restarts via localStorage,
-  // the same UI-preference mechanism App.svelte uses (zoom, sidebar width).
-  const RESEARCH_PREF_KEY = "grafium.chat.research";
-  function loadResearchPref(): boolean {
+  let researchMode = $state(false);
+  let scope = $state<ChatScope>("local");
+  let loadingPreferences = $state(true);
+  let savingPreferences = $state(false);
+  async function restoreChatPreferences() {
     try {
-      return localStorage.getItem(RESEARCH_PREF_KEY) === "1";
-    } catch {
-      return false;
+      const saved = await loadChatPreferences();
+      scope = saved.scope;
+      researchMode = saved.research;
+    } catch (err) {
+      error = `Could not load Chat preferences: ${String(err)}`;
+    } finally {
+      loadingPreferences = false;
     }
   }
-  let researchMode = $state(loadResearchPref());
-  function saveResearchPref() {
+  async function persistChatPreferences() {
+    savingPreferences = true;
     try {
-      localStorage.setItem(RESEARCH_PREF_KEY, researchMode ? "1" : "0");
-    } catch {
-      // A blocked/full localStorage just means the toggle stays session-only.
+      await saveChatPreferences({ scope, research: researchMode });
+    } catch (err) {
+      error = `Could not save Chat preferences: ${String(err)}`;
+    } finally {
+      savingPreferences = false;
     }
   }
 
@@ -126,6 +133,7 @@
   let indexEmpty = $derived(shouldShowIndexBanner(indexedChunks));
 
   onMount(() => {
+    void restoreChatPreferences();
     keepInputFocusedSoon(true);
     void refreshConnectionState();
     void refreshIndexStatus();
@@ -182,7 +190,7 @@
   });
 
   $effect(() => {
-    if (!checkingConnection && chatConnected && !isStreaming) {
+    if (!checkingConnection && chatConnected && !isStreaming && !loadingPreferences) {
       keepInputFocusedSoon(true);
     }
   });
@@ -303,6 +311,7 @@
     }
     requestAnimationFrame(() => {
       if (pointerDown) return; // a drag started in the meantime
+      if (document.activeElement?.closest(".research-toggle-row")) return;
       const selection = window.getSelection();
       if (selection && !selection.isCollapsed) return;
       focusInput(false);
@@ -327,6 +336,7 @@
     // selection on the transcript; otherwise restore type-anywhere focus.
     requestAnimationFrame(() => {
       if (pointerDown) return; // a new drag began
+      if (document.activeElement?.closest(".research-toggle-row")) return;
       if (selectionIntersectsTranscript(window.getSelection(), chatScroll)) return;
       focusInput(false);
     });
@@ -334,7 +344,7 @@
 
   async function send() {
     const trimmed = question.trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed || isStreaming || loadingPreferences || savingPreferences) return;
 
     if (checkingConnection) {
       error = "Checking Chat connection. Please wait a moment.";
@@ -362,10 +372,9 @@
 
     let assistantIndex = messages.length - 1;
 
-    // Research mode forces the multi-round workflow, which is always web-backed,
-    // so light the badge immediately rather than waiting for the first web phase.
-    const forceResearch = researchMode;
-    if (forceResearch) {
+    const runScope = scope;
+    const forceResearch = runScope === "internet" && researchMode;
+    if (runScope === "internet") {
       messages = messages.map((m, i) =>
         i === assistantIndex ? { ...m, webResearch: true } : m
       );
@@ -453,9 +462,9 @@
     };
 
     if (forceResearch) {
-      await researchDeep(trimmed, handlers, undefined, undefined, priorTurns);
+      await researchDeep(trimmed, handlers, undefined, undefined, priorTurns, runScope);
     } else {
-      await aiAskStream(trimmed, handlers, undefined, priorTurns);
+      await aiAskStream(trimmed, handlers, undefined, priorTurns, runScope);
     }
   }
 
@@ -676,28 +685,51 @@
     <textarea
       bind:value={question}
       bind:this={inputEl}
-      placeholder="Ask about relationships, themes, or missing links in your graph..."
+      placeholder={scope === "local"
+        ? "Ask about your graph or chat without searching the internet..."
+        : "Ask a question to look up on the internet..."}
       rows="3"
       onkeydown={onInputKeydown}
       onblur={onInputBlur}
-      disabled={isStreaming || (!checkingConnection && !chatConnected)}
+      disabled={isStreaming || loadingPreferences || (!checkingConnection && !chatConnected)}
     ></textarea>
-    <button onclick={() => void send()} disabled={isStreaming || !question.trim() || checkingConnection || !chatConnected}>
+    <button onclick={() => void send()} disabled={isStreaming || loadingPreferences || savingPreferences || !question.trim() || checkingConnection || !chatConnected}>
       {isStreaming ? "Streaming..." : "Send"}
     </button>
   </div>
 
   <div class="research-toggle-row">
-    <label class="research-toggle">
+    <label class="research-toggle" title={scope === "local"
+      ? "Select Internet to enable multi-step research."
+      : "Plan searches, read multiple websites, refine queries, and synthesize a cited answer."}>
       <input
         type="checkbox"
-        bind:checked={researchMode}
-        onchange={saveResearchPref}
-        disabled={isStreaming}
+        checked={scope === "internet" && researchMode}
+        onchange={(event) => {
+          researchMode = event.currentTarget.checked;
+          void persistChatPreferences();
+        }}
+        disabled={isStreaming || loadingPreferences || savingPreferences || scope === "local"}
       />
       <span class="research-toggle-label">Research</span>
-      <span class="research-toggle-hint">— searches the web, takes longer</span>
     </label>
+    <label class="chat-scope">
+      <span>Scope</span>
+      <select
+        bind:value={scope}
+        onchange={() => void persistChatPreferences()}
+        disabled={isStreaming || loadingPreferences || savingPreferences}
+        title="Controls internet search, not which AI provider is used."
+      >
+        <option value="local">Local graph</option>
+        <option value="internet">Internet</option>
+      </select>
+    </label>
+    <span class="research-toggle-hint">
+      {scope === "local"
+        ? "No internet search. Select Internet to enable Research."
+        : researchMode ? "Multi-step research across websites; takes longer." : "Search the web for this answer."}
+    </span>
   </div>
 </div>
 
@@ -971,7 +1003,31 @@
   .research-toggle-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
     margin-top: -4px;
+  }
+
+  .chat-scope {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .chat-scope select {
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font: inherit;
+  }
+
+  .chat-scope select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 
   /* Native checkbox + text label: keyboard-reachable and state is conveyed by
@@ -1002,6 +1058,7 @@
 
   .research-toggle-hint {
     color: var(--text-muted);
+    font-size: 12px;
   }
 
   textarea {

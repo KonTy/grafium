@@ -12,14 +12,93 @@ pub enum ExtractedLink {
 impl ExtractedLink {
     /// Normalize page/tag titles so hierarchy separators are consistent.
     fn normalize_title(title: &str) -> String {
-        title
-            .replace('\\', "/")
-            .split('/')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("/")
+        normalize_page_title(title)
     }
+}
+
+/// Collapse `\`/`/` and empty segments so `A / B\\C` becomes `A/B/C`.
+pub fn normalize_page_title(title: &str) -> String {
+    title
+        .replace('\\', "/")
+        .split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Rewrite `[[target]]` / `[[target|alias]]` spans. `rewrite` receives the
+/// trimmed target and returns a replacement, or `None` to leave it alone.
+pub fn rewrite_wiki_link_targets(content: &str, rewrite: impl Fn(&str) -> Option<String>) -> String {
+    PAGE_LINK_RE
+        .replace_all(content, |caps: &regex::Captures| {
+            let inner = &caps[1];
+            let (target, alias) = match inner.split_once('|') {
+                Some((target, alias)) => (target, Some(alias)),
+                None => (inner, None),
+            };
+            let trimmed = target.trim();
+            match rewrite(trimmed) {
+                Some(new_target) if new_target != trimmed => match alias {
+                    Some(alias) => format!("[[{new_target}|{alias}]]"),
+                    None => format!("[[{new_target}]]"),
+                },
+                _ => caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            }
+        })
+        .into_owned()
+}
+
+/// Apply a find/replace to a page title.
+///
+/// `from = "self/"` + `to = ""` turns `Self/Health/X` into `Health/X`.
+/// `from = "self"` (no slash) matches that exact title or `self/...`, but not
+/// `selfish`. Returns `None` when the title does not match or the result
+/// would be empty.
+pub fn apply_title_prefix_replace(title: &str, from: &str, to: &str) -> Option<String> {
+    let from = from.trim();
+    if from.is_empty() {
+        return None;
+    }
+
+    let rest = if title.eq_ignore_ascii_case(from) {
+        ""
+    } else if let Some(stripped) = strip_prefix_ignore_ascii_case(title, from) {
+        if from.ends_with('/') || stripped.starts_with('/') {
+            stripped.trim_start_matches('/')
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let combined = if to.is_empty() {
+        rest.to_string()
+    } else if rest.is_empty() {
+        to.trim_end_matches('/').to_string()
+    } else {
+        format!("{}/{}", to.trim_end_matches('/'), rest)
+    };
+    let normalized = normalize_page_title(&combined);
+    if normalized.is_empty() || normalized.eq_ignore_ascii_case(title) {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(title: &'a str, prefix: &str) -> Option<&'a str> {
+    if !starts_with_ignore_ascii_case(title, prefix) {
+        return None;
+    }
+    Some(&title[prefix.len()..])
+}
+
+fn starts_with_ignore_ascii_case(haystack: &str, prefix: &str) -> bool {
+    haystack.is_char_boundary(prefix.len())
+        && haystack.len() >= prefix.len()
+        && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 static PAGE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
@@ -506,5 +585,40 @@ mod tests {
             }],
         );
         assert_eq!(out, "[[Magnesium]] helps with sleep.");
+    }
+
+    #[test]
+    fn test_rewrite_wiki_link_targets_keeps_alias() {
+        let out = rewrite_wiki_link_targets(
+            "See [[Self/Health]] and [[self/health|vitamins]] plus [[Other]]",
+            |target| {
+                target
+                    .eq_ignore_ascii_case("Self/Health")
+                    .then(|| "Health".to_string())
+            },
+        );
+        assert_eq!(
+            out,
+            "See [[Health]] and [[Health|vitamins]] plus [[Other]]"
+        );
+    }
+
+    #[test]
+    fn test_apply_title_prefix_replace_strips_namespace() {
+        assert_eq!(
+            apply_title_prefix_replace("Self/Health/Supplements", "self/", ""),
+            Some("Health/Supplements".to_string())
+        );
+        assert_eq!(
+            apply_title_prefix_replace("Self/Health/Supplements", "self", ""),
+            Some("Health/Supplements".to_string())
+        );
+        assert_eq!(apply_title_prefix_replace("Self", "self/", ""), None);
+        assert_eq!(apply_title_prefix_replace("Self", "self", ""), None);
+        assert_eq!(apply_title_prefix_replace("selfish", "self", ""), None);
+        assert_eq!(
+            apply_title_prefix_replace("Self/Health", "self/", "Body"),
+            Some("Body/Health".to_string())
+        );
     }
 }

@@ -27,7 +27,7 @@ use grafium_core::research::{ResearchConfig, ResearchPrompts, SearchEngineDef};
 use grafium_core::scraping::browser::HttpBrowserDriver;
 
 use super::knowledge::{
-    AskSourcesPayload, AskStreamChunk, KnowledgeState, SourceDto, WebSourceDto,
+    AskSourcesPayload, AskStreamChunk, ChatScope, KnowledgeState, SourceDto, WebSourceDto,
 };
 
 /// One search hit, as returned by the Settings "Test" button.
@@ -154,7 +154,9 @@ pub async fn research_deep(
     request_id: String,
     graph_id: Option<String>,
     history: Option<Vec<ChatTurn>>,
+    scope: Option<ChatScope>,
 ) -> Result<(), String> {
+    scope.unwrap_or_default().require_internet()?;
     let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
     let engine = guard

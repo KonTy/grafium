@@ -152,6 +152,33 @@ body {
   white-space: nowrap;
 }
 
+/* CodeMirror autocomplete is portaled to <body>. Paint an opaque floor
+   first so later page blocks (or a translucent theme token) cannot show
+   through the list. */
+.cm-tooltip,
+.cm-tooltip.cm-tooltip-autocomplete,
+.cm-tooltip-autocomplete,
+.cm-tooltip-autocomplete ul {
+  background-color: var(--bg-primary) !important;
+  background-image: linear-gradient(var(--bg-secondary), var(--bg-secondary)) !important;
+  color: var(--text-primary) !important;
+  opacity: 1 !important;
+  isolation: isolate;
+  z-index: 10050 !important;
+  border: 2px solid var(--accent) !important;
+  outline: 1px solid color-mix(in srgb, var(--text-primary) 40%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+.cm-tooltip-autocomplete ul li {
+  background-color: transparent !important;
+  color: var(--text-secondary) !important;
+}
+.cm-tooltip-autocomplete ul li[aria-selected] {
+  background-color: var(--bg-active) !important;
+  background-image: none !important;
+  color: var(--text-primary) !important;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
@@ -220,6 +247,11 @@ body {
 .main-content {
   padding: 0 !important;
   margin: 0 !important;
+}
+
+.app-shell:not(.wide-mode) .main-content {
+  padding-left: 15% !important;
+  padding-right: 15% !important;
 }
 
 /* Plain terminal typography for Matrix. Uses installed programmer fonts first

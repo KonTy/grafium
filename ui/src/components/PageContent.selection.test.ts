@@ -37,7 +37,7 @@ describe("PageContent block selection cut", () => {
   });
 
   it("records undo for batched multi-block paste", () => {
-    expect(source).toContain("createBlocks(page.id, batch)");
+    expect(source).toContain("createBlocks(request.pageId, batch)");
     expect(source).toContain('type: "insert_blocks"');
     expect(source).toContain("beforeContent: anchorBeforeContent");
     expect(source).toContain("insertedBlocks: newBlocks.map(snapshotBlock)");

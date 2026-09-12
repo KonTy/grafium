@@ -414,6 +414,30 @@
 
   let gridRange = $derived(getGridRange(completionMap, noteEditMap));
   let heatmapColumnsStyle = $derived(`grid-template-columns: repeat(${gridRange.weeks}, var(--heatmap-cell, 11px));`);
+  let taskHeatmapEl: HTMLDivElement | null = $state(null);
+  let noteHeatmapEl: HTMLDivElement | null = $state(null);
+  let scrolledHeatmapToEnd = false;
+
+  function scrollHeatmapToLatest(el: HTMLDivElement | null) {
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth;
+  }
+
+  $effect(() => {
+    if (loading) {
+      scrolledHeatmapToEnd = false;
+      return;
+    }
+    const task = taskHeatmapEl;
+    const note = noteHeatmapEl;
+    void gridRange.weeks;
+    if (!task || !note || scrolledHeatmapToEnd) return;
+    scrolledHeatmapToEnd = true;
+    requestAnimationFrame(() => {
+      scrollHeatmapToLatest(task);
+      scrollHeatmapToLatest(note);
+    });
+  });
   let taskGrid = $derived(generateGrid(completionMap, gridRange));
   let noteEditGrid = $derived(generateGrid(noteEditMap, gridRange));
   let monthLabels = $derived(getMonthLabels(gridRange));
@@ -437,7 +461,7 @@
         <!-- Heatmap -->
         <div class="heatmap-container">
           <div class="activity-heatmaps">
-            <div class="activity-heatmap-panel">
+            <div class="activity-heatmap-panel" bind:this={taskHeatmapEl}>
               <div class="heatmap-title-row">
                 <h2>Task completions</h2>
                 <span>{totalCompleted} done</span>
@@ -480,7 +504,7 @@
               </div>
             </div>
 
-            <div class="activity-heatmap-panel note-edit-heatmap">
+            <div class="activity-heatmap-panel note-edit-heatmap" bind:this={noteHeatmapEl}>
               <div class="heatmap-title-row">
                 <h2>Note edits</h2>
                 <span>{totalEditedNotes} note-day{totalEditedNotes === 1 ? "" : "s"}</span>
@@ -980,6 +1004,22 @@
     border-radius: 10px;
     background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
     overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .activity-heatmap-panel::-webkit-scrollbar {
+    width: 2px;
+    height: 2px;
+  }
+
+  .activity-heatmap-panel::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .activity-heatmap-panel::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 1px;
   }
 
   .note-edit-heatmap {

@@ -2,15 +2,19 @@
   interface Props {
     x: number;
     y: number;
+    showClear?: boolean;
     onSelect: (date: string) => void;
     onCancel: () => void;
   }
 
-  let { x, y, onSelect, onCancel }: Props = $props();
+  let { x, y, showClear = true, onSelect, onCancel }: Props = $props();
 
   let today = new Date();
   let viewYear = $state(today.getFullYear());
   let viewMonth = $state(today.getMonth()); // 0-indexed
+  let viewMode = $state<"days" | "months" | "years">("days");
+  const YEAR_PAGE = 12;
+  let yearPageStart = $derived(Math.floor(viewYear / YEAR_PAGE) * YEAR_PAGE);
 
   const DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -26,6 +30,14 @@
   }
 
   function prevMonth() {
+    if (viewMode === "years") {
+      viewYear -= YEAR_PAGE;
+      return;
+    }
+    if (viewMode === "months") {
+      viewYear--;
+      return;
+    }
     if (viewMonth === 0) {
       viewMonth = 11;
       viewYear--;
@@ -35,12 +47,30 @@
   }
 
   function nextMonth() {
+    if (viewMode === "years") {
+      viewYear += YEAR_PAGE;
+      return;
+    }
+    if (viewMode === "months") {
+      viewYear++;
+      return;
+    }
     if (viewMonth === 11) {
       viewMonth = 0;
       viewYear++;
     } else {
       viewMonth++;
     }
+  }
+
+  function selectMonth(month: number) {
+    viewMonth = month;
+    viewMode = "days";
+  }
+
+  function selectYear(year: number) {
+    viewYear = year;
+    viewMode = "months";
   }
 
   function selectDate(day: number) {
@@ -57,6 +87,10 @@
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
+      if (viewMode !== "days") {
+        viewMode = "days";
+        return;
+      }
       onCancel();
     }
   }
@@ -81,32 +115,75 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="date-picker" style={style} onclick={(e) => e.stopPropagation()}>
     <div class="dp-header">
-      <button class="dp-nav" onclick={prevMonth}>&lsaquo;</button>
-      <span class="dp-title">{MONTHS[viewMonth]} {viewYear}</span>
-      <button class="dp-nav" onclick={nextMonth}>&rsaquo;</button>
+      <button class="dp-nav" type="button" onclick={prevMonth} aria-label="Previous">&lsaquo;</button>
+      <div class="dp-title-group">
+        {#if viewMode === "years"}
+          <span class="dp-title">{yearPageStart}–{yearPageStart + YEAR_PAGE - 1}</span>
+        {:else}
+          {#if viewMode === "days"}
+            <button class="dp-title-btn" type="button" onclick={() => (viewMode = "months")}>{MONTHS[viewMonth]}</button>
+          {/if}
+          <button class="dp-title-btn" type="button" onclick={() => (viewMode = "years")} aria-label="Choose year">{viewYear}</button>
+        {/if}
+      </div>
+      <button class="dp-nav" type="button" onclick={nextMonth} aria-label="Next">&rsaquo;</button>
     </div>
-    <div class="dp-days-header">
-      {#each DAYS as d}
-        <span class="dp-day-name">{d}</span>
-      {/each}
-    </div>
-    <div class="dp-grid">
-      {#each Array(firstDayOfWeek(viewYear, viewMonth)) as _}
-        <span class="dp-cell empty"></span>
-      {/each}
-      {#each Array(daysInMonth(viewYear, viewMonth)) as _, i}
-        <button
-          class="dp-cell"
-          class:today={isToday(i + 1)}
-          onclick={() => selectDate(i + 1)}
-        >
-          {i + 1}
-        </button>
-      {/each}
-    </div>
+    {#if viewMode === "months"}
+      <div class="dp-month-grid">
+        {#each MONTHS as month, index}
+          <button
+            class="dp-choice"
+            class:current={index === viewMonth}
+            class:today={viewYear === today.getFullYear() && index === today.getMonth()}
+            type="button"
+            onclick={() => selectMonth(index)}
+          >
+            {month}
+          </button>
+        {/each}
+      </div>
+    {:else if viewMode === "years"}
+      <div class="dp-month-grid">
+        {#each Array(YEAR_PAGE) as _, offset}
+          {@const year = yearPageStart + offset}
+          <button
+            class="dp-choice"
+            class:current={year === viewYear}
+            class:today={year === today.getFullYear()}
+            type="button"
+            onclick={() => selectYear(year)}
+          >
+            {year}
+          </button>
+        {/each}
+      </div>
+    {:else}
+      <div class="dp-days-header">
+        {#each DAYS as d}
+          <span class="dp-day-name">{d}</span>
+        {/each}
+      </div>
+      <div class="dp-grid">
+        {#each Array(firstDayOfWeek(viewYear, viewMonth)) as _}
+          <span class="dp-cell empty"></span>
+        {/each}
+        {#each Array(daysInMonth(viewYear, viewMonth)) as _, i}
+          <button
+            class="dp-cell"
+            class:today={isToday(i + 1)}
+            type="button"
+            onclick={() => selectDate(i + 1)}
+          >
+            {i + 1}
+          </button>
+        {/each}
+      </div>
+    {/if}
     <div class="dp-footer">
       <button class="dp-today-btn" onclick={() => { viewYear = today.getFullYear(); viewMonth = today.getMonth(); selectDate(today.getDate()); }}>Today</button>
-      <button class="dp-clear-btn" onclick={() => onSelect("")}>Clear</button>
+      {#if showClear}
+        <button class="dp-clear-btn" onclick={() => onSelect("")}>Clear</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -154,10 +231,61 @@
     color: var(--text-primary);
   }
 
-  .dp-title {
+  .dp-title-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .dp-title,
+  .dp-title-btn {
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
+    background: none;
+    border: none;
+    padding: 4px 6px;
+    border-radius: 4px;
+  }
+
+  .dp-title-btn {
+    cursor: pointer;
+  }
+
+  .dp-title-btn:hover {
+    background: var(--bg-hover);
+  }
+
+  .dp-month-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    min-height: 168px;
+  }
+
+  .dp-choice {
+    border: none;
+    border-radius: 6px;
+    padding: 10px 4px;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .dp-choice:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .dp-choice.current {
+    outline: 1px solid var(--border);
+  }
+
+  .dp-choice.today {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-fg);
+    font-weight: 600;
   }
 
   .dp-days-header {

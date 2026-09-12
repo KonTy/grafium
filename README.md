@@ -18,6 +18,17 @@ Every page is a tree of blocks. Indent, reorder, collapse, and reference individ
 ### Bidirectional Links & Graph
 Connect ideas with `[[page links]]`, `#tags`, and `((block references))`. Backlinks are computed automatically — every mention is tracked and queryable.
 
+In the 3D graph, **Space flight** turns topics into named planets and continuously
+flies along their links, briefly orbiting each destination. Planets have stable
+topic colors; pages in the same namespace share a hue with different shades. Search first to pick
+a starting topic. Use the same button (**Stop flight**) or Escape to regain manual
+camera control. Changing the graph or leaving the view also stops the flight.
+Visible child pages become smaller, ringless satellites around their nearest
+visible ancestor (for example, `Health/Supplements/Creatine` around
+`Health/Supplements`). Some main planets have rings. These systems and their
+parent-child flight routes are visual only: stopping restores the normal graph,
+without changing pages or stored links.
+
 ### Hierarchical Pages
 Organize pages into topic trees using slash-separated titles: `projects/grafium/roadmap` automatically nests under `projects/grafium`. Navigate the hierarchy from the sidebar or breadcrumbs.
 
@@ -69,6 +80,18 @@ Turn any block into a flashcard. Grafium uses the SM-2 algorithm to schedule rev
 
 ### Full-Text Search
 Powered by SQLite FTS5 with Porter stemming. Search across all content instantly — results are ranked by relevance and returned in milliseconds.
+
+### Chat Search Scope
+Chat defaults to **Local graph**, which searches your notes without searching
+the internet. **Internet** enables web search for each answer. The selection is
+remembered across chats and restarts. Scope controls search sources, not the
+configured local or cloud AI provider.
+
+With Internet selected, **Research** enables the multi-step workflow: plan
+queries, search and read multiple websites, assess gaps, refine searches, and
+synthesize a cited answer. Research is unavailable in Local graph scope, but
+its preference is restored when you switch back to Internet. Both preferences
+are saved in the app configuration, independently of the incognito webview.
 
 ### Audio Notes
 Attach audio recordings to pages with transcript storage for searchable voice notes.
@@ -150,6 +173,10 @@ cargo test -p grafium-core
 # Run frontend unit tests
 cd ui && npm test
 ```
+
+Keep `custom-protocol` as a crate feature rather than enabling it directly on
+the `tauri` dependency. The Tauri CLI disables it for `dev`, so the window loads
+Vite; production builds use it to embed the freshly built frontend.
 
 ### Browser UI tests
 

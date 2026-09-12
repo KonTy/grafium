@@ -28,6 +28,45 @@ fn create_block_indexes_links_immediately() {
 }
 
 #[test]
+fn backlinks_omit_self_links_and_dedupe_wiki_plus_tag() {
+    let temp = tempfile::tempdir().unwrap();
+    let graph = Graph::open(temp.path()).unwrap();
+
+    let subject = graph.create_page("Health/Weight", false).unwrap();
+    graph
+        .create_block(
+            &subject.id,
+            None,
+            0,
+            "How do you use biology [[Health/Weight]]",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let journal = graph.create_page("2023-07-24", true).unwrap();
+    let journal_block = graph
+        .create_block(
+            &journal.id,
+            None,
+            0,
+            "How do you use biology [[Health/Weight]] #Health/Weight",
+            BlockType::Text,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let backlinks = graph.db.get_backlinks(&subject.id).unwrap();
+    assert_eq!(
+        backlinks.len(),
+        1,
+        "self-links and wiki+tag on one block should not duplicate linked references: {backlinks:?}"
+    );
+    assert_eq!(backlinks[0].1.id, journal_block.id);
+    assert_eq!(backlinks[0].1.page_id, journal.id);
+}
+
+#[test]
 fn move_block_preserves_content_and_backlinks() {
     let temp = tempfile::tempdir().unwrap();
     let graph = Graph::open(temp.path()).unwrap();

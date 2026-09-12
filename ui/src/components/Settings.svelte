@@ -3,8 +3,8 @@
   import { themes, applyTheme, getThemeById } from "../lib/themes";
   import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import type { OrphanedAsset } from "../lib/api";
-  import { keymap_manager } from "../lib/keymap";
-  import type { Shortcut } from "../lib/keymap";
+  import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
+  import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
 
@@ -19,9 +19,34 @@
   interface Props {
     showBlockGuides?: boolean;
     onSetShowBlockGuides?: (value: boolean) => void;
+    openSection?: string;
   }
 
-  let { showBlockGuides = true, onSetShowBlockGuides }: Props = $props();
+  let { showBlockGuides = true, onSetShowBlockGuides, openSection = "" }: Props = $props();
+  let themeSectionEl: HTMLDetailsElement | null = $state(null);
+  let settingsRoot: HTMLDivElement | null = $state(null);
+  let settingsQuery = $state("");
+  let settingsMatchCount = $state(0);
+
+  $effect(() => {
+    if (openSection === "theme" && themeSectionEl && !settingsQuery.trim()) {
+      themeSectionEl.open = true;
+      themeSectionEl.scrollIntoView({ block: "start" });
+    }
+  });
+
+  $effect(() => {
+    const root = settingsRoot;
+    const query = settingsQuery;
+    if (!root) return;
+    const apply = () => {
+      settingsMatchCount = applySettingsSearch(root, query).items;
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  });
 
   let currentThemeId = $state("auto");
   let smplosThemeName = $state<string | null>(null);
@@ -244,28 +269,23 @@
     }
   }
 
-  // Keymap
-  function getShortcutsByCategory(): Map<string, Shortcut[]> {
-    const shortcuts = keymap_manager.getShortcuts();
-    const map = new Map<string, Shortcut[]>();
-    for (const s of shortcuts) {
-      const cat = s.category || "other";
-      if (!map.has(cat)) map.set(cat, []);
-      map.get(cat)!.push(s);
-    }
-    return map;
-  }
-
-  function formatBinding(binding: string): string {
-    return binding
-      .replace(/mod/g, "Ctrl")
-      .replace(/\+/g, " + ")
-      .replace(/ {2}/g, "  then  ");
-  }
 </script>
 
-<div class="settings-page">
-  <h1 class="settings-title">Settings</h1>
+<div class="settings-page" bind:this={settingsRoot}>
+  <div class="settings-header">
+    <h1 class="settings-title">Settings</h1>
+    <input
+      type="search"
+      class="settings-search"
+      data-local-search
+      placeholder="Filter settings…"
+      aria-label="Filter settings"
+      bind:value={settingsQuery}
+    />
+  </div>
+  {#if settingsQuery.trim() && settingsMatchCount === 0}
+    <p class="settings-empty">No settings match “{settingsQuery.trim()}”.</p>
+  {/if}
 
   <!-- General Section -->
   <details class="settings-section" open>
@@ -451,7 +471,7 @@
   </details>
 
   <!-- Theme Section -->
-  <details class="settings-section">
+  <details class="settings-section" data-settings-section="theme" bind:this={themeSectionEl}>
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
@@ -508,16 +528,27 @@
       <span class="section-title">Keyboard Shortcuts</span>
     </summary>
     <div class="section-content">
-    <p class="section-desc">Press <kbd>Escape</kbd> in a block editor to return to navigation mode.</p>
+    <p class="section-desc">Chords such as <kbd>g j</kbd> work after Escape (navigation mode). Modifier shortcuts work while editing.</p>
 
     <div class="keymap-list">
-      {#each [...getShortcutsByCategory()] as [category, shortcuts]}
+      {#each [...getShortcutRowsByCategory()] as [category, rows]}
         <div class="keymap-category">
           <h3 class="keymap-category-title">{category}</h3>
-          {#each shortcuts as shortcut}
+          {#each rows as row}
             <div class="keymap-row">
-              <span class="keymap-desc">{shortcut.description || shortcut.binding}</span>
-              <kbd class="keymap-binding">{formatBinding(shortcut.binding)}</kbd>
+              <span class="keymap-desc">{row.description}</span>
+              <span class="keymap-keys">
+                {#if row.chords.length}
+                  <kbd class="keymap-binding">{row.chords.map(formatBinding).join(" | ")}</kbd>
+                {:else}
+                  <span class="keymap-binding-empty"></span>
+                {/if}
+                {#if row.modifiers.length}
+                  <kbd class="keymap-binding">{row.modifiers.map(formatBinding).join(" | ")}</kbd>
+                {:else}
+                  <span class="keymap-binding-empty"></span>
+                {/if}
+              </span>
             </div>
           {/each}
         </div>
@@ -654,11 +685,43 @@
     max-width: 800px;
   }
 
+  .settings-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+
   .settings-title {
     font-size: 24px;
     font-weight: 700;
     color: var(--text-primary);
-    margin-bottom: 24px;
+    margin: 0;
+    flex: none;
+  }
+
+  .settings-search {
+    flex: 1;
+    min-width: 180px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .settings-search:focus-visible {
+    outline: 2px solid var(--text-link);
+    outline-offset: 1px;
+  }
+
+  .settings-empty {
+    margin: 0 0 16px;
+    color: var(--text-muted);
+    font-size: 13px;
   }
 
   .settings-section {
@@ -1083,9 +1146,10 @@
   }
 
   .keymap-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     padding: 6px 0;
   }
 
@@ -1098,6 +1162,14 @@
     color: var(--text-secondary);
   }
 
+  .keymap-keys {
+    display: grid;
+    grid-template-columns: minmax(4.5rem, auto) minmax(7.5rem, auto);
+    gap: 8px;
+    justify-items: end;
+    align-items: center;
+  }
+
   .keymap-binding {
     font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
     font-size: 11px;
@@ -1107,6 +1179,11 @@
     border-radius: 4px;
     color: var(--text-primary);
     white-space: nowrap;
+  }
+
+  .keymap-binding-empty {
+    min-width: 1px;
+    min-height: 1px;
   }
 
   /* About */

@@ -24,6 +24,11 @@ export interface DeleteBookFolderResult {
   deleted_pages: number;
 }
 
+export interface DeletePageResult {
+  deleted_pages: number;
+  deleted_assets: number;
+}
+
 export interface Block {
   id: string;
   page_id: string;
@@ -113,8 +118,47 @@ export function updatePageMeta(id: string, title?: string, properties?: Record<s
   return invoke("update_page_meta", { id, title, properties });
 }
 
-export function deletePage(id: string): Promise<void> {
+export function renamePage(id: string, title: string): Promise<Page> {
+  return invoke("rename_page", { id, title });
+}
+
+export interface RenamedPage {
+  id: string;
+  old_title: string;
+  new_title: string;
+}
+
+export interface SkippedRename {
+  id: string | null;
+  old_title: string;
+  new_title: string;
+  reason: string;
+}
+
+export interface MergedPage {
+  source_id: string;
+  dest_id: string;
+  old_title: string;
+  new_title: string;
+}
+
+export interface BulkRenameResult {
+  renamed: RenamedPage[];
+  merged: MergedPage[];
+  skipped: SkippedRename[];
+  links_updated: number;
+}
+
+export function bulkRenamePages(from: string, to: string, dryRun = false): Promise<BulkRenameResult> {
+  return invoke("bulk_rename_pages", { from, to, dryRun });
+}
+
+export function deletePage(id: string): Promise<DeletePageResult> {
   return invoke("delete_page", { id });
+}
+
+export function deleteNamespace(title: string): Promise<DeletePageResult> {
+  return invoke("delete_namespace", { title });
 }
 
 export function deleteBookFolder(bookTitle: string): Promise<DeleteBookFolderResult> {
@@ -123,6 +167,10 @@ export function deleteBookFolder(bookTitle: string): Promise<DeleteBookFolderRes
 
 export function openPageInFileBrowser(id: string): Promise<void> {
   return invoke("open_page_in_file_browser", { id });
+}
+
+export function openNamespaceInFileBrowser(title: string): Promise<void> {
+  return invoke("open_namespace_in_file_browser", { title });
 }
 
 export function openBookFolderInFileBrowser(bookTitle: string): Promise<void> {

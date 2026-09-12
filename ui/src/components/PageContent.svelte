@@ -16,6 +16,8 @@
     reorderBlocks,
     getBacklinks,
     getPage,
+    renamePage,
+    deletePage,
     getParentPage,
     getChildPages,
     discoverLinkCandidates,
@@ -66,7 +68,20 @@
     withMissingCommandFallback,
   } from "../lib/pageTree";
   import { setCurrentBlockAnchor } from "../lib/currentBlockAnchor";
+  import { showToast } from "../lib/toast.svelte";
+  import {
+    buildBacklinkSourceIndex,
+    buildBacklinkTree,
+    type BacklinkSourceIndex,
+    type BacklinkTreeNode,
+  } from "../lib/backlinkTree";
   import { listen } from "@tauri-apps/api/event";
+  import {
+    clearPendingEditPageEnd,
+    EDIT_PAGE_END_EVENT,
+    peekPendingEditPageEnd,
+    type EditPageEndDetail,
+  } from "../lib/editorInsert";
 
   interface Props {
     page: Page;
@@ -75,9 +90,11 @@
     highlight?: string;
     /** Draw the vertical lines that connect a nested block to its ancestors. */
     showBlockGuides?: boolean;
+    onPageRenamed?: (page: Page) => void;
+    onPageDeleted?: (parentTitle: string | null) => void;
   }
 
-  let { page, compact = false, highlight = "", showBlockGuides = true }: Props = $props();
+  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted }: Props = $props();
 
   // Asset references in this page's blocks are resolved relative to the
   // directory its markdown file lives in, so media stored beside a page (and a
@@ -97,6 +114,7 @@
   let assetBaseDir = $derived(assetBaseDirFor(page.file_path ?? materializedFilePath));
 
   let blocks: Block[] = $state([]);
+  let destroyed = false;
 
   // Highlight after the blocks are in the DOM. Depending on `blocks` as well as
   // `highlight` matters: navigation renders the page before its content loads,
@@ -126,6 +144,7 @@
     emitFocusChanged(blockId);
   }
   onDestroy(() => {
+    destroyed = true;
     emitFocusChanged(null);
     if (linkCandidateRevealTimer !== undefined) {
       window.clearTimeout(linkCandidateRevealTimer);
@@ -134,8 +153,56 @@
   let navigatingBlock = false;
   // Imperative handles to each BlockEditor, keyed by block id, for deterministic
   // cross-block Arrow Up/Down caret movement.
-  let blockRefs: Record<string, { focusForNav: (x: number, edge: "top" | "bottom") => void }> = {};
-  type BacklinkTreeNode = { block: Block; depth: number };
+  type BlockEditorHandle = {
+    focusForNav: (x: number, edge: "top" | "bottom") => void;
+    focusAtEnd: () => void;
+    insertText: (text: string) => void;
+  };
+  let blockRefs: Record<string, BlockEditorHandle> = {};
+
+  function pageMatchesEditRequest(detail: EditPageEndDetail): boolean {
+    if (detail.pageId && detail.pageId === page.id) return true;
+    if (detail.pageTitle && detail.pageTitle === page.title) return true;
+    return false;
+  }
+
+  async function focusLastBlockAtEnd(insert?: string, attempt = 0) {
+    const last = visibleBlocks.at(-1) ?? blocks.at(-1);
+    if (!last) {
+      if (attempt < 40) requestAnimationFrame(() => void focusLastBlockAtEnd(insert, attempt + 1));
+      return;
+    }
+    document.getElementById(`block-${last.id}`)?.scrollIntoView({ block: "nearest" });
+    await tick();
+    const ref = blockRefs[last.id];
+    if (!ref) {
+      if (attempt < 40) requestAnimationFrame(() => void focusLastBlockAtEnd(insert, attempt + 1));
+      return;
+    }
+    if (insert) ref.insertText(insert);
+    else ref.focusAtEnd();
+  }
+
+  $effect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<EditPageEndDetail>).detail;
+      if (!detail || !pageMatchesEditRequest(detail)) return;
+      clearPendingEditPageEnd();
+      void focusLastBlockAtEnd(detail.insert);
+    };
+    window.addEventListener(EDIT_PAGE_END_EVENT, handler);
+    return () => window.removeEventListener(EDIT_PAGE_END_EVENT, handler);
+  });
+
+  $effect(() => {
+    void blocks.length;
+    void page.id;
+    void page.title;
+    const pending = peekPendingEditPageEnd(page);
+    if (!pending || blocks.length === 0) return;
+    clearPendingEditPageEnd();
+    void focusLastBlockAtEnd(pending.insert);
+  });
   type BacklinkView = BacklinkResult & {
     sourcePageTitle: string;
     /** Where the *source* page lives, so its media resolves against its own
@@ -211,6 +278,7 @@
     canTurnTasksToBullets: boolean;
     canTurnBulletsToTodos: boolean;
     makeLink?: SelectionMakeLinkAction;
+    showPageActions: boolean;
   } | null = $state(null);
   let selectionCopyMessage = $state("");
   let selectionCopyTimer: number | undefined;
@@ -255,6 +323,102 @@
         ? page.title.replace(/_/g, "-")
         : page.title
   );
+  const canRenamePage = $derived(!compact && !page.is_journal);
+  const canDeletePage = $derived(canRenamePage);
+  let renamingTitle = $state(false);
+  let renameDraft = $state("");
+  let renameError = $state("");
+  let renameBusy = $state(false);
+  let renameInputEl: HTMLInputElement | null = $state(null);
+
+  function startRename() {
+    renameDraft = page.title;
+    renameError = "";
+    renamingTitle = true;
+    void tick().then(() => renameInputEl?.select());
+  }
+
+  function cancelRename() {
+    renamingTitle = false;
+    renameError = "";
+    renameBusy = false;
+  }
+
+  async function commitRename() {
+    const next = renameDraft.trim();
+    if (!next || next === page.title) {
+      cancelRename();
+      return;
+    }
+    renameBusy = true;
+    renameError = "";
+    try {
+      const existing = await getPage({ title: next }).catch(() => null);
+      if (existing && existing.id !== page.id) {
+        const ok = window.confirm(
+          `A page named "${existing.title}" already exists.\n\nMerge this page into it? Notes from both pages will be kept.`,
+        );
+        if (!ok) return;
+      }
+      const updated = await renamePage(page.id, next);
+      renamingTitle = false;
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+      if (updated.id !== page.id) {
+        showToast(
+          `Merged into ${updated.title}. Notes from both pages were kept.`,
+          "success",
+        );
+      }
+      onPageRenamed?.(updated);
+    } catch (e: unknown) {
+      renameError = e instanceof Error ? e.message : String(e);
+    } finally {
+      renameBusy = false;
+    }
+  }
+
+  function handleRenameKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitRename();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  }
+
+  async function deleteCurrentPage() {
+    selectionMenu = null;
+    if (!canDeletePage) return;
+    let childCount = 0;
+    try {
+      childCount = (await getChildPages(page.title)).length;
+    } catch {
+      childCount = 0;
+    }
+    const extra = childCount > 0
+      ? ` and ${childCount} subpage${childCount === 1 ? "" : "s"}`
+      : "";
+    const ok = window.confirm(
+      `Delete page '${page.title}'${extra}? This removes notes, markdown files, and media that nothing else uses. This cannot be undone.`,
+    );
+    if (!ok) return;
+    try {
+      const result = await deletePage(page.id);
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+      const pages = result.deleted_pages;
+      const assets = result.deleted_assets;
+      showToast(
+        `Deleted ${pages} page${pages === 1 ? "" : "s"}`
+          + (assets > 0 ? ` and ${assets} media file${assets === 1 ? "" : "s"}` : "")
+          + ".",
+        "success",
+      );
+      onPageDeleted?.(parentPage?.title ?? null);
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }
   const blockSelectionOwnerId = `page-content-${Math.random().toString(36).slice(2)}`;
 
   function claimBlockSelectionOwner() {
@@ -1305,29 +1469,6 @@
   // of Map/array operations on the main thread) -- this froze and eventually
   // crashed the app for large pages. Building the index once per source
   // page and reusing it for every backlink result makes this O(n) overall.
-  type BacklinkSourceIndex = {
-    blockMap: Map<string, Block>;
-    childrenByParent: Map<string | null, Block[]>;
-  };
-
-  function buildBacklinkSourceIndex(sourceBlocks: Block[]): BacklinkSourceIndex {
-    const blockMap = new Map(sourceBlocks.map((block) => [block.id, block]));
-    const childrenByParent = new Map<string | null, Block[]>();
-
-    for (const block of sourceBlocks) {
-      const key = block.parent_id ?? null;
-      const current = childrenByParent.get(key) ?? [];
-      current.push(block);
-      childrenByParent.set(key, current);
-    }
-
-    for (const childList of childrenByParent.values()) {
-      childList.sort((a, b) => a.order_index - b.order_index);
-    }
-
-    return { blockMap, childrenByParent };
-  }
-
   async function loadBacklinks(request: PageLoadRequest = currentPageLoad()) {
     if (isCurrentPageLoad(pageLoadState, request)) {
       backlinks = [];
@@ -1353,7 +1494,15 @@
       // times in a race. Storing the in-flight Promise itself (computed
       // synchronously, before any await) closes that race: concurrent
       // lookups for the same page_id all await the same one promise.
-      const uniquePageIds = Array.from(new Set(backlinkResults.map((r) => r.block.page_id)));
+      const seenBlockIds = new Set<string>();
+      const uniqueBacklinkResults = backlinkResults.filter((result) => {
+        if (result.block.page_id === request.pageId) return false;
+        if (seenBlockIds.has(result.block.id)) return false;
+        seenBlockIds.add(result.block.id);
+        return true;
+      });
+
+      const uniquePageIds = Array.from(new Set(uniqueBacklinkResults.map((r) => r.block.page_id)));
       const blocksPromiseCache = new Map<string, Promise<Block[]>>();
       const pagePromiseCache = new Map<string, Promise<Page | null>>();
       for (const pageId of uniquePageIds) {
@@ -1369,7 +1518,7 @@
         );
       }
 
-      const renderedBacklinks = await Promise.all(backlinkResults.map(async (result) => {
+      const renderedBacklinks = await Promise.all(uniqueBacklinkResults.map(async (result) => {
         const [sourcePage, index] = await Promise.all([
           pagePromiseCache.get(result.block.page_id)!,
           indexCache.get(result.block.page_id)!,
@@ -1391,24 +1540,6 @@
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       backlinks = [];
     }
-  }
-
-  function buildBacklinkTree(rootBlockId: string, index: BacklinkSourceIndex): BacklinkTreeNode[] {
-    const { blockMap, childrenByParent } = index;
-    const root = blockMap.get(rootBlockId);
-    if (!root) return [];
-
-    const tree: BacklinkTreeNode[] = [];
-    const visit = (block: Block, depth: number) => {
-      tree.push({ block, depth });
-      const children = childrenByParent.get(block.id) ?? [];
-      for (const child of children) {
-        visit(child, depth + 1);
-      }
-    };
-
-    visit(root, 0);
-    return tree;
   }
 
   // Track block content before editing starts, so undo can restore it
@@ -1644,11 +1775,15 @@
     blockId: string,
     pasteBlocks: import("../lib/htmlToMd").PasteBlock[],
     anchorEdit?: { beforeContent: string; afterContent: string },
+    persistAnchor?: () => Promise<void>,
   ) {
+    const request = currentPageLoad();
+    const originalBlocks = blocks;
+    const isCurrent = () => !destroyed && page.id === request.pageId && isCurrentPageLoad(pageLoadState, request);
     try {
       const idx = blocks.findIndex((b) => b.id === blockId);
       const block = blocks[idx];
-      if (!block) return;
+      if (!block) throw new Error("The paste destination is no longer available.");
 
       const anchorBeforeContent = anchorEdit?.beforeContent ?? preEditSnapshots.get(blockId)?.content ?? block.content;
       const anchorAfterContent = anchorEdit?.afterContent ?? block.content;
@@ -1694,20 +1829,23 @@
           orderAtDepth[d] = 0;
         }
       }
-      let newBlocks = await createBlocks(page.id, batch);
+      // Capture the destination before saving the anchor can yield to navigation.
+      await persistAnchor?.();
+      let newBlocks = await createBlocks(request.pageId, batch);
+      let updatedBlocks = isCurrent() ? blocks : originalBlocks;
+      let finalSiblingIds: string[] = [];
       const siblingInsertCount = pasteBlocks.filter((pb) => pb.depth === 0).length;
       if (siblingInsertCount > 0) {
         const pastedSiblingIds = newBlocks
           .filter((newBlock) => newBlock.parent_id === baseParentId)
           .sort((a, b) => a.order_index - b.order_index)
           .map((newBlock) => newBlock.id);
-        const finalSiblingIds = blocks
+        finalSiblingIds = updatedBlocks
           .filter((candidate) => candidate.parent_id === baseParentId)
           .sort((a, b) => a.order_index - b.order_index)
           .flatMap((candidate) => candidate.id === blockId ? [candidate.id, ...pastedSiblingIds] : [candidate.id]);
-        await reorderBlocks(page.id, finalSiblingIds);
         const orderById = new Map(finalSiblingIds.map((id, order) => [id, order]));
-        blocks = blocks.map((existing) => {
+        updatedBlocks = updatedBlocks.map((existing) => {
           const order = orderById.get(existing.id);
           return order === undefined ? existing : { ...existing, order_index: order };
         });
@@ -1718,29 +1856,43 @@
       }
       pushUndo({
         type: "insert_blocks",
-        pageId: page.id,
+        pageId: request.pageId,
         anchorBlockId: blockId,
         beforeContent: anchorBeforeContent,
         afterContent: anchorAfterContent,
         insertedBlocks: newBlocks.map(snapshotBlock),
       });
-      blocks = blocksInTreeOrder([...blocks, ...newBlocks]);
-      refreshCollectionAfterMutation();
+      // The batch is already saved. Publish it without waiting for the separate
+      // ordering write, whose failure must never hide successfully created text.
+      if (isCurrent()) {
+        blocks = blocksInTreeOrder([...updatedBlocks, ...newBlocks]);
+        refreshCollectionAfterMutation();
+      }
+      if (finalSiblingIds.length > 0) {
+        void reorderBlocks(request.pageId, finalSiblingIds).catch((error) => {
+          console.error("Failed to save pasted block order:", error);
+          showToast(`Pasted blocks were saved, but their order could not be confirmed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        });
+      }
       if (pasteBlocks.some((block) => pageTreeReferencesChanged("", block.content))) {
         refreshPageTrees();
       }
       // Focus the last new block
       const lastNew = newBlocks[newBlocks.length - 1];
-      requestAnimationFrame(() => {
-        focusedBlockId = lastNew.id;
-        const el = document.querySelector(`[data-block-id="${lastNew.id}"] .block-content`);
-        if (el) {
-          el.scrollIntoView({ block: "nearest" });
-          (el as HTMLElement).click();
-        }
-      });
+      if (lastNew && isCurrent() && focusedBlockId === blockId) {
+        requestAnimationFrame(() => {
+          if (!isCurrent() || focusedBlockId !== blockId) return;
+          void revealBlock(lastNew.id).then((rendered) => {
+            if (!rendered || !isCurrent() || focusedBlockId !== blockId) return;
+            focusedBlockId = lastNew.id;
+            blockRefs[lastNew.id]?.focusAtEnd();
+          });
+        });
+      }
     } catch (e) {
       console.error("Failed to paste blocks:", e);
+      showToast(`Paste could not be completed: ${e instanceof Error ? e.message : String(e)}`, "error");
+      throw e;
     }
   }
 
@@ -2476,23 +2628,27 @@
   }
 
   function handleSelectionContextMenu(e: MouseEvent) {
-    const blockId = blockIdFromNode(e.target as Node | null);
-    if (!blockId) return;
+    const target = e.target as Element | null;
+    if (!pageContentEl?.contains(target)) return;
+    if (target?.closest?.("input, textarea, select, .cm-editor, .app-context-menu, .image-size-menu, .make-link-menu")) {
+      return;
+    }
 
-    const clickedBlock = blockRenderState.blockById.get(blockId);
+    const blockId = blockIdFromNode(target);
+    const clickedBlock = blockId ? blockRenderState.blockById.get(blockId) : undefined;
     const makeLink = clickedBlock
-      ? captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId)
+      ? captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId!)
       : null;
+    const showPageActions = canRenamePage || canDeletePage;
     // Journal/backlink views can mount multiple PageContent instances, and
     // every one receives the same window-level contextmenu event. Only the
-    // instance that owns the clicked block may prevent the native menu or render
-    // the Grafium menu; otherwise a sibling page can swallow right-click and
-    // leave no menu at all.
-    if (!clickedBlock && !makeLink) return;
+    // instance that owns the clicked target may prevent the native menu.
+    if (!clickedBlock && !makeLink && !showPageActions) return;
 
     const currentSelectedBlocks = selectedBlocksInDocumentOrder();
-    const selectionIncludesClickedBlock =
-      selectedBlockIds.has(blockId) && currentSelectedBlocks.some((block) => block.id === blockId);
+    const selectionIncludesClickedBlock = !!blockId
+      && selectedBlockIds.has(blockId)
+      && currentSelectedBlocks.some((block) => block.id === blockId);
     const menuBlocks = selectionIncludesClickedBlock
       ? currentSelectedBlocks
       : clickedBlock
@@ -2500,11 +2656,11 @@
         : [];
     const menuBlockIds = menuBlocks.map((block) => block.id);
 
-    if (menuBlocks.length === 0 && !makeLink) return;
+    if (menuBlocks.length === 0 && !makeLink && !showPageActions) return;
 
     e.preventDefault();
     e.stopPropagation();
-    if (!selectionIncludesClickedBlock && clickedBlock) {
+    if (blockId && !selectionIncludesClickedBlock && clickedBlock) {
       selectedBlockIds = new Set([blockId]);
       claimBlockSelectionOwner();
       promotedSelectionCopyText = null;
@@ -2512,15 +2668,17 @@
     selectionMenu = {
       ...contextMenuPositionFromEvent(e, {
         width: 230,
-        height: 92
+        height: (menuBlocks.length > 0 ? 92 : 12)
           + (makeLink ? 42 : 0)
           + (menuBlocks.some((block) => isTaskContent(block.content)) ? 42 : 0)
-          + (menuBlocks.some((block) => !isTaskContent(block.content)) ? 42 : 0),
+          + (menuBlocks.some((block) => !isTaskContent(block.content)) ? 42 : 0)
+          + (showPageActions ? 84 : 0),
       }),
       blockIds: menuBlockIds,
       blockCount: menuBlocks.length,
       canTurnTasksToBullets: menuBlocks.some((block) => isTaskContent(block.content)),
       canTurnBulletsToTodos: menuBlocks.some((block) => !isTaskContent(block.content)),
+      showPageActions,
       ...(makeLink ? { makeLink } : {}),
     };
   }
@@ -2722,7 +2880,58 @@
 
 <div class="page-content" bind:this={pageContentEl} class:compact class:bookPage={isImportedBookPage}>
   <div class="page-heading">
-    <h1 class="page-title">{displayPageTitle}</h1>
+    <div class="page-title-row">
+      {#if renamingTitle}
+        <input
+          class="page-title-input"
+          bind:this={renameInputEl}
+          bind:value={renameDraft}
+          disabled={renameBusy}
+          spellcheck="false"
+          aria-label="Rename page"
+          onkeydown={handleRenameKeydown}
+        />
+        <button class="rename-page-btn" type="button" onclick={() => void commitRename()} disabled={renameBusy}>
+          Save
+        </button>
+        <button class="rename-page-btn" type="button" onclick={cancelRename} disabled={renameBusy}>
+          Cancel
+        </button>
+      {:else}
+        <h1 class="page-title">{displayPageTitle}</h1>
+        {#if canRenamePage}
+          <button
+            class="rename-page-btn icon"
+            type="button"
+            title="Rename page"
+            aria-label="Rename page"
+            onclick={startRename}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+            </svg>
+          </button>
+        {/if}
+        {#if canDeletePage}
+          <button
+            class="rename-page-btn icon danger"
+            type="button"
+            title="Delete page"
+            aria-label="Delete page"
+            onclick={() => void deleteCurrentPage()}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+          </button>
+        {/if}
+      {/if}
+    </div>
     <div class="page-heading-actions">
       {#if !compact}
         <PageMenu
@@ -2751,6 +2960,10 @@
       </button>
     </div>
   </div>
+
+  {#if renameError}
+    <div class="load-error">{renameError}</div>
+  {/if}
 
   {#if !compact && (conceptEdgeBusy || conceptEdgesError || conceptEdgesMessage)}
     <div class="concept-edge-status" class:error={!!conceptEdgesError} role="status">
@@ -2842,14 +3055,40 @@
          {selectionMenu.blockCount > 1 ? "Turn bullets into TODOs" : "Turn bullet into TODO"}
        </button>
       {/if}
-      <button type="button" role="menuitem" onclick={copySelectedBlocks}>Copy selection</button>
-      <button
-        type="button"
-        role="menuitem"
-        onclick={clearBlockSelection}
-      >
-        Clear selection
-      </button>
+      {#if selectionMenu.blockCount > 0}
+        <button type="button" role="menuitem" onclick={copySelectedBlocks}>Copy selection</button>
+        <button
+          type="button"
+          role="menuitem"
+          onclick={clearBlockSelection}
+        >
+          Clear selection
+        </button>
+      {/if}
+      {#if selectionMenu.showPageActions}
+        {#if selectionMenu.blockCount > 0 || selectionMenu.makeLink}
+          <div class="selection-menu-separator" role="separator"></div>
+        {/if}
+        {#if canRenamePage}
+          <button
+            type="button"
+            role="menuitem"
+            onclick={() => { selectionMenu = null; startRename(); }}
+          >
+            Rename page
+          </button>
+        {/if}
+        {#if canDeletePage}
+          <button
+            type="button"
+            role="menuitem"
+            class="danger"
+            onclick={() => void deleteCurrentPage()}
+          >
+            Delete page
+          </button>
+        {/if}
+      {/if}
     </div>
   {/if}
 
@@ -3123,6 +3362,14 @@
     padding-bottom: 48px;
   }
 
+  .page-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
   .page-title {
     font-size: 32px;
     font-weight: 700;
@@ -3130,6 +3377,57 @@
     color: var(--text-primary);
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+
+  .page-title-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 22px;
+    font-weight: 700;
+    padding: 4px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--bg-input, var(--bg-secondary));
+    color: var(--text-primary);
+    outline: none;
+  }
+
+  .rename-page-btn {
+    flex-shrink: 0;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .rename-page-btn.icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    opacity: 0.55;
+  }
+
+  .rename-page-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--accent);
+    background: var(--bg-hover);
+    opacity: 1;
+  }
+
+  .rename-page-btn.icon.danger:hover:not(:disabled) {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+
+  .rename-page-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .page-heading {
@@ -3326,6 +3624,16 @@
 
   .selection-context-menu button:hover {
     background: var(--bg-tertiary);
+  }
+
+  .selection-context-menu button.danger {
+    color: var(--danger);
+  }
+
+  .selection-menu-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
   }
 
   .selection-toolbar-error {

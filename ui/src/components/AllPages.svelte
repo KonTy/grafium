@@ -1,14 +1,20 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import PageTree from "./PageTree.svelte";
   import {
     countPages,
     listPagesWindow,
     createPage,
+    bulkRenamePages,
     deletePage,
+    deleteNamespace,
     deleteBookFolder,
+    renamePage,
+    getChildPages,
     getGraphInfo,
     openBookFolderInFileBrowser,
+    openNamespaceInFileBrowser,
     openPageInFileBrowser,
   } from "../lib/api";
   import {
@@ -26,7 +32,7 @@
     sortTree,
     type PageTreeViewNode,
   } from "../lib/pageTreeState";
-  import type { Page } from "../lib/api";
+  import type { BulkRenameResult, Page } from "../lib/api";
 
   interface PageActionMenu {
     x: number;
@@ -34,6 +40,19 @@
     pageId: string | null;
     title: string;
     bookTitle: string | null;
+    folder: boolean;
+  }
+
+  interface ConfirmDialog {
+    message: string;
+    confirmLabel: string;
+  }
+
+  interface RenameDialog {
+    title: string;
+    draft: string;
+    pageId: string | null;
+    folder: boolean;
   }
 
   interface Props {
@@ -69,6 +88,11 @@
   /// silently search a fraction of the graph and report "no matches" for pages
   /// that exist. The tree holds every page, so filtering it is a real search.
   let filterQuery = $state("");
+  let bulkFrom = $state("");
+  let bulkTo = $state("");
+  let bulkBusy = $state(false);
+  let bulkError = $state("");
+  let bulkPreview: BulkRenameResult | null = $state(null);
   // Sorted first, then filtered. Filtering preserves order, so ordering the
   // whole tree once per sort change beats re-sorting the filtered result on
   // every keystroke — the sort is the expensive half.
@@ -85,6 +109,12 @@
   let spacerEl: HTMLDivElement | null = $state(null);
   let actionMenuEl: HTMLDivElement | null = $state(null);
   let actionMenu: PageActionMenu | null = $state(null);
+  let confirmDialog: ConfirmDialog | null = $state(null);
+  let confirmResolver: ((ok: boolean) => void) | null = null;
+  let renameDialog: RenameDialog | null = $state(null);
+  let renameInputEl: HTMLInputElement | null = $state(null);
+  let renameBusy = $state(false);
+  let renameError = $state("");
   let relTop = $state(0); // px of list scrolled above the viewport top
   let visH = $state(0); // viewport height in px
 
@@ -178,6 +208,18 @@
       window.removeEventListener("pointerdown", closeOutside);
       window.removeEventListener("keydown", closeOnEscape);
     };
+  });
+
+
+  $effect(() => {
+    if (!confirmDialog && !renameDialog) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (confirmDialog) answerConfirm(false);
+      else if (renameDialog && !renameBusy) renameDialog = null;
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
   });
 
   // Track scroll/resize of the enclosing .main-content scroller.
@@ -285,6 +327,64 @@
     }
   }
 
+  async function previewBulkRename() {
+    const from = bulkFrom.trim();
+    bulkError = "";
+    bulkPreview = null;
+    if (!from) {
+      bulkError = "Enter the text to find, e.g. self/";
+      return;
+    }
+    bulkBusy = true;
+    try {
+      bulkPreview = await bulkRenamePages(from, bulkTo, true);
+    } catch (e) {
+      bulkError = errorMessage(e);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
+  async function applyBulkRename() {
+    const from = bulkFrom.trim();
+    if (!from) return;
+    let preview = bulkPreview;
+    if (!preview) {
+      await previewBulkRename();
+      preview = bulkPreview;
+    }
+    if (!preview) return;
+    const mergedCount = preview.merged?.length ?? 0;
+    const changeCount = preview.renamed.length + mergedCount;
+    if (changeCount === 0) return;
+    const parts = [];
+    if (preview.renamed.length > 0) {
+      parts.push(`rename ${preview.renamed.length} page${preview.renamed.length === 1 ? "" : "s"}`);
+    }
+    if (mergedCount > 0) {
+      parts.push(`merge ${mergedCount} into existing page${mergedCount === 1 ? "" : "s"}`);
+    }
+    const confirmed = await askConfirm(
+      `${parts.join(" and ")}? This updates titles, markdown files, and [[wiki links]].`,
+      "Rename",
+    );
+    if (!confirmed) return;
+    bulkBusy = true;
+    bulkError = "";
+    try {
+      const result = await bulkRenamePages(from, bulkTo, false);
+      bulkPreview = result;
+      resetWindows();
+      await refreshCount();
+      if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    } catch (e) {
+      bulkError = errorMessage(e);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
   async function handleCreatePage() {
     const title = newPageTitle.trim();
     if (!title) return;
@@ -297,12 +397,20 @@
   }
 
   async function deletePageById(pageId: string, title: string) {
-    // Deleting a page also removes its .md file from disk and evicts it
-    // from favorites / recent pages — irreversible, so gate on an explicit
-    // confirmation instead of the previous silent one-click delete.
-    const confirmed = window.confirm(
-      `Delete page '${title}'? This will remove the .md file from disk `
-      + `and cannot be undone.`,
+    // Deleting a page also removes namespaced subpages, unused media, the .md
+    // file, and evicts it from favorites / recent pages.
+    let childCount = 0;
+    try {
+      childCount = (await getChildPages(title)).length;
+    } catch {
+      childCount = 0;
+    }
+    const extra = childCount > 0
+      ? ` and ${childCount} subpage${childCount === 1 ? "" : "s"}`
+      : "";
+    const confirmed = await askConfirm(
+      `Delete page '${title}'${extra}? This removes notes, markdown files, `
+      + `and media that nothing else uses. This cannot be undone.`,
     );
     if (!confirmed) return;
 
@@ -311,6 +419,32 @@
     } catch (e) {
       console.error("Failed to delete page:", e);
       alert(`Failed to delete page: ${errorMessage(e)}`);
+      return;
+    }
+    await refreshAfterDeletion();
+  }
+
+  async function deleteFolderByTitle(title: string, pageId: string | null) {
+    let childCount = 0;
+    try {
+      childCount = (await getChildPages(title)).length;
+    } catch {
+      childCount = 0;
+    }
+    const total = childCount + (pageId ? 1 : 0);
+    const confirmed = await askConfirm(
+      `Delete folder '${title}' and ${total} page${total === 1 ? "" : "s"} under it? `
+      + `This removes notes, markdown files, and media that nothing else uses. `
+      + `This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      if (pageId) await deletePage(pageId);
+      else await deleteNamespace(title);
+    } catch (e) {
+      console.error("Failed to delete folder:", e);
+      alert(`Failed to delete folder: ${errorMessage(e)}`);
       return;
     }
     await refreshAfterDeletion();
@@ -329,9 +463,19 @@
     return `Books/${parts[1]}`;
   }
 
-  function hasTreeNodeMenu(node: PageTreeViewNode): boolean {
-    const title = titleFromTreeNode(node);
-    return Boolean(node.page_id || bookTitleFromAnyTitle(title));
+  function askConfirm(message: string, confirmLabel = "Delete"): Promise<boolean> {
+    confirmResolver?.(false);
+    return new Promise((resolve) => {
+      confirmResolver = resolve;
+      confirmDialog = { message, confirmLabel };
+    });
+  }
+
+  function answerConfirm(ok: boolean) {
+    const resolve = confirmResolver;
+    confirmResolver = null;
+    confirmDialog = null;
+    resolve?.(ok);
   }
 
   function errorMessage(error: unknown): string {
@@ -389,13 +533,25 @@
     actionMenu = { ...target, x, y };
   }
 
-  function handleTreeNodeMenu(event: MouseEvent, node: PageTreeViewNode) {
+  function openMenuForNode(node: PageTreeViewNode, x: number, y: number) {
+    if (treeSource !== "namespace" && !node.page_id) return;
     const title = titleFromTreeNode(node);
-    openActionMenu(event, {
+    actionMenu = {
       pageId: node.page_id,
       title,
       bookTitle: bookTitleFromAnyTitle(title),
-    });
+      folder: treeSource === "namespace"
+        && (!node.page_id || node.count > 1 || node.children.length > 0),
+      x: Math.min(Math.max(8, x), Math.max(8, window.innerWidth - 240)),
+      y: Math.min(Math.max(8, y), Math.max(8, window.innerHeight - 180)),
+    };
+  }
+
+  function handleTreeNodeMenu(event: MouseEvent, node: PageTreeViewNode) {
+    const { x, y } = event.type === "contextmenu"
+      ? { x: event.clientX, y: event.clientY }
+      : menuPosition(event);
+    openMenuForNode(node, x, y);
   }
 
   function handleListPageMenu(event: MouseEvent, page: Page) {
@@ -403,7 +559,57 @@
       pageId: page.id,
       title: page.title,
       bookTitle: bookTitleFromAnyTitle(page.title),
+      folder: false,
     });
+  }
+
+  async function handleRenameActionTarget() {
+    const target = actionMenu;
+    if (!target || target.bookTitle) return;
+    actionMenu = null;
+    renameError = "";
+    renameBusy = false;
+    renameDialog = {
+      title: target.title,
+      draft: target.title,
+      pageId: target.pageId,
+      folder: target.folder,
+    };
+    await tick();
+    renameInputEl?.select();
+  }
+
+  async function commitRenameDialog() {
+    if (!renameDialog || renameBusy) return;
+    const current = renameDialog;
+    const next = current.draft.trim().replace(/\/+$/, "");
+    if (!next) {
+      renameError = "Title cannot be empty";
+      return;
+    }
+    if (next === current.title) {
+      renameDialog = null;
+      return;
+    }
+    renameBusy = true;
+    renameError = "";
+    try {
+      if (current.folder) {
+        await bulkRenamePages(`${current.title}/`, `${next}/`, false);
+      }
+      if (current.pageId) {
+        await renamePage(current.pageId, next);
+      }
+      renameDialog = null;
+      resetWindows();
+      await refreshCount();
+      if (pageTreeAvailable !== false) void loadPageTree(treeSource);
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    } catch (e) {
+      renameError = errorMessage(e);
+    } finally {
+      renameBusy = false;
+    }
   }
 
   async function handleOpenInFileBrowser() {
@@ -413,6 +619,8 @@
     try {
       if (target.bookTitle) {
         await openBookFolderInFileBrowser(target.bookTitle);
+      } else if (target.folder) {
+        await openNamespaceInFileBrowser(target.title);
       } else if (target.pageId) {
         await openPageInFileBrowser(target.pageId);
       }
@@ -428,7 +636,7 @@
     actionMenu = null;
 
     if (target.bookTitle) {
-      const confirmed = window.confirm(
+      const confirmed = await askConfirm(
         `Delete imported book '${target.bookTitle}'? This removes the whole folder under pages/Books, including generated Markdown and assets. Original source files outside Grafium are not touched. This cannot be undone.`,
       );
       if (!confirmed) return;
@@ -444,8 +652,15 @@
       return;
     }
 
+    if (target.folder) {
+      await deleteFolderByTitle(target.title, target.pageId);
+      return;
+    }
+
     if (target.pageId) {
       await deletePageById(target.pageId, target.title);
+    } else {
+      await deleteFolderByTitle(target.title, null);
     }
   }
 
@@ -483,6 +698,81 @@
       Import Media
     </button>
   </div>
+
+  <div class="bulk-rename">
+    <span class="bulk-rename-label">Bulk rename</span>
+    <input
+      class="new-page-input"
+      type="text"
+      placeholder="Find (e.g. self/)"
+      bind:value={bulkFrom}
+      disabled={bulkBusy}
+      oninput={() => { bulkPreview = null; bulkError = ""; }}
+    />
+    <span class="bulk-rename-arrow" aria-hidden="true">→</span>
+    <input
+      class="new-page-input"
+      type="text"
+      placeholder="Replace with (empty ok)"
+      bind:value={bulkTo}
+      disabled={bulkBusy}
+      oninput={() => { bulkPreview = null; bulkError = ""; }}
+    />
+    <button class="btn-import-media" type="button" onclick={() => void previewBulkRename()} disabled={bulkBusy}>
+      Preview
+    </button>
+    <button
+      class="btn-create"
+      type="button"
+      onclick={() => void applyBulkRename()}
+      disabled={bulkBusy || !bulkFrom.trim() || (bulkPreview !== null && bulkPreview.renamed.length + (bulkPreview.merged?.length ?? 0) === 0)}
+    >
+      Rename{bulkPreview && bulkPreview.renamed.length + (bulkPreview.merged?.length ?? 0) > 0 ? ` ${bulkPreview.renamed.length + (bulkPreview.merged?.length ?? 0)}` : ""}
+    </button>
+  </div>
+  {#if bulkError}
+    <p class="bulk-rename-status error">{bulkError}</p>
+  {:else if bulkPreview}
+    <p class="bulk-rename-status">
+      {bulkPreview.renamed.length} page{bulkPreview.renamed.length === 1 ? "" : "s"}
+      {#if (bulkPreview.merged?.length ?? 0) > 0}
+        · {bulkPreview.merged.length} merged
+      {/if}
+      {#if bulkPreview.links_updated > 0}
+        · {bulkPreview.links_updated} block{bulkPreview.links_updated === 1 ? "" : "s"} with links updated
+      {/if}
+      {#if bulkPreview.skipped.length > 0}
+        · {bulkPreview.skipped.length} skipped
+      {/if}
+    </p>
+    {#if bulkPreview.renamed.length > 0}
+      <ul class="bulk-rename-examples">
+        {#each bulkPreview.renamed.slice(0, 8) as item (item.id)}
+          <li><code>{item.old_title}</code> → <code>{item.new_title}</code></li>
+        {/each}
+        {#if bulkPreview.renamed.length > 8}
+          <li>…and {bulkPreview.renamed.length - 8} more</li>
+        {/if}
+      </ul>
+    {/if}
+    {#if (bulkPreview.merged?.length ?? 0) > 0}
+      <ul class="bulk-rename-examples">
+        {#each bulkPreview.merged.slice(0, 8) as item (item.source_id)}
+          <li><code>{item.old_title}</code> → merge into <code>{item.new_title}</code></li>
+        {/each}
+        {#if bulkPreview.merged.length > 8}
+          <li>…and {bulkPreview.merged.length - 8} more</li>
+        {/if}
+      </ul>
+    {/if}
+    {#if bulkPreview.skipped.length > 0}
+      <ul class="bulk-rename-examples skipped">
+        {#each bulkPreview.skipped.slice(0, 5) as item, index (`${item.old_title}-${index}`)}
+          <li><code>{item.old_title}</code> — {item.reason}</li>
+        {/each}
+      </ul>
+    {/if}
+  {/if}
 
   <div class="browser-controls">
     <div class="control-group" role="group" aria-label="Page browser view">
@@ -559,6 +849,7 @@
       <input
         type="search"
         class="page-filter-input"
+        data-local-search
         placeholder="Filter pages…"
         aria-label="Filter pages"
         bind:value={filterQuery}
@@ -588,8 +879,8 @@
           columns
           revealToken={filterQuery.trim()}
           {onNavigate}
-          onPageContextMenu={treeSource === "namespace" ? handleTreeNodeMenu : undefined}
-          hasPageMenu={treeSource === "namespace" ? hasTreeNodeMenu : undefined}
+          onPageContextMenu={handleTreeNodeMenu}
+          hasPageMenu={(node) => treeSource === "namespace" || node.page_id !== null}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
           emptyText={treeSource === "namespace"
@@ -604,7 +895,14 @@
         {@const page = rows.get(i)}
         <div class="page-row" style="top: {i * ROW_H}px;">
           {#if page}
-            <button class="page-link" onclick={() => onNavigate(page.title)}>
+            <button
+              class="page-link"
+              onclick={() => onNavigate(page.title)}
+              oncontextmenu={(event) => {
+                event.preventDefault();
+                handleListPageMenu(event, page);
+              }}
+            >
               {page.title}
               {#if page.is_journal}
                 <span class="badge">Journal</span>
@@ -635,13 +933,91 @@
       bind:this={actionMenuEl}
     >
       <p class="page-action-title">{actionMenu.bookTitle ?? actionMenu.title}</p>
-      <button type="button" role="menuitem" class="page-action-item" onclick={handleOpenInFileBrowser}>
-        Open in file browser
-      </button>
+      {#if !actionMenu.bookTitle}
+        <button type="button" role="menuitem" class="page-action-item" onclick={() => void handleRenameActionTarget()}>
+          Rename{actionMenu.folder ? " folder" : ""}
+        </button>
+      {/if}
+      {#if actionMenu.pageId || actionMenu.bookTitle || actionMenu.folder}
+        <button type="button" role="menuitem" class="page-action-item" onclick={handleOpenInFileBrowser}>
+          Open in file browser
+        </button>
+      {/if}
       <div class="page-action-separator" role="separator"></div>
-      <button type="button" role="menuitem" class="page-action-item danger" onclick={handleDeleteActionTarget}>
-        {actionMenu.bookTitle ? "Delete whole book folder" : "Delete page"}
+      <button type="button" role="menuitem" class="page-action-item danger" onclick={() => void handleDeleteActionTarget()}>
+        {#if actionMenu.bookTitle}
+          Delete whole book folder
+        {:else if actionMenu.folder}
+          Delete folder
+        {:else}
+          Delete page
+        {/if}
       </button>
+    </div>
+  {/if}
+
+  {#if confirmDialog}
+    <div class="page-dialog-backdrop" role="presentation" onclick={() => answerConfirm(false)}>
+      <div
+        class="page-dialog"
+        role="alertdialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label={confirmDialog.confirmLabel}
+        onclick={(event) => event.stopPropagation()}
+        onkeydown={(event) => {
+          if (event.key === "Escape") answerConfirm(false);
+        }}
+      >
+        <p class="page-dialog-message">{confirmDialog.message}</p>
+        <div class="page-dialog-actions">
+          <button type="button" class="page-dialog-btn" onclick={() => answerConfirm(false)}>Cancel</button>
+          <button type="button" class="page-dialog-btn danger" onclick={() => answerConfirm(true)}>
+            {confirmDialog.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if renameDialog}
+    <div class="page-dialog-backdrop" role="presentation" onclick={() => { if (!renameBusy) renameDialog = null; }}>
+      <div
+        class="page-dialog"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label="Rename"
+        onclick={(event) => event.stopPropagation()}
+        onkeydown={(event) => {
+          if (event.key === "Escape" && !renameBusy) renameDialog = null;
+          if (event.key === "Enter") void commitRenameDialog();
+        }}
+      >
+        <p class="page-dialog-message">
+          {renameDialog.folder ? `Rename folder '${renameDialog.title}'` : `Rename '${renameDialog.title}'`}
+        </p>
+        <input
+          class="new-page-input"
+          bind:this={renameInputEl}
+          bind:value={renameDialog.draft}
+          disabled={renameBusy}
+        />
+        {#if renameDialog.folder}
+          <p class="page-dialog-hint">Pages under this folder are renamed too.</p>
+        {/if}
+        {#if renameError}
+          <p class="bulk-rename-status error">{renameError}</p>
+        {/if}
+        <div class="page-dialog-actions">
+          <button type="button" class="page-dialog-btn" onclick={() => { if (!renameBusy) renameDialog = null; }} disabled={renameBusy}>
+            Cancel
+          </button>
+          <button type="button" class="page-dialog-btn primary" onclick={() => void commitRenameDialog()} disabled={renameBusy}>
+            Rename
+          </button>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
@@ -734,6 +1110,50 @@
 
   .btn-create:hover {
     background: var(--btn-primary-hover);
+  }
+
+  .bulk-rename {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 12px;
+    flex-wrap: wrap;
+  }
+
+  .bulk-rename-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .bulk-rename .new-page-input {
+    min-width: 140px;
+    flex: 1;
+  }
+
+  .bulk-rename-arrow {
+    color: var(--text-muted);
+  }
+
+  .bulk-rename-status {
+    margin: -4px 0 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .bulk-rename-status.error {
+    color: var(--danger, #c44);
+  }
+
+  .bulk-rename-examples {
+    margin: -4px 0 12px;
+    padding-left: 18px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .bulk-rename-examples code {
+    color: var(--text-primary);
   }
 
   .browser-controls {
@@ -945,13 +1365,9 @@
     min-width: 32px;
     min-height: 32px;
     border-radius: 4px;
-    opacity: 0;
+    opacity: 0.7;
   }
 
-  /* `:focus-within` matters as much as `:hover` here: the button is revealed
-     on hover only, so a keyboard user used to tab onto a delete control that
-     was invisible — focus landed on something they could not see, one keypress
-     away from deleting a page. */
   .page-row:hover .btn-page-actions,
   .page-row:focus-within .btn-page-actions {
     opacity: 1;
@@ -1024,6 +1440,76 @@
     height: 1px;
     margin: 5px 2px;
     background: var(--border);
+  }
+
+  .page-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--bg-primary) 55%, transparent);
+  }
+
+  .page-dialog {
+    width: min(440px, calc(100vw - 32px));
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-overlay, var(--bg-secondary));
+    box-shadow: 0 16px 40px color-mix(in srgb, var(--bg-primary) 70%, transparent);
+  }
+
+  .page-dialog-message {
+    margin: 0 0 12px;
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .page-dialog-hint {
+    margin: 8px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .page-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+  }
+
+  .page-dialog-btn {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--btn-bg, transparent);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .page-dialog-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+  }
+
+  .page-dialog-btn.primary {
+    background: var(--btn-primary-bg);
+    border-color: transparent;
+    color: var(--btn-primary-fg);
+  }
+
+  .page-dialog-btn.danger {
+    background: var(--danger, #c44);
+    border-color: transparent;
+    color: #fff;
+  }
+
+  .page-dialog-btn:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   .empty-state {

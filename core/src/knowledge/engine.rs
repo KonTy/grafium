@@ -1013,7 +1013,21 @@ impl KnowledgeEngine {
         // it, and if the model only reasoned (budget exhausted with no answer)
         // surface a clear message instead of raw chain-of-thought.
         let answer = match crate::ai::reasoning::strip_think_blocks(&raw) {
-            crate::ai::reasoning::ThinkStripResult::Answer(a) => a,
+            crate::ai::reasoning::ThinkStripResult::Answer(a) => {
+                if crate::ai::language::expects_english(question, std::iter::empty()) {
+                    crate::ai::language::repair_english_answer(
+                        llm.as_ref(),
+                        &a,
+                        &crate::ai::traits::CompletionOptions {
+                            max_tokens: Some(request.output_tokens as u32),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                } else {
+                    a
+                }
+            }
             crate::ai::reasoning::ThinkStripResult::ReasoningOnly => {
                 crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()
             }
@@ -1024,9 +1038,10 @@ impl KnowledgeEngine {
     }
 
     /// Streaming counterpart to [`Self::ask`]: runs the same retrieval,
-    /// gating, budgeting and prompt assembly, then streams the model's answer
-    /// token-by-token through `on_event`, hiding `<think>` reasoning behind a
-    /// `Thinking` signal. `cancel` (if provided) can be flipped from the UI to
+    /// gating, budgeting and prompt assembly, hiding `<think>` reasoning behind a
+    /// `Thinking` signal. English-guarded answers are buffered until validated,
+    /// with progress notes driven by received answer characters; other answers
+    /// stream incrementally through `on_event`. `cancel` can be flipped from the UI to
     /// abort a slow local generation. Returns the cited sources and, when the
     /// model produced only reasoning, a trailing message to show in place of
     /// an answer.
@@ -1064,10 +1079,19 @@ impl KnowledgeEngine {
         on_event(AskStreamEvent::Phase(AskPhase::ProcessingPrompt));
 
         let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
+        let guard_english = crate::ai::language::expects_english(
+            question,
+            history
+                .iter()
+                .rev()
+                .filter(|turn| turn.is_user())
+                .map(|turn| turn.content.as_str()),
+        );
         // Track the last phase we announced so token-level updates only emit a
         // Phase event on a real transition (into Thinking, into Generating),
         // not once per token.
         let mut phase = AskPhase::ProcessingPrompt;
+        let mut progress = BufferedGenerationProgress::default();
         {
             let mut on_token = |piece: &str| match filter.push(piece) {
                 crate::ai::reasoning::StreamStep::Answer(delta) => {
@@ -1075,7 +1099,13 @@ impl KnowledgeEngine {
                         phase = AskPhase::Generating;
                         on_event(AskStreamEvent::Phase(AskPhase::Generating));
                     }
-                    on_event(AskStreamEvent::Delta(&delta));
+                    // Validate before displaying: a refusal (or a late paragraph)
+                    // can switch language even after an English opening.
+                    if !guard_english {
+                        on_event(AskStreamEvent::Delta(&delta));
+                    } else {
+                        progress.record(&delta, on_event);
+                    }
                 }
                 crate::ai::reasoning::StreamStep::Thinking => {
                     if phase != AskPhase::Thinking {
@@ -1090,11 +1120,33 @@ impl KnowledgeEngine {
         }
 
         match filter.finish() {
-            crate::ai::reasoning::ThinkStripResult::Answer(answer) => Ok(AskStreamOutcome {
-                sources: build_sources(&request.entries, &answer),
-                trailing_message: None,
-                web_citations: Vec::new(),
-            }),
+            crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
+                let answer = if guard_english {
+                    if crate::ai::language::has_language_drift(&answer) {
+                        on_event(AskStreamEvent::Note(
+                            "Translating the response into English…",
+                        ));
+                    }
+                    let answer =
+                        crate::ai::language::repair_english_answer(llm.as_ref(), &answer, &options)
+                            .await;
+                    if !answer.is_empty() {
+                        on_event(AskStreamEvent::Delta(&answer));
+                    }
+                    answer
+                } else {
+                    let pending = filter.remaining_answer();
+                    if !pending.is_empty() {
+                        on_event(AskStreamEvent::Delta(&pending));
+                    }
+                    answer
+                };
+                Ok(AskStreamOutcome {
+                    sources: build_sources(&request.entries, &answer),
+                    trailing_message: None,
+                    web_citations: Vec::new(),
+                })
+            }
             crate::ai::reasoning::ThinkStripResult::ReasoningOnly => Ok(AskStreamOutcome {
                 sources: Vec::new(),
                 trailing_message: Some(crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()),
@@ -1106,10 +1158,9 @@ impl KnowledgeEngine {
     /// Two-part "research on the web" answer: streams the ordinary
     /// notes-grounded answer under a `## From your notes` header, then runs a
     /// live [`crate::ai::web_research`] pass and streams its cited summary
-    /// under `## From the web`. Used when
-    /// [`crate::knowledge::detect_research_intent`] fires on the user's
-    /// question — the deliberate, explicit gesture that authorises actually
-    /// leaving the graph and hitting the internet.
+    /// under `## From the web`, validating its language before any summary text
+    /// reaches the transcript. Callers must explicitly authorize Internet scope;
+    /// this method performs web requests regardless of the question's wording.
     ///
     /// The two arms are isolated so a weakness in one never eats the other: if
     /// the notes arm finds nothing relevant it *says so* (rather than
@@ -1196,7 +1247,7 @@ impl KnowledgeEngine {
         match research {
             Ok(result) => {
                 on_event(AskStreamEvent::Phase(AskPhase::Generating));
-                on_event(AskStreamEvent::Delta(&render_web_section(&result)));
+                emit_guarded_web_section(llm.as_ref(), question, &result, &cancel, on_event).await;
                 web_citations = result.citations;
             }
             // A cancelled web arm is a deliberate Stop, not a failure — stay
@@ -1213,8 +1264,9 @@ impl KnowledgeEngine {
     }
 
     /// Stream the shared "From your notes" arm (Part 1 of the two-part flows):
-    /// emit the header, run gated hybrid retrieval, stream the notes-only answer
-    /// with `<think>` filtering, and return the sources the model cited.
+    /// emit the header, run gated hybrid retrieval, then buffer the notes-only
+    /// answer for capability/language checks. Received characters drive progress
+    /// notes; reasoning remains hidden. Return the sources the model cited.
     ///
     /// Extracted so [`Self::ask_stream_with_web_using`] and
     /// [`Self::ask_stream_with_deep_research_using`] produce an identical notes
@@ -1256,9 +1308,10 @@ impl KnowledgeEngine {
                 };
                 let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
                 let mut phase = AskPhase::ProcessingPrompt;
+                let mut progress = BufferedGenerationProgress::default();
                 {
                     let mut on_token = |piece: &str| match filter.push(piece) {
-                        crate::ai::reasoning::StreamStep::Answer(_delta) => {
+                        crate::ai::reasoning::StreamStep::Answer(delta) => {
                             if phase != AskPhase::Generating {
                                 phase = AskPhase::Generating;
                                 on_event(AskStreamEvent::Phase(AskPhase::Generating));
@@ -1267,6 +1320,7 @@ impl KnowledgeEngine {
                             // research answer. Buffer it so capability
                             // disclaimers ("I can't browse the web") can be
                             // replaced before they reach the transcript.
+                            progress.record(&delta, on_event);
                         }
                         crate::ai::reasoning::StreamStep::Thinking => {
                             if phase != AskPhase::Thinking {
@@ -1282,6 +1336,18 @@ impl KnowledgeEngine {
                 match filter.finish() {
                     crate::ai::reasoning::ThinkStripResult::Answer(answer) => {
                         let answer = sanitize_notes_research_answer(question, &answer);
+                        let answer =
+                            if crate::ai::language::expects_english(question, std::iter::empty()) {
+                                if crate::ai::language::has_language_drift(&answer) {
+                                    on_event(AskStreamEvent::Note(
+                                        "Translating the response into English…",
+                                    ));
+                                }
+                                crate::ai::language::repair_english_answer(llm, &answer, &options)
+                                    .await
+                            } else {
+                                answer
+                            };
                         if !answer.is_empty() {
                             on_event(AskStreamEvent::Delta(&answer));
                         }
@@ -1387,7 +1453,7 @@ impl KnowledgeEngine {
                 // Rendering the finished result is the answer-text phase, same
                 // as the single-round flow.
                 on_event(AskStreamEvent::Phase(AskPhase::Generating));
-                on_event(AskStreamEvent::Delta(&render_web_section(&result)));
+                emit_guarded_web_section(llm.as_ref(), question, &result, &cancel, on_event).await;
                 web_citations = result.citations;
             }
             // A cancelled arm is a deliberate Stop, not a failure — stay silent.
@@ -1501,7 +1567,14 @@ impl KnowledgeEngine {
         }
         messages.push(crate::ai::traits::ChatMessage {
             role: crate::ai::traits::MessageRole::User,
-            content: crate::ai::question_with_answer_language_rule(question),
+            content: crate::ai::question_with_answer_language_rule_in_history(
+                question,
+                history
+                    .iter()
+                    .rev()
+                    .filter(|turn| turn.is_user())
+                    .map(|turn| turn.content.as_str()),
+            ),
         });
 
         Ok(AskRequest {
@@ -2084,7 +2157,7 @@ The user's notes (each prefixed with its [N] citation marker and date):\n\n{cont
     )
 }
 
-fn sanitize_notes_research_answer(question: &str, answer: &str) -> String {
+fn sanitize_notes_research_answer(_question: &str, answer: &str) -> String {
     let trimmed = answer.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -2092,12 +2165,15 @@ fn sanitize_notes_research_answer(question: &str, answer: &str) -> String {
     if trimmed == "I didn't find an answer in your notes." {
         return trimmed.to_string();
     }
+    if !looks_like_notes_capability_refusal(trimmed)
+        && (crate::ai::language::is_english_refusal(trimmed)
+            || crate::ai::language::is_chinese_refusal(trimmed))
+    {
+        return trimmed.to_string();
+    }
     if looks_like_notes_capability_refusal(trimmed)
         || trimmed.to_lowercase().contains("[n]")
         || parse_cited_indices(trimmed).is_empty()
-        || (crate::ai::answer_language_rule_for_question(question)
-            .contains("Write the answer in English only")
-            && contains_cjk_text(trimmed))
     {
         "I didn't find an answer in your notes.".to_string()
     } else {
@@ -2129,19 +2205,6 @@ fn looks_like_notes_capability_refusal(answer: &str) -> bool {
         ]
         .iter()
         .any(|needle| lower.contains(needle))
-}
-
-fn contains_cjk_text(text: &str) -> bool {
-    text.chars().any(|ch| {
-        matches!(
-            ch,
-            '\u{3400}'..='\u{4DBF}'
-                | '\u{4E00}'..='\u{9FFF}'
-                | '\u{F900}'..='\u{FAFF}'
-                | '\u{3040}'..='\u{30FF}'
-                | '\u{AC00}'..='\u{D7AF}'
-        )
-    })
 }
 
 /// Turns a web-research failure into something the user can act on.
@@ -2180,6 +2243,64 @@ fn describe_web_failure(error: &str) -> String {
             "I couldn't complete the web research just now ({error}). Your notes answer above is \
              unaffected — you can try again."
         )
+    }
+}
+
+#[derive(Default)]
+struct BufferedGenerationProgress {
+    received_chars: usize,
+    reported_chars: usize,
+}
+
+impl BufferedGenerationProgress {
+    fn record(&mut self, delta: &str, on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send)) {
+        self.received_chars += delta.chars().count();
+        if self.received_chars > 0
+            && (self.reported_chars == 0 || self.received_chars - self.reported_chars >= 128)
+        {
+            self.reported_chars = self.received_chars;
+            on_event(AskStreamEvent::Note(&format!(
+                "Generating answer… {} characters received (validation pending).",
+                self.received_chars
+            )));
+        }
+    }
+}
+
+/// Both web flows validate only generated prose. Citation metadata (including
+/// original source titles and URLs) is never sent through a translation model.
+async fn emit_guarded_web_section(
+    llm: &dyn LlmProvider,
+    question: &str,
+    result: &crate::ai::web_research::WebResearchResult,
+    cancel: &Option<Arc<std::sync::atomic::AtomicBool>>,
+    on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
+) {
+    if cancel_requested(cancel) {
+        return;
+    }
+    let answer = render_web_section(result);
+    let answer = if crate::ai::language::expects_english(question, std::iter::empty()) {
+        if crate::ai::language::has_language_drift(&answer) {
+            on_event(AskStreamEvent::Note(
+                "Translating the response into English…",
+            ));
+        }
+        crate::ai::language::repair_english_answer(
+            llm,
+            &answer,
+            &crate::ai::traits::CompletionOptions {
+                max_tokens: Some(4096),
+                cancel: cancel.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+    } else {
+        answer
+    };
+    if !answer.is_empty() && !cancel_requested(cancel) {
+        on_event(AskStreamEvent::Delta(&answer));
     }
 }
 
@@ -3426,6 +3547,331 @@ mod tests {
         fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
             Box::pin(async move { Ok(true) })
         }
+    }
+
+    struct ChunkedLanguageLlm(QueueLlm);
+
+    impl LlmProvider for ChunkedLanguageLlm {
+        fn complete<'a>(
+            &'a self,
+            messages: &'a [crate::ai::traits::ChatMessage],
+            options: &'a crate::ai::traits::CompletionOptions,
+        ) -> BoxFuture<'a, Result<String>> {
+            self.0.complete(messages, options)
+        }
+
+        fn complete_stream<'a>(
+            &'a self,
+            messages: &'a [crate::ai::traits::ChatMessage],
+            options: &'a crate::ai::traits::CompletionOptions,
+            on_token: &'a mut (dyn FnMut(&str) + Send),
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                let answer = self.complete(messages, options).await?;
+                for ch in answer.chars() {
+                    on_token(&ch.to_string());
+                }
+                Ok(answer)
+            })
+        }
+
+        fn name(&self) -> &str {
+            "chunked-language-test"
+        }
+        fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    #[tokio::test]
+    async fn language_guard_repairs_refusals_in_complete_and_chunked_chat() -> Result<()> {
+        let db = crate::db::Database::in_memory()?;
+        let translated = "I'm sorry, but I can't help with that request.";
+        for raw in [
+            "抱歉，我无法帮助处理这个请求。",
+            "<think>internal text</think>抱歉，我无法帮助处理这个请求。",
+            "Here is an English introduction.\n\n抱歉，我无法帮助处理这个请求。",
+        ] {
+            for streaming in [false, true] {
+                let engine = test_engine_with_llm(Box::new(ChunkedLanguageLlm(QueueLlm::new([
+                    raw, translated,
+                ]))))?;
+                if streaming {
+                    let mut deltas = Vec::new();
+                    let outcome = engine
+                        .ask_stream(
+                            &db,
+                            "Can you answer this request?",
+                            None,
+                            &[],
+                            None,
+                            &mut |ev| {
+                                if let AskStreamEvent::Delta(delta) = ev {
+                                    deltas.push(delta.to_string());
+                                }
+                            },
+                        )
+                        .await?;
+                    assert_eq!(deltas, vec![translated]);
+                    assert!(outcome.sources.is_empty());
+                    assert!(outcome.trailing_message.is_none());
+                } else {
+                    let response = engine
+                        .ask(&db, "Can you answer this request?", None)
+                        .await?;
+                    assert_eq!(response.answer, translated);
+                    assert!(response.sources.is_empty());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn language_guard_preserves_requested_chinese_and_short_streams() -> Result<()> {
+        let db = crate::db::Database::in_memory()?;
+        for (question, raw) in [
+            (
+                "Please answer in Chinese.",
+                "抱歉，我无法帮助处理这个请求。",
+            ),
+            ("Please translate stand up into Chinese.", "起来"),
+            ("地下室是什么意思？", "你好"),
+            (
+                "What does this term mean?",
+                "The term is 地下室, meaning basement.",
+            ),
+        ] {
+            let engine = test_engine_with_llm(Box::new(ChunkedLanguageLlm(QueueLlm::new([raw]))))?;
+            let mut answer = String::new();
+            engine
+                .ask_stream(&db, question, None, &[], None, &mut |ev| {
+                    if let AskStreamEvent::Delta(delta) = ev {
+                        answer.push_str(delta);
+                    }
+                })
+                .await?;
+            assert_eq!(answer, raw);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn language_guard_one_shot_stream_keeps_a_failed_repair_as_a_refusal() -> Result<()> {
+        let db = crate::db::Database::in_memory()?;
+        let refusal = "抱歉，我无法帮助处理这个请求。";
+        let engine = test_engine_with_llm(Box::new(QueueLlm::new([refusal, refusal])))?;
+        let mut answer = String::new();
+        engine
+            .ask_stream(
+                &db,
+                "Can you answer this request?",
+                None,
+                &[],
+                None,
+                &mut |ev| {
+                    if let AskStreamEvent::Delta(delta) = ev {
+                        answer.push_str(delta);
+                    }
+                },
+            )
+            .await?;
+        assert_eq!(answer, crate::ai::language::REFUSAL_MESSAGE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn language_guard_follow_up_uses_user_language_not_an_erroneous_assistant_reply(
+    ) -> Result<()> {
+        let db = crate::db::Database::in_memory()?;
+        let refusal = "抱歉，我无法帮助处理这个请求。";
+        let translated = "I can't help with that request.";
+        let history = [
+            ChatTurn {
+                role: "user".into(),
+                content: "Can you answer this request?".into(),
+            },
+            ChatTurn {
+                role: "assistant".into(),
+                content: refusal.into(),
+            },
+        ];
+        let engine = test_engine_with_llm(Box::new(ChunkedLanguageLlm(QueueLlm::new([
+            refusal, translated,
+        ]))))?;
+        let request = engine
+            .build_ask_request(
+                &db,
+                engine.llm.as_ref().unwrap().as_ref(),
+                "Why?",
+                None,
+                &history,
+            )
+            .await?;
+        assert!(request
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Write the answer in English only"));
+        let mut answer = String::new();
+        engine
+            .ask_stream(&db, "Why?", None, &history, None, &mut |ev| {
+                if let AskStreamEvent::Delta(delta) = ev {
+                    answer.push_str(delta);
+                }
+            })
+            .await?;
+        assert_eq!(answer, translated);
+        Ok(())
+    }
+
+    #[test]
+    fn language_guard_notes_keep_cited_names_and_safety_refusals() {
+        for answer in [
+            "The author is 鲁迅 [1].",
+            "I can't help with that request.",
+            "抱歉，我无法帮助处理这个请求。",
+        ] {
+            assert_eq!(
+                sanitize_notes_research_answer("Can you explain this?", answer),
+                answer
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn language_guard_buffering_reports_actual_generation_progress() -> Result<()> {
+        let db = crate::db::Database::in_memory()?;
+        let raw = "Private response text, not a progress message. ".repeat(10);
+        let engine = test_engine_with_llm(Box::new(ChunkedLanguageLlm(QueueLlm {
+            responses: Mutex::new([raw.clone()].into_iter().collect()),
+        })))?;
+        let mut events = Vec::new();
+        engine
+            .ask_stream(
+                &db,
+                "Can you explain this response?",
+                None,
+                &[],
+                None,
+                &mut |event| match event {
+                    AskStreamEvent::Delta(delta) => events.push((true, delta.to_string())),
+                    AskStreamEvent::Note(note) => events.push((false, note.to_string())),
+                    _ => {}
+                },
+            )
+            .await?;
+        assert_eq!(events.last(), Some(&(true, raw.trim().to_string())));
+        let notes = &events[..events.len() - 1];
+        assert!(notes.len() >= 3);
+        for (i, (is_delta, note)) in notes.iter().enumerate() {
+            assert!(!is_delta, "unvalidated answer reached the stream");
+            assert!(
+                note.contains(&format!("{} characters received", 1 + i * 128)),
+                "{note}"
+            );
+            assert!(!note.contains("Private response text"));
+        }
+        let mut empty_events = Vec::new();
+        BufferedGenerationProgress::default().record("", &mut |event| {
+            if let AskStreamEvent::Note(note) = event {
+                empty_events.push(note.to_string());
+            }
+        });
+        assert!(empty_events.is_empty(), "no progress without received text");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn language_guard_repairs_both_web_summaries_without_changing_sources_or_quotes(
+    ) -> Result<()> {
+        use crate::ai::web_research::Citation;
+        let db = crate::db::Database::in_memory()?;
+        let source_title = "这是一个需要保留原名的很长中文文献标题";
+        let raw = "抱歉，我无法帮助处理这个请求。[1]\n\n> 这是一个应当保留原文的引用内容。";
+        let translated = "I can't help with that request.[1]\n\n> 这是一个应当保留原文的引用内容。";
+        let mut config = crate::research::ResearchConfig {
+            max_rounds: 1,
+            ..Default::default()
+        };
+        config.engines.retain(|engine| engine.id == "brave");
+        for engine in &mut config.engines {
+            engine.enabled = true;
+        }
+        let browser = CannedBrowser {
+            search_html: format!(
+                "<html><body><div class=\"snippet\" data-type=\"web\"><a href=\"https://a.example/x\"><div class=\"title\">{source_title}</div></a><div class=\"generic-snippet\"><div class=\"content\">A source response.</div></div></div></body></html>"
+            ),
+            pages: HashMap::from([(
+                "https://a.example/x".into(),
+                stub_page_html(source_title, "This source discusses the example response."),
+            )]),
+        };
+        for deep in [false, true] {
+            for english in [false, true] {
+                let question = if english {
+                    "Can you explain this response?"
+                } else {
+                    "Please answer in Chinese."
+                };
+                let engine = test_engine_with_llm(Box::new(QueueLlm::new([
+                    r#"{"queries":["response"]}"#,
+                    r#"{"picks":[0]}"#,
+                    r#"{"title_answer":"抱歉，我无法帮助处理这个请求。[1]\n\n> 这是一个应当保留原文的引用内容。","topics":[]}"#,
+                    translated,
+                ])))?;
+                let mut deltas = Vec::new();
+                let mut notes = Vec::new();
+                let mut on_event = |event: AskStreamEvent<'_>| match event {
+                    AskStreamEvent::Delta(delta) => deltas.push(delta.to_string()),
+                    AskStreamEvent::Note(note) => notes.push(note.to_string()),
+                    _ => {}
+                };
+                let outcome = if deep {
+                    engine
+                        .ask_stream_with_deep_research_using(
+                            &db,
+                            question,
+                            None,
+                            &config,
+                            &browser,
+                            None,
+                            &mut on_event,
+                        )
+                        .await?
+                } else {
+                    engine
+                        .ask_stream_with_web_using(
+                            &db,
+                            question,
+                            None,
+                            &browser,
+                            None,
+                            &mut on_event,
+                        )
+                        .await?
+                };
+                assert_eq!(
+                    deltas.last().map(String::as_str),
+                    Some(if english { translated } else { raw }),
+                    "deep={deep}"
+                );
+                if english {
+                    assert!(deltas.iter().all(|delta| !delta.contains("抱歉")));
+                    assert!(notes.iter().any(|note| note.contains("Translating")));
+                }
+                assert_eq!(
+                    outcome.web_citations,
+                    vec![Citation {
+                        number: 1,
+                        title: source_title.into(),
+                        url: "https://a.example/x".into(),
+                    }]
+                );
+            }
+        }
+        Ok(())
     }
 
     /// A browser that serves canned Brave results HTML for any `search.brave.com`

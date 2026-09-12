@@ -58,11 +58,16 @@ const run = (cmd, args, opts) =>
 
   try {
     await waitForServer();
-    const code = await run("node", [path.join(__dirname, "allPages.ui.cjs")], {
-      cwd: uiDir,
-      env: { ...process.env, UI_TEST_URL: URL },
-    });
-    process.exitCode = code;
+    for (const testFile of ["allPages.ui.cjs", "chat.ui.cjs", "graphFlight.ui.cjs", "paste.ui.cjs"]) {
+      const code = await run("node", [path.join(__dirname, testFile)], {
+        cwd: uiDir,
+        env: { ...process.env, UI_TEST_URL: URL },
+      });
+      if (code !== 0) {
+        process.exitCode = code;
+        break;
+      }
+    }
   } catch (e) {
     console.error(e.message ?? e);
     process.exitCode = 1;

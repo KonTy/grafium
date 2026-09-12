@@ -4,6 +4,8 @@
 /// color, so a densely-linked group of pages reads as one color family
 /// instead of every node/edge being a single uniform accent color.
 
+import { fnv1a, tagHashKey } from "./tagColor";
+
 export interface GraphEdgeLike {
   source: string;
   target: string;
@@ -91,4 +93,11 @@ export function clusterPalette(isLightTheme: boolean): string[] {
 export function clusterColor(clusterIndex: number, isLightTheme: boolean): string {
   const palette = clusterPalette(isLightTheme);
   return palette[clusterIndex % palette.length];
+}
+
+/** Namespace families share a hue; individual topics get stable shade variations. */
+export function planetColor(title: string): string {
+  const hue = fnv1a(tagHashKey(title)) % 360;
+  const shade = fnv1a(title.trim().toLowerCase());
+  return `hsl(${hue}, ${64 + shade % 13}%, ${54 + (shade >>> 8) % 13}%)`;
 }

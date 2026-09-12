@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
-  import { Vector3 } from "three";
+  import { BufferGeometry, Float32BufferAttribute, Mesh, MeshBasicMaterial, Points, PointsMaterial, RingGeometry, DoubleSide, Vector3 } from "three";
+  import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
   import { getGraphData, type GraphData } from "../lib/api";
   import { fuzzyScore } from "../lib/fuzzy";
-  import { clusterColor, computeGraphClusters } from "../lib/graphClusters";
+  import { clusterColor, computeGraphClusters, planetColor } from "../lib/graphClusters";
+  import { buildFlightNeighbors, createFlightLeg, nextFlightTopic, sampleFlightLeg, sampleFlightOrbit, type FlightLeg } from "../lib/graphFlight";
+  import { buildPlanetHierarchy, layoutPlanetSystems, planetHasRings, type PlanetLayout } from "../lib/planetSystems";
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -21,6 +24,9 @@
     x?: number;
     y?: number;
     z?: number;
+    fx?: number;
+    fy?: number;
+    fz?: number;
   }
   interface Link3D {
     source: string;
@@ -34,6 +40,7 @@
     x: number;
     y: number;
     hovered: boolean;
+    destination: boolean;
   }
   interface SearchGlow {
     id: string;
@@ -84,6 +91,31 @@
   let latestNodes: Node3D[] = [];
   let searchMatchIds = new Set<string>();
   let rankedSearchMatches: Node3D[] = [];
+  let loadVersion = 0;
+  let flying = $state(false);
+  let flightAvailable = $state(false);
+  let flightTopic = $state<Node3D | null>(null);
+  let flightFromTitle = $state("");
+  let flightPhase = $state<"travel" | "orbit">("travel");
+  let flightStops = $state(0);
+  let flightNeighbors = new Map<string, string[]>();
+  let flightVisits = new Map<string, number>();
+  let flightPrevious: string | null = null;
+  let flightLeg: FlightLeg | null = null;
+  let flightElapsed = 0;
+  let flightLastFrame: number | null = null;
+  let starfield: Points<BufferGeometry, PointsMaterial> | null = null;
+  let planetRing: Mesh<RingGeometry, MeshBasicMaterial> | null = null;
+  let savedCooldownTicks = 300;
+  let savedWarmupTicks = 120;
+  let restoreSimulationPending = false;
+  let savedDamping = true;
+  let normalGraphData: { nodes: Node3D[]; links: Link3D[] } | null = null;
+  let flightLayout = $state.raw<PlanetLayout | null>(null);
+  let flightLinks: Link3D[] = [];
+  let flightFamilyLabel = $state("");
+  let flightRinged = $state(false);
+  const FLIGHT_ORBIT_MS = 2600;
 
   const MIN_NODE_VAL = 8;
   const MAX_NODE_VAL = 64;
@@ -106,6 +138,7 @@
   let isolatedIds = new Set<string>();
 
   function nodeColorFor(n: Node3D): string {
+    if (flying) return planetColor(n.name);
     if (hasActiveSearch()) {
       if (searchMatchIds.has(n.id)) return themeColor("--accent-green", "#9ece6a");
       return themeColor("--text-muted", isLightTheme ? "#b8b8b8" : "#4d5360");
@@ -118,9 +151,15 @@
     return Math.sqrt(Math.max(0, n.degree) / Math.max(1, maxDegree));
   }
 
+  function baseNodeValFor(n: Node3D): number {
+    return MIN_NODE_VAL + degreeRatio(n) * (MAX_NODE_VAL - MIN_NODE_VAL);
+  }
+
   function nodeValFor(n: Node3D): number {
-    const base = MIN_NODE_VAL + degreeRatio(n) * (MAX_NODE_VAL - MIN_NODE_VAL);
-    return searchMatchIds.has(n.id) ? base * 2.2 + 24 : base;
+    const radius = flying ? flightLayout?.radii.get(n.id) : undefined;
+    if (radius !== undefined) return (radius / 5) ** 3;
+    const base = baseNodeValFor(n);
+    return !flying && searchMatchIds.has(n.id) ? base * 2.2 + 24 : base;
   }
 
   function linkWidthFor(l: Link3D): number {
@@ -167,7 +206,7 @@
       window.clearTimeout(searchFlyTimer);
       searchFlyTimer = undefined;
     }
-    if (!hasActiveSearch() || rankedSearchMatches.length === 0) return;
+    if (flying || !hasActiveSearch() || rankedSearchMatches.length === 0) return;
     searchFlyTimer = window.setTimeout(() => {
       searchFlyTimer = undefined;
       flyToSearchMatches();
@@ -175,7 +214,7 @@
   }
 
   function flyToSearchMatches(): void {
-    if (!graph || rankedSearchMatches.length === 0) return;
+    if (!graph || flying || rankedSearchMatches.length === 0) return;
 
     const targets = rankedSearchMatches.filter(hasGraphPosition).slice(0, 8);
     if (targets.length === 0) return;
@@ -233,6 +272,7 @@
 
   function currentLabelBudget(): number {
     if (!graph) return 0;
+    if (flying) return 14;
     const controls = graph.controls() as { target: Vector3 };
     const distance = graph.camera().position.distanceTo(controls.target);
     if (mode === "local") return 120;
@@ -274,8 +314,15 @@
       if (screen.x < -MAX_LABEL_WIDTH || screen.x > width + MAX_LABEL_WIDTH) continue;
       if (screen.y < -40 || screen.y > height + 40) continue;
 
-      const text = labelTextFor(node);
-      const searchMatch = searchMatchIds.has(node.id);
+      const destination = flying && node.id === flightTopic?.id;
+      const satellite = flying && flightLayout?.parentById.has(node.id);
+      const text = destination ? node.name : satellite ? node.name.split("/").at(-1)! : labelTextFor(node);
+      const searchMatch = !flying && searchMatchIds.has(node.id);
+      if (destination) {
+        const abovePlanet = new Vector3(node.x, node.y, node.z)
+          .addScaledVector(graph.camera().up, planetRadius(node) * 1.3);
+        screen.y = graph.graph2ScreenCoords(abovePlanet.x, abovePlanet.y, abovePlanet.z).y;
+      }
       if (searchMatch) {
         glows.push({
           id: node.id,
@@ -289,6 +336,8 @@
       const centerScore = 1 - Math.min(1, centerDistance / Math.max(1, maxCenterDistance));
       const hovered = node.id === hoveredId;
       const score =
+        (destination ? 3000 : 0) +
+        (flying && flightLayout?.parentById.get(node.id) === flightTopic?.id ? 800 : 0) +
         (hovered ? 1000 : 0) +
         (searchMatch ? 650 : 0) +
         degreeRatio(node) * 110 +
@@ -301,6 +350,7 @@
         x: screen.x,
         y: screen.y,
         hovered,
+        destination,
         score,
         width: estimateLabelWidth(text),
       });
@@ -308,7 +358,7 @@
 
     visibleSearchGlows = hasActiveSearch() ? glows.slice(0, 120) : [];
 
-    if (!showSmartLabels) {
+    if (!showSmartLabels && !flying) {
       visibleLabels = [];
       return;
     }
@@ -319,6 +369,7 @@
     const labels: ScreenLabel[] = [];
 
     for (const candidate of candidates.slice(0, MAX_LABEL_CANDIDATES)) {
+      if (!showSmartLabels && !candidate.destination) continue;
       if (labels.length >= budget && !candidate.hovered) break;
       const rect = labelRect(candidate);
       if (!candidate.hovered && acceptedRects.some((accepted) => rectsOverlap(rect, accepted))) {
@@ -331,6 +382,7 @@
         x: candidate.x,
         y: candidate.y,
         hovered: candidate.hovered,
+        destination: candidate.destination,
       });
       if (labels.length >= budget && labels.some((label) => label.hovered || !hoveredId)) break;
     }
@@ -340,10 +392,237 @@
 
   function startLabelLoop(): void {
     const tick = (timestamp: number) => {
+      updateFlight(timestamp);
       updateScreenLabels(timestamp);
       labelFrame = window.requestAnimationFrame(tick);
     };
     labelFrame = window.requestAnimationFrame(tick);
+  }
+
+  function planetRadius(node: Node3D): number {
+    return Math.cbrt(nodeValFor(node)) * 5;
+  }
+
+  function clearCameraTimers(): void {
+    pendingFit = false;
+    if (fitTimer !== undefined) window.clearTimeout(fitTimer);
+    if (searchFlyTimer !== undefined) window.clearTimeout(searchFlyTimer);
+    fitTimer = undefined;
+    searchFlyTimer = undefined;
+  }
+
+  function addFlightStars(): void {
+    if (!graph) return;
+    const radius = Math.max(1800, ...latestNodes.filter(hasGraphPosition)
+      .map((node) => Math.hypot(node.x, node.y, node.z) * 2 + 600));
+    const points: number[] = [];
+    for (let i = 0; i < 1800; i++) {
+      const direction = new Vector3().randomDirection().multiplyScalar(radius * (1 + Math.random()));
+      points.push(direction.x, direction.y, direction.z);
+    }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(points, 3));
+    starfield = new Points(geometry, new PointsMaterial({
+      color: "#cbd5ff", size: 5, transparent: true, opacity: 0.85, depthWrite: false,
+    }));
+    graph.scene().add(starfield);
+  }
+
+  function clearPlanetRing(): void {
+    if (!planetRing) return;
+    planetRing.removeFromParent();
+    planetRing.geometry.dispose();
+    planetRing.material.dispose();
+    planetRing = null;
+  }
+
+  function restoreSimulationSettings(): void {
+    if (!restoreSimulationPending || !graph) return;
+    restoreSimulationPending = false;
+    graph.warmupTicks(savedWarmupTicks).cooldownTicks(savedCooldownTicks);
+  }
+
+  function beginFlightTo(node: PositionedNode3D): void {
+    if (!graph) return;
+    const controls = graph.controls() as OrbitControls;
+    flightFromTitle = flightTopic?.name ?? "";
+    flightPrevious = flightTopic?.id ?? null;
+    flightTopic = node;
+    flightVisits.set(node.id, (flightVisits.get(node.id) ?? 0) + 1);
+    flightStops++;
+    flightPhase = "travel";
+    flightElapsed = 0;
+    const parentId = flightLayout?.parentById.get(node.id);
+    const parent = latestNodes.find((candidate) => candidate.id === parentId);
+    const childCount = flightLayout?.childrenById.get(node.id)?.length ?? 0;
+    flightFamilyLabel = parent ? `Satellite of ${parent.name}`
+      : childCount ? `${childCount} child topic${childCount === 1 ? "" : "s"} in this planet system`
+      : "Topic planet";
+    const position = new Vector3(node.x, node.y, node.z);
+    const extent = flightLayout?.extents.get(node.id) ?? planetRadius(node);
+    flightLeg = createFlightLeg(
+      graph.camera().position, controls.target,
+      position, planetRadius(node),
+      {
+        distance: Math.max(40 + planetRadius(node) * 5, extent * 2.6),
+        approach: parent && hasGraphPosition(parent)
+          ? position.clone().sub(new Vector3(parent.x, parent.y, parent.z))
+          : undefined,
+      },
+    );
+    clearPlanetRing();
+    flightRinged = planetHasRings(node.name, !!parentId);
+    if (flightRinged) {
+      planetRing = new Mesh(
+        new RingGeometry(planetRadius(node) * 1.35, planetRadius(node) * 1.65, 64),
+        new MeshBasicMaterial({ color: planetColor(node.name), side: DoubleSide, transparent: true, opacity: 0.45, depthWrite: false }),
+      );
+      planetRing.position.copy(position);
+      planetRing.lookAt(graph.camera().position);
+      planetRing.rotateX(1.1);
+      planetRing.rotateZ(0.3);
+      graph.scene().add(planetRing);
+    }
+    refreshColors();
+  }
+
+  function toggleFlight(): void {
+    if (flying) {
+      stopFlight();
+      return;
+    }
+    if (!graph || loading) return;
+    const connected = latestNodes.filter((node): node is PositionedNode3D =>
+      hasGraphPosition(node) && (flightNeighbors.get(node.id)?.length ?? 0) > 0);
+    const matchedStart = rankedSearchMatches.find((match) => connected.some((node) => node.id === match.id));
+    const first = hasActiveSearch()
+      ? connected.find((node) => node.id === matchedStart?.id)
+      : connected.find((node) => node.id === currentPageId)
+        ?? connected.sort((a, b) => b.degree - a.degree)[0];
+    if (!first) {
+      errorMsg = hasActiveSearch()
+        ? "No matching topic has a visible link. Clear the search or choose another starting topic."
+        : "Space flight needs at least two linked topics in the visible graph.";
+      return;
+    }
+    errorMsg = null;
+    clearCameraTimers();
+    restoreSimulationSettings();
+    const controls = graph.controls() as OrbitControls;
+    // Finish any library-owned search/reset tween at the current view, then
+    // let our frame loop own both camera position and its orbit-control target.
+    const position = graph.camera().position.clone();
+    const target = controls.target.clone();
+    graph.cameraPosition(position, target, 0);
+    savedDamping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enabled = false;
+    savedCooldownTicks = graph.cooldownTicks();
+    savedWarmupTicks = graph.warmupTicks();
+    normalGraphData = { nodes: latestNodes, links: graph.graphData().links };
+    flightLayout = layoutPlanetSystems(latestNodes.filter(hasGraphPosition).map((node) => ({
+      id: node.id, name: node.name, x: node.x, y: node.y, z: node.z, radius: Math.cbrt(baseNodeValFor(node)) * 5,
+    })));
+    const flightNodes = latestNodes.filter(hasGraphPosition).map((node) => {
+      const position = flightLayout!.positions.get(node.id)!;
+      return {
+        ...node, x: position.x, y: position.y, z: position.z,
+        fx: position.x, fy: position.y, fz: position.z,
+      };
+    });
+    latestNodes = flightNodes;
+    graph.warmupTicks(0).cooldownTicks(0).enableNodeDrag(false).enablePointerInteraction(false);
+    flying = true;
+    hoverNode = null;
+    flightStops = 0;
+    flightVisits = new Map();
+    flightLastFrame = null;
+    graph.camera().up.set(0, 1, 0);
+    graph.backgroundColor("#050711").nodeRelSize(5).nodeResolution(32)
+      .nodeVal((node) => nodeValFor(node)).linkOpacity(0.15)
+      .graphData({ nodes: flightNodes, links: flightLinks.map((link) => ({ ...link })) });
+    addFlightStars();
+    beginFlightTo(flightNodes.find((node) => node.id === first.id)!);
+  }
+
+  function updateFlight(timestamp: number): void {
+    if (!flying || !graph || !flightLeg) return;
+    // Do not skip whole destinations after a suspended/background frame.
+    flightElapsed += flightLastFrame === null ? 0 : Math.min(100, timestamp - flightLastFrame);
+    flightLastFrame = timestamp;
+    const duration = flightPhase === "travel" ? flightLeg.durationMs : FLIGHT_ORBIT_MS;
+    const fraction = Math.min(1, flightElapsed / duration);
+    const pose = flightPhase === "travel"
+      ? sampleFlightLeg(flightLeg, fraction)
+      : sampleFlightOrbit(flightLeg, fraction);
+    (graph.controls() as OrbitControls).target.copy(pose.lookAt);
+    graph.cameraPosition(pose.position, pose.lookAt, 0);
+    if (fraction < 1) return;
+    flightElapsed = 0;
+    if (flightPhase === "travel") {
+      flightPhase = "orbit";
+      return;
+    }
+    const nextId = nextFlightTopic(flightNeighbors, flightTopic!.id, flightPrevious, flightVisits);
+    const next = latestNodes.find((node) => node.id === nextId);
+    if (!next || !hasGraphPosition(next)) {
+      stopFlight();
+      errorMsg = "No positioned, related topic is available to continue this flight.";
+      return;
+    }
+    beginFlightTo(next);
+  }
+
+  function stopFlight(restoreGraph = true): void {
+    if (!flying) return;
+    if (restoreGraph && graph && normalGraphData) {
+      const originalTopic = normalGraphData.nodes.find((node) => node.id === flightTopic?.id);
+      if (originalTopic && flightTopic && hasGraphPosition(originalTopic) && hasGraphPosition(flightTopic)) {
+        // Keep the camera beside the same topic while restoring the normal layout.
+        const offset = new Vector3(originalTopic.x - flightTopic.x, originalTopic.y - flightTopic.y, originalTopic.z - flightTopic.z);
+        graph.camera().position.add(offset);
+        (graph.controls() as OrbitControls).target.add(offset);
+      }
+      latestNodes = normalGraphData.nodes;
+      graph.warmupTicks(0).cooldownTicks(0).graphData(normalGraphData);
+      restoreSimulationPending = true;
+    }
+    normalGraphData = null;
+    flying = false;
+    flightLayout = null;
+    flightLeg = null;
+    flightTopic = null;
+    flightLastFrame = null;
+    clearPlanetRing();
+    if (starfield) {
+      starfield.removeFromParent();
+      starfield.geometry.dispose();
+      starfield.material.dispose();
+      starfield = null;
+    }
+    if (restoreGraph && graph) {
+      const controls = graph.controls() as OrbitControls;
+      controls.enabled = true;
+      controls.update();
+      controls.enableDamping = savedDamping;
+      graph.enableNodeDrag(true).enablePointerInteraction(true)
+        .backgroundColor(themeColor("--bg-primary", "#16161e"))
+        .nodeRelSize(2).nodeResolution(14).nodeVal((node) => nodeValFor(node)).linkOpacity(0.25);
+      refreshColors();
+      updateScreenLabels(performance.now(), true);
+    }
+  }
+
+  function onFlightKeydown(event: KeyboardEvent): void {
+    if (flying && event.key === "Escape") {
+      event.preventDefault();
+      stopFlight();
+    }
+  }
+
+  function onVisibilityChange(): void {
+    if (document.hidden) stopFlight();
   }
 
   function isDatePageTitle(title: string): boolean {
@@ -391,9 +670,14 @@
   }
 
   function linkColorFor(l: Link3D): string {
-    const sourceId = linkEndpointId(l.source as unknown as string | Node3D);
+    const sourceId = linkEndpointId(l.source);
+    const targetId = linkEndpointId(l.target);
+    if (flying && (
+      (sourceId === flightPrevious && targetId === flightTopic?.id) ||
+      (targetId === flightPrevious && sourceId === flightTopic?.id)
+    )) return "#e0f2fe";
     if (isolatedIds.has(sourceId)) return themeColor("--text-secondary", isLightTheme ? "#666" : "#aaa");
-    return clusterColor(clusterIndexById.get(sourceId) ?? 0, isLightTheme);
+    return clusterColor(clusterIndexById.get(sourceId) ?? 0, flying ? false : isLightTheme);
   }
 
   function detectIsLightTheme(): boolean {
@@ -417,13 +701,26 @@
 
   async function loadData() {
     if (!graph) return;
+    const version = ++loadVersion;
+    stopFlight();
+    clearCameraTimers();
     loading = true;
     errorMsg = null;
     try {
       const focus = mode === "local" ? currentPageId || undefined : undefined;
       const data: GraphData = await getGraphData(nodeLimit, focus);
+      if (version !== loadVersion || !graph) return;
       const { nodes, links } = filteredGraphData(data);
       latestNodes = nodes;
+      const hierarchy = buildPlanetHierarchy(nodes);
+      flightLinks = links.map((link) => ({ ...link }));
+      for (const [child, parent] of hierarchy.parentById) {
+        if (!flightLinks.some((link) =>
+          (link.source === child && link.target === parent) || (link.source === parent && link.target === child)
+        )) flightLinks.push({ source: parent, target: child, weight: 1 });
+      }
+      flightNeighbors = buildFlightNeighbors(nodes.map((node) => node.id), flightLinks);
+      flightAvailable = [...flightNeighbors.values()].some((related) => related.length > 0);
       updateSearchMatches();
       maxDegree = Math.max(1, ...nodes.map((n) => n.degree));
       const clusters = computeGraphClusters(
@@ -435,6 +732,7 @@
       stats = { nodes: nodes.length, edges: links.length };
       graph.nodeVal((n) => nodeValFor(n)).linkWidth((l) => linkWidthFor(l));
       graph.graphData({ nodes, links });
+      restoreSimulationPending = false;
       configureForces();
       refreshColors();
       updateScreenLabels(performance.now(), true);
@@ -444,6 +742,8 @@
         scheduleFitToGraph();
       }
     } catch (e) {
+      if (version !== loadVersion || !graph) return;
+      flightAvailable = false;
       latestNodes = [];
       searchMatchIds = new Set();
       rankedSearchMatches = [];
@@ -452,12 +752,12 @@
       visibleSearchGlows = [];
       errorMsg = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (version === loadVersion) loading = false;
     }
   }
 
   function fitToGraph(durationMs = 650): void {
-    if (!graph || stats.nodes === 0) return;
+    if (!graph || flying || stats.nodes === 0) return;
     graph.camera().up.set(0, 1, 0);
     const distance = Math.max(MIN_CAMERA_DISTANCE, 440 + Math.sqrt(stats.nodes) * 34);
     graph.cameraPosition({ x: 0, y: 0, z: distance }, { x: 0, y: 0, z: 0 }, durationMs);
@@ -513,7 +813,7 @@
   }
 
   function handlePointerDown(event: PointerEvent): void {
-    if (!event.ctrlKey || event.button !== 0 || !graph || !wrapperEl) return;
+    if (flying || !event.ctrlKey || event.button !== 0 || !graph || !wrapperEl) return;
     isRolling = true;
     rollLastX = event.clientX;
     setOrbitControlsEnabled(false);
@@ -564,13 +864,14 @@
       .linkWidth((l) => linkWidthFor(l))
       .linkDirectionalParticles(0)
       .showNavInfo(false)
-      .onNodeClick((n) => onNavigate(n.name))
+      .onNodeClick((n) => { if (!flying) onNavigate(n.name); })
       .onNodeHover((n) => {
         hoverNode = n ?? null;
         if (wrapperEl) wrapperEl.style.cursor = n ? "pointer" : "grab";
         updateScreenLabels(performance.now(), true);
       })
       .onEngineStop(() => {
+        if (!flying) restoreSimulationSettings();
         if (!pendingFit) return;
         pendingFit = false;
         if (fitTimer !== undefined) {
@@ -601,7 +902,7 @@
       const nextIsLight = detectIsLightTheme();
       if (nextIsLight === isLightTheme) return;
       isLightTheme = nextIsLight;
-      graph?.backgroundColor(themeColor("--bg-primary", "#16161e"));
+      if (!flying) graph?.backgroundColor(themeColor("--bg-primary", "#16161e"));
       refreshColors();
     });
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
@@ -609,14 +910,20 @@
     wrapperEl.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", endRoll);
+    window.addEventListener("keydown", onFlightKeydown);
+    document.addEventListener("visibilitychange", onVisibilityChange);
   });
 
   onDestroy(() => {
+    loadVersion++;
+    stopFlight(false);
     resizeObserver?.disconnect();
     themeObserver?.disconnect();
     wrapperEl?.removeEventListener("pointerdown", handlePointerDown);
     window.removeEventListener("pointermove", handlePointerMove);
     window.removeEventListener("pointerup", endRoll);
+    window.removeEventListener("keydown", onFlightKeydown);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
     if (fitTimer !== undefined) {
       window.clearTimeout(fitTimer);
       fitTimer = undefined;
@@ -634,6 +941,8 @@
   });
 
   function resetView() {
+    stopFlight();
+    clearCameraTimers();
     fitToGraph(600);
   }
 
@@ -643,27 +952,39 @@
     nodeLimit;
     currentPageId;
     hideDatePages;
-    void loadData();
+    untrack(() => void loadData());
   });
 
   $effect(() => {
     searchText;
-    updateSearchMatches();
-    graph?.nodeVal((n) => nodeValFor(n));
-    refreshColors();
-    updateScreenLabels(performance.now(), true);
-    scheduleFlyToSearchMatches();
+    untrack(() => {
+      updateSearchMatches();
+      graph?.nodeVal((n) => nodeValFor(n));
+      refreshColors();
+      updateScreenLabels(performance.now(), true);
+      scheduleFlyToSearchMatches();
+    });
   });
 
   $effect(() => {
     showSmartLabels;
-    updateScreenLabels(performance.now(), true);
+    untrack(() => updateScreenLabels(performance.now(), true));
   });
 </script>
 
-<div class="graph-view-3d">
+<div class="graph-view-3d" class:flying data-satellites={flying ? flightLayout?.parentById.size ?? 0 : 0}>
   <div class="graph-canvas-wrap" bind:this={wrapperEl}>
     <div class="graph-canvas" bind:this={graphMountEl}></div>
+    {#if flying && flightTopic}
+      <div class="flight-hud" role="status" data-stop={flightStops} data-topic={flightTopic.id}
+        data-ringed={flightRinged} data-satellite={flightLayout?.parentById.has(flightTopic.id) ?? false}
+        style={`--planet-color: ${planetColor(flightTopic.name)};`}>
+        <span class="flight-eyebrow">SPACE FLIGHT · {flightPhase === "travel" ? "Approaching" : "Orbiting"}</span>
+        <strong>{flightTopic.name}</strong>
+        <span>{flightFamilyLabel}</span>
+        <span>{flightFromTitle ? `From ${flightFromTitle}` : "Beginning your journey"}</span>
+      </div>
+    {/if}
 
     {#if loading}
       <div class="graph-overlay">Building graph…</div>
@@ -703,19 +1024,33 @@
           <span
             class="graph-label"
             class:hovered={label.hovered}
-            style={`left: ${label.x}px; top: ${label.y}px;`}
+            class:destination={label.destination}
+            style={`left: ${label.x}px; top: ${label.y}px; --planet-color: ${planetColor(label.text)};`}
           >{label.text}</span>
         {/each}
       </div>
     {/if}
 
     <div class="zoom-controls">
-      <button title="Reset view" onclick={resetView}>⤢</button>
+      <button title="Reset view" aria-label="Reset view" onclick={resetView}>⤢</button>
     </div>
   </div>
 
   <aside class="graph-controls">
     <h2>Graph (3D)</h2>
+    <button
+      class="flight-toggle"
+      class:active={flying}
+      aria-pressed={flying}
+      disabled={!flying && (loading || !flightAvailable)}
+      onclick={toggleFlight}
+    >{flying ? "Stop flight" : "Space flight"}</button>
+    <p class="hint">
+      {flying
+        ? "Autopilot follows links and child topics. Press Stop flight or Escape to take control."
+        : "Fly between topic-planets along their links. Search first to choose a starting topic."}
+      {#if !loading && !flightAvailable}At least two linked, visible topics are needed.{/if}
+    </p>
 
     <div class="mode-toggle">
       <button class:active={mode === "global"} onclick={() => (mode = "global")}>Global</button>
@@ -733,7 +1068,7 @@
 
     <label class="ctrl">
       <span>Search</span>
-      <input type="text" placeholder="Fly to nodes…" bind:value={searchText} />
+      <input type="text" data-local-search placeholder="Fly to nodes…" bind:value={searchText} disabled={flying} />
     </label>
 
     {#if searchText.trim()}
@@ -764,11 +1099,87 @@
       Click a node to open it. Labels stay in screen space; hover any node for the exact title.
       Drag to orbit, scroll to zoom, right-drag to pan, Ctrl+drag to roll.
     </p>
-    <p class="hint">Linked clusters share a color; unlinked pages are shown in a neutral gray.</p>
+    <p class="hint">{flying
+      ? "Child pages are smaller, ringless satellites of their nearest visible parent. Some main planets have rings. Namespace families share colors."
+      : "Linked clusters share a color; unlinked pages are shown in a neutral gray."}</p>
   </aside>
 </div>
 
 <style>
+  .flight-toggle {
+    padding: 10px 12px;
+    border: 1px solid var(--accent, #6ea8fe);
+    border-radius: 6px;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent, #6ea8fe) 15%, var(--bg-primary));
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .flight-toggle.active {
+    color: #e0f2fe;
+    background: #15344e;
+    border-color: #7dd3fc;
+  }
+
+  .flight-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .flight-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .flight-hud {
+    position: absolute;
+    top: 64px;
+    left: 24px;
+    max-width: min(460px, calc(100% - 48px));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 18px;
+    border-left: 2px solid var(--planet-color, #7dd3fc);
+    border-radius: 0 8px 8px 0;
+    color: #cbd5e1;
+    background: #050711cc;
+    pointer-events: none;
+    z-index: 4;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .flight-hud strong {
+    font-size: 22px;
+    font-weight: 500;
+    color: #f0f9ff;
+  }
+
+  .flight-eyebrow {
+    color: var(--planet-color, #7dd3fc);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+  }
+
+  .flying .graph-label {
+    background: #050711cc;
+    color: #cbd5e1;
+    border-color: #334155;
+  }
+
+  .graph-label.destination {
+    max-width: 320px;
+    border-color: var(--planet-color, #7dd3fc);
+    color: #f0f9ff;
+    font-size: 15px;
+    white-space: normal;
+    text-align: center;
+    overflow-wrap: anywhere;
+    border-radius: 6px;
+  }
+
   .graph-view-3d {
     display: flex;
     height: 100%;

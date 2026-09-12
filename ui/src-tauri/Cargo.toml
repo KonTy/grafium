@@ -5,7 +5,7 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
-tauri = { version = "2", features = ["custom-protocol", "devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -57,6 +57,11 @@ jni = "0.21"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+# Tauri dev disables this feature to load Vite instead of an old embedded dist.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [lib]
 name = "grafium_lib"

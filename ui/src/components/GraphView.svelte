@@ -721,7 +721,7 @@
 
     <label class="ctrl">
       <span>Search</span>
-      <input type="text" placeholder="Filter nodes…" bind:value={searchText} />
+      <input type="text" data-local-search placeholder="Filter nodes…" bind:value={searchText} />
     </label>
 
     {#if searchText.trim()}

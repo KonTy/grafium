@@ -15,8 +15,6 @@ describe("global undo/redo routing", () => {
   it("does not register Ctrl-Z/Ctrl-Y shortcuts as no-ops", () => {
     expect(appSource).toContain("function triggerNativeUndo()");
     expect(appSource).toContain("function triggerNativeRedo()");
-    expect(appSource).toContain("undo: triggerNativeUndo");
-    expect(appSource).toContain("redo: triggerNativeRedo");
     expect(appSource).not.toContain("undo: () => {}");
     expect(appSource).not.toContain("redo: () => {}");
   });

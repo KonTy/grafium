@@ -50,6 +50,40 @@ const wrappers: Array<[string, (h: Handlers) => Promise<void>]> = [
   ["aiAskStream", (h) => aiAskStream("q", h)],
 ];
 
+describe("explicit chat scope", () => {
+  beforeEach(() => {
+    listenMock.mockResolvedValue(vi.fn());
+    invokeMock.mockResolvedValue(undefined);
+  });
+
+  it("defaults ordinary chat to Local graph even for web-worded questions", async () => {
+    await aiAskStream("Search the web for test results", handlers());
+    expect(invokeMock).toHaveBeenCalledWith("ai_ask_stream",
+      expect.objectContaining({ scope: "local", history: [] }));
+  });
+
+  it("passes Internet independently of the research toggle", async () => {
+    const history = [{ role: "user" as const, content: "Tell me about test results" }];
+    await aiAskStream("What is new?", handlers(), undefined, history, "internet");
+    expect(invokeMock).toHaveBeenCalledWith("ai_ask_stream",
+      expect.objectContaining({ scope: "internet", history }));
+  });
+
+  it("explicitly opts deep research into Internet", async () => {
+    await researchDeep("test results", handlers());
+    expect(invokeMock).toHaveBeenCalledWith("research_deep",
+      expect.objectContaining({ scope: "internet" }));
+  });
+
+  it("rejects deep research in Local graph before attaching listeners", async () => {
+    const h = handlers();
+    await researchDeep("test results", h, undefined, undefined, undefined, "local");
+    expect(h.onError).toHaveBeenCalledWith("Error: Select Internet scope to use Research.");
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+});
+
 for (const [name, run] of wrappers) {
   describe(`${name} setup safety`, () => {
     it("reports a real invoke rejection through onError and removes both listeners", async () => {

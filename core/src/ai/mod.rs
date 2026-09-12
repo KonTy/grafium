@@ -23,14 +23,18 @@ pub(crate) const ANSWER_LANGUAGE_RULE: &str =
     "Always write your answer in the language the user asked their question in, even when the \
 notes or sources you are drawing on are in a different language. Quote foreign-language material \
 verbatim where the exact wording matters, but translate or paraphrase it for the user instead of \
-switching languages yourself.";
+switching languages yourself. An explicitly requested output language takes precedence. For a \
+language-neutral follow-up, keep the conversation's requested language. These rules also apply \
+to refusals and safety explanations; do not change a refusal into compliance.";
 
 const ENGLISH_QUESTION_LANGUAGE_RULE: &str =
     "The current user question is in English. Write the answer in English only. Do not translate \
-the answer into Chinese or any other language unless the user explicitly asks for translation.";
+the answer into Chinese or any other language unless the user explicitly requests that language. \
+Preserve requested quotations, translations, code and proper names. Refusals and safety explanations \
+must also be in English; this language instruction never requires answering a request you would refuse.";
 
 pub(crate) fn answer_language_rule_for_question(question: &str) -> &'static str {
-    if looks_like_english_question(question) {
+    if language::expects_english(question, std::iter::empty()) {
         ENGLISH_QUESTION_LANGUAGE_RULE
     } else {
         ANSWER_LANGUAGE_RULE
@@ -38,11 +42,44 @@ pub(crate) fn answer_language_rule_for_question(question: &str) -> &'static str 
 }
 
 pub(crate) fn question_with_answer_language_rule(question: &str) -> String {
-    let rule = answer_language_rule_for_question(question);
+    question_with_answer_language_rule_in_history(question, std::iter::empty())
+}
+
+pub(crate) fn question_with_answer_language_rule_in_history<'a>(
+    question: &str,
+    history: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let rule = if language::expects_english(question, history) {
+        ENGLISH_QUESTION_LANGUAGE_RULE
+    } else {
+        ANSWER_LANGUAGE_RULE
+    };
     format!("{question}\n\nLanguage instruction: {rule}")
 }
 
 fn looks_like_english_question(question: &str) -> bool {
+    let first_word = question
+        .split(|ch: char| !ch.is_alphabetic())
+        .find(|word| !word.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        first_word.as_str(),
+        "explain"
+            | "describe"
+            | "summarize"
+            | "summarise"
+            | "tell"
+            | "show"
+            | "give"
+            | "write"
+            | "please"
+            | "why"
+            | "how"
+            | "what"
+    ) {
+        return true;
+    }
     let mut english_markers = 0usize;
     for raw in question.split(|ch: char| !ch.is_alphabetic() && ch != '\'') {
         let word = raw.trim_matches('\'').to_ascii_lowercase();
@@ -99,6 +136,7 @@ fn looks_like_english_question(question: &str) -> bool {
 pub mod config;
 pub mod embeddings;
 pub mod gpu_fit;
+pub(crate) mod language;
 pub mod providers;
 pub mod reasoning;
 pub mod references;

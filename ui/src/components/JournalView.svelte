@@ -1,24 +1,36 @@
 <script lang="ts">
   import PageContent from "./PageContent.svelte";
+  import DatePicker from "./DatePicker.svelte";
   import { listJournalPages, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { dispatchEditPageEnd } from "../lib/editorInsert";
+  import { formatLocalIsoDate, insertJournalPageByTitleDesc, isJournalDateTitle } from "../lib/journalDate";
 
   interface Props {
     restorePageTitle?: string;
     restoreRequestId?: number;
+    editTodayRequestId?: number;
     onNavigate?: (target: string) => void;
     onActivePageChange?: (page: Page | null) => void;
     onPageDeleted?: () => void;
   }
 
-  let { restorePageTitle = "", restoreRequestId = 0, onNavigate, onActivePageChange, onPageDeleted }: Props = $props();
+  let {
+    restorePageTitle = "",
+    restoreRequestId = 0,
+    editTodayRequestId = 0,
+    onNavigate,
+    onActivePageChange,
+    onPageDeleted,
+  }: Props = $props();
 
   let journalPages: Page[] = $state([]);
   let loading = $state(true);
   let loadingMore = $state(false);
   let hasMore = $state(true);
   let bottomSentinel: HTMLDivElement | null = $state(null);
+  let journalFeedEl: HTMLDivElement | null = $state(null);
 
   // Journals are a scrolling feed of many day-pages rather than one "current page", so the
   // Reference/Knowledge panel needs to know which entry is actually in view to enable
@@ -60,11 +72,30 @@
   }
 
   function getLocalDate(): string {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    return formatLocalIsoDate();
   }
 
   let lastDate = getLocalDate();
+  let goToDatePicker: { x: number; y: number } | null = $state(null);
+  let goingToDate = $state(false);
+  let lastEditTodayHandled = 0;
+
+  $effect(() => {
+    const requestId = editTodayRequestId;
+    if (!requestId || loading || requestId === lastEditTodayHandled) return;
+    lastEditTodayHandled = requestId;
+    const today = getLocalDate();
+    const tryFocus = (attempt = 0) => {
+      const el = document.getElementById(`journal-page-${today}`);
+      if (!el && attempt < 40) {
+        requestAnimationFrame(() => tryFocus(attempt + 1));
+        return;
+      }
+      el?.scrollIntoView({ block: "start" });
+      dispatchEditPageEnd({ pageTitle: today });
+    };
+    tryFocus();
+  });
 
   $effect(() => {
     restorePageTitle;
@@ -90,7 +121,7 @@
   $effect(() => {
     if (!bottomSentinel) return;
 
-    const root = bottomSentinel.closest(".main-content");
+    const root = journalFeedEl ?? bottomSentinel.closest(".journal-feed") ?? bottomSentinel.closest(".main-content");
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
@@ -114,7 +145,7 @@
    * "most visible" one as the active page for the Reference/Knowledge panel. */
   function trackVisibility(node: HTMLElement, pageId: string) {
     if (!visibilityObserver) {
-      const root = node.closest(".main-content");
+      const root = journalFeedEl ?? node.closest(".journal-feed") ?? node.closest(".main-content");
       visibilityObserver = new IntersectionObserver(
         (entries) => {
           for (const entry of entries) {
@@ -216,10 +247,24 @@
 
       journalPages = loadedPages;
       hasMore = moreAvailable;
+
+      if (restorePageTitle && !journalPages.some((page) => page.title === restorePageTitle)) {
+        try {
+          await getPage({ title: restorePageTitle });
+        } catch {
+          await createPage(restorePageTitle, true);
+        }
+        journalPages = await listJournalPages(Math.max(pageSize, journalPages.length + 1), 0);
+      }
     } catch (e) {
       console.error("Failed to load journals:", e);
     }
     loading = false;
+    if (restorePageTitle) {
+      requestAnimationFrame(() => {
+        document.getElementById(`journal-page-${restorePageTitle}`)?.scrollIntoView({ block: "start" });
+      });
+    }
   }
 
   async function loadMore() {
@@ -233,6 +278,68 @@
       console.error("Failed to load more journals:", e);
     }
     loadingMore = false;
+  }
+
+  function openGoToDatePicker(event: MouseEvent) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    goToDatePicker = { x: rect.right - 250, y: rect.bottom + 6 };
+  }
+
+  function scrollToJournalDate(title: string) {
+    requestAnimationFrame(() => {
+      document.getElementById(`journal-page-${title}`)?.scrollIntoView({ block: "start" });
+    });
+  }
+
+  async function goToJournalDate(title: string) {
+    goToDatePicker = null;
+    if (!isJournalDateTitle(title) || goingToDate) return;
+    goingToDate = true;
+    try {
+      let page: Page;
+      try {
+        page = await getPage({ title });
+      } catch {
+        page = await createPage(title, true);
+      }
+
+      const alreadyLoaded = journalPages.some((item) => item.id === page.id || item.title === page.title);
+      if (alreadyLoaded) {
+        journalPages = insertJournalPageByTitleDesc(journalPages, page);
+        scrollToJournalDate(page.title);
+        return;
+      }
+
+      const newest = journalPages[0]?.title;
+      const oldest = journalPages[journalPages.length - 1]?.title;
+      if (
+        journalPages.length === 0
+        || (newest && page.title >= newest)
+        || (oldest && page.title >= oldest)
+      ) {
+        journalPages = insertJournalPageByTitleDesc(journalPages, page);
+        scrollToJournalDate(page.title);
+        return;
+      }
+
+      const pageSize = 10;
+      let loaded = journalPages;
+      let moreAvailable = hasMore;
+      while (!loaded.some((item) => item.title === page.title) && moreAvailable) {
+        const more = await listJournalPages(pageSize, loaded.length);
+        loaded = [...loaded, ...more];
+        moreAvailable = more.length >= pageSize;
+        const last = loaded[loaded.length - 1]?.title;
+        if (last && last < page.title) break;
+      }
+      journalPages = insertJournalPageByTitleDesc(loaded, page);
+      hasMore = moreAvailable;
+      scrollToJournalDate(page.title);
+    } catch (e) {
+      console.error("Failed to open journal date:", e);
+    } finally {
+      goingToDate = false;
+    }
   }
 
   async function refreshVisibleJournals() {
@@ -255,54 +362,117 @@
 </script>
 
 <div class="journal-view">
-  {#if loading}
-    <div class="loading">Loading journals...</div>
-  {:else}
-    {#each journalPages as page (page.id)}
-      <div
-        class="journal-entry"
-        id={`journal-page-${page.title}`}
-        data-page-title={page.title}
-        oncontextmenu={(e) => handleDateRightClick(e, page)}
-        use:trackVisibility={page.id}
-      >
-        <PageContent {page} compact />
-      </div>
-      <hr class="journal-divider" />
-    {/each}
+  <div class="journal-toolbar">
+    <button
+      class="goto-date-btn"
+      type="button"
+      aria-haspopup="dialog"
+      aria-expanded={goToDatePicker !== null}
+      disabled={loading || goingToDate}
+      onclick={openGoToDatePicker}
+    >
+      Go to date
+    </button>
+  </div>
+  <div class="journal-feed" bind:this={journalFeedEl}>
+    {#if loading}
+      <div class="loading">Loading journals...</div>
+    {:else}
+      {#each journalPages as page (page.id)}
+        <div
+          class="journal-entry"
+          id={`journal-page-${page.title}`}
+          data-page-title={page.title}
+          oncontextmenu={(e) => handleDateRightClick(e, page)}
+          use:trackVisibility={page.id}
+        >
+          <PageContent {page} compact />
+        </div>
+        <hr class="journal-divider" />
+      {/each}
 
-    {#if loadingMore}
-      <div class="loading-more">Loading more...</div>
+      {#if loadingMore}
+        <div class="loading-more">Loading more...</div>
+      {/if}
+
+      {#if hasMore && !loadingMore}
+        <button class="load-more-btn" onclick={loadMore}>Load older journals</button>
+      {/if}
+
+      <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
+
+      {#if contextMenu}
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <div
+          class="context-menu app-context-menu"
+          style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
+          onclick={(e) => e.stopPropagation()}
+        >
+          <button class="context-menu-item danger" onclick={handleDeletePage}>
+            Delete page
+          </button>
+          <button class="context-menu-item" onclick={handleImportMediaClick}>
+            Import from Media...
+          </button>
+        </div>
+      {/if}
     {/if}
-
-    {#if hasMore && !loadingMore}
-      <button class="load-more-btn" onclick={loadMore}>Load older journals</button>
-    {/if}
-
-    <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
-
-    {#if contextMenu}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class="context-menu app-context-menu"
-        style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
-        onclick={(e) => e.stopPropagation()}
-      >
-        <button class="context-menu-item danger" onclick={handleDeletePage}>
-          Delete page
-        </button>
-        <button class="context-menu-item" onclick={handleImportMediaClick}>
-          Import from Media...
-        </button>
-      </div>
-    {/if}
+  </div>
+  {#if goToDatePicker}
+    <DatePicker
+      x={goToDatePicker.x}
+      y={goToDatePicker.y}
+      showClear={false}
+      onSelect={goToJournalDate}
+      onCancel={() => (goToDatePicker = null)}
+    />
   {/if}
 </div>
 
 <style>
   .journal-view {
     height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-sizing: border-box;
     padding: 0;
+  }
+
+  .journal-toolbar {
+    flex: 0 0 auto;
+    z-index: 6;
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 12px 6px;
+    background: var(--bg-primary);
+  }
+
+  .journal-feed {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .goto-date-btn {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .goto-date-btn:hover:not(:disabled) {
+    background: var(--bg-active);
+  }
+
+  .goto-date-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .journal-entry {

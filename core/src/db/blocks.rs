@@ -408,6 +408,37 @@ impl Database {
         load_blocks_for_page(&conn, page_id)
     }
 
+    /// Blocks whose content contains `needle` (ASCII case-insensitive).
+    /// Used by page rename to find `[[wiki links]]` without scanning the
+    /// whole graph in Rust.
+    pub fn list_blocks_containing(&self, needle: &str) -> Result<Vec<Block>> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, page_id, parent_id, order_index, content, block_type, properties, created_at, updated_at
+             FROM blocks
+             WHERE instr(lower(content), lower(?1)) > 0",
+        )?;
+        let blocks = stmt
+            .query_map(params![needle], |row| {
+                Ok(Block {
+                    id: row.get(0)?,
+                    page_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    order_index: row.get(3)?,
+                    content: row.get(4)?,
+                    block_type: BlockType::from_str(&row.get::<_, String>(5)?),
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(blocks)
+    }
+
     pub fn list_child_blocks(&self, parent_id: &str) -> Result<Vec<Block>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

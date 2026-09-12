@@ -248,23 +248,15 @@
     if (focusedId) itemElements.get(focusedId)?.focus();
   }
 
-  function handleContextMenu(event: MouseEvent, node: PageTreeViewNode) {
-    if (!nodeHasMenu(node) || !onPageContextMenu) return;
+  function emitRowAction(event: MouseEvent, node: PageTreeViewNode) {
+    if (!nodeHasMenu(node)) return;
     event.preventDefault();
     event.stopPropagation();
-    onPageContextMenu(event, node);
+    onPageContextMenu?.(event, node);
   }
 
   function nodeHasMenu(node: PageTreeViewNode): boolean {
-    if (!onPageContextMenu) return false;
-    return hasPageMenu ? hasPageMenu(node) : node.page_id !== null;
-  }
-
-  function handleMenuButtonClick(event: MouseEvent, node: PageTreeViewNode) {
-    if (!nodeHasMenu(node) || !onPageContextMenu) return;
-    event.preventDefault();
-    event.stopPropagation();
-    onPageContextMenu(event, node);
+    return Boolean(onPageContextMenu) && (hasPageMenu?.(node) ?? true);
   }
 </script>
 
@@ -286,7 +278,9 @@
             <div
               class="tree-row"
               role="none"
+              data-tree-node={row.id}
               style={`--tree-depth: ${Math.min(row.level - 1, 12)}`}
+              oncontextmenu={(event) => emitRowAction(event, row.node)}
             >
               <div class="tree-row-inner">
                 <button
@@ -304,7 +298,6 @@
                   use:registerTreeItem={row.id}
                   onclick={(event) => handleNodeClick(event, row.node, row.id, row.has_children)}
                   onfocus={() => { focusedId = row.id; }}
-                  oncontextmenu={(event) => handleContextMenu(event, row.node)}
                 >
                   {#if row.has_children}
                     <span
@@ -352,12 +345,15 @@
                   <button
                     type="button"
                     class="tree-action"
+                    title={`Actions for ${row.node.label}`}
                     aria-label={`Actions for ${row.node.label}`}
-                    onclick={(event) => handleMenuButtonClick(event, row.node)}
-                    oncontextmenu={(event) => handleContextMenu(event, row.node)}
-                  >
-                    <span aria-hidden="true">⋯</span>
-                  </button>
+                    aria-haspopup="menu"
+                    tabindex={focusedId === row.id ? 0 : -1}
+                    onclick={(event) => emitRowAction(event, row.node)}
+                    onkeydown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+                    }}
+                  >⋯</button>
                 {/if}
               </div>
             </div>
@@ -373,22 +369,13 @@
     min-width: 0;
   }
 
-  /* One column of a few hundred loose pages leaves most of a wide window empty
-     and pushes the rest below the fold. Sized in rem rather than as a fixed
-     count so the number of columns follows the window instead of fighting it.
-     `display: block` is required: a flex container ignores column-width. */
+  /* Read top-to-bottom, then left-to-right, keeping branches together. */
   .tree.columns {
     display: block;
-    /* Capped as well as sized: columns read top-to-bottom then left-to-right,
-       which stays followable at four but stops being so once a listing is
-       spread across six or seven. The cap also holds if the container is ever
-       widened or the reader's font size is small. */
     columns: 4 22rem;
     column-gap: 28px;
   }
 
-  /* Columns break wherever they run out of room, so each branch is kept whole
-     to stop a folder being separated from its children. */
   .tree.columns .tree-group {
     break-inside: avoid;
     margin-bottom: 2px;
@@ -422,7 +409,7 @@
     display: flex;
     align-items: center;
     min-width: 0;
-    gap: 2px;
+    gap: 4px;
   }
 
   .disclosure,
@@ -455,7 +442,7 @@
   .tree-item {
     display: flex;
     align-items: center;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     width: auto;
     min-width: 0;
     min-height: 32px;
@@ -497,31 +484,26 @@
   .tree-action {
     display: grid;
     place-items: center;
-    flex: 0 0 auto;
-    width: 28px;
-    height: 28px;
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    margin-left: auto;
     border: none;
     border-radius: 5px;
     background: transparent;
-    color: var(--text-muted);
+    color: var(--accent);
     font: inherit;
-    font-size: 17px;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
     cursor: pointer;
-    opacity: 0;
-  }
-
-  .tree-row-inner:hover .tree-action,
-  .tree-row-inner:focus-within .tree-action {
-    opacity: 1;
   }
 
   .tree-action:hover {
     background: var(--bg-hover);
-    color: var(--text-primary);
   }
 
   .tree-action:focus-visible {
-    opacity: 1;
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }

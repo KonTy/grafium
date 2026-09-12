@@ -17,6 +17,14 @@
   import Toaster from "./components/Toaster.svelte";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
+  import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
+  import {
+    dispatchEditPageEnd,
+    personalJournalSnippet,
+    timeStampSnippet,
+    tryInsertIntoActiveEditor,
+  } from "./lib/editorInsert";
+  import { formatBinding, formatBindingList, groupShortcutRows } from "./lib/shortcuts";
   import type { PageNavigationTarget } from "./lib/navigation";
   import { resolvePageLookup } from "./lib/navigation";
   import { applyTheme, getThemeById } from "./lib/themes";
@@ -72,6 +80,7 @@
   // Journals are a scrolling feed, not a single page — this tracks whichever day-entry is
   // currently most visible, so the Reference/Knowledge panel has something to analyze there too.
   let journalActivePage: Page | null = $state(null);
+  let journalEditTodayRequestId = $state(0);
   let loading = $state(true);
   let error: string | null = $state(null);
   let sidebarVisible = $state(true);
@@ -87,6 +96,11 @@
   } | null = $state(null);
   let showBlockGuides = $state(true);
   let zenMode = $state(false);
+  let wideMode = $state(true);
+  let settingsOpenSection = $state("");
+  let commandPaletteOpen = $state(false);
+  let commandPaletteQuery = $state("");
+  let commandPaletteIndex = $state(0);
   let referencePanelVisible = $state(false);
   let referencePanelTab = $state<"references" | "search" | "ask">("references");
   let referencePanelFocusTrigger = $state(0);
@@ -689,31 +703,110 @@
     }
   }
 
+  function loadWideModePreference() {
+    try {
+      const raw = localStorage.getItem("grafium.ui.wideMode");
+      if (raw === "false") wideMode = false;
+      if (raw === "true") wideMode = true;
+    } catch {
+      // Keep the default (wide).
+    }
+  }
+
+  function toggleWideMode() {
+    wideMode = !wideMode;
+    try {
+      localStorage.setItem("grafium.ui.wideMode", String(wideMode));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function focusLocalSearch(): boolean {
+    const el = document.querySelector("[data-local-search]") as HTMLInputElement | null;
+    if (!el || el.disabled || el.closest("[hidden]") || el.getClientRects().length === 0) return false;
+    el.focus();
+    el.select();
+    return true;
+  }
+
+  function journalCursorTitle(): string {
+    if (currentView === "journal" && isJournalDateTitle(journalActivePage?.title)) {
+      return journalActivePage!.title;
+    }
+    if (isJournalDateTitle(currentPage?.title)) {
+      return currentPage!.title;
+    }
+    return formatLocalIsoDate();
+  }
+
+  function shiftJournalDay(days: number) {
+    const next = shiftIsoDate(journalCursorTitle(), days);
+    if (currentView === "journal") {
+      const el = document.getElementById(`journal-page-${next}`);
+      if (el) {
+        el.scrollIntoView({ block: "start" });
+        return;
+      }
+      pendingJournalRestore = { kind: "journal", scrollTop: 0, sourcePageTitle: next };
+      journalRestoreRequestId += 1;
+      return;
+    }
+    void navigateToPage(next, true);
+  }
+
+  function openThemeSettings() {
+    settingsOpenSection = "theme";
+    void navigateToPage("__settings__");
+  }
+
+  function toggleSettingsView() {
+    if (currentView === "settings") {
+      goBack();
+      return;
+    }
+    settingsOpenSection = "";
+    void navigateToPage("__settings__");
+  }
+
+  function toggleCommandPalette() {
+    commandPaletteOpen = !commandPaletteOpen;
+    commandPaletteQuery = "";
+    commandPaletteIndex = 0;
+  }
+
+  const commandPaletteRows = $derived(
+    groupShortcutRows(keymap_manager.getShortcuts()).filter((row) => {
+      const q = commandPaletteQuery.trim().toLowerCase();
+      if (!q) return true;
+      return (
+        row.description.toLowerCase().includes(q) ||
+        row.chords.some((b) => b.toLowerCase().includes(q)) ||
+        row.modifiers.some((b) => formatBinding(b).toLowerCase().includes(q))
+      );
+    }),
+  );
+
+  function runCommandPaletteRow(index: number) {
+    const row = commandPaletteRows[index];
+    if (!row) return;
+    const match = keymap_manager.getShortcuts().find((s) => (s.id || s.description) === row.id);
+    commandPaletteOpen = false;
+    match?.action();
+  }
+
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
+    goJournalEdit: () => { void goJournalAndEdit(); },
     goHome: () => navigateToJournal(),
     goAllPages: () => navigateToPage("__all_pages__"),
     goGraph: () => navigateToPage("__graph__"),
     goFlashcards: () => navigateToPage("__flashcards__"),
-    goTomorrow: () => {
-      const d = new Date();
-      d.setDate(d.getDate() + 1);
-      navigateToPage(d.toISOString().split("T")[0], true);
-    },
-    goNextJournal: () => {
-      if (currentPage && /^\d{4}-\d{2}-\d{2}$/.test(currentPage.title)) {
-        const d = new Date(currentPage.title);
-        d.setDate(d.getDate() + 1);
-        navigateToPage(d.toISOString().split("T")[0], true);
-      }
-    },
-    goPrevJournal: () => {
-      if (currentPage && /^\d{4}-\d{2}-\d{2}$/.test(currentPage.title)) {
-        const d = new Date(currentPage.title);
-        d.setDate(d.getDate() - 1);
-        navigateToPage(d.toISOString().split("T")[0], true);
-      }
-    },
+    goTomorrow: () => navigateToPage(shiftIsoDate(formatLocalIsoDate(), 1), true),
+    goTasks: () => navigateToPage("__statistics__"),
+    goChat: () => navigateToPage("__chat__"),
+    goNextJournal: () => shiftJournalDay(1),
+    goPrevJournal: () => shiftJournalDay(-1),
     goForward: () => {
       goForward();
     },
@@ -726,37 +819,62 @@
     searchInPage: () => {
       window.dispatchEvent(new CustomEvent("toggle-search"));
     },
+    focusLocalSearch: () => {
+      focusLocalSearch();
+    },
     toggleSidebar: () => {
-      sidebarVisible = !sidebarVisible;
+      void focusLeftSidebar();
     },
     toggleRightSidebar: () => {
       referencePanelVisible = !referencePanelVisible;
     },
-    toggleTheme: () => {}, // Not implemented yet
-    toggleHelp: () => {
-      window.dispatchEvent(new CustomEvent("toggle-help"));
-    },
-    toggleSettings: () => {
-      navigateToPage("__settings__");
-    },
-    toggleWideMode: () => {},
+    toggleTheme: () => openThemeSettings(),
+    toggleSettings: () => toggleSettingsView(),
+    toggleWideMode,
     toggleZenMode: () => {
       zenMode = !zenMode;
     },
-    newPage: () => {
-      newPageName = "";
-      showNewPageDialog = true;
-    },
-    reindex: () => {
-      void runReindex(true);
-    },
-    undo: triggerNativeUndo,
-    redo: triggerNativeRedo,
-    commandPalette: () => {},
+    commandPalette: () => toggleCommandPalette(),
+    importMedia: () => openImportMediaDialog(),
+    importBooks: () => void openImportBooksDirectory(),
+    insertTimeStamp: () => insertEditorSnippet(timeStampSnippet()),
+    insertPersonalJournal: () => insertEditorSnippet(personalJournalSnippet()),
   });
 
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (commandPaletteOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        commandPaletteOpen = false;
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        commandPaletteIndex = Math.min(commandPaletteIndex + 1, Math.max(0, commandPaletteRows.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        commandPaletteIndex = Math.max(commandPaletteIndex - 1, 0);
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runCommandPaletteRow(commandPaletteIndex);
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyC") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      void navigateToPage("__chat__");
+      return;
+    }
+
     if (e.ctrlKey || e.metaKey) {
       const key = e.key.toLowerCase();
       if (key === "0") {
@@ -774,83 +892,39 @@
         adjustUiZoom(-1);
         return;
       }
-    }
-
-    // Keep search shortcut global, including while editing.
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-      e.preventDefault();
-      openGlobalSearch();
-      return;
-    }
-
-    // Ctrl+B focuses/opens the left sidebar — always works, including while
-    // editing a block, so switching pages/searching never requires first
-    // escaping out of the editor.
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
-      e.preventDefault();
-      void focusLeftSidebar();
-      return;
-    }
-
-    // Ctrl+Shift+A / F / D jump straight to a right-panel (Knowledge Panel)
-    // sub-tab — References/Summarize, Search, Ask respectively — always
-    // works, including while editing a block.
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
-      const key = e.key.toLowerCase();
-      if (key === "a") {
-        e.preventDefault();
-        openReferencePanelTab("references");
-        return;
-      }
-      if (key === "f") {
-        e.preventDefault();
-        openReferencePanelTab("search");
-        return;
-      }
-      if (key === "d") {
-        e.preventDefault();
-        openReferencePanelTab("ask");
-        return;
-      }
-      // Ctrl+Shift+J = jump to today's journal, always available —
-      // including from inside the editor. Complements the nav-mode
-      // "g j" chord which is unusable mid-typing.
-      if (key === "j") {
-        e.preventDefault();
-        void navigateToJournal();
+      // Ctrl-F focuses a visible page filter; otherwise leave browser/editor find.
+      if (!e.shiftKey && !e.altKey && key === "f") {
+        if (focusLocalSearch()) e.preventDefault();
         return;
       }
     }
 
-    // Ctrl+. toggles reference panel (always works regardless of editing state)
-    if ((e.ctrlKey || e.metaKey) && e.key === ".") {
-      e.preventDefault();
-      referencePanelVisible = !referencePanelVisible;
-      return;
-    }
-
-    // Escape closes reference panel (always works)
     if (e.key === "Escape" && referencePanelVisible) {
       referencePanelVisible = false;
       e.preventDefault();
       return;
     }
 
-    // Don't intercept if a dialog is open
-    if (showNewPageDialog) return;
+    if (zenMode && e.key === "Escape") {
+      zenMode = false;
+      e.preventDefault();
+      return;
+    }
 
-    // Never hijack native editor/navigation keys while typing in editable elements.
+    if (showNewPageDialog || showImportMediaDialog) return;
+
+    if (keymap_manager.handleKeydown(e)) return;
+
     const target = e.target as HTMLElement | null;
     const editableContainer = target?.closest?.("[contenteditable='true'], [role='textbox']");
     const isNativeInput =
       target?.tagName === "INPUT" ||
       target?.tagName === "TEXTAREA" ||
       target?.tagName === "SELECT";
-    if (isNativeInput || target?.isContentEditable || !!editableContainer) {
+    if (isNativeInput || target?.isContentEditable || !!editableContainer || keymap_manager.isEditing) {
       return;
     }
 
-    // Keep paging keys reliable regardless of lingering focus on editor DOM after Escape.
     if (mainContentEl && (e.key === "PageDown" || e.key === "PageUp" || e.key === "Home" || e.key === "End")) {
       e.preventDefault();
       if (e.key === "PageDown") {
@@ -862,20 +936,7 @@
       } else if (e.key === "End") {
         mainContentEl.scrollTo({ top: mainContentEl.scrollHeight, behavior: "auto" });
       }
-      return;
     }
-
-    // Don't intercept if editing a block
-    if (keymap_manager.isEditing) return;
-
-    // Escape exits zen mode
-    if (zenMode && e.key === "Escape") {
-      zenMode = false;
-      e.preventDefault();
-      return;
-    }
-
-    keymap_manager.handleKeydown(e);
   }
 
   function handleMouseNavigation(e: MouseEvent) {
@@ -931,6 +992,7 @@
 
   $effect(() => {
     loadUiZoomPreference();
+    loadWideModePreference();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("mouseup", handleMouseNavigation);
     window.addEventListener("wheel", handleWheelZoom, { passive: false });
@@ -988,10 +1050,6 @@
     | { kind: "page"; title: string }
     | { kind: "journal" }
     | { kind: "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
-
-  function isJournalDateTitle(title: string | undefined): boolean {
-    return !!title && /^\d{4}-\d{2}-\d{2}$/.test(title);
-  }
 
   function saveLastLocation() {
     try {
@@ -1124,6 +1182,20 @@
         if (t) applyTheme(t.colors);
       } catch (_) {}
     }
+  }
+
+  async function goJournalAndEdit() {
+    journalEditTodayRequestId += 1;
+    await navigateToJournal();
+  }
+
+  function insertEditorSnippet(text: string) {
+    if (tryInsertIntoActiveEditor(text)) return;
+    const pageTitle = currentView === "journal"
+      ? (journalActivePage?.title ?? formatLocalIsoDate())
+      : currentPage?.title;
+    if (!pageTitle) return;
+    dispatchEditPageEnd({ pageTitle, insert: text });
   }
 
   async function navigateToJournal(skipHistory = false, restoreEntry?: HistoryEntry) {
@@ -1620,7 +1692,7 @@
   });
 </script>
 
-<div class="app-shell" class:zen={zenMode}>
+<div class="app-shell" class:zen={zenMode} class:wide-mode={wideMode}>
   {#if !zenMode}
     <TitleBar
       {sidebarVisible}
@@ -1697,20 +1769,48 @@
     {:else if currentView === "chat"}
       <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
     {:else if currentView === "settings"}
-      <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} />
+      <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} openSection={settingsOpenSection} />
     {:else if currentView === "jobs"}
       <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
     {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
+        editTodayRequestId={journalEditTodayRequestId}
         onNavigate={handleNavigate}
         onActivePageChange={(page) => (journalActivePage = page)}
         onPageDeleted={() => { void sidebarRef?.refresh(); }}
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
-        <PageContent page={currentPage} highlight={pendingHighlight} {showBlockGuides} />
+        <PageContent
+          page={currentPage}
+          highlight={pendingHighlight}
+          {showBlockGuides}
+          onPageRenamed={(page) => {
+            const previous = currentPage;
+            currentPage = page;
+            if (!previous || (previous.id === page.id && previous.title === page.title)) return;
+            navHistory = navHistory.map((entry) => {
+              let next = entry;
+              if (entry.kind === "page" && entry.title === previous.title) {
+                next = { ...next, title: page.title };
+              }
+              if (entry.sourcePageTitle === previous.title) {
+                next = { ...next, sourcePageTitle: page.title };
+              }
+              return next;
+            });
+          }}
+          onPageDeleted={(parentTitle) => {
+            void sidebarRef?.refresh();
+            if (parentTitle) {
+              void navigateToPage(parentTitle);
+            } else {
+              void navigateToPage("__all_pages__");
+            }
+          }}
+        />
       {/key}
     {/if}
     </main>
@@ -1877,6 +1977,41 @@
 {#if currentView !== "jobs"}
   <JobActivity />
 {/if}
+{#if commandPaletteOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="command-palette-backdrop" onclick={() => (commandPaletteOpen = false)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="command-palette" onclick={(e) => e.stopPropagation()}>
+      <input
+        class="command-palette-input"
+        type="text"
+        placeholder="Run a command…"
+        bind:value={commandPaletteQuery}
+        oninput={() => (commandPaletteIndex = 0)}
+        autofocus
+      />
+      <div class="command-palette-list">
+        {#each commandPaletteRows as row, index}
+          <button
+            class="command-palette-item"
+            class:active={index === commandPaletteIndex}
+            onclick={() => runCommandPaletteRow(index)}
+          >
+            <span class="command-palette-desc">{row.description}</span>
+            <span class="command-palette-keys">
+              {formatBindingList([...(row.chords.length ? row.chords : []), ...(row.modifiers.length ? row.modifiers : [])])}
+            </span>
+          </button>
+        {:else}
+          <div class="command-palette-empty">No matching commands</div>
+        {/each}
+      </div>
+    </div>
+  </div>
+{/if}
+
 <Toaster />
 
 {#if showNewPageDialog}
@@ -2406,5 +2541,79 @@
     .main-content {
       padding-bottom: 60px;
     }
+  }
+
+  .command-palette-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 4000;
+    background: color-mix(in srgb, var(--bg-primary) 35%, transparent);
+    display: flex;
+    justify-content: center;
+    padding-top: 12vh;
+  }
+
+  .command-palette {
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(70vh, 520px);
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-overlay, var(--bg-secondary));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+  }
+
+  .command-palette-input {
+    width: 100%;
+    padding: 12px 14px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+  }
+
+  .command-palette-list {
+    overflow-y: auto;
+    padding: 6px;
+  }
+
+  .command-palette-item {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .command-palette-item.active,
+  .command-palette-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .command-palette-desc {
+    font-size: 13px;
+  }
+
+  .command-palette-keys {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .command-palette-empty {
+    padding: 12px 10px;
+    color: var(--text-muted);
+    font-size: 13px;
   }
 </style>

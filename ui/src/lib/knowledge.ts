@@ -1,6 +1,7 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ChatScope } from "./chatScope";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -511,7 +512,8 @@ export async function aiAskStream(
   graphId?: string,
   /** Prior turns, oldest first. Sent whole — the backend decides how much to
    *  replay verbatim and compacts the rest. */
-  history?: ChatTurn[]
+  history?: ChatTurn[],
+  scope: ChatScope = "local",
 ): Promise<void> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   handlers.onStart?.(requestId);
@@ -564,7 +566,7 @@ export async function aiAskStream(
       }
     });
 
-    await invoke("ai_ask_stream", { question, graphId, requestId, history: history ?? [] });
+    await invoke("ai_ask_stream", { question, graphId, requestId, history: history ?? [], scope });
   } catch (e: any) {
     // A user Stop cancels the run; when that surfaces as the canonical
     // cancellation rejection it's a normal end, not an error to report.

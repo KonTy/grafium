@@ -12,6 +12,8 @@
 export type ActionFn = () => void;
 
 export interface Shortcut {
+  /** Groups aliases into one help row (e.g. "g j" and "mod+shift+j"). */
+  id?: string;
   /** Binding string: "mod+k", "g j", "t t", etc. */
   binding: string;
   /** Action to perform */
@@ -46,16 +48,22 @@ function eventToKeyString(e: KeyboardEvent): string {
   if (e.metaKey) parts.push("Meta");
 
   let key = e.key;
-  // Normalize some key names
+  // Physical keys so Ctrl-Shift-. matches Ctrl-> on US keyboards, and
+  // Ctrl-Shift-C is KeyC even when the webview reports "C" or a translated key.
+  if ((e.ctrlKey || e.metaKey || e.altKey) && /^Key[A-Z]$/.test(e.code)) {
+    key = e.code.slice(3).toLowerCase();
+  } else if (e.code === "Period") key = ".";
+  else if (e.code === "Comma") key = ",";
+  else if (e.code === "BracketLeft") key = "[";
+  else if (e.code === "BracketRight") key = "]";
   if (key === " ") key = "Space";
   if (key.length === 1) key = key.toLowerCase();
 
-  // Don't add modifier keys as the main key
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) {
     parts.push(key);
   }
 
-  return parts.join("+");
+  return parts.sort().join("+");
 }
 
 function parseBinding(binding: string): string[][] {
@@ -120,36 +128,36 @@ class KeymapManager {
   }
 
   handleKeydown(e: KeyboardEvent): boolean {
-    // Skip if target is an input/textarea (native ones, not CodeMirror)
-    const target = e.target as HTMLElement;
-    if (
-      target.tagName === "INPUT" ||
-      target.tagName === "TEXTAREA" ||
-      target.tagName === "SELECT"
-    ) {
-      return false;
-    }
-
-    // In edit mode, only process shortcuts marked as not navOnly
-    if (this._editing) {
-      return false;
-    }
+    const target = e.target as HTMLElement | null;
+    const inField =
+      target?.tagName === "INPUT" ||
+      target?.tagName === "TEXTAREA" ||
+      target?.tagName === "SELECT" ||
+      !!target?.isContentEditable ||
+      !!target?.closest?.("[contenteditable='true'], [role='textbox']");
+    const navBlocked = this._editing || inField;
 
     const keyStr = eventToKeyString(e);
     if (!keyStr || keyStr === "Shift" || keyStr === "Control" || keyStr === "Alt" || keyStr === "Meta") {
       return false;
     }
 
-    // Build the current chord sequence
+    const active = navBlocked
+      ? this.shortcuts.filter((s) => !s.navOnly)
+      : this.shortcuts;
+
+    if (navBlocked) {
+      this.pendingChord = [];
+    }
+
     this.pendingChord.push(keyStr);
 
     if (this.chordTimeout !== null) {
       clearTimeout(this.chordTimeout);
     }
 
-    // Check for matches
     const pending = [...this.pendingChord];
-    const exactMatch = this.shortcuts.find(
+    const exactMatch = active.find(
       (s) =>
         s.sequence.length === pending.length &&
         s.sequence.every((chord, i) => chord === pending[i])
@@ -163,8 +171,7 @@ class KeymapManager {
       return true;
     }
 
-    // Check if any shortcut starts with this prefix (potential chord in progress)
-    const prefixMatch = this.shortcuts.some(
+    const prefixMatch = active.some(
       (s) =>
         s.sequence.length > pending.length &&
         pending.every((chord, i) => chord === s.sequence[i])
@@ -172,14 +179,12 @@ class KeymapManager {
 
     if (prefixMatch) {
       e.preventDefault();
-      // Wait for next key in chord
       this.chordTimeout = window.setTimeout(() => {
         this.pendingChord = [];
       }, 1000);
       return true;
     }
 
-    // No match at all - reset
     this.pendingChord = [];
     return false;
   }
@@ -194,181 +199,151 @@ export const keymap_manager = new KeymapManager();
  */
 export function registerDefaultShortcuts(actions: {
   goJournal: () => void;
+  goJournalEdit: () => void;
   goHome: () => void;
   goAllPages: () => void;
   goGraph: () => void;
   goFlashcards: () => void;
   goTomorrow: () => void;
+  goTasks: () => void;
+  goChat: () => void;
   goNextJournal: () => void;
   goPrevJournal: () => void;
   goForward: () => void;
   goBackward: () => void;
   search: () => void;
   searchInPage: () => void;
+  focusLocalSearch: () => void;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
   toggleTheme: () => void;
-  toggleHelp: () => void;
+  toggleHelp?: () => void;
   toggleSettings: () => void;
   toggleWideMode: () => void;
   toggleZenMode: () => void;
-  newPage: () => void;
-  reindex: () => void;
-  undo: () => void;
-  redo: () => void;
+  newPage?: () => void;
+  reindex?: () => void;
+  undo?: () => void;
+  redo?: () => void;
   commandPalette: () => void;
+  importMedia: () => void;
+  importBooks: () => void;
+  insertTimeStamp: () => void;
+  insertPersonalJournal: () => void;
 }) {
+  const pair = (
+    id: string,
+    description: string,
+    category: string,
+    action: ActionFn,
+    bindings: Array<{ binding: string; navOnly?: boolean }>,
+  ): Shortcut[] =>
+    bindings.map((b) => ({
+      id,
+      description,
+      category,
+      action,
+      binding: b.binding,
+      navOnly: b.navOnly ?? !b.binding.includes("+"),
+    }));
+
   const shortcuts: Shortcut[] = [
-    // ─── Navigation (g prefix) ─────────────────────
-    // On Linux, these are also handled at the GTK/Rust level via __chordActions
-    // because WebKitGTK JS keydown delivery can be unreliable.
-    {
-      binding: "g j",
-      action: actions.goJournal,
-      category: "navigation",
-      description: "Go to today's journal",
-    },
-    {
-      // Editor-safe variant of "g j": Ctrl+Shift+J works even while
-      // typing in a block. The always-on delivery lives in
-      // App.svelte's handleGlobalKeydown; this entry only exists so
-      // a future help/command-palette listing shows it.
-      binding: "mod+shift+j",
-      action: actions.goJournal,
-      navOnly: false,
-      category: "navigation",
-      description: "Go to today's journal (works while editing)",
-    },
-    {
-      binding: "g h",
-      action: actions.goHome,
-      category: "navigation",
-      description: "Go to home",
-    },
-    {
-      binding: "g a",
-      action: actions.goAllPages,
-      category: "navigation",
-      description: "Go to all pages",
-    },
-    {
-      binding: "g g",
-      action: actions.goGraph,
-      category: "navigation",
-      description: "Go to graph view",
-    },
-    {
-      binding: "g f",
-      action: actions.goFlashcards,
-      category: "navigation",
-      description: "Go to flashcards",
-    },
-    {
-      binding: "g t",
-      action: actions.goTomorrow,
-      category: "navigation",
-      description: "Go to tomorrow",
-    },
-    {
-      binding: "g n",
-      action: actions.goNextJournal,
-      category: "navigation",
-      description: "Go to next journal",
-    },
-    {
-      binding: "g p",
-      action: actions.goPrevJournal,
-      category: "navigation",
-      description: "Go to previous journal",
-    },
+    ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournal, [
+      { binding: "g j" },
+    ]),
+    ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournalEdit, [
+      { binding: "mod+shift+j", navOnly: false },
+    ]),
+    ...pair("go-home", "Go to home", "navigation", actions.goHome, [
+      { binding: "g h" },
+      { binding: "mod+shift+h", navOnly: false },
+    ]),
+    ...pair("go-all-pages", "Go to all pages", "navigation", actions.goAllPages, [
+      { binding: "g a" },
+      { binding: "mod+shift+a", navOnly: false },
+    ]),
+    ...pair("go-graph", "Go to graph view", "navigation", actions.goGraph, [
+      { binding: "g g" },
+      { binding: "mod+shift+g", navOnly: false },
+    ]),
+    ...pair("go-flashcards", "Go to flashcards", "navigation", actions.goFlashcards, [
+      { binding: "g f" },
+      { binding: "mod+shift+f", navOnly: false },
+    ]),
+    ...pair("go-tomorrow", "Go to tomorrow's journal page", "navigation", actions.goTomorrow, [
+      { binding: "g t" },
+    ]),
+    ...pair("go-tasks", "Go to tasks", "navigation", actions.goTasks, [
+      { binding: "mod+shift+t", navOnly: false },
+    ]),
+    ...pair("go-next-journal", "Go to next journal", "navigation", actions.goNextJournal, [
+      { binding: "g n" },
+      { binding: "mod+shift+.", navOnly: false },
+    ]),
+    ...pair("go-prev-journal", "Go to previous journal", "navigation", actions.goPrevJournal, [
+      { binding: "g p" },
+      { binding: "mod+shift+,", navOnly: false },
+    ]),
+    ...pair("go-backward", "Go backward", "navigation", actions.goBackward, [
+      { binding: "mod+[", navOnly: false },
+    ]),
+    ...pair("go-forward", "Go forward", "navigation", actions.goForward, [
+      { binding: "mod+]", navOnly: false },
+    ]),
+    ...pair("go-chat", "Go to Chat tab", "navigation", actions.goChat, [
+      { binding: "mod+shift+c", navOnly: false },
+    ]),
 
-    // ─── Toggle (t prefix) ─────────────────────────
-    {
-      binding: "t l",
-      action: actions.toggleSidebar,
-      category: "toggle",
-      description: "Toggle left sidebar",
-    },
-    {
-      binding: "t r",
-      action: actions.toggleRightSidebar,
-      category: "toggle",
-      description: "Toggle right sidebar",
-    },
-    {
-      binding: "t t",
-      action: actions.toggleTheme,
-      category: "toggle",
-      description: "Toggle theme",
-    },
-    {
-      binding: "t w",
-      action: actions.toggleWideMode,
-      category: "toggle",
-      description: "Toggle wide mode",
-    },
-    {
-      binding: "t z",
-      action: actions.toggleZenMode,
-      category: "toggle",
-      description: "Toggle zen mode",
-    },
-    {
-      binding: "t s",
-      action: actions.toggleSettings,
-      category: "toggle",
-      description: "Toggle settings",
-    },
+    ...pair("toggle-left-sidebar", "Toggle left sidebar", "toggle", actions.toggleSidebar, [
+      { binding: "t l" },
+      { binding: "mod+b", navOnly: false },
+    ]),
+    ...pair("toggle-right-sidebar", "Toggle right sidebar", "toggle", actions.toggleRightSidebar, [
+      { binding: "t r" },
+      { binding: "mod+alt+b", navOnly: false },
+      { binding: "mod+.", navOnly: false },
+    ]),
+    ...pair("toggle-theme", "Open theme settings", "toggle", actions.toggleTheme, [
+      { binding: "t t" },
+    ]),
+    ...pair("toggle-wide", "Toggle wide mode", "toggle", actions.toggleWideMode, [
+      { binding: "t w" },
+      { binding: "alt+w", navOnly: false },
+    ]),
+    ...pair("toggle-zen", "Toggle zen mode", "toggle", actions.toggleZenMode, [
+      { binding: "t z" },
+      { binding: "alt+z", navOnly: false },
+    ]),
+    ...pair("toggle-settings", "Toggle settings", "toggle", actions.toggleSettings, [
+      { binding: "t s" },
+      { binding: "alt+s", navOnly: false },
+    ]),
 
-    // ─── Global with modifiers ─────────────────────
-    {
-      binding: "mod+k",
-      action: actions.search,
-      category: "search",
-      description: "Global search",
-    },
-    {
-      binding: "mod+shift+k",
-      action: actions.searchInPage,
-      category: "search",
-      description: "Search in page",
-    },
-    {
-      binding: "mod+shift+p",
-      action: actions.commandPalette,
-      category: "basics",
-      description: "Command palette",
-    },
-    // Disabled due conflict with slash command entry on some keyboard layouts
-    // where '/' requires Shift and could interfere with editor slash menu.
+    ...pair("search-global", "Global search", "search", actions.search, [
+      { binding: "mod+k", navOnly: false },
+    ]),
+    ...pair("search-in-page", "Search in page", "search", actions.searchInPage, [
+      { binding: "mod+shift+k", navOnly: false },
+    ]),
+    ...pair("search-local", "Focus page search", "search", actions.focusLocalSearch, [
+      { binding: "mod+f", navOnly: false },
+    ]),
 
-    // ─── History navigation ────────────────────────
-    {
-      binding: "mod+[",
-      action: actions.goBackward,
-      category: "navigation",
-      description: "Go backward",
-    },
-    {
-      binding: "mod+]",
-      action: actions.goForward,
-      category: "navigation",
-      description: "Go forward",
-    },
-
-    // ─── Familiar aliases (VS Code / Obsidian / Cursor muscle memory) ─────────
-    {
-      binding: "mod+b",
-      action: actions.toggleSidebar,
-      category: "toggle",
-      description: "Toggle left sidebar",
-    },
-    {
-      binding: "mod+shift+a",
-      action: actions.toggleRightSidebar,
-      category: "toggle",
-      description: "Toggle Knowledge Panel",
-    },
+    ...pair("command-palette", "Command palette", "basics", actions.commandPalette, [
+      { binding: "mod+shift+p", navOnly: false },
+    ]),
+    ...pair("import-media", "Import media", "basics", actions.importMedia, [
+      { binding: "alt+m", navOnly: false },
+    ]),
+    ...pair("import-books", "Import books", "basics", actions.importBooks, [
+      { binding: "alt+b", navOnly: false },
+    ]),
+    ...pair("insert-time", "Insert current time", "basics", actions.insertTimeStamp, [
+      { binding: "alt+t", navOnly: false },
+    ]),
+    ...pair("insert-personal-journal", "Insert [[personal/journal]]", "basics", actions.insertPersonalJournal, [
+      { binding: "alt+j", navOnly: false },
+    ]),
   ];
 
   keymap_manager.register(shortcuts);

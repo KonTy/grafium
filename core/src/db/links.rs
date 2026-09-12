@@ -954,12 +954,14 @@ impl Database {
     pub fn get_backlinks(&self, page_id: &str) -> Result<Vec<(Link, Block)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT l.from_block_id, l.to_page_id, l.link_type,
+            "SELECT l.from_block_id, l.to_page_id, MIN(l.link_type),
                     b.id, b.page_id, b.parent_id, b.order_index, b.content, b.block_type, b.properties, b.created_at, b.updated_at
              FROM links l
              JOIN blocks b ON b.id = l.from_block_id
              JOIN pages target ON target.id = l.to_page_id
              WHERE lower(target.title) = (SELECT lower(title) FROM pages WHERE id = ?1)
+               AND b.page_id != ?1
+             GROUP BY b.id
              ORDER BY b.updated_at DESC"
         )?;
         let results = stmt

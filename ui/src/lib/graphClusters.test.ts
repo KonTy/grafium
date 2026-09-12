@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeGraphClusters, clusterColor, clusterPalette } from "./graphClusters";
+import { computeGraphClusters, clusterColor, clusterPalette, planetColor } from "./graphClusters";
 
 describe("computeGraphClusters", () => {
   it("groups connected nodes into the same cluster and orders clusters by size", () => {
@@ -53,6 +53,28 @@ describe("cluster color palettes", () => {
     expect(new Set(palette).size).toBe(palette.length);
     expect(clusterColor(0, false)).toBe(clusterColor(0, false));
     expect(clusterColor(0, false)).not.toBe(clusterColor(1, false));
+  });
+
+  describe("topic planet colors", () => {
+    it("gives connected topic names varied, stable colors", () => {
+      const topics = ["Rust", "WebAssembly", "JavaScript", "Type systems"];
+      expect(new Set(topics.map(planetColor)).size).toBe(topics.length);
+      expect(planetColor("Rust")).toBe(planetColor(" RUST "));
+    });
+
+    it("keeps namespace families on one hue while varying individual shades", () => {
+      const colors = ["AI/Models", "AI/Research", "ai/Agents"].map(planetColor);
+      expect(new Set(colors.map((color) => color.split(",")[0])).size).toBe(1);
+      expect(new Set(colors).size).toBeGreaterThan(1);
+      expect(planetColor("AI/Models").split(",")[0]).not.toBe(planetColor("Health/Fitness").split(",")[0]);
+    });
+
+    it("supports Unicode topic names and empty titles deterministically", () => {
+      for (const title of ["数学/代数", "Café", ""]) {
+        expect(planetColor(title)).toMatch(/^hsl\(\d+, \d+%, \d+%\)$/);
+        expect(planetColor(title)).toBe(planetColor(title));
+      }
+    });
   });
 
   it("uses a different (darker/more saturated) palette for light themes", () => {

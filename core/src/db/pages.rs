@@ -199,6 +199,42 @@ impl Database {
         Ok(pages)
     }
 
+    /// Regular (non-journal) pages whose title equals `from` or lives under
+    /// that namespace (`from/` or `from` matching `from/...`).
+    pub fn list_pages_for_title_rewrite(&self, from: &str) -> Result<Vec<Page>> {
+        let from = from.trim();
+        if from.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn()?;
+        let like = if from.ends_with('/') {
+            format!("{}%", escape_like(&from.to_lowercase()))
+        } else {
+            format!("{}/%", escape_like(&from.to_lowercase()))
+        };
+        let mut stmt = conn.prepare(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages
+             WHERE is_journal = 0
+               AND (lower(title) = lower(?1) OR lower(title) LIKE ?2 ESCAPE '\\')
+             ORDER BY length(title) DESC, title ASC",
+        )?;
+        let pages = stmt
+            .query_map(params![from, like], |row| {
+                Ok(Page {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    is_journal: row.get::<_, i32>(5)? != 0,
+                    properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pages)
+    }
+
     pub fn get_or_create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
         match self.get_page_by_title_ci(title) {
             Ok(page) => Ok(page),
@@ -490,6 +526,94 @@ impl Database {
     pub fn delete_page(&self, id: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute("DELETE FROM pages WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Move every block from `source_id` onto `dest_id` and retarget
+    /// page-scoped rows so `source_id` can be deleted without CASCADE
+    /// wiping the moved content or colliding unique keys.
+    pub fn rehome_page_into(&self, source_id: &str, dest_id: &str) -> Result<()> {
+        if source_id == dest_id {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().timestamp_millis();
+        let offset: i32 = tx.query_row(
+            "SELECT COALESCE(MAX(order_index), -1) + 1 FROM blocks WHERE page_id = ?1 AND parent_id IS NULL",
+            params![dest_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE blocks SET order_index = order_index + ?1, updated_at = ?2
+             WHERE page_id = ?3 AND parent_id IS NULL",
+            params![offset, now, source_id],
+        )?;
+        tx.execute(
+            "UPDATE blocks SET page_id = ?1, updated_at = ?2 WHERE page_id = ?3",
+            params![dest_id, now, source_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM links
+             WHERE to_page_id = ?1
+               AND (from_block_id, link_type) IN (
+                   SELECT from_block_id, link_type FROM links WHERE to_page_id = ?2
+               )",
+            params![source_id, dest_id],
+        )?;
+        tx.execute(
+            "UPDATE links SET to_page_id = ?1 WHERE to_page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+
+        tx.execute(
+            "UPDATE link_candidates SET from_page_id = ?1 WHERE from_page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+        tx.execute(
+            "DELETE FROM link_candidates
+             WHERE to_page_id = ?1
+               AND (from_block_id, anchor_start, anchor_end, source) IN (
+                   SELECT from_block_id, anchor_start, anchor_end, source
+                   FROM link_candidates
+                   WHERE to_page_id = ?2
+               )",
+            params![source_id, dest_id],
+        )?;
+        tx.execute(
+            "UPDATE link_candidates SET to_page_id = ?1 WHERE to_page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM favorites WHERE page_id = ?1 AND EXISTS (SELECT 1 FROM favorites WHERE page_id = ?2)",
+            params![source_id, dest_id],
+        )?;
+        tx.execute(
+            "UPDATE favorites SET page_id = ?1 WHERE page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM recent_pages WHERE page_id = ?1 AND EXISTS (SELECT 1 FROM recent_pages WHERE page_id = ?2)",
+            params![source_id, dest_id],
+        )?;
+        tx.execute(
+            "UPDATE recent_pages SET page_id = ?1 WHERE page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+
+        tx.execute(
+            "DELETE FROM pending_reindex WHERE page_id = ?1 AND EXISTS (SELECT 1 FROM pending_reindex WHERE page_id = ?2)",
+            params![source_id, dest_id],
+        )?;
+        tx.execute(
+            "UPDATE pending_reindex SET page_id = ?1 WHERE page_id = ?2",
+            params![dest_id, source_id],
+        )?;
+
+        tx.commit()?;
         Ok(())
     }
 

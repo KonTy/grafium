@@ -51,59 +51,36 @@ struct Scan {
     saw_open: bool,
 }
 
-/// Single left-to-right pass splitting `raw` into answer text vs. `<think>`
-/// reasoning while tracking nesting depth. Handles multiple and nested
-/// blocks, and stray or unterminated tags, without panicking. Operates on
-/// `&str` byte offsets found via `find`, so it is UTF-8 safe.
-/// Whether text appearing before the first `<think>` is a tokenizer artifact
-/// rather than the start of an answer.
-///
 /// Some converted GGUFs emit a stray token ahead of the reasoning block — one
 /// abliterated Qwen3 build reliably opens with the Chinese fragment "起来" —
 /// which was shown to the user as the first words of the reply.
 ///
-/// Length alone can't separate that from a genuine short answer that precedes
-/// reasoning, so the test is whether the fragment contains any ASCII letters
-/// or digits. Prompts and answers here are English, so a short run with no
-/// Latin characters at all is an artifact, while "Partial answer" is plainly
-/// real text and is kept.
-/// Removes a stray opening fragment from `raw`, if present.
+/// Only recognize that exact artifact immediately before reasoning. Script or
+/// byte length alone cannot distinguish an artifact from a requested Chinese
+/// answer, a proper name, or even opening punctuation.
 fn strip_leading_stray(raw: &str) -> &str {
-    let trimmed = raw.trim_start();
-    // The fragment ends at the first ASCII character, which is where real
-    // content (or a `<think>` tag) begins.
-    let end = trimmed
-        .char_indices()
-        .find(|(_, c)| c.is_ascii())
-        .map(|(i, _)| i)
-        .unwrap_or(trimmed.len());
-    if end > 0 && is_stray_preamble(&trimmed[..end]) {
-        trimmed[end..].trim_start()
-    } else {
-        raw
+    if let Some(rest) = raw.trim_start().strip_prefix("起来") {
+        if rest.trim_start().starts_with(OPEN_TAG) {
+            return rest.trim_start();
+        }
     }
+    raw
 }
 
-fn is_stray_preamble(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= STRAY_PREAMBLE_MAX_BYTES
-        && !trimmed.chars().any(|c| c.is_ascii_alphanumeric())
+fn possible_stray_preamble(raw: &str) -> bool {
+    let raw = raw.trim_start();
+    "起来".starts_with(raw)
+        || raw.strip_prefix("起来").is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest.len() < OPEN_TAG.len() && OPEN_TAG.starts_with(rest)
+        })
 }
 
-/// Upper bound on a fragment considered a stray emission. Observed leaks are a
-/// handful of bytes; anything longer is treated as content whatever its script.
-const STRAY_PREAMBLE_MAX_BYTES: usize = 24;
-
+/// Single UTF-8-safe pass tracking multiple, nested and unterminated think blocks.
 fn scan(raw: &str) -> Scan {
     let mut answer = String::new();
     let mut depth: usize = 0;
     let mut saw_open = false;
-    // Drop a stray opening fragment before anything else. Doing it here rather
-    // than only where a `<think>` is found is what makes it work while
-    // streaming: the fragment is the very first token, so at that moment no
-    // tag has arrived yet and there is nothing to recognise it by — it was
-    // emitted to the UI immediately and could not be taken back.
     let mut rest = strip_leading_stray(raw);
 
     loop {
@@ -118,9 +95,7 @@ fn scan(raw: &str) -> Scan {
 
         if let Some(o) = next_open.filter(|_| open_first) {
             if depth == 0 {
-                if saw_open || !is_stray_preamble(&rest[..o]) {
-                    answer.push_str(&rest[..o]);
-                }
+                answer.push_str(&rest[..o]);
             }
             depth += 1;
             saw_open = true;
@@ -207,6 +182,9 @@ impl ThinkStreamFilter {
     /// Feed one raw token piece; returns what the UI should do about it.
     pub fn push(&mut self, piece: &str) -> StreamStep {
         self.raw.push_str(piece);
+        if self.emitted == 0 && possible_stray_preamble(&self.raw) {
+            return StreamStep::Idle;
+        }
         let scanned = scan(&self.raw);
 
         // Withhold a trailing partial tag: only meaningful at depth 0, where
@@ -235,6 +213,11 @@ impl ThinkStreamFilter {
     /// text.
     pub fn finish(&self) -> ThinkStripResult {
         strip_think_blocks(&self.raw)
+    }
+
+    /// Release text withheld as an ambiguous prefix once generation ends.
+    pub(crate) fn remaining_answer(&self) -> String {
+        scan(&self.raw).answer[self.emitted..].to_string()
     }
 }
 
@@ -324,13 +307,12 @@ mod tests {
         assert_eq!(shown.trim(), "The real answer.");
     }
 
-    /// Also covers the case where the model emits the fragment and then answers
-    /// directly, with no reasoning block at all.
+    /// Without a think block this could be an intentionally requested term.
     #[test]
-    fn a_stray_fragment_is_dropped_even_without_a_think_block() {
+    fn a_chinese_term_is_preserved_without_a_think_block() {
         assert_eq!(
             strip_think_blocks("起来 The whole answer."),
-            ThinkStripResult::Answer("The whole answer.".to_string())
+            ThinkStripResult::Answer("起来 The whole answer.".to_string())
         );
     }
 
@@ -346,14 +328,43 @@ mod tests {
         );
     }
 
-    /// …but a genuine answer that precedes reasoning must survive, which is
-    /// why the test is script-based rather than length-based.
+    /// A genuine answer that precedes reasoning must survive in every script.
     #[test]
     fn real_text_before_reasoning_is_kept() {
         assert_eq!(
             strip_think_blocks("Partial answer<think>reasoning</think>"),
             ThinkStripResult::Answer("Partial answer".to_string())
         );
+        assert_eq!(
+            strip_think_blocks("你好<think>reasoning</think>"),
+            ThinkStripResult::Answer("你好".to_string())
+        );
+    }
+
+    #[test]
+    fn short_non_ascii_answers_are_never_deleted_or_split() {
+        for raw in [
+            "你好",
+            "起来",
+            "“Hello.”",
+            "鲁迅 is the author.",
+            "🙂 Hello",
+        ] {
+            assert_eq!(
+                strip_think_blocks(raw),
+                ThinkStripResult::Answer(raw.to_string())
+            );
+            let mut filter = ThinkStreamFilter::new();
+            let mut shown = String::new();
+            for ch in raw.chars() {
+                if let StreamStep::Answer(delta) = filter.push(&ch.to_string()) {
+                    shown.push_str(&delta);
+                }
+            }
+            shown.push_str(&filter.remaining_answer());
+            assert_eq!(shown, raw);
+            assert_eq!(filter.finish(), ThinkStripResult::Answer(raw.to_string()));
+        }
     }
 
     #[test]

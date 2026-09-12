@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { StreamChunk, SourcesPayload, ChatSource, WebSource, ChatTurn } from "./knowledge";
 import { isResearchCancellation } from "./knowledge";
+import type { ChatScope } from "./chatScope";
 
 // ─── Payload casing (the single flip point) ──────────────────────────────────
 //
@@ -221,6 +222,7 @@ export async function researchDeep(
   requestId: string = `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   graphId?: string,
   history?: ChatTurn[],
+  scope: ChatScope = "internet",
 ): Promise<void> {
   handlers.onStart?.(requestId);
 
@@ -232,6 +234,7 @@ export async function researchDeep(
   let unlistenStream: UnlistenFn | null = null;
   let unlistenSources: UnlistenFn | null = null;
   try {
+    if (scope !== "internet") throw new Error("Select Internet scope to use Research.");
     unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
       const payload = event.payload;
       if (!payload || payload.request_id !== requestId) return;
@@ -258,7 +261,7 @@ export async function researchDeep(
       }
     });
 
-    await invoke("research_deep", { question, requestId, graphId, history: history ?? [] });
+    await invoke("research_deep", { question, requestId, graphId, history: history ?? [], scope });
   } catch (e: any) {
     // A user Stop rejects the invoke with the canonical cancellation message;
     // that's a normal end to the run, not a failure to surface.

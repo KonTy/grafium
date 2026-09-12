@@ -2010,6 +2010,64 @@ pub struct AskSourcesPayload {
     pub web_sources: Vec<WebSourceDto>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatScope {
+    #[default]
+    Local,
+    Internet,
+}
+
+impl ChatScope {
+    pub fn require_internet(self) -> Result<(), String> {
+        match self {
+            Self::Internet => Ok(()),
+            Self::Local => Err("Select Internet scope to use Research.".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatPreferences {
+    scope: ChatScope,
+    research: bool,
+}
+
+fn chat_preferences_path() -> Result<PathBuf, String> {
+    dirs::config_dir()
+        .map(|dir| dir.join("grafium").join("chat.json"))
+        .ok_or_else(|| "Could not locate the app configuration directory.".to_string())
+}
+
+#[tauri::command]
+pub fn get_chat_preferences() -> Result<Option<ChatPreferences>, String> {
+    match std::fs::read(chat_preferences_path()?) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|err| format!("Could not read Chat preferences: {err}")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("Could not read Chat preferences: {err}")),
+    }
+}
+
+#[tauri::command]
+pub fn set_chat_preferences(preferences: ChatPreferences) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&preferences).map_err(|err| err.to_string())?;
+    grafium_core::fsutil::atomic_write(&chat_preferences_path()?, &bytes)
+        .map_err(|err| format!("Could not save Chat preferences: {err}"))
+}
+
+fn scoped_web_question(scope: ChatScope, question: &str, history: &[ChatTurn]) -> Option<String> {
+    if scope != ChatScope::Internet {
+        return None;
+    }
+    let cleaned = detect_research_intent(question)
+        .map(|intent| intent.cleaned_question)
+        .unwrap_or_else(|| question.to_string());
+    Some(conversation::resolve_research_followup(&cleaned, history))
+}
+
 #[tauri::command]
 pub async fn ai_ask_stream(
     state: State<'_, KnowledgeState>,
@@ -2019,6 +2077,7 @@ pub async fn ai_ask_stream(
     graph_id: Option<String>,
     request_id: String,
     history: Option<Vec<ChatTurn>>,
+    scope: Option<ChatScope>,
 ) -> Result<(), String> {
     let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
@@ -2046,46 +2105,9 @@ pub async fn ai_ask_stream(
         map.insert(request_id.clone(), cancel.clone());
     }
 
-    // A research trigger ("… search the web") turns Chat into a two-part
-    // answer: the notes-grounded reply plus a live internet research pass. We
-    // strip the trigger phrase (via the core detector) so neither retrieval nor
-    // the web queries are polluted by "search the web", then route to the
-    // two-part path. An LLM is required for both arms — already checked above.
-    // A research trigger may carry no topic of its own ("look it up on the
-    // internet") — mid-conversation that's the normal way to ask, so the topic
-    // is taken from the turn it refers back to rather than refusing.
-    let rule_match = detect_research_intent(&question).and_then(|intent| {
-        let resolved = conversation::resolve_research_followup(&intent.cleaned_question, &history);
-        if !intent.needs_conversation_context && resolved == intent.cleaned_question {
-            return Some(intent.cleaned_question);
-        }
-        // With nothing to resolve against, searching for "it" would be worse
-        // than not searching at all.
-        conversation::is_self_contained(&resolved).then_some(resolved)
-    });
-
-    // Rules are instant and deterministic, so an explicit "search the web"
-    // costs nothing. They can't read a misspelled or merely *implied* request
-    // though ("what papers did Levin publish recently" names no web at all),
-    // and extending the phrase list was repeatedly followed by another
-    // phrasing it missed. So anything the rules neither match nor confidently
-    // reject is put to the model — about half a second, and only on questions
-    // that would otherwise have been answered without the web.
-    let research = match rule_match {
-        Some(q) => Some(q),
-        None if grafium_core::knowledge::research_intent::rules_reject_research(&question) => None,
-        None => {
-            let resolved = conversation::resolve_research_followup(&question, &history);
-            if grafium_core::knowledge::research_intent::should_research_before_answer(&resolved) {
-                Some(resolved)
-            } else {
-                match engine.classify_needs_web(&resolved).await {
-                    true => Some(resolved),
-                    false => None,
-                }
-            }
-        }
-    };
+    // Only the selected scope permits web access; prompt wording and model
+    // classification must never silently override a Local graph selection.
+    let research = scoped_web_question(scope.unwrap_or_default(), &question, &history);
     let effective_question = research.clone().unwrap_or_else(|| question.clone());
 
     // Forward real token deltas and phase transitions as they happen. Phase
@@ -2281,6 +2303,57 @@ mod tests {
     };
     use grafium_core::models::{Block, BlockType};
     use grafium_core::parser::TagTerm;
+
+    #[test]
+    fn chat_scope_defaults_local_and_never_promotes_prompt_intent_to_web() {
+        assert_eq!(super::ChatScope::default(), super::ChatScope::Local);
+        for question in [
+            "Search the web for Rust releases",
+            "Look it up online",
+            "Latest news today",
+        ] {
+            assert!(super::scoped_web_question(super::ChatScope::Local, question, &[]).is_none());
+        }
+        assert!(super::ChatScope::Local.require_internet().is_err());
+        assert!(super::ChatScope::Internet.require_internet().is_ok());
+    }
+
+    #[test]
+    fn chat_scope_internet_uses_web_without_a_research_trigger() {
+        assert_eq!(
+            super::scoped_web_question(super::ChatScope::Internet, "Rust releases", &[]),
+            Some("Rust releases".to_string())
+        );
+    }
+
+    #[test]
+    fn chat_scope_wire_values_are_explicit() {
+        assert_eq!(
+            serde_json::from_str::<super::ChatScope>("\"local\"").unwrap(),
+            super::ChatScope::Local
+        );
+        assert_eq!(
+            serde_json::from_str::<super::ChatScope>("\"internet\"").unwrap(),
+            super::ChatScope::Internet
+        );
+        assert!(serde_json::from_str::<super::ChatScope>("\"auto\"").is_err());
+    }
+
+    #[test]
+    fn chat_scope_preferences_round_trip_and_safe_defaults() {
+        let defaults = serde_json::from_str::<super::ChatPreferences>("{}").unwrap();
+        assert_eq!(defaults.scope, super::ChatScope::Local);
+        assert!(!defaults.research);
+        let saved = super::ChatPreferences {
+            scope: super::ChatScope::Internet,
+            research: true,
+        };
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        let restored = serde_json::from_slice::<super::ChatPreferences>(&bytes).unwrap();
+        assert_eq!(restored.scope, saved.scope);
+        assert!(restored.research);
+        assert!(serde_json::from_str::<super::ChatPreferences>(r#"{"scope":"auto"}"#).is_err());
+    }
 
     #[test]
     fn page_batch_cursor_streams_past_legacy_ten_thousand_cap() {

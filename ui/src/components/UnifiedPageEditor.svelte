@@ -48,6 +48,7 @@
     sourceBlockContentReplacement,
     type SourceBlock,
   } from "../lib/pageSourceMap";
+  import { isFencedCodeBlock } from "../lib/codeFence";
 
   interface Props {
     page: Page;
@@ -131,10 +132,6 @@
         row.dataset.sourceBlockId = this.blockId;
       }
 
-      const bullet = document.createElement("span");
-      bullet.className = "unified-rendered-bullet";
-      bullet.textContent = "•";
-
       const content = document.createElement("div");
       content.className = "unified-rendered-content rendered-content";
       if (this.content.trim()) {
@@ -143,7 +140,16 @@
         content.appendChild(document.createTextNode("\u00a0"));
       }
 
-      row.append(bullet, content);
+      if (isFencedCodeBlock(this.content)) {
+        row.classList.add("code-block");
+        row.style.gridTemplateColumns = "minmax(0, 1fr)";
+        row.append(content);
+      } else {
+        const bullet = document.createElement("span");
+        bullet.className = "unified-rendered-bullet";
+        bullet.textContent = "•";
+        row.append(bullet, content);
+      }
       row.addEventListener("click", (event) => {
         if (event.button !== 0) return;
         if (row.ownerDocument.getSelection()?.toString()) return;
@@ -623,6 +629,9 @@
           ".unified-rendered-content ul, .unified-rendered-content ol": {
             paddingLeft: "0",
             listStylePosition: "inside",
+          },
+          ".unified-rendered-content li:has(.code-block-wrapper)": {
+            listStyle: "none",
           },
           ".unified-rendered-content li > p": {
             display: "inline",

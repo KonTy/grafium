@@ -1,4 +1,5 @@
 use crate::AppState;
+use grafium_core::graph::{BulkRenameResult, DeletePageResult};
 use grafium_core::models::Page;
 use serde::Serialize;
 use std::path::Path;
@@ -170,16 +171,49 @@ pub fn update_page_meta(
     properties: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    if let Some(title) = title.as_deref() {
+        graph.rename_page(&id, title).map_err(|e| e.to_string())?;
+    }
+    if let Some(props) = properties {
+        graph
+            .update_page_properties(&id, props)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_page(state: State<AppState>, id: String, title: String) -> Result<Page, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.rename_page(&id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn bulk_rename_pages(
+    state: State<AppState>,
+    from: String,
+    to: String,
+    dry_run: Option<bool>,
+) -> Result<BulkRenameResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph
-        .db
-        .update_page(&id, title.as_deref(), properties.as_ref())
+        .bulk_rename_pages(&from, &to, dry_run.unwrap_or(false))
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_page(state: State<AppState>, id: String) -> Result<(), String> {
+pub fn delete_page(state: State<AppState>, id: String) -> Result<DeletePageResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.delete_page(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_namespace(
+    state: State<AppState>,
+    title: String,
+) -> Result<DeletePageResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph.delete_namespace(&title).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -199,6 +233,20 @@ pub fn open_page_in_file_browser(state: State<AppState>, id: String) -> Result<(
     let path = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         graph.page_filesystem_path(&id).map_err(|e| e.to_string())?
+    };
+    open_path_in_file_browser(&path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_namespace_in_file_browser(
+    state: State<AppState>,
+    title: String,
+) -> Result<(), String> {
+    let path = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        graph
+            .namespace_filesystem_path(&title)
+            .map_err(|e| e.to_string())?
     };
     open_path_in_file_browser(&path)
 }

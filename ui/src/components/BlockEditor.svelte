@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers } from "@codemirror/view";
-  import { EditorState, EditorSelection, Transaction } from "@codemirror/state";
+  import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, tooltips } from "@codemirror/view";
+  import { EditorState, EditorSelection, Prec, Transaction } from "@codemirror/state";
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
-  import { autocompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+  import { autocompletion, closeCompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -29,6 +29,8 @@
     readAssetDataUrl,
     resolveAssetFilePath,
     saveImageToPath,
+    searchPageTitles,
+    listPages,
   } from "../lib/api";
   import type { QueryRow } from "../lib/api";
   import type { BlockContentChange } from "../lib/undoStack";
@@ -40,7 +42,14 @@
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
   import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
+  import {
+    loadWikiLinkPages,
+    wikiLinkCloseExtra,
+    wikiLinkReplacement,
+    wikiLinkToken,
+  } from "../lib/wikiLinkCompletion";
   import { toggleWrapText, wrapPageLinkText } from "../lib/editorFormat";
+  import { insertAtCursor } from "../lib/editorInsert";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import {
     assetPathFromImageUrl,
@@ -53,6 +62,7 @@
     scaledImageDimensions,
   } from "../lib/imageSizing";
   import { isTaskContent } from "../lib/taskSyntax";
+  import { isFencedCodeBlock } from "../lib/codeFence";
   import DatePicker from "./DatePicker.svelte";
 
   interface Props {
@@ -86,6 +96,7 @@
       blockId: string,
       blocks: PasteBlock[],
       anchorEdit?: { beforeContent: string; afterContent: string },
+      persistAnchor?: () => Promise<void>,
     ) => void | Promise<void>;
     onToggleCollapse?: (blockId: string) => void;
     onContentChange?: (pageId: string, change: BlockContentChange) => void;
@@ -122,7 +133,11 @@
   let blurTeardownTimer: number | undefined;
   let shiftHeld = false;
   let isEditing = $state(false);
+  /// Set when the user dismisses the `[[` picker with Escape so the
+  /// update listener does not immediately reopen it while the token remains.
+  let wikiCompletionDismissed = false;
   let isCodeBlock = $derived(detectCodeBlock(block.content));
+  let isFenceBlock = $derived(isFencedCodeBlock(block.content));
   let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
   let isTableBlock = $derived(renderedHtml.includes("<table"));
 
@@ -144,6 +159,8 @@
   let imageMenuMessage = $state<string | null>(null);
   let imageMenuMessageTimer: number | undefined;
   let pendingSaveContent = $state<string | null>(null);
+  let nextPasteId = 0;
+  let pendingPastes = $state<{ id: number; markdown: string; error: string | null }[]>([]);
   let finishEditingPromise: Promise<boolean> | null = null;
   type ImageSizeMenu = {
     index: number;
@@ -298,11 +315,11 @@
   let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
   let isVisuallyEmpty = $derived(isVisuallyEmptyBlock(block.content));
   let suppressBullet = $derived(
-    getHeadingLevel(block.content) > 0 || isTaskContent(block.content) || isTableBlock
+    getHeadingLevel(block.content) > 0 || isTaskContent(block.content) || isTableBlock || isFenceBlock
   );
   let showBlockMarker = $derived(
     !bookMode &&
-      !block.content.trim().startsWith("```") &&
+      !isFenceBlock &&
       !queryExpression &&
       !isVisuallyEmpty &&
       !isQuoteBlock &&
@@ -540,6 +557,36 @@
         },
       })),
     };
+  }
+
+  async function wikiLinkCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
+    const head = context.state.selection.main.head;
+    const line = context.state.doc.lineAt(head);
+    const beforeCursor = line.text.slice(0, head - line.from);
+    const token = wikiLinkToken(beforeCursor);
+    if (!token) return null;
+    if (editorView && isInsideCodeFence(editorView)) return null;
+
+    try {
+      const pages = await loadWikiLinkPages(token.query, {
+        search: searchPageTitles,
+        listRecent: (limit) => listPages(limit, 0),
+      });
+      if (pages.length === 0) return null;
+      const extra = wikiLinkCloseExtra(line.text.slice(head - line.from));
+      return {
+        from: line.from + token.from,
+        to: head + extra,
+        filter: false,
+        options: pages.map((page) => ({
+          label: page.title,
+          detail: page.is_journal ? "journal" : "page",
+          apply: wikiLinkReplacement(page.title),
+        })),
+      };
+    } catch {
+      return null;
+    }
   }
 
   // Detect if the block is entirely a code fence
@@ -1026,6 +1073,11 @@
   }
 
   // Detect if cursor is inside a code fence (``` ... ```)
+  function completionOpen(view: EditorView): boolean {
+    const status = completionStatus(view.state);
+    return status === "active" || status === "pending";
+  }
+
   function isInsideCodeFence(view: EditorView): boolean {
     const doc = view.state.doc.toString();
     const pos = view.state.selection.main.head;
@@ -1052,6 +1104,8 @@
   // Imperative caret target for cross-block Arrow Up/Down navigation. Set by
   // the parent via focusForNav() right before/while the editor opens.
   let navPending: { x: number; edge: "top" | "bottom" } | null = null;
+  let pendingEndCaret = false;
+  let pendingInsert: string | null = null;
 
   /** Called imperatively by the parent (PageContent) when this block is the
    *  target of an Arrow Up/Down move. Opens the editor and places the caret at
@@ -1064,6 +1118,27 @@
     if (isEditing && editorView) {
       placeNavCaret(editorView);
     } else {
+      startEditing();
+    }
+  }
+
+  /** Open this block for editing and put the caret at the end of its text. */
+  export function focusAtEnd() {
+    pendingEndCaret = true;
+    if (isEditing && editorView) {
+      placeEndCaret(editorView);
+    } else {
+      startEditing();
+    }
+  }
+
+  /** Insert text at the caret. If the block is not being edited, open it at the end first. */
+  export function insertText(text: string) {
+    pendingInsert = text;
+    if (isEditing && editorView) {
+      flushPendingInsert(editorView);
+    } else {
+      pendingEndCaret = true;
       startEditing();
     }
   }
@@ -1084,6 +1159,20 @@
       view.dispatch({ selection: EditorSelection.cursor(view.state.doc.length) });
     }
     view.focus();
+  }
+
+  function placeEndCaret(view: EditorView) {
+    if (!pendingEndCaret) return;
+    pendingEndCaret = false;
+    view.dispatch({ selection: EditorSelection.cursor(view.state.doc.length) });
+    view.focus();
+  }
+
+  function flushPendingInsert(view: EditorView) {
+    if (!pendingInsert) return;
+    const text = pendingInsert;
+    pendingInsert = null;
+    insertAtCursor(view, text);
   }
 
   function startEditing() {
@@ -1141,10 +1230,25 @@
           markdown(),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
-            override: [slashCompletionSource, angleCompletionSource],
+            override: [slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource],
             activateOnTyping: false,
             closeOnBlur: false,
           }),
+          // Keep the completion menu out of the block stacking context so later
+          // journal/page blocks cannot paint through it.
+          tooltips({ parent: document.body }),
+          Prec.highest(keymap.of([{
+            key: "Escape",
+            run: (view) => {
+              if (completionOpen(view)) {
+                wikiCompletionDismissed = true;
+                closeCompletion(view);
+                return true;
+              }
+              void stopEditing();
+              return true;
+            },
+          }])),
           keymap.of([
             {
               key: "/",
@@ -1191,6 +1295,7 @@
             {
               key: "Enter",
               run: (view) => {
+                if (completionOpen(view)) return false;
                 // If inside a code fence, insert a newline instead
                 if (isInsideCodeFence(view)) {
                   const { from } = view.state.selection.main;
@@ -1235,6 +1340,7 @@
             {
               key: "Tab",
               run: (view) => {
+                if (completionOpen(view)) return false;
                 // Inside code fence: insert tab/spaces
                 if (isInsideCodeFence(view)) {
                   const { from } = view.state.selection.main;
@@ -1257,13 +1363,6 @@
                 }
                 const content = view.state.doc.toString();
                 onIndent?.(block.id, "out", content);
-                return true;
-              },
-            },
-            {
-              key: "Escape",
-              run: (view) => {
-                void stopEditing();
                 return true;
               },
             },
@@ -1343,9 +1442,33 @@
             // mid-word `<`, comparisons, or non-matching text so ordinary typing
             // is never hijacked.
             const angleOpen = angleTemplateMenu(beforeCursor) !== null;
-            if (!slashToken && !angleOpen) return;
+            const wikiOpen = wikiLinkToken(beforeCursor) !== null;
+            if (!slashToken && !angleOpen && !wikiOpen) {
+              wikiCompletionDismissed = false;
+              return;
+            }
 
+            const prevStatus = completionStatus(update.startState);
             const status = completionStatus(update.state);
+            // Wiki-link results come from the DB, so re-query as the title
+            // fragment changes. Slash/`<` menus filter locally and only need
+            // to open once. Escape dismisses the picker; keep it closed until
+            // the user types again inside `[[`.
+            if (wikiOpen && update.docChanged) {
+              wikiCompletionDismissed = false;
+              startCompletion(update.view);
+              return;
+            }
+            if (
+              wikiOpen &&
+              !update.docChanged &&
+              (prevStatus === "active" || prevStatus === "pending") &&
+              status === null
+            ) {
+              wikiCompletionDismissed = true;
+              return;
+            }
+            if (wikiOpen && wikiCompletionDismissed) return;
             if (status === null) {
               startCompletion(update.view);
             }
@@ -1397,6 +1520,7 @@
               } else {
                 // Ctrl+V: split into separate blocks with hierarchy
                 const chunks = splitMarkdownIntoBlocks(md);
+                if (chunks.length === 0) return true;
                 const beforePasteContent = view.state.doc.toString();
                 // First chunk goes into the current block at cursor
                 const { from, to } = view.state.selection.main;
@@ -1407,15 +1531,23 @@
                 // Remaining chunks become new blocks (with depth info)
                 if (chunks.length > 1) {
                   const content = view.state.doc.toString();
+                  const pasteId = nextPasteId++;
+                  pendingPastes = [...pendingPastes, {
+                    id: pasteId,
+                    markdown: chunks.slice(1).map((chunk) => `${"  ".repeat(chunk.depth)}${chunk.content}`).join("\n\n"),
+                    error: null,
+                  }];
                   void (async () => {
                     try {
-                      await saveContent(content);
                       await onPasteBlocks?.(block.id, chunks.slice(1), {
                         beforeContent: beforePasteContent,
                         afterContent: content,
-                      });
-                    } catch {
-                      // saveContent already surfaces the error state
+                      }, async () => { await saveContent(content); });
+                      pendingPastes = pendingPastes.filter((paste) => paste.id !== pasteId);
+                    } catch (error) {
+                      pendingPastes = pendingPastes.map((paste) => paste.id === pasteId
+                        ? { ...paste, error: error instanceof Error ? error.message : String(error) }
+                        : paste);
                     }
                   })();
                 }
@@ -1549,6 +1681,8 @@
       // pressing Arrow Up/Down in an adjacent block, drop the caret at the same
       // viewport x on the appropriate (top/bottom) visual line — like MS Word.
       placeNavCaret(editorView);
+      placeEndCaret(editorView);
+      flushPendingInsert(editorView);
   }
 
   async function stopEditing() {
@@ -1909,7 +2043,7 @@
   class:bookMode
   class:editing={isEditing}
   class:selected
-  class:code-block={isCodeBlock !== null}
+  class:code-block={isFenceBlock || isCodeBlock !== null}
   class:image-menu-open={imageSizeMenu !== null}
   class:h1={editorStyleClass === "h1"}
   class:h2={editorStyleClass === "h2"}
@@ -2062,6 +2196,21 @@
         </div>
       {/if}
     {/if}
+    {#each pendingPastes as paste (paste.id)}
+      <div class="paste-preview">
+        {#if paste.error}
+          <div class="save-error" role="alert">
+            Paste could not be completed: {paste.error}. Saving all of this text could not be confirmed;
+            copy it before leaving this page.
+          </div>
+          <textarea aria-label="Unfinished pasted text" readonly rows="10" value={paste.markdown}
+            onclick={(event) => event.stopPropagation()}></textarea>
+        {:else}
+          <div class="paste-status" role="status">Saving pasted blocks...</div>
+          <pre>{paste.markdown}</pre>
+        {/if}
+      </div>
+    {/each}
     {#if imageSizeMenu}
       <div
         class="image-size-menu app-context-menu"
@@ -2347,6 +2496,26 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .paste-preview {
+    margin-top: 8px;
+  }
+
+  .paste-status {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .paste-preview pre,
+  .paste-preview textarea {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+  }
+
+  .paste-preview textarea {
+    width: 100%;
   }
 
   .save-error {
@@ -2892,6 +3061,14 @@
     list-style-position: inside;
   }
 
+  .rendered-content :global(li:has(.code-block-wrapper)) {
+    list-style: none;
+  }
+
+  .block-item.code-block .bullet-container {
+    display: none;
+  }
+
   .rendered-content :global(li) {
     margin: 0;
     line-height: inherit;
@@ -3075,10 +3252,12 @@
 
   /* CodeMirror autocomplete dropdown theme override */
   :global(.cm-tooltip-autocomplete) {
-    background: var(--bg-sidebar) !important;
+    background-color: var(--bg-primary) !important;
+    background-image: linear-gradient(var(--bg-secondary), var(--bg-secondary)) !important;
+    opacity: 1 !important;
     border: 1px solid var(--border) !important;
     border-radius: 6px !important;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.25) !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45) !important;
   }
 
   :global(.cm-tooltip-autocomplete ul li) {
