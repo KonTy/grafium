@@ -106,7 +106,6 @@ export function removeBionicReaderFromElement(root: HTMLElement): void {
   for (const wrapper of Array.from(root.querySelectorAll<HTMLElement>(".bionic-word[data-bionic-word='1']"))) {
     wrapper.replaceWith(root.ownerDocument.createTextNode(wrapper.textContent ?? ""));
   }
-  root.normalize();
 }
 
 export function applyBionicReaderToElement(root: HTMLElement): void {

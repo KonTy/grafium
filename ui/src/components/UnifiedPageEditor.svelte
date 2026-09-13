@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
-  import { autocompletion } from "@codemirror/autocomplete";
+  import { autocompletion, completionStatus } from "@codemirror/autocomplete";
   import {
     EditorSelection,
     EditorState,
@@ -791,6 +791,7 @@
       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
       if (event.altKey || event.ctrlKey || event.metaKey) return;
       if (!editorView || editorView !== view) return;
+      if (!event.shiftKey && completionStatus(view.state) === "active") return;
 
       const handled = moveVerticalSelection(
         view,

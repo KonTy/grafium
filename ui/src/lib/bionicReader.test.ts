@@ -32,4 +32,18 @@ describe("bionic reader", () => {
     expect(bionicPrefixLength("to")).toBe(1);
     expect(bionicPrefixLength("reading")).toBe(3);
   });
+
+  it("preserves empty text anchors owned by the renderer", () => {
+    const root = document.createElement("div");
+    root.innerHTML = "<table><tbody><tr><td>Reading notes</td></tr></tbody></table>";
+    const anchor = document.createTextNode("");
+    root.append(anchor);
+
+    applyBionicReaderToElement(root);
+    removeBionicReaderFromElement(root);
+
+    expect(root.lastChild).toBe(anchor);
+    expect(anchor.parentNode).toBe(root);
+    expect(root.querySelector("td")?.textContent).toBe("Reading notes");
+  });
 });

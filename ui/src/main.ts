@@ -4,6 +4,7 @@ import App from "./App.svelte";
 import { mount } from "svelte";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { completionStatus, moveCompletionSelection } from "@codemirror/autocomplete";
 import { invoke } from "@tauri-apps/api/core";
 import {
   redo,
@@ -136,6 +137,10 @@ function moveVerticalSelection(view: EditorView, direction: "up" | "down", exten
   if (!view) {
     debugLog(`[arrow] native ${direction} extend=${extend} no active CodeMirror view active=${document.activeElement?.tagName ?? "none"}`);
     return false;
+  }
+
+  if (!extend && completionStatus(view.state) === "active") {
+    return moveCompletionSelection(direction === "down")(view);
   }
 
   const before = selectionSummary(view);

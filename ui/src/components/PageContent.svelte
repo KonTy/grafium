@@ -3417,7 +3417,7 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 320px;
   }
 
   .page-title {
@@ -3489,6 +3489,7 @@
 
   .page-heading {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
@@ -3512,12 +3513,15 @@
 
   .page-heading-actions {
     display: flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
   }
 
   .prototype-toggle {
+    max-width: 100%;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-secondary);
@@ -4183,9 +4187,7 @@
     color: var(--text-primary);
   }
 
-  /* Phone: keep the title on its own row so action buttons cannot squeeze
-     "math" (and journal dates) into one character per line. Desktop heading
-     stays a single row. */
+  /* Phone titles always get their own row; wider layouts wrap only as needed. */
   @media (max-width: 640px) {
     .page-heading {
       flex-direction: column;
