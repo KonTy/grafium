@@ -994,6 +994,7 @@ impl KnowledgeEngine {
         db: &crate::db::Database,
         question: &str,
         graph_id: Option<&str>,
+        history: &[ChatTurn],
     ) -> Result<AskResponse> {
         let llm = self
             .llm
@@ -1001,7 +1002,7 @@ impl KnowledgeEngine {
             .ok_or_else(|| CoreError::Other("LLM not initialized".to_string()))?;
 
         let request = self
-            .build_ask_request(db, llm.as_ref(), question, graph_id, &[])
+            .build_ask_request(db, llm.as_ref(), question, graph_id, history)
             .await?;
 
         let raw = llm
@@ -1494,10 +1495,10 @@ impl KnowledgeEngine {
         };
         let budget = ask_context_budget_with(llm.context_window(), reserved_output);
 
-        // Retrieval can't resolve "it"/"that", so a follow-up is searched
-        // under the topic it refers back to rather than under its own
-        // (contentless) words.
-        let retrieval_query = conversation::resolve_followup(question, history);
+        // Retrieval can't infer the missing anchors in follow-ups like
+        // "it/that" or "the drive", so search those under the prior exchange
+        // too instead of relying only on the new wording.
+        let retrieval_query = conversation::resolve_retrieval_query(question, history);
 
         let mut hits = self
             .hybrid_search(db, &retrieval_query, ASK_TOP_K, graph_id)
@@ -3625,7 +3626,7 @@ mod tests {
                     assert!(outcome.trailing_message.is_none());
                 } else {
                     let response = engine
-                        .ask(&db, "Can you answer this request?", None)
+                        .ask(&db, "Can you answer this request?", None, &[])
                         .await?;
                     assert_eq!(response.answer, translated);
                     assert!(response.sources.is_empty());

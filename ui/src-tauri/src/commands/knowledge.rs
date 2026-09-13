@@ -1923,7 +1923,9 @@ pub async fn ai_ask(
     app_state: State<'_, crate::AppState>,
     question: String,
     graph_id: Option<String>,
+    history: Option<Vec<ChatTurn>>,
 ) -> Result<AskResult, String> {
+    let history = history.unwrap_or_default();
     let guard = state.engine.read().await;
     let engine = guard
         .as_ref()
@@ -1943,7 +1945,12 @@ pub async fn ai_ask(
     let graph = crate::open_graph_snapshot(&snapshot)?;
 
     let response = engine
-        .ask(&graph.db, &question, Some(resolved_graph_id.as_str()))
+        .ask(
+            &graph.db,
+            &question,
+            Some(resolved_graph_id.as_str()),
+            &history,
+        )
         .await
         .map_err(|e| e.to_string())?;
 

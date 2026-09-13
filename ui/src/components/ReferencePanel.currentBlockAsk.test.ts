@@ -63,6 +63,15 @@ describe("ReferencePanel current-block Ask scope", () => {
     expect(referencePanelSource).toContain("Clear thread");
   });
 
+  it("passes structured conversation history without replacing the current scope or thread", () => {
+    expect(referencePanelSource).toContain("askTurns.slice(-8).flatMap<ChatTurn>");
+    expect(referencePanelSource).toContain('content: turn.question');
+    expect(referencePanelSource).toContain('content: turn.answer');
+    expect(referencePanelSource).toContain("aiAsk(question, undefined, priorHistory)");
+    expect(referencePanelSource.match(/aiAsk\(scopedQuestion, undefined, priorHistory\)/g)).toHaveLength(2);
+    expect(referencePanelSource).not.toContain("let askTurns = $state<ChatTurn[]>([])");
+  });
+
   it("renders Ask with the shared chat bubble and adds pending turns immediately", () => {
     expect(referencePanelSource).toContain('import ChatMessageBubble from "./ChatMessageBubble.svelte";');
     expect(referencePanelSource).toContain("beginAskMessage(question, willUseWebResearch)");

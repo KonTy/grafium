@@ -20,6 +20,7 @@
     type WebSource,
     type SemanticSearchResult,
     type HealthStatus,
+    type ChatTurn,
   } from "../lib/knowledge";
   import type { ChatMessageModel, ChatThinkingTone } from "../lib/chatMessage";
   import { pushUndo } from "../lib/undoStack";
@@ -730,6 +731,10 @@
     if (isLoading) return;
     const question = askQuery.trim();
     if (!question) return;
+    const priorHistory = askTurns.slice(-8).flatMap<ChatTurn>((turn) => [
+      { role: "user", content: turn.question },
+      { role: "assistant", content: turn.answer },
+    ]);
     askThreadGeneration += 1;
     const generation = askThreadGeneration;
     activeAskGeneration = generation;
@@ -764,15 +769,13 @@
           return;
         }
         const blockContext = await buildCurrentBlockContext(question);
-        const thread = formatAskThreadForPrompt();
         const scopedQuestion =
           `You are looking at the page titled "${blockContext.pageTitle}". Answer the user's question using ONLY `
           + `the current block context below and the prior Ask thread when it is relevant. If the block and thread `
           + `do not contain enough information, say so plainly.\n\n`
           + `--- CURRENT BLOCK CONTEXT ---\n${blockContext.text}\n--- END CURRENT BLOCK CONTEXT ---\n\n`
-          + (thread ? `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\n` : "")
           + `Question: ${question}`;
-        const result = await aiAsk(scopedQuestion);
+        const result = await aiAsk(scopedQuestion, undefined, priorHistory);
         if (generation !== askThreadGeneration) return;
         const answer = result.answer;
         askAnswer = answer;
@@ -790,28 +793,21 @@
         // answer is always grounded in exactly this page's content, even
         // when the embedder isn't reachable or hasn't been indexed yet.
         const pageContext = await buildPageContextForAsk();
-        const thread = formatAskThreadForPrompt();
         const scopedQuestion = pageContext.text
           ? `You are looking at the page titled "${pageContext.pageTitle}". Answer the user's `
             + `question using ONLY the page content below plus the prior Ask thread when relevant. If the page and thread don't `
             + `contain enough information, say so plainly.\n\n`
             + `--- PAGE CONTENT ---\n${pageContext.text}\n--- END PAGE CONTENT ---\n\n`
-            + (thread ? `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\n` : "")
             + `Question: ${question}`
           : question;
-        const result = await aiAsk(scopedQuestion);
+        const result = await aiAsk(scopedQuestion, undefined, priorHistory);
         if (generation !== askThreadGeneration) return;
         const answer = result.answer;
         askAnswer = answer;
         finishAskMessage(assistantIndex, answer, { sources: result.sources });
         addAskTurn({ scope: "page", question, answer, pageTitle: pageContext.pageTitle });
       } else {
-        const thread = formatAskThreadForPrompt();
-        const prompt = thread
-          ? `Use the prior Ask thread below as conversation context, then answer the follow-up question across my notes.\n\n`
-            + `--- PRIOR ASK THREAD ---\n${thread}\n--- END PRIOR ASK THREAD ---\n\nQuestion: ${question}`
-          : question;
-        const result = await aiAsk(prompt);
+        const result = await aiAsk(question, undefined, priorHistory);
         if (generation !== askThreadGeneration) return;
         const answer = result.answer;
         askAnswer = answer;

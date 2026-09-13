@@ -487,14 +487,14 @@ export function aiReapplySummaryInsert(
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
 
-export function aiAsk(question: string, graphId?: string): Promise<AskResult> {
-  return invoke("ai_ask", { question, graphId });
-}
-
 /** One prior message in the Chat transcript, as the backend expects it. */
 export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
+}
+
+export function aiAsk(question: string, graphId?: string, history?: ChatTurn[]): Promise<AskResult> {
+  return invoke("ai_ask", { question, graphId, history: history ?? [] });
 }
 
 export async function aiAskStream(

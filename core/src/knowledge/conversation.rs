@@ -158,6 +158,53 @@ const STOPWORDS: &[&str] = &[
     "your",
 ];
 
+/// Words that describe the *shape* of a follow-up request rather than the
+/// subject that retrieval should search for. "list the events during the
+/// drive" is a real request, but only "drive" remains as a topic without the
+/// prior exchange that established "Montana on May 5".
+const FOLLOWUP_FILLER_WORDS: &[&str] = &[
+    "activity",
+    "activities",
+    "all",
+    "anything",
+    "everything",
+    "event",
+    "events",
+    "happen",
+    "happened",
+    "happening",
+    "happens",
+    "list",
+    "summarize",
+    "summary",
+    "thing",
+    "things",
+];
+
+/// Definite noun phrases that usually point back to a prior answer: "the
+/// drive", "the trip", "the meeting", etc. They carry some signal, so
+/// `is_self_contained` should still treat them as answerable when no history is
+/// available, but retrieval gets much better when we also search the exchange
+/// that made the phrase definite.
+const DEFINITE_FOLLOWUP_NOUNS: &[&str] = &[
+    "article",
+    "block",
+    "call",
+    "conversation",
+    "drive",
+    "event",
+    "events",
+    "issue",
+    "meeting",
+    "note",
+    "problem",
+    "source",
+    "story",
+    "thing",
+    "things",
+    "trip",
+];
+
 /// Whether `question` carries enough of its own topic for retrieval or a web
 /// search to act on, or whether it leans on the conversation to make sense.
 ///
@@ -202,6 +249,29 @@ pub fn resolve_research_followup(question: &str, history: &[ChatTurn]) -> String
         }
     }
     resolve_followup(cleaned, history)
+}
+
+/// Resolve the text that should be handed to note retrieval for `question`.
+///
+/// `resolve_followup` intentionally only rewrites pure back-references, because
+/// callers such as web-search intent classification need a conservative answer.
+/// Retrieval needs one more case: a follow-up may contain request words and a
+/// weak definite noun ("list the things that happened during the drive") while
+/// still depending on the prior answer for the actual anchors (Montana, May 5).
+/// In that case, search the current wording *plus* the nearest prior exchange.
+pub fn resolve_retrieval_query(question: &str, history: &[ChatTurn]) -> String {
+    if !is_self_contained(question) {
+        return resolve_followup(question, history);
+    }
+
+    if !looks_like_contextual_followup(question) {
+        return question.to_string();
+    }
+
+    match last_substantive_exchange(history) {
+        Some(exchange) => format!("{question}\n\nPrevious context:\n{exchange}"),
+        None => question.to_string(),
+    }
 }
 
 /// The most recent user turn that carries a topic of its own, searching
@@ -296,6 +366,87 @@ fn extract_embedded_research_question(input: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn last_substantive_exchange(history: &[ChatTurn]) -> Option<String> {
+    let user_idx = history.iter().rposition(|turn| {
+        turn.is_user() && !turn.content.trim().is_empty() && is_self_contained(&turn.content)
+    })?;
+    let user = history[user_idx].content.trim();
+    let assistant = history
+        .iter()
+        .skip(user_idx + 1)
+        .find(|turn| !turn.is_user() && !turn.content.trim().is_empty())
+        .map(|turn| turn.content.trim());
+
+    let mut out = format!("User asked: {user}");
+    if let Some(answer) = assistant {
+        out.push_str("\nAssistant answered: ");
+        out.push_str(&trim_for_retrieval_context(answer));
+    }
+    Some(out)
+}
+
+fn looks_like_contextual_followup(question: &str) -> bool {
+    let words = normalized_words(question);
+    if words.is_empty() {
+        return false;
+    }
+
+    let has_definite_followup_noun = words.windows(2).any(|pair| {
+        matches!(
+            pair[0].as_str(),
+            "the" | "that" | "this" | "those" | "these"
+        ) && DEFINITE_FOLLOWUP_NOUNS.contains(&pair[1].as_str())
+    });
+    let has_followup_filler = words
+        .iter()
+        .any(|word| FOLLOWUP_FILLER_WORDS.contains(&word.as_str()));
+    let has_temporal_bridge = words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "after" | "before" | "during" | "later" | "then" | "there"
+        )
+    });
+
+    (has_definite_followup_noun && (has_followup_filler || has_temporal_bridge))
+        || (has_followup_filler && has_temporal_bridge && weak_topic_word_count(&words) <= 2)
+}
+
+fn weak_topic_word_count(words: &[String]) -> usize {
+    words
+        .iter()
+        .filter(|word| {
+            !STOPWORDS.contains(&word.as_str())
+                && !FOLLOWUP_FILLER_WORDS.contains(&word.as_str())
+                && !matches!(
+                    word.as_str(),
+                    "after" | "before" | "during" | "later" | "then" | "there"
+                )
+        })
+        .count()
+}
+
+fn normalized_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|word| {
+            let w: String = word
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_ascii_lowercase();
+            (!w.is_empty()).then_some(w)
+        })
+        .collect()
+}
+
+fn trim_for_retrieval_context(text: &str) -> String {
+    const MAX_CHARS: usize = 900;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX_CHARS).collect();
+    out.push_str("…");
+    out
 }
 
 /// How a transcript was fitted into the available budget.
@@ -479,6 +630,32 @@ mod tests {
         let history = vec![user("what is scientology"), assistant("…")];
         assert_eq!(
             resolve_followup("does creatine cause cancer", &history),
+            "does creatine cause cancer"
+        );
+    }
+
+    #[test]
+    fn contextual_followup_retrieval_uses_the_previous_exchange() {
+        let history = vec![
+            user("on what day I was driving to montana?"),
+            assistant("You were driving to Montana on May 5, 2026 [1]."),
+        ];
+
+        let query = resolve_retrieval_query(
+            "can you list all the things that happened during the drive?",
+            &history,
+        );
+
+        assert!(query.contains("things that happened during the drive"));
+        assert!(query.contains("driving to montana"));
+        assert!(query.contains("May 5, 2026"));
+    }
+
+    #[test]
+    fn unrelated_self_contained_retrieval_question_is_left_alone() {
+        let history = vec![user("what is scientology"), assistant("…")];
+        assert_eq!(
+            resolve_retrieval_query("does creatine cause cancer", &history),
             "does creatine cause cancer"
         );
     }
