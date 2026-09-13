@@ -2,7 +2,7 @@ import { EditorSelection } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
 export const EDIT_PAGE_END_EVENT = "grafium-edit-page-end";
-export const PERSONAL_JOURNAL_LINK = "[[personal/journal]]";
+export const PERSONAL_DIARY_LINK = "[[personal/diary]]";
 
 export type EditPageEndDetail = {
   pageTitle?: string;
@@ -20,8 +20,8 @@ export function timeStampSnippet(date = new Date()): string {
   return `${formatLocalClockTime(date)}\n`;
 }
 
-export function personalJournalSnippet(): string {
-  return `${PERSONAL_JOURNAL_LINK}\n`;
+export function personalDiarySnippet(): string {
+  return `${PERSONAL_DIARY_LINK}\n`;
 }
 
 export function insertAtCursor(view: EditorView, text: string): void {

@@ -38,7 +38,7 @@ function stubActions() {
     importMedia: vi.fn(),
     importBooks: vi.fn(),
     insertTimeStamp: vi.fn(),
-    insertPersonalJournal: vi.fn(),
+    insertPersonalDiary: vi.fn(),
   };
 }
 
@@ -105,7 +105,7 @@ describe("keymap dual-mode matching", () => {
     expect(actions.toggleRightSidebar).toHaveBeenCalledTimes(1);
   });
 
-  it("matches Alt-T and Alt-J while editing", () => {
+  it("matches Alt-T and Alt-D while editing", () => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
     keymap_manager.isEditing = true;
@@ -113,7 +113,7 @@ describe("keymap dual-mode matching", () => {
     expect(keymap_manager.handleKeydown(keyEvent({ key: "t", code: "KeyT", altKey: true }))).toBe(true);
     expect(actions.insertTimeStamp).toHaveBeenCalledTimes(1);
 
-    expect(keymap_manager.handleKeydown(keyEvent({ key: "j", code: "KeyJ", altKey: true }))).toBe(true);
-    expect(actions.insertPersonalJournal).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "d", code: "KeyD", altKey: true }))).toBe(true);
+    expect(actions.insertPersonalDiary).toHaveBeenCalledTimes(1);
   });
 });

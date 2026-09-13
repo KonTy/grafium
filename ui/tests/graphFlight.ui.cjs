@@ -11,7 +11,11 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const errors = [];
+    const planetRequests = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (/\/planets\/.*\.png(?:\?|$)/i.test(request.url())) planetRequests.push(request.url());
+    });
     await page.addInitScript(() => {
       window.__flightGraph = {
         nodes: [
@@ -37,8 +41,8 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
         invoke: async (cmd) => {
           switch (cmd) {
             case "get_page": throw new Error("Page not found");
-            case "get_app_theme": return "dark";
-            case "get_graph_info": return { name: "Flight test", path: "/tmp/flight-test-graph" };
+            case "get_app_theme": return "tokyo-night";
+            case "get_graph_info": return { name: "Flight test", path: "/synthetic/flight-test-graph" };
             case "get_graph_data": return structuredClone(window.__flightGraph);
             case "plugin:event|listen": return 1;
             default: return [];
@@ -51,7 +55,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       await page.getByRole("button", { name: "Graph View", exact: true }).first().click();
       await page.getByRole("button", { name: "3D", exact: true }).click();
       await page.waitForFunction(() => {
-        const button = document.querySelector(".flight-toggle");
+        const button = document.querySelector(".flight-fab");
         return button && !button.disabled;
       });
     };
@@ -60,6 +64,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     const stop = page.getByRole("button", { name: "Stop flight", exact: true });
     const canvas = page.locator(".graph-view-3d .graph-canvas canvas");
     const hud = page.locator(".flight-hud");
+    await page.getByRole("button", { name: "Show graph settings", exact: true }).click();
     await page.getByPlaceholder("Fly to nodes…").fill("WebAssembly");
     await page.getByRole("checkbox", { name: "Show labels", exact: true }).uncheck();
     await start.click();
@@ -83,7 +88,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       previous = topic;
     }
     assert.equal(new Set(destinationColors).size, 3, "different topics should have distinct destination colors");
-    await page.locator(".flight-eyebrow").filter({ hasText: "Orbiting" }).waitFor({ timeout: 15000 });
+    await page.locator(".flight-eyebrow").filter({ hasText: "Flying by" }).waitFor();
     await page.locator(".graph-label.destination").waitFor();
     if (process.env.GRAPH_FLIGHT_SCREENSHOT) {
       await page.locator(".graph-view-3d").screenshot({ path: process.env.GRAPH_FLIGHT_SCREENSHOT });
@@ -114,6 +119,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       await stop.click();
     }
     await start.click();
+    await page.locator(".graph-controls .controls-close").click();
     await page.getByRole("button", { name: "Reset view", exact: true }).click();
     await hud.waitFor({ state: "detached" });
     await start.click();
@@ -121,10 +127,11 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.getByRole("button", { name: "3D", exact: true }).click();
     await start.waitFor();
     assert.equal(await hud.count(), 0);
+    await page.getByRole("button", { name: "Show graph settings", exact: true }).click();
 
     await page.evaluate(() => { window.__flightGraph.edges = []; });
-    await page.getByRole("checkbox", { name: "Hide date pages", exact: true }).uncheck();
-    await page.waitForFunction(() => document.querySelector(".flight-toggle")?.disabled);
+    await page.getByRole("checkbox", { name: "Hide date pages", exact: true }).check();
+    await page.waitForFunction(() => document.querySelector(".flight-fab")?.disabled);
     await page.getByText("At least two linked, visible topics are needed.", { exact: false }).waitFor();
 
     // Hierarchy alone is enough to create a display-only planet system.
@@ -139,15 +146,15 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
         edges: [],
       };
     });
-    await page.getByRole("checkbox", { name: "Hide date pages", exact: true }).check();
-    await page.waitForFunction(() => !document.querySelector(".flight-toggle")?.disabled);
+    await page.getByRole("checkbox", { name: "Hide date pages", exact: true }).uncheck();
+    await page.waitForFunction(() => !document.querySelector(".flight-fab")?.disabled);
     await page.getByPlaceholder("Fly to nodes…").fill("Health/Supplements");
     await page.getByRole("checkbox", { name: "Show labels", exact: true }).check();
     await start.click();
     assert.equal(await hud.getAttribute("data-topic"), "supplements");
     assert.equal(await page.locator(".graph-view-3d").getAttribute("data-satellites"), "3");
     await hud.getByText("2 child topics in this planet system", { exact: true }).waitFor();
-    await page.locator(".flight-eyebrow").filter({ hasText: "Orbiting" }).waitFor({ timeout: 15000 });
+    await page.locator(".flight-eyebrow").filter({ hasText: "Flying by" }).waitFor();
     await page.locator(".graph-label").filter({ hasText: /^Creatine$/ }).waitFor();
     if (process.env.GRAPH_SATELLITES_SCREENSHOT) {
       await page.locator(".graph-view-3d").screenshot({ path: process.env.GRAPH_SATELLITES_SCREENSHOT });
@@ -163,7 +170,8 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     assert.equal(await hud.getAttribute("data-topic"), "supplements");
     await stop.click();
     assert.deepEqual(errors, []);
-    console.log("PASS WebGL flight, related destinations, satellites, ringless moons, stop, manual controls and cleanup");
+    assert.deepEqual(planetRequests, [], "solid spheres must not fetch planet images");
+    console.log("PASS solid-sphere WebGL flight, related destinations, satellites, ringless moons, stop, manual controls and cleanup");
   } finally {
     await browser.close();
   }

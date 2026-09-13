@@ -44,8 +44,8 @@ pub struct KnowledgeEngine {
     /// unset. Defaults to `data_dir` (old behaviour), but callers that keep
     /// `data_dir` scoped to a feature-specific subfolder (e.g.
     /// `<app_data_dir>/knowledge`, so vectors.db/graph_registry.json don't
-    /// share a folder with other data) should override this via
-    /// [`Self::with_models_root`] to the actual app data root, so "leave
+    /// share a folder with other data) should supply the actual app data root
+    /// to [`Self::new_with_models_root`], so "leave
     /// Models Directory blank" resolves to the *same* shared folder the
     /// Whisper settings default to as well — one shared models folder
     /// instead of two different feature-namespaced ones a user would never
@@ -57,6 +57,16 @@ impl KnowledgeEngine {
     /// Create a new Knowledge Engine.
     /// `data_dir` is the app's data directory where vector store and registry live.
     pub fn new(data_dir: &Path, config: AiConfig) -> Result<Self> {
+        Self::new_with_models_root(data_dir, config, data_dir)
+    }
+
+    /// Construct providers using the same models root as the host's model picker.
+    /// Set it before initialization, not after resolving the configured models.
+    pub fn new_with_models_root(
+        data_dir: &Path,
+        config: AiConfig,
+        models_root: &Path,
+    ) -> Result<Self> {
         let registry_path = data_dir.join("graph_registry.json");
         let registry = GraphRegistry::load(&registry_path)?;
 
@@ -73,7 +83,7 @@ impl KnowledgeEngine {
             reference_engine,
             registry: RwLock::new(registry),
             data_dir: data_dir.to_path_buf(),
-            models_root: data_dir.to_path_buf(),
+            models_root: models_root.to_path_buf(),
         };
 
         if config.enabled {
@@ -83,10 +93,8 @@ impl KnowledgeEngine {
         Ok(engine)
     }
 
-    /// Overrides where the default (unconfigured) local models directory is
-    /// resolved from — see the `models_root` field doc for why a caller
-    /// would want this to differ from `data_dir`. Chainable so it reads
-    /// naturally right after `new(...)` at the call site.
+    /// Override the models root for subsequent reconfiguration. To apply the
+    /// root to initial provider construction, use [`Self::new_with_models_root`].
     pub fn with_models_root(mut self, root: PathBuf) -> Self {
         self.models_root = root;
         self
@@ -343,6 +351,7 @@ impl KnowledgeEngine {
     pub fn reconfigure(&mut self, config: AiConfig) -> Result<()> {
         self.config = config.clone();
         self.llm = None;
+        self.llm_load_error = None;
         self.embedder = None;
         self.vector_store = None;
         self.pipeline = RwLock::new(EmbeddingPipeline::new(config.embedding.clone()));
@@ -393,12 +402,9 @@ impl KnowledgeEngine {
         }
     }
 
-    /// Check if the engine is ready for operations that need semantic
-    /// search (indexing, vector search, "research this page" references) —
-    /// these fundamentally require an embedding model, so the Embedded
-    /// (llama.cpp) local provider — which is chat-only, see the
-    /// `ProviderType::HuggingFace` branch in `initialize_providers` — never
-    /// satisfies this, by design.
+    /// Whether all providers needed for semantic search and chat are configured.
+    /// Local model weights load lazily; this is not a successful inference or
+    /// GPU-health check. Load errors are returned by the requested operation.
     pub fn is_ready(&self) -> bool {
         self.config.enabled
             && self.llm.is_some()
@@ -1662,6 +1668,8 @@ impl KnowledgeEngine {
 pub struct HealthStatus {
     pub enabled: bool,
     pub llm_available: bool,
+    /// A configured embedding provider, not a claim that native weights are
+    /// resident. Deferred native load failures are returned by embedding calls.
     pub embedder_available: bool,
     pub vector_store_available: bool,
     pub vector_count: usize,
@@ -1687,8 +1695,8 @@ pub struct IndexStatus {
     /// vector refresh — lets Chat show "N pages pending" instead of implying
     /// the index is perfectly current.
     pub pending_pages: usize,
-    /// Whether an embedder + vector store are available (semantic indexing
-    /// possible).
+    /// Whether an embedder + vector store are configured (indexing can be
+    /// requested). Local weights load on demand and may report a load error.
     pub embedder_ready: bool,
     /// Whether the LLM is ready for chat.
     pub llm_ready: bool,

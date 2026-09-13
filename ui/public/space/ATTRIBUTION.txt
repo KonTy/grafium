@@ -1,0 +1,45 @@
+GRAFIUM UNIVERSE BACKGROUND IMAGES
+================================
+These are local derivatives of real Hubble Space Telescope observations, not
+generated galaxy illustrations. They decorate the sky only; their positions,
+orientations, scale, colors and brightness are not an astronomical sky map.
+No endorsement by NASA, ESA, STScI or AURA is claimed or implied.
+
+whirlpool.webp
+  Object: Messier 51 (Whirlpool Galaxy) and companion NGC 5195.
+  Credit: NASA, ESA, S. Beckwith (STScI) and the Hubble Heritage Team (STScI/AURA).
+  Official source and image-specific credit:
+  https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-51/
+  Image downloaded from NASA (not the amateur comparison photograph):
+  https://science.nasa.gov/wp-content/uploads/2023/04/m51-and-companion_0-jpg.webp?w=1200
+
+sombrero.webp
+  Object: Messier 104 (Sombrero Galaxy).
+  Credit: NASA and The Hubble Heritage Team (STScI/AURA).
+  Official source and image-specific credit:
+  https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-104/
+  Image downloaded from NASA (not the amateur comparison photograph):
+  https://science.nasa.gov/wp-content/uploads/2023/04/sombrero-galaxy-hubble-jpg.webp?w=1200
+
+RIGHTS / USAGE
+  NASA/Hubble scientific imagery, not subject to copyright in the United States
+  (public domain); the image-specific credit lines above contain no third-party
+  copyright restriction. Do not extend this status to NASA logos or to other
+  photographs on these pages. In particular, their amateur comparison photographs
+  have separate credits/permissions and are NOT included here.
+  NASA's official media usage guidance, checked 2026-09-13:
+  https://www.nasa.gov/nasa-brand-center/images-and-media/
+  The guidance permits NASA content in computer graphical simulations and web
+  pages, requires acknowledgment of NASA, excludes separately copyrighted third-
+  party material, and prohibits implying NASA endorsement.
+  These image assets are not relicensed under Grafium's source-code MIT license.
+
+LOCAL PROCESSING
+  Downloaded from the official URLs above on 2026-09-13.
+  Reduced to 512 pixels wide with Pillow's Lanczos resampling; sizes are 512x356
+  (Whirlpool) and 512x284 (Sombrero). Low-level black sky was removed, luminosity
+  moved into alpha, and elliptical plus edge feathering applied. All outermost
+  pixels are fully transparent. RGB is unpremultiplied for soft alpha compositing;
+  the shader further reduces brightness to preserve foreground graph readability.
+  Encoded as WebP, quality 90, method 6, with transparency. Total image size is
+  201,954 bytes. Presentation is intentionally modified from the scientific images.

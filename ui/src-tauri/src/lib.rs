@@ -1,4 +1,5 @@
 mod commands;
+mod welcome;
 
 // Android-only JNI bridge: exposes grafium_core::assistant::handle_command as
 // `Java_com_grafium_app_AssistantReceiver_nativeHandleCommand` so the Kotlin
@@ -10,13 +11,13 @@ use commands::graph::GraphConfig;
 use grafium_core::Graph;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
+use welcome::seed_tutorial_graph;
 
 pub struct AppState {
     pub graph: Arc<Mutex<Graph>>,
@@ -681,428 +682,6 @@ fn metadata_dir_name(app: &tauri::AppHandle) -> String {
     format!(".{}", normalized)
 }
 
-fn has_any_markdown(dir: &Path) -> bool {
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = match fs::read_dir(&current) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn write_text_file(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(path, content).map_err(|e| e.to_string())
-}
-
-fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Result<bool, String> {
-    let marker_v1 = graph_root.join(metadata_dir).join("tutorial-seeded-v1");
-    let marker_v2 = graph_root.join(metadata_dir).join("tutorial-seeded-v2");
-    let marker_v3 = graph_root.join(metadata_dir).join("tutorial-seeded-v3");
-    let marker_v4 = graph_root.join(metadata_dir).join("tutorial-seeded-v4");
-    let marker_v5 = graph_root.join(metadata_dir).join("tutorial-seeded-v5");
-    let marker_v6 = graph_root.join(metadata_dir).join("tutorial-seeded-v6");
-    let marker_v7 = graph_root.join(metadata_dir).join("tutorial-seeded-v7");
-    let marker_v8 = graph_root.join(metadata_dir).join("tutorial-seeded-v8");
-    let marker_v9 = graph_root.join(metadata_dir).join("tutorial-seeded-v9");
-    let marker_v10 = graph_root.join(metadata_dir).join("tutorial-seeded-v10");
-    let marker = graph_root.join(metadata_dir).join("tutorial-seeded-v11");
-    if marker.exists() {
-        return Ok(false);
-    }
-
-    let pages_dir = graph_root.join("pages");
-    let journals_dir = graph_root.join("journals");
-    let has_markdown = has_any_markdown(&pages_dir) || has_any_markdown(&journals_dir);
-    // Allow one-time in-place refresh of the built-in tutorial graph from v1..v10 -> v11.
-    if has_markdown
-        && !marker_v1.exists()
-        && !marker_v2.exists()
-        && !marker_v3.exists()
-        && !marker_v4.exists()
-        && !marker_v5.exists()
-        && !marker_v6.exists()
-        && !marker_v7.exists()
-        && !marker_v8.exists()
-        && !marker_v9.exists()
-        && !marker_v10.exists()
-    {
-        return Ok(false);
-    }
-
-    let start_here = r##"# Welcome To Grafium
-
-Grafium is a **second brain** — a place to capture what you learn, connect it, and remember it for good. This is a safe tutorial graph, so you can practice without touching your real notes.
-
-## ⭐ Start Here: Learn Anything, Remember It Forever
-
-Grafium isn't just note storage — it's a system for **studying and remembering** any book, video, or lecture. Read these three pages in order:
-
-1. [[The Grafium Study Method]] — why it works (CODE + PACER)
-2. [[PACER - Tag What You Read]] — label each note so you know how to use it
-3. [[The Study Loop]] — the exact steps: capture, digest, review
-4. [[How To Study a Book]] — a full worked example (studying an economics chapter)
-
-## Learn The App
-
-- [[Try Block Editing]] — blocks, links, tags, and tasks
-- [[How To Create A Flashcard]] — text, image, audio & video cards (+ import Anki decks)
-- [[Create Your Own Graph]] — make your real graph in Documents
-
-## Quick Editor Tips
-
-> **Tip:**
-> Click any block to edit it.
-> Press `Enter` to create a new block.
-> Press `Shift+Enter` to create a new line inside the same block.
-> Type `/` to show commands.
-
-## Important
-
-This tutorial graph stays active until you create/switch to your own graph.
-Your personal notes should live in your own graph folder.
-"##;
-
-    let create_graph_page = r##"# Create Your Own Graph
-
-## Recommended Location
-
-Use a folder under:
-
-`~/Documents/grafium/`
-
-Example:
-
-`~/Documents/grafium/my-notes`
-
-## Steps
-
-1. Open the graph menu (top-left graph button).
-2. Click **New Graph**.
-3. Enter a graph name.
-4. Pick a location in `Documents/grafium`.
-5. Grafium creates structure automatically (`pages/`, `journals/`, and metadata).
-
-## Switching Graphs
-
-- Use graph menu to switch back/forth between tutorial and your graph.
-- Once switched, Grafium remembers your choice.
-"##;
-
-    let block_editing_page = r##"# Try Block Editing
-
-Practice these directly in this page:
-
-- Press **Enter** to create a new block
-- Press **Tab** to indent, **Shift+Tab** to outdent
-- Write `TODO` at line start to create tasks
-- Create a page link like `[[Ideas]]`
-- Add a tag like `#project`
-
-## Journal Tip
-
-Open Journal view and right-click the date title to delete a journal page.
-
-## Search Tip
-
-Use search in sidebar to jump by page name or block content.
-"##;
-
-    let study_method_page = r##"# The Grafium Study Method
-
-Most people try to learn by **consuming more** — reading faster, watching at 2x. But we forget up to **90%** of what we read. The fix isn't consuming more; it's **digesting** what you consume.
-
-Grafium combines two proven ideas:
-
-- **CODE / Second Brain** (Tiago Forte) — *where* notes live and how they link: Capture, Organize, Distill, Express.
-- **PACER** (Justin Sung) — *how* to process each note so it sticks: Procedural, Analogous, Conceptual, Evidence, Reference.
-
-> **The core rule:** Learning = **consume + digest**, and the two must stay **balanced**. If you can't digest what you're reading, slow down.
-
-## The Two Stages
-
-1. **Consume** — capture ideas fast in your daily [[Journal]], tagging each one.
-2. **Digest** — later, turn the important notes into permanent, linked [[concept page]]s. That is what builds your second brain (and your graph).
-
-## Watch The Source
-
-This method is based on Justin Sung's video on how to remember what you read. Search YouTube for **Justin Sung — "How to remember everything you read"** to watch his full explanation of the PACER system.
-
-## Next
-
-- [[PACER - Tag What You Read]]
-- [[The Study Loop]]
-"##;
-
-    let pacer_page = r##"# PACER - Tag What You Read
-
-Not all information is equal. As you read, decide which of the **five PACER types** each note is, and tag it. That single decision *is* active learning — and it tells you how to digest the note later.
-
-## The Five Types
-
-- **P — Procedural** `#proc` — how to *do* something (a technique, steps, code).
-  - Digest by: **practice it** as soon as you can.
-- **A — Analogous** `#analogy` — it reminds you of something you already know.
-  - Digest by: **critique the analogy** — where does it fit, where does it break?
-- **C — Conceptual** `#concept` — the *what* and *why* (facts, theories, links).
-  - Digest by: **map it** — create/link a concept page. This grows your graph.
-- **E — Evidence** `#evidence` — an example, stat, or case that proves a concept.
-  - Digest by: **store** it under its concept, then **rehearse**.
-- **R — Reference** `#ref` — a nitty-gritty fact you may need later.
-  - Digest by: **store** it as a flashcard — write it as `Question :: Answer`.
-
-## Workflow Tags
-
-Use these to find notes again:
-
-- `#inbox` — captured, not yet digested
-- `#rehearse` — needs active-recall practice
-- `#flashcard` — should become a spaced-repetition card
-- `#digested` — done; it now lives in a concept page
-
-> **Tip:** Click any tag to see every note with it. That is how you build your review list.
-
-## Next
-
-- [[The Study Loop]]
-"##;
-
-    let study_loop_page = r##"# The Study Loop
-
-Here is the exact step-by-step. Example: you're watching a video on learning.
-
-## 1. Before (10 seconds)
-
-Open today's **Journal** and add the source, then indent notes under it:
-
-- [[Source - Justin Sung: How to Remember]]  #inbox
-  - (your notes go here, indented)
-
-## 2. Consume (while watching)
-
-Capture each idea in your own words and **tag its PACER type**. Do not stop to memorize — just capture and tag:
-
-- Learning = consume + [[digest]], keep it balanced  #concept
-- Muscle contraction is like my swimming stroke  #analogy
-- Up to 90% forgotten without digestion  #evidence
-- Kim Peek had FG syndrome  #ref
-- Draw a mind-map while reading conceptual info  #proc
-
-> **Balance rule:** if you can't keep tagging, you're consuming too fast.
-
-## 3. Digest (that evening)
-
-Go back through today's journal and process each tag:
-
-- `#concept` → open/create the [[concept page]] and link it to related ideas.
-- `#analogy` → write *why* it fits and where it breaks.
-- `#proc` → add a `TODO` to practice it.
-- `#evidence` → move it under its concept, then tag `#rehearse`.
-- `#ref` → turn it into a flashcard: write `Question :: Answer` (for example `Capital of France :: Paris`). Review it later in **Flashcards** (sidebar).
-
-Change each note from `#inbox` to `#digested` as you finish.
-
-## 4. Review (ongoing)
-
-- **Flashcards (sidebar):** spaced-repetition review of every `Question :: Answer` card. Grade each recall (Again / Hard / Good / Easy) and Grafium schedules when you should see it next.
-- **Rehearse list:** search the `#rehearse` tag to actively recall evidence notes.
-- **Graph view:** find **orphan** notes (captured but never linked = not learned yet) and connect them; practice recall from your dense **hub** topics.
-
-## That's The Whole System
-
-Capture fast → tag with PACER → digest into linked concept pages → review by tag and graph. Do this for any topic and your knowledge compounds forever.
-
-## See It In Action
-
-- [[How To Study a Book]] — the same loop applied end-to-end to a real chapter.
-"##;
-
-    let study_book_page = r##"# How To Study a Book
-
-This is a full worked example: studying the first chapter of an intro **economics** textbook using the Grafium study loop. It adapts the classic *"summarize in the margins"* reading method (progressive summarization) to your graph.
-
-## The One Rule: Summarize, Never Copy
-
-You only remember what you force your brain to process. Copying a sentence is passive — you can do it without understanding. **Summarizing in your own words is active** — you can only compress six sentences into one if you actually understood them. So for every chunk you read, you write **one sentence in your own words**. In Grafium, each summary is a block, and that block *is* your margin note.
-
-## The Progressive Summary Trick
-
-- Paragraph 1 → one block: a one-sentence summary of paragraph 1.
-- Paragraph 2 → one block: a one-sentence summary of paragraph 2.
-- Paragraph 3 and onward → **two** blocks: first a **rolling summary of everything so far**, then a summary of the new paragraph.
-
-The rolling summary is where the magic is: it forces you to connect and compress every idea so far into one line, every few paragraphs. That act of synthesis is what actually builds memory.
-
-## Step 1 — Set Up The Source (Journal)
-
-Open today's **Journal**, add the source, tag it `#inbox`, and indent your notes under it:
-
-- [[Source - Bernanke: Principles of Economics, Ch.1]]  #inbox
-  - (your one-sentence summaries go here, indented)
-
-## Step 2 — Read & Summarize (Consume)
-
-Read one paragraph, then write one sentence in your own words and **tag its PACER type**. Every third block or so, make it a *rolling* summary instead:
-
-- Economics = the study of how scarce resources get allocated  #concept
-- "Scarce" just means finite — money, sand, and time are all scarce  #concept
-- Rolling summary: economics studies who gets limited resources, and at what cost  #concept
-- Opportunity cost = the value of the next-best thing you gave up  #concept
-- Rolling summary: scarcity forces choices, and every choice has an opportunity cost  #concept
-
-Notice the two `Rolling summary` lines — that is the paragraph-3 move: compress everything so far into one line *before* adding the new idea.
-
-## Step 3 — Make Key Facts Stick (Flashcards)
-
-Turn the definitions worth memorizing into flashcards right inside your notes, using the `Question :: Answer` syntax:
-
-- Economics :: the study of the allocation of scarce resources  #economics
-- Opportunity cost :: the value of the next-best alternative you gave up  #economics
-
-Grafium turns these into spaced-repetition cards automatically — review them later in **Flashcards** (sidebar).
-
-Tip: the `#economics` tag turns these cards into a **study topic**. In **Flashcards** you can drill just one topic (e.g. `#economics` or `#chinese`) or study **Mixed** — pulling due cards from every topic at once.
-
-## Step 4 — Digest (That Evening)
-
-Go back through the journal and turn your **rolling summaries** into a permanent [[concept page]]. Your last, best rolling summary basically *is* the distilled page:
-
-- Open or create [[Economics]] and make your best rolling summary its opening line.
-- Link the concepts it touches: [[Scarcity]], [[Opportunity Cost]], [[Allocation]].
-- Change the source from `#inbox` to `#digested`.
-
-## Step 5 — Review (Later)
-
-- You **never reread the whole chapter** — you reread your one-line summaries.
-- **Flashcards (sidebar):** grade recall on each `Question :: Answer` card.
-- Search the `#rehearse` tag to actively recall the evidence you flagged.
-
-## Why This Works
-
-Every single step forces you to think through *meaning* — summarizing, connecting, and recalling — instead of passively passing your eyes over the page. That is the whole secret: no thinking, no memory.
-
-## Watch The Source
-
-This reading method comes from a well-known video by a philosophy professor on how to remember what you read. Search YouTube for **"how to remember what you read — summarize in the margins"** to watch the full explanation.
-
-## Next
-
-- [[The Study Loop]]
-- [[PACER - Tag What You Read]]
-"##;
-
-    let flashcard_page = r##"# How To Create A Flashcard
-
-Flashcards in Grafium are just blocks. Write a question and an answer on one line separated by ` :: ` and Grafium turns it into a spaced-repetition card automatically. Review your due cards any time from **Flashcards** in the sidebar.
-
-## The Syntax
-
-Write `Front :: Answer` in any block. The part before `::` is the front (the prompt); the part after is the back (the answer). Add a `#tag` to file the card into a study topic. Here are three real, reviewable cards:
-
-- What is the capital of France? :: Paris  #geography
-- Photosynthesis :: how plants convert light into chemical energy  #biology
-- 7 × 8 :: 56  #math
-
-Open **Flashcards** in the sidebar and you will see these appear under the `#geography`, `#biology`, and `#math` topics. Study one topic at a time, or pick **Mixed** to pull due cards from every topic at once.
-
-## Text Cards With Rich Answers
-
-The answer can contain normal markdown — **bold**, *italics*, `code`, and math. This is one single card (keep the whole card on one line):
-
-- What does $E = mc^2$ describe? :: the equivalence of **energy** and **mass**, where $c$ is the speed of light  #physics
-
-## Image Cards
-
-Add a picture to a card with image syntax: `![](path)`. Point it at a file in your graph's `assets` folder. This card shows a diagram on the back:
-
-- What shape is this? :: A rounded card sample → ![](../assets/tutorial/flashcard-demo.svg)  #demo
-
-Any local image works — PNG, JPG, GIF, WebP, or SVG. Drop the file into your graph's `assets` folder and reference it as `../assets/<your-file>`.
-
-## Audio Cards
-
-Use the same `![](path)` syntax with an audio file (`.mp3`, `.wav`, `.ogg`, `.m4a`, `.opus`, `.flac`). Grafium renders a little audio player right on the card — perfect for language pronunciation or ear training:
-
-`- How do you say "hello" in Mandarin? :: 你好 (nǐ hǎo) ![](../assets/audio/nihao.mp3)  #chinese`
-
-(The line above is shown as code because this tutorial graph doesn't ship an audio file — but the syntax is exactly that. Imported Anki language decks bring their pronunciation audio automatically.)
-
-## Video Cards
-
-Video works too (`.mp4`, `.webm`, `.mov`, `.mkv`). Great for a golf swing, a chemistry reaction, or a sign-language sign:
-
-`- Show the correct kettlebell swing :: ![](../assets/video/swing.mp4)  #fitness`
-
-## Import A Whole Anki Deck
-
-Already have an Anki deck? In **Flashcards** (sidebar), click **Import Anki deck** and pick a `.apkg` file. Grafium converts every note into a `Front :: Back` card on a new page, files them under a topic named after the deck, and copies the deck's audio and images into your graph so they play right on the card.
-
-## Tips
-
-- Keep each card on **one physical line** — a new line starts a new block (and a new card).
-- The `::` must have a space on each side: `Front :: Back`, not `Front::Back`.
-- Cards become reviewable as soon as the page is saved.
-- Tag every card (`#topic`) so you can study by subject.
-
-## Next
-
-- [[The Study Loop]]
-- [[How To Study a Book]]
-"##;
-
-    write_text_file(&graph_root.join("pages/Welcome To Grafium.md"), start_here)?;
-    write_text_file(
-        &graph_root.join("pages/Create Your Own Graph.md"),
-        create_graph_page,
-    )?;
-    write_text_file(
-        &graph_root.join("pages/Try Block Editing.md"),
-        block_editing_page,
-    )?;
-    write_text_file(
-        &graph_root.join("pages/The Grafium Study Method.md"),
-        study_method_page,
-    )?;
-    write_text_file(
-        &graph_root.join("pages/PACER - Tag What You Read.md"),
-        pacer_page,
-    )?;
-    write_text_file(&graph_root.join("pages/The Study Loop.md"), study_loop_page)?;
-    write_text_file(
-        &graph_root.join("pages/How To Study a Book.md"),
-        study_book_page,
-    )?;
-    write_text_file(
-        &graph_root.join("pages/How To Create A Flashcard.md"),
-        flashcard_page,
-    )?;
-
-    // Seed a tiny self-contained SVG so the image-card demo renders out of the box.
-    let demo_svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140" viewBox="0 0 240 140"><rect x="6" y="6" width="228" height="128" rx="16" fill="#1e293b" stroke="#7dd3fc" stroke-width="3"/><text x="120" y="66" font-family="sans-serif" font-size="20" fill="#7dd3fc" text-anchor="middle">Flashcard</text><text x="120" y="96" font-family="sans-serif" font-size="13" fill="#94a3b8" text-anchor="middle">image demo</text></svg>"##;
-    write_text_file(
-        &graph_root.join("assets/tutorial/flashcard-demo.svg"),
-        demo_svg,
-    )?;
-
-    write_text_file(&marker, "seeded_v11")?;
-    Ok(true)
-}
-
 fn platform_db_path(app: &tauri::AppHandle, graph_root: &std::path::Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
@@ -1383,12 +962,15 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .manage(commands::startup::StartupWindow::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("grafium-asset", |ctx, request| {
             asset_scheme_handler(ctx.app_handle(), request)
         })
         .setup(|app| {
+            #[cfg(desktop)]
+            commands::startup::install_fallback(app.handle());
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path)
@@ -1430,8 +1012,14 @@ pub fn run() {
 
             let should_seed_tutorial = graph_dir == default_graph_dir;
             if should_seed_tutorial {
-                if let Ok(true) = seed_tutorial_graph(&graph_dir, &metadata_dir) {
-                    let _ = graph.reindex_all();
+                match seed_tutorial_graph(&graph_dir, &metadata_dir) {
+                    Ok(true) => {
+                        if let Err(error) = graph.reindex_all() {
+                            eprintln!("Warning: Welcome graph indexing failed: {error}");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("Warning: Welcome graph seeding failed: {error}"),
                 }
             }
 
@@ -1494,7 +1082,7 @@ pub fn run() {
             let mut config = config;
             let path_str = graph_dir.to_string_lossy().to_string();
             let name = if should_seed_tutorial {
-                "Tutorial Graph".to_string()
+                "Welcome Graph".to_string()
             } else {
                 graph_dir.file_name()
                     .and_then(|n| n.to_str())
@@ -1547,8 +1135,11 @@ pub fn run() {
                 } else {
                     grafium_core::ai::config::AiConfig::default()
                 };
-                let engine = grafium_core::KnowledgeEngine::new(&data_dir, ai_config)
-                    .map(|e| e.with_models_root(app_dir.clone()))
+                let engine = grafium_core::KnowledgeEngine::new_with_models_root(
+                    &data_dir,
+                    ai_config,
+                    &app_dir,
+                )
                     .ok();
                 commands::knowledge::KnowledgeState {
                     engine: Arc::new(tokio::sync::RwLock::new(engine)),
@@ -1702,6 +1293,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::startup::reveal_startup_window,
             commands::pages::list_pages,
             commands::pages::count_pages,
             commands::pages::list_pages_window,

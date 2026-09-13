@@ -1,9 +1,71 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" style="--bg-primary: #ffffff; --text-primary: #1f2328;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Grafium</title>
+    <style>
+      :root { --bg-primary: #ffffff; --text-primary: #1f2328; color-scheme: light; }
+      html, body { margin: 0; background: var(--bg-primary); color: var(--text-primary); }
+      #grafium-startup {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 12px;
+        background: var(--bg-primary); color: var(--text-primary);
+        font: 15px/1.5 system-ui, sans-serif;
+      }
+      #grafium-startup strong { font-size: 24px; }
+      #grafium-startup button { padding: 6px 16px; }
+    </style>
+    <script id="grafium-bootstrap">
+      // This runs before the application module graph or native IPC is ready.
+      try {
+        var cachedTheme = localStorage.getItem("grafium.startupTheme");
+        if (cachedTheme) {
+          var theme = JSON.parse(cachedTheme);
+          if (!theme || !/^#[0-9a-f]{6}$/i.test(theme.background) ||
+              !/^#[0-9a-f]{6}$/i.test(theme.foreground) ||
+              !["light", "dark"].includes(theme.colorScheme)) {
+            throw new Error("Invalid cached startup theme");
+          }
+          document.documentElement.style.setProperty("--bg-primary", theme.background);
+          document.documentElement.style.setProperty("--text-primary", theme.foreground);
+          document.documentElement.style.colorScheme = theme.colorScheme;
+        }
+      } catch (error) {
+        console.warn("[startup] Could not restore the startup theme:", error);
+      }
+      (function () {
+        function showFailure(message) {
+          var status = document.getElementById("grafium-startup-message");
+          if (!status) return;
+          status.textContent = "Grafium could not start: " + message;
+          document.getElementById("grafium-startup-retry").hidden = false;
+          document.getElementById("grafium-startup").setAttribute("role", "alert");
+          // Even a failed entry-module load must reveal the recovery controls.
+          var background = getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim();
+          var hex = /^#([0-9a-f]{6})$/i.exec(background);
+          var rgb = hex ? [0, 2, 4].map(function (offset) { return parseInt(hex[1].slice(offset, offset + 2), 16); }) : [30, 30, 46];
+          if (window.__TAURI_INTERNALS__) {
+            window.__TAURI_INTERNALS__.invoke("reveal_startup_window", { background: rgb })
+              .catch(function (error) { console.error("[startup] Could not show recovery window:", error); });
+          }
+        }
+        function onError(event) {
+          if (event instanceof ErrorEvent) showFailure(event.message);
+          else if (event.target instanceof HTMLScriptElement && event.target.type === "module") showFailure("application files could not be loaded.");
+        }
+        function onRejection(event) {
+          showFailure(event.reason instanceof Error ? event.reason.message : String(event.reason));
+        }
+        window.addEventListener("error", onError, true);
+        window.addEventListener("unhandledrejection", onRejection);
+        window.addEventListener("grafium-ready", function () {
+          document.getElementById("grafium-startup").remove();
+          window.removeEventListener("error", onError, true);
+          window.removeEventListener("unhandledrejection", onRejection);
+        }, { once: true });
+      })();
+    </script>
     <script>
       // === DEBUG CONSOLE (toggle with Ctrl+`) ===
       var __log = [];
@@ -86,7 +148,12 @@
     </style>
   </head>
   <body>
+    <div id="grafium-startup" role="status" aria-live="polite">
+      <strong>Grafium</strong>
+      <span id="grafium-startup-message">Opening your graph...</span>
+      <button id="grafium-startup-retry" hidden onclick="location.reload()">Retry</button>
+    </div>
     <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <script id="grafium-main" type="module" src="/src/main.ts"></script>
   </body>
 </html>

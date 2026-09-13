@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::gguf::GgufContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -41,19 +42,58 @@ const DEFAULT_CTX_SIZE: u32 = 2048;
 /// trained context (KV cache allocation scales directly with this).
 const DEFAULT_AUTO_CTX_CAP: u32 = 8192;
 
-/// Long enough to load a cold model from disk on a slow drive.
-const EMBED_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Indexing sends large batches, and the first one pays the load cost too.
 const EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Runs a GGUF embedding model fully in-process via llama.cpp. Stateless
-/// per call beyond the loaded model, so one instance is reused across many
-/// `embed()` calls — mirrors `LocalLlm` exactly.
+/// Metadata-validated embedding provider. Weights are loaded on the first
+/// nonempty embedding request, in the isolated worker rather than during setup.
 pub struct LocalEmbedder {
     model_path: PathBuf,
     ctx_size: NonZeroU32,
     dimension: usize,
     name: String,
+}
+
+fn context_size(trained: u32) -> NonZeroU32 {
+    NonZeroU32::new(trained.min(DEFAULT_AUTO_CTX_CAP))
+        .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"))
+}
+
+fn read_metadata(model_path: &Path) -> Result<(NonZeroU32, usize)> {
+    // GGUF type tags are part of the file format. Check them before calling
+    // the typed accessors, which assert in native code on a type mismatch.
+    const GGUF_TYPE_UINT32: u32 = 4;
+    const GGUF_TYPE_STRING: u32 = 8;
+    let invalid = |detail: &str| {
+        CoreError::Other(format!(
+            "Invalid embedding model metadata in {}: {detail}",
+            model_path.display()
+        ))
+    };
+    let metadata =
+        GgufContext::from_file(model_path).ok_or_else(|| invalid("could not read GGUF header"))?;
+    let architecture_key = metadata.find_key("general.architecture");
+    if architecture_key < 0 || metadata.kv_type(architecture_key) != GGUF_TYPE_STRING {
+        return Err(invalid("general.architecture must be a string"));
+    }
+    let architecture = metadata
+        .val_str(architecture_key)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("general.architecture is empty or invalid"))?;
+    let read_u32 = |suffix: &str| -> Result<u32> {
+        let key = format!("{architecture}.{suffix}");
+        let index = metadata.find_key(&key);
+        if index < 0 || metadata.kv_type(index) != GGUF_TYPE_UINT32 {
+            return Err(invalid(&format!("{key} must be a uint32")));
+        }
+        Ok(metadata.val_u32(index))
+    };
+    let dimension = read_u32("embedding_length")?;
+    if dimension == 0 || dimension > i32::MAX as u32 {
+        return Err(invalid("embedding_length must be a positive int32"));
+    }
+    let context = context_size(read_u32("context_length")?);
+    Ok((context, dimension as usize))
 }
 
 /// A loaded embedding model, resident in the worker child between requests.
@@ -89,11 +129,7 @@ fn ensure_slot(slot: &mut Option<EmbedderSlot>, model_path: &Path) -> Result<()>
     let model_params = LlamaModelParams::default().with_n_gpu_layers(OFFLOAD_ALL_LAYERS);
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
         .map_err(|e| CoreError::Other(format!("failed to load embedding model: {e}")))?;
-    let ctx_size = Some(model.n_ctx_train())
-        .filter(|&n| n > 0)
-        .map(|n| n.min(DEFAULT_AUTO_CTX_CAP))
-        .and_then(NonZeroU32::new)
-        .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
+    let ctx_size = context_size(model.n_ctx_train());
     let dimension = model.n_embd() as usize;
     *slot = Some(EmbedderSlot {
         model_path: model_path.to_path_buf(),
@@ -131,31 +167,13 @@ pub(crate) fn embed_in_process(
 impl LocalEmbedder {
     /// Prepare a GGUF embedding model for use.
     ///
-    /// Deliberately does not load anything here. The model lives in the worker
-    /// child, so a fault inside llama.cpp — an allocation failure, a driver
-    /// reset — kills the worker rather than the application. The context
-    /// length and embedding width still have to be known up front to size the
-    /// vector store, so those are read once, in the child, and returned.
+    /// Read only GGUF metadata, without loading tensor weights, initializing a
+    /// GPU, spawning a worker, or waiting for the inference lock. This keeps
+    /// engine construction/reconfiguration cheap even while another model runs.
+    /// Native model validation and load errors are reported by the first
+    /// embedding request, just as they are for the lazy local chat provider.
     pub fn load(model_path: &Path) -> Result<Self> {
-        let (context_size, dimension) = match crate::ai::worker::execute(
-            crate::ai::worker::WorkerRequest::EmbedderInfo {
-                model_path: model_path.to_path_buf(),
-            },
-            EMBED_LOAD_TIMEOUT,
-        )? {
-            crate::ai::worker::WorkerOutput::EmbedderInfo {
-                context_size,
-                dimension,
-            } => (context_size, dimension),
-            _ => {
-                return Err(CoreError::Other(
-                    "embedding worker returned an unexpected response".to_string(),
-                ))
-            }
-        };
-
-        let ctx_size = NonZeroU32::new(context_size)
-            .unwrap_or_else(|| NonZeroU32::new(DEFAULT_CTX_SIZE).expect("nonzero constant"));
+        let (ctx_size, dimension) = read_metadata(model_path)?;
 
         let name = model_path
             .file_name()
@@ -417,6 +435,178 @@ fn embed_all(
 mod config_tests {
     use super::*;
     use crate::ai::config::{AiConfig, LocalConfig, ProviderType};
+
+    fn gguf_string(value: &str) -> Vec<u8> {
+        let mut bytes = (value.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(value.as_bytes());
+        bytes
+    }
+
+    fn metadata_fixture(entries: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        // No tensors: this fixture cannot be loaded for inference. Successful
+        // preparation therefore proves that it did not request a native load.
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        for (key, kind, value) in entries {
+            bytes.extend(gguf_string(key));
+            bytes.extend_from_slice(&kind.to_le_bytes());
+            bytes.extend_from_slice(value);
+        }
+        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+        bytes
+    }
+
+    fn model_fixture(architecture: &str, context: u32, dimension: u32) -> Vec<u8> {
+        metadata_fixture(&[
+            ("general.architecture", 8, gguf_string(architecture)),
+            (
+                &format!("{architecture}.context_length"),
+                4,
+                context.to_le_bytes().to_vec(),
+            ),
+            (
+                &format!("{architecture}.embedding_length"),
+                4,
+                dimension.to_le_bytes().to_vec(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn prepares_metadata_without_loading_a_worker_or_tensor_weights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomic-embed.gguf");
+        std::fs::write(&path, model_fixture("nomic-bert", 2048, 768)).unwrap();
+
+        let provider = LocalEmbedder::load(&path).unwrap();
+        assert_eq!(provider.dimension(), 768);
+        assert_eq!(provider.ctx_size.get(), 2048);
+        assert_eq!(provider.embedding_scheme_id(), "search_document: ");
+    }
+
+    #[test]
+    fn metadata_context_uses_the_same_cap_and_fallback_as_native_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed.gguf");
+        for (trained, expected) in [(0, 2048), (512, 512), (32768, 8192)] {
+            std::fs::write(&path, model_fixture("bert", trained, 384)).unwrap();
+            assert_eq!(LocalEmbedder::load(&path).unwrap().ctx_size.get(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_metadata_instead_of_guessing_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed.gguf");
+        for bytes in [
+            b"not a GGUF model".to_vec(),
+            metadata_fixture(&[]),
+            metadata_fixture(&[("general.architecture", 4, 1u32.to_le_bytes().to_vec())]),
+            metadata_fixture(&[
+                ("general.architecture", 8, gguf_string("bert")),
+                ("bert.embedding_length", 8, gguf_string("768")),
+                ("bert.context_length", 4, 512u32.to_le_bytes().to_vec()),
+            ]),
+            model_fixture("bert", 512, 0),
+            model_fixture("bert", 512, u32::MAX),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let error = LocalEmbedder::load(&path).err().expect("invalid metadata");
+            assert!(error
+                .to_string()
+                .contains("Invalid embedding model metadata"));
+        }
+        assert!(LocalEmbedder::load(&dir.path().join("missing.gguf")).is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_embedding_request_does_not_load_the_lazy_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed.gguf");
+        std::fs::write(&path, model_fixture("bert", 512, 384)).unwrap();
+        let provider = LocalEmbedder::load(&path).unwrap();
+        assert!(provider.embed(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deferred_load_errors_are_returned_instead_of_successful_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed.gguf");
+        std::fs::write(&path, model_fixture("bert", 512, 384)).unwrap();
+        let provider = LocalEmbedder::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // No native worker is configured in this test process; even if it
+        // were, admission cannot start one for the now-missing model.
+        let result = provider.embed(&["test input".to_string()]).await;
+        assert!(
+            result.is_err(),
+            "deferred load failures must reach the caller"
+        );
+    }
+
+    #[test]
+    fn engine_startup_and_reconfigure_use_current_model_metadata_and_models_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("knowledge");
+        let models_dir = dir.path().join("models");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::write(
+            models_dir.join("embed.gguf"),
+            model_fixture("bert", 512, 384),
+        )
+        .unwrap();
+        let mut config = AiConfig {
+            enabled: true,
+            local: Some(LocalConfig {
+                provider: ProviderType::HuggingFace,
+                local_llm: crate::ai::config::LocalLlmSettings {
+                    model_ref: model_library::LocalModelRef::named("missing-chat.gguf"),
+                    ..Default::default()
+                },
+                local_embedding: LocalEmbeddingSettings {
+                    model_ref: model_library::LocalModelRef::named("embed.gguf"),
+                },
+                ..Default::default()
+            }),
+            ..AiConfig::default()
+        };
+        let mut engine =
+            crate::KnowledgeEngine::new_with_models_root(&data_dir, config.clone(), dir.path())
+                .unwrap();
+        assert!(
+            engine.can_index(),
+            "initialization must use the host models root"
+        );
+        assert!(!engine.is_llm_ready());
+        assert!(engine.llm_load_error().is_some());
+
+        config.local.as_mut().unwrap().local_embedding.model_ref =
+            model_library::LocalModelRef::named("missing-embed.gguf");
+        engine.reconfigure(config.clone()).unwrap();
+        assert!(
+            !engine.can_index(),
+            "a prior provider must not survive new config"
+        );
+
+        config.local.as_mut().unwrap().local_embedding.model_ref =
+            model_library::LocalModelRef::named("embed.gguf");
+        engine.reconfigure(config.clone()).unwrap();
+        assert!(
+            engine.can_index(),
+            "reconfiguration must retain the host models root"
+        );
+
+        config.enabled = false;
+        engine.reconfigure(config).unwrap();
+        assert!(!engine.can_index());
+        assert!(
+            engine.llm_load_error().is_none(),
+            "disabled AI must not retain stale errors"
+        );
+    }
 
     /// Same reasoning as `local_llm`'s equivalent test: proves
     /// `from_config` resolves against `LocalConfig::models_dir` when set,

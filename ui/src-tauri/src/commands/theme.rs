@@ -62,8 +62,15 @@ pub fn get_app_theme() -> Result<String, String> {
             .map(|s| s.trim().to_string())
             .map_err(|e| e.to_string())
     } else {
-        // Default: auto (follow smplos)
-        Ok("auto".to_string())
+        // First install: GitHub Light on desktop, OLED on Android.
+        #[cfg(target_os = "android")]
+        {
+            Ok("oled".to_string())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Ok("github".to_string())
+        }
     }
 }
 

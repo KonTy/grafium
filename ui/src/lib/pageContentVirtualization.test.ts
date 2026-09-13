@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { Block } from "./api";
 import {
   buildBlockRenderState,
+  buildBulletThreadRoles,
   computeVirtualWindow,
   getAncestorGuides,
+  focusedPathIds,
+  NO_THREAD,
   nextProgressiveRenderLimit,
 } from "./pageContentVirtualization";
 
@@ -168,11 +171,50 @@ describe("progressive render limit", () => {
 });
 
 describe("getAncestorGuides", () => {
+  it("marks last siblings so the UI can draw L elbows instead of T junctions", () => {
+    const blocks = [
+      makeBlock("a", null, 0),
+      makeBlock("a1", "a", 0),
+      makeBlock("a2", "a", 1),
+      makeBlock("b", null, 1),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    expect(state.isLastChildById.get("a1")).toBe(false);
+    expect(state.isLastChildById.get("a2")).toBe(true);
+    expect(state.isLastChildById.get("a")).toBe(false);
+    expect(state.isLastChildById.get("b")).toBe(true);
+  });
+
+  it("sorts siblings by order_index before last-child flags", () => {
+    const blocks = [
+      makeBlock("a2", "a", 1),
+      makeBlock("a", null, 0),
+      makeBlock("a1", "a", 0),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    expect(state.childrenByParent.get("a")?.map((block) => block.id)).toEqual(["a1", "a2"]);
+    expect(state.isLastChildById.get("a1")).toBe(false);
+    expect(state.isLastChildById.get("a2")).toBe(true);
+  });
+
   it("draws no guides for a root-level block", () => {
     const blocks = [makeBlock("a", null, 0)];
     const state = buildBlockRenderState(blocks, new Set());
     const guides = getAncestorGuides("a", state.parentById, state.depthById, state.isLastChildById);
     expect(guides).toEqual([]);
+  });
+
+  it("keeps displayed sibling order and last-child flags when order numbers are equal", () => {
+    const blocks = [
+      makeBlock("parent", null, 0),
+      { ...makeBlock("z-earlier", "parent", 1), created_at: "100" },
+      { ...makeBlock("a-later", "parent", 1), created_at: "200" },
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    expect(state.childrenByParent.get("parent")?.map((block) => block.id)).toEqual(["z-earlier", "a-later"]);
+    expect(state.visibleBlocks.map((block) => block.id)).toEqual(blocks.map((block) => block.id));
+    expect(state.isLastChildById.get("z-earlier")).toBe(false);
+    expect(state.isLastChildById.get("a-later")).toBe(true);
   });
 
   it("draws a guide for a parent that has a later sibling", () => {
@@ -187,7 +229,7 @@ describe("getAncestorGuides", () => {
     expect(guides).toEqual([true]);
   });
 
-  it("omits the guide when the ancestor is the last child", () => {
+  it("does not draw a guide when the ancestor is the last child", () => {
     // a
     //   b (child of a, and a is an only child overall)
     const blocks = [makeBlock("a", null, 0), makeBlock("b", "a", 0)];
@@ -196,7 +238,7 @@ describe("getAncestorGuides", () => {
     expect(guides).toEqual([false]);
   });
 
-  it("computes an independent guide per ancestor level for deeply nested blocks", () => {
+  it("draws a guide only while a later sibling still exists in that column", () => {
     // a
     //   b
     //     c
@@ -209,8 +251,144 @@ describe("getAncestorGuides", () => {
     ];
     const state = buildBlockRenderState(blocks, new Set());
     const guides = getAncestorGuides("c", state.parentById, state.depthById, state.isLastChildById);
-    // Level 0 (ancestor "a"): has later sibling "d" -> guide drawn.
-    // Level 1 (ancestor "b"): only child of "a" -> no guide.
     expect(guides).toEqual([true, false]);
+  });
+});
+
+describe("buildBulletThreadRoles", () => {
+  it("does not skip or extend past equal-order siblings with IDs in reverse display order", () => {
+    const blocks = [
+      makeBlock("root", null, 0),
+      makeBlock("parent", "root", 0),
+      makeBlock("first", "parent", 0),
+      makeBlock("z-earlier", "parent", 1),
+      makeBlock("a-later", "parent", 1),
+      makeBlock("last", "parent", 2),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    const rolesFor = (id: string) => buildBulletThreadRoles(
+      id, state.parentById, state.childrenByParent, new Set(), [...state.visibleIds],
+    );
+    const later = rolesFor("a-later");
+    expect(later.get("z-earlier")).toEqual({ elbow: false, continuationDepth: 1, stem: false });
+    expect(later.get("a-later")).toEqual({ elbow: true, continuationDepth: null, stem: false });
+    const earlier = rolesFor("z-earlier");
+    expect(earlier.get("z-earlier")).toEqual({ elbow: true, continuationDepth: null, stem: false });
+    expect(earlier.has("a-later")).toBe(false);
+    expect(earlier.has("last")).toBe(false);
+  });
+
+  it("colors only the focused path and prior siblings, with no tail on the focused block", () => {
+    const blocks = [
+      makeBlock("a", null, 0),
+      makeBlock("a1", "a", 0),
+      makeBlock("a2", "a", 1),
+      makeBlock("a2x", "a2", 0),
+      makeBlock("a3", "a", 2),
+      makeBlock("b", null, 1),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    const roles = buildBulletThreadRoles("a2x", state.parentById, state.childrenByParent, new Set(), blocks.map((block) => block.id));
+    const role = (id: string) => roles.get(id) ?? NO_THREAD;
+
+    expect(role("a")).toEqual({ elbow: false, continuationDepth: null, stem: true });
+    expect(role("a1")).toEqual({ elbow: false, continuationDepth: 0, stem: false });
+    expect(role("a2")).toEqual({ elbow: true, continuationDepth: null, stem: true });
+    expect(role("a2x")).toEqual({ elbow: true, continuationDepth: null, stem: false });
+    expect(role("a3")).toEqual(NO_THREAD);
+    expect(role("b")).toEqual(NO_THREAD);
+  });
+
+  const nestedBlocks = [
+    makeBlock("other-root", null, 0),
+    makeBlock("a", null, 1),
+    makeBlock("prior", "a", 0),
+    makeBlock("prior-child", "prior", 0),
+    makeBlock("prior-grandchild", "prior-child", 0),
+    makeBlock("b", "a", 1),
+    makeBlock("b-prior", "b", 0),
+    makeBlock("b-prior-child", "b-prior", 0),
+    makeBlock("c", "b", 1),
+    makeBlock("c-prior", "c", 0),
+    makeBlock("focus", "c", 1),
+    makeBlock("focus-child", "focus", 0),
+    makeBlock("later", "c", 2),
+    makeBlock("last-root", null, 2),
+  ];
+
+  function nestedRoles(focusedId: string | null = "focus", collapsedIds = new Set<string>()) {
+    const state = buildBlockRenderState(nestedBlocks, collapsedIds);
+    return buildBulletThreadRoles(focusedId, state.parentById, state.childrenByParent, collapsedIds, [...state.visibleIds]);
+  }
+
+  it("carries exactly one parent column through preceding subtrees, including virtualized rows", () => {
+    const roles = nestedRoles();
+    for (const id of ["prior", "prior-child", "prior-grandchild"]) {
+      expect(roles.get(id)).toEqual({ elbow: false, continuationDepth: 0, stem: false });
+    }
+    for (const id of ["b-prior", "b-prior-child"]) {
+      expect(roles.get(id)).toEqual({ elbow: false, continuationDepth: 1, stem: false });
+    }
+    expect(roles.get("c-prior")).toEqual({ elbow: false, continuationDepth: 2, stem: false });
+    expect(roles.has("other-root")).toBe(false);
+    expect(roles.has("later")).toBe(false);
+    expect(roles.has("focus-child")).toBe(false);
+    expect(roles.has("last-root")).toBe(false);
+  });
+
+  it("turns at each path ancestor without continuing the old column below its bullet", () => {
+    const roles = nestedRoles();
+    for (const id of ["b", "c"]) {
+      expect(roles.get(id)).toEqual({ elbow: true, continuationDepth: null, stem: true });
+    }
+    expect(roles.get("focus")).toEqual({ elbow: true, continuationDepth: null, stem: false });
+  });
+
+  it("stops at a parent when focus moves up and does not retain the previous path", () => {
+    nestedRoles();
+    const roles = nestedRoles("b");
+    expect(roles.get("b")).toEqual({ elbow: true, continuationDepth: null, stem: false });
+    for (const id of ["b-prior", "b-prior-child", "c", "c-prior", "focus"]) {
+      expect(roles.has(id)).toBe(false);
+    }
+    expect(nestedRoles("a").get("a")).toEqual(NO_THREAD);
+    expect(nestedRoles("a").size).toBe(1);
+  });
+
+  it("skips collapsed preceding descendants and rejects an endpoint hidden by collapse", () => {
+    const roles = nestedRoles("focus", new Set(["prior"]));
+    expect(roles.get("prior")?.continuationDepth).toBe(0);
+    expect(roles.has("prior-child")).toBe(false);
+    expect(roles.has("prior-grandchild")).toBe(false);
+    expect(nestedRoles("focus", new Set(["b"])).size).toBe(0);
+    expect(nestedRoles("b", new Set(["b"])).get("b")?.stem).toBe(false);
+  });
+
+  it("uses sorted tree order, not the input array or virtual window order", () => {
+    const state = buildBlockRenderState([...nestedBlocks].reverse(), new Set());
+    const roles = buildBulletThreadRoles("focus", state.parentById, state.childrenByParent, new Set(), [...state.visibleIds]);
+    expect(roles).toEqual(nestedRoles());
+  });
+
+  it("rejects deleted and orphaned endpoints", () => {
+    expect(nestedRoles("deleted").size).toBe(0);
+    const state = buildBlockRenderState([makeBlock("orphan", "missing", 0)], new Set());
+    expect(buildBulletThreadRoles("orphan", state.parentById, state.childrenByParent, new Set(), ["orphan"]).size).toBe(0);
+  });
+
+  it("does not hang when parent pointers form a cycle", () => {
+    const parentById = new Map<string, string | null>([
+      ["a", "b"],
+      ["b", "a"],
+    ]);
+    const started = Date.now();
+    const path = focusedPathIds("a", parentById);
+    expect(Date.now() - started).toBeLessThan(50);
+    expect([...path].sort()).toEqual(["a", "b"]);
+    expect(buildBulletThreadRoles("a", parentById, new Map(), new Set(), ["a", "b"]).size).toBe(0);
+  });
+
+  it("does not color anything when nothing is focused", () => {
+    expect(nestedRoles(null).size).toBe(0);
   });
 });

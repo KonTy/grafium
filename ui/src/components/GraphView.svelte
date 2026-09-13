@@ -1,8 +1,14 @@
 <script lang="ts">
+  import { onMount, untrack } from "svelte";
   import { discoverLinkCandidates, getGraphData, type GraphData } from "../lib/api";
   import { fuzzyScore } from "../lib/fuzzy";
-  import { assignClusterHues, edgeHue, exceedsDragThreshold } from "../lib/graphColor";
-  import type { TagHue } from "../lib/tagColor";
+  import { exceedsDragThreshold } from "../lib/graphColor";
+  import { clusterColor } from "../lib/graphClusters";
+  import {
+    createCommunityLayout,
+    communityLinkDistance,
+    type CommunityLayout,
+  } from "../lib/graphCommunityLayout";
 
   interface Props {
     onNavigate: (title: string, highlight?: string) => void;
@@ -21,6 +27,8 @@
     y: number;
     vx: number;
     vy: number;
+    anchorX: number;
+    anchorY: number;
   }
   interface SimEdge {
     source: SimNode;
@@ -28,6 +36,8 @@
     weight: number;
     suggested: boolean;
     confidence: number;
+    distance: number;
+    internal: boolean;
   }
 
   // ---- View / control state (Logseq-style) ----
@@ -45,7 +55,7 @@
 
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
-  let stats = $state({ nodes: 0, edges: 0, suggested: 0 });
+  let stats = $state({ nodes: 0, edges: 0, suggested: 0, communities: 0 });
   let searchMatchCount = $state(0);
   let scanningSuggestions = $state(false);
   let mobileControlsOpen = $state(false);
@@ -62,17 +72,10 @@
   let scale = 1;
   let offsetX = 0;
   let offsetY = 0;
+  let autoFit = true;
 
   // ---- Simulation data (non-reactive, mutated in the rAF loop) ----
-  /// Cluster hue per node id — see `graphColor.ts`. Recomputed on load, not on
-  /// every frame: it depends only on topology, which doesn't change as the
-  /// layout settles.
-  let clusterHues = new Map<string, TagHue>();
-  /// Resolved `--accent-<hue>` values, read once per draw. `getComputedStyle`
-  /// is a layout-flushing call, so doing it per node would cost a reflow for
-  /// every dot on screen.
-  let huePalette = new Map<string, string>();
-
+  let communityLayout: CommunityLayout | null = null;
   let nodes: SimNode[] = [];
   let edges: SimEdge[] = [];
   let nodeById = new Map<string, SimNode>();
@@ -81,6 +84,8 @@
   let alpha = 0;
   let raf = 0;
   let running = false;
+  let loadGeneration = 0;
+  let destroyed = false;
 
   // Interaction
   let dragNode: SimNode | null = null;
@@ -96,51 +101,50 @@
 
   const MIN_ALPHA = 0.008;
 
-  function themeColor(varName: string, fallback: string): string {
-    if (typeof window === "undefined") return fallback;
-    const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-    return v || fallback;
-  }
-
   async function loadData() {
+    const generation = ++loadGeneration;
     loading = true;
     errorMsg = null;
     try {
       const focus = mode === "local" ? currentPageId || undefined : undefined;
       const data: GraphData = await getGraphData(nodeLimit, focus, showSuggestedEdges);
+      if (destroyed || generation !== loadGeneration) return;
       buildSimulation(data);
       updateSearchMatchCount();
       stats = {
         nodes: data.nodes.length,
-        edges: data.edges.length,
-        suggested: data.suggested_edges ?? data.edges.filter((edge) => edge.suggested).length,
+        edges: edges.length,
+        suggested: edges.filter((edge) => edge.suggested).length,
+        communities: communityLayout?.groups.length ?? 0,
       };
     } catch (e) {
+      if (destroyed || generation !== loadGeneration) return;
       errorMsg = String(e);
       console.error("Failed to load graph data:", e);
+    } finally {
+      if (!destroyed && generation === loadGeneration) loading = false;
     }
-    loading = false;
   }
 
   function buildSimulation(data: GraphData) {
-    clusterHues = assignClusterHues(
-      data.nodes.map((n) => n.id),
-      data.edges.map((e) => ({ source: e.source, target: e.target }))
-    );
+    const layout = createCommunityLayout(data.nodes, data.edges, 2);
+    communityLayout = layout;
     nodeById = new Map();
-    const cx = width / 2;
-    const cy = height / 2;
-    const R = Math.min(width, height) * 0.4 || 300;
-    nodes = data.nodes.map((n, i) => {
-      const angle = (i / Math.max(1, data.nodes.length)) * Math.PI * 2;
+    dragNode = null;
+    hoverNode = null;
+    nodes = data.nodes.map((n) => {
+      const position = layout.positions.get(n.id);
+      if (!position) throw new Error(`Missing graph layout position for ${n.id}`);
       const node: SimNode = {
         id: n.id,
         title: n.title,
         degree: n.degree,
-        x: cx + Math.cos(angle) * R * (0.5 + Math.random() * 0.5),
-        y: cy + Math.sin(angle) * R * (0.5 + Math.random() * 0.5),
+        x: position.x * linkDistance / 70,
+        y: position.y * linkDistance / 70,
         vx: 0,
         vy: 0,
+        anchorX: position.x,
+        anchorY: position.y,
       };
       nodeById.set(n.id, node);
       return node;
@@ -156,15 +160,17 @@
           weight: e.weight ?? 1,
           suggested: e.suggested ?? false,
           confidence: e.confidence ?? 1,
+          distance: communityLinkDistance(layout, e.source, e.target),
+          internal: layout.clusterIndexById.has(e.source) &&
+            layout.clusterIndexById.get(e.source) === layout.clusterIndexById.get(e.target),
         });
       }
     }
     maxDegree = Math.max(1, ...data.nodes.map((n) => n.degree));
     maxWeight = Math.max(1, ...edges.map((e) => e.weight));
-    // Reset camera to fit
-    scale = 1;
-    offsetX = 0;
-    offsetY = 0;
+    autoFit = true;
+    fitView();
+    draw();
     settleThenShow();
   }
 
@@ -187,12 +193,12 @@
   function settleAsync(iterations = 300) {
     cancelAnimationFrame(raf);
     running = false;
+    const token = ++settleToken;
     if (nodes.length === 0) {
       alpha = 0;
       draw();
       return;
     }
-    const token = ++settleToken;
     alpha = 1;
     let done = 0;
     const step = () => {
@@ -209,6 +215,7 @@
       } else {
         alpha = 0;
         running = false;
+        if (autoFit) fitView();
         draw();
       }
     };
@@ -249,6 +256,10 @@
     return (3 + rel * 13) * nodeScale;
   }
 
+  function screenRadiusOf(node: SimNode): number {
+    return Math.max(2.5, radiusOf(node) * Math.sqrt(scale));
+  }
+
   function hasActiveSearch(): boolean {
     return searchText.trim().length > 0;
   }
@@ -281,9 +292,9 @@
   function simulate() {
     const n = nodes.length;
     if (n === 0) return;
-    const cx = width / 2;
-    const cy = height / 2;
     const repel = chargeStrength * chargeStrength;
+    const layoutScale = linkDistance / 70;
+    const radii = nodes.map(radiusOf);
 
     // Repulsion (O(n^2), fine for the capped node counts we render).
     for (let i = 0; i < n; i++) {
@@ -294,12 +305,14 @@
         let dy = a.y - b.y;
         let d2 = dx * dx + dy * dy;
         if (d2 < 0.01) {
-          dx = (Math.random() - 0.5) * 1;
-          dy = (Math.random() - 0.5) * 1;
-          d2 = dx * dx + dy * dy + 0.01;
+          const angle = (i + j * n) * 2.399963229728653;
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          d2 = 1;
         }
-        const force = repel / d2;
         const d = Math.sqrt(d2);
+        const collision = Math.max(0, radii[i] + radii[j] + 5 - d) * 0.7;
+        const force = repel / d2 + collision;
         const fx = (dx / d) * force;
         const fy = (dy / d) * force;
         a.vx += fx;
@@ -309,13 +322,14 @@
       }
     }
 
-    // Spring along edges (heavier ties pull a little stronger).
+    // Bridges stay long and weak; suggestions never rearrange accepted topics.
     for (const e of edges) {
+      if (e.suggested) continue;
       const dx = e.target.x - e.source.x;
       const dy = e.target.y - e.source.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
       const w = 0.6 + 0.4 * (e.weight / maxWeight);
-      const force = (d - linkDistance) * 0.02 * w;
+      const force = (d - e.distance * layoutScale) * (e.internal ? 0.018 : 0.004) * w;
       const fx = (dx / d) * force;
       const fy = (dy / d) * force;
       e.source.vx += fx;
@@ -324,15 +338,16 @@
       e.target.vy -= fy;
     }
 
-    // Centering + integration.
+    // Structural anchors preserve the coarse community layout instead of
+    // pulling every topic toward the same screen center.
     for (const node of nodes) {
       if (node === dragNode) {
         node.vx = 0;
         node.vy = 0;
         continue;
       }
-      node.vx += (cx - node.x) * 0.0015;
-      node.vy += (cy - node.y) * 0.0015;
+      node.vx += (node.anchorX * layoutScale - node.x) * 0.085;
+      node.vy += (node.anchorY * layoutScale - node.y) * 0.085;
       node.vx *= 0.85;
       node.vy *= 0.85;
       node.x += node.vx * alpha;
@@ -351,24 +366,36 @@
     if (!ctx) return;
     ctx.save();
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = themeColor("--bg-primary", "#16161e");
+    const theme = getComputedStyle(document.documentElement);
+    const themeColor = (name: string, fallback: string) =>
+      theme.getPropertyValue(name).trim() || fallback;
+    const backgroundColor = themeColor("--bg-primary", "#16161e");
+    ctx.fillStyle = backgroundColor;
     ctx.fillRect(0, 0, width, height);
 
-    const edgeColor = themeColor("--border", "#333");
-    const nodeColor = themeColor("--accent", "#6ea8fe");
+    const edgeColor = themeColor("--text-muted", "#777");
     const textColor = themeColor("--text-secondary", "#aaa");
+    const primaryColor = themeColor("--text-primary", "#fff");
+    const focusColor = themeColor("--accent-yellow", "#e0af68");
+    const matchColor = themeColor("--accent-green", "#9ece6a");
     const visibleIds = visibleNodeIdSet();
-
-    // One `getComputedStyle` per hue per frame instead of one per element.
-    huePalette = new Map();
-    const hueColor = (hue: TagHue | null): string => {
-      if (!hue) return edgeColor;
-      const cached = huePalette.get(hue);
+    const palette = new Map<number, string>();
+    const colorFor = (id: string): string => {
+      const index = communityLayout?.clusterIndexById.get(id);
+      if (index === undefined) return edgeColor;
+      const cached = palette.get(index);
       if (cached) return cached;
-      const resolved = themeColor(`--accent-${hue}`, nodeColor);
-      huePalette.set(hue, resolved);
+      const resolved = clusterColor(index, theme.colorScheme === "light");
+      palette.set(index, resolved);
       return resolved;
     };
+    const neighbors = new Set<string>();
+    if (hoverNode) {
+      for (const edge of edges) {
+        if (edge.source === hoverNode) neighbors.add(edge.target.id);
+        if (edge.target === hoverNode) neighbors.add(edge.source.id);
+      }
+    }
 
     // Edges — thickness/opacity scale with tie magnitude (weight), and hue
     // follows the cluster. An edge *between* clusters keeps the neutral border
@@ -380,12 +407,12 @@
       const [x1, y1] = toScreen(e.source.x, e.source.y);
       const [x2, y2] = toScreen(e.target.x, e.target.y);
       const rel = e.weight / maxWeight;
-      ctx.strokeStyle = hueColor(
-        edgeHue(clusterHues, { source: e.source.id, target: e.target.id })
-      );
+      ctx.strokeStyle = e.internal && !e.suggested ? colorFor(e.source.id) : edgeColor;
       ctx.setLineDash(e.suggested ? [4 * scale, 4 * scale] : []);
       ctx.lineWidth = Math.max(0.4, (e.suggested ? 0.4 + rel * 2 : 0.6 + rel * 3.5) * scale);
-      ctx.globalAlpha = e.suggested ? 0.16 + rel * 0.28 : 0.22 + rel * 0.5;
+      const highlighted = e.source === hoverNode || e.target === hoverNode;
+      ctx.globalAlpha = hoverNode && !highlighted ? 0.08 :
+        highlighted ? 0.9 : e.suggested ? 0.3 : e.internal ? 0.25 + rel * 0.25 : 0.65;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -394,14 +421,18 @@
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
 
-    // Nodes
+    type Label = { node: SimNode; x: number; y: number; r: number; priority: number };
+    const labels: Label[] = [];
+    const occupied: { left: number; right: number; top: number; bottom: number }[] = [];
+    const groupBounds = new Map<number, { left: number; right: number; top: number; bottom: number }>();
     for (const node of nodes) {
       if (visibleIds && !visibleIds.has(node.id)) continue;
       const [x, y] = toScreen(node.x, node.y);
-      const r = radiusOf(node) * scale;
+      const r = screenRadiusOf(node);
       const isMatch = hasActiveSearch();
       const isFocus = node.id === currentPageId;
       const isHover = node === hoverNode;
+      const isHub = communityLayout?.hubIds.has(node.id) ?? false;
 
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -409,34 +440,83 @@
       // distinguishable from whatever hue their cluster happens to hold; every
       // other node wears its cluster's colour. These were hardcoded hex, which
       // was unreadable on light themes.
-      if (isFocus) ctx.fillStyle = themeColor("--accent-yellow", "#e0af68");
-      else if (isMatch) ctx.fillStyle = themeColor("--accent-green", "#9ece6a");
-      else ctx.fillStyle = hueColor(clusterHues.get(node.id) ?? null);
-      ctx.globalAlpha = 1;
+      if (isFocus) ctx.fillStyle = focusColor;
+      else if (isMatch) ctx.fillStyle = matchColor;
+      else ctx.fillStyle = colorFor(node.id);
+      ctx.globalAlpha = hoverNode && !isHover && !neighbors.has(node.id) ? 0.35 : 1;
       ctx.fill();
 
       if (isHover || isFocus) {
         ctx.lineWidth = 2;
-        ctx.strokeStyle = themeColor("--text-primary", "#fff");
+        ctx.strokeStyle = primaryColor;
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
 
-      const showThis =
-        showLabels && (scale > 0.75 || r > 6 || isHover || isFocus || isMatch);
-      if (showThis) {
-        ctx.fillStyle = textColor;
-        ctx.font = `${Math.max(10, 11 * Math.min(scale, 1.5))}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        const label = node.title.length > 28 ? node.title.slice(0, 27) + "…" : node.title;
-        ctx.fillText(label, x, y + r + 2);
+      occupied.push({ left: x - r - 2, right: x + r + 2, top: y - r - 2, bottom: y + r + 2 });
+      const group = communityLayout?.clusterIndexById.get(node.id);
+      if (group !== undefined) {
+        const bounds = groupBounds.get(group);
+        groupBounds.set(group, {
+          left: Math.min(bounds?.left ?? x - r, x - r),
+          right: Math.max(bounds?.right ?? x + r, x + r),
+          top: Math.min(bounds?.top ?? y - r, y - r),
+          bottom: Math.max(bounds?.bottom ?? y + r, y + r),
+        });
+      }
+      if (isHover || (showLabels && (scale > 0.65 || r > 6 || isHub || isFocus || isMatch || neighbors.has(node.id)))) {
+        labels.push({
+          node, x, y, r,
+          priority: isHover ? 5 : isFocus ? 4 : isHub ? 3 : isMatch || neighbors.has(node.id) ? 2 : 1,
+        });
+      }
+    }
+    // Read the hubs first; fit secondary labels only where they don't obscure
+    // other labels or nodes. Zooming reveals the remaining titles.
+    labels.sort((a, b) => b.priority - a.priority || b.node.degree - a.node.degree || a.node.id.localeCompare(b.node.id));
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const { node, x, y, r, priority } of labels) {
+      const fontSize = priority >= 3 ? 12 : Math.max(10, 11 * Math.min(scale, 1.5));
+      ctx.font = `${priority >= 3 ? 600 : 400} ${fontSize}px system-ui, sans-serif`;
+      const label = node.title.length > 36 ? node.title.slice(0, 35) + "…" : node.title;
+      const halfWidth = ctx.measureText(label).width / 2 + 4;
+      const placements = [
+        [x, y + r + 5],
+        [x, y - r - fontSize - 6],
+        [x + r + halfWidth + 4, y - fontSize / 2],
+        [x - r - halfWidth - 4, y - fontSize / 2],
+      ];
+      if (communityLayout?.hubIds.has(node.id)) {
+        const index = communityLayout.clusterIndexById.get(node.id)!;
+        const bounds = groupBounds.get(index)!;
+        const centerX = (bounds.left + bounds.right) / 2;
+        placements.push(
+          [centerX, bounds.bottom + 6],
+          [centerX, bounds.top - fontSize - 7],
+          [bounds.right + halfWidth + 5, y - fontSize / 2],
+          [bounds.left - halfWidth - 5, y - fontSize / 2],
+        );
+      }
+      for (const [lx, ly] of placements) {
+        const box = { left: lx - halfWidth, right: lx + halfWidth, top: ly - 2, bottom: ly + fontSize + 3 };
+        if (box.left < 4 || box.right > width - 4 || box.top < 4 || box.bottom > height - 4) continue;
+        if (occupied.some((other) => box.left < other.right && box.right > other.left &&
+          box.top < other.bottom && box.bottom > other.top)) continue;
+        ctx.fillStyle = priority >= 3 ? primaryColor : textColor;
+        ctx.strokeStyle = backgroundColor;
+        ctx.lineWidth = 3;
+        ctx.strokeText(label, lx, ly);
+        ctx.fillText(label, lx, ly);
+        occupied.push(box);
+        break;
       }
     }
     ctx.restore();
   }
 
   function tick() {
+    if (destroyed) return;
     if (alpha > MIN_ALPHA) {
       simulate();
       alpha *= 0.985;
@@ -446,6 +526,10 @@
       raf = requestAnimationFrame(tick);
     } else {
       running = false;
+      if (autoFit) {
+        fitView();
+        draw();
+      }
     }
   }
 
@@ -460,6 +544,7 @@
     canvasEl.style.height = height + "px";
     ctx = canvasEl.getContext("2d");
     if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (autoFit) fitView();
     draw();
   }
 
@@ -473,7 +558,7 @@
       const dx = node.x - wx;
       const dy = node.y - wy;
       const d = dx * dx + dy * dy;
-      const r = radiusOf(node) + 4;
+      const r = (screenRadiusOf(node) + 4) / scale;
       if (d < r * r && d < bestD) {
         best = node;
         bestD = d;
@@ -484,6 +569,12 @@
 
   function onPointerDown(e: PointerEvent) {
     if (!canvasEl) return;
+    if (!animate) {
+      settleToken++;
+      cancelAnimationFrame(raf);
+      alpha = 0;
+      running = false;
+    }
     canvasEl.setPointerCapture(e.pointerId);
     const rect = canvasEl.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -523,12 +614,16 @@
         const [wx, wy] = toWorld(sx, sy);
         dragNode.x = wx;
         dragNode.y = wy;
+        dragNode.anchorX = wx * 70 / linkDistance;
+        dragNode.anchorY = wy * 70 / linkDistance;
+        autoFit = false;
         dragNode.vx = 0;
         dragNode.vy = 0;
         nudge();
       }
     } else if (panning) {
       if (pointerMoved) {
+        autoFit = false;
         offsetX += sx - lastX;
         offsetY += sy - lastY;
         wake();
@@ -561,12 +656,13 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     if (!canvasEl) return;
+    autoFit = false;
     const rect = canvasEl.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     const [wx, wy] = toWorld(sx, sy);
-    scale = Math.min(6, Math.max(0.15, scale * factor));
+    scale = Math.min(6, Math.max(0.01, scale * factor));
     // keep the cursor point stable
     offsetX = sx - wx * scale;
     offsetY = sy - wy * scale;
@@ -574,20 +670,33 @@
   }
 
   function zoomBy(factor: number) {
+    autoFit = false;
     const cx = width / 2;
     const cy = height / 2;
     const [wx, wy] = toWorld(cx, cy);
-    scale = Math.min(6, Math.max(0.15, scale * factor));
+    scale = Math.min(6, Math.max(0.01, scale * factor));
     offsetX = cx - wx * scale;
     offsetY = cy - wy * scale;
     draw();
   }
 
+  function fitView() {
+    if (!nodes.length || width <= 0 || height <= 0) return;
+    const left = Math.min(...nodes.map((node) => node.x - radiusOf(node)));
+    const right = Math.max(...nodes.map((node) => node.x + radiusOf(node)));
+    const top = Math.min(...nodes.map((node) => node.y - radiusOf(node)));
+    const bottom = Math.max(...nodes.map((node) => node.y + radiusOf(node)));
+    const padding = Math.min(70, width * 0.12, height * 0.12);
+    scale = Math.min(1.5, (width - padding * 2) / Math.max(1, right - left),
+      (height - padding * 2) / Math.max(1, bottom - top));
+    offsetX = width / 2 - (left + right) * scale / 2;
+    offsetY = height / 2 - (top + bottom) * scale / 2;
+  }
+
   function resetView() {
-    scale = 1;
-    offsetX = 0;
-    offsetY = 0;
-    reheat(0.8);
+    autoFit = true;
+    fitView();
+    draw();
   }
 
   async function scanSuggestedLinks() {
@@ -606,15 +715,21 @@
   }
 
   // ---- Lifecycle ----
-  $effect(() => {
+  onMount(() => {
     if (!canvasEl || !wrapperEl) return;
     resize();
     const ro = new ResizeObserver(resize);
+    const themeObserver = new MutationObserver(() => draw());
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class", "data-theme"] });
     ro.observe(wrapperEl);
     window.addEventListener("resize", resize);
     void loadData();
     return () => {
       ro.disconnect();
+      themeObserver.disconnect();
+      destroyed = true;
+      loadGeneration++;
+      settleToken++;
       window.removeEventListener("resize", resize);
       cancelAnimationFrame(raf);
       running = false;
@@ -622,19 +737,23 @@
   });
 
   // Reload when mode or node limit changes.
-  let lastMode = mode;
-  let lastLimit = nodeLimit;
-  let lastShowSuggestedEdges = showSuggestedEdges;
+  let lastMode: "global" | "local" = "global";
+  let lastLimit = 200;
+  let lastShowSuggestedEdges = false;
+  let lastFocus = "";
   $effect(() => {
+    const focus = mode === "local" ? currentPageId : "";
     if (
       mode !== lastMode ||
       nodeLimit !== lastLimit ||
-      showSuggestedEdges !== lastShowSuggestedEdges
+      showSuggestedEdges !== lastShowSuggestedEdges ||
+      focus !== lastFocus
     ) {
       lastMode = mode;
       lastLimit = nodeLimit;
       lastShowSuggestedEdges = showSuggestedEdges;
-      void loadData();
+      lastFocus = focus;
+      untrack(() => void loadData());
     }
   });
 
@@ -651,14 +770,18 @@
   $effect(() => {
     chargeStrength;
     linkDistance;
-    reheat(0.4);
+    nodeScale;
+    untrack(() => reheat(0.4));
   });
 
   // Start/stop the live animation when the toggle flips.
-  let lastAnimate = animate;
+  let lastAnimate = false;
   $effect(() => {
     if (animate !== lastAnimate) {
       lastAnimate = animate;
+      settleToken++;
+      cancelAnimationFrame(raf);
+      running = false;
       if (animate) {
         alpha = Math.max(alpha, 0.6);
         wake();
@@ -677,6 +800,8 @@
       onpointerdown={onPointerDown}
       onpointermove={onPointerMove}
       onpointerup={onPointerUp}
+      onpointercancel={() => { dragNode = null; panning = false; }}
+      onpointerleave={() => { if (!dragNode) { hoverNode = null; draw(); } }}
       onwheel={onWheel}
     ></canvas>
 
@@ -790,12 +915,12 @@
     {/if}
 
     <div class="graph-stats">
-      {stats.nodes.toLocaleString()} nodes · {stats.edges.toLocaleString()} links
+      {stats.nodes.toLocaleString()} nodes · {stats.edges.toLocaleString()} links · {stats.communities.toLocaleString()} communities
       {#if showSuggestedEdges && stats.suggested > 0}
         · {stats.suggested.toLocaleString()} suggested
       {/if}
     </div>
-    <p class="hint">Click a node to open it. Dashed lines are suggestions until you accept them on a page.</p>
+    <p class="hint">Colors group densely linked pages. Long gray links connect communities. Click a node to open it. Dashed lines are suggestions until you accept them on a page.</p>
   </aside>
 </div>
 

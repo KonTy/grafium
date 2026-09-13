@@ -10,5 +10,8 @@ export function lazyComponent<T>(
   loader: () => Promise<{ default: T }>
 ): () => Promise<{ default: T }> {
   let cached: Promise<{ default: T }> | undefined;
-  return () => (cached ??= loader());
+  return () => (cached ??= loader().catch((error: unknown) => {
+    cached = undefined;
+    throw error;
+  }));
 }

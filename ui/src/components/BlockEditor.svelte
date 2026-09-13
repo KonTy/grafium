@@ -63,6 +63,7 @@
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitImeEnterContent } from "../lib/taskSyntax";
   import { isFencedCodeBlock } from "../lib/codeFence";
+  import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
   import DatePicker from "./DatePicker.svelte";
   import MobileEditorBar from "./MobileEditorBar.svelte";
 
@@ -81,6 +82,14 @@
     /// level's column, false/undefined draws nothing (that ancestor has no
     /// more siblings below, so there's nothing to visually connect to).
     guides?: boolean[];
+    /// Colored L into this bullet when it sits on the focused path.
+    threadElbow?: boolean;
+    /// Column continued through a preceding sibling and all its descendants.
+    threadContinuationDepth?: number | null;
+    /// Colored stem from an ancestor into its children (never the focused row).
+    threadStem?: boolean;
+    /// When false, skip all indent/thread decorations (Settings toggle).
+    showGuides?: boolean;
     focused?: boolean;
     selected?: boolean;
     hasChildren?: boolean;
@@ -111,6 +120,10 @@
     bookMode = false,
     depth = 0,
     guides = [],
+    threadElbow = false,
+    threadContinuationDepth = null,
+    threadStem = false,
+    showGuides = true,
     focused = false,
     selected = false,
     hasChildren = false,
@@ -195,6 +208,7 @@
   // Rendered-content container, used to hydrate <audio>/<video> media that
   // WebKitGTK can't load from the custom asset scheme.
   let renderedEl = $state<HTMLElement | null>(null);
+  let tableSort: { tableIndex: number; columnIndex: number; direction: TableSortDirection } | null = $state(null);
   $effect(() => {
     void renderedHtml;
     const el = renderedEl;
@@ -231,6 +245,23 @@
       cancelled = true;
       cleanup?.();
     };
+  });
+
+  $effect(() => {
+    void renderedHtml;
+    const el = renderedEl;
+    const sort = tableSort;
+    if (!el || !sort) return;
+    queueMicrotask(() => {
+      const table = el.querySelectorAll("table")[sort.tableIndex];
+      if (!table) return;
+      table.querySelectorAll("th").forEach((th, i) => {
+        th.setAttribute(
+          "aria-sort",
+          i === sort.columnIndex ? (sort.direction === "asc" ? "ascending" : "descending") : "none",
+        );
+      });
+    });
   });
 
   $effect(() => {
@@ -1973,6 +2004,34 @@
     }
   }
 
+  function handleRenderedTableSort(e: MouseEvent, target: HTMLElement): boolean {
+    const th = target.closest("th");
+    const table = th?.closest("table");
+    if (!th || !table || !renderedEl?.contains(table) || table.classList.contains("query-table")) {
+      return false;
+    }
+    const headerRow = th.parentElement;
+    if (!headerRow) return false;
+    const columnIndex = Array.from(headerRow.children).indexOf(th);
+    const tableIndex = Array.from(renderedEl.querySelectorAll("table")).indexOf(table);
+    if (columnIndex < 0 || tableIndex < 0) return false;
+
+    e.stopPropagation();
+    e.preventDefault();
+    const direction: TableSortDirection =
+      tableSort?.tableIndex === tableIndex && tableSort.columnIndex === columnIndex && tableSort.direction === "asc"
+        ? "desc"
+        : "asc";
+    const next = sortMarkdownTableColumn(block.content, tableIndex, columnIndex, direction);
+    if (!next || next === block.content) {
+      tableSort = { tableIndex, columnIndex, direction };
+      return true;
+    }
+    tableSort = { tableIndex, columnIndex, direction };
+    void saveContent(next);
+    return true;
+  }
+
   function handleRenderedClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
 
@@ -1991,6 +2050,8 @@
       }
       return;
     }
+
+    if (handleRenderedTableSort(e, target)) return;
 
     // Handle task marker clicks — cycle state
     if (target.classList.contains("task-marker")) {
@@ -2172,13 +2233,25 @@
   data-depth={depth}
   onpointerdown={markCurrentBlock}
 >
-  {#if !bookMode && guides.length > 0}
+  {#if !bookMode && showGuides && (guides.length > 0 || threadElbow || threadContinuationDepth !== null || threadStem)}
     <div class="indent-guides" aria-hidden="true">
       {#each guides as active, level (level)}
-        {#if active}
+        {#if active && level !== threadContinuationDepth && !(threadElbow && level === depth - 1)}
           <span class="indent-guide-line" style={`left: ${level * 24 + 10}px`}></span>
         {/if}
       {/each}
+      {#if threadElbow}
+        <span
+          class="indent-guide-elbow"
+          style={`left: ${(depth - 1) * 24 + 9}px`}
+        ></span>
+      {/if}
+      {#if threadContinuationDepth !== null}
+        <span class="indent-guide-line indent-guide-path" style={`left: ${threadContinuationDepth * 24 + 9}px`}></span>
+      {/if}
+      {#if threadStem}
+        <span class="indent-guide-line indent-guide-stem" style={`left: ${depth * 24 + 9}px`}></span>
+      {/if}
     </div>
   {/if}
   {#if showBlockMarker}
@@ -2412,10 +2485,13 @@
     align-items: center;
     min-height: 24px;
     min-width: 0;
+    padding-bottom: 2px;
+    box-sizing: border-box;
     border-radius: 4px;
     transition: background-color 0.1s;
     scroll-margin: 40px;
     position: relative;
+    overflow: visible;
   }
 
   .block-item.image-menu-open {
@@ -2440,6 +2516,7 @@
 
   .block-item.bookMode {
     min-height: 0;
+    padding-bottom: 0;
     border-radius: 0;
     transition: none;
   }
@@ -2472,28 +2549,49 @@
     flex-shrink: 0;
     cursor: pointer;
     font-size: 15px;
+    position: relative;
+    z-index: 1;
   }
 
-  /* Bullet-threading hierarchy guide lines: a thin vertical line per
-     ancestor indent level, positioned under that ancestor's bullet, running
-     the full height of this row so consecutive sibling/child rows read as a
-     continuous connector (see getAncestorGuides in
-     pageContentVirtualization.ts for which levels get a line). Purely
-     decorative — never intercepts clicks. */
+  /* Bullet centers track the row height, excluding its 2px bottom spacing.
+     Keep the lines inside that spacing so adjacent rows meet without clipping. */
   .indent-guides {
     position: absolute;
     inset: 0;
+    overflow: visible;
     pointer-events: none;
+    z-index: 0;
   }
 
   .indent-guide-line {
     position: absolute;
     top: 0;
     bottom: 0;
+    width: 1px;
+    border-radius: 0;
+    background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  }
+
+  .indent-guide-path {
     width: 2px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 42%, var(--text-secondary, currentColor));
-    opacity: 0.72;
+    background: var(--accent);
+  }
+
+  .indent-guide-stem {
+    top: calc(50% - 1px);
+    width: 2px;
+    background: var(--accent);
+  }
+
+  .indent-guide-elbow {
+    position: absolute;
+    box-sizing: border-box;
+    top: 0;
+    width: 25px;
+    height: 50%;
+    border-left: 2px solid var(--accent);
+    border-bottom: 2px solid var(--accent);
+    border-bottom-left-radius: 8px;
   }
 
   .bullet {
@@ -3233,6 +3331,19 @@
   .rendered-content :global(th) {
     background: var(--bg-secondary);
     font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .rendered-content :global(th[aria-sort="ascending"])::after,
+  .rendered-content :global(th[aria-sort="descending"])::after {
+    content: " ▲";
+    font-size: 0.75em;
+    color: var(--accent);
+  }
+
+  .rendered-content :global(th[aria-sort="descending"])::after {
+    content: " ▼";
   }
 
   .rendered-content :global(img) {

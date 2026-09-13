@@ -191,6 +191,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 };
 
 const app = mount(App, { target: document.getElementById("app")! });
+window.dispatchEvent(new Event("grafium-ready"));
 
 // === TEMP DIAGNOSTIC: key-event visibility on WebKitGTK ===
 // Shows what the JS layer actually receives when arrow keys are pressed.

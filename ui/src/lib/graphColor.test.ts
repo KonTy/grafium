@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { assignClusterHues, edgeHue, exceedsDragThreshold } from "./graphColor";
 import { TAG_HUES } from "./tagColor";
+import { computeGraphClusters } from "./graphClusters";
 
 describe("assignClusterHues", () => {
-  it("gives every node in a connected component the same hue", () => {
+  it("gives every node in a small hub community the same hue", () => {
     const hues = assignClusterHues(
       ["a", "b", "c"],
       [
@@ -62,6 +63,17 @@ describe("assignClusterHues", () => {
     const hues = assignClusterHues(nodes, edges);
     for (const n of nodes) expect(hues.get(n)).toBeDefined();
   });
+
+  it("delegates to the same structural assignment as both layouts", () => {
+    const nodes = Array.from({ length: 12 }, (_, i) => `n${i}`);
+    const edges = nodes.map((source, i) => ({ source, target: nodes[(i + 1) % nodes.length] }));
+    const hues = assignClusterHues(nodes, edges);
+    const { clusterIndexById } = computeGraphClusters(nodes, edges);
+    expect(new Set(clusterIndexById.values()).size).toBeGreaterThan(1);
+    for (const [id, cluster] of clusterIndexById) {
+      expect(hues.get(id)).toBe(TAG_HUES[cluster % TAG_HUES.length]);
+    }
+  });
 });
 
 describe("edgeHue", () => {
@@ -76,6 +88,23 @@ describe("edgeHue", () => {
     expect(edgeHue(hues, { source: "a", target: "b" })).toBe(hues.get("a"));
     // A bridge belongs to neither cluster, so it has no owning hue.
     expect(edgeHue(hues, { source: "a", target: "x" })).toBeNull();
+  });
+
+  it("does not mistake a repeated palette hue for shared community identity", () => {
+    const edges = Array.from({ length: TAG_HUES.length + 1 }, (_, i) =>
+      ({ source: `a${i}`, target: `b${i}` }));
+    const hues = assignClusterHues(edges.flatMap((edge) => [edge.source, edge.target]), edges);
+    expect(hues.get("a0")).toBe(hues.get(`a${TAG_HUES.length}`));
+    expect(edgeHue(hues, { source: "a0", target: `a${TAG_HUES.length}` })).toBeNull();
+    expect(edgeHue(hues, edges[0])).toBe(hues.get("a0"));
+  });
+
+  it("keeps suggested links and unassigned/unknown endpoints neutral", () => {
+    const hues = assignClusterHues(["a", "b", "x", "y"], [{ source: "a", target: "b" }]);
+    expect(edgeHue(hues, { source: "a", target: "b", suggested: true })).toBeNull();
+    expect(edgeHue(hues, { source: "x", target: "y" })).toBeNull();
+    expect(edgeHue(hues, { source: "a", target: "unknown" })).toBeNull();
+    expect(edgeHue(new Map(hues), { source: "a", target: "b" })).toBeNull();
   });
 });
 

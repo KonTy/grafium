@@ -2,7 +2,7 @@
 //
 // The graph view drew every node and edge in one flat accent, which made a
 // dense graph a uniform haze: you could see that things were connected but not
-// *what belonged with what*. Assigning colour per connected component means a
+// *what belonged with what*. Assigning colour per structural community means a
 // topic cluster reads as one colour group at a glance, and an edge crossing
 // between two clusters is visibly a bridge.
 //
@@ -15,77 +15,26 @@
 // resolve the returned hue name to a `--accent-<hue>` custom property.
 
 import { TAG_HUES, type TagHue } from "./tagColor";
+import { computeGraphClusters, type GraphEdgeLike } from "./graphClusters";
 
 /** Minimal shape this module needs from a rendered edge. */
-export interface ClusterEdge {
-  source: string;
-  target: string;
-}
+export type ClusterEdge = GraphEdgeLike;
 
-/**
- * Group node ids into connected components via union-find, then assign each
- * component one of [`TAG_HUES`].
- *
- * Components are ranked by size and assigned hues in that order, so the palette
- * is spent on the clusters that dominate the view: the largest cluster always
- * gets the first hue, which keeps colouring stable between renders of the same
- * graph instead of flickering as the layout settles.
- *
- * Isolated nodes (no edges) all share the last hue rather than each consuming
- * one — they carry no grouping information, and letting them eat the palette
- * would leave real clusters sharing colours.
- */
+// Identity must survive palette cycling without changing the public Map API.
+const assignments = new WeakMap<Map<string, TagHue>, Map<string, number>>();
+
+/** Shared Louvain assignment, ranked by size; isolates retain the legacy hue. */
 export function assignClusterHues(
   nodeIds: readonly string[],
   edges: readonly ClusterEdge[]
 ): Map<string, TagHue> {
-  const parent = new Map<string, string>();
-  for (const id of nodeIds) parent.set(id, id);
-
-  const find = (x: string): string => {
-    let root = x;
-    while (parent.get(root) !== root) root = parent.get(root) ?? root;
-    // Path compression keeps this near-linear on large graphs, which matters
-    // because this runs on every data load, not once.
-    let cur = x;
-    while (parent.get(cur) !== root) {
-      const next = parent.get(cur) ?? root;
-      parent.set(cur, root);
-      cur = next;
-    }
-    return root;
-  };
-
-  for (const edge of edges) {
-    if (!parent.has(edge.source) || !parent.has(edge.target)) continue;
-    const a = find(edge.source);
-    const b = find(edge.target);
-    if (a !== b) parent.set(a, b);
-  }
-
-  const members = new Map<string, string[]>();
-  for (const id of nodeIds) {
-    const root = find(id);
-    const list = members.get(root);
-    if (list) list.push(id);
-    else members.set(root, [id]);
-  }
-
-  // Largest first; ties broken by root id so the result is deterministic and
-  // doesn't depend on Map iteration order for equal-sized clusters.
-  const ranked = [...members.entries()].sort(
-    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0])
-  );
-
+  const { clusterIndexById, isolatedIds } = computeGraphClusters(nodeIds, edges);
   const hues = new Map<string, TagHue>();
-  let next = 0;
-  for (const [, ids] of ranked) {
-    const hue: TagHue =
-      ids.length > 1
-        ? TAG_HUES[next++ % TAG_HUES.length]
-        : TAG_HUES[TAG_HUES.length - 1];
-    for (const id of ids) hues.set(id, hue);
+  for (const [id, cluster] of clusterIndexById) {
+    hues.set(id, TAG_HUES[cluster % TAG_HUES.length]);
   }
+  for (const id of isolatedIds) hues.set(id, TAG_HUES[TAG_HUES.length - 1]);
+  assignments.set(hues, clusterIndexById);
   return hues;
 }
 
@@ -101,6 +50,16 @@ export function edgeHue(
   hues: Map<string, TagHue>,
   edge: ClusterEdge
 ): TagHue | null {
+  if (edge.suggested) return null;
+  const clusters = assignments.get(hues);
+  if (clusters) {
+    const source = clusters.get(edge.source);
+    if (source === undefined || source !== clusters.get(edge.target)) return null;
+  } else {
+    // A copied/hand-built palette has no community identity. Equal colors alone
+    // cannot prove membership; conservatively keep its links neutral.
+    return null;
+  }
   const a = hues.get(edge.source);
   const b = hues.get(edge.target);
   return a && b && a === b ? a : null;

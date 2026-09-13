@@ -3,17 +3,11 @@
   import Sidebar from "./components/Sidebar.svelte";
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
-  import AllPages from "./components/AllPages.svelte";
-  import GraphView from "./components/GraphView.svelte";
-  import GraphView3D from "./components/GraphView3D.svelte";
-  import Statistics from "./components/Statistics.svelte";
-  import FlashcardReview from "./components/FlashcardReview.svelte";
-  import ChatView from "./components/ChatView.svelte";
-  import Settings from "./components/Settings.svelte";
+  import LazyView from "./components/LazyView.svelte";
+  import { lazyComponent } from "./lib/lazy";
+  import { revealStartupWindow } from "./lib/startupWindow";
   import TitleBar from "./components/TitleBar.svelte";
-  import ReferencePanel from "./components/ReferencePanel.svelte";
   import JobActivity from "./components/JobActivity.svelte";
-  import JobsView from "./components/JobsView.svelte";
   import Toaster from "./components/Toaster.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
@@ -21,7 +15,7 @@
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
     dispatchEditPageEnd,
-    personalJournalSnippet,
+    personalDiarySnippet,
     timeStampSnippet,
     tryInsertIntoActiveEditor,
   } from "./lib/editorInsert";
@@ -37,6 +31,16 @@
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
+
+  const loadAllPages = lazyComponent(() => import("./components/AllPages.svelte"));
+  const loadGraphView = lazyComponent(() => import("./components/GraphView.svelte"));
+  const loadGraphView3D = lazyComponent(() => import("./components/GraphView3D.svelte"));
+  const loadStatistics = lazyComponent(() => import("./components/Statistics.svelte"));
+  const loadFlashcardReview = lazyComponent(() => import("./components/FlashcardReview.svelte"));
+  const loadChatView = lazyComponent(() => import("./components/ChatView.svelte"));
+  const loadSettings = lazyComponent(() => import("./components/Settings.svelte"));
+  const loadJobsView = lazyComponent(() => import("./components/JobsView.svelte"));
+  const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
 
   function isAndroidClient(): boolean {
     return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
@@ -127,6 +131,10 @@
   let showBlockGuides = $state(true);
   let zenMode = $state(false);
   let wideMode = $state(true);
+  const DEFAULT_NARROW_PADDING_PCT = 15;
+  const MIN_NARROW_PADDING_PCT = 0;
+  const MAX_NARROW_PADDING_PCT = 40;
+  let narrowPaddingPct = $state(DEFAULT_NARROW_PADDING_PCT);
   let settingsOpenSection = $state("");
   let commandPaletteOpen = $state(false);
   let commandPaletteQuery = $state("");
@@ -227,11 +235,8 @@
     }
   }
 
-  // "Bullet threading" / block hierarchy guide lines — a purely visual
-  // indicator of parent/child nesting (default on). Exposed as a Settings
-  // toggle since it adds a handful of extra DOM nodes per indented block,
-  // so users on lower-end machines can turn it off if it's ever noticeably
-  // slow on very large/deeply nested pages.
+  // Logseq-style bullet threading — L/T elbows from parent bullets into
+  // children (default on). Settings > General can turn it off.
   function loadShowBlockGuidesPreference() {
     try {
       const raw = localStorage.getItem("grafium.pageContent.showBlockGuides");
@@ -245,6 +250,37 @@
     showBlockGuides = value;
     try {
       localStorage.setItem("grafium.pageContent.showBlockGuides", String(value));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function applyNarrowPadding(pct: number) {
+    const next = Math.max(
+      MIN_NARROW_PADDING_PCT,
+      Math.min(MAX_NARROW_PADDING_PCT, Math.round(Number.isFinite(pct) ? pct : DEFAULT_NARROW_PADDING_PCT)),
+    );
+    narrowPaddingPct = next;
+    document.documentElement.style.setProperty("--narrow-padding-x", `${next}%`);
+  }
+
+  function loadNarrowPaddingPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.ui.narrowPaddingPct");
+      if (raw === null) {
+        applyNarrowPadding(DEFAULT_NARROW_PADDING_PCT);
+        return;
+      }
+      applyNarrowPadding(Number(raw));
+    } catch {
+      applyNarrowPadding(DEFAULT_NARROW_PADDING_PCT);
+    }
+  }
+
+  function setNarrowPaddingPct(value: number) {
+    applyNarrowPadding(value);
+    try {
+      localStorage.setItem("grafium.ui.narrowPaddingPct", String(narrowPaddingPct));
     } catch {
       // Ignore localStorage failures.
     }
@@ -738,10 +774,10 @@
   }
 
   function defaultAutoThemeId(): string {
-    // Desktop follows smplOS, then Catppuccin. Phones have no smplOS theme file,
-    // so auto would otherwise land on the navy default instead of OLED.
+    // Desktop follows smplOS, then GitHub Light. Phones have no smplOS theme
+    // file, so auto would otherwise land on a light canvas instead of OLED.
     if (typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)) return "oled";
-    return "catppuccin";
+    return "github";
   }
 
   function loadWideModePreference() {
@@ -884,7 +920,7 @@
     importMedia: () => openImportMediaDialog(),
     importBooks: () => void openImportBooksDirectory(),
     insertTimeStamp: () => insertEditorSnippet(timeStampSnippet()),
-    insertPersonalJournal: () => insertEditorSnippet(personalJournalSnippet()),
+    insertPersonalDiary: () => insertEditorSnippet(personalDiarySnippet()),
   });
 
   // Global keydown handler
@@ -1081,7 +1117,11 @@
         loading = false;
       });
       // Initialize theme
-      initTheme();
+      void initTheme().then(revealStartupWindow).catch((e) => {
+        const message = `Could not reveal the startup window: ${errorText(e)}`;
+        console.error(message);
+        uiLog(message);
+      });
     }
   });
 
@@ -1735,6 +1775,7 @@
     loadReferencePanelWidthPreference();
     loadGraphViewModePreference();
     loadShowBlockGuidesPreference();
+    loadNarrowPaddingPreference();
   });
 </script>
 
@@ -1787,7 +1828,11 @@
     {:else if loading}
       <div class="loading">Loading...</div>
     {:else if currentView === "all-pages"}
-      <AllPages onNavigate={handleNavigate} onPageDeleted={() => { void sidebarRef?.refresh(); }} />
+      <LazyView load={loadAllPages} name="all pages">
+        {#snippet children(AllPages)}
+          <AllPages onNavigate={handleNavigate} onPageDeleted={() => { void sidebarRef?.refresh(); }} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "graph"}
       <div class="graph-view-wrapper">
         <div class="graph-renderer-toggle">
@@ -1795,34 +1840,69 @@
           <button class:active={graphViewMode === "3d"} onclick={() => setGraphViewMode("3d")}>3D</button>
         </div>
         {#if graphViewMode === "3d"}
-          <GraphView3D
-            onNavigate={handleNavigate}
-            currentPageId={currentPage?.id ?? ""}
-            currentPageTitle={currentPage?.title ?? ""}
-          />
+          <LazyView load={loadGraphView3D} name="3D graph">
+            {#snippet children(GraphView3D)}
+              <GraphView3D
+                onNavigate={handleNavigate}
+                currentPageId={currentPage?.id ?? ""}
+                currentPageTitle={currentPage?.title ?? ""}
+              />
+            {/snippet}
+          </LazyView>
         {:else}
-          <GraphView
-            onNavigate={handleNavigate}
-            currentPageId={currentPage?.id ?? ""}
-            currentPageTitle={currentPage?.title ?? ""}
-          />
+          <LazyView load={loadGraphView} name="graph">
+            {#snippet children(GraphView)}
+              <GraphView
+                onNavigate={handleNavigate}
+                currentPageId={currentPage?.id ?? ""}
+                currentPageTitle={currentPage?.title ?? ""}
+              />
+            {/snippet}
+          </LazyView>
         {/if}
       </div>
     {:else if currentView === "statistics"}
-      <Statistics onNavigate={handleNavigate} />
+      <LazyView load={loadStatistics} name="statistics">
+        {#snippet children(Statistics)}
+          <Statistics onNavigate={handleNavigate} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "flashcards"}
-      <FlashcardReview onNavigate={handleNavigate} />
+      <LazyView load={loadFlashcardReview} name="flashcards">
+        {#snippet children(FlashcardReview)}
+          <FlashcardReview onNavigate={handleNavigate} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "chat"}
-      <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
+      <LazyView load={loadChatView} name="chat">
+        {#snippet children(ChatView)}
+          <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "settings"}
-      <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} openSection={settingsOpenSection} />
+      <LazyView load={loadSettings} name="settings">
+        {#snippet children(Settings)}
+          <Settings
+            {showBlockGuides}
+            onSetShowBlockGuides={setShowBlockGuides}
+            {narrowPaddingPct}
+            onSetNarrowPaddingPct={setNarrowPaddingPct}
+            openSection={settingsOpenSection}
+          />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "jobs"}
-      <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
+      <LazyView load={loadJobsView} name="jobs">
+        {#snippet children(JobsView)}
+          <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "journal"}
       <JournalView
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
         editTodayRequestId={journalEditTodayRequestId}
+        {showBlockGuides}
         onNavigate={handleNavigate}
         onActivePageChange={(page) => (journalActivePage = page)}
         onPageDeleted={() => { void sidebarRef?.refresh(); }}
@@ -1874,18 +1954,22 @@
         onpointerdown={startReferencePanelResize}
         ondblclick={resetReferencePanelWidth}
       ></div>
-      <ReferencePanel
-        visible={true}
-        pageId={(currentView === "journal" ? journalActivePage?.id : currentPage?.id) || ""}
-        pageTitle={(currentView === "journal" ? journalActivePage?.title : currentPage?.title) || ""}
-        initialTab={referencePanelTab}
-        focusTrigger={referencePanelFocusTrigger}
-        width={referencePanelWidth}
-        preferFocusedPageForPageScope={currentView === "journal"}
-        onClose={() => (referencePanelVisible = false)}
-        onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
-        onFindLinks={handleFindLinksForPage}
-      />
+      <LazyView load={loadReferencePanel} name="reference panel">
+        {#snippet children(ReferencePanel)}
+          <ReferencePanel
+            visible={true}
+            pageId={(currentView === "journal" ? journalActivePage?.id : currentPage?.id) || ""}
+            pageTitle={(currentView === "journal" ? journalActivePage?.title : currentPage?.title) || ""}
+            initialTab={referencePanelTab}
+            focusTrigger={referencePanelFocusTrigger}
+            width={referencePanelWidth}
+            preferFocusedPageForPageScope={currentView === "journal"}
+            onClose={() => (referencePanelVisible = false)}
+            onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
+            onFindLinks={handleFindLinksForPage}
+          />
+        {/snippet}
+      </LazyView>
     {/if}
 
     <!-- Bottom nav for narrow screens -->

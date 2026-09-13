@@ -1155,9 +1155,8 @@ pub async fn ai_set_config(
         engine.reconfigure(config).map_err(|e| e.to_string())?;
     } else {
         let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        let engine = KnowledgeEngine::new(&config_dir, config)
-            .map_err(|e| e.to_string())?
-            .with_models_root(app_data_dir);
+        let engine = KnowledgeEngine::new_with_models_root(&config_dir, config, &app_data_dir)
+            .map_err(|e| e.to_string())?;
         *guard = Some(engine);
     }
 

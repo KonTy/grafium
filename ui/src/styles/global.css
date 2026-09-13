@@ -97,7 +97,7 @@
   --content-max-width: 100%;
   --content-padding-x: 8px;
   --content-padding-y: 8px;
-  --narrow-padding-x: 0;
+  --narrow-padding-x: 15%;
   --zen-padding-top: 0;
   --zen-max-width: 100%;
   --zen-wide-padding-x: 0;
@@ -250,8 +250,8 @@ body {
 }
 
 .app-shell:not(.wide-mode) .main-content {
-  padding-left: 15% !important;
-  padding-right: 15% !important;
+  padding-left: var(--narrow-padding-x) !important;
+  padding-right: var(--narrow-padding-x) !important;
 }
 
 /* Plain terminal typography for Matrix. Uses installed programmer fonts first

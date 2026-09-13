@@ -31,8 +31,10 @@
   import { planIndentSelection } from "../lib/blockIndent";
   import {
     buildBlockRenderState,
+    buildBulletThreadRoles,
     computeVirtualWindow,
     getAncestorGuides,
+    NO_THREAD,
     nextProgressiveRenderLimit,
   } from "../lib/pageContentVirtualization";
   import { renderBlock, assetBaseDirFor, markdownHeadingSlug } from "../lib/markdown";
@@ -92,9 +94,10 @@
     showBlockGuides?: boolean;
     onPageRenamed?: (page: Page) => void;
     onPageDeleted?: (parentTitle: string | null) => void;
+    onLoadSettled?: () => void;
   }
 
-  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted }: Props = $props();
+  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted, onLoadSettled }: Props = $props();
 
   // Asset references in this page's blocks are resolved relative to the
   // directory its markdown file lives in, so media stored beside a page (and a
@@ -137,10 +140,14 @@
     return () => cancelAnimationFrame(handle);
   });
   let focusedBlockId: string | null = $state(null);
+  /// Last current block for bullet threading. Survives the click-to-edit blur
+  /// that clears `focusedBlockId` after ~120ms.
+  let threadBlockId: string | null = $state(null);
   function emitFocusChanged(blockId: string | null) {
     setCurrentBlockAnchor(page.id, blockId);
   }
   function handleBlockAnchor(blockId: string) {
+    threadBlockId = blockId;
     emitFocusChanged(blockId);
   }
   onDestroy(() => {
@@ -187,6 +194,7 @@
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<EditPageEndDetail>).detail;
       if (!detail || !pageMatchesEditRequest(detail)) return;
+      if (blocks.length === 0) return;
       clearPendingEditPageEnd();
       void focusLastBlockAtEnd(detail.insert);
     };
@@ -673,6 +681,7 @@
     selectedBlockIds = new Set([blockId]);
     claimBlockSelectionOwner();
     focusedBlockId = null;
+    threadBlockId = blockId;
     emitFocusChanged(blockId);
     promotedSelectionCopyText = null;
     selectionMenu = null;
@@ -710,12 +719,24 @@
     );
   }
 
+  const threadById = $derived.by(() => {
+    if (!showBlockGuides || !threadBlockId) return new Map();
+    return buildBulletThreadRoles(
+      threadBlockId,
+      blockRenderState.parentById,
+      blockRenderState.childrenByParent,
+      collapsedIds,
+      visibleBlocks.map((block) => block.id),
+    );
+  });
+
   function getBlockDepth(blockId: string): number {
     return blockRenderState.depthById.get(blockId) ?? 0;
   }
 
-  function trackBlockHeight(node: HTMLElement, blockId: string) {
-    let currentBlockId = blockId;
+  function trackBlockHeight(node: HTMLElement, options: { blockId: string; enabled: boolean }) {
+    let currentBlockId = options.blockId;
+    let resizeObserver: ResizeObserver | undefined;
 
     const update = () => {
       const nextHeight = Math.max(1, Math.ceil(node.getBoundingClientRect().height)) + BLOCK_SHELL_GAP;
@@ -723,17 +744,25 @@
       blockHeights.set(currentBlockId, nextHeight);
     };
 
-    update();
-    const resizeObserver = new ResizeObserver(update);
-    resizeObserver.observe(node);
+    const configure = (next: typeof options) => {
+      currentBlockId = next.blockId;
+      if (!next.enabled) {
+        resizeObserver?.disconnect();
+        resizeObserver = undefined;
+        return;
+      }
+      if (!resizeObserver) {
+        resizeObserver = new ResizeObserver(update);
+        resizeObserver.observe(node);
+      }
+      update();
+    };
+    configure(options);
 
     return {
-      update(nextBlockId: string) {
-        currentBlockId = nextBlockId;
-        update();
-      },
+      update: configure,
       destroy() {
-        resizeObserver.disconnect();
+        resizeObserver?.disconnect();
       },
     };
   }
@@ -921,6 +950,7 @@
       lastLinkCandidateAction = null;
       clearBlockSelection();
       focusedBlockId = null;
+      threadBlockId = null;
       emitFocusChanged(null);
       void loadBlocks(request);
       void loadBacklinks(request);
@@ -1044,6 +1074,11 @@
       if (!isCurrentPageLoad(pageLoadState, request)) return;
       loadError = e?.toString() || "Unknown error loading blocks";
       console.error("loadBlocks failed:", e);
+    } finally {
+      if (onLoadSettled) {
+        await tick();
+        if (!destroyed && isCurrentPageLoad(pageLoadState, request)) onLoadSettled();
+      }
     }
   }
 
@@ -1547,6 +1582,7 @@
 
   function handleFocus(blockId: string) {
     focusedBlockId = blockId;
+    threadBlockId = blockId;
     emitFocusChanged(blockId);
     clearBlockSelection();
     // Snapshot the block content before the user edits it
@@ -1728,6 +1764,7 @@
 
         requestAnimationFrame(() => {
           focusedBlockId = newBlock.id;
+          threadBlockId = newBlock.id;
           const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
           if (el) {
             el.scrollIntoView({ block: "nearest" });
@@ -1760,6 +1797,7 @@
       // Focus the new block
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
+        threadBlockId = newBlock.id;
         const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
         if (el) {
           el.scrollIntoView({ block: "nearest" });
@@ -1972,6 +2010,7 @@
       // Moving up lands on the target's BOTTOM line; down lands on its TOP.
       const edge: "top" | "bottom" = direction === "up" ? "bottom" : "top";
       focusedBlockId = target.id;
+      threadBlockId = target.id;
       void revealBlock(target.id).then((rendered) => {
         if (!rendered) return;
         blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
@@ -2898,7 +2937,7 @@
           Cancel
         </button>
       {:else}
-        <h1 class="page-title">{displayPageTitle}</h1>
+        <h1 class="page-title" class:journal-date={page.is_journal}>{displayPageTitle}</h1>
         {#if canRenamePage}
           <button
             class="rename-page-btn icon"
@@ -2983,6 +3022,7 @@
   {#if loadError}
     <div class="load-error">
       Error: {loadError}
+      <button type="button" onclick={() => void loadBlocks()}>Retry</button>
     </div>
   {/if}
 
@@ -3228,12 +3268,13 @@
         <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
       {/if}
       {#each windowedBlocks as block (block.id)}
+        {@const thread = threadById.get(block.id) ?? NO_THREAD}
         <div
           class="block-shell"
           class:revealed={revealedBlockId === block.id}
           id={`block-${block.id}`}
           data-block-id={block.id}
-          use:trackBlockHeight={block.id}
+          use:trackBlockHeight={{ blockId: block.id, enabled: shouldVirtualizeBlocks }}
         >
           <BlockEditor
             bind:this={blockRefs[block.id]}
@@ -3243,6 +3284,10 @@
             {assetBaseDir}
             bookMode={isImportedBookPage}
             guides={getBlockGuides(block.id)}
+            threadElbow={thread.elbow}
+            threadContinuationDepth={thread.continuationDepth}
+            threadStem={thread.stem}
+            showGuides={showBlockGuides}
             depth={getBlockDepth(block.id)}
             focused={focusedBlockId === block.id}
             selected={selectedBlockIds.has(block.id)}
@@ -3378,6 +3423,12 @@
     min-width: 0;
     overflow-wrap: break-word;
     word-break: normal;
+  }
+
+  .page-title.journal-date {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.2;
   }
 
   .page-title-input {
@@ -3881,7 +3932,8 @@
   .block-shell {
     position: relative;
     z-index: 0;
-    padding-bottom: 2px;
+    padding-bottom: 0;
+    overflow: visible;
     box-sizing: border-box;
     /*
      * Scope layout and style invalidation to the individual block.

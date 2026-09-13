@@ -77,6 +77,12 @@ export function buildBlockRenderState(
     childrenByParent.set(block.parent_id, siblings);
   }
 
+  for (const siblings of childrenByParent.values()) {
+    // Equal order numbers are valid. Keep their incoming display order (the
+    // backend already breaks ties by creation time), not UUID order.
+    siblings.sort((a, b) => a.order_index - b.order_index);
+  }
+
   const depthById = new Map<string, number>();
   const visibilityById = new Map<string, boolean>();
   const depthStack = new Set<string>();
@@ -139,28 +145,109 @@ export function buildBlockRenderState(
   };
 }
 
-/// Computes, for a block, whether a vertical "thread" guide line should be
-/// drawn at each of its ancestor indent levels (index 0 = root level, index
-/// `depth - 1` = the block's immediate parent's level). A level's guide is
-/// drawn (true) as long as the ancestor at that depth still has a later
-/// sibling somewhere in the tree — i.e. more content will appear in that
-/// column further down the page — matching the classic outliner
-/// "bullet-threading" visual (e.g. Logseq's dev-theme bullet threading).
+/// Computes, for a block, whether a muted vertical nesting guide should be
+/// drawn at each ancestor indent level (index 0 = root, index `depth - 1` =
+/// the immediate parent). A column is drawn only while that ancestor still
+/// has a later sibling — otherwise the line would hang past the subtree.
+const EMPTY_GUIDES: boolean[] = [];
+const GUIDE_INTERN = new Map<string, boolean[]>();
+
+function internGuides(guides: boolean[]): boolean[] {
+  const key = guides.map((flag) => (flag ? "1" : "0")).join("");
+  const cached = GUIDE_INTERN.get(key);
+  if (cached) return cached;
+  GUIDE_INTERN.set(key, guides);
+  return guides;
+}
+
 export function getAncestorGuides(
   blockId: string,
   parentById: ReadonlyMap<string, string | null>,
   depthById: ReadonlyMap<string, number>,
-  isLastChildById: ReadonlyMap<string, boolean>
+  isLastChildById?: ReadonlyMap<string, boolean>
 ): boolean[] {
   const depth = depthById.get(blockId) ?? 0;
-  const guides = new Array<boolean>(depth);
+  if (depth <= 0) return EMPTY_GUIDES;
+  const guides = new Array<boolean>(depth).fill(false);
   let ancestorId: string | null = blockId;
-  for (let level = depth - 1; level >= 0; level--) {
+  for (let level = depth - 1; level >= 0; level -= 1) {
     ancestorId = parentById.get(ancestorId ?? "") ?? null;
     if (ancestorId === null) break;
-    guides[level] = !(isLastChildById.get(ancestorId) ?? false);
+    guides[level] = !(isLastChildById?.get(ancestorId) ?? false);
   }
-  return guides;
+  return internGuides(guides);
+}
+
+export interface BulletThreadRole {
+  /** Colored L from the parent column into this bullet (focused path only). */
+  elbow: boolean;
+  /** Parent column carried through an earlier sibling's entire visible subtree. */
+  continuationDepth: number | null;
+  /** Colored stem from an ancestor into its children. Never on the focused block. */
+  stem: boolean;
+}
+
+export const NO_THREAD: BulletThreadRole = { elbow: false, continuationDepth: null, stem: false };
+
+export function focusedPathIds(
+  focusedId: string | null,
+  parentById: ReadonlyMap<string, string | null>,
+): Set<string> {
+  const path = new Set<string>();
+  let id: string | null = focusedId;
+  while (id) {
+    if (path.has(id)) break;
+    path.add(id);
+    id = parentById.get(id) ?? null;
+  }
+  return path;
+}
+
+// The active thread is a staircase, not a highlight of every ancestor gutter.
+// Each parent-to-child edge spans earlier siblings AND their descendants, then
+// turns at the child bullet. Compute it once for the full visible tree so rows
+// entering the virtual window already know which column to continue.
+export function buildBulletThreadRoles(
+  focusedId: string | null,
+  parentById: ReadonlyMap<string, string | null>,
+  childrenByParent: ReadonlyMap<string | null, Block[]>,
+  collapsedIds: ReadonlySet<string>,
+  blockIds: readonly string[],
+): Map<string, BulletThreadRole> {
+  const roles = new Map<string, BulletThreadRole>();
+  if (!focusedId) return roles;
+  const visibleIds = new Set(blockIds);
+  const path = [...focusedPathIds(focusedId, parentById)].reverse();
+  if (parentById.get(path[0]) !== null) return roles;
+
+  // A collapsed/hidden target has no drawable endpoint.
+  if (path.some((id, index) => !visibleIds.has(id) || (index < path.length - 1 && collapsedIds.has(id)))) {
+    return roles;
+  }
+
+  const visited = new Set(path);
+  for (let depth = 0; depth < path.length; depth += 1) {
+    const id = path[depth];
+    const childId = path[depth + 1];
+    roles.set(id, { elbow: depth > 0, continuationDepth: null, stem: childId !== undefined });
+    if (childId === undefined) break;
+
+    const siblings = childrenByParent.get(id) ?? [];
+    for (const sibling of siblings) {
+      if (sibling.id === childId) break;
+      const pending = [sibling.id];
+      while (pending.length > 0) {
+        const precedingId = pending.pop()!;
+        if (visited.has(precedingId) || !visibleIds.has(precedingId)) continue;
+        visited.add(precedingId);
+        roles.set(precedingId, { elbow: false, continuationDepth: depth, stem: false });
+        if (!collapsedIds.has(precedingId)) {
+          for (const child of childrenByParent.get(precedingId) ?? []) pending.push(child.id);
+        }
+      }
+    }
+  }
+  return roles;
 }
 
 export function computeVirtualWindow<T extends { id: string }>(

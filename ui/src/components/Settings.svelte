@@ -19,10 +19,18 @@
   interface Props {
     showBlockGuides?: boolean;
     onSetShowBlockGuides?: (value: boolean) => void;
+    narrowPaddingPct?: number;
+    onSetNarrowPaddingPct?: (value: number) => void;
     openSection?: string;
   }
 
-  let { showBlockGuides = true, onSetShowBlockGuides, openSection = "" }: Props = $props();
+  let {
+    showBlockGuides = true,
+    onSetShowBlockGuides,
+    narrowPaddingPct = 15,
+    onSetNarrowPaddingPct,
+    openSection = "",
+  }: Props = $props();
   let themeSectionEl: HTMLDetailsElement | null = $state(null);
   let settingsRoot: HTMLDivElement | null = $state(null);
   let settingsQuery = $state("");
@@ -178,12 +186,12 @@
       const t = getThemeById(smplosThemeName);
       if (t) return { accent: t.colors.accent, bg: t.colors.bgPrimary, fg: t.colors.textPrimary };
     }
-    return { accent: "#89b4fa", bg: "#1e1e2e", fg: "#cdd6f4" };
+    return { accent: "#0969da", bg: "#ffffff", fg: "#1f2328" };
   }
 
   function resolvedThemeId(): string {
     if (currentThemeId === "auto") {
-      return smplosThemeName ?? "catppuccin";
+      return smplosThemeName ?? "github";
     }
     return currentThemeId;
   }
@@ -312,14 +320,36 @@
         </div>
       </div>
       <div class="setting-row">
-        <span class="setting-label">Block hierarchy guide lines</span>
+        <span class="setting-label">Bullet threading</span>
         <label class="setting-checkbox">
           <input
             type="checkbox"
             checked={showBlockGuides}
             onchange={(e) => onSetShowBlockGuides?.((e.currentTarget as HTMLInputElement).checked)}
           />
-          <span>Show vertical "thread" lines connecting parent/child blocks</span>
+          <span>Connect bullets with Logseq-style L-shaped thread lines</span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Narrow view side padding</span>
+        <label class="setting-range">
+          <input
+            type="range"
+            min="0"
+            max="40"
+            step="1"
+            value={narrowPaddingPct}
+            oninput={(e) => onSetNarrowPaddingPct?.(Number((e.currentTarget as HTMLInputElement).value))}
+          />
+          <input
+            type="number"
+            min="0"
+            max="40"
+            step="1"
+            value={narrowPaddingPct}
+            onchange={(e) => onSetNarrowPaddingPct?.(Number((e.currentTarget as HTMLInputElement).value))}
+          />
+          <span>%</span>
         </label>
       </div>
     </div>
@@ -812,6 +842,29 @@
 
   .setting-checkbox input {
     cursor: pointer;
+  }
+
+  .setting-range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .setting-range input[type="range"] {
+    width: 120px;
+    accent-color: var(--accent);
+  }
+
+  .setting-range input[type="number"] {
+    width: 52px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 12px;
   }
 
   .section-desc {

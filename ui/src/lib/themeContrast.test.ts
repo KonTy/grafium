@@ -90,6 +90,17 @@ describe("theme metadata", () => {
     expect(oled).toBeDefined();
     expect(oled!.colors.bgPrimary.toLowerCase()).toBe("#000000");
   });
+
+  it("includes GitHub Light and GitHub Dark", () => {
+    const github = themes.find((t) => t.id === "github");
+    const githubDark = themes.find((t) => t.id === "github-dark");
+    expect(github).toBeDefined();
+    expect(github!.colors.isLight).toBe(true);
+    expect(github!.colors.bgPrimary.toLowerCase()).toBe("#ffffff");
+    expect(githubDark).toBeDefined();
+    expect(githubDark!.colors.isLight).toBe(false);
+    expect(githubDark!.colors.bgPrimary.toLowerCase()).toBe("#0d1117");
+  });
 });
 
 // ── Guard 1: every accent is AA (>=4.5:1) on every surface that hosts its text

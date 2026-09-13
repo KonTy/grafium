@@ -229,7 +229,7 @@ export function registerDefaultShortcuts(actions: {
   importMedia: () => void;
   importBooks: () => void;
   insertTimeStamp: () => void;
-  insertPersonalJournal: () => void;
+  insertPersonalDiary: () => void;
 }) {
   const pair = (
     id: string,
@@ -341,8 +341,8 @@ export function registerDefaultShortcuts(actions: {
     ...pair("insert-time", "Insert current time", "basics", actions.insertTimeStamp, [
       { binding: "alt+t", navOnly: false },
     ]),
-    ...pair("insert-personal-journal", "Insert [[personal/journal]]", "basics", actions.insertPersonalJournal, [
-      { binding: "alt+j", navOnly: false },
+    ...pair("insert-personal-diary", "Insert [[personal/diary]]", "basics", actions.insertPersonalDiary, [
+      { binding: "alt+d", navOnly: false },
     ]),
   ];
 
