@@ -41,6 +41,7 @@
   import { wrapPageLinkText } from "../lib/editorFormat";
   import { bulletToTodoContent, isTaskContent, taskToBulletContent } from "../lib/taskSyntax";
   import { formatBlocksAsOutlineMarkdown, formatBlocksAsPlainText } from "../lib/blockClipboard";
+  import { bionicReader } from "../lib/bionicReader";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
     applyIfCurrentPageLoad,
@@ -3376,7 +3377,11 @@
                   title="Jump to this block"
                 >
                   <span class="backlink-bullet">•</span>
-                  <div class="backlink-content" use:hydrateRenderedMedia={node.block.content}>
+                  <div
+                    class="backlink-content"
+                    use:bionicReader={node.block.content}
+                    use:hydrateRenderedMedia={node.block.content}
+                  >
                     {@html renderBlock(node.block.content, bl.sourceAssetBaseDir)}
                   </div>
                 </button>

@@ -27,6 +27,10 @@
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
   import { showToast } from "./lib/toast.svelte";
   import { uiLog } from "./lib/uiLog";
+  import {
+    loadBionicReaderPreference as readBionicReaderPreference,
+    setBionicReaderEnabled,
+  } from "./lib/bionicReader";
   import { listen } from "@tauri-apps/api/event";
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -129,6 +133,7 @@
     refresh: () => Promise<void>;
   } | null = $state(null);
   let showBlockGuides = $state(true);
+  let bionicReaderMode = $state(false);
   let zenMode = $state(false);
   let wideMode = $state(true);
   const DEFAULT_NARROW_PADDING_PCT = 15;
@@ -284,6 +289,15 @@
     } catch {
       // Ignore localStorage failures.
     }
+  }
+
+  function loadBionicReaderPreference() {
+    bionicReaderMode = readBionicReaderPreference();
+  }
+
+  function toggleBionicReader() {
+    bionicReaderMode = !bionicReaderMode;
+    setBionicReaderEnabled(bionicReaderMode);
   }
 
   function resetSidebarWidth() {
@@ -1776,6 +1790,7 @@
     loadGraphViewModePreference();
     loadShowBlockGuidesPreference();
     loadNarrowPaddingPreference();
+    loadBionicReaderPreference();
   });
 </script>
 
@@ -1791,6 +1806,8 @@
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
       onOpenSearch={openGlobalSearch}
       onOpenSettings={() => navigateToPage("__settings__")}
+      bionicReaderMode={bionicReaderMode}
+      onToggleBionicReader={toggleBionicReader}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}

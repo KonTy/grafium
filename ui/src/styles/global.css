@@ -179,6 +179,30 @@ body {
   color: var(--text-primary) !important;
 }
 
+.grafium-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1em;
+  margin: 0 0.06em;
+  color: var(--accent-cyan);
+  font-family: "Segoe UI Symbol", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -0.08em;
+}
+
+.bionic-reader-enabled .rendered-content,
+.bionic-reader-enabled .backlink-content,
+.bionic-reader-enabled .unified-rendered-content {
+  letter-spacing: 0.006em;
+}
+
+.bionic-word-prefix {
+  color: inherit;
+  font-weight: 850;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;

@@ -12,6 +12,8 @@
     onToggleReferencePanel?: () => void;
     onOpenSearch?: () => void;
     onOpenSettings?: () => void;
+    bionicReaderMode?: boolean;
+    onToggleBionicReader?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
     onZoomReset?: () => void;
@@ -27,6 +29,8 @@
     onToggleReferencePanel = () => {},
     onOpenSearch = () => {},
     onOpenSettings = () => {},
+    bionicReaderMode = false,
+    onToggleBionicReader = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
     onZoomReset = () => {},
@@ -80,6 +84,17 @@
         <path d="m21 21-4.35-4.35"></path>
       </svg>
     </button>
+    <button
+      class="titlebar-btn"
+      class:active={bionicReaderMode}
+      data-tauri-drag-region="false"
+      onclick={onToggleBionicReader}
+      title="Bionic Speedreader"
+      aria-pressed={bionicReaderMode}
+    >
+      <span class="bionic-toggle-icon" aria-hidden="true">B</span>
+    </button>
+
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title="Knowledge Panel">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
@@ -171,6 +186,17 @@
   .titlebar-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .titlebar-btn.active {
+    background: color-mix(in srgb, var(--accent-purple) 22%, transparent);
+    color: var(--accent-purple);
+  }
+
+  .bionic-toggle-icon {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
   }
 
   .titlebar-btn:disabled:hover {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
+  import { autocompletion } from "@codemirror/autocomplete";
   import {
     EditorSelection,
     EditorState,
@@ -24,6 +25,8 @@
     historyKeymap,
   } from "@codemirror/commands";
   import { markdown } from "@codemirror/lang-markdown";
+  import { applyBionicReaderToElement, bionicReaderEnabled, isBionicReaderEnabled } from "../lib/bionicReader";
+  import { emojiIconCompletionSource } from "../lib/emojiIconCompletion";
   import type { Page } from "../lib/api";
   import { getPageSource, updatePageSource } from "../lib/api";
   import {
@@ -100,6 +103,7 @@
     private editPos: number;
     private previewFrom: number;
     private assetBaseDir: string;
+    private bionic: boolean;
 
     constructor(block: SourceBlock, assetBaseDir: string) {
       super();
@@ -110,6 +114,7 @@
       this.editPos = block.contentFrom;
       this.previewFrom = block.previewFrom;
       this.assetBaseDir = assetBaseDir;
+      this.bionic = isBionicReaderEnabled();
     }
 
     eq(other: WidgetType): boolean {
@@ -120,7 +125,8 @@
         && other.content === this.content
         && other.editPos === this.editPos
         && other.previewFrom === this.previewFrom
-        && other.assetBaseDir === this.assetBaseDir;
+        && other.assetBaseDir === this.assetBaseDir
+        && other.bionic === this.bionic;
     }
 
     toDOM(view: EditorView): HTMLElement {
@@ -189,7 +195,10 @@
           },
         }));
       });
-      queueMicrotask(() => void hydrateAssetMedia(content));
+      queueMicrotask(() => {
+        if (this.bionic) applyBionicReaderToElement(content);
+        void hydrateAssetMedia(content);
+      });
       return row;
     }
 
@@ -214,6 +223,7 @@
   }
 
   const activeBlockEffect = StateEffect.define<string | null>();
+  const bionicModeEffect = StateEffect.define<void>();
 
   const activeBlockField = StateField.define<string | null>({
     create() {
@@ -316,6 +326,7 @@
     },
     update(decorations, transaction) {
       return transaction.docChanged || transactionChangesActiveBlock(transaction)
+        || transaction.effects.some((effect) => effect.is(bionicModeEffect))
         ? buildBlockPreviewDecorations(transaction.state)
         : decorations;
     },
@@ -328,6 +339,10 @@
     const pageId = page.id;
     void loadSource(pageId);
   });
+
+  $effect(() => bionicReaderEnabled.subscribe(() => {
+    editorView?.dispatch({ effects: bionicModeEffect.of(undefined) });
+  }));
 
   onDestroy(() => {
     destroyEditor();
@@ -463,6 +478,11 @@
       extensions: [
         markdown(),
         history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
+        autocompletion({
+          override: [emojiIconCompletionSource],
+          activateOnTyping: true,
+          closeOnBlur: false,
+        }),
         drawSelection(),
         editingModeCompartment.of(editingModeExtensions(false)),
         activeBlockField,

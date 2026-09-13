@@ -5,6 +5,8 @@
   import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
   import { autocompletion, closeCompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
+  import { bionicReader } from "../lib/bionicReader";
+  import { emojiIconCompletionSource } from "../lib/emojiIconCompletion";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import {
@@ -41,6 +43,7 @@
   import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
+  import { EMOJI_ICON_SLASH_COMMANDS, emojiIconMenuBeforeCursor } from "../lib/emojiIconPicker";
   import { FORMATTING_SLASH_COMMANDS, angleTemplateMenu } from "../lib/slashCommands";
   import {
     loadWikiLinkPages,
@@ -504,6 +507,7 @@
     // unaffected. These are pure text insertions with an explicit cursor
     // offset (e.g. callouts drop the cursor on the blank body line).
     ...FORMATTING_SLASH_COMMANDS,
+    ...EMOJI_ICON_SLASH_COMMANDS,
   ];
 
   // Toggle markdown emphasis markers (`*`, `**`, `~~`) around the current
@@ -1292,7 +1296,7 @@
           markdown(),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
-            override: [slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource],
+            override: [emojiIconCompletionSource, slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource],
             activateOnTyping: false,
             closeOnBlur: false,
           }),
@@ -1501,7 +1505,8 @@
             // is never hijacked.
             const angleOpen = angleTemplateMenu(beforeCursor) !== null;
             const wikiOpen = wikiLinkToken(beforeCursor) !== null;
-            if (!slashToken && !angleOpen && !wikiOpen) {
+            const emojiOpen = emojiIconMenuBeforeCursor(beforeCursor) !== null;
+            if (!slashToken && !angleOpen && !wikiOpen && !emojiOpen) {
               wikiCompletionDismissed = false;
               return;
             }
@@ -1512,7 +1517,7 @@
             // fragment changes. Slash/`<` menus filter locally and only need
             // to open once. Escape dismisses the picker; keep it closed until
             // the user types again inside `[[`.
-            if (wikiOpen && update.docChanged) {
+            if ((wikiOpen || emojiOpen) && update.docChanged) {
               wikiCompletionDismissed = false;
               startCompletion(update.view);
               return;
@@ -2336,7 +2341,7 @@
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
                         <td>
                           {#if col === "content" && val}
-                            <span class="rendered-content query-cell-content">{@html renderBlock(String(val), queryRowBaseDir(row))}</span>
+                            <span class="rendered-content query-cell-content" use:bionicReader={String(val)}>{@html renderBlock(String(val), queryRowBaseDir(row))}</span>
                           {:else if col === "state" && val}
                             <span class="rendered-content"><span class="task-marker {String(val).toLowerCase()}">{val}</span></span>
                           {:else}
@@ -2366,6 +2371,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="rendered-content"
+        use:bionicReader={block.content}
         onclick={handleRenderedClick}
         onkeydown={handleRenderedKeydown}
         oncontextmenu={handleRenderedContextMenu}
