@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import FolderBrowser from "./FolderBrowser.svelte";
   import {
     getGraphInfo,
     listGraphs,
@@ -23,6 +24,46 @@
   let showCreateDialog = $state(false);
   let newGraphName = $state("");
   let isLoading = $state(false);
+  let showFolderBrowser = $state(false);
+  let folderBrowserTitle = $state("Select Folder");
+  let folderBrowserResolve: ((path: string | null) => void) | null = null;
+
+  function isAndroidClient(): boolean {
+    return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  }
+
+  function pickFolderWithBrowser(title: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      folderBrowserTitle = title;
+      folderBrowserResolve = resolve;
+      showFolderBrowser = true;
+    });
+  }
+
+  function finishFolderBrowser(path: string | null) {
+    showFolderBrowser = false;
+    const resolve = folderBrowserResolve;
+    folderBrowserResolve = null;
+    resolve?.(path);
+  }
+
+  async function pickGraphFolder(title: string): Promise<string | null> {
+    if (isAndroidClient()) {
+      return pickFolderWithBrowser(title);
+    }
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title,
+      });
+      if (selected && typeof selected === "string") return selected;
+    } catch (e) {
+      console.error("Native folder picker failed:", e);
+      return pickFolderWithBrowser(title);
+    }
+    return null;
+  }
 
   $effect(() => {
     loadGraphInfo();
@@ -47,11 +88,7 @@
 
   async function handleOpenExisting() {
     closeMenu();
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Open Graph Folder",
-    });
+    const selected = await pickGraphFolder("Open Graph Folder");
 
     if (selected && typeof selected === "string") {
       isLoading = true;
@@ -92,11 +129,7 @@
   async function confirmCreate() {
     if (!newGraphName.trim()) return;
 
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Choose location for new graph",
-    });
+    const selected = await pickGraphFolder("Choose location for new graph");
 
     if (selected && typeof selected === "string") {
       const graphPath = selected + "/" + newGraphName.trim();
@@ -237,6 +270,14 @@
     </div>
   {/if}
 </div>
+
+{#if showFolderBrowser}
+  <FolderBrowser
+    title={folderBrowserTitle}
+    onSelect={(path) => finishFolderBrowser(path)}
+    onCancel={() => finishFolderBrowser(null)}
+  />
+{/if}
 
 {#if showCreateDialog}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -386,7 +427,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 200;
+    z-index: 2500;
   }
 
   .dialog {

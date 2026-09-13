@@ -48,6 +48,7 @@
   let stats = $state({ nodes: 0, edges: 0, suggested: 0 });
   let searchMatchCount = $state(0);
   let scanningSuggestions = $state(false);
+  let mobileControlsOpen = $state(false);
   let suggestionError = $state<string | null>(null);
 
   // ---- Canvas / camera ----
@@ -701,8 +702,18 @@
     </div>
   </div>
 
-  <!-- Controls panel (Logseq-style) -->
-  <aside class="graph-controls">
+  <!-- Controls panel (Logseq-style). On phones this docks to the bottom. -->
+  <aside class="graph-controls" class:open={mobileControlsOpen}>
+    <button
+      type="button"
+      class="graph-controls-handle"
+      aria-expanded={mobileControlsOpen}
+      onclick={() => (mobileControlsOpen = !mobileControlsOpen)}
+    >
+      <span class="handle-grip" aria-hidden="true"></span>
+      <span>Graph</span>
+      <span class="handle-chevron">{mobileControlsOpen ? "▾" : "▴"}</span>
+    </button>
     <h2>Graph</h2>
 
     <div class="mode-toggle">
@@ -959,5 +970,74 @@
     color: var(--text-muted);
     margin: 0;
     line-height: 1.5;
+  }
+
+  .graph-controls-handle {
+    display: none;
+  }
+
+  @media (max-width: 640px) {
+    .graph-view {
+      flex-direction: column;
+    }
+
+    .graph-controls-handle {
+      display: flex;
+      position: relative;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 44px;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .handle-grip {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      width: 36px;
+      height: 4px;
+      margin-left: -18px;
+      border-radius: 999px;
+      background: var(--border);
+    }
+
+    .handle-chevron {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .graph-controls {
+      width: 100%;
+      flex-shrink: 0;
+      border-left: none;
+      border-top: 1px solid var(--border);
+      border-radius: 14px 14px 0 0;
+      max-height: 48px;
+      padding: 0 12px;
+      overflow: hidden;
+      gap: 10px;
+    }
+
+    .graph-controls.open {
+      max-height: min(46vh, 380px);
+      overflow-y: auto;
+      padding-bottom: 12px;
+    }
+
+    .graph-controls h2 {
+      display: none;
+    }
+
+    .zoom-controls {
+      bottom: 12px;
+    }
   }
 </style>

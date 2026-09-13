@@ -1022,12 +1022,13 @@ function renderMarkdownContent(content: string): string {
 
   // Handle task markers
   processed = renderMarkdownCheckboxTasks(processed);
-  processed = processed.replace(/^TODO\s+/i, `${taskCheckbox("TODO", false)}${taskMarker("TODO")} `);
-  processed = processed.replace(/^DOING\s+/i, `${taskCheckbox("DOING", false)}${taskMarker("DOING")} `);
-  processed = processed.replace(/^DONE\s+/i, `${taskCheckbox("DONE", true)}${taskMarker("DONE")} `);
-  processed = processed.replace(/^LATER\s+/i, `${taskCheckbox("LATER", false)}${taskMarker("LATER")} `);
-  processed = processed.replace(/^NOW\s+/i, `${taskCheckbox("NOW", false)}${taskMarker("NOW")} `);
-  processed = processed.replace(/^CANCELED\s+/i, `${taskCheckbox("CANCELED", true)}${taskMarker("CANCELED")} `);
+  processed = processed.replace(/^TODO\b:?\s*/i, `${taskCheckbox("TODO", false)}${taskMarker("TODO")} `);
+  processed = processed.replace(/^DOING\b:?\s*/i, `${taskCheckbox("DOING", false)}${taskMarker("DOING")} `);
+  processed = processed.replace(/^DONE\b:?\s*/i, `${taskCheckbox("DONE", true)}${taskMarker("DONE")} `);
+  processed = processed.replace(/^LATER\b:?\s*/i, `${taskCheckbox("LATER", false)}${taskMarker("LATER")} `);
+  processed = processed.replace(/^NOW\b:?\s*/i, `${taskCheckbox("NOW", false)}${taskMarker("NOW")} `);
+  processed = processed.replace(/^CANCELED\b:?\s*/i, `${taskCheckbox("CANCELED", true)}${taskMarker("CANCELED")} `);
+  processed = processed.replace(/^CANCELLED\b:?\s*/i, `${taskCheckbox("CANCELED", true)}${taskMarker("CANCELED")} `);
 
   // Handle SCHEDULED and DEADLINE timestamps (display as badges)
   processed = processed.replace(

@@ -232,6 +232,15 @@
     box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-primary) 70%, transparent);
   }
 
+  @media (max-width: 640px) {
+    .page-menu-popover {
+      left: 0;
+      right: auto;
+      min-width: min(220px, calc(100vw - 32px));
+      max-width: calc(100vw - 32px);
+    }
+  }
+
   .page-menu-item {
     display: flex;
     align-items: center;

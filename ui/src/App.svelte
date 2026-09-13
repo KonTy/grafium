@@ -15,6 +15,7 @@
   import JobActivity from "./components/JobActivity.svelte";
   import JobsView from "./components/JobsView.svelte";
   import Toaster from "./components/Toaster.svelte";
+  import FolderBrowser from "./components/FolderBrowser.svelte";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
@@ -37,9 +38,31 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
 
-  /** Pick a folder using native OS dialog on all platforms */
+  function isAndroidClient(): boolean {
+    return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  }
+
+  let showFolderBrowser = $state(false);
+  let folderBrowserTitle = $state("Select Folder");
+  let folderBrowserResolve: ((path: string | null) => void) | null = null;
+
+  function openFolderBrowser(title: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      folderBrowserTitle = title;
+      folderBrowserResolve = resolve;
+      showFolderBrowser = true;
+    });
+  }
+
+  function finishFolderBrowser(path: string | null) {
+    showFolderBrowser = false;
+    const resolve = folderBrowserResolve;
+    folderBrowserResolve = null;
+    resolve?.(path);
+  }
+
+  /** Native folder dialog on desktop; in-app browser on Android (no directory picker). */
   async function pickFolder(title = "Select Folder", defaultPath?: string): Promise<string | null> {
-    // Check if Android JS bridge is available
     if ((window as any).FolderPickerBridge) {
       return new Promise<string | null>((resolve) => {
         (window as any).__FOLDER_PICKER_RESOLVE = (result: string | null) => {
@@ -49,15 +72,22 @@
         (window as any).FolderPickerBridge.pickFolder();
       });
     }
-    // Desktop: use Tauri dialog plugin
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title,
-      defaultPath,
-    });
-    if (selected && typeof selected === "string") {
-      return selected;
+    if (isAndroidClient()) {
+      return openFolderBrowser(title);
+    }
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title,
+        defaultPath,
+      });
+      if (selected && typeof selected === "string") {
+        return selected;
+      }
+    } catch (e) {
+      console.error("[graph] native folder picker failed:", e);
+      return openFolderBrowser(title);
     }
     return null;
   }
@@ -703,8 +733,24 @@
     }
   }
 
+  function isNarrowPhoneLayout(): boolean {
+    return typeof window !== "undefined" && window.innerWidth <= 640;
+  }
+
+  function defaultAutoThemeId(): string {
+    // Desktop follows smplOS, then Catppuccin. Phones have no smplOS theme file,
+    // so auto would otherwise land on the navy default instead of OLED.
+    if (typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)) return "oled";
+    return "catppuccin";
+  }
+
   function loadWideModePreference() {
     try {
+      if (isNarrowPhoneLayout()) {
+        wideMode = true;
+        sidebarVisible = false;
+        return;
+      }
       const raw = localStorage.getItem("grafium.ui.wideMode");
       if (raw === "false") wideMode = false;
       if (raw === "true") wideMode = true;
@@ -1169,7 +1215,7 @@
     // Apply saved/smplos theme on startup
     try {
       const [appTheme, smplosTheme] = await Promise.all([getAppTheme(), getSmplosTheme()]);
-      const themeId = appTheme === "auto" ? (smplosTheme ?? "catppuccin") : appTheme;
+      const themeId = appTheme === "auto" ? (smplosTheme ?? defaultAutoThemeId()) : appTheme;
       const theme = getThemeById(themeId);
       if (theme) {
         applyTheme(theme.colors);
@@ -1178,7 +1224,7 @@
       // If theme commands fail, fall back to smplos or default
       try {
         const smplos = await getSmplosTheme();
-        const t = getThemeById(smplos ?? "catppuccin");
+        const t = getThemeById(smplos ?? defaultAutoThemeId());
         if (t) applyTheme(t.colors);
       } catch (_) {}
     }
@@ -2081,6 +2127,14 @@
   </div>
 {/if}
 
+{#if showFolderBrowser}
+  <FolderBrowser
+    title={folderBrowserTitle}
+    onSelect={(path) => finishFolderBrowser(path)}
+    onCancel={() => finishFolderBrowser(null)}
+  />
+{/if}
+
 {#if showCreateGraphDialog}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2291,7 +2345,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 200;
+    z-index: 2500;
   }
 
   .dialog {
@@ -2449,8 +2503,9 @@
   }
 
   @media (max-width: 640px) {
-    .sidebar-resizer {
-      display: none;
+    .sidebar-resizer,
+    .reference-panel-resizer {
+      display: none !important;
     }
 
     .bottom-nav {
@@ -2503,15 +2558,19 @@
 
     .more-menu {
       position: fixed;
-      bottom: 56px;
+      bottom: calc(56px + env(safe-area-inset-bottom, 0px));
       right: 8px;
+      left: auto;
       background: var(--bg-secondary);
       border: 1px solid var(--border);
       border-radius: 12px;
       box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
       z-index: 200;
       padding: 6px;
-      min-width: 180px;
+      min-width: min(180px, calc(100vw - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: min(70dvh, calc(100dvh - 72px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)));
+      overflow-y: auto;
     }
 
     .more-menu-item {
@@ -2533,13 +2592,20 @@
       background: var(--bg-hover);
     }
 
-    /* Hide sidebar on narrow screens */
+    /* Hide the whole sidebar column, not just its contents — otherwise a 260px
+       empty strip remains and journal titles wrap one character per line. */
+    .sidebar-container {
+      display: none !important;
+      width: 0 !important;
+    }
+
     :global(.sidebar) {
       display: none !important;
     }
 
     .main-content {
       padding-bottom: 60px;
+      word-break: normal;
     }
   }
 

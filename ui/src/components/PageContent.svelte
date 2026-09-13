@@ -1688,7 +1688,7 @@
     }
   }
 
-  async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean) {
+  async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean, remainder = "") {
     try {
       const block = blocks.find((b) => b.id === blockId);
       if (!block) return;
@@ -1752,7 +1752,7 @@
         newOrder = myIdx + 1;
       }
 
-      const newBlock = await createBlock(page.id, parentId, newOrder, "");
+      const newBlock = await createBlock(page.id, parentId, newOrder, remainder);
       // Insert after current block in the array
       const idx = blocks.findIndex((b) => b.id === blockId);
       blocks = [...blocks.slice(0, idx + 1), newBlock, ...blocks.slice(idx + 1)];
@@ -3376,7 +3376,8 @@
     margin: 0;
     color: var(--text-primary);
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   .page-title-input {
@@ -4123,5 +4124,34 @@
   .backlinks-show-more:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* Phone: keep the title on its own row so action buttons cannot squeeze
+     "math" (and journal dates) into one character per line. Desktop heading
+     stays a single row. */
+  @media (max-width: 640px) {
+    .page-heading {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .page-title-row {
+      flex: none;
+      width: 100%;
+    }
+
+    .page-title {
+      font-size: 1.6rem;
+      line-height: 1.2;
+      overflow-wrap: break-word;
+      word-break: keep-all;
+    }
+
+    .page-heading-actions {
+      flex-shrink: 1;
+      flex-wrap: wrap;
+      width: 100%;
+    }
   }
 </style>

@@ -1,13 +1,23 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
-  import { BufferGeometry, Float32BufferAttribute, Mesh, MeshBasicMaterial, Points, PointsMaterial, RingGeometry, DoubleSide, Vector3 } from "three";
+  import { AdditiveBlending, BufferGeometry, CanvasTexture, Float32BufferAttribute, Mesh, MeshBasicMaterial, Points, ShaderMaterial, RingGeometry, SphereGeometry, SRGBColorSpace, TextureLoader, DoubleSide, Vector3, type Texture } from "three";
   import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
   import { getGraphData, type GraphData } from "../lib/api";
   import { fuzzyScore } from "../lib/fuzzy";
   import { clusterColor, computeGraphClusters, planetColor } from "../lib/graphClusters";
-  import { buildFlightNeighbors, createFlightLeg, nextFlightTopic, sampleFlightLeg, sampleFlightOrbit, type FlightLeg } from "../lib/graphFlight";
+  import { buildFlightNeighbors, createFlightLeg, lingerFlightFraction, nextFlightTopic, sampleFlightLeg, type FlightLeg } from "../lib/graphFlight";
   import { buildPlanetHierarchy, layoutPlanetSystems, planetHasRings, type PlanetLayout } from "../lib/planetSystems";
+  import {
+    oceanWorldPaletteIndex,
+    oceanWorldWarpSeed,
+    OCEAN_WORLD_PALETTES,
+    planetKindFor,
+    PLANET_KINDS,
+    PLANET_TEXTURE_URLS,
+    remapOceanWorldImageData,
+    type PlanetKind,
+  } from "../lib/planetTextures";
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -64,6 +74,7 @@
   let hideDatePages = $state(true);
   let showSmartLabels = $state(true);
   let searchText = $state("");
+  let controlsOpen = $state(false);
 
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -96,15 +107,15 @@
   let flightAvailable = $state(false);
   let flightTopic = $state<Node3D | null>(null);
   let flightFromTitle = $state("");
-  let flightPhase = $state<"travel" | "orbit">("travel");
   let flightStops = $state(0);
   let flightNeighbors = new Map<string, string[]>();
   let flightVisits = new Map<string, number>();
   let flightPrevious: string | null = null;
+  let flightNextId: string | null = null;
   let flightLeg: FlightLeg | null = null;
   let flightElapsed = 0;
   let flightLastFrame: number | null = null;
-  let starfield: Points<BufferGeometry, PointsMaterial> | null = null;
+  let starfield: Points<BufferGeometry, ShaderMaterial> | null = null;
   let planetRing: Mesh<RingGeometry, MeshBasicMaterial> | null = null;
   let savedCooldownTicks = 300;
   let savedWarmupTicks = 120;
@@ -115,7 +126,8 @@
   let flightLinks: Link3D[] = [];
   let flightFamilyLabel = $state("");
   let flightRinged = $state(false);
-  const FLIGHT_ORBIT_MS = 2600;
+  let planetTextureByKind = new Map<PlanetKind, Texture>();
+  let oceanWorldTextures: Texture[] = [];
 
   const MIN_NODE_VAL = 8;
   const MAX_NODE_VAL = 64;
@@ -403,6 +415,88 @@
     return Math.cbrt(nodeValFor(node)) * 5;
   }
 
+  function visualPlanetRadius(node: Node3D): number {
+    return Math.cbrt(nodeValFor(node)) * (flying ? 5 : 2);
+  }
+
+  function loadPlanetTextures(): void {
+    const loader = new TextureLoader();
+    let remaining = PLANET_KINDS.length;
+    const finish = () => {
+      remaining--;
+      if (remaining === 0) graph?.nodeThreeObject((node) => createPlanetObject(node));
+    };
+    for (const kind of PLANET_KINDS) {
+      loader.load(PLANET_TEXTURE_URLS[kind], (texture) => {
+        texture.colorSpace = SRGBColorSpace;
+        texture.anisotropy = 4;
+        if (kind === "earth") {
+          oceanWorldTextures = makeOceanWorldTextures(texture);
+          texture.dispose();
+        } else planetTextureByKind.set(kind, texture);
+        finish();
+      }, undefined, finish);
+    }
+  }
+
+  function makeOceanWorldTextures(earth: Texture): Texture[] {
+    const image = earth.image as CanvasImageSource | undefined;
+    if (!image || typeof document === "undefined") return [];
+    const width = Number((image as { width?: number }).width ?? 0);
+    const height = Number((image as { height?: number }).height ?? 0);
+    if (!width || !height) return [];
+    return OCEAN_WORLD_PALETTES.map((palette, index) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return earth;
+      ctx.drawImage(image, 0, 0);
+      const source = ctx.getImageData(0, 0, width, height);
+      const dest = ctx.createImageData(width, height);
+      remapOceanWorldImageData(
+        source.data,
+        dest.data,
+        width,
+        height,
+        palette,
+        oceanWorldWarpSeed(index),
+      );
+      ctx.putImageData(dest, 0, 0);
+      const texture = new CanvasTexture(canvas);
+      texture.colorSpace = SRGBColorSpace;
+      texture.anisotropy = 4;
+      return texture;
+    });
+  }
+
+  function createPlanetObject(node: Node3D): Mesh {
+    const satellite = flying && (flightLayout?.parentById.has(node.id) ?? false);
+    const kind = planetKindFor(node.name, satellite);
+    const map = kind === "earth"
+      ? oceanWorldTextures[oceanWorldPaletteIndex(node.name)]
+      : planetTextureByKind.get(kind);
+    const dimmed = !flying && hasActiveSearch() && !searchMatchIds.has(node.id);
+    const mesh = new Mesh(
+      new SphereGeometry(1, 28, 18),
+      new MeshBasicMaterial({
+        map: map ?? null,
+        color: map ? "#ffffff" : planetColor(node.name),
+        transparent: dimmed,
+        opacity: dimmed ? 0.22 : 1,
+      }),
+    );
+    mesh.scale.setScalar(visualPlanetRadius(node));
+    return mesh;
+  }
+
+  function disposePlanetTextures(): void {
+    for (const texture of planetTextureByKind.values()) texture.dispose();
+    planetTextureByKind.clear();
+    for (const texture of oceanWorldTextures) texture.dispose();
+    oceanWorldTextures = [];
+  }
+
   function clearCameraTimers(): void {
     pendingFit = false;
     if (fitTimer !== undefined) window.clearTimeout(fitTimer);
@@ -415,16 +509,73 @@
     if (!graph) return;
     const radius = Math.max(1800, ...latestNodes.filter(hasGraphPosition)
       .map((node) => Math.hypot(node.x, node.y, node.z) * 2 + 600));
+    const count = 5600;
     const points: number[] = [];
-    for (let i = 0; i < 1800; i++) {
-      const direction = new Vector3().randomDirection().multiplyScalar(radius * (1 + Math.random()));
+    const colors: number[] = [];
+    const sizes: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const direction = new Vector3().randomDirection().multiplyScalar(radius * (0.7 + Math.random() * 1.5));
       points.push(direction.x, direction.y, direction.z);
+      const roll = Math.random();
+      let mag: number;
+      let size: number;
+      if (roll < 0.7) {
+        mag = 0.1 + Math.random() * 0.22;
+        size = 1.1 + Math.random() * 1.0;
+      } else if (roll < 0.92) {
+        mag = 0.38 + Math.random() * 0.32;
+        size = 2.1 + Math.random() * 1.5;
+      } else if (roll < 0.985) {
+        mag = 0.82 + Math.random() * 0.4;
+        size = 3.6 + Math.random() * 2.0;
+      } else {
+        mag = 1.35 + Math.random() * 0.55;
+        size = 6.0 + Math.random() * 3.2;
+      }
+      const tint = Math.random();
+      if (tint < 0.12) colors.push(mag, mag * 0.86, mag * 0.68);
+      else if (tint < 0.42) colors.push(mag * 0.78, mag * 0.9, mag);
+      else colors.push(mag, mag, mag * 1.08);
+      sizes.push(size);
     }
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new Float32BufferAttribute(points, 3));
-    starfield = new Points(geometry, new PointsMaterial({
-      color: "#cbd5ff", size: 5, transparent: true, opacity: 0.85, depthWrite: false,
+    geometry.setAttribute("aColor", new Float32BufferAttribute(colors, 3));
+    geometry.setAttribute("aSize", new Float32BufferAttribute(sizes, 1));
+    starfield = new Points(geometry, new ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2.5) },
+      },
+      vertexShader: `
+        attribute float aSize;
+        attribute vec3 aColor;
+        uniform float uPixelRatio;
+        varying vec3 vColor;
+        void main() {
+          vColor = aColor;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = max(1.0, aSize * uPixelRatio);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        precision mediump float;
+        varying vec3 vColor;
+        void main() {
+          vec2 uv = gl_PointCoord - vec2(0.5);
+          float d = length(uv) * 2.0;
+          float core = clamp(1.0 - d, 0.0, 1.0);
+          core *= core;
+          if (core < 0.02) discard;
+          gl_FragColor = vec4(vColor * core, core);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: AdditiveBlending,
+      toneMapped: false,
     }));
+    starfield.frustumCulled = false;
     graph.scene().add(starfield);
   }
 
@@ -450,7 +601,6 @@
     flightTopic = node;
     flightVisits.set(node.id, (flightVisits.get(node.id) ?? 0) + 1);
     flightStops++;
-    flightPhase = "travel";
     flightElapsed = 0;
     const parentId = flightLayout?.parentById.get(node.id);
     const parent = latestNodes.find((candidate) => candidate.id === parentId);
@@ -460,6 +610,9 @@
       : "Topic planet";
     const position = new Vector3(node.x, node.y, node.z);
     const extent = flightLayout?.extents.get(node.id) ?? planetRadius(node);
+    const nextId = nextFlightTopic(flightNeighbors, node.id, flightPrevious, flightVisits);
+    const next = latestNodes.find((candidate) => candidate.id === nextId);
+    flightNextId = next && hasGraphPosition(next) ? next.id : null;
     flightLeg = createFlightLeg(
       graph.camera().position, controls.target,
       position, planetRadius(node),
@@ -468,6 +621,7 @@
         approach: parent && hasGraphPosition(parent)
           ? position.clone().sub(new Vector3(parent.x, parent.y, parent.z))
           : undefined,
+        nextTarget: next && hasGraphPosition(next) ? new Vector3(next.x, next.y, next.z) : undefined,
       },
     );
     clearPlanetRing();
@@ -541,7 +695,8 @@
     graph.camera().up.set(0, 1, 0);
     graph.backgroundColor("#050711").nodeRelSize(5).nodeResolution(32)
       .nodeVal((node) => nodeValFor(node)).linkOpacity(0.15)
-      .graphData({ nodes: flightNodes, links: flightLinks.map((link) => ({ ...link })) });
+      .graphData({ nodes: flightNodes, links: flightLinks.map((link) => ({ ...link })) })
+      .nodeThreeObject((node) => createPlanetObject(node));
     addFlightStars();
     beginFlightTo(flightNodes.find((node) => node.id === first.id)!);
   }
@@ -551,21 +706,13 @@
     // Do not skip whole destinations after a suspended/background frame.
     flightElapsed += flightLastFrame === null ? 0 : Math.min(100, timestamp - flightLastFrame);
     flightLastFrame = timestamp;
-    const duration = flightPhase === "travel" ? flightLeg.durationMs : FLIGHT_ORBIT_MS;
-    const fraction = Math.min(1, flightElapsed / duration);
-    const pose = flightPhase === "travel"
-      ? sampleFlightLeg(flightLeg, fraction)
-      : sampleFlightOrbit(flightLeg, fraction);
+    const fraction = lingerFlightFraction(Math.min(1, flightElapsed / flightLeg.durationMs));
+    const pose = sampleFlightLeg(flightLeg, fraction);
     (graph.controls() as OrbitControls).target.copy(pose.lookAt);
     graph.cameraPosition(pose.position, pose.lookAt, 0);
     if (fraction < 1) return;
     flightElapsed = 0;
-    if (flightPhase === "travel") {
-      flightPhase = "orbit";
-      return;
-    }
-    const nextId = nextFlightTopic(flightNeighbors, flightTopic!.id, flightPrevious, flightVisits);
-    const next = latestNodes.find((node) => node.id === nextId);
+    const next = latestNodes.find((node) => node.id === flightNextId);
     if (!next || !hasGraphPosition(next)) {
       stopFlight();
       errorMsg = "No positioned, related topic is available to continue this flight.";
@@ -593,6 +740,7 @@
     flightLayout = null;
     flightLeg = null;
     flightTopic = null;
+    flightNextId = null;
     flightLastFrame = null;
     clearPlanetRing();
     if (starfield) {
@@ -608,7 +756,8 @@
       controls.enableDamping = savedDamping;
       graph.enableNodeDrag(true).enablePointerInteraction(true)
         .backgroundColor(themeColor("--bg-primary", "#16161e"))
-        .nodeRelSize(2).nodeResolution(14).nodeVal((node) => nodeValFor(node)).linkOpacity(0.25);
+        .nodeRelSize(2).nodeResolution(14).nodeVal((node) => nodeValFor(node)).linkOpacity(0.25)
+        .nodeThreeObject((node) => createPlanetObject(node));
       refreshColors();
       updateScreenLabels(performance.now(), true);
     }
@@ -864,6 +1013,7 @@
       .linkWidth((l) => linkWidthFor(l))
       .linkDirectionalParticles(0)
       .showNavInfo(false)
+      .nodeThreeObject((n) => createPlanetObject(n))
       .onNodeClick((n) => { if (!flying) onNavigate(n.name); })
       .onNodeHover((n) => {
         hoverNode = n ?? null;
@@ -884,6 +1034,7 @@
     graph.width(wrapperEl.clientWidth).height(wrapperEl.clientHeight);
 
     void loadData();
+    loadPlanetTextures();
     startLabelLoop();
 
     resizeObserver = new ResizeObserver(() => {
@@ -936,6 +1087,7 @@
       window.clearTimeout(searchFlyTimer);
       searchFlyTimer = undefined;
     }
+    disposePlanetTextures();
     graph?._destructor();
     graph = null;
   });
@@ -961,6 +1113,7 @@
       updateSearchMatches();
       graph?.nodeVal((n) => nodeValFor(n));
       refreshColors();
+      graph?.nodeThreeObject((n) => createPlanetObject(n));
       updateScreenLabels(performance.now(), true);
       scheduleFlyToSearchMatches();
     });
@@ -979,7 +1132,7 @@
       <div class="flight-hud" role="status" data-stop={flightStops} data-topic={flightTopic.id}
         data-ringed={flightRinged} data-satellite={flightLayout?.parentById.has(flightTopic.id) ?? false}
         style={`--planet-color: ${planetColor(flightTopic.name)};`}>
-        <span class="flight-eyebrow">SPACE FLIGHT · {flightPhase === "travel" ? "Approaching" : "Orbiting"}</span>
+        <span class="flight-eyebrow">SPACE FLIGHT · Flying by</span>
         <strong>{flightTopic.name}</strong>
         <span>{flightFamilyLabel}</span>
         <span>{flightFromTitle ? `From ${flightFromTitle}` : "Beginning your journey"}</span>
@@ -1031,23 +1184,70 @@
       </div>
     {/if}
 
+    <button
+      type="button"
+      class="flight-fab"
+      class:active={flying}
+      aria-pressed={flying}
+      aria-label={flying ? "Stop flight" : "Space flight"}
+      title={flying ? "Stop flight" : "Space flight"}
+      disabled={!flying && (loading || !flightAvailable)}
+      onclick={toggleFlight}
+    >
+      {#if flying}
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
+      {:else}
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M8 5.5v13l12-6.5-12-6.5z" />
+        </svg>
+      {/if}
+    </button>
+    <button
+      type="button"
+      class="controls-toggle"
+      aria-expanded={controlsOpen}
+      aria-label={controlsOpen ? "Hide graph settings" : "Show graph settings"}
+      title={controlsOpen ? "Hide settings" : "Graph settings"}
+      onclick={() => (controlsOpen = !controlsOpen)}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <line x1="4" y1="6" x2="20" y2="6" />
+        <line x1="8" y1="12" x2="20" y2="12" />
+        <line x1="4" y1="18" x2="16" y2="18" />
+        <circle cx="6" cy="12" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="18" cy="18" r="1.6" fill="currentColor" stroke="none" />
+      </svg>
+    </button>
     <div class="zoom-controls">
       <button title="Reset view" aria-label="Reset view" onclick={resetView}>⤢</button>
     </div>
   </div>
 
-  <aside class="graph-controls">
-    <h2>Graph (3D)</h2>
+  <aside class="graph-controls" class:open={controlsOpen}>
     <button
-      class="flight-toggle"
-      class:active={flying}
-      aria-pressed={flying}
-      disabled={!flying && (loading || !flightAvailable)}
-      onclick={toggleFlight}
-    >{flying ? "Stop flight" : "Space flight"}</button>
+      type="button"
+      class="graph-controls-handle"
+      aria-expanded={controlsOpen}
+      onclick={() => (controlsOpen = !controlsOpen)}
+    >
+      <span class="handle-grip" aria-hidden="true"></span>
+      <span>Graph</span>
+      <span class="handle-chevron">{controlsOpen ? "▾" : "▴"}</span>
+    </button>
+    <div class="graph-controls-head">
+      <h2>Graph (3D)</h2>
+      <button
+        type="button"
+        class="controls-close"
+        aria-label="Hide graph settings"
+        onclick={() => (controlsOpen = false)}
+      >✕</button>
+    </div>
     <p class="hint">
       {flying
-        ? "Autopilot follows links and child topics. Press Stop flight or Escape to take control."
+        ? "Autopilot flies past each topic like a ship, then on to the next linked planet. Press Stop flight or Escape to take control."
         : "Fly between topic-planets along their links. Search first to choose a starting topic."}
       {#if !loading && !flightAvailable}At least two linked, visible topics are needed.{/if}
     </p>
@@ -1106,30 +1306,61 @@
 </div>
 
 <style>
-  .flight-toggle {
-    padding: 10px 12px;
-    border: 1px solid var(--accent, #6ea8fe);
-    border-radius: 6px;
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--accent, #6ea8fe) 15%, var(--bg-primary));
-    font: inherit;
+  .flight-fab {
+    position: absolute;
+    left: 16px;
+    bottom: 16px;
+    z-index: 6;
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--accent, #6ea8fe) 55%, transparent);
+    border-radius: 50%;
+    color: #f0f9ff;
+    background: color-mix(in srgb, var(--bg-primary, #050508) 42%, transparent);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     cursor: pointer;
   }
 
-  .flight-toggle.active {
+  .flight-fab.active {
     color: #e0f2fe;
-    background: #15344e;
     border-color: #7dd3fc;
+    background: color-mix(in srgb, #15344e 62%, transparent);
   }
 
-  .flight-toggle:disabled {
-    opacity: 0.45;
+  .flight-fab:disabled {
+    opacity: 0.4;
     cursor: not-allowed;
   }
 
-  .flight-toggle:focus-visible {
-    outline: 2px solid var(--accent);
+  .flight-fab:focus-visible {
+    outline: 2px solid var(--accent, #6ea8fe);
     outline-offset: 3px;
+  }
+
+  .controls-toggle {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 6;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--border-color, #333) 70%, transparent);
+    border-radius: 8px;
+    color: var(--text-primary, #eee);
+    background: color-mix(in srgb, var(--bg-secondary, #1e1e2e) 55%, transparent);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
+  }
+
+  .controls-toggle:hover {
+    background: color-mix(in srgb, var(--bg-hover, #2a2a3d) 70%, transparent);
   }
 
   .flight-hud {
@@ -1331,22 +1562,57 @@
   }
 
   .graph-controls {
-    position: relative;
-    z-index: 3;
-    width: 240px;
-    flex-shrink: 0;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: 260px;
     border-left: 1px solid var(--border-color, #333);
-    background: var(--bg-secondary, #1e1e2e);
+    background: color-mix(in srgb, var(--bg-secondary, #1e1e2e) 92%, transparent);
+    backdrop-filter: blur(14px);
     padding: 16px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 12px;
+    transform: translateX(110%);
+    pointer-events: none;
+    opacity: 0;
+    transition: transform 0.18s ease, opacity 0.18s ease;
+  }
+
+  .graph-controls.open {
+    transform: translateX(0);
+    pointer-events: auto;
+    opacity: 1;
+  }
+
+  .graph-controls-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .graph-controls h2 {
-    margin: 0 0 4px;
+    margin: 0;
     font-size: 15px;
+  }
+
+  .controls-close {
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted, #888);
+    cursor: pointer;
+  }
+
+  .controls-close:hover {
+    background: var(--bg-hover, #2a2a3d);
+    color: var(--text-primary, #eee);
   }
 
   .mode-toggle {
@@ -1421,5 +1687,96 @@
     font-size: 11px;
     color: var(--text-muted, #666);
     margin: 0;
+  }
+
+  .graph-controls-handle {
+    display: none;
+  }
+
+  @media (max-width: 640px) {
+    .graph-view-3d {
+      flex-direction: column;
+    }
+
+    .controls-toggle,
+    .graph-controls-head {
+      display: none;
+    }
+
+    .flight-fab {
+      bottom: 64px;
+    }
+
+    .flight-hud {
+      display: none;
+    }
+
+    .graph-label.destination {
+      font-size: 16px;
+      max-width: min(280px, calc(100vw - 24px));
+    }
+
+    .graph-controls-handle {
+      display: flex;
+      position: relative;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 44px;
+      border: none;
+      background: transparent;
+      color: var(--text-primary, #eee);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .handle-grip {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      width: 36px;
+      height: 4px;
+      margin-left: -18px;
+      border-radius: 999px;
+      background: var(--border-color, #333);
+    }
+
+    .handle-chevron {
+      color: var(--text-muted, #888);
+      font-weight: 500;
+    }
+
+    .graph-controls {
+      position: relative;
+      top: auto;
+      right: auto;
+      bottom: auto;
+      width: 100%;
+      flex-shrink: 0;
+      border-left: none;
+      border-top: 1px solid var(--border-color, #333);
+      border-radius: 14px 14px 0 0;
+      max-height: 48px;
+      padding: 0 12px;
+      overflow: hidden;
+      gap: 10px;
+      transform: none;
+      opacity: 1;
+      pointer-events: auto;
+      background: var(--bg-secondary, #1e1e2e);
+    }
+
+    .graph-controls.open {
+      max-height: min(46vh, 380px);
+      overflow-y: auto;
+      padding-bottom: 12px;
+    }
+
+    .graph-controls h2 {
+      display: none;
+    }
   }
 </style>

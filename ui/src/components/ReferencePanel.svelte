@@ -2408,21 +2408,18 @@
     white-space: pre-wrap;
   }
 
-  /* Mobile adjustments */
-  @media (max-width: 768px) {
+  /* Phone: bottom sheet above the tab bar. Inline width must not win. */
+  @media (max-width: 640px) {
     .reference-panel {
-      width: 100%;
-      max-width: 100%;
+      width: 100% !important;
+      max-width: 100% !important;
       top: auto;
-      height: 70vh;
+      bottom: 56px;
+      height: min(62vh, 480px);
       border-left: none;
       border-top: 1px solid var(--border-color, #333);
       border-radius: 16px 16px 0 0;
-      transform: translateY(100%);
-    }
-
-    .panel-visible {
-      transform: translateY(0);
+      transform: none;
     }
   }
 </style>

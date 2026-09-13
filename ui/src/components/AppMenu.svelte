@@ -201,6 +201,18 @@
     min-width: 160px;
   }
 
+  @media (max-width: 640px) {
+    .menu-dropdown {
+      left: 8px;
+      right: auto;
+      position: fixed;
+      top: calc(36px + env(safe-area-inset-top, 0px));
+      margin-top: 4px;
+      min-width: min(200px, calc(100vw - 16px));
+      max-width: calc(100vw - 16px);
+    }
+  }
+
   .menu-item {
     display: flex;
     align-items: center;

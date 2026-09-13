@@ -1492,6 +1492,9 @@
     }
 
     .heatmap-sticky {
+      position: static;
+      top: auto;
+      z-index: auto;
       padding: 12px 12px;
     }
 

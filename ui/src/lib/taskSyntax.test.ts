@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { bulletToTodoContent, isTaskContent, taskToBulletContent } from "./taskSyntax";
+import {
+  bulletToTodoContent,
+  isTaskContent,
+  normalizeTaskPrefix,
+  splitImeEnterContent,
+  taskToBulletContent,
+} from "./taskSyntax";
 
 describe("task syntax helpers", () => {
   it("detects Logseq and Markdown task prefixes", () => {
@@ -36,5 +42,27 @@ describe("task syntax helpers", () => {
     expect(bulletToTodoContent("Call dentist")).toBe("TODO Call dentist");
     expect(bulletToTodoContent("  Indented note")).toBe("  TODO Indented note");
     expect(bulletToTodoContent("TODO already a task")).toBe("TODO already a task");
+  });
+
+  it("uppercases a task keyword even without a trailing space", () => {
+    expect(normalizeTaskPrefix("todo")).toBe("TODO");
+    expect(normalizeTaskPrefix("todo buy milk")).toBe("TODO buy milk");
+    expect(isTaskContent("TODO")).toBe(true);
+    expect(normalizeTaskPrefix("today is sunny")).toBe("today is sunny");
+  });
+
+  it("splits an IME newline so the leftover line becomes a new block", () => {
+    expect(splitImeEnterContent("TODO buy milk")).toEqual({
+      head: "TODO buy milk",
+      remainder: "",
+    });
+    expect(splitImeEnterContent("TODO first\nTODO hide AI")).toEqual({
+      head: "TODO first",
+      remainder: "TODO hide AI",
+    });
+    expect(splitImeEnterContent("todo\n")).toEqual({
+      head: "TODO",
+      remainder: "",
+    });
   });
 });

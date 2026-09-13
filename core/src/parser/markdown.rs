@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 static PROPERTY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([a-zA-Z_-]+)::(.*)$").unwrap());
 static TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\s+(.*)").unwrap()
+    Regex::new(r"^(TODO|DOING|DONE|CANCELED|CANCELLED|LATER|NOW)\b:?\s*(.*)").unwrap()
 });
 static SCHEDULED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"SCHEDULED:\s*<(\d{4}-\d{2}-\d{2})[^>]*>").unwrap());
@@ -549,6 +549,15 @@ mod tests {
             parsed.blocks[0].scheduled_date,
             Some("2024-01-15".to_string())
         );
+    }
+
+    #[test]
+    fn test_bare_todo_is_a_task() {
+        let parsed = parse_page("- TODO\n- TODAY is not a task", "test.md");
+        assert_eq!(parsed.blocks[0].content, "TODO");
+        assert_eq!(parsed.blocks[0].task_state, Some(TaskState::Todo));
+        assert_eq!(parsed.blocks[1].content, "TODAY is not a task");
+        assert_eq!(parsed.blocks[1].task_state, None);
     }
 
     #[test]

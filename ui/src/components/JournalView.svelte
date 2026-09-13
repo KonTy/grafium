@@ -490,6 +490,19 @@
     font-weight: 800;
     line-height: 1.05;
     letter-spacing: 0.04em;
+    overflow-wrap: normal;
+    word-break: keep-all;
+  }
+
+  @media (max-width: 640px) {
+    .journal-view {
+      padding-bottom: 64px;
+    }
+
+    .journal-entry :global(.page-content.compact .page-title) {
+      font-size: 1.55rem;
+      letter-spacing: 0;
+    }
   }
 
   .journal-divider {

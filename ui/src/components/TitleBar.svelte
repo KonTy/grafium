@@ -86,12 +86,12 @@
         <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
       </svg>
     </button>
-    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={minimize} title="Minimize">
+    <button class="titlebar-btn window-ctl" data-tauri-drag-region="false" onclick={minimize} title="Minimize">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <rect x="2" y="5.5" width="8" height="1" fill="currentColor" />
       </svg>
     </button>
-    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={toggleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
+    <button class="titlebar-btn window-ctl" data-tauri-drag-region="false" onclick={toggleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
       {#if isMaximized}
         <svg width="12" height="12" viewBox="0 0 12 12">
           <rect x="3" y="1" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1" />
@@ -103,7 +103,7 @@
         </svg>
       {/if}
     </button>
-    <button class="titlebar-btn titlebar-close" data-tauri-drag-region="false" onclick={close} title="Close">
+    <button class="titlebar-btn titlebar-close window-ctl" data-tauri-drag-region="false" onclick={close} title="Close">
       <svg width="12" height="12" viewBox="0 0 12 12">
         <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
       </svg>
@@ -181,5 +181,12 @@
   .titlebar-close:hover {
     background: #e81123;
     color: #fff;
+  }
+
+  @media (max-width: 640px) {
+    .titlebar-left,
+    .window-ctl {
+      display: none;
+    }
   }
 </style>

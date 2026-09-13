@@ -68,6 +68,12 @@ describe("markdown tag colouring", () => {
     expect(html).toContain(`style="color:${tagColorVar("concept")}"`);
   });
 
+  it("renders a bare TODO as a task checkbox", () => {
+    const html = renderBlock("TODO");
+    expect(html).toContain('class="task-checkbox unchecked todo"');
+    expect(renderBlock("TODAY")).not.toContain("task-checkbox");
+  });
+
   it("renders an immediate-complete checkbox before open task markers", () => {
     const html = renderBlock("TODO [#A] sharpen task UI");
     expect(html).toContain('class="task-checkbox unchecked todo"');

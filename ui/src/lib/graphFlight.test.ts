@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Vector3 } from "three";
-import { buildFlightNeighbors, createFlightLeg, nextFlightTopic, sampleFlightLeg, sampleFlightOrbit } from "./graphFlight";
+import { buildFlightNeighbors, createFlightLeg, lingerFlightFraction, nextFlightTopic, sampleFlightLeg } from "./graphFlight";
 
 describe("linked-topic flight", () => {
   const neighbors = buildFlightNeighbors(["a", "b", "c", "d", "isolated"], [
@@ -50,20 +50,34 @@ describe("camera flight geometry", () => {
   const target = new Vector3(320, 40, -80);
   const leg = createFlightLeg(position, lookAt, target, 20);
 
-  it("starts at the current view and docks outside the planet", () => {
+  it("starts at the current view and flies past the planet instead of docking", () => {
     expect(sampleFlightLeg(leg, 0)).toEqual({ position, lookAt });
-    expect(sampleFlightLeg(leg, 1).lookAt).toEqual(target);
-    expect(leg.end.distanceTo(target)).toBeCloseTo(140);
+    const closest = sampleFlightLeg(leg, 0.5).position.distanceTo(target);
+    expect(closest).toBeGreaterThan(100);
+    expect(closest).toBeLessThan(180);
+    expect(leg.end.distanceTo(target)).toBeGreaterThan(closest);
+    expect(sampleFlightLeg(leg, 0.5).lookAt).toEqual(target);
+    expect(sampleFlightLeg(leg, 1).lookAt).not.toEqual(target);
     expect(position.toArray()).toEqual([0, 0, 900]);
     expect(target.toArray()).toEqual([320, 40, -80]);
   });
 
-  it("joins the arrival orbit and the next leg without snapping", () => {
-    expect(sampleFlightOrbit(leg, 0)).toEqual(sampleFlightLeg(leg, 1));
-    const orbitEnd = sampleFlightOrbit(leg, 1);
-    expect(orbitEnd.position.distanceTo(target)).toBeCloseTo(140);
-    const next = createFlightLeg(orbitEnd.position, orbitEnd.lookAt, new Vector3(-200, 30, 50), 12);
-    expect(sampleFlightLeg(next, 0)).toEqual(orbitEnd);
+  it("spends extra clock time looking at the planet near closest approach", () => {
+    expect(lingerFlightFraction(0)).toBe(0);
+    expect(lingerFlightFraction(1)).toBe(1);
+    expect(lingerFlightFraction(0.53)).toBeGreaterThan(0.45);
+    expect(lingerFlightFraction(0.53)).toBeLessThan(0.55);
+    expect(lingerFlightFraction(0.72) - lingerFlightFraction(0.34))
+      .toBeLessThan(lingerFlightFraction(0.34) - lingerFlightFraction(0));
+  });
+
+  it("joins one flyby to the next without snapping", () => {
+    const flybyEnd = sampleFlightLeg(leg, 1);
+    const nextPlanet = new Vector3(-200, 30, 50);
+    const next = createFlightLeg(flybyEnd.position, flybyEnd.lookAt, nextPlanet, 12, {
+      nextTarget: new Vector3(80, -10, 40),
+    });
+    expect(sampleFlightLeg(next, 0)).toEqual(flybyEnd);
   });
 
   it("handles coincident positions and vertical approaches without NaN", () => {
@@ -75,14 +89,18 @@ describe("camera flight geometry", () => {
     }
   });
 
-  it("can frame a planet family and approach a satellite from outside its parent", () => {
+  it("passes on the outward side and looks toward the next planet by the end", () => {
     const outward = new Vector3(1, 0, 0);
+    const nextPlanet = new Vector3(-200, 30, 50);
     const path = createFlightLeg(position, lookAt, target, 8, {
-      distance: 300, approach: outward,
+      distance: 300, approach: outward, nextTarget: nextPlanet,
     });
     expect(sampleFlightLeg(path, 0)).toEqual({ position, lookAt });
-    expect(path.end).toEqual(target.clone().add(new Vector3(300, 0, 0)));
-    expect(sampleFlightLeg(path, 1).lookAt).toEqual(target);
+    const closest = sampleFlightLeg(path, 0.5).position;
+    expect(closest.distanceTo(target)).toBeGreaterThan(250);
+    expect(closest.distanceTo(target)).toBeLessThan(400);
+    expect(closest.clone().sub(target).dot(outward)).toBeGreaterThan(0);
+    expect(sampleFlightLeg(path, 1).lookAt).toEqual(nextPlanet);
     expect(outward.toArray()).toEqual([1, 0, 0]);
   });
 });

@@ -61,9 +61,10 @@
     renderedImageBaseSize,
     scaledImageDimensions,
   } from "../lib/imageSizing";
-  import { isTaskContent } from "../lib/taskSyntax";
+  import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitImeEnterContent } from "../lib/taskSyntax";
   import { isFencedCodeBlock } from "../lib/codeFence";
   import DatePicker from "./DatePicker.svelte";
+  import MobileEditorBar from "./MobileEditorBar.svelte";
 
   interface Props {
     block: Block;
@@ -86,7 +87,7 @@
     collapsed?: boolean;
     onFocus?: (blockId: string) => void;
     onBlur?: (blockId: string) => void;
-    onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean) => void;
+    onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean, remainder?: string) => void;
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
@@ -639,15 +640,45 @@
     return content.includes("\n") ? "multiline-block" : "normal-block";
   }
 
-  function normalizeTaskPrefix(content: string): string {
-    return content.replace(
-      /^(todo|doing|done|later|now|canceled)\s+/i,
-      (match, keyword: string) => `${keyword.toUpperCase()} `
-    );
+  let enterHandling = false;
+
+  function submitBlockEnter(view: EditorView): boolean {
+    if (completionOpen(view)) return false;
+    if (isInsideCodeFence(view)) {
+      const { from } = view.state.selection.main;
+      view.dispatch({
+        changes: { from, to: from, insert: "\n" },
+        selection: EditorSelection.cursor(from + 1),
+      });
+      return true;
+    }
+    const sel = view.state.selection.main;
+    const atStart = sel.from === 0 && sel.to === 0;
+    const { head, remainder } = splitImeEnterContent(view.state.doc.toString());
+    if (head !== view.state.doc.toString()) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: head },
+      });
+    }
+    onEnter?.(block.id, head, block.order_index, atStart && remainder === "", remainder);
+    return true;
+  }
+
+  function submitBlockEnterOnce(view: EditorView): boolean {
+    if (enterHandling) return true;
+    enterHandling = true;
+    try {
+      return submitBlockEnter(view);
+    } finally {
+      queueMicrotask(() => {
+        enterHandling = false;
+      });
+    }
   }
 
   // Save content on blur
   async function saveContent(content: string) {
+    content = normalizeTaskPrefix(content);
     const context = buildSaveContext(block.id, pageId, block.content, content);
     telemetry("savecontext", () => (context));
     const beforeContent = block.content;
@@ -1237,18 +1268,24 @@
           // Keep the completion menu out of the block stacking context so later
           // journal/page blocks cannot paint through it.
           tooltips({ parent: document.body }),
-          Prec.highest(keymap.of([{
-            key: "Escape",
-            run: (view) => {
-              if (completionOpen(view)) {
-                wikiCompletionDismissed = true;
-                closeCompletion(view);
+          Prec.highest(keymap.of([
+            {
+              key: "Escape",
+              run: (view) => {
+                if (completionOpen(view)) {
+                  wikiCompletionDismissed = true;
+                  closeCompletion(view);
+                  return true;
+                }
+                void stopEditing();
                 return true;
-              }
-              void stopEditing();
-              return true;
+              },
             },
-          }])),
+            {
+              key: "Enter",
+              run: (view) => submitBlockEnterOnce(view),
+            },
+          ])),
           keymap.of([
             {
               key: "/",
@@ -1294,28 +1331,7 @@
             },
             {
               key: "Enter",
-              run: (view) => {
-                if (completionOpen(view)) return false;
-                // If inside a code fence, insert a newline instead
-                if (isInsideCodeFence(view)) {
-                  const { from } = view.state.selection.main;
-                  view.dispatch({
-                    changes: { from, to: from, insert: "\n" },
-                    selection: EditorSelection.cursor(from + 1),
-                  });
-                  return true;
-                }
-                const content = normalizeTaskPrefix(view.state.doc.toString());
-                if (content !== view.state.doc.toString()) {
-                  view.dispatch({
-                    changes: { from: 0, to: view.state.doc.length, insert: content },
-                  });
-                }
-                const sel = view.state.selection.main;
-                const atStart = sel.from === 0 && sel.to === 0;
-                onEnter?.(block.id, content, block.order_index, atStart);
-                return true;
-              },
+              run: (view) => submitBlockEnterOnce(view),
             },
             {
               key: "Backspace",
@@ -1429,6 +1445,17 @@
             },
           }),
           EditorView.updateListener.of((update) => {
+            if (update.docChanged && !isInsideCodeFence(update.view)) {
+              const prev = update.startState.doc.toString();
+              const next = update.state.doc.toString();
+              const pasted = update.transactions.some(
+                (tr) => tr.isUserEvent("input.paste") || tr.isUserEvent("input.drop"),
+              );
+              if (!pasted && !shiftHeld && !prev.includes("\n") && next.includes("\n")) {
+                submitBlockEnterOnce(update.view);
+                return;
+              }
+            }
             if (!update.view.hasFocus) return;
             rememberEditorPageLinkRange(update.view);
             const sel = update.state.selection.main;
@@ -1479,6 +1506,16 @@
                 window.clearTimeout(blurTeardownTimer);
                 blurTeardownTimer = undefined;
               }
+            },
+            beforeinput: (event, view) => {
+              const inputType = (event as InputEvent).inputType;
+              if (inputType !== "insertLineBreak" && inputType !== "insertParagraph") {
+                return false;
+              }
+              if (shiftHeld || isInsideCodeFence(view)) return false;
+              event.preventDefault();
+              submitBlockEnterOnce(view);
+              return true;
             },
             keydown: (event) => {
               if (event.key === "Shift") shiftHeld = true;
@@ -1617,6 +1654,19 @@
                 return true;
               }
             }
+            // Android IMEs often insert "\n" instead of firing the Enter keymap.
+            if (text.includes("\n") && !shiftHeld && !isInsideCodeFence(view)) {
+              const nl = text.search(/\r?\n/);
+              const before = nl >= 0 ? text.slice(0, nl) : "";
+              if (before) {
+                view.dispatch({
+                  changes: { from, to, insert: before },
+                  selection: EditorSelection.cursor(from + before.length),
+                });
+              }
+              submitBlockEnterOnce(view);
+              return true;
+            }
             return false;
           }),
         ],
@@ -1675,6 +1725,16 @@
           }
         };
         view.contentDOM.addEventListener("keydown", onArrowKey, true);
+        const onEnterKey = (e: KeyboardEvent) => {
+          if (e.key !== "Enter" || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+          if (e.isComposing || e.keyCode === 229) return;
+          if (!editorView || editorView !== view) return;
+          if (completionOpen(view)) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          submitBlockEnterOnce(view);
+        };
+        view.contentDOM.addEventListener("keydown", onEnterKey, true);
       }
 
       // Column-preserving vertical navigation: when this block was reached by
@@ -1744,6 +1804,60 @@
     } catch (e) {
       console.error("Failed to cycle task state:", e);
     }
+  }
+
+  function replaceEditorDoc(next: string, cursor = next.length) {
+    const view = editorView;
+    if (!view) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: next },
+      selection: EditorSelection.cursor(Math.max(0, Math.min(cursor, next.length))),
+    });
+    view.focus();
+  }
+
+  async function handleMobileTodo() {
+    const view = editorView;
+    if (!view) return;
+    const content = view.state.doc.toString();
+    if (isTaskContent(content)) {
+      try {
+        const newContent = await cycleTaskState(block.id);
+        recordPersistedContentChange(pageId, block.id, content, newContent);
+        replaceEditorDoc(newContent);
+      } catch (e) {
+        console.error("Failed to cycle task state:", e);
+      }
+      return;
+    }
+    const next = bulletToTodoContent(content);
+    replaceEditorDoc(next, content.trim() === "" ? next.length : next.length);
+  }
+
+  function handleMobileIndent(direction: "in" | "out") {
+    onIndent?.(block.id, direction, editorView?.state.doc.toString());
+  }
+
+  function handleMobileLink() {
+    const view = editorView;
+    if (!view) return;
+    const { from, to } = view.state.selection.main;
+    const result = wrapPageLinkText(view.state.doc.toString(), from, to);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: result.doc },
+      selection:
+        result.selStart === result.selEnd
+          ? EditorSelection.cursor(result.selStart)
+          : EditorSelection.range(result.selStart, result.selEnd),
+    });
+    view.focus();
+  }
+
+  function handleMobileInsert(text: string, complete = false) {
+    const view = editorView;
+    if (!view) return;
+    insertAtCursor(view, text);
+    if (complete) startCompletion(view);
   }
 
   async function handleTaskComplete() {
@@ -2280,6 +2394,18 @@
   />
 {/if}
 
+{#if isEditing}
+  <MobileEditorBar
+    onTodo={() => void handleMobileTodo()}
+    onOutdent={() => handleMobileIndent("out")}
+    onIndent={() => handleMobileIndent("in")}
+    onLink={handleMobileLink}
+    onTag={() => handleMobileInsert("#")}
+    onSlash={() => handleMobileInsert("/", true)}
+    onHide={() => void stopEditing()}
+  />
+{/if}
+
 <style>
   .block-item {
     display: flex;
@@ -2299,6 +2425,12 @@
   .block-item.editing {
     background: transparent;
     align-items: center;
+  }
+
+  @media (max-width: 640px) {
+    .block-item.editing {
+      scroll-margin-bottom: 96px;
+    }
   }
 
   .block-item.selected {

@@ -487,8 +487,53 @@ pub struct DirListing {
     pub entries: Vec<DirEntry>,
 }
 
+#[cfg(target_os = "android")]
+fn android_places_listing(app: &AppHandle) -> Option<DirListing> {
+    use tauri::Manager;
+    let app_data = app.path().app_data_dir().ok()?;
+    let places = [
+        ("App storage", app_data.clone()),
+        (
+            "Documents",
+            PathBuf::from("/storage/emulated/0/Documents"),
+        ),
+        (
+            "Download",
+            PathBuf::from("/storage/emulated/0/Download"),
+        ),
+        (
+            "Internal storage",
+            PathBuf::from("/storage/emulated/0"),
+        ),
+    ];
+    let mut entries = Vec::new();
+    for (name, p) in places {
+        if p.is_dir() {
+            entries.push(DirEntry {
+                name: name.to_string(),
+                path: p.to_string_lossy().to_string(),
+                is_dir: true,
+            });
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(DirListing {
+        current_path: app_data.to_string_lossy().to_string(),
+        entries,
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_directory(app: AppHandle, path: String) -> Result<DirListing, String> {
+    #[cfg(target_os = "android")]
+    if path.is_empty() {
+        if let Some(listing) = android_places_listing(&app) {
+            return Ok(listing);
+        }
+    }
+
     let dir_path = if path.is_empty() {
         #[cfg(target_os = "android")]
         {
