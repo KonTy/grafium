@@ -1,5 +1,3 @@
-# Learning / Flashcards
-
 A card is an ordinary block written as `Front :: Back` on one physical line. The examples below are real cards; their #Space topic connects them to the subject, not to a universal demo category.
 
 - What bends the path of an object in a simple gravitational orbit? :: Gravity continually changes its direction of motion. #Space

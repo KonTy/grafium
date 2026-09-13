@@ -1,5 +1,3 @@
-# Learning
-
 Turn a question into a short explanation, connect it to something you know, and test what you can recall. Adjust the method to the subject rather than collecting notes for their own sake.
 
 - [[Learning/Reading Notes]] — an original worked example.

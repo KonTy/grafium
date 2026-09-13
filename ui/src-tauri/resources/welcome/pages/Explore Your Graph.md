@@ -1,5 +1,3 @@
-# Explore Your Graph
-
 Open **Graph** to see notes as a network. Switch between **2D** and **3D**: both use the same pages and accepted connections. Date pages and their links are included by default.
 
 ## Read the neighborhoods

@@ -1,5 +1,3 @@
-# Projects
-
 A project needs a purpose, a next action, and somewhere to record what changed. It does not need a complicated system.
 
 The fictional [[Projects/Observatory Night]] connects a plan with learning about the night sky:

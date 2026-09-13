@@ -1,5 +1,3 @@
-# Journal And Calendar
-
 Use **Journal** when the date is the natural place to begin. Write a thought now; link it to a lasting topic when the connection becomes clear.
 
 ## Go to a date—not just today

@@ -1,5 +1,3 @@
-# Writing / Tables
-
 This is an ordinary Markdown table, not a database view. The fictional kit comparison gives you both text and numbers to sort.
 
 | Item | Setup minutes | Packed mass kg | Best use |

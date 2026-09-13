@@ -1,5 +1,3 @@
-# Space / Light
-
 Light takes time to travel. Looking farther away means receiving light that left its source earlier.
 
 A **light-year** is a distance, not a duration: the distance light travels in one year. Distance and travel time are related, but they are not the same kind of quantity.

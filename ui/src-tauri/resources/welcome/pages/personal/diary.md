@@ -1,5 +1,3 @@
-# personal / diary
-
 **Alt+D** inserts a link to this ordinary page. It does not insert today's date or navigate the journal calendar.
 
 Use a running diary when you want a sequence of reflections together:

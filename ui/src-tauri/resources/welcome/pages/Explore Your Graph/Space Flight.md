@@ -1,5 +1,3 @@
-# Explore Your Graph / Space Flight
-
 ## Your first flight
 
 1. Open **Graph** and switch to **3D**.

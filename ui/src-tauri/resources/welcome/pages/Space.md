@@ -1,5 +1,3 @@
-# Space
-
 A small subject with several connected questions: how things move, how light travels, and how we observe it.
 
 - [[Space/Orbits]] — falling while moving sideways.

@@ -1,5 +1,3 @@
-# Projects / Tasks And Dates
-
 Start a block with `TODO`, `DOING`, `DONE`, or `CANCELED` to give it a task state. The sample tasks live in [[Projects/Observatory Night/Plan]], so this guide does not add extra work to your dashboard.
 
 **Scheduled** means when you intend to work on something. **Deadline** means when it is due. Use a task's date controls to pick either date, and clear a date when it no longer applies.

@@ -1,5 +1,3 @@
-# Your Files
-
 Grafium keeps notes as local Markdown and indexes them in SQLite for search, links, tasks, and queries. You can inspect and edit the Markdown with another editor.
 
 - `pages/` holds ordinary pages; slash namespaces map to nested folders.

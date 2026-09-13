@@ -1,5 +1,3 @@
-# Start With One Idea
-
 Click the practice block below and replace the question with something you are curious about. This is ordinary, editable Markdown—not a tour overlay.
 
 - I wonder why a satellite keeps falling without reaching the ground.

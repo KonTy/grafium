@@ -1,5 +1,3 @@
-# Chat And Research
-
 Chat is optional. Set up a provider before expecting AI answers; the core note-taking examples do not require one.
 
 ## Choose sources separately from the provider

@@ -1,5 +1,3 @@
-# Projects / Observatory Night / Plan
-
 These are real tasks. Change a state here, then check [[Projects/Task Dashboard]].
 
 - Preparation

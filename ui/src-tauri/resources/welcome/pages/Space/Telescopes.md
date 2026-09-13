@@ -1,5 +1,3 @@
-# Space / Telescopes
-
 A telescope collects light. Its **aperture** is the diameter of the main light-collecting opening; magnification describes how large the view appears. More magnification is not automatically a more useful view.
 
 - A larger aperture can collect more light under comparable conditions.

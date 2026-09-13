@@ -1,5 +1,3 @@
-# Projects / Observatory Night / Log
-
 An example decision log can be short:
 
 - **Decision:** start with binoculars rather than assembling the full kit.

@@ -1,5 +1,3 @@
-# Writing
-
 Keep a rough thought rough until it needs structure. A page can hold a quick list, a carefully shaped outline, or a long reference note.
 
 - [[Writing/Outline]] — arrange ideas as nested blocks.

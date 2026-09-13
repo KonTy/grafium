@@ -1,5 +1,3 @@
-# Space / Orbits
-
 An orbit is motion under gravity in which an object keeps passing around another body. For a simple circular model, gravity bends the path while sideways motion carries the object onward.
 
 ![Gravity points inward while motion is sideways](../assets/welcome/orbit.svg)

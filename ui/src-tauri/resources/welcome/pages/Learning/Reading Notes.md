@@ -1,5 +1,3 @@
-# Learning / Reading Notes
-
 ## Question
 
 Why does an orbit need both gravity and sideways motion?

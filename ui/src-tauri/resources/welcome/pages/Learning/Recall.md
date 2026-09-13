@@ -1,5 +1,3 @@
-# Learning / Recall
-
 Try answering before following the links:
 
 - What bends an orbiting object's path?

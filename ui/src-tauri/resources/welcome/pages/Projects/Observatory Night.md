@@ -1,5 +1,3 @@
-# Projects / Observatory Night
-
 **Purpose:** design a relaxed, fictional evening of sky watching with a small kit and a short list of questions.
 
 This is a planning example, not an event you have been signed up for. No dates or reminders have been assigned.

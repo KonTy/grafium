@@ -1,5 +1,3 @@
-# Writing / Find It Again
-
 ## A name, not a filing decision
 
 Pages give ideas a reusable address. Press **Ctrl/Cmd+K** for global search: search for **sideways motion** to find a block by its content, or **Orbits** to jump by title. **Ctrl/Cmd+Shift+K** searches within the current page. Full-text search indexes your graph; it is separate from optional AI chat.

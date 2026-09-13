@@ -1,5 +1,3 @@
-# Space / Orbits / Gravity
-
 In a simple two-body model, gravitational acceleration points toward the other body. For a circular orbit it changes the direction of velocity without changing its speed.
 
 $$

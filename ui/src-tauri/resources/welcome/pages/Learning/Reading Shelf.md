@@ -1,8 +1,6 @@
 collection:: reading-list
 
-# Learning / Reading Shelf
-
-This is a real collection: an ordinary page with an ordered set of linked blocks. Its **Reading List** panel shows the members on this page. They point to existing notes; they do not move or duplicate those notes.
+This is a real collection: an ordinary page with an ordered set of linked blocks. Its collection panel shows the members on this page. They point to existing notes; they do not move or duplicate those notes.
 
 - [[Learning/Reading Notes]] — begin with a question and a short explanation.
 - [[Space/Orbits]] — inspect a concrete example.

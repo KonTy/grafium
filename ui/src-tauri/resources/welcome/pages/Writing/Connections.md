@@ -1,5 +1,3 @@
-# Writing / Connections
-
 A page link gives an idea another entrance. Type `[[Space/Orbits]]` to link that page; its linked references show where it was mentioned. Tags also connect blocks to topic pages: this note uses #Writing.
 
 ## One precise block

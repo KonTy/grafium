@@ -1,5 +1,3 @@
-# Create Your Own Graph
-
 A graph is a folder-backed workspace. This Welcome Graph is one workspace; your own graph can begin empty and grow around your interests.
 
 1. Open the graph menu.

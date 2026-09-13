@@ -1,5 +1,3 @@
-# Welcome To Grafium
-
 **Start with one idea. Give it somewhere to grow.**
 
 A note can become a plan, a question can become a flashcard, and a few links can become a map. This Welcome Graph is an editable playground, separate from any graph you create.

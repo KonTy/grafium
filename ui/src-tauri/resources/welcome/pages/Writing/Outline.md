@@ -1,5 +1,3 @@
-# Writing / Outline
-
 An outline is a draft you can rearrange. Indent supporting detail under the idea it explains, collapse a branch to focus, and reorder blocks when the story changes.
 
 - A short explanation of an orbit

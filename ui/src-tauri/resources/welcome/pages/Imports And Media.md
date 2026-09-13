@@ -1,5 +1,3 @@
-# Imports And Media
-
 Bring in material when you have a reason to use it. This graph ships only Markdown and one original SVG; no book, audio clip, video, or AI model is silently downloaded.
 
 ## Books and documents

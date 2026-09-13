@@ -1,5 +1,3 @@
-# Projects / Task Dashboard
-
 This table is a live read-only query of the graph's index. It starts with three open tasks from [[Projects/Observatory Night/Plan]].
 
 {{query SELECT p.title AS page, t.state AS state, b.content AS task, t.scheduled_date AS scheduled, t.deadline_date AS deadline FROM tasks t JOIN blocks b ON b.id = t.block_id JOIN pages p ON p.id = b.page_id WHERE t.state IN ('TODO', 'DOING') AND p.title = 'Projects/Observatory Night/Plan' AND p.is_journal = 0 ORDER BY t.state, b.content}}
