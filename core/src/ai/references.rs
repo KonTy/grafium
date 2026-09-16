@@ -954,24 +954,12 @@ pub async fn generate_page_summary(
             )
             .await?;
 
-            let cleaned = strip_reasoning_block(plain_response.trim()).trim();
-            let cleaned = cleaned
-                .strip_prefix("<think>")
-                .or_else(|| cleaned.strip_prefix("<thinking>"))
-                .map(str::trim_start)
-                .unwrap_or(cleaned);
-            if is_substantive_summary_text(cleaned) {
-                return Ok(PageSummary {
-                    title_answer: None,
-                    topics: vec![TopicSummary {
-                        topic: "Summary".to_string(),
-                        summary: cleaned.to_string(),
-                        tags: Vec::new(),
-                    }],
-                });
-            }
+            let plain_error = match parse_summary_response(&plain_response) {
+                Ok(summary) => return Ok(summary),
+                Err(error) => error,
+            };
 
-            // Both structured and plain prompts came back empty (usually
+            // Both structured and plain prompts came back unusable (often
             // just a bare `<think>` and EOS). Some reasoning-mode models
             // get stuck in a fully deterministic "emit `<think>` → stop"
             // loop with a low temperature and the `/no_think` directive —
@@ -989,8 +977,7 @@ pub async fn generate_page_summary(
             );
             tracing::debug!(
                 target: "grafium_core::ai::references",
-                "plain summary also empty (response={:?}), attempting last-resort retry",
-                super::truncate_to_char_boundary(plain_response.trim(), 200),
+                "plain summary also invalid ({plain_error}), attempting last-resort retry",
             );
             let last_resort_options = CompletionOptions {
                 // Deliberately much lower than `summary_options`: this
@@ -1022,22 +1009,10 @@ pub async fn generate_page_summary(
                 cancel,
             )
             .await?;
-            let last_cleaned = strip_reasoning_block(last_resort_response.trim()).trim();
-            let last_cleaned = last_cleaned
-                .strip_prefix("<think>")
-                .or_else(|| last_cleaned.strip_prefix("<thinking>"))
-                .map(str::trim_start)
-                .unwrap_or(last_cleaned);
-            if is_substantive_summary_text(last_cleaned) {
-                return Ok(PageSummary {
-                    title_answer: None,
-                    topics: vec![TopicSummary {
-                        topic: "Summary".to_string(),
-                        summary: last_cleaned.to_string(),
-                        tags: Vec::new(),
-                    }],
-                });
-            }
+            let last_error = match parse_summary_response(&last_resort_response) {
+                Ok(summary) => return Ok(summary),
+                Err(error) => error,
+            };
 
             // Three attempts all came back with nothing usable. Rewrap
             // the original error with the actionable "which model is
@@ -1051,15 +1026,10 @@ pub async fn generate_page_summary(
             Err(CoreError::Parse(format!(
                 "The currently loaded model \"{model_name}\"{backend} refused to \
                  produce a usable summary after three attempts (structured, plain-text, \
-                 and last-resort). Its responses were either an unclosed `<think>` \
-                 reasoning tag or a fragmentary preamble (\"Here\", \"Sure, here's a \
-                 summary:\") and then EOS — usually a sign the model is a reasoning-mode \
-                 or creative-writing fine-tune whose training got damaged during \
-                 aggressive (IQ2_M / IQ3_XXS / etc.) quantization. Open Settings → Local \
-                 LLM and pick a different model — a plain instruction-tuned chat model \
-                 like Qwen3-4B-Instruct, Llama-3.1-8B-Instruct, or Mistral-7B-Instruct \
-                 is a safe bet; avoid IQ2/IQ3 quantizations of \"Fable\", \"Fusion\", or \
-                 other creative-writing fine-tunes. Original parse error: {structured_error}"
+                 and last-resort). Responses contained invalid or unrecognized JSON, \
+                 empty reasoning tags, or fragmentary text rather than a usable summary. \
+                 Retry, or choose an instruction-tuned chat model in Settings. \
+                 Original parse error: {structured_error}. Last parse error: {last_error}"
             )))
         }
     }
@@ -1652,7 +1622,42 @@ pub(crate) fn parse_summary_json_object(
     json_str: &str,
 ) -> std::result::Result<StructuredSummaryJson, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(json_str)?;
-    Ok(summary_from_json_value(&value))
+    let parsed = summary_from_json_value(&value);
+    if parsed.title_answer.is_none() && parsed.topics.is_empty() {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "JSON-shaped page summary response contained no recognized summary text",
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Only treat JSON-shaped output as an envelope; mathematical braces in a
+/// normal paragraph are not JSON. A broken envelope must never become body text.
+pub(crate) fn parse_optional_summary_json(response: &str) -> Result<Option<StructuredSummaryJson>> {
+    let text = response.trim();
+    let candidate = text
+        .strip_prefix("```")
+        .and_then(|fenced| fenced.split_once('\n').map(|(_, body)| body.trim_start()))
+        .unwrap_or(text);
+    let json_fence = text.lines().any(|line| {
+        line.trim().strip_prefix("```").is_some_and(|label| label.trim().eq_ignore_ascii_case("json"))
+    });
+    let json_key = text.match_indices('{')
+        .any(|(offset, _)| text[offset + 1..].trim_start().starts_with('"'));
+    let json_array = candidate.strip_prefix('[').is_some_and(|rest| {
+        rest.trim_start().starts_with(['{', '[', '"', ']'])
+    });
+    if !json_fence && !json_key && !json_array && !candidate.starts_with('{') {
+        return Ok(None);
+    }
+    if candidate.starts_with('[') {
+        return Err(summary_parse_error("expected a summary JSON object, not an array", text));
+    }
+    let json = extract_json_object(text)
+        .map_err(|_| summary_parse_error("missing or unterminated summary JSON object", text))?;
+    parse_summary_json_object(json)
+        .map(Some)
+        .map_err(|error| summary_parse_error(&format!("invalid page summary JSON: {error}"), text))
 }
 
 fn summary_from_json_value(value: &serde_json::Value) -> StructuredSummaryJson {
@@ -1848,10 +1853,7 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
     // `{title_answer, topics: [...]}`, but user-edited prompts and smaller
     // local models sometimes return a fenced object with top-level topic keys
     // instead. Normalize both before deciding whether to fall back to plain text.
-    if let Ok(json_str) = extract_json_object(trimmed) {
-        let parsed = parse_summary_json_object(json_str).map_err(|error| {
-            summary_parse_error(&format!("invalid page summary JSON: {error}"), trimmed)
-        })?;
+    if let Some(parsed) = parse_optional_summary_json(trimmed)? {
         let topics: Vec<TopicSummary> = parsed
             .topics
             .into_iter()
@@ -2610,6 +2612,62 @@ Notes after the JSON."#;
 
         assert!(error.contains("JSON-shaped page summary response"));
         assert!(error.contains("Response snippet"));
+    }
+
+    #[test]
+    fn summary_json_does_not_leak_truncated_envelopes() {
+        for response in [
+            r#"{"topics": [{"topic": "Sleep", "summary": "The selected passage describes several factors that affect sleep quality."#,
+            "```json\n{\"topics\": [{\"summary\": \"The selected passage describes several factors that affect sleep quality.",
+            "Here is the summary:\n{\"sleep\": {\"summary\": \"The selected passage describes several factors that affect sleep quality.",
+            "[\"The selected passage describes several factors that affect sleep quality.\"]",
+        ] {
+            assert!(parse_summary_response(response).is_err(), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_json_normalizes_each_retry_instead_of_displaying_raw_json() -> Result<()> {
+        let expected = "The selected passage describes several factors that affect sleep quality.";
+        let json = format!(r#"{{"sleep": {{"summary": "{expected}", "tags": ["sleep"]}}}}"#);
+        for failed_attempts in [1, 2] {
+            let mut responses = vec!["<think>".to_string(); failed_attempts];
+            responses.push(json.clone());
+            let (llm, state) = MockLlm::new(responses);
+            let summary = generate_page_summary(
+                "Sleep", expected, &llm, &mut |_| {},
+                &crate::cancel::CancellationToken::disabled(),
+            ).await?;
+            assert_eq!(summary.topics[0].summary, expected);
+            assert_eq!(summary.topics[0].tags[0].term, "sleep");
+            assert_eq!(state.lock().unwrap().calls, failed_attempts + 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn summary_json_rejects_invalid_json_on_every_attempt() {
+        let response = r#"{"topics": [{"summary": "The selected passage describes several factors that affect sleep quality."#;
+        let (llm, state) = MockLlm::new([response.to_string(), response.to_string(), response.to_string()]);
+        assert!(generate_page_summary(
+            "Sleep", "Synthetic source content for the summary.", &llm, &mut |_| {},
+            &crate::cancel::CancellationToken::disabled(),
+        ).await.is_err());
+        assert_eq!(state.lock().unwrap().calls, 3);
+    }
+
+    #[test]
+    fn summary_json_rejects_empty_or_unrecognized_structures_for_all_callers() {
+        for response in [r#"{"topics":null}"#, r#"{"metadata":{"model":"test"}}"#, "[]"] {
+            assert!(parse_summary_json_object(response).is_err(), "{response}");
+        }
+    }
+
+    #[test]
+    fn summary_json_keeps_ordinary_text_with_mathematical_braces() -> Result<()> {
+        let text = "The set {a, b, c} contains the three possible outcomes described in this passage.";
+        assert_eq!(parse_summary_response(text)?.topics[0].summary, text);
+        Ok(())
     }
 
     #[test]

@@ -63,7 +63,7 @@ use crate::ai::references::{
 };
 use crate::ai::traits::{ChatMessage, LlmProvider};
 use crate::ai::web_research::{
-    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries,
+    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries, parse_synthesis_text_fallback,
     rerank_research_candidates, research_domain_instruction, truncate, Citation, ResearchTopic,
     WebResearchResult,
 };
@@ -748,21 +748,7 @@ sources. Return only the user-facing answer text.",
                 cancel,
             )
             .await?;
-        let answer = strip_reasoning(&raw).trim().to_string();
-        if answer.is_empty() {
-            return Err(CoreError::Parse(
-                "research synthesis JSON failed and fallback answer was empty".to_string(),
-            ));
-        }
-
-        Ok((
-            None,
-            vec![ResearchTopic {
-                topic: "Research synthesis".to_string(),
-                summary: answer,
-                tags: Vec::new(),
-            }],
-        ))
+        parse_synthesis_text_fallback(&raw, "Research synthesis")
     }
 
     /// Shared LLM call: the user-editable prompt for the step is the *system*
@@ -938,6 +924,27 @@ mod tests {
                 assert_eq!(phases, vec!["planning"]);
                 assert!(llm.requests.lock().unwrap().is_empty());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_json_is_normalized_in_deep_synthesis_and_its_retry() {
+        let json = r#"```json
+{"sleep": {"summary": "The source reports improved sleep quality after the intervention[4].", "tags": ["sleep"]}}
+```"#;
+        for retry in [false, true] {
+            let responses = if retry { vec![r#"{"topics":null}"#, json] } else { vec![json] };
+            let llm = StubLlm::new(responses);
+            let browser = MockBrowserDriver { pages: HashMap::new() };
+            let config = config_with(vec![], 1);
+            let engine = DeepResearchEngine::new(&llm, &browser, &config);
+            let (_, topics) = engine.synthesize(
+                "What does the source say about sleep?",
+                &[(4, "Synthetic source about sleep.".into())], None,
+            ).await.unwrap();
+            assert_eq!(topics[0].topic, "sleep");
+            assert_eq!(topics[0].summary, "The source reports improved sleep quality after the intervention[4].");
+            assert_eq!(topics[0].tags[0].term, "sleep");
         }
     }
 
