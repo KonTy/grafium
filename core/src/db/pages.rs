@@ -1,10 +1,19 @@
 use super::Database;
-use crate::error::Result;
-use crate::models::Page;
-use chrono::{Local, TimeZone, Utc};
+use crate::error::{CoreError, Result};
+use crate::models::{Page, PageSummary};
+use chrono::{Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+const JOURNAL_NOTE_DATES_SQL: &str = "
+    SELECT p.title FROM pages p
+    WHERE p.is_journal = 1 AND p.title >= ?1 AND p.title < ?2
+      AND EXISTS (
+        SELECT 1 FROM blocks b WHERE b.page_id = p.id
+          AND trim(b.content, char(9) || char(10) || char(13) || char(160) || ' ') <> ''
+      )
+    ORDER BY p.title";
 
 fn local_day_from_timestamp(timestamp: i64) -> String {
     Local
@@ -20,6 +29,10 @@ fn local_day_from_timestamp(timestamp: i64) -> String {
 }
 
 fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Result<Page> {
+    let title = crate::parser::normalize_page_title(title);
+    if title.is_empty() {
+        return Err(CoreError::Other("Page title cannot be empty".into()));
+    }
     let now = Utc::now().timestamp_millis();
     let id = Uuid::new_v4().to_string();
     let properties = serde_json::json!({});
@@ -38,6 +51,31 @@ fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Resu
         is_journal,
         properties,
     })
+}
+
+fn find_page_by_name_on_conn(conn: &Connection, title: &str) -> Result<Option<Page>> {
+    let ids: Vec<String> = conn
+        .prepare("SELECT DISTINCT page_id FROM entity_names WHERE name_key = entity_key(?1) LIMIT 2")?
+        .query_map([title], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let id = match ids.as_slice() {
+        [] => return Ok(None),
+        [id] => id,
+        _ => return Err(CoreError::Other(format!(
+            "The page name '{title}' is ambiguous: it matches more than one title or approved alias."
+        ))),
+    };
+    Ok(Some(conn.query_row(
+        "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+         FROM pages WHERE id = ?1",
+        [id],
+        |row| Ok(Page {
+            id: row.get(0)?, title: row.get(1)?, file_path: row.get(2)?,
+            created_at: row.get(3)?, updated_at: row.get(4)?,
+            is_journal: row.get::<_, i32>(5)? != 0,
+            properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+        }),
+    )?))
 }
 
 fn get_page_by_title_ci_on_conn(conn: &Connection, title: &str) -> Result<Page> {
@@ -78,6 +116,14 @@ impl Database {
 
     pub fn get_page_by_id(&self, id: &str) -> Result<Page> {
         let conn = self.conn()?;
+        self.get_page_by_id_in_connection(&conn, id)
+    }
+
+    pub(crate) fn get_page_by_id_in_connection(
+        &self,
+        conn: &Connection,
+        id: &str,
+    ) -> Result<Page> {
         let page = conn.query_row(
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE id = ?1",
             params![id],
@@ -170,6 +216,31 @@ impl Database {
         get_page_by_title_ci_on_conn(&conn, title)
     }
 
+    /// Authoritative name lookup for links and navigation. Only a genuinely
+    /// absent name returns None; ambiguity and database failures remain errors.
+    /// Unlike title-only lookup (also used by rename/merge), approved aliases
+    /// and normalized hierarchy spelling are included.
+    pub fn find_page_by_name(&self, title: &str) -> Result<Option<Page>> {
+        let conn = self.conn()?;
+        find_page_by_name_on_conn(&conn, title)
+    }
+
+    pub fn list_page_summaries(&self) -> Result<Vec<PageSummary>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, is_journal FROM pages
+             ORDER BY title COLLATE NOCASE, title, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PageSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                is_journal: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn search_page_titles(&self, query: &str, limit: i64) -> Result<Vec<Page>> {
         if query.trim().is_empty() || limit <= 0 {
             return Ok(Vec::new());
@@ -236,10 +307,11 @@ impl Database {
     }
 
     pub fn get_or_create_page(&self, title: &str, is_journal: bool) -> Result<Page> {
-        match self.get_page_by_title_ci(title) {
-            Ok(page) => Ok(page),
-            Err(_) => self.create_page(title, is_journal),
-        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let page = self.get_or_create_page_in_connection(&tx, title, is_journal)?;
+        tx.commit()?;
+        Ok(page)
     }
 
     pub(crate) fn get_or_create_page_in_connection(
@@ -248,9 +320,9 @@ impl Database {
         title: &str,
         is_journal: bool,
     ) -> Result<Page> {
-        match get_page_by_title_ci_on_conn(conn, title) {
-            Ok(page) => Ok(page),
-            Err(_) => create_page_on_conn(conn, title, is_journal),
+        match find_page_by_name_on_conn(conn, title)? {
+            Some(page) => Ok(page),
+            None => create_page_on_conn(conn, title, is_journal),
         }
     }
 
@@ -439,6 +511,25 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
+    }
+
+    pub fn list_journal_note_dates(&self, year: i32, month: u32) -> Result<Vec<String>> {
+        if !(1..=9999).contains(&year) || NaiveDate::from_ymd_opt(year, month, 1).is_none() {
+            return Err(CoreError::Parse("Invalid calendar month".into()));
+        }
+        // Canonical journal titles are ISO dates; these bounds use the existing
+        // journal title index and never inspect another month's blocks.
+        let start = format!("{year:04}-{month:02}-01");
+        let end = format!("{year:04}-{month:02}-32");
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached(JOURNAL_NOTE_DATES_SQL)?;
+        let dates = stmt
+            .query_map(params![start, end], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(dates
+            .into_iter()
+            .filter(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+            .collect())
     }
 
     pub fn update_page(
@@ -813,6 +904,116 @@ mod tests {
     use super::Database;
     use crate::error::Result;
     use chrono::TimeZone;
+
+    #[test]
+    fn page_summaries_include_all_pages_journals_and_unwritten_link_targets() -> Result<()> {
+        let db = Database::in_memory()?;
+        assert!(db.list_page_summaries()?.is_empty());
+        let journal = db.create_page("2026-09-13", true)?;
+        let target = db.create_page("Projects/Unwritten target", false)?;
+        for index in 0..105 {
+            db.create_page(&format!("Topic {index:03}"), false)?;
+        }
+        let rows = db.list_page_summaries()?;
+        assert_eq!(rows.len(), 107, "not limited to the usual first 100 pages");
+        assert_eq!(rows[0].id, journal.id);
+        assert!(rows[0].is_journal);
+        assert_eq!(rows[1].id, target.id);
+        assert!(!rows[1].is_journal);
+        assert_eq!(rows.last().unwrap().title, "Topic 104");
+        Ok(())
+    }
+
+    #[test]
+    fn journal_note_dates_include_only_real_notes_in_the_requested_month() -> Result<()> {
+        let db = Database::in_memory()?;
+        for (title, journal, contents) in [
+            ("2024-02-01", true, vec![]),
+            ("2024-02-02", true, vec![" \t\r\n\u{a0} "]),
+            ("2024-02-03", false, vec!["A regular page, not a journal"]),
+            (
+                "2024-02-04",
+                true,
+                vec!["", "A nested or later note", "Another note"],
+            ),
+            ("2024-02-29", true, vec!["TODO Observe the leap day"]),
+            ("2024-02-30", true, vec!["An invalid date"]),
+            ("2024-03-01", true, vec!["A different month"]),
+            ("2023-02-15", true, vec!["A different year"]),
+        ] {
+            let page = db.create_page(title, journal)?;
+            for (index, content) in (0..).zip(contents) {
+                db.create_block(
+                    &page.id,
+                    None,
+                    index,
+                    content,
+                    crate::models::BlockType::Text,
+                    serde_json::json!({}),
+                )?;
+            }
+        }
+        assert_eq!(
+            db.list_journal_note_dates(2024, 2)?,
+            ["2024-02-04", "2024-02-29"]
+        );
+        assert!(db.list_journal_note_dates(2025, 2)?.is_empty());
+        for (year, month) in [(0, 2), (10000, 1), (2024, 0), (2024, 13)] {
+            assert!(db.list_journal_note_dates(year, month).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn journal_note_dates_follow_edits_and_deletion_without_a_stale_cache() -> Result<()> {
+        let db = Database::in_memory()?;
+        let page = db.create_page("2026-09-13", true)?;
+        let block = db.create_block(
+            &page.id,
+            None,
+            0,
+            "",
+            crate::models::BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        assert!(db.list_journal_note_dates(2026, 9)?.is_empty());
+        db.update_block(&block.id, "New note", None)?;
+        assert_eq!(db.list_journal_note_dates(2026, 9)?, ["2026-09-13"]);
+        db.delete_block(&block.id)?;
+        assert!(db.list_journal_note_dates(2026, 9)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn journal_note_dates_use_bounded_page_and_block_index_searches() -> Result<()> {
+        let db = Database::in_memory()?;
+        let conn = db.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::JOURNAL_NOTE_DATES_SQL
+        ))?;
+        let plan = stmt
+            .query_map(["2026-09-01", "2026-09-32"], |row| row.get::<_, String>(3))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert!(
+            plan.iter().any(
+                |step| step.contains("SEARCH p USING INDEX idx_pages_journal_title")
+                    && step.contains("title>?")
+                    && step.contains("title<?")
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH b USING INDEX idx_blocks_page")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN ")),
+            "{plan:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn get_page_titles_batches_ids_and_omits_missing_pages() -> Result<()> {

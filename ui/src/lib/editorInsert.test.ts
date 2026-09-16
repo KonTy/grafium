@@ -4,8 +4,8 @@ import {
   dispatchEditPageEnd,
   formatLocalClockTime,
   peekPendingEditPageEnd,
-  PERSONAL_JOURNAL_LINK,
-  personalJournalSnippet,
+  PERSONAL_DIARY_LINK,
+  personalDiarySnippet,
   timeStampSnippet,
 } from "./editorInsert";
 
@@ -21,9 +21,9 @@ describe("snippets", () => {
     expect(timeStampSnippet(new Date(2026, 0, 2, 14, 7))).toBe("14:07\n");
   });
 
-  it("inserts the personal journal wiki link then a newline", () => {
-    expect(personalJournalSnippet()).toBe("[[personal/journal]]\n");
-    expect(PERSONAL_JOURNAL_LINK).toBe("[[personal/journal]]");
+  it("inserts the personal diary wiki link then a newline", () => {
+    expect(personalDiarySnippet()).toBe("[[personal/diary]]\n");
+    expect(PERSONAL_DIARY_LINK).toBe("[[personal/diary]]");
   });
 });
 

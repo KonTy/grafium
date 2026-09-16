@@ -90,6 +90,17 @@ describe("theme metadata", () => {
     expect(oled).toBeDefined();
     expect(oled!.colors.bgPrimary.toLowerCase()).toBe("#000000");
   });
+
+  it("includes GitHub Light and GitHub Dark", () => {
+    const github = themes.find((t) => t.id === "github");
+    const githubDark = themes.find((t) => t.id === "github-dark");
+    expect(github).toBeDefined();
+    expect(github!.colors.isLight).toBe(true);
+    expect(github!.colors.bgPrimary.toLowerCase()).toBe("#ffffff");
+    expect(githubDark).toBeDefined();
+    expect(githubDark!.colors.isLight).toBe(false);
+    expect(githubDark!.colors.bgPrimary.toLowerCase()).toBe("#0d1117");
+  });
 });
 
 // ── Guard 1: every accent is AA (>=4.5:1) on every surface that hosts its text
@@ -150,6 +161,22 @@ describe("primary button foregrounds meet WCAG AA", () => {
         ratio,
         `${theme.id} --btn-primary-fg (${c.btnPrimaryFg}) on --btn-primary-bg (${c.btnPrimaryBg}) = ${ratio.toFixed(2)}:1`
       ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+    });
+  }
+});
+
+describe("assistant accordion headers and boundaries stay distinct in every theme", () => {
+  for (const theme of themes) {
+    it(`${theme.id}: readable titles, markers and enclosing borders`, () => {
+      const c = theme.colors;
+      const border = mixSrgb(c.textPrimary, c.bgPrimary, 75);
+      for (const tint of [0, 8, 14]) {
+        const surface = mixSrgb(c.accentBlue, c.bgPrimary, tint);
+        expect(contrastRatio(c.textPrimary, surface), `title on ${tint}% tint`).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(c.accentBlue, surface), `marker on ${tint}% tint`).toBeGreaterThanOrEqual(3);
+        expect(contrastRatio(border, surface), `border on ${tint}% tint`).toBeGreaterThanOrEqual(3);
+      }
+      expect(contrastRatio(border, c.bgSecondary), "frame against surrounding panel").toBeGreaterThanOrEqual(3);
     });
   }
 });

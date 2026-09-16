@@ -3,6 +3,14 @@ import { renderBlock, assetBaseDirFor } from "./markdown";
 
 const BOOK = "pages/mybooks/coolbook";
 
+function renderedImage(markdown: string, baseDir: string): HTMLImageElement {
+  const host = document.createElement("div");
+  host.innerHTML = renderBlock(markdown, baseDir);
+  const image = host.querySelector("img");
+  expect(image).not.toBeNull();
+  return image!;
+}
+
 /**
  * Two reference shapes resolve differently, deliberately. The historical
  * `../assets/…` form always meant "from the graph root" whatever the page's
@@ -35,10 +43,12 @@ describe("asset path resolution", () => {
   it("treats ./assets the same as plain assets", () => {
     // `./x` and `x` mean the same thing in every markdown tool. Classifying
     // the dot-slash form as root-relative made them resolve to different files.
-    const plain = renderBlock("![a](assets/cover.png)", BOOK);
-    const dotted = renderBlock("![a](./assets/cover.png)", BOOK);
-    expect(dotted).toContain(`${BOOK}/assets/cover.png`);
-    expect(dotted).toBe(plain);
+    const plain = renderedImage("![a](assets/cover.png)", BOOK);
+    const dotted = renderedImage("![a](./assets/cover.png)", BOOK);
+    expect(dotted.getAttribute("data-src")).toBe(`grafium-asset://localhost/${BOOK}/assets/cover.png`);
+    expect(dotted.getAttribute("data-src")).toBe(plain.getAttribute("data-src"));
+    expect(plain.getAttribute("data-markdown-src")).toBe("assets/cover.png");
+    expect(dotted.getAttribute("data-markdown-src")).toBe("./assets/cover.png");
   });
 
   it("falls back to the graph root when no page context is given", () => {
@@ -51,9 +61,10 @@ describe("asset path resolution", () => {
     // Asserting only "no .. survives" passes for any implementation that
     // strips dots, including one that then happily requests the wrong file.
     // Pin the exact resolved path instead.
-    const html = renderBlock("![x](../../../../etc/passwd)", "pages/deep");
-    expect(html).toContain("grafium-asset://localhost/etc/passwd");
-    expect(html).not.toContain("..");
+    const image = renderedImage("![x](../../../../etc/passwd)", "pages/deep");
+    expect(image.getAttribute("data-src")).toBe("grafium-asset://localhost/etc/passwd");
+    expect(image.hasAttribute("src")).toBe(false);
+    expect(image.getAttribute("data-markdown-src")).toBe("../../../../etc/passwd");
   });
 
   it("keeps a mid-path .. inside the page directory for the backend to reject", () => {

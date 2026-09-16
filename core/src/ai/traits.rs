@@ -22,7 +22,8 @@ pub struct CompletionOptions {
     /// stops the token loop and returns what it has so far, so a slow local
     /// generation can be aborted from the UI. Skipped for (de)serialization —
     /// it's a live in-process handle, never part of persisted config — and
-    /// ignored by remote providers, which return in one shot anyway.
+    /// ignored by remote providers, which return in one shot anyway. Native
+    /// prompt counting also checks this flag while waiting for its worker.
     #[serde(skip)]
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -144,6 +145,17 @@ pub trait LlmProvider: Send + Sync {
     /// callers fall back to a conservative default.
     fn context_window(&self) -> Option<usize> {
         None
+    }
+
+    /// Count the exact rendered prompt, including template and special tokens,
+    /// without generating an answer. `None` means no tokenizer is available;
+    /// tokenizer, transport, and cancellation errors must not become `None`.
+    fn count_prompt_tokens<'a>(
+        &'a self,
+        _messages: &'a [ChatMessage],
+        _options: &'a CompletionOptions,
+    ) -> BoxFuture<'a, Result<Option<usize>>> {
+        Box::pin(async { Ok(None) })
     }
 
     /// Whether this provider's model is a "reasoning" model that emits a
@@ -311,5 +323,42 @@ pub trait VectorStore: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<(String, String)>>> {
         let _ = graph_id;
         Box::pin(async move { Ok(Vec::new()) })
+    }
+}
+
+#[cfg(test)]
+mod prompt_count_tests {
+    use super::*;
+
+    struct ProviderWithoutTokenizer;
+
+    impl LlmProvider for ProviderWithoutTokenizer {
+        fn complete<'a>(
+            &'a self,
+            _messages: &'a [ChatMessage],
+            _options: &'a CompletionOptions,
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { panic!("counting must not generate") })
+        }
+
+        fn name(&self) -> &str {
+            "synthetic"
+        }
+
+        fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+            Box::pin(async { panic!("counting must not probe a remote provider") })
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_without_tokenizer_reports_none() {
+        let provider: &dyn LlmProvider = &ProviderWithoutTokenizer;
+        assert_eq!(
+            provider
+                .count_prompt_tokens(&[], &CompletionOptions::default())
+                .await
+                .unwrap(),
+            None
+        );
     }
 }

@@ -41,6 +41,7 @@ export interface SourceBlock {
   contentSegments: SourceContentSegment[];
   propertyLines: SourcePropertyLine[];
   idLine: SourcePropertyLine | null;
+  readingNote?: { storage: "inline" | "file"; footnoteLabel: string | null; opening?: string };
 }
 
 export interface PageSourceMap {
@@ -48,6 +49,7 @@ export interface PageSourceMap {
   lines: SourceLine[];
   blocks: SourceBlock[];
   idLines: SourcePropertyLine[];
+  hiddenRanges?: SourceRange[];
 }
 
 export interface SourceReplacement {
@@ -62,6 +64,7 @@ interface BlockStart {
   indent: string;
   contentColumn: number;
   content: string;
+  readingNote?: ManagedNoteRange;
 }
 
 const BLOCK_START_RE = /^([ \t]*)-(?:[ \t](.*)|$)/;
@@ -173,9 +176,39 @@ export function sourceRangesIntersect(aFrom: number, aTo: number, bFrom: number,
 
 export function parsePageSourceMap(source: string): PageSourceMap {
   const lines = splitSourceLines(source);
+  const legacy = legacyReadingNoteBody(source);
+  if (legacy) {
+    const firstLine = lines.findIndex((line) => line.from === legacy.bodyFrom);
+    const segments = lines.slice(firstLine).map((line) => ({
+      line, from: line.from, to: line.to, contentFrom: line.from - legacy.bodyFrom,
+      contentTo: line.to - legacy.bodyFrom, text: line.text,
+    }));
+    const line = lines[firstLine];
+    return {
+      source, lines, idLines: [], hiddenRanges: [{ from: 0, to: legacy.bodyFrom }],
+      blocks: [{
+        id: legacy.metadata.bodyBlockId, depth: 0, indent: "", line,
+        ownFrom: legacy.bodyFrom, ownTo: source.length, subtreeFrom: legacy.bodyFrom, subtreeTo: source.length,
+        contentFrom: legacy.bodyFrom, contentTo: source.length, previewFrom: legacy.bodyFrom, previewTo: source.length,
+        content: source.slice(legacy.bodyFrom), contentSegments: segments, propertyLines: [], idLine: null,
+        readingNote: { storage: "file", footnoteLabel: null },
+      }],
+    };
+  }
+  const notes = managedReadingNoteRanges(source);
   const starts: BlockStart[] = [];
+  let managedIndex = 0;
 
   for (const line of lines) {
+    while (notes[managedIndex] && notes[managedIndex].lastLine < line.index) managedIndex++;
+    const candidate = notes[managedIndex];
+    const managed = candidate && line.index >= candidate.firstLine ? candidate : null;
+    if (managed) {
+      if (line.index === managed.firstLine) starts.push({
+        lineIndex: line.index, depth: 0, indent: "", contentColumn: 0, content: "", readingNote: managed,
+      });
+      continue;
+    }
     const start = matchSourceBlockStart(line.text);
     if (!start) continue;
     starts.push({
@@ -204,6 +237,29 @@ export function parsePageSourceMap(source: string): PageSourceMap {
   for (let startIndex = 0; startIndex < starts.length; startIndex += 1) {
     const start = starts[startIndex];
     const line = lines[start.lineIndex];
+    if (start.readingNote) {
+      const note = start.readingNote;
+      const segments: SourceContentSegment[] = [];
+      let content = "";
+      for (let index = note.bodyFirstLine; index <= note.bodyLastLine; index++) {
+        const bodyLine = lines[index];
+        const prefix = index === note.bodyFirstLine ? note.firstPrefix.length : 4;
+        if (segments.length) content += "\n";
+        const contentFrom = content.length;
+        const text = bodyLine.text.slice(prefix).replace(/\r$/, "");
+        content += text;
+        segments.push({ line: bodyLine, from: bodyLine.from + prefix, to: bodyLine.from + prefix + text.length, contentFrom, contentTo: content.length, text });
+      }
+      blocks.push({
+        id: note.metadata.bodyBlockId, depth: 0, indent: "", line,
+        ownFrom: note.from, ownTo: lines[note.lastLine].to, subtreeFrom: note.from, subtreeTo: lines[note.lastLine].to,
+        contentFrom: segments[0].from, contentTo: segments.at(-1)!.to,
+        previewFrom: note.from, previewTo: lines[note.lastLine].to, content,
+        contentSegments: segments, propertyLines: [], idLine: null,
+        readingNote: { storage: "inline", footnoteLabel: note.metadata.footnoteLabel!, opening: note.opening },
+      });
+      continue;
+    }
     const nextStart = starts[startIndex + 1];
     const nextStartLineIndex = nextStart?.lineIndex ?? lines.length;
     const nextPeerStart = starts[nextPeerStartIndexes[startIndex] ?? -1];
@@ -312,6 +368,11 @@ export function blockIntersectsSourceRange(block: SourceBlock, from: number, to:
 }
 
 export function sourceBlockContentReplacement(block: SourceBlock, content: string): SourceReplacement {
+  if (block.readingNote?.storage === "file") return { from: block.contentFrom, to: block.contentTo, insert: content };
+  if (block.readingNote?.storage === "inline") {
+    const body = content.split("\n").map((line, index) => `${index ? "    " : `[^${block.readingNote!.footnoteLabel}]: `}${line}`).join("\n");
+    return { from: block.previewFrom, to: block.previewTo, insert: `${block.readingNote.opening}\n${body}\n${READING_NOTE_CLOSE}` };
+  }
   const firstPrefix = block.line.text.slice(0, block.contentFrom - block.line.from);
   const secondSegment = block.contentSegments[1];
   const continuationPrefix = secondSegment
@@ -334,3 +395,4 @@ export function sourceBlockContentReplacement(block: SourceBlock, content: strin
     insert,
   };
 }
+import { legacyReadingNoteBody, managedReadingNoteRanges, READING_NOTE_CLOSE, type ManagedNoteRange } from "./readingNoteFormat";

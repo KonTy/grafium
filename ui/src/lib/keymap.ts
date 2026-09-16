@@ -199,6 +199,8 @@ export const keymap_manager = new KeymapManager();
  */
 export function registerDefaultShortcuts(actions: {
   goJournal: () => void;
+  goJournalDate: () => void;
+  goLink: () => void;
   goJournalEdit: () => void;
   goHome: () => void;
   goAllPages: () => void;
@@ -229,7 +231,7 @@ export function registerDefaultShortcuts(actions: {
   importMedia: () => void;
   importBooks: () => void;
   insertTimeStamp: () => void;
-  insertPersonalJournal: () => void;
+  insertPersonalDiary: () => void;
 }) {
   const pair = (
     id: string,
@@ -253,6 +255,12 @@ export function registerDefaultShortcuts(actions: {
     ]),
     ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournalEdit, [
       { binding: "mod+shift+j", navOnly: false },
+    ]),
+    ...pair("go-journal-date", "Go to date calendar", "navigation", actions.goJournalDate, [
+      { binding: "mod+g", navOnly: false },
+    ]),
+    ...pair("go-link", "Go to link", "navigation", actions.goLink, [
+      { binding: "mod+l", navOnly: false },
     ]),
     ...pair("go-home", "Go to home", "navigation", actions.goHome, [
       { binding: "g h" },
@@ -291,7 +299,7 @@ export function registerDefaultShortcuts(actions: {
       { binding: "mod+]", navOnly: false },
     ]),
     ...pair("go-chat", "Go to Chat tab", "navigation", actions.goChat, [
-      { binding: "mod+shift+c", navOnly: false },
+      { binding: "alt+c", navOnly: false },
     ]),
 
     ...pair("toggle-left-sidebar", "Toggle left sidebar", "toggle", actions.toggleSidebar, [
@@ -300,7 +308,7 @@ export function registerDefaultShortcuts(actions: {
     ]),
     ...pair("toggle-right-sidebar", "Toggle right sidebar", "toggle", actions.toggleRightSidebar, [
       { binding: "t r" },
-      { binding: "mod+alt+b", navOnly: false },
+      { binding: "mod+shift+b", navOnly: false },
       { binding: "mod+.", navOnly: false },
     ]),
     ...pair("toggle-theme", "Open theme settings", "toggle", actions.toggleTheme, [
@@ -341,8 +349,8 @@ export function registerDefaultShortcuts(actions: {
     ...pair("insert-time", "Insert current time", "basics", actions.insertTimeStamp, [
       { binding: "alt+t", navOnly: false },
     ]),
-    ...pair("insert-personal-journal", "Insert [[personal/journal]]", "basics", actions.insertPersonalJournal, [
-      { binding: "alt+j", navOnly: false },
+    ...pair("insert-personal-diary", "Insert [[personal/diary]]", "basics", actions.insertPersonalDiary, [
+      { binding: "alt+d", navOnly: false },
     ]),
   ];
 

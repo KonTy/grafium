@@ -185,7 +185,7 @@ impl EmbeddingPipeline {
     /// `Page Title > Grandparent text > Parent text [tags: #a #b]`, with each
     /// ancestor truncated so a long parent can't dominate the chunk, and the
     /// whole prefix capped.
-    fn build_structural_prefix(
+    pub(crate) fn build_structural_prefix(
         page: &Page,
         block: &Block,
         block_map: &HashMap<&str, &Block>,
@@ -360,35 +360,56 @@ impl EmbeddingPipeline {
         Ok(total)
     }
 
-    /// Split a large block into smaller chunks at sentence boundaries.
+    /// Split a large block into bounded, overlapping chunks.
     fn split_block(&self, content: &str) -> Vec<String> {
-        let max_chars = self.config.chunk_max_tokens * 4; // rough char estimate
-        let overlap_chars = self.config.chunk_overlap_tokens * 4;
+        self.split_block_ranges(content)
+            .into_iter()
+            .map(|range| content[range].to_string())
+            .collect()
+    }
 
-        let sentences: Vec<&str> = content
-            .split_inclusive(|c| c == '.' || c == '!' || c == '?' || c == '\n')
-            .collect();
-
-        let mut chunks = Vec::new();
-        let mut current = String::new();
-
-        for sentence in sentences {
-            if current.len() + sentence.len() > max_chars && !current.is_empty() {
-                chunks.push(current.clone());
-                // Overlap: keep the last portion.
-                if current.len() > overlap_chars {
-                    current = super::suffix_to_char_boundary(&current, overlap_chars).to_string();
+    /// Byte ranges allow current-text retrieval to validate cached dense hits
+    /// against the exact source span, including blocks with repeated passages.
+    pub(crate) fn split_block_ranges(&self, content: &str) -> Vec<std::ops::Range<usize>> {
+        let max_bytes = self.config.chunk_max_tokens.saturating_mul(4).max(4);
+        let overlap_bytes = self
+            .config
+            .chunk_overlap_tokens
+            .saturating_mul(4)
+            .min(max_bytes / 2);
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        while start < content.len() {
+            let window = super::truncate_to_char_boundary(&content[start..], max_bytes);
+            let mut end = start + window.len();
+            if end < content.len() {
+                // Prefer a late sentence boundary, then whitespace; a long
+                // unpunctuated sentence or word must still obey the hard cap.
+                let boundary = |sentence_only: bool| {
+                    window
+                        .char_indices()
+                        .filter(|(_, c)| {
+                            matches!(c, '.' | '!' | '?' | '\n')
+                                || (!sentence_only && c.is_whitespace())
+                        })
+                        .map(|(i, c)| i + c.len_utf8())
+                        .filter(|&i| i >= max_bytes / 2)
+                        .next_back()
+                };
+                if let Some(offset) = boundary(true).or_else(|| boundary(false)) {
+                    end = start + offset;
                 }
-                // Don't clear completely — overlap preserved above.
             }
-            current.push_str(sentence);
+            ranges.push(start..end);
+            if end == content.len() {
+                break;
+            }
+            let overlap = super::suffix_to_char_boundary(&content[start..end], overlap_bytes);
+            let next = end - overlap.len();
+            // A four-byte character can fill a tiny window/overlap by itself.
+            start = if next > start { next } else { end };
         }
-
-        if !current.is_empty() {
-            chunks.push(current);
-        }
-
-        chunks
+        ranges
     }
 
     fn hash_content(&self, content: &str) -> String {
@@ -488,6 +509,53 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| std::str::from_utf8(chunk.as_bytes()).is_ok()));
+    }
+
+    #[test]
+    fn split_block_bounds_unpunctuated_and_unicode_content_without_losing_tail() {
+        let pipeline = pipeline();
+        for text in [
+            format!("{}TAIL", "x".repeat(50_000)),
+            format!("{}終点", "無句読点🙂".repeat(10_000)),
+            format!(
+                "{}last",
+                "some long words without punctuation ".repeat(1500)
+            ),
+        ] {
+            let ranges = pipeline.split_block_ranges(&text);
+            assert!(ranges.len() > 12);
+            assert_eq!(ranges[0].start, 0);
+            assert_eq!(ranges.last().unwrap().end, text.len());
+            for range in &ranges {
+                assert!(!range.is_empty());
+                assert!(range.len() <= 1024);
+                assert!(text.is_char_boundary(range.start));
+                assert!(text.is_char_boundary(range.end));
+            }
+            for pair in ranges.windows(2) {
+                assert!(pair[0].start < pair[1].start);
+                assert!(pair[0].end > pair[1].start);
+                assert!(pair[0].end < pair[1].end);
+            }
+        }
+    }
+
+    #[test]
+    fn split_block_zero_or_excessive_overlap_still_makes_bounded_progress() {
+        for (max, overlap) in [(0, 0), (1, usize::MAX), (8, 0), (8, 8)] {
+            let pipeline = EmbeddingPipeline::new(EmbeddingConfig {
+                chunk_max_tokens: max,
+                chunk_overlap_tokens: overlap,
+                ..EmbeddingConfig::default()
+            });
+            let text = "🙂ab界 ".repeat(100);
+            let ranges = pipeline.split_block_ranges(&text);
+            assert!(ranges.len() <= text.chars().count());
+            assert_eq!(ranges.last().unwrap().end, text.len());
+            for range in ranges {
+                assert!(range.len() <= (max * 4).max(4));
+            }
+        }
     }
 
     #[test]

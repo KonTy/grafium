@@ -1,23 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
-  import { AdditiveBlending, BufferGeometry, CanvasTexture, Float32BufferAttribute, Mesh, MeshBasicMaterial, Points, ShaderMaterial, RingGeometry, SphereGeometry, SRGBColorSpace, TextureLoader, DoubleSide, Vector3, type Texture } from "three";
+  import { Mesh, MeshBasicMaterial, RingGeometry, DoubleSide, Vector3, PerspectiveCamera } from "three";
   import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
   import { getGraphData, type GraphData } from "../lib/api";
   import { fuzzyScore } from "../lib/fuzzy";
-  import { clusterColor, computeGraphClusters, planetColor } from "../lib/graphClusters";
+  import { clusterColor, planetColor } from "../lib/graphClusters";
+  import { createCommunityLayout, communityLinkDistance, type CommunityLayout } from "../lib/graphCommunityLayout";
+  import { createUniverseBackground, type UniverseBackground } from "../lib/graphUniverse";
   import { buildFlightNeighbors, createFlightLeg, lingerFlightFraction, nextFlightTopic, sampleFlightLeg, type FlightLeg } from "../lib/graphFlight";
   import { buildPlanetHierarchy, layoutPlanetSystems, planetHasRings, type PlanetLayout } from "../lib/planetSystems";
-  import {
-    oceanWorldPaletteIndex,
-    oceanWorldWarpSeed,
-    OCEAN_WORLD_PALETTES,
-    planetKindFor,
-    PLANET_KINDS,
-    PLANET_TEXTURE_URLS,
-    remapOceanWorldImageData,
-    type PlanetKind,
-  } from "../lib/planetTextures";
 
   interface Props {
     onNavigate: (title: string) => void;
@@ -34,6 +26,9 @@
     x?: number;
     y?: number;
     z?: number;
+    vx?: number;
+    vy?: number;
+    vz?: number;
     fx?: number;
     fy?: number;
     fz?: number;
@@ -42,6 +37,7 @@
     source: string;
     target: string;
     weight: number;
+    suggested?: boolean;
   }
   type PositionedNode3D = Node3D & Required<Pick<Node3D, "x" | "y" | "z">>;
   interface ScreenLabel {
@@ -71,14 +67,15 @@
 
   let mode = $state<"global" | "local">("global");
   let nodeLimit = $state(200);
-  let hideDatePages = $state(true);
+  let hideDatePages = $state(false);
   let showSmartLabels = $state(true);
   let searchText = $state("");
   let controlsOpen = $state(false);
 
   let loading = $state(false);
   let errorMsg = $state<string | null>(null);
-  let stats = $state({ nodes: 0, edges: 0 });
+  let backgroundError = $state<string | null>(null);
+  let stats = $state({ nodes: 0, edges: 0, communities: 0 });
   let visibleLabels = $state<ScreenLabel[]>([]);
   let visibleSearchGlows = $state<SearchGlow[]>([]);
   let searchMatchCount = $state(0);
@@ -115,10 +112,10 @@
   let flightLeg: FlightLeg | null = null;
   let flightElapsed = 0;
   let flightLastFrame: number | null = null;
-  let starfield: Points<BufferGeometry, ShaderMaterial> | null = null;
+  let universeBackground: UniverseBackground | null = null;
   let planetRing: Mesh<RingGeometry, MeshBasicMaterial> | null = null;
-  let savedCooldownTicks = 300;
-  let savedWarmupTicks = 120;
+  let savedCooldownTicks = 240;
+  let savedWarmupTicks = 24;
   let restoreSimulationPending = false;
   let savedDamping = true;
   let normalGraphData: { nodes: Node3D[]; links: Link3D[] } | null = null;
@@ -126,13 +123,14 @@
   let flightLinks: Link3D[] = [];
   let flightFamilyLabel = $state("");
   let flightRinged = $state(false);
-  let planetTextureByKind = new Map<PlanetKind, Texture>();
-  let oceanWorldTextures: Texture[] = [];
 
   const MIN_NODE_VAL = 8;
   const MAX_NODE_VAL = 64;
+  const OVERVIEW_NODE_SCALE = 3;
+  let overviewNodeScale = OVERVIEW_NODE_SCALE;
+  let overviewLinkScale = 1;
   const MIN_CAMERA_DISTANCE = 620;
-  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+  const COMMUNITY_SPACING = 120;
   const LABEL_UPDATE_INTERVAL_MS = 50;
   const MAX_LABEL_CANDIDATES = 240;
   const LABEL_COLLISION_PADDING = 4;
@@ -141,11 +139,7 @@
   const labelCameraDirection = new Vector3();
   const labelNodeVector = new Vector3();
 
-  // Connected components (see lib/graphClusters.ts): nodes reachable from
-  // each other through links count as the same "cluster" and share a
-  // color, so a densely-linked group of pages reads as one color family
-  // instead of a uniform accent-colored blob. Isolated nodes (no links at
-  // all) get a plain muted color instead of a palette slot.
+  let communityLayout: CommunityLayout = createCommunityLayout([], [], 3, COMMUNITY_SPACING);
   let clusterIndexById = new Map<string, number>();
   let isolatedIds = new Set<string>();
 
@@ -175,7 +169,8 @@
   }
 
   function linkWidthFor(l: Link3D): number {
-    return Math.min(1.4, Math.max(0.2, 0.25 + Math.sqrt(Math.max(1, l.weight)) * 0.18));
+    const width = Math.min(2.2, 0.65 + Math.sqrt(Math.max(1, l.weight)) * 0.35);
+    return flying ? width : width * overviewLinkScale * (isCommunityBridge(l) ? 0.8 : 1);
   }
 
   function labelTextFor(n: Node3D): string {
@@ -405,6 +400,7 @@
   function startLabelLoop(): void {
     const tick = (timestamp: number) => {
       updateFlight(timestamp);
+      updateUniverseBackground();
       updateScreenLabels(timestamp);
       labelFrame = window.requestAnimationFrame(tick);
     };
@@ -415,88 +411,6 @@
     return Math.cbrt(nodeValFor(node)) * 5;
   }
 
-  function visualPlanetRadius(node: Node3D): number {
-    return Math.cbrt(nodeValFor(node)) * (flying ? 5 : 2);
-  }
-
-  function loadPlanetTextures(): void {
-    const loader = new TextureLoader();
-    let remaining = PLANET_KINDS.length;
-    const finish = () => {
-      remaining--;
-      if (remaining === 0) graph?.nodeThreeObject((node) => createPlanetObject(node));
-    };
-    for (const kind of PLANET_KINDS) {
-      loader.load(PLANET_TEXTURE_URLS[kind], (texture) => {
-        texture.colorSpace = SRGBColorSpace;
-        texture.anisotropy = 4;
-        if (kind === "earth") {
-          oceanWorldTextures = makeOceanWorldTextures(texture);
-          texture.dispose();
-        } else planetTextureByKind.set(kind, texture);
-        finish();
-      }, undefined, finish);
-    }
-  }
-
-  function makeOceanWorldTextures(earth: Texture): Texture[] {
-    const image = earth.image as CanvasImageSource | undefined;
-    if (!image || typeof document === "undefined") return [];
-    const width = Number((image as { width?: number }).width ?? 0);
-    const height = Number((image as { height?: number }).height ?? 0);
-    if (!width || !height) return [];
-    return OCEAN_WORLD_PALETTES.map((palette, index) => {
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return earth;
-      ctx.drawImage(image, 0, 0);
-      const source = ctx.getImageData(0, 0, width, height);
-      const dest = ctx.createImageData(width, height);
-      remapOceanWorldImageData(
-        source.data,
-        dest.data,
-        width,
-        height,
-        palette,
-        oceanWorldWarpSeed(index),
-      );
-      ctx.putImageData(dest, 0, 0);
-      const texture = new CanvasTexture(canvas);
-      texture.colorSpace = SRGBColorSpace;
-      texture.anisotropy = 4;
-      return texture;
-    });
-  }
-
-  function createPlanetObject(node: Node3D): Mesh {
-    const satellite = flying && (flightLayout?.parentById.has(node.id) ?? false);
-    const kind = planetKindFor(node.name, satellite);
-    const map = kind === "earth"
-      ? oceanWorldTextures[oceanWorldPaletteIndex(node.name)]
-      : planetTextureByKind.get(kind);
-    const dimmed = !flying && hasActiveSearch() && !searchMatchIds.has(node.id);
-    const mesh = new Mesh(
-      new SphereGeometry(1, 28, 18),
-      new MeshBasicMaterial({
-        map: map ?? null,
-        color: map ? "#ffffff" : planetColor(node.name),
-        transparent: dimmed,
-        opacity: dimmed ? 0.22 : 1,
-      }),
-    );
-    mesh.scale.setScalar(visualPlanetRadius(node));
-    return mesh;
-  }
-
-  function disposePlanetTextures(): void {
-    for (const texture of planetTextureByKind.values()) texture.dispose();
-    planetTextureByKind.clear();
-    for (const texture of oceanWorldTextures) texture.dispose();
-    oceanWorldTextures = [];
-  }
-
   function clearCameraTimers(): void {
     pendingFit = false;
     if (fitTimer !== undefined) window.clearTimeout(fitTimer);
@@ -505,78 +419,23 @@
     searchFlyTimer = undefined;
   }
 
-  function addFlightStars(): void {
+  function updateUniverseBackground(): void {
+    if (!graph || !universeBackground) return;
+    universeBackground.update(graph.camera(), graph.renderer().getPixelRatio());
+  }
+
+  function addUniverseBackground(): void {
     if (!graph) return;
-    const radius = Math.max(1800, ...latestNodes.filter(hasGraphPosition)
-      .map((node) => Math.hypot(node.x, node.y, node.z) * 2 + 600));
-    const count = 5600;
-    const points: number[] = [];
-    const colors: number[] = [];
-    const sizes: number[] = [];
-    for (let i = 0; i < count; i++) {
-      const direction = new Vector3().randomDirection().multiplyScalar(radius * (0.7 + Math.random() * 1.5));
-      points.push(direction.x, direction.y, direction.z);
-      const roll = Math.random();
-      let mag: number;
-      let size: number;
-      if (roll < 0.7) {
-        mag = 0.1 + Math.random() * 0.22;
-        size = 1.1 + Math.random() * 1.0;
-      } else if (roll < 0.92) {
-        mag = 0.38 + Math.random() * 0.32;
-        size = 2.1 + Math.random() * 1.5;
-      } else if (roll < 0.985) {
-        mag = 0.82 + Math.random() * 0.4;
-        size = 3.6 + Math.random() * 2.0;
-      } else {
-        mag = 1.35 + Math.random() * 0.55;
-        size = 6.0 + Math.random() * 3.2;
-      }
-      const tint = Math.random();
-      if (tint < 0.12) colors.push(mag, mag * 0.86, mag * 0.68);
-      else if (tint < 0.42) colors.push(mag * 0.78, mag * 0.9, mag);
-      else colors.push(mag, mag, mag * 1.08);
-      sizes.push(size);
-    }
-    const geometry = new BufferGeometry();
-    geometry.setAttribute("position", new Float32BufferAttribute(points, 3));
-    geometry.setAttribute("aColor", new Float32BufferAttribute(colors, 3));
-    geometry.setAttribute("aSize", new Float32BufferAttribute(sizes, 1));
-    starfield = new Points(geometry, new ShaderMaterial({
-      uniforms: {
-        uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2.5) },
-      },
-      vertexShader: `
-        attribute float aSize;
-        attribute vec3 aColor;
-        uniform float uPixelRatio;
-        varying vec3 vColor;
-        void main() {
-          vColor = aColor;
-          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = max(1.0, aSize * uPixelRatio);
-          gl_Position = projectionMatrix * mvPosition;
-        }
-      `,
-      fragmentShader: `
-        precision mediump float;
-        varying vec3 vColor;
-        void main() {
-          vec2 uv = gl_PointCoord - vec2(0.5);
-          float d = length(uv) * 2.0;
-          float core = clamp(1.0 - d, 0.0, 1.0);
-          core *= core;
-          if (core < 0.02) discard;
-          gl_FragColor = vec4(vColor * core, core);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      blending: AdditiveBlending,
-      toneMapped: false,
-    }));
-    starfield.frustumCulled = false;
-    graph.scene().add(starfield);
+    const background = createUniverseBackground();
+    universeBackground = background;
+    background.setAppearance({ flying, isLightTheme });
+    graph.scene().add(background.object);
+    updateUniverseBackground();
+    void background.ready.catch((error: unknown) => {
+      if (universeBackground !== background) return;
+      console.error("Unable to load galaxy background images:", error);
+      backgroundError = "Some galaxy background images could not be loaded.";
+    });
   }
 
   function clearPlanetRing(): void {
@@ -694,10 +553,8 @@
     flightLastFrame = null;
     graph.camera().up.set(0, 1, 0);
     graph.backgroundColor("#050711").nodeRelSize(5).nodeResolution(32)
-      .nodeVal((node) => nodeValFor(node)).linkOpacity(0.15)
-      .graphData({ nodes: flightNodes, links: flightLinks.map((link) => ({ ...link })) })
-      .nodeThreeObject((node) => createPlanetObject(node));
-    addFlightStars();
+      .nodeVal((node) => nodeValFor(node)).linkOpacity(0.15).linkWidth((link) => linkWidthFor(link))
+      .graphData({ nodes: flightNodes, links: flightLinks.map((link) => ({ ...link })) });
     beginFlightTo(flightNodes.find((node) => node.id === first.id)!);
   }
 
@@ -743,12 +600,6 @@
     flightNextId = null;
     flightLastFrame = null;
     clearPlanetRing();
-    if (starfield) {
-      starfield.removeFromParent();
-      starfield.geometry.dispose();
-      starfield.material.dispose();
-      starfield = null;
-    }
     if (restoreGraph && graph) {
       const controls = graph.controls() as OrbitControls;
       controls.enabled = true;
@@ -756,8 +607,8 @@
       controls.enableDamping = savedDamping;
       graph.enableNodeDrag(true).enablePointerInteraction(true)
         .backgroundColor(themeColor("--bg-primary", "#16161e"))
-        .nodeRelSize(2).nodeResolution(14).nodeVal((node) => nodeValFor(node)).linkOpacity(0.25)
-        .nodeThreeObject((node) => createPlanetObject(node));
+        .nodeRelSize(overviewNodeScale).nodeResolution(24).nodeVal((node) => nodeValFor(node))
+        .linkOpacity(0.35).linkWidth((link) => linkWidthFor(link));
       refreshColors();
       updateScreenLabels(performance.now(), true);
     }
@@ -792,22 +643,8 @@
     const visibleNodeIds = new Set(nodes.map((node) => node.id));
     const links: Link3D[] = data.edges
       .filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target))
-      .map((edge) => ({ source: edge.source, target: edge.target, weight: edge.weight }));
-    seedNodePositions(nodes);
+      .map((edge) => ({ source: edge.source, target: edge.target, weight: edge.weight, suggested: edge.suggested }));
     return { nodes, links };
-  }
-
-  function seedNodePositions(nodes: Node3D[]): void {
-    const count = Math.max(1, nodes.length);
-    const radius = 180 + Math.sqrt(count) * 18;
-    nodes.forEach((node, index) => {
-      const y = 1 - (2 * (index + 0.5)) / count;
-      const r = Math.sqrt(Math.max(0, 1 - y * y));
-      const theta = index * GOLDEN_ANGLE;
-      node.x = Math.cos(theta) * r * radius;
-      node.y = y * radius;
-      node.z = Math.sin(theta) * r * radius;
-    });
   }
 
   // Links keep string ids only until 3d-force-graph binds the graph data,
@@ -818,6 +655,11 @@
     return typeof endpoint === "string" ? endpoint : endpoint.id;
   }
 
+  function isCommunityBridge(link: Link3D): boolean {
+    return clusterIndexById.get(linkEndpointId(link.source))
+      !== clusterIndexById.get(linkEndpointId(link.target));
+  }
+
   function linkColorFor(l: Link3D): string {
     const sourceId = linkEndpointId(l.source);
     const targetId = linkEndpointId(l.target);
@@ -825,6 +667,7 @@
       (sourceId === flightPrevious && targetId === flightTopic?.id) ||
       (targetId === flightPrevious && sourceId === flightTopic?.id)
     )) return "#e0f2fe";
+    if (!flying && isCommunityBridge(l)) return themeColor("--text-secondary", isLightTheme ? "#666" : "#aaa");
     if (isolatedIds.has(sourceId)) return themeColor("--text-secondary", isLightTheme ? "#666" : "#aaa");
     return clusterColor(clusterIndexById.get(sourceId) ?? 0, flying ? false : isLightTheme);
   }
@@ -835,10 +678,10 @@
 
   function refreshColors(): void {
     if (!graph) return;
-    // Re-invoking the accessor setters (rather than relying on the closure
-    // alone) is what makes three-forcegraph actually recompute node/link
-    // materials — it only redraws colors when the accessor function
-    // *reference* changes, not just when the values it reads change.
+    universeBackground?.setAppearance({ flying, isLightTheme });
+    updateUniverseBackground();
+    // Library-owned solid spheres update and dispose their materials with these
+    // accessors; custom nodeThreeObject meshes bypass that lifecycle.
     graph.nodeColor((n) => nodeColorFor(n)).linkColor((l) => linkColorFor(l));
   }
 
@@ -872,17 +715,20 @@
       flightAvailable = [...flightNeighbors.values()].some((related) => related.length > 0);
       updateSearchMatches();
       maxDegree = Math.max(1, ...nodes.map((n) => n.degree));
-      const clusters = computeGraphClusters(
-        nodes.map((n) => n.id),
-        links
+      communityLayout = createCommunityLayout(
+        nodes.map((node) => ({ id: node.id, title: node.name, degree: node.degree })),
+        links, 3, COMMUNITY_SPACING,
       );
-      clusterIndexById = clusters.clusterIndexById;
-      isolatedIds = clusters.isolatedIds;
-      stats = { nodes: nodes.length, edges: links.length };
-      graph.nodeVal((n) => nodeValFor(n)).linkWidth((l) => linkWidthFor(l));
-      graph.graphData({ nodes, links });
+      clusterIndexById = communityLayout.clusterIndexById;
+      isolatedIds = communityLayout.isolatedIds;
+      for (const node of nodes) Object.assign(node, communityLayout.positions.get(node.id));
+      stats = { nodes: nodes.length, edges: links.length, communities: communityLayout.groups.length };
+      overviewNodeScale = OVERVIEW_NODE_SCALE;
+      overviewLinkScale = 1;
+      graph.nodeRelSize(overviewNodeScale).nodeVal((n) => nodeValFor(n)).linkWidth((l) => linkWidthFor(l));
       restoreSimulationPending = false;
       configureForces();
+      graph.graphData({ nodes, links });
       refreshColors();
       updateScreenLabels(performance.now(), true);
       if (hasActiveSearch() && rankedSearchMatches.length > 0) {
@@ -907,9 +753,35 @@
 
   function fitToGraph(durationMs = 650): void {
     if (!graph || flying || stats.nodes === 0) return;
-    graph.camera().up.set(0, 1, 0);
-    const distance = Math.max(MIN_CAMERA_DISTANCE, 440 + Math.sqrt(stats.nodes) * 34);
-    graph.cameraPosition({ x: 0, y: 0, z: distance }, { x: 0, y: 0, z: 0 }, durationMs);
+    const nodes = latestNodes.filter(hasGraphPosition);
+    if (!nodes.length) return;
+    const min = new Vector3(Infinity, Infinity, Infinity);
+    const max = new Vector3(-Infinity, -Infinity, -Infinity);
+    for (const node of nodes) {
+      const radius = Math.cbrt(nodeValFor(node)) * overviewNodeScale;
+      min.min(new Vector3(node.x - radius, node.y - radius, node.z - radius));
+      max.max(new Vector3(node.x + radius, node.y + radius, node.z + radius));
+    }
+    const center = min.clone().add(max).multiplyScalar(0.5);
+    const halfSize = max.clone().sub(min).multiplyScalar(0.5);
+    const camera = graph.camera();
+    camera.up.set(0, 1, 0);
+    const aspect = Math.max(0.1, graph.width() / Math.max(1, graph.height()));
+    const fov = camera instanceof PerspectiveCamera ? camera.fov : 50;
+    const tanHalfFov = Math.tan(fov * Math.PI / 360);
+    const distance = Math.max(MIN_CAMERA_DISTANCE,
+      halfSize.z + 1.2 * Math.max(halfSize.y / tanHalfFov, halfSize.x / (tanHalfFov * aspect)));
+    // Community separation needs a wider overview, not subpixel spheres and
+    // disappearing bridges. Size once for the fitted view; manual zoom remains natural.
+    const worldPerPixel = 2 * (distance + halfSize.z) * tanHalfFov / Math.max(1, graph.height());
+    overviewNodeScale = Math.max(OVERVIEW_NODE_SCALE, Math.min(20, worldPerPixel * 1.15));
+    overviewLinkScale = Math.max(1, worldPerPixel * 0.8);
+    graph.nodeRelSize(overviewNodeScale).linkWidth((link) => linkWidthFor(link));
+    if (camera instanceof PerspectiveCamera) {
+      camera.far = Math.max(10000, distance + halfSize.z * 2 + 2000);
+      camera.updateProjectionMatrix();
+    }
+    graph.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, durationMs);
     updateScreenLabels(performance.now(), true);
   }
 
@@ -951,14 +823,79 @@
 
   function configureForces(): void {
     if (!graph) return;
-    graph.d3VelocityDecay(0.55).warmupTicks(120).cooldownTicks(300);
-    (graph.d3Force("charge") as { strength?: (value: number) => unknown } | undefined)
-      ?.strength?.(-520);
-    const linkForce = graph.d3Force("link") as
-      | { distance?: (value: number) => unknown; strength?: (value: number) => unknown }
+    graph.d3VelocityDecay(0.55).warmupTicks(24).cooldownTicks(240);
+    const charge = graph.d3Force("charge") as
+      | { strength: (value: number) => unknown; distanceMax: (value: number) => unknown }
       | undefined;
-    linkForce?.distance?.(180);
-    linkForce?.strength?.(0.08);
+    charge?.strength(-90);
+    charge?.distanceMax(COMMUNITY_SPACING * 2);
+    const linkForce = graph.d3Force("link") as
+      | { distance: (value: (link: Link3D) => number) => unknown; strength: (value: (link: Link3D) => number) => unknown }
+      | undefined;
+    linkForce?.distance((link) => communityLinkDistance(
+      communityLayout, linkEndpointId(link.source), linkEndpointId(link.target), COMMUNITY_SPACING,
+    ));
+    linkForce?.strength((link) => link.suggested ? 0 : (isCommunityBridge(link) ? 0.008 : 0.14));
+    graph.d3Force("center", null);
+    graph.d3Force("community", createCommunityForce());
+  }
+
+  function createCommunityForce() {
+    let nodes: Node3D[] = [];
+    const force = (alpha: number) => {
+      if (flying) return;
+      for (const node of nodes) {
+        const anchor = communityLayout.positions.get(node.id);
+        if (!anchor) continue;
+        if (!hasGraphPosition(node)) Object.assign(node, anchor, { vx: 0, vy: 0, vz: 0 });
+        // Anchor every member, not just its hub: bridge springs cannot pull
+        // otherwise disconnected leaves into the space between communities.
+        node.vx = (node.vx ?? 0) + (anchor.x - node.x!) * alpha * 0.08;
+        node.vy = (node.vy ?? 0) + (anchor.y - node.y!) * alpha * 0.08;
+        node.vz = (node.vz ?? 0) + (anchor.z - node.z!) * alpha * 0.08;
+      }
+
+      // Spatial buckets bound collision checks to nearby spheres, including
+      // after dragging, without a quadratic all-pairs warmup on large graphs.
+      const cellSize = Math.max(48, ...nodes.map((node) =>
+        2 * (Math.cbrt(nodeValFor(node)) * overviewNodeScale + 6)));
+      const cells = new Map<string, PositionedNode3D[]>();
+      for (const node of nodes) {
+        if (!hasGraphPosition(node)) continue;
+        const gx = Math.floor(node.x / cellSize);
+        const gy = Math.floor(node.y / cellSize);
+        const gz = Math.floor(node.z / cellSize);
+        const radius = Math.cbrt(nodeValFor(node)) * overviewNodeScale + 6;
+        for (let x = gx - 1; x <= gx + 1; x++) {
+          for (let y = gy - 1; y <= gy + 1; y++) {
+            for (let z = gz - 1; z <= gz + 1; z++) {
+              for (const other of cells.get(`${x},${y},${z}`) ?? []) {
+                let dx = node.x - other.x;
+                const dy = node.y - other.y;
+                const dz = node.z - other.z;
+                let distance = Math.hypot(dx, dy, dz);
+                const minDistance = radius + Math.cbrt(nodeValFor(other)) * overviewNodeScale + 6;
+                if (distance >= minDistance) continue;
+                if (distance < 0.001) { dx = 0.001; distance = 0.001; }
+                const push = (minDistance - distance) / distance * 0.5;
+                node.vx = (node.vx ?? 0) + dx * push;
+                node.vy = (node.vy ?? 0) + dy * push;
+                node.vz = (node.vz ?? 0) + dz * push;
+                other.vx = (other.vx ?? 0) - dx * push;
+                other.vy = (other.vy ?? 0) - dy * push;
+                other.vz = (other.vz ?? 0) - dz * push;
+              }
+            }
+          }
+        }
+        const key = `${gx},${gy},${gz}`;
+        const bucket = cells.get(key) ?? [];
+        bucket.push(node);
+        cells.set(key, bucket);
+      }
+    };
+    force.initialize = (nextNodes: Node3D[]) => { nodes = nextNodes; };
+    return force;
   }
 
   function handlePointerDown(event: PointerEvent): void {
@@ -1001,19 +938,18 @@
       .backgroundColor(bgColor)
       .nodeId("id")
       .nodeLabel((n) => n.name)
-      .nodeRelSize(2)
+      .nodeRelSize(OVERVIEW_NODE_SCALE)
       .nodeVal((n) => nodeValFor(n))
       .nodeColor((n) => nodeColorFor(n))
-      .nodeOpacity(0.98)
-      .nodeResolution(14)
+      .nodeOpacity(1)
+      .nodeResolution(24)
       .linkSource("source")
       .linkTarget("target")
       .linkColor((l) => linkColorFor(l))
-      .linkOpacity(0.25)
+      .linkOpacity(0.35)
       .linkWidth((l) => linkWidthFor(l))
       .linkDirectionalParticles(0)
       .showNavInfo(false)
-      .nodeThreeObject((n) => createPlanetObject(n))
       .onNodeClick((n) => { if (!flying) onNavigate(n.name); })
       .onNodeHover((n) => {
         hoverNode = n ?? null;
@@ -1033,8 +969,8 @@
     configureForces();
     graph.width(wrapperEl.clientWidth).height(wrapperEl.clientHeight);
 
+    addUniverseBackground();
     void loadData();
-    loadPlanetTextures();
     startLabelLoop();
 
     resizeObserver = new ResizeObserver(() => {
@@ -1087,7 +1023,8 @@
       window.clearTimeout(searchFlyTimer);
       searchFlyTimer = undefined;
     }
-    disposePlanetTextures();
+    universeBackground?.dispose();
+    universeBackground = null;
     graph?._destructor();
     graph = null;
   });
@@ -1113,7 +1050,6 @@
       updateSearchMatches();
       graph?.nodeVal((n) => nodeValFor(n));
       refreshColors();
-      graph?.nodeThreeObject((n) => createPlanetObject(n));
       updateScreenLabels(performance.now(), true);
       scheduleFlyToSearchMatches();
     });
@@ -1125,7 +1061,7 @@
   });
 </script>
 
-<div class="graph-view-3d" class:flying data-satellites={flying ? flightLayout?.parentById.size ?? 0 : 0}>
+<div class="graph-view-3d" class:flying data-communities={stats.communities} data-satellites={flying ? flightLayout?.parentById.size ?? 0 : 0}>
   <div class="graph-canvas-wrap" bind:this={wrapperEl}>
     <div class="graph-canvas" bind:this={graphMountEl}></div>
     {#if flying && flightTopic}
@@ -1293,7 +1229,8 @@
     </label>
 
     <div class="graph-stats">
-      {stats.nodes.toLocaleString()} nodes · {stats.edges.toLocaleString()} links
+      {stats.nodes.toLocaleString()} nodes · {stats.edges.toLocaleString()} links ·
+      {stats.communities.toLocaleString()} {stats.communities === 1 ? "community" : "communities"}
     </div>
     <p class="hint">
       Click a node to open it. Labels stay in screen space; hover any node for the exact title.
@@ -1301,7 +1238,10 @@
     </p>
     <p class="hint">{flying
       ? "Child pages are smaller, ringless satellites of their nearest visible parent. Some main planets have rings. Namespace families share colors."
-      : "Linked clusters share a color; unlinked pages are shown in a neutral gray."}</p>
+      : "Topic communities share a color. Long, muted links bridge communities; unlinked pages are neutral gray."}</p>
+    {#if backgroundError}
+      <p class="hint" role="status">{backgroundError}</p>
+    {/if}
   </aside>
 </div>
 

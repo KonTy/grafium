@@ -58,7 +58,7 @@ const run = (cmd, args, opts) =>
 
   try {
     await waitForServer();
-    for (const testFile of ["allPages.ui.cjs", "chat.ui.cjs", "graphFlight.ui.cjs", "paste.ui.cjs"]) {
+    for (const testFile of ["startup.ui.cjs", "emojiReader.ui.cjs", "goToLink.ui.cjs", "globalSearch.ui.cjs", "settingsSearch.ui.cjs", "mainPanePaging.ui.cjs", "journalLoading.ui.cjs", "keyboardSelection.ui.cjs", "allPages.ui.cjs", "chat.ui.cjs", "askContext.ui.cjs", "researchPanel.ui.cjs", "researchLinks.ui.cjs", "scopedResearch.ui.cjs", "readingNotes.ui.cjs", "writing.ui.cjs", "graphCommunities2D.ui.cjs", "graphCommunities3D.ui.cjs", "graphFlight.ui.cjs", "paste.ui.cjs", "bulletThreading.ui.cjs"]) {
       const code = await run("node", [path.join(__dirname, testFile)], {
         cwd: uiDir,
         env: { ...process.env, UI_TEST_URL: URL },

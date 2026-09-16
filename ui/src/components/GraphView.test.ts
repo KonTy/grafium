@@ -10,6 +10,22 @@ describe("GraphView search", () => {
     expect(source).toContain("if (visibleIds && (!visibleIds.has(e.source.id) || !visibleIds.has(e.target.id)))");
   });
 
+  describe("GraphView community layout", () => {
+    it("uses the shared weighted layout instead of randomized component positions", () => {
+      expect(source).toContain("createCommunityLayout(data.nodes, data.edges, 2)");
+      expect(source).toContain("communityLinkDistance(layout, e.source, e.target)");
+      expect(source).toContain('import { clusterColor } from "../lib/graphClusters"');
+      expect(source).not.toContain("Math.random()");
+    });
+
+    it("anchors communities, leaves suggestions out of physics, and fits actual bounds", () => {
+      expect(source).toContain("node.anchorX * layoutScale - node.x");
+      expect(source).toContain("if (e.suggested) continue;");
+      expect(source).toContain("node.x - radiusOf(node)");
+      expect(source).toContain("onMount(() =>");
+    });
+  });
+
   it("keeps hidden search misses out of picking and reports match count", () => {
     expect(source).toContain("if (!nodeMatchesSearch(node)) continue;");
     expect(source).toContain("searchMatchCount");

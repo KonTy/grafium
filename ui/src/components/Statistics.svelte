@@ -447,7 +447,7 @@
   const dayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
 </script>
 
-<div class="statistics-view">
+<div class="statistics-view" data-main-scroll-pane>
   <div class="stats-header">
     <h1>Tasks</h1>
   </div>

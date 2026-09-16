@@ -55,13 +55,15 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use super::budget::{Evidence, StepInput};
 use crate::ai::reasoning::{strip_think_blocks, ThinkStripResult};
 use crate::ai::references::{
-    clean_tag_terms, concept_parse_error, extract_json_object, research_parse_error, TagJson,
+    clean_tag_terms, concept_parse_error, extract_json_object, parse_summary_json_object,
+    research_parse_error, StructuredSummaryJson,
 };
-use crate::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, MessageRole};
+use crate::ai::traits::{ChatMessage, LlmProvider};
 use crate::ai::web_research::{
-    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries,
+    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries, parse_synthesis_text_fallback,
     rerank_research_candidates, research_domain_instruction, truncate, Citation, ResearchTopic,
     WebResearchResult,
 };
@@ -104,9 +106,6 @@ const SYNTHESIS_FALLBACK_MAX_TOKENS: u32 = 1800;
 /// prompt ever uses — so clipping here can never change an answer, while
 /// bounding what a run holds regardless of how large the fetched documents are.
 const STORED_EXCERPT_CHARS: usize = SYNTH_EXCERPT_CHARS * 4;
-/// Question length passed to the query-planning/refining steps; questions are
-/// normally short, this just guards against a pathologically long paste.
-const QUESTION_CHARS: usize = 2000;
 /// Upper bound on candidates handed to the selection step in a round. With
 /// several enabled engines times several queries, the raw candidate list can be
 /// large; ranking is order-preserving (web engines first, then academic), so
@@ -158,6 +157,8 @@ pub struct DeepResearchEngine<'a> {
     llm: &'a dyn LlmProvider,
     browser: &'a dyn BrowserDriver,
     config: &'a ResearchConfig,
+    reading_context: Option<&'a [(usize, String)]>,
+    history: &'a [ChatMessage],
 }
 
 impl<'a> DeepResearchEngine<'a> {
@@ -170,7 +171,25 @@ impl<'a> DeepResearchEngine<'a> {
             llm,
             browser,
             config,
+            reading_context: None,
+            history: &[],
         }
+    }
+
+    pub fn with_reading_context(
+        mut self,
+        source: &'a [(usize, String)],
+        history: &'a [ChatMessage],
+    ) -> Self {
+        self.reading_context = Some(source);
+        self.history = history;
+        self
+    }
+
+    /// Conversation alone is not reading evidence (notably for No notes Chat).
+    pub fn with_history(mut self, history: &'a [ChatMessage]) -> Self {
+        self.history = history;
+        self
     }
 
     /// Uncancellable convenience form — see [`Self::research_cancellable`].
@@ -212,10 +231,23 @@ impl<'a> DeepResearchEngine<'a> {
         // A failed/garbled plan step must not sink the run: fall back to
         // searching the literal question, which is a perfectly reasonable first
         // query and keeps the "never give up" promise even here.
-        let mut queries = self
-            .plan_queries(question, cancel.clone())
-            .await
-            .unwrap_or_default();
+        let planned = self.plan_queries(question, cancel.clone()).await;
+        let mut queries = match planned {
+            Ok(queries) => queries,
+            Err(CoreError::Parse(_)) => Vec::new(),
+            Err(error)
+                if self.reading_context.is_some() || super::budget::is_context_error(&error) =>
+            {
+                return Err(error)
+            }
+            Err(_) => Vec::new(),
+        };
+        if self.reading_context.is_some() && queries.is_empty() {
+            return Err(CoreError::Parse(
+                "Could not plan searches from the selected source. Try a more specific research question."
+                    .into(),
+            ));
+        }
         queries = normalize_research_queries(queries, question, question, 4);
         if queries.is_empty() {
             queries = vec![question.trim().to_string()];
@@ -297,11 +329,11 @@ impl<'a> DeepResearchEngine<'a> {
                 }
                 // Tolerant: a broken selection response shouldn't waste the
                 // round — fall back to reading the top candidates in rank order.
-                let picked = match self
-                    .select_sources(question, &candidates, cancel.clone())
-                    .await
-                {
-                    Ok(picked) if !picked.is_empty() => picked,
+                let picked = match super::budget::optional_step(
+                    self.select_sources(question, &candidates, cancel.clone())
+                        .await,
+                )? {
+                    Some(picked) if !picked.is_empty() => picked,
                     _ => candidates.clone(),
                 };
 
@@ -362,16 +394,17 @@ impl<'a> DeepResearchEngine<'a> {
                 progress(ResearchProgress::Note(
                     "No usable sources yet — refining the search and trying again",
                 ));
-                queries = self
-                    .refine_queries(
+                queries = super::budget::optional_step(
+                    self.refine_queries(
                         question,
                         &titles,
                         "No usable sources were found yet; try different, more specific queries.",
                         &tried_queries,
                         cancel.clone(),
                     )
-                    .await
-                    .unwrap_or_default();
+                    .await,
+                )?
+                .unwrap_or_default();
                 queries = normalize_research_queries(queries, question, question, 4);
                 if queries.is_empty() {
                     queries = vec![question.trim().to_string()];
@@ -387,10 +420,11 @@ impl<'a> DeepResearchEngine<'a> {
             // Tolerant: if the verdict can't be parsed, treat it as sufficient
             // and synthesize what we have rather than burning more rounds on an
             // anomaly — the user gets an answer instead of extra latency.
-            let (sufficient, missing) = self
-                .assess_sufficiency(question, &excerpts, cancel.clone())
-                .await
-                .unwrap_or((true, String::new()));
+            let (sufficient, missing) = super::budget::optional_step(
+                self.assess_sufficiency(question, &excerpts, cancel.clone())
+                    .await,
+            )?
+            .unwrap_or((true, String::new()));
             if sufficient {
                 break;
             }
@@ -402,10 +436,11 @@ impl<'a> DeepResearchEngine<'a> {
                 format!("Still missing: {}", truncate(&missing, 160))
             };
             progress(ResearchProgress::Note(&note));
-            queries = self
-                .refine_queries(question, &titles, &missing, &tried_queries, cancel.clone())
-                .await
-                .unwrap_or_default();
+            queries = super::budget::optional_step(
+                self.refine_queries(question, &titles, &missing, &tried_queries, cancel.clone())
+                    .await,
+            )?
+            .unwrap_or_default();
             queries = normalize_research_queries(queries, question, question, 4);
             if queries.is_empty() {
                 // Even a failed refine must not stall the loop.
@@ -498,13 +533,14 @@ impl<'a> DeepResearchEngine<'a> {
         question: &str,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<String>> {
-        let mut user = format!("Question: {}", truncate(question, QUESTION_CHARS));
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push_str("\n\n");
-            user.push_str(instruction);
-        }
         let raw = self
-            .complete(&self.config.prompts.plan_queries, &user, 200, 0.2, cancel)
+            .complete(
+                &self.config.prompts.plan_queries,
+                StepInput::new(question, ""),
+                200,
+                0.2,
+                cancel,
+            )
             .await?;
         parse_queries(&raw)
     }
@@ -521,25 +557,20 @@ impl<'a> DeepResearchEngine<'a> {
             picks: Vec<usize>,
         }
 
-        let mut user = format!(
-            "Question: {}\n\nCandidate results (index: title — url — snippet):\n",
-            truncate(question, QUESTION_CHARS)
-        );
+        let mut input = StepInput::new(question, "Candidate results above use their original zero-based indices. Return picks using these indices, not their positions in the displayed subset.");
         for (index, candidate) in candidates.iter().enumerate() {
-            user.push_str(&format!(
-                "{index}: {} — {} — {}\n",
-                truncate(&candidate.title, SELECT_TITLE_CHARS),
-                candidate.url,
-                truncate(&candidate.snippet, SELECT_SNIPPET_CHARS),
-            ));
-        }
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push('\n');
-            user.push_str(instruction);
+            input.evidence.push(Evidence {
+                label: format!("[{index}]: {}", candidate.url),
+                text: format!(
+                    "{} — {}",
+                    truncate(&candidate.title, SELECT_TITLE_CHARS),
+                    truncate(&candidate.snippet, SELECT_SNIPPET_CHARS)
+                ),
+            });
         }
 
         let raw = self
-            .complete(&self.config.prompts.select_sources, &user, 150, 0.0, cancel)
+            .complete(&self.config.prompts.select_sources, input, 150, 0.0, cancel)
             .await?;
         let cleaned = strip_reasoning(&raw);
         let json = extract_json_object(cleaned.trim())?;
@@ -569,25 +600,16 @@ impl<'a> DeepResearchEngine<'a> {
             missing: String,
         }
 
-        let mut user = format!(
-            "Question: {}\n\nExcerpts from the sources gathered so far:\n",
-            truncate(question, QUESTION_CHARS)
+        let mut input = StepInput::new(
+            question,
+            "The numbered excerpts above are from the sources gathered so far.",
         );
-        for (number, text) in excerpts {
-            user.push_str(&format!(
-                "[{number}]:\n{}\n\n",
-                truncate(text, ASSESS_EXCERPT_CHARS)
-            ));
-        }
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push_str(instruction);
-            user.push('\n');
-        }
+        input.evidence = numbered_excerpts(excerpts, ASSESS_EXCERPT_CHARS);
 
         let raw = self
             .complete(
                 &self.config.prompts.assess_sufficiency,
-                &user,
+                input,
                 200,
                 0.0,
                 cancel,
@@ -608,30 +630,35 @@ impl<'a> DeepResearchEngine<'a> {
         tried: &[String],
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<String>> {
-        let mut user = format!("Question: {}\n\n", truncate(question, QUESTION_CHARS));
+        let mut input = StepInput::new(
+            question,
+            "Refine toward missing evidence. Do NOT repeat earlier queries.",
+        );
         if titles.is_empty() {
-            user.push_str("Titles gathered so far: (none)\n\n");
+            input
+                .instructions
+                .push_str("\nTitles gathered so far: (none)");
         } else {
-            user.push_str("Titles gathered so far:\n");
-            for title in titles {
-                user.push_str(&format!("- {}\n", truncate(title, 120)));
-            }
-            user.push('\n');
-        }
-        user.push_str(&format!("Still missing: {}\n\n", truncate(missing, 400)));
-        if !tried.is_empty() {
-            user.push_str("Earlier queries (do NOT repeat these):\n");
-            for query in tried {
-                user.push_str(&format!("- {query}\n"));
+            for (index, title) in titles.iter().enumerate() {
+                input.evidence.push(Evidence {
+                    label: format!("Gathered title {}:", index + 1),
+                    text: truncate(title, 120).to_string(),
+                });
             }
         }
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push('\n');
-            user.push_str(instruction);
+        input.evidence.push(Evidence {
+            label: "Still missing:".into(),
+            text: truncate(missing, 400).to_string(),
+        });
+        for (index, query) in tried.iter().enumerate() {
+            input.evidence.push(Evidence {
+                label: format!("Earlier query {}:", index + 1),
+                text: query.clone(),
+            });
         }
 
         let raw = self
-            .complete(&self.config.prompts.refine_queries, &user, 200, 0.2, cancel)
+            .complete(&self.config.prompts.refine_queries, input, 200, 0.2, cancel)
             .await?;
         // Drop any refined query that merely repeats one we already ran — a
         // repeat would waste the round it was meant to rescue.
@@ -649,51 +676,22 @@ impl<'a> DeepResearchEngine<'a> {
         excerpts: &[(usize, String)],
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<(Option<String>, Vec<ResearchTopic>)> {
-        #[derive(Deserialize)]
-        struct TopicJson {
-            #[serde(default)]
-            topic: String,
-            #[serde(default)]
-            summary: String,
-            #[serde(default)]
-            tags: Vec<TagJson>,
-        }
-
-        #[derive(Deserialize)]
-        struct SynthesisJson {
-            #[serde(default)]
-            title_answer: Option<String>,
-            #[serde(default)]
-            topics: Vec<TopicJson>,
-        }
-
-        let mut user = format!("Question: {}\n\n", truncate(question, QUESTION_CHARS));
-        user.push_str("Sources (numbered — cite these numbers as [n] in your answer):\n");
-        for (number, text) in excerpts {
-            user.push_str(&format!(
-                "[{number}]:\n{}\n\n",
-                truncate(text, SYNTH_EXCERPT_CHARS)
-            ));
-        }
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push_str(instruction);
-            user.push('\n');
-        }
-        user.push_str(&format!(
-            "\nLanguage instruction: {}\n",
+        let mut input = StepInput::new(question, format!(
+            "The sources above are numbered. Cite their original numbers as [n] in your answer.\nLanguage instruction: {}",
             crate::ai::answer_language_rule_for_question(question)
         ));
+        input.evidence = numbered_excerpts(excerpts, SYNTH_EXCERPT_CHARS);
 
         let raw = self
             .complete(
                 &self.config.prompts.synthesize,
-                &user,
+                input,
                 SYNTHESIS_MAX_TOKENS,
                 0.3,
                 cancel.clone(),
             )
             .await?;
-        let parsed: SynthesisJson = match parse_synthesis_response(&raw) {
+        let parsed: StructuredSummaryJson = match parse_synthesis_response(&raw) {
             Ok(parsed) => parsed,
             Err(_error) => {
                 return self
@@ -727,25 +725,15 @@ impl<'a> DeepResearchEngine<'a> {
         excerpts: &[(usize, String)],
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<(Option<String>, Vec<ResearchTopic>)> {
-        let mut user = format!("Question: {}\n\n", truncate(question, QUESTION_CHARS));
-        user.push_str("Sources (numbered — cite these numbers as [n] in your answer):\n");
-        for (number, text) in excerpts {
-            user.push_str(&format!(
-                "[{number}]:\n{}\n\n",
-                truncate(text, SYNTH_EXCERPT_CHARS)
-            ));
-        }
-        user.push_str(
-            "\nThe structured JSON answer was invalid. Write the answer as concise Markdown \
+        let mut input = StepInput::new(
+            question,
+            "The structured JSON answer was invalid. Write the answer as concise Markdown \
 instead. Use ONLY the numbered sources above, and put an inline citation like [1] or [2][4] \
 after every factual claim. Do not write JSON, markdown fences, chain-of-thought, or any note \
 about the failed JSON.",
         );
-        if let Some(instruction) = research_domain_instruction(question, question) {
-            user.push_str("\n\n");
-            user.push_str(instruction);
-        }
-        user.push_str(&format!(
+        input.evidence = numbered_excerpts(excerpts, SYNTH_EXCERPT_CHARS);
+        input.instructions.push_str(&format!(
             "\n\nLanguage instruction: {}\n",
             crate::ai::answer_language_rule_for_question(question)
         ));
@@ -754,27 +742,13 @@ about the failed JSON.",
             .complete(
                 "You are a careful research assistant writing a cited answer from real, numbered \
 sources. Return only the user-facing answer text.",
-                &user,
+                input,
                 SYNTHESIS_FALLBACK_MAX_TOKENS,
                 0.2,
                 cancel,
             )
             .await?;
-        let answer = strip_reasoning(&raw).trim().to_string();
-        if answer.is_empty() {
-            return Err(CoreError::Parse(
-                "research synthesis JSON failed and fallback answer was empty".to_string(),
-            ));
-        }
-
-        Ok((
-            None,
-            vec![ResearchTopic {
-                topic: "Research synthesis".to_string(),
-                summary: answer,
-                tags: Vec::new(),
-            }],
-        ))
+        parse_synthesis_text_fallback(&raw, "Research synthesis")
     }
 
     /// Shared LLM call: the user-editable prompt for the step is the *system*
@@ -784,7 +758,7 @@ sources. Return only the user-facing answer text.",
     async fn complete(
         &self,
         system_prompt: &str,
-        user: &str,
+        mut input: StepInput<'_>,
         max_tokens: u32,
         temperature: f32,
         cancel: Option<Arc<AtomicBool>>,
@@ -792,19 +766,29 @@ sources. Return only the user-facing answer text.",
         if is_cancelled(cancel.as_deref()) {
             return Err(cancelled_error());
         }
-        let messages = [ChatMessage {
-            role: MessageRole::User,
-            content: user.to_string(),
-        }];
-        let options = CompletionOptions {
-            max_tokens: Some(max_tokens),
-            temperature: Some(temperature),
-            system_prompt: Some(system_prompt.to_string()),
-            stop: None,
+        if let Some(instruction) = research_domain_instruction(input.question, input.question) {
+            input.instructions.push_str("\n\n");
+            input.instructions.push_str(instruction);
+        }
+        super::budget::complete(
+            self.llm,
+            system_prompt,
+            &input,
+            self.reading_context,
+            self.history,
+            max_tokens,
+            temperature,
             cancel,
-        };
-        self.llm.complete(&messages, &options).await
+        )
+        .await
     }
+}
+
+fn numbered_excerpts(excerpts: &[(usize, String)], max_chars: usize) -> Vec<Evidence> {
+    excerpts
+        .iter()
+        .map(|(number, text)| Evidence::numbered(*number, truncate(text, max_chars).to_string()))
+        .collect()
 }
 
 /// Parse a `{"queries": [...]}` object into a cleaned, de-duplicated,
@@ -840,15 +824,12 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-fn parse_synthesis_response<T>(raw: &str) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
+fn parse_synthesis_response(raw: &str) -> Result<StructuredSummaryJson> {
     let cleaned = strip_reasoning(raw);
     let trimmed = cleaned.trim();
     let json = extract_json_object(trimmed)
         .map_err(|_| research_parse_error("missing or unterminated synthesis JSON", trimmed))?;
-    serde_json::from_str(json)
+    parse_summary_json_object(json)
         .map_err(|e| research_parse_error(&format!("invalid synthesis JSON: {e}"), trimmed))
 }
 
@@ -884,6 +865,191 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     const SEARCH_TEMPLATE: &str = "https://s.test/api?q={query}";
+
+    #[tokio::test]
+    async fn research_required_prompt_overflow_is_not_silently_recovered() {
+        use crate::research::budget::tests::InspectModel;
+        for stage in ["plan", "select", "assess", "refine"] {
+            let llm = InspectModel::default();
+            let mut config = config_with(vec![test_engine()], 2);
+            config.prompts.plan_queries = "PLAN".into();
+            config.prompts.select_sources = "SELECT".into();
+            config.prompts.assess_sufficiency = "ASSESS".into();
+            config.prompts.refine_queries = "REFINE".into();
+            let oversized = "required instruction ".repeat(400);
+            match stage {
+                "plan" => config.prompts.plan_queries = oversized,
+                "select" => config.prompts.select_sources = oversized,
+                "assess" => config.prompts.assess_sufficiency = oversized,
+                "refine" => config.prompts.refine_queries = oversized,
+                _ => unreachable!(),
+            }
+            let source = "https://article.test/evidence";
+            let hits = if stage == "refine" {
+                Vec::new()
+            } else {
+                vec![(source, "Evidence", "An independent source")]
+            };
+            let browser = MockBrowserDriver {
+                pages: HashMap::from([
+                    (
+                        query_url("source claim verification"),
+                        search_results(&hits),
+                    ),
+                    (
+                        source.into(),
+                        article(
+                            source,
+                            "Evidence",
+                            &"Independent source evidence. ".repeat(100),
+                        ),
+                    ),
+                ]),
+            };
+            let mut phases = Vec::new();
+            let error = DeepResearchEngine::new(&llm, &browser, &config)
+                .research("Verify a claim", &mut |progress| {
+                    if let ResearchProgress::Phase(phase) = progress {
+                        phases.push(phase.as_str());
+                    }
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                crate::research::budget::is_context_error(&error),
+                "{stage}: {error}"
+            );
+            assert!(!phases.contains(&"synthesizing"));
+            if stage == "plan" {
+                assert_eq!(phases, vec!["planning"]);
+                assert!(llm.requests.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_json_is_normalized_in_deep_synthesis_and_its_retry() {
+        let json = r#"```json
+{"sleep": {"summary": "The source reports improved sleep quality after the intervention[4].", "tags": ["sleep"]}}
+```"#;
+        for retry in [false, true] {
+            let responses = if retry { vec![r#"{"topics":null}"#, json] } else { vec![json] };
+            let llm = StubLlm::new(responses);
+            let browser = MockBrowserDriver { pages: HashMap::new() };
+            let config = config_with(vec![], 1);
+            let engine = DeepResearchEngine::new(&llm, &browser, &config);
+            let (_, topics) = engine.synthesize(
+                "What does the source say about sleep?",
+                &[(4, "Synthetic source about sleep.".into())], None,
+            ).await.unwrap();
+            assert_eq!(topics[0].topic, "sleep");
+            assert_eq!(topics[0].summary, "The source reports improved sleep quality after the intervention[4].");
+            assert_eq!(topics[0].tags[0].term, "sleep");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_research_step_preserves_question_and_original_evidence_labels() {
+        use crate::research::budget::tests::{assert_provenance, body, InspectModel};
+        for scoped in [false, true] {
+            let llm = InspectModel::default();
+            let browser = MockBrowserDriver {
+                pages: HashMap::new(),
+            };
+            let mut config = config_with(vec![], 1);
+            config.prompts = crate::research::ResearchPrompts {
+                plan_queries: "PLAN".into(),
+                select_sources: "SELECT".into(),
+                assess_sufficiency: "ASSESS".into(),
+                refine_queries: "REFINE".into(),
+                synthesize: "SYNTH".into(),
+            };
+            let reading = vec![(27, body(27))];
+            let mut engine = DeepResearchEngine::new(&llm, &browser, &config);
+            if scoped {
+                engine = engine.with_reading_context(&reading, &[]);
+            }
+            let question = format!(
+                "QUESTION-BEGIN {} QUESTION-END",
+                "meaningful qualifier ".repeat(100)
+            );
+            assert!(question.len() > 2000);
+            let excerpts = vec![(1, body(1)), (7, body(7)), (13, body(13))];
+            engine.plan_queries(&question, None).await.unwrap();
+            let candidates: Vec<SearchResult> = (0..3)
+                .map(|number| SearchResult {
+                    title: format!("Source {number}"),
+                    url: format!("https://source.test/{number}"),
+                    snippet: body(number),
+                })
+                .collect();
+            engine
+                .select_sources(&question, &candidates, None)
+                .await
+                .unwrap();
+            engine
+                .assess_sufficiency(&question, &excerpts, None)
+                .await
+                .unwrap();
+            engine
+                .refine_queries(
+                    &question,
+                    &["Original title".into()],
+                    "Missing evidence",
+                    &[],
+                    None,
+                )
+                .await
+                .unwrap();
+            engine.synthesize(&question, &excerpts, None).await.unwrap();
+            engine
+                .synthesize_text_fallback(&question, &excerpts, None)
+                .await
+                .unwrap();
+
+            let requests = llm.requests.lock().unwrap();
+            assert_eq!(requests.len(), 6);
+            for (messages, options) in requests.iter() {
+                let payload = &messages.last().unwrap().content;
+                assert!(payload.starts_with(&format!("Question: {question}\n\n")));
+                let system = options.system_prompt.as_deref().unwrap();
+                if system.starts_with("SELECT") {
+                    for number in 0..3 {
+                        assert!(payload
+                            .contains(&format!("[{number}]: https://source.test/{number}\n")));
+                    }
+                } else if system.starts_with("ASSESS") {
+                    for number in [1, 7, 13] {
+                        let label = format!("[{number}]:\n");
+                        let section = payload
+                            .split(&label)
+                            .nth(1)
+                            .unwrap()
+                            .split("\n\n")
+                            .next()
+                            .unwrap();
+                        assert!(section.contains(&format!("BEGIN-SOURCE-{number}")));
+                        for other in [1, 7, 13].into_iter().filter(|&n| n != number) {
+                            assert!(!section.contains(&format!("SOURCE-{other};")));
+                        }
+                    }
+                } else if system.starts_with("SYNTH")
+                    || system
+                        .starts_with("You are a careful research assistant writing a cited answer")
+                {
+                    assert_provenance(payload, &[1, 7, 13], "");
+                    assert!(payload.contains("Language instruction:"));
+                    if !system.starts_with("SYNTH") {
+                        assert!(payload
+                            .contains("Do not write JSON, markdown fences, chain-of-thought"));
+                    }
+                }
+                if scoped {
+                    assert_provenance(&messages[0].content, &[27], "Reading excerpt ");
+                }
+            }
+        }
+    }
 
     fn test_engine() -> SearchEngineDef {
         SearchEngineDef {

@@ -21,6 +21,14 @@ describe("wikiLinkToken", () => {
     expect(wikiLinkToken("[[page]] more")).toBeNull();
     expect(wikiLinkToken("foo [bar")).toBeNull();
   });
+
+  it("searches only the target, never an alias or escaped wiki literal", () => {
+    expect(wikiLinkToken("[[Insulin res")).toEqual({ from: 0, query: "Insulin res" });
+    expect(wikiLinkToken("[[Insulin resistance|#insulin")).toBeNull();
+    expect(wikiLinkToken("[[Insulin resistance|")).toBeNull();
+    expect(wikiLinkToken("\\[[literal")).toBeNull();
+    expect(wikiLinkToken("\\\\[[target")).toEqual({ from: 2, query: "target" });
+  });
 });
 
 describe("wikiLinkReplacement", () => {
@@ -29,6 +37,19 @@ describe("wikiLinkReplacement", () => {
       "[[Self/Health/Supplements]]",
     );
   });
+
+  it.each([
+    ["|#insulin_resistance]] rest", "[[Insulin resistance|#insulin_resistance]] rest"],
+    ["stance|#insulin_resistance]] rest", "[[Insulin resistance|#insulin_resistance]] rest"],
+    ["|健康 & café | display]] rest", "[[Insulin resistance|健康 & café | display]] rest"],
+    ["|]] rest", "[[Insulin resistance|]] rest"],
+    ["|#insulin_resistance", "[[Insulin resistance|#insulin_resistance]]"],
+    ["stance]] rest", "[[Insulin resistance]] rest"],
+  ])("preserves an existing alias or target suffix: %s", (afterCursor, expected) => {
+    const replacement = wikiLinkReplacement("Insulin resistance", afterCursor);
+    const remaining = afterCursor.slice(wikiLinkCloseExtra(afterCursor));
+    expect(replacement + remaining).toBe(expected);
+  });
 });
 
 describe("wikiLinkCloseExtra", () => {
@@ -36,6 +57,7 @@ describe("wikiLinkCloseExtra", () => {
     expect(wikiLinkCloseExtra("]] leftover")).toBe(2);
     expect(wikiLinkCloseExtra("] leftover")).toBe(1);
     expect(wikiLinkCloseExtra(" leftover")).toBe(0);
+    expect(wikiLinkCloseExtra(" | next table cell |")).toBe(0);
   });
 });
 

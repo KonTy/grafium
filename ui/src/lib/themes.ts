@@ -206,6 +206,33 @@ function light(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim
 // variants of the same hue (not dropped or diluted) so they stay legible.
 export const themes: Theme[] = [
   {
+    // Primer-inspired GitHub Light — the Logseq "GitHub" look: white canvas,
+    // gray chrome, blue links. Default for new desktop installs.
+    id: "github",
+    name: "GitHub",
+    colors: {
+      ...light("#ffffff", "#f6f8fa", "#d0d7de", "#1f2328", "#59636e", "#656d76", "#0969da", "#8250df", "#cf222e", "#1a7f37", "#9a6700",
+        { orange: "#bc4c00", magenta: "#a40e66", green: "#1a7f37", yellow: "#9a6700", blue: "#0969da", cyan: "#1b7c83", purple: "#8250df", red: "#cf222e" }),
+      textLink: "#0969da",
+      textLinkHover: "#0550ae",
+      textLinkVisited: "#8250df",
+      border: "#d0d7de",
+    },
+  },
+  {
+    // Primer GitHub Dark (dim canvas #0d1117).
+    id: "github-dark",
+    name: "GitHub Dark",
+    colors: {
+      ...dark("#0d1117", "#161b22", "#21262d", "#e6edf3", "#c9d1d9", "#8b949e", "#4493f8", "#f778ba", "#f85149", "#3fb950", "#d29922",
+        { orange: "#e09b39", magenta: "#f778ba", green: "#3fb950", yellow: "#d29922", blue: "#58a6ff", cyan: "#39c5cf", purple: "#bc8cff", red: "#f85149" }),
+      textLink: "#4493f8",
+      textLinkHover: "#79c0ff",
+      textLinkVisited: "#bc8cff",
+      border: "#30363d",
+    },
+  },
+  {
     id: "catppuccin",
     name: "Catppuccin",
     colors: dark("#1e1e2e", "#45475a", "#585b70", "#cdd6f4", "#cdd6f4", "#585b70", "#89b4fa", "#f5c2e7", "#f38ba8", "#a6e3a1", "#f9e2af",
@@ -398,4 +425,14 @@ export function applyTheme(theme: ThemeColors): void {
     if (cls.startsWith("theme-fx-")) root.classList.remove(cls);
   });
   if (theme.fx) root.classList.add(`theme-fx-${theme.fx}`);
+
+  try {
+    localStorage.setItem("grafium.startupTheme", JSON.stringify({
+      background: theme.bgPrimary,
+      foreground: theme.textPrimary,
+      colorScheme: theme.isLight ? "light" : "dark",
+    }));
+  } catch (error) {
+    console.warn("[startup] Could not cache the startup theme:", error);
+  }
 }

@@ -7,6 +7,18 @@ describe("HTML to markdown clipboard conversion", () => {
       .toBe("[[Tech/Android/Backup]]");
   });
 
+  it("preserves a compact concept label without changing its canonical destination", () => {
+    expect(htmlToMarkdown('<a class="page-link" data-page="Insulin resistance">#insulin_resistance</a>'))
+      .toBe("[[Insulin resistance|#insulin_resistance]]");
+    expect(htmlToMarkdown('<a class="page-link" data-page="C++">#cpp</a>'))
+      .toBe("[[C++|#cpp]]");
+  });
+
+  it("preserves non-ASCII tags through the rendered clipboard", () => {
+    expect(htmlToMarkdown('<a class="tag" data-tag="睡眠/质量">#睡眠/质量</a>'))
+      .toBe("#睡眠/质量");
+  });
+
   it("preserves Grafium rendered tags and block refs", () => {
     expect(htmlToMarkdown('<a class="tag" data-tag="health/a1c">#health/a1c</a> <span class="block-ref" data-ref="abc123">((abc123))</span>'))
       .toBe("#health/a1c ((abc123))");
@@ -34,6 +46,11 @@ describe("HTML to markdown clipboard conversion", () => {
       { content: "DONE Logseq", depth: 0 },
       { content: "DOING GPS Tracks", depth: 0 },
     ]);
+  });
+
+  it("keeps plain multiline text in one paste block", () => {
+    const content = "list of motorcycles\n**Honda CRF300L**\n✅✅✅\n$5,599";
+    expect(splitMarkdownIntoBlocks(content)).toEqual([{ content, depth: 0 }]);
   });
 
   it("splits copied outline markdown into block hierarchy", () => {

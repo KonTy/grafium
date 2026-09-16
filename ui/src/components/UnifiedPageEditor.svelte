@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
+  import { editorHasDialogFocus } from "../lib/editorDialogFocus";
+  import { readingSelectionCapture, publishContinuousReadingSelection } from "../lib/readingSelection";
+  import type { BlockTextSelection } from "../lib/keyboardBlockSelection.svelte";
+  import { onDestroy, tick, untrack } from "svelte";
+  import { autocompletion, completionStatus } from "@codemirror/autocomplete";
   import {
     EditorSelection,
     EditorState,
@@ -8,7 +12,7 @@
     RangeSetBuilder,
     StateEffect,
     StateField,
-    type Transaction,
+    Transaction,
   } from "@codemirror/state";
   import {
     Decoration,
@@ -24,8 +28,16 @@
     historyKeymap,
   } from "@codemirror/commands";
   import { markdown } from "@codemirror/lang-markdown";
+  import { applyBionicReaderToElement, bionicReaderEnabled, isBionicReaderEnabled } from "../lib/bionicReader";
+  import { emojiIconCompletionSource } from "../lib/emojiIconCompletion";
   import type { Page } from "../lib/api";
-  import { getPageSource, updatePageSource } from "../lib/api";
+  import { loadPageSourceSession, type PageSourceSession } from "../lib/pageSourcePersistence";
+  import { editorWriteLockExtension, registerEditorFlush } from "../lib/editorPersistence";
+  import { openReadingNoteFromEvent, protectReadingNotePointer } from "../lib/readingNoteLinks";
+  import { renderReadingNoteFooter } from "../lib/readingNotes";
+  import { touchesReadingNoteDefinition } from "../lib/readingNoteFormat";
+  import type { WritingRewrittenDetail } from "../lib/writing";
+  import { getLatestCurrentBlockAnchor, setCurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import {
     assetBaseDirFor,
     clearMarkdownImageWidth,
@@ -42,7 +54,7 @@
     renderedImageBaseSize,
     scaledImageDimensions,
   } from "../lib/imageSizing";
-  import { EDITOR_UNDO_MIN_DEPTH } from "../lib/editorUndo";
+  import { applyWritingEditorChanges, EDITOR_UNDO_MIN_DEPTH, markStructuralUndoBoundary, undoEditor, redoEditor } from "../lib/editorUndo";
   import {
     parsePageSourceMap,
     sourceBlockContentReplacement,
@@ -55,14 +67,19 @@
     compact?: boolean;
     onReload?: () => void | Promise<void>;
     onExitPrototype?: () => void;
+    onNavigateBoundary?: (direction: "up" | "down", caretX: number) => void;
+    onSelectBoundary?: (blockId: string, direction: "up" | "down", selection: BlockTextSelection, caretX: number, headBlockId?: string) => void;
+    selectedBlockIds?: ReadonlySet<string>;
   }
 
-  let { page, compact = false, onReload, onExitPrototype }: Props = $props();
+  let { page, compact = false, onReload, onExitPrototype, onNavigateBoundary, onSelectBoundary, selectedBlockIds }: Props = $props();
 
   let editorHost: HTMLDivElement;
   let editorView: EditorView | undefined;
   let verticalArrowCleanup: (() => void) | undefined;
   let loadToken = 0;
+  let sourceReady: Promise<void> = Promise.resolve();
+  let sourceSession: PageSourceSession | undefined;
   let loading = $state(false);
   let saving = $state(false);
   let dirty = $state(false);
@@ -100,6 +117,9 @@
     private editPos: number;
     private previewFrom: number;
     private assetBaseDir: string;
+    private bionic: boolean;
+    private selected: boolean;
+    private noteLabel: string | null;
 
     constructor(block: SourceBlock, assetBaseDir: string) {
       super();
@@ -110,6 +130,9 @@
       this.editPos = block.contentFrom;
       this.previewFrom = block.previewFrom;
       this.assetBaseDir = assetBaseDir;
+      this.bionic = isBionicReaderEnabled();
+      this.selected = !!block.id && !!selectedBlockIds?.has(block.id);
+      this.noteLabel = block.readingNote?.storage === "inline" ? block.readingNote.footnoteLabel : null;
     }
 
     eq(other: WidgetType): boolean {
@@ -120,14 +143,22 @@
         && other.content === this.content
         && other.editPos === this.editPos
         && other.previewFrom === this.previewFrom
-        && other.assetBaseDir === this.assetBaseDir;
+        && other.assetBaseDir === this.assetBaseDir
+        && other.selected === this.selected
+        && other.noteLabel === this.noteLabel
+        && other.bionic === this.bionic;
     }
 
     toDOM(view: EditorView): HTMLElement {
       const row = document.createElement("div");
       row.className = "unified-rendered-block";
+      row.classList.toggle("selected", this.selected);
       row.style.setProperty("--preview-depth", String(this.depth));
       row.title = "Click to edit this block as raw Markdown";
+      if (this.noteLabel) {
+        row.dataset.readingNoteFooter = "";
+        row.title = "Edit this footnote in Notes";
+      }
       if (this.blockId) {
         row.dataset.sourceBlockId = this.blockId;
       }
@@ -135,12 +166,14 @@
       const content = document.createElement("div");
       content.className = "unified-rendered-content rendered-content";
       if (this.content.trim()) {
-        content.innerHTML = renderBlock(this.content, this.assetBaseDir);
+        content.innerHTML = this.noteLabel
+          ? renderReadingNoteFooter(this.content, this.noteLabel, this.assetBaseDir)
+          : renderBlock(this.content, this.assetBaseDir);
       } else {
         content.appendChild(document.createTextNode("\u00a0"));
       }
 
-      if (isFencedCodeBlock(this.content)) {
+      if (this.noteLabel || isFencedCodeBlock(this.content)) {
         row.classList.add("code-block");
         row.style.gridTemplateColumns = "minmax(0, 1fr)";
         row.append(content);
@@ -152,7 +185,19 @@
       }
       row.addEventListener("click", (event) => {
         if (event.button !== 0) return;
+        if (openReadingNoteFromEvent(event, page.id, this.blockId)) return;
+        if (this.noteLabel) { event.stopPropagation(); return; }
         if (row.ownerDocument.getSelection()?.toString()) return;
+        const link = event.target instanceof Element
+          ? event.target.closest<HTMLElement>(".page-link[data-page], .tag[data-tag]")
+          : null;
+        const pageName = link?.dataset.page ?? link?.dataset.tag;
+        if (pageName) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName } }));
+          return;
+        }
         row.ownerDocument.getSelection()?.removeAllRanges();
         event.preventDefault();
         event.stopPropagation();
@@ -162,6 +207,7 @@
           scrollIntoView: true,
           userEvent: "select.pointer",
         });
+        row.addEventListener("pointerdown", protectReadingNotePointer);
         view.focus();
       });
       row.addEventListener("contextmenu", (event) => {
@@ -189,7 +235,10 @@
           },
         }));
       });
-      queueMicrotask(() => void hydrateAssetMedia(content));
+      queueMicrotask(() => {
+        if (this.bionic) applyBionicReaderToElement(content);
+        void hydrateAssetMedia(content);
+      });
       return row;
     }
 
@@ -209,11 +258,15 @@
   }
 
   function blockPreviewWithBreakTo(sourceMap: ReturnType<typeof parsePageSourceMap>, block: SourceBlock): number {
+    if (block.readingNote?.storage === "inline") {
+      return block.previewTo < sourceMap.source.length ? block.previewTo + 1 : block.previewTo;
+    }
     const lastLine = block.contentSegments.at(-1)?.line ?? block.line;
     return sourceLineWithBreakTo(sourceMap, lastLine.index);
   }
 
   const activeBlockEffect = StateEffect.define<string | null>();
+  const bionicModeEffect = StateEffect.define<void>();
 
   const activeBlockField = StateField.define<string | null>({
     create() {
@@ -265,6 +318,9 @@
       : null;
     const activeEditing = activeBlock !== null;
     const ranges: Array<{ from: number; to: number; decoration: Decoration }> = [];
+    for (const hidden of sourceMap.hiddenRanges ?? []) {
+      if (hidden.to > hidden.from) ranges.push({ ...hidden, decoration: Decoration.replace({ block: true }) });
+    }
 
     for (const idLine of sourceMap.idLines) {
       const isActiveIdLine = activeEditing && activeBlock?.idLine === idLine;
@@ -288,7 +344,7 @@
     }
 
     for (const block of sourceMap.blocks) {
-      if (activeEditing && block === activeBlock) {
+      if (activeEditing && block === activeBlock && block.readingNote?.storage !== "inline") {
         continue;
       }
       ranges.push({
@@ -297,7 +353,9 @@
         decoration: Decoration.replace({
           widget: new RenderedBlockWidget(block, assetBaseDir),
           block: true,
-          inclusive: false,
+          // Adjacent block replacements must cover their shared boundary when
+          // switching between rendered widgets and source lines.
+          inclusive: true,
         }),
       });
     }
@@ -316,6 +374,7 @@
     },
     update(decorations, transaction) {
       return transaction.docChanged || transactionChangesActiveBlock(transaction)
+        || transaction.effects.some((effect) => effect.is(bionicModeEffect) || effect.is(blockSelectionEffect))
         ? buildBlockPreviewDecorations(transaction.state)
         : decorations;
     },
@@ -324,13 +383,43 @@
     },
   });
 
+  const blockSelectionEffect = StateEffect.define<void>();
   $effect(() => {
-    const pageId = page.id;
-    void loadSource(pageId);
+    void selectedBlockIds;
+    editorView?.dispatch({ effects: blockSelectionEffect.of(undefined) });
   });
 
+  $effect(() => {
+    const pageId = page.id;
+    sourceReady = untrack(() => loadSource(pageId));
+  });
+
+  $effect(() => bionicReaderEnabled.subscribe(() => {
+    editorView?.dispatch({ effects: bionicModeEffect.of(undefined) });
+  }));
+
   onDestroy(() => {
+    loadToken += 1;
+    sourceSession?.invalidate();
+    setCurrentBlockAnchor(page.id, null);
     destroyEditor();
+  });
+
+  $effect(() => registerEditorFlush(page.id, async () => {
+    await sourceReady;
+    if (dirty || saving) await saveSource();
+    if (dirty || error) throw new Error(error ?? "Save the page source before continuing.");
+  }));
+
+  $effect(() => {
+    const handleRewrite = (event: Event) => {
+      const detail = (event as CustomEvent<WritingRewrittenDetail>).detail;
+      if (detail?.pageId !== page.id) return;
+      sourceReady = loadSource(page.id, false, detail);
+      detail.refreshes.push(sourceReady.then(() => { if (error) throw new Error(error); }));
+    };
+    window.addEventListener("grafium-writing-rewritten", handleRewrite);
+    return () => window.removeEventListener("grafium-writing-rewritten", handleRewrite);
   });
 
   $effect(() => {
@@ -462,7 +551,21 @@
       doc: content,
       extensions: [
         markdown(),
+        editorWriteLockExtension(page.id),
         history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
+        EditorState.transactionFilter.of((transaction) => {
+          if (!transaction.docChanged || transaction.annotation(Transaction.addToHistory) === false) return transaction;
+          const changes: { from: number; to: number }[] = [];
+          transaction.changes.iterChangedRanges((from, to) => changes.push({ from, to }));
+          if (!touchesReadingNoteDefinition(transaction.startState.doc.toString(), changes)) return transaction;
+          queueMicrotask(() => { savedMessage = "Edit managed footnotes in the Notes tab."; });
+          return [];
+        }),
+        autocompletion({
+          override: [emojiIconCompletionSource],
+          activateOnTyping: true,
+          closeOnBlur: false,
+        }),
         drawSelection(),
         editingModeCompartment.of(editingModeExtensions(false)),
         activeBlockField,
@@ -480,6 +583,9 @@
           },
         ])),
         keymap.of([
+          { key: "Mod-z", run: undoEditor },
+          { key: "Mod-Shift-z", run: redoEditor },
+          { key: "Mod-y", run: redoEditor },
           {
             key: "Mod-s",
             run: () => {
@@ -495,9 +601,17 @@
         ]),
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
+          if (update.view.hasFocus && (update.selectionSet || update.docChanged)) {
+            const { from, to } = update.state.selection.main;
+            publishContinuousReadingSelection(update.view.dom, page.id, update.state.doc.toString(), from, to);
+          }
           if (update.docChanged) {
-            dirty = true;
+            if (sourceSession) sourceSession.content = update.state.doc.toString();
+            dirty = sourceSession?.dirty ?? true;
             savedMessage = "";
+          }
+          if (update.view.hasFocus && (update.docChanged || update.selectionSet || update.focusChanged)) {
+            publishBlockAnchor(update.view);
           }
         }),
         EditorView.domEventHandlers({
@@ -512,6 +626,7 @@
             }
           },
           blur: (_event, view) => {
+            if (editorHasDialogFocus(view.dom)) return;
             if ((window as any).__activeEditorView === view) {
               (window as any).__activeEditorView = undefined;
             }
@@ -598,7 +713,8 @@
             columnGap: "0",
             alignItems: "baseline",
             minHeight: "21px",
-            marginBottom: "1px",
+            // Widget spacing must be included in CodeMirror's height measurement.
+            paddingBottom: "1px",
             paddingLeft: "calc(var(--preview-depth, 0) * 24px)",
             color: "var(--text-primary)",
             fontFamily: "inherit",
@@ -613,6 +729,9 @@
             color: "var(--text-muted)",
             lineHeight: "inherit",
             userSelect: "none",
+          },
+          ".unified-rendered-block.selected": {
+            background: "color-mix(in srgb, var(--accent, #7c3aed) 20%, transparent)",
           },
           ".unified-rendered-content": {
             minWidth: "0",
@@ -731,6 +850,83 @@
   function activateEditor(view: EditorView) {
     (window as any).__activeEditorView = view;
     (window as any).__unifiedPageEditorView = view;
+    publishBlockAnchor(view);
+  }
+
+  function publishBlockAnchor(view: EditorView) {
+    const blocks = parsePageSourceMap(view.state.doc.toString()).blocks;
+    const block = blocks.find((_, index) => view.state.selection.main.head < (blocks[index + 1]?.ownFrom ?? Infinity));
+    const current = getLatestCurrentBlockAnchor();
+    if (current?.pageId !== page.id || current.blockId !== (block?.id ?? null)) {
+      setCurrentBlockAnchor(page.id, block?.id ?? null);
+    }
+  }
+
+  export async function prepareBlockSelection(isCurrent: () => boolean): Promise<boolean> {
+    await sourceReady;
+    if (error) throw new Error(error);
+    const view = editorView;
+    if (!view || !isCurrent()) return false;
+    const doc = view.state.doc;
+    if (dirty || saving) {
+      if (!await saveSource()) throw new Error(error ?? "Save the page source before selecting blocks.");
+      if (!isCurrent() || view !== editorView || view.state.doc !== doc) return false;
+    }
+    if (!isCurrent() || editorView !== view) return false;
+    setActiveBlock(view, null);
+    return true;
+  }
+
+  export async function restoreTextSelection(blockId: string, selection: BlockTextSelection, isCurrent: () => boolean) {
+    await sourceReady;
+    const view = editorView;
+    if (!view || !isCurrent()) return;
+    const clamp = (value: number) => Math.max(0, Math.min(view.state.doc.length, value));
+    view.dispatch({
+      selection: EditorSelection.range(clamp(selection.anchor), clamp(selection.head)),
+      effects: activeBlockEffects(blockId),
+      scrollIntoView: true,
+    });
+    view.focus();
+  }
+
+  export function revealBlock(blockId: string) {
+    const row = editorHost?.querySelector(`[data-source-block-id="${CSS.escape(blockId)}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }
+
+  export async function reloadSource() {
+    sourceReady = loadSource(page.id);
+    await sourceReady;
+    if (error) throw new Error(error);
+  }
+
+  export async function focusForNav(x: number | undefined, edge: "top" | "bottom", isCurrent: () => boolean, blockId?: string): Promise<void> {
+    await sourceReady;
+    if (!isCurrent()) return;
+    if (error) throw new Error(error);
+    const view = editorView;
+    if (!view) throw new Error("Continuous journal editor is not ready");
+    const blocks = parsePageSourceMap(view.state.doc.toString()).blocks;
+    const block = blockId ? blocks.find((entry) => entry.id === blockId)
+      : edge === "top" ? blocks[0] : blocks.at(-1);
+    if (blockId && !block) throw new Error("The selected block is no longer available");
+    const anchor = edge === "top" ? block?.contentFrom ?? 0 : block?.contentTo ?? view.state.doc.length;
+    view.dispatch({
+      selection: EditorSelection.cursor(anchor),
+      effects: activeBlockEffects(block ? sourceBlockKey(block) : "empty"),
+      scrollIntoView: true,
+    });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (!isCurrent() || editorView !== view) return;
+    const coords = view.coordsAtPos(anchor, edge === "top" ? 1 : -1);
+    const pos = x === undefined ? anchor
+      : coords && view.posAtCoords({ x, y: edge === "top" ? coords.top + 2 : coords.bottom - 2 });
+    const line = view.state.doc.lineAt(anchor);
+    const target = Math.max(line.from, Math.min(line.to, pos ?? anchor));
+    view.dispatch({ selection: EditorSelection.cursor(target), scrollIntoView: true });
+    if (x === undefined) markStructuralUndoBoundary(view);
+    view.focus();
   }
 
   function moveVerticalSelection(view: EditorView, direction: "up" | "down", extend: boolean): boolean {
@@ -770,11 +966,51 @@
     const onArrowKey = (event: KeyboardEvent) => {
       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
       if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.isComposing || event.keyCode === 229) return;
       if (!editorView || editorView !== view) return;
+      if (!event.shiftKey && completionStatus(view.state) !== null) return;
+
+      const direction = event.key === "ArrowUp" ? "up" : "down";
+      if (event.shiftKey && onSelectBoundary && completionStatus(view.state) === null) {
+        const range = view.state.selection.main;
+        const blocks = parsePageSourceMap(view.state.doc.toString()).blocks;
+        const edgeBlock = direction === "up" ? blocks[0] : blocks.at(-1);
+        const boundary = direction === "up" ? edgeBlock?.contentFrom ?? 0
+          : edgeBlock?.contentTo ?? view.state.doc.length;
+        const caret = view.coordsAtPos(range.head);
+        const edgeCaret = view.coordsAtPos(boundary);
+        const atBoundary = direction === "up" ? range.head <= boundary : range.head >= boundary;
+        if (atBoundary || (caret && edgeCaret && Math.abs(caret.top - edgeCaret.top) <= 1)) {
+          // Page-start properties and the final newline belong to the nearest
+          // block too, even though they fall outside its own source range.
+          const origin = blocks.find((_, index) => range.anchor < (blocks[index + 1]?.ownFrom ?? Infinity));
+          if (origin?.id && edgeBlock?.id) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            onSelectBoundary(origin.id, direction, { anchor: range.anchor, head: range.head },
+              caret?.left ?? 0, edgeBlock.id);
+            return;
+          }
+        }
+      }
+      if (onNavigateBoundary && !event.shiftKey && view.state.selection.main.empty) {
+        const head = view.state.selection.main.head;
+        const blocks = parsePageSourceMap(view.state.doc.toString()).blocks;
+        const boundary = direction === "up" ? blocks[0]?.contentFrom ?? 0
+          : blocks.at(-1)?.contentTo ?? view.state.doc.length;
+        const caret = view.coordsAtPos(head);
+        const edge = view.coordsAtPos(boundary);
+        if (caret && edge && Math.abs(caret.top - edge.top) <= 1) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          onNavigateBoundary(direction, caret.left);
+          return;
+        }
+      }
 
       const handled = moveVerticalSelection(
         view,
-        event.key === "ArrowUp" ? "up" : "down",
+        direction,
         event.shiftKey,
       );
 
@@ -789,19 +1025,48 @@
     };
   }
 
-  async function loadSource(pageId: string) {
+  async function loadSource(pageId: string, discardDraft = false, rewrite?: WritingRewrittenDetail) {
+    const previousView = editorView;
+    const previousDoc = previousView?.state.doc;
+    const previousSession = sourceSession;
+    if (saving || (dirty && !discardDraft)) {
+      error = "Source refresh stopped to preserve unsaved text. Save it or explicitly reload from disk.";
+      return;
+    }
     const token = ++loadToken;
     loading = true;
     error = null;
     savedMessage = "";
 
     try {
-      const source = await getPageSource(pageId);
+      const session = await loadPageSourceSession(pageId,
+        previousSession?.pageId === pageId ? previousSession.graphPath : undefined);
       if (token !== loadToken) return;
       await tick();
       if (token !== loadToken) return;
-      resetEditor(source);
-      dirty = false;
+      if (previousView !== editorView || previousView?.state.doc !== previousDoc) {
+        throw new Error("Source refresh stopped because you typed while it was loading. Your unsaved text is preserved.");
+      }
+      if (rewrite && previousView) {
+        const blocks = parsePageSourceMap(previousView.state.doc.toString()).blocks;
+        const replacements = rewrite.changes.map((change) => {
+          const block = blocks.find((block) => block.id === change.blockId);
+          return block ? sourceBlockContentReplacement(block, change.afterContent) : null;
+        }).filter((replacement) => replacement !== null).sort((a, b) => a.from - b.from);
+        const changes = replacements.length === rewrite.changes.length
+          && previousView.state.changes(replacements).apply(previousView.state.doc).toString() === session.expectedSource
+            ? replacements : { from: 0, to: previousView.state.doc.length, insert: session.expectedSource };
+        applyWritingEditorChanges(previousView, changes, rewrite.action, rewrite.undo);
+      } else {
+        resetEditor(session.expectedSource);
+      }
+      if (editorView?.state.doc.toString() !== session.expectedSource.replace(/\r\n?/g, "\n")) {
+        throw new Error("The editor could not display the verified source. Reload explicitly before saving.");
+      }
+      previousSession?.invalidate();
+      sourceSession = session;
+      session.content = editorView?.state.doc.toString() ?? session.expectedSource;
+      dirty = session.dirty;
     } catch (e) {
       if (token !== loadToken) return;
       error = `Failed to load page source: ${errorMessage(e)}`;
@@ -812,22 +1077,34 @@
     }
   }
 
-  async function saveSource() {
-    if (!editorView || saving) return;
-    const content = editorView.state.doc.toString();
+  async function saveSource(): Promise<boolean> {
+    const view = editorView;
+    const session = sourceSession;
+    if (!view || !session || loading || session.pageId !== page.id) return false;
+    session.content = view.state.doc.toString();
+    const write = session.save();
+    const stillCurrent = () => editorView === view && sourceSession === session && page.id === session.pageId;
     saving = true;
     error = null;
     savedMessage = "";
 
     try {
-      await updatePageSource(page.id, content);
-      dirty = false;
-      savedMessage = "Saved";
+      await write;
+      if (!stillCurrent()) return false;
+      dirty = session.dirty;
+      error = null;
+      savedMessage = dirty ? "" : "Saved";
       await onReload?.();
+      return true;
     } catch (e) {
-      error = `Failed to save page source: ${errorMessage(e)}`;
+      if (stillCurrent()) {
+        dirty = session.dirty;
+        savedMessage = "";
+        error = `Failed to save page source: ${errorMessage(e)}`;
+      }
+      return false;
     } finally {
-      saving = false;
+      if (stillCurrent()) saving = session.pending > 0;
     }
   }
 
@@ -835,7 +1112,7 @@
     if (dirty && !window.confirm("Discard unsaved source edits and reload from disk?")) {
       return;
     }
-    await loadSource(page.id);
+    await loadSource(page.id, true);
   }
 
   function exitPrototype() {
@@ -846,7 +1123,7 @@
   }
 </script>
 
-<div class="unified-page-editor">
+<div class="unified-page-editor" data-page-id={page.id} use:readingSelectionCapture>
   <div class="prototype-banner">
     <div>
       <strong>Experimental continuous editor</strong>

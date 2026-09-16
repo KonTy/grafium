@@ -21,6 +21,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
+pub mod reading_notes;
+mod reading_note_replace;
+mod research_edits;
+pub use research_edits::{
+    AiInsertSummaryResult, SummaryLinkPlan, SummaryLinkTarget, SummaryRetainedTarget,
+    SummarySiblingOrder, SummaryUndoResult, SummaryUnlinkedTarget, SummaryWrapChange,
+};
+
 pub struct Graph {
     pub db: Database,
     pub root_dir: PathBuf,
@@ -56,6 +64,14 @@ pub struct BlockCreateSpec {
     pub content: String,
     pub block_type: BlockType,
     pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritingContentChange {
+    pub block_id: String,
+    pub before_content: String,
+    pub after_content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,7 +535,8 @@ impl Graph {
         conn: &rusqlite::Connection,
         title: &str,
     ) -> Result<()> {
-        let parts: Vec<&str> = title.split('/').collect();
+        let normalized = parser::normalize_page_title(title);
+        let parts: Vec<&str> = normalized.split('/').collect();
 
         // Build up each parent level
         for i in 1..parts.len() {
@@ -544,19 +561,17 @@ impl Graph {
     ) -> Result<(String, LinkType)> {
         match link {
             ExtractedLink::Page(title) => {
-                // Auto-create parent hierarchy if title contains "/"
-                self.ensure_parent_hierarchy_in_connection(conn, &title)?;
                 let page = self
                     .db
                     .get_or_create_page_in_connection(conn, &title, false)?;
+                self.ensure_parent_hierarchy_in_connection(conn, &page.title)?;
                 Ok((page.id, LinkType::Page))
             }
             ExtractedLink::Tag(tag) => {
-                // Auto-create parent hierarchy for tags too
-                self.ensure_parent_hierarchy_in_connection(conn, &tag)?;
                 let page = self
                     .db
                     .get_or_create_page_in_connection(conn, &tag, false)?;
+                self.ensure_parent_hierarchy_in_connection(conn, &page.title)?;
                 Ok((page.id, LinkType::Tag))
             }
             ExtractedLink::BlockRef(block_id) => Ok((block_id, LinkType::BlockRef)),
@@ -991,6 +1006,7 @@ impl Graph {
     /// [`Self::index_file`].
     fn index_file_impl(&self, path: &Path) -> Result<Option<String>> {
         let content = fs::read_to_string(path)?;
+        self.ensure_reading_note_files_unique(path, &content)?;
         let content_hash = Self::content_hash(&content);
         if self.indexed_content_matches(path, &content_hash) {
             return Ok(None);
@@ -1019,7 +1035,7 @@ impl Graph {
                 Self::title_from_file_path(&self.knowledge_dir, path, filename)
             )
         } else {
-            canonical_journal_title.or(parsed.title).unwrap_or_else(|| {
+            canonical_journal_title.or(parsed.title.clone()).unwrap_or_else(|| {
                 let base_dir = if in_journals_dir {
                     &self.journals_dir
                 } else {
@@ -1052,6 +1068,7 @@ impl Graph {
 
         let mut conn = self.db.conn()?;
         let tx = conn.transaction()?;
+        self.guard_managed_block_ids(&tx, path, &parsed)?;
 
         let page = self.db.upsert_page_in_connection(
             &tx,
@@ -1521,17 +1538,28 @@ impl Graph {
     /// something else happens to re-index that file, so a task could be written
     /// and simply not show up.
     fn sync_task_row(&self, block_id: &str, content: &str) -> Result<()> {
+        let conn = self.db.conn()?;
+        self.sync_task_row_in_connection(&conn, block_id, content)
+    }
+
+    fn sync_task_row_in_connection(
+        &self,
+        conn: &rusqlite::Connection,
+        block_id: &str,
+        content: &str,
+    ) -> Result<()> {
         use crate::parser::task;
 
         let marker = task::current_marker(content);
         if marker.is_empty() {
-            return self.db.delete_task(block_id);
+            return self.db.delete_task_in_connection(conn, block_id);
         }
         let Some(state) = crate::models::TaskState::from_str(&marker) else {
             return Ok(());
         };
         let fields = task::parse_fields(content);
-        self.db.upsert_task(
+        self.db.upsert_task_in_connection(
+            conn,
             block_id,
             &state,
             fields
@@ -1551,7 +1579,7 @@ impl Graph {
             None
         };
         self.db
-            .sync_task_from_content(block_id, &marker, &fields, closed_at)
+            .sync_task_from_content_in_connection(conn, block_id, &marker, &fields, closed_at)
     }
 
     fn cleanup_removed_local_images(
@@ -1595,82 +1623,252 @@ impl Graph {
     }
 
     pub fn accept_link_candidate(&self, candidate_id: &str) -> Result<LinkCandidate> {
-        let candidate = self.db.get_link_candidate(candidate_id)?;
-        if candidate.status != LinkCandidateStatus::Pending {
-            return Err(CoreError::Other(
-                "Only pending link suggestions can be accepted".to_string(),
-            ));
-        }
+        self.apply_link_candidate_review(candidate_id, false)
+    }
 
-        let block = self.db.get_block_by_id(&candidate.from_block_id)?;
-        let start = usize::try_from(candidate.anchor_start).map_err(|_| {
-            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
-        })?;
-        let end = usize::try_from(candidate.anchor_end).map_err(|_| {
-            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
-        })?;
-        let current_anchor = block.content.get(start..end).ok_or_else(|| {
-            CoreError::Other(
-                "This link suggestion is stale because the block changed; refresh suggestions."
-                    .to_string(),
-            )
-        })?;
-        if current_anchor != candidate.anchor_text {
-            return Err(CoreError::Other(
-                "This link suggestion is stale because the block changed; refresh suggestions."
-                    .to_string(),
-            ));
+    pub fn resolve_link_candidate(
+        &self,
+        candidate_id: &str,
+        target_page_id: Option<&str>,
+        create_new: bool,
+    ) -> Result<LinkCandidate> {
+        if target_page_id.is_some() == create_new {
+            return Err(CoreError::Other("Choose one existing target or the proposed new page.".into()));
         }
-
-        let linked = wrap_link_candidate_anchor(
-            &block.content,
-            candidate.anchor_start,
-            candidate.anchor_end,
-            link_candidate_target_label(&candidate, current_anchor),
+        self.apply_link_candidate_review_with_selection(
+            candidate_id, false, Some((target_page_id, create_new)), Self::atomic_write,
         )
-        .ok_or_else(|| {
-            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
-        })?;
-        self.update_block(&candidate.from_block_id, &linked, None)?;
-        self.db
-            .mark_link_candidate_accepted(candidate_id, &block.content)?;
-        self.db.get_link_candidate(candidate_id)
     }
 
     pub fn undo_link_candidate_accept(&self, candidate_id: &str) -> Result<LinkCandidate> {
-        let candidate = self.db.get_link_candidate(candidate_id)?;
-        if candidate.status != LinkCandidateStatus::Accepted {
-            return Err(CoreError::Other(
-                "Only accepted link suggestions can be undone".to_string(),
-            ));
-        }
+        self.apply_link_candidate_review(candidate_id, true)
+    }
 
-        let Some(previous_content) = self.db.undo_link_candidate_accept_content(candidate_id)?
-        else {
-            return Err(CoreError::Other(
-                "This accepted link suggestion has no undo snapshot".to_string(),
-            ));
+    fn apply_link_candidate_review(&self, candidate_id: &str, undo: bool) -> Result<LinkCandidate> {
+        self.apply_link_candidate_review_with_writer(candidate_id, undo, Self::atomic_write)
+    }
+
+    fn apply_link_candidate_review_with_writer(
+        &self,
+        candidate_id: &str,
+        undo: bool,
+        write: impl FnOnce(&Path, &str) -> Result<()>,
+    ) -> Result<LinkCandidate> {
+        self.apply_link_candidate_review_with_selection(candidate_id, undo, None, write)
+    }
+
+    fn apply_link_candidate_review_with_selection(
+        &self,
+        candidate_id: &str,
+        undo: bool,
+        selection: Option<(Option<&str>, bool)>,
+        write: impl FnOnce(&Path, &str) -> Result<()>,
+    ) -> Result<LinkCandidate> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut candidate = self.db.get_link_candidate_in_connection(&tx, candidate_id)?;
+        let expected_status = if undo {
+            LinkCandidateStatus::Accepted
+        } else {
+            LinkCandidateStatus::Pending
         };
-        let expected_linked = wrap_link_candidate_anchor(
-            &previous_content,
-            candidate.anchor_start,
-            candidate.anchor_end,
-            link_candidate_target_label(&candidate, &candidate.anchor_text),
-        )
-        .ok_or_else(|| {
-            CoreError::Other("Link suggestion has an invalid anchor range".to_string())
-        })?;
-        let block = self.db.get_block_by_id(&candidate.from_block_id)?;
-        if block.content != expected_linked {
+        if candidate.status != expected_status {
             return Err(CoreError::Other(
-                "This block changed after the link was accepted, so Grafium will not overwrite it."
-                    .to_string(),
+                "The link suggestion's review state changed; refresh suggestions.".into(),
             ));
         }
+        let page = self.db.get_page_by_id_in_connection(&tx, &candidate.from_page_id)?;
+        let mut blocks = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
+        let block_count: usize = tx.query_row(
+            "SELECT count(*) FROM blocks WHERE page_id = ?1", [&page.id], |row| row.get(0),
+        )?;
+        if blocks.len() != block_count {
+            return Err(CoreError::Other("Page contains unreachable blocks; link review was not applied.".into()));
+        }
+        let position = blocks.iter().position(|b| b.id == candidate.from_block_id)
+            .ok_or_else(|| CoreError::Other("The source block moved or was deleted.".into()))?;
+        let block = blocks[position].clone();
+        let (source_content, undo_content, accepted_content): (Option<String>, Option<String>, Option<String>) =
+            tx.query_row(
+                "SELECT source_content, undo_content, accepted_content FROM link_candidates WHERE id = ?1",
+                [candidate_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let after = if undo {
+            let previous = undo_content.ok_or_else(|| CoreError::Other(
+                "This accepted link suggestion has no undo snapshot.".into()))?;
+            let expected = accepted_content.or_else(|| wrap_link_candidate_anchor(
+                &previous, candidate.anchor_start, candidate.anchor_end,
+                link_candidate_target_label(&candidate, &candidate.anchor_text),
+            ));
+            if expected.as_deref() != Some(block.content.as_str()) {
+                return Err(CoreError::Other(
+                    "This block changed after the link was accepted, so Grafium will not overwrite it.".into()));
+            }
+            previous
+        } else {
+            if source_content.as_deref().is_some_and(|content| content != block.content) {
+                return Err(CoreError::Other(
+                    "This link suggestion is stale because the block changed; refresh suggestions.".into()));
+            }
+            let start = usize::try_from(candidate.anchor_start).unwrap_or(usize::MAX);
+            let end = usize::try_from(candidate.anchor_end).unwrap_or(usize::MAX);
+            if block.content.get(start..end) != Some(candidate.anchor_text.as_str()) {
+                return Err(CoreError::Other(
+                    "This link suggestion is stale because the block changed; refresh suggestions.".into()));
+            }
+            if parser::protected_link_spans(&block.content).iter().any(|(s, e)| start < *e && end > *s) {
+                return Err(CoreError::Other("The suggestion overlaps protected source syntax; refresh suggestions.".into()));
+            }
+            if let Some((Some(selected_id), false)) = selection {
+                let selected = self.db.get_page_by_id_in_connection(&tx, selected_id)?;
+                let fresh = self.db.resolve_tag_terms_in_connection(
+                    &tx, &[crate::parser::TagTerm::from(candidate.proposed_title.as_str())])?;
+                let listed = candidate.alternatives.iter().any(|allowed| {
+                    allowed.id == selected.id && allowed.title == selected.title
+                });
+                let current = fresh[0].candidates.iter().any(|allowed| {
+                    allowed.id == selected.id && allowed.title == selected.title
+                }) || (fresh[0].target_page_id.as_deref() == Some(selected_id)
+                    && fresh[0].target_title == selected.title);
+                if !listed || !current {
+                    return Err(CoreError::Other("The selected page is not in the current allowed shortlist; refresh suggestions.".into()));
+                }
+                candidate.to_page_id = Some(selected.id);
+                candidate.to_page_title = selected.title.clone();
+                candidate.proposed_title = selected.title;
+                candidate.reason = "User selected an existing page from the current identity shortlist.".into();
+            }
+            let explicit_new = selection.is_some_and(|(target, new)| target.is_none() && new);
+            if explicit_new {
+                candidate.to_page_id = None;
+                candidate.reason = "User approved the proposed title; existing identity was revalidated before creation.".into();
+            }
+            if candidate.resolution == "ambiguous" && selection.is_none() {
+                return Err(CoreError::Other(
+                    "This suggestion has uncertain identity; choose or clarify its target before linking.".into()));
+            }
+            let target = if let Some(id) = &candidate.to_page_id {
+                let target = self.db.get_page_by_id_in_connection(&tx, id)?;
+                if !candidate.proposed_title.is_empty() && candidate.proposed_title != target.title {
+                    return Err(CoreError::Other("The target page was renamed; refresh suggestions.".into()));
+                }
+                let resolved = self.db.resolve_tag_terms_in_connection(
+                    &tx, &[crate::parser::TagTerm::from(target.title.as_str())])?;
+                if resolved[0].target_page_id.as_deref() != Some(id.as_str()) {
+                    return Err(CoreError::Other("The target name is now ambiguous; refresh suggestions.".into()));
+                }
+                target
+            } else {
+                let resolved = self.db.resolve_tag_terms_in_connection(
+                    &tx, &[crate::parser::TagTerm::from(candidate.proposed_title.as_str())])?;
+                match resolved[0].decision {
+                    crate::db::EntityDecision::Reuse => self.db.get_page_by_id_in_connection(
+                        &tx, resolved[0].target_page_id.as_deref().unwrap())?,
+                    crate::db::EntityDecision::New => self.db.get_or_create_page_in_connection(
+                        &tx, &candidate.proposed_title, false)?,
+                    crate::db::EntityDecision::Ambiguous
+                        if explicit_new || (candidate.resolution == "new"
+                            && !candidate.alternatives.is_empty()
+                            && candidate.alternatives == resolved[0].candidates) =>
+                        self.db.get_or_create_page_in_connection(&tx, &candidate.proposed_title, false)?,
+                    crate::db::EntityDecision::Ambiguous => return Err(CoreError::Other(
+                        "Similar pages appeared since discovery; refresh and review the target.".into())),
+                }
+            };
+            if target.id == candidate.from_page_id {
+                return Err(CoreError::Other("A suggestion cannot link this page to itself.".into()));
+            }
+            candidate.to_page_id = Some(target.id);
+            candidate.to_page_title = target.title;
+            let link = parser::format_concept_link(&candidate.to_page_title)
+                .ok_or_else(|| CoreError::Other("The target cannot be represented as a safe page link.".into()))?;
+            format!("{}{}{}", &block.content[..start], link, &block.content[end..])
+        };
 
-        self.update_block(&candidate.from_block_id, &previous_content, None)?;
-        self.db
-            .mark_link_candidate_pending_after_undo(candidate_id)?;
+        let relative_path = page.file_path.as_deref().ok_or_else(|| {
+            CoreError::Other("Link review requires an existing source page file.".into())
+        })?;
+        let path = self.root_dir.join(relative_path);
+        self.ensure_path_inside_graph(&path)?;
+        let original = fs::read_to_string(&path)?;
+        if !self.indexed_content_matches(&path, &Self::content_hash(&original))
+            && original != parser::serialize_page(&page.properties, &blocks)
+        {
+            return Err(CoreError::Other(
+                "Page file changed outside Grafium; refresh before reviewing links.".into(),
+            ));
+        }
+        self.db.update_block_in_connection(&tx, &block.id, &after, None)?;
+        self.db.delete_links_from_block_in_connection(&tx, &block.id)?;
+        for link in parser::extract_links(&after) {
+            let (target, link_type) = self.resolve_link_target_in_connection(&tx, link)?;
+            self.db.insert_link_in_connection(&tx, &block.id, &target, link_type)?;
+        }
+        self.sync_task_row_in_connection(&tx, &block.id, &after)?;
+        let now = Utc::now().timestamp_millis();
+        let delta = after.len() as i64 - block.content.len() as i64;
+        let replaced_end = if undo {
+            candidate.anchor_end - delta
+        } else {
+            candidate.anchor_end
+        };
+        // Other non-overlapping suggestions can follow this known edit without
+        // trusting stale user edits or losing the rest of a Link all operation.
+        tx.execute(
+            "UPDATE link_candidates SET source_content = ?1,
+             anchor_start = anchor_start + CASE WHEN anchor_start >= ?2 THEN ?3 ELSE 0 END,
+             anchor_end = anchor_end + CASE WHEN anchor_start >= ?2 THEN ?3 ELSE 0 END
+             WHERE from_block_id = ?4 AND id != ?5 AND status = 'pending'
+               AND source_content = ?6 AND (anchor_end <= ?7 OR anchor_start >= ?2)",
+            rusqlite::params![after, replaced_end, delta, block.id, candidate_id,
+                block.content, candidate.anchor_start],
+        )?;
+        if undo {
+            tx.execute(
+                "UPDATE link_candidates SET status = 'pending', accepted_at = NULL,
+                 undo_content = NULL, accepted_content = NULL, source_content = ?2, updated_at = ?3
+                 WHERE id = ?1",
+                rusqlite::params![candidate_id, after, now],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE link_candidates SET status = 'accepted', accepted_at = ?2,
+                 updated_at = ?2, undo_content = ?3, accepted_content = ?4, to_page_id = ?5,
+                 proposed_title = ?6, resolution = 'reuse', reason = ?7 WHERE id = ?1",
+                rusqlite::params![candidate_id, now, block.content, after,
+                    candidate.to_page_id, candidate.to_page_title, candidate.reason],
+            )?;
+        }
+        blocks[position].content = after;
+        let content = parser::serialize_page(&page.properties, &blocks);
+        let backup = path.with_file_name(format!(".link-review-rollback-{}", Uuid::new_v4().as_simple()));
+        Self::atomic_write(&backup, &original)?;
+        if fs::read_to_string(&path).ok().as_deref() != Some(original.as_str()) {
+            let _ = fs::remove_file(&backup);
+            return Err(CoreError::Other("Page file changed while reviewing links.".into()));
+        }
+        let result = write(&path, &content)
+            .and_then(|()| tx.commit().map_err(CoreError::from));
+        if let Err(error) = result {
+            let current = fs::read_to_string(&path).ok();
+            if current.as_deref() == Some(original.as_str()) {
+                let _ = fs::remove_file(&backup);
+            } else if current.as_deref() != Some(content.as_str()) {
+                return Err(CoreError::Other(format!(
+                    "Link review rolled back, but the page changed externally; it was preserved. The original is saved at {}",
+                    backup.display()
+                )));
+            } else if fs::rename(&backup, &path).is_err() {
+                return Err(CoreError::Other(format!(
+                    "Link review rolled back; the original page is saved at {}", backup.display())));
+            }
+            self.note_self_write(&path);
+            return Err(error);
+        }
+        let _ = fs::remove_file(&backup);
+        self.note_self_write(&path);
+        self.remember_indexed_content_hash(&path, Self::content_hash(&content));
+        drop(conn);
         self.db.get_link_candidate(candidate_id)
     }
 
@@ -1812,6 +2010,12 @@ impl Graph {
     ) -> Result<()> {
         // Get the page this block belongs to
         let block = self.db.get_block_by_id(block_id)?;
+        if parser::is_reading_note_block(&block) {
+            return self.update_reading_note_block(&block, content, properties);
+        }
+        if self.try_update_inline_source_block(&block, content, properties)? {
+            return Ok(());
+        }
         let page = self.db.get_page_by_id(&block.page_id)?;
 
         // Update in DB
@@ -1838,6 +2042,217 @@ impl Graph {
             eprintln!("Warning: could not clean up removed local images: {e}");
         }
 
+        Ok(())
+    }
+
+    /// Replace existing content as one guarded edit. Omit `expected_blocks` for
+    /// undo/redo: target contents are still checked, but unrelated metadata edits
+    /// are retained. Callers must serialize this with other Graph mutations.
+    pub fn apply_writing_changes(
+        &self,
+        page_id: &str,
+        changes: &[WritingContentChange],
+        expected_blocks: Option<&[Block]>,
+    ) -> Result<()> {
+        self.apply_writing_changes_with_writer(page_id, changes, expected_blocks, Self::atomic_write)
+    }
+
+    fn apply_writing_changes_with_writer(
+        &self,
+        page_id: &str,
+        changes: &[WritingContentChange],
+        expected_blocks: Option<&[Block]>,
+        write: impl FnOnce(&Path, &str) -> Result<()>,
+    ) -> Result<()> {
+        if changes.is_empty() {
+            return Err(CoreError::Other("Writing changes cannot be empty".into()));
+        }
+        let mut ids = HashSet::new();
+        for change in changes {
+            if change.block_id.is_empty() || !ids.insert(change.block_id.as_str()) {
+                return Err(CoreError::Other(
+                    "Writing changes contain an empty or duplicate block ID".into(),
+                ));
+            }
+            if !change.before_content.trim().is_empty() && change.after_content.trim().is_empty() {
+                return Err(CoreError::Other(
+                    "Writing changes cannot erase a nonempty block".into(),
+                ));
+            }
+        }
+
+        let mut conn = self.db.conn()?;
+        // Lock out competing database writers before taking the snapshot, not
+        // merely before the first UPDATE. Nothing here performs inference.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let page = self.db.get_page_by_id_in_connection(&tx, page_id)?;
+        let mut blocks = self.db.list_blocks_for_page_in_connection(&tx, page_id)?;
+        let block_count: usize = tx.query_row(
+            "SELECT COUNT(*) FROM blocks WHERE page_id = ?1",
+            [page_id],
+            |row| row.get(0),
+        )?;
+        if blocks.len() != block_count {
+            return Err(CoreError::Other(
+                "Page contains unreachable blocks; writing changes were not applied".into(),
+            ));
+        }
+        if let Some(expected) = expected_blocks {
+            if expected.len() != blocks.len()
+                || expected.iter().zip(&blocks).any(|(before, current)| {
+                    before.id != current.id
+                        || before.page_id != current.page_id
+                        || before.parent_id != current.parent_id
+                        || before.order_index != current.order_index
+                        || before.content != current.content
+                        || before.block_type != current.block_type
+                        || before.properties != current.properties
+                        || before.created_at != current.created_at
+                        || before.updated_at != current.updated_at
+                })
+            {
+                return Err(CoreError::Other(
+                    "Page changed since writing analysis; run the analysis again".into(),
+                ));
+            }
+        }
+
+        let positions: HashMap<&str, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.id.as_str(), index))
+            .collect();
+        let mut replacements = Vec::new();
+        for change in changes {
+            let Some(&index) = positions.get(change.block_id.as_str()) else {
+                return Err(CoreError::Other(
+                    "Writing change refers to a missing block or a different page".into(),
+                ));
+            };
+            if blocks[index].content != change.before_content {
+                return Err(CoreError::Other(
+                    "Block changed since writing analysis; no changes were applied".into(),
+                ));
+            }
+            if change.before_content != change.after_content {
+                replacements.push((index, change));
+            }
+        }
+        if replacements.is_empty() {
+            return Ok(());
+        }
+        drop(positions);
+
+        let relative_path = page.file_path.as_deref().ok_or_else(|| {
+            CoreError::Other("Writing changes require an existing page file".into())
+        })?;
+        let file_path = self.root_dir.join(relative_path);
+        self.ensure_path_inside_graph(&file_path)?;
+        let original = fs::read_to_string(&file_path)?;
+        // The watcher may not yet have indexed an external editor's change.
+        // Never replace those bytes with our older database snapshot.
+        if !self.indexed_content_matches(&file_path, &Self::content_hash(&original))
+            && original != parser::serialize_page(&page.properties, &blocks)
+        {
+            let parsed = parser::parse_page(
+                &original,
+                file_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("page.md"),
+            );
+            let mut slots: HashMap<BlockSlot, Vec<String>> = HashMap::new();
+            for block in &blocks {
+                slots
+                    .entry((block.parent_id.clone(), block.order_index))
+                    .or_default()
+                    .push(block.id.clone());
+            }
+            let mut indexed = Vec::new();
+            self.flatten_parsed_blocks(
+                &parsed.blocks,
+                None,
+                &mut slots,
+                &mut HashSet::new(),
+                &mut indexed,
+            );
+            if parsed.properties != page.properties
+                || indexed.len() != blocks.len()
+                || indexed
+                    .iter()
+                    .zip(&blocks)
+                    .any(|(disk, current)| disk.id != current.id || !disk.matches_block(current))
+            {
+                return Err(CoreError::Other(
+                    "Page file changed outside Grafium; refresh it before applying writing changes"
+                        .into(),
+                ));
+            }
+        }
+
+        for (index, change) in replacements {
+            self.db.update_block_in_connection(
+                &tx,
+                &change.block_id,
+                &change.after_content,
+                None,
+            )?;
+            self.db
+                .delete_links_from_block_in_connection(&tx, &change.block_id)?;
+            for link in parser::extract_links(&change.after_content) {
+                let (target, link_type) = self.resolve_link_target_in_connection(&tx, link)?;
+                self.db
+                    .insert_link_in_connection(&tx, &change.block_id, &target, link_type)?;
+            }
+            self.sync_task_row_in_connection(&tx, &change.block_id, &change.after_content)?;
+            blocks[index].content.clone_from(&change.after_content);
+        }
+        let content = parser::serialize_page(&page.properties, &blocks);
+
+        // Keep a fully flushed rollback file beside the page: restoring by
+        // rename needs no new disk allocation if SQLite's COMMIT fails. Unlike
+        // a hard link, it also survives an external in-place edit of the page.
+        let backup_path =
+            file_path.with_file_name(format!(".writing-rollback-{}", Uuid::new_v4().as_simple()));
+        Self::atomic_write(&backup_path, &original)?;
+        let result = (|| -> Result<()> {
+            if fs::read_to_string(&file_path)? != original {
+                return Err(CoreError::Other(
+                    "Page file changed while preparing writing changes; no changes were applied"
+                        .into(),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&backup_path);
+            return Err(error);
+        }
+        let result = write(&file_path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
+        if let Err(error) = result {
+            // A failed writer normally leaves the old file untouched. Also
+            // handle a failure after replacement (including a failed COMMIT).
+            if fs::read_to_string(&file_path).ok().as_deref() == Some(original.as_str()) {
+                let _ = fs::remove_file(&backup_path);
+            } else if fs::rename(&backup_path, &file_path).is_err() {
+                return Err(CoreError::Other(format!(
+                    "Writing changes were rolled back in the database, but restoring the page file failed; the original is saved at {}",
+                    backup_path.display()
+                )));
+            }
+            self.note_self_write(&file_path);
+            return Err(error);
+        }
+        let _ = fs::remove_file(&backup_path);
+        self.note_self_write(&file_path);
+        let hash = Self::content_hash(&content);
+        self.remember_indexed_content_hash(&file_path, hash.clone());
+        self.remember_canonical_content_hash(&file_path, hash);
+        drop(conn);
+        // These existing best-effort notifications cannot turn a successful
+        // durable edit into an error (which would prevent the caller's undo).
+        self.mark_page_dirty(page_id);
+        self.record_page_edit(page_id, "app");
         Ok(())
     }
 
@@ -2853,15 +3268,38 @@ impl Graph {
         Ok(fs::read_to_string(file_path)?)
     }
 
-    /// Replace a page's markdown source and re-index it into block rows.
+    /// Trusted internal replacement for pages without annotations. Editor IPC
+    /// must use `update_page_source_guarded` with its actual loaded base.
     pub fn update_page_source(&self, page_id: &str, content: &str) -> Result<()> {
         let page = self.db.get_page_by_id(page_id)?;
         let file_path = self.resolve_page_file_path(&page)?;
+        let current = fs::read_to_string(&file_path)?;
+        if current.contains(parser::reading_notes::OPEN)
+            || content.contains(parser::reading_notes::OPEN)
+            || reading_notes::is_note_page(&page.properties)
+        {
+            return Err(CoreError::Other(
+                "Annotated source requires expectedSource; use update_page_source_guarded".into(),
+            ));
+        }
 
         Self::atomic_write(&file_path, content)?;
         self.note_self_write(&file_path);
         self.forget_indexed_content(&file_path);
         self.index_file(&file_path)
+    }
+
+    /// Replace exactly the source version the editor loaded, never a freshly
+    /// read version substituted for the editor's base.
+    pub fn update_page_source_guarded(
+        &self,
+        page_id: &str,
+        expected_source: &str,
+        content: &str,
+    ) -> Result<()> {
+        let page = self.db.get_page_by_id(page_id)?;
+        let file_path = self.resolve_page_file_path(&page)?;
+        self.update_reading_source_file(&file_path, expected_source, content)
     }
 
     /// Reorder blocks for a page, then rewrite the file.
@@ -3153,6 +3591,8 @@ impl Graph {
         let current_hash = Self::content_hash(&current_content);
         if !self.canonical_content_matches(&file_path, &current_hash)
             || current_content.contains('\r')
+            || reading_notes::is_note_page(&page.properties)
+            || current_content.contains(parser::reading_notes::OPEN)
         {
             self.write_page_to_disk(page)?;
             return Ok(PageWriteStrategy::FullRewrite);
@@ -3301,6 +3741,339 @@ mod tests {
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;
+
+    mod writing_changes {
+        use super::*;
+
+        fn fixture(journal: bool) -> Result<(tempfile::TempDir, Graph, Page, Vec<Block>)> {
+            let directory = tempfile::tempdir_in(".")?;
+            let graph = Graph::open(directory.path())?;
+            let page = graph.create_page_with_content(
+                if journal { "2026-09-14" } else { "Writing" },
+                journal,
+                concat!(
+                    "category:: example\n",
+                    "- TODO Draft [[Original]] #topic\n",
+                    "  SCHEDULED: <2026-09-15 Tue 09:00 .+1d>\n",
+                    "  id:: writing-parent\n",
+                    "  owner:: editor\n",
+                    "  - Child ![sample](../assets/example.png)\n",
+                    "    id:: writing-child\n",
+                    "    style:: quiet\n",
+                ),
+            )?;
+            fs::create_dir_all(directory.path().join("assets"))?;
+            fs::write(directory.path().join("assets/example.png"), b"sample asset")?;
+            let blocks = graph.db.list_blocks_for_page(&page.id)?;
+            assert_eq!(blocks.len(), 2);
+            Ok((directory, graph, page, blocks))
+        }
+
+        fn changes(blocks: &[Block]) -> Vec<WritingContentChange> {
+            vec![
+                WritingContentChange {
+                    block_id: blocks[0].id.clone(),
+                    before_content: blocks[0].content.clone(),
+                    after_content: blocks[0]
+                        .content
+                        .replace("Draft [[Original]]", "Polished [[Revised]]"),
+                },
+                WritingContentChange {
+                    block_id: blocks[1].id.clone(),
+                    before_content: blocks[1].content.clone(),
+                    after_content: blocks[1].content.replace("Child", "Refined"),
+                },
+            ]
+        }
+
+        fn assert_blocks_unchanged(graph: &Graph, page: &Page, before: &[Block]) -> Result<()> {
+            assert_eq!(
+                serde_json::to_value(graph.db.list_blocks_for_page(&page.id)?)?,
+                serde_json::to_value(before)?,
+            );
+            Ok(())
+        }
+
+        fn task_data(graph: &Graph) -> Result<Vec<String>> {
+            let conn = graph.db.conn()?;
+            let row = conn.query_row(
+                "SELECT id, state, scheduled_date, scheduled_time, repeat_rule, created_at
+                 FROM tasks WHERE block_id = 'writing-parent'",
+                [],
+                |row| {
+                    Ok(vec![
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?.to_string(),
+                    ])
+                },
+            )?;
+            Ok(row)
+        }
+
+        #[test]
+        fn full_page_and_journal_preserve_structure_metadata_assets_and_indexes() -> Result<()> {
+            for journal in [false, true] {
+                let (directory, graph, page, before) = fixture(journal)?;
+                let changes = changes(&before);
+                let task_before = task_data(&graph)?;
+                graph.apply_writing_changes(&page.id, &changes, Some(&before))?;
+                let after = graph.db.list_blocks_for_page(&page.id)?;
+                for ((before, after), change) in before.iter().zip(&after).zip(&changes) {
+                    assert_eq!(after.id, before.id);
+                    assert_eq!(after.parent_id, before.parent_id);
+                    assert_eq!(after.page_id, before.page_id);
+                    assert_eq!(after.order_index, before.order_index);
+                    assert_eq!(after.block_type, before.block_type);
+                    assert_eq!(after.properties, before.properties);
+                    assert_eq!(after.created_at, before.created_at);
+                    assert_eq!(after.content, change.after_content);
+                }
+                let markdown = fs::read_to_string(graph.resolve_page_file_path(&page)?)?;
+                assert_eq!(markdown, parser::serialize_page(&page.properties, &after));
+                assert!(markdown.contains("    id:: writing-child"));
+                assert_eq!(
+                    fs::read(directory.path().join("assets/example.png"))?,
+                    b"sample asset"
+                );
+                assert!(graph.db.search_fts("Draft", 10)?.is_empty());
+                assert_eq!(graph.db.search_fts("Polished", 10)?[0].id, before[0].id);
+                let original = graph.db.get_page_by_title("Original")?;
+                let revised = graph.db.get_page_by_title("Revised")?;
+                assert!(graph.db.get_backlinks(&original.id)?.is_empty());
+                assert_eq!(graph.db.get_backlinks(&revised.id)?[0].1.id, before[0].id);
+                assert_eq!(task_before, task_data(&graph)?);
+                assert!(pending_page_ids(&graph)?.contains(&page.id));
+                assert!(graph
+                    .self_write_tracker()
+                    .lock()
+                    .unwrap()
+                    .contains_key(&graph.resolve_page_file_path(&page)?));
+
+                // Reopening and reconciling must not flatten the outline or
+                // lose metadata now that the text is durably in Markdown.
+                drop(graph);
+                let reopened = Graph::open(directory.path())?;
+                reopened.reconcile_files_from_disk()?;
+                let blocks = reopened.db.list_blocks_for_page(&page.id)?;
+                assert_eq!(blocks[0].id, before[0].id);
+                assert_eq!(blocks[1].id, before[1].id);
+                assert_eq!(blocks[1].parent_id, before[1].parent_id);
+                assert_eq!(blocks[1].properties, before[1].properties);
+                assert_eq!(blocks[0].content, changes[0].after_content);
+                assert_eq!(task_before, task_data(&reopened)?);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn stale_last_block_and_invalid_ids_make_zero_writes() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let original_file = fs::read(graph.resolve_page_file_path(&page)?)?;
+            let valid = changes(&before);
+            let mut stale = valid.clone();
+            stale[1].before_content = "Stale".into();
+            let mut missing = valid.clone();
+            missing[1].block_id = "missing".into();
+            let mut empty_id = valid.clone();
+            empty_id[1].block_id.clear();
+            let mut erase = valid.clone();
+            erase[1].after_content = " \n ".into();
+            let other = graph.create_page_with_content("Elsewhere", false, "- Other\n")?;
+            let mut wrong_page = valid.clone();
+            wrong_page[1].block_id = graph.db.list_blocks_for_page(&other.id)?[0].id.clone();
+            for invalid in [
+                vec![],
+                stale,
+                missing,
+                empty_id,
+                erase,
+                wrong_page,
+                vec![valid[0].clone(), valid[0].clone()],
+            ] {
+                assert!(graph
+                    .apply_writing_changes(&page.id, &invalid, None)
+                    .is_err());
+                assert_blocks_unchanged(&graph, &page, &before)?;
+                assert_eq!(
+                    fs::read(graph.resolve_page_file_path(&page)?)?,
+                    original_file
+                );
+                assert!(graph.db.get_page_by_title("Revised").is_err());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn full_snapshot_guards_page_structure_and_metadata() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let changes = changes(&before);
+            let mut snapshots = Vec::new();
+            snapshots.push(before[..1].to_vec());
+            let mut extra = before.clone();
+            extra.push(before[1].clone());
+            snapshots.push(extra);
+            for field in 0..9 {
+                let mut stale = before.clone();
+                match field {
+                    0 => stale.swap(0, 1),
+                    1 => stale[1].id = before[0].id.clone(),
+                    2 => stale[1].parent_id = None,
+                    3 => stale[1].order_index += 1,
+                    4 => stale[1].content.push('!'),
+                    5 => stale[1].block_type = BlockType::Audio,
+                    6 => stale[1].properties = serde_json::json!({"changed": true}),
+                    7 => stale[1].page_id = "another-page".into(),
+                    _ => stale[1].updated_at += 1,
+                }
+                snapshots.push(stale);
+            }
+            for stale in snapshots {
+                assert!(graph
+                    .apply_writing_changes(&page.id, &changes[..1], Some(&stale))
+                    .is_err());
+                assert_blocks_unchanged(&graph, &page, &before)?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn inverse_undo_redo_retains_unrelated_property_edits() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let changes = changes(&before);
+            graph.apply_writing_changes(&page.id, &changes, Some(&before))?;
+            let properties = serde_json::json!({"owner": "changed after rewrite"});
+            graph.update_block(&before[0].id, &changes[0].after_content, Some(&properties))?;
+            let inverse: Vec<_> = changes
+                .iter()
+                .map(|change| WritingContentChange {
+                    block_id: change.block_id.clone(),
+                    before_content: change.after_content.clone(),
+                    after_content: change.before_content.clone(),
+                })
+                .collect();
+            graph.apply_writing_changes(&page.id, &inverse, None)?;
+            let undone = graph.db.list_blocks_for_page(&page.id)?;
+            assert_eq!(undone[0].content, before[0].content);
+            assert_eq!(undone[1].content, before[1].content);
+            assert_eq!(undone[0].properties, properties);
+            graph.apply_writing_changes(&page.id, &changes, None)?;
+            let redone = graph.db.list_blocks_for_page(&page.id)?;
+            assert_eq!(redone[0].content, changes[0].after_content);
+            assert_eq!(redone[1].content, changes[1].after_content);
+            assert_eq!(redone[0].properties, properties);
+            assert_eq!(
+                fs::read_to_string(graph.resolve_page_file_path(&page)?)?,
+                parser::serialize_page(&page.properties, &redone),
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn persistence_failure_rolls_back_all_rows_and_can_be_retried() -> Result<()> {
+            for fail_after_write in [false, true] {
+                let (_directory, graph, page, before) = fixture(false)?;
+                let path = graph.resolve_page_file_path(&page)?;
+                let original = fs::read(&path)?;
+                let changes = changes(&before);
+                let task_before = task_data(&graph)?;
+                assert!(graph
+                    .apply_writing_changes_with_writer(
+                        &page.id,
+                        &changes,
+                        Some(&before),
+                        |path, content| {
+                            if fail_after_write {
+                                Graph::atomic_write(path, content)?;
+                            }
+                            Err(std::io::Error::other("injected persistence failure").into())
+                        }
+                    )
+                    .is_err());
+                assert_blocks_unchanged(&graph, &page, &before)?;
+                assert_eq!(fs::read(&path)?, original);
+                assert_eq!(task_before, task_data(&graph)?);
+                assert_eq!(graph.db.search_fts("Draft", 10)?[0].id, before[0].id);
+                assert!(graph.db.search_fts("Polished", 10)?.is_empty());
+                assert!(graph.db.get_page_by_title("Revised").is_err());
+                assert_eq!(fs::read_dir(&graph.pages_dir)?.count(), 1);
+                graph.apply_writing_changes(&page.id, &changes, Some(&before))?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn commit_failure_restores_original_markdown_and_derived_rows() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let path = graph.resolve_page_file_path(&page)?;
+            let original = fs::read(&path)?;
+            let changes = changes(&before);
+            {
+                let conn = graph.db.conn()?;
+                // Deferred foreign-key failure occurs only at COMMIT, after
+                // the page file and every derived index have been written.
+                conn.execute_batch(
+                    "CREATE TABLE writing_commit_failure (
+                        block_id TEXT REFERENCES blocks(id) DEFERRABLE INITIALLY DEFERRED
+                     );
+                     CREATE TRIGGER writing_fail_commit AFTER UPDATE OF content ON blocks
+                     BEGIN INSERT INTO writing_commit_failure VALUES ('nonexistent'); END;",
+                )?;
+            }
+            assert!(graph
+                .apply_writing_changes(&page.id, &changes, Some(&before))
+                .is_err());
+            assert_blocks_unchanged(&graph, &page, &before)?;
+            assert_eq!(fs::read(&path)?, original);
+            assert!(graph.db.search_fts("Polished", 10)?.is_empty());
+            assert!(graph.db.get_page_by_title("Revised").is_err());
+            assert_eq!(fs::read_dir(&graph.pages_dir)?.count(), 1);
+            graph
+                .db
+                .conn()?
+                .execute_batch("DROP TRIGGER writing_fail_commit")?;
+            graph.apply_writing_changes(&page.id, &changes, Some(&before))?;
+            Ok(())
+        }
+
+        #[test]
+        fn unindexed_external_file_changes_are_not_overwritten() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let path = graph.resolve_page_file_path(&page)?;
+            let external = fs::read_to_string(&path)?.replace("Child", "External");
+            fs::write(&path, &external)?;
+            assert!(graph
+                .apply_writing_changes(&page.id, &changes(&before), Some(&before))
+                .is_err());
+            assert_blocks_unchanged(&graph, &page, &before)?;
+            assert_eq!(fs::read_to_string(&path)?, external);
+            Ok(())
+        }
+
+        #[test]
+        fn unchanged_content_is_a_safe_no_op_without_disk_or_index_writes() -> Result<()> {
+            let (_directory, graph, page, before) = fixture(false)?;
+            let changes: Vec<_> = before
+                .iter()
+                .map(|block| WritingContentChange {
+                    block_id: block.id.clone(),
+                    before_content: block.content.clone(),
+                    after_content: block.content.clone(),
+                })
+                .collect();
+            graph.apply_writing_changes_with_writer(
+                &page.id,
+                &changes,
+                Some(&before),
+                |_, _| panic!("no-op must not call persistence"),
+            )?;
+            assert_blocks_unchanged(&graph, &page, &before)?;
+            Ok(())
+        }
+    }
 
     fn page_property_count(graph: &Graph, page_id: &str) -> Result<i64> {
         let conn = graph.db.conn()?;
@@ -3916,7 +4689,7 @@ mod tests {
         let accepted = graph.accept_link_candidate(&candidates[0].id)?;
         assert_eq!(accepted.status, LinkCandidateStatus::Accepted);
         let linked_block = graph.db.get_block_by_id(&block.id)?;
-        assert_eq!(linked_block.content, "[[magnesium]] helps");
+        assert_eq!(linked_block.content, "[[Magnesium|#magnesium]] helps");
         assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
 
         let restored = graph.undo_link_candidate_accept(&accepted.id)?;
@@ -3950,16 +4723,286 @@ mod tests {
             10,
         )?;
         assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].to_page_id.is_none());
+        assert!(graph.db.get_page_by_title_ci("writing topics").is_err());
 
         let accepted = graph.accept_link_candidate(&candidates[0].id)?;
 
         assert_eq!(accepted.status, LinkCandidateStatus::Accepted);
         assert_eq!(
             graph.db.get_block_by_id(&block.id)?.content,
-            "A [[writing topics]] matters"
+            "A [[writing topics|#writing_topics]] matters"
         );
         let target = graph.db.get_page_by_title_ci("writing topics")?;
         assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_revalidates_source_and_target_without_orphan_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source = graph.create_page_with_content("Research source", false, "- Memory Palace matters\n")?;
+        let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
+        let tags = [crate::parser::TagTerm::from("Memory Palace")];
+        graph.db.discover_semantic_concept_candidates(&source.id, &tags, 10)?;
+        let candidate = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        graph.update_block(&block.id, "Memory Palace now has different context", None)?;
+        assert!(graph.accept_link_candidate(&candidate.id).is_err());
+        assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
+        assert_eq!(graph.db.get_link_candidate(&candidate.id)?.status, LinkCandidateStatus::Pending);
+
+        graph.db.discover_semantic_concept_candidates(&source.id, &tags, 10)?;
+        let candidate = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        let target = graph.create_page("Memory Palace", false)?;
+        let accepted = graph.accept_link_candidate(&candidate.id)?;
+        assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
+        assert_eq!(graph.db.count_pages()?, 2);
+        graph.update_block(&block.id, "A later user edit", None)?;
+        assert!(graph.undo_link_candidate_accept(&candidate.id).is_err());
+        assert_eq!(graph.db.get_block_by_id(&block.id)?.content, "A later user edit");
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_batch_reuses_created_target_and_preserves_undo() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source = graph.create_page_with_content(
+            "Research source", false, "- Memory Palace helps. Memory Palace repeats.\n")?;
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Memory Palace")], 10)?;
+        let mut candidates = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+        candidates.sort_by_key(|candidate| candidate.anchor_start);
+        assert_eq!(candidates.len(), 2);
+        let first = graph.accept_link_candidate(&candidates[0].id)?;
+        let second = graph.accept_link_candidate(&candidates[1].id)?;
+        assert_eq!(first.to_page_id, second.to_page_id);
+        assert_eq!(graph.db.count_pages()?, 2);
+        graph.undo_link_candidate_accept(&second.id)?;
+        graph.undo_link_candidate_accept(&first.id)?;
+        assert_eq!(graph.db.list_blocks_for_page(&source.id)?[0].content,
+            "Memory Palace helps. Memory Palace repeats.");
+        Ok(())
+    }
+
+    #[test]
+    fn hierarchy_concept_candidates_round_trip_to_one_addressable_identity() -> Result<()> {
+        for title in ["Projects / Alpha", r"Projects\Alpha"] {
+            let temp = tempdir()?;
+            let graph = Graph::open(temp.path())?;
+            let source = graph.create_page_with_content("Synthetic source", false, "- Alpha matters\n")?;
+            graph.db.discover_semantic_concept_candidates(&source.id, &[crate::parser::TagTerm {
+                term: "Alpha".into(), qualified: Some(title.into()),
+            }], 10)?;
+            let candidate = graph.list_link_candidates(
+                Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            assert_eq!(candidate.proposed_title, "Projects/Alpha");
+            let accepted = graph.accept_link_candidate(&candidate.id)?;
+            let target = graph.db.find_page_by_name(title)?.unwrap();
+            assert_eq!(target.title, "Projects/Alpha");
+            assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
+            assert_eq!(graph.db.count_pages()?, 3);
+            graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
+            assert_eq!(graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id, target.id);
+            assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+            assert_eq!(graph.db.count_pages()?, 3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hierarchy_summary_targets_round_trip_through_index_and_undo_redo() -> Result<()> {
+        for title in ["Projects / Alpha", r"Projects\Alpha"] {
+            let temp = tempdir()?;
+            let graph = Graph::open(temp.path())?;
+            let source = graph.create_page_with_content("Synthetic source", false, "- Original source\n")?;
+            let before = graph.db.list_blocks_for_page(&source.id)?;
+            let plan = SummaryLinkPlan {
+                new_target_titles: vec![title.into()],
+                topic_link_blocks: vec![parser::format_concept_link(title).unwrap()],
+                ..SummaryLinkPlan::default()
+            };
+            let receipt = graph.insert_research_summary(
+                &source.id, Some("Summary"), &[("Topic".into(), "Explanation.".into())],
+                None, vec![], None, Some(&before), &plan,
+            )?;
+            assert_eq!(receipt.created_targets.len(), 2);
+            let target = graph.db.find_page_by_name(title)?.unwrap();
+            assert_eq!(target.title, "Projects/Alpha");
+            assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+            drop(graph);
+            let graph = Graph::open(temp.path())?;
+            graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
+            assert_eq!(graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id, target.id);
+            assert_eq!(graph.db.count_pages()?, 3);
+            graph.undo_research_summary(&receipt)?;
+            assert!(graph.db.find_page_by_name("Projects/Alpha")?.is_none());
+            graph.reapply_research_summary(&receipt)?;
+            assert_eq!(graph.db.find_page_by_name(title)?.unwrap().id, target.id);
+            assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn alias_links_and_navigation_reuse_canonical_identity_without_alias_pages() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let target = graph.create_page_with_content(
+            "Projects/Alpha", false, "aliases:: Work/Alpha\n- Canonical project\n")?;
+        let source = graph.create_page_with_content(
+            "Synthetic source", false, "- [[Work / Alpha]] is an approved alias\n")?;
+        assert_eq!(graph.db.find_page_by_name(r"Work\Alpha")?.unwrap().id, target.id);
+        assert!(graph.db.get_page_by_title("Work").is_err());
+        assert!(graph.db.get_page_by_title("Work/Alpha").is_err());
+        assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
+        graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
+        assert_eq!(graph.db.find_page_by_name("Work/Alpha")?.unwrap().id, target.id);
+        assert!(graph.db.get_page_by_title("Work").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_explicit_choice_reuses_only_allowed_current_identity() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let target = graph.create_page("Niacin", false)?;
+        let unrelated = graph.create_page("Mercury", false)?;
+        let source = graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
+        let candidate = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        assert!(graph.resolve_link_candidate(&candidate.id, Some(&unrelated.id), false).is_err());
+        assert!(graph.resolve_link_candidate(&candidate.id, None, false).is_err());
+        assert!(graph.resolve_link_candidate(&candidate.id, Some(&target.id), true).is_err());
+        let accepted = graph.resolve_link_candidate(&candidate.id, Some(&target.id), false)?;
+        assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
+        assert_eq!(graph.db.count_pages()?, 3);
+        graph.undo_link_candidate_accept(&candidate.id)?;
+        assert_eq!(graph.db.list_blocks_for_page(&source.id)?[0].content, "Nicin matters");
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_explicit_new_choice_creates_only_the_proposal() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        graph.create_page("Mercury (planet)", false)?;
+        let source = graph.create_page_with_content("Synthetic source", false, "- Mercury is our project codename\n")?;
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Mercury")], 10)?;
+        let candidate = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        assert_eq!(candidate.resolution, "ambiguous");
+        assert!(graph.db.get_page_by_title("Mercury").is_err());
+        let accepted = graph.resolve_link_candidate(&candidate.id, None, true)?;
+        assert_eq!(accepted.to_page_title, "Mercury");
+        assert!(accepted.to_page_id.is_some());
+        assert_eq!(graph.db.count_pages()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_contextual_new_remains_a_proposal_until_acceptance() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        graph.create_page("Mercury (planet)", false)?;
+        let source = graph.create_page_with_content("Synthetic source", false, "- Mercury is a distinct project codename\n")?;
+        let tags = [crate::parser::TagTerm::from("Mercury")];
+        let mut resolved = graph.db.resolve_tag_terms(&tags)?;
+        assert_eq!(resolved[0].decision, crate::db::EntityDecision::Ambiguous);
+        resolved[0].decision = crate::db::EntityDecision::New;
+        resolved[0].reason = "Contextual AI suggestion: distinct project codename.".into();
+        let snapshot = graph.db.list_blocks_for_page(&source.id)?;
+        graph.db.discover_resolved_semantic_concept_candidates(
+            &source.id, &tags, &resolved, &snapshot, 10, &crate::cancel::CancellationToken::new())?;
+        assert_eq!(graph.db.count_pages()?, 2);
+        let candidate = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        assert_eq!(candidate.resolution, "new");
+        assert!(candidate.to_page_id.is_none());
+        graph.accept_link_candidate(&candidate.id)?;
+        assert_eq!(graph.db.count_pages()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_explicit_choice_rejects_stale_source_and_shortlist() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let target = graph.create_page("Niacin", false)?;
+        let source = graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
+        let candidate = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
+        graph.update_block(&block.id, "Nicin source changed", None)?;
+        assert!(graph.resolve_link_candidate(&candidate.id, Some(&target.id), false).is_err());
+        assert!(graph.resolve_link_candidate(&candidate.id, None, true).is_err());
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
+        let current = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        graph.rename_page(&target.id, "Changed nutrient")?;
+        assert!(graph.resolve_link_candidate(&current.id, Some(&target.id), false).is_err());
+        assert!(graph.db.get_page_by_title("Nicin").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_rolls_back_failure_without_overwriting_external_edit() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source = graph.create_page_with_content(
+            "Research source", false, "- Memory Palace matters\n")?;
+        graph.db.discover_semantic_concept_candidates(
+            &source.id, &[crate::parser::TagTerm::from("Memory Palace")], 10)?;
+        let candidate = graph.list_link_candidates(
+            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        let path = graph.root_dir.join(source.file_path.as_deref().unwrap());
+        let original = fs::read_to_string(&path)?;
+        let result = graph.apply_link_candidate_review_with_writer(
+            &candidate.id, false, |path, intended| {
+                Graph::atomic_write(path, intended)?;
+                fs::write(path, "- Concurrent external edit\n")?;
+                Err(CoreError::Other("Simulated failure after page replacement".into()))
+            });
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path)?, "- Concurrent external edit\n");
+        assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
+        assert_eq!(graph.db.get_link_candidate(&candidate.id)?.status, LinkCandidateStatus::Pending);
+        let backups = fs::read_dir(path.parent().unwrap())?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".link-review-rollback-"))
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(backups[0].path())?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn link_candidate_review_rejects_external_source_edits_and_uncertain_spelling() -> Result<()> {
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let source = graph.create_page_with_content("Research source", false, "- Memory Palace matters\n- Nicin matters\n")?;
+        graph.create_page("Niacin", false)?;
+        graph.db.discover_semantic_concept_candidates(&source.id, &[
+            crate::parser::TagTerm::from("Memory Palace"), crate::parser::TagTerm::from("Nicin"),
+        ], 10)?;
+        let candidates = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+        let uncertain = candidates.iter().find(|c| c.anchor_text == "Nicin").unwrap();
+        assert_eq!(uncertain.resolution, "ambiguous");
+        assert!(graph.accept_link_candidate(&uncertain.id).is_err());
+        assert!(graph.db.get_page_by_title_ci("Nicin").is_err());
+        let new_page = candidates.iter().find(|c| c.anchor_text == "Memory Palace").unwrap();
+        fs::write(graph.root_dir.join(source.file_path.as_deref().unwrap()), "- An external edit\n")?;
+        assert!(graph.accept_link_candidate(&new_page.id).is_err());
+        assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
+        assert_eq!(graph.db.count_pages()?, 2);
         Ok(())
     }
 
@@ -4039,14 +5082,15 @@ mod tests {
 
     #[test]
     fn page_source_update_round_trips_into_block_rows() -> Result<()> {
-        let temp = tempdir()?;
+        let temp = tempfile::tempdir_in(".")?;
         let graph = Graph::open(temp.path())?;
         let page = graph.create_page("source-prototype", false)?;
 
         assert!(graph.get_page_source(&page.id)?.contains("- "));
 
-        graph.update_page_source(
+        graph.update_page_source_guarded(
             &page.id,
+            &graph.get_page_source(&page.id)?,
             concat!(
                 "- Alpha\n",
                 "  id:: alpha-id\n",
@@ -4073,12 +5117,16 @@ mod tests {
 
     #[test]
     fn page_source_update_reuses_existing_slot_id_without_metadata() -> Result<()> {
-        let temp = tempdir()?;
+        let temp = tempfile::tempdir_in(".")?;
         let graph = Graph::open(temp.path())?;
         let page = graph.create_page("source-slot-reuse", false)?;
         let original_block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
 
-        graph.update_page_source(&page.id, "- Edited without explicit id\n")?;
+        graph.update_page_source_guarded(
+            &page.id,
+            &graph.get_page_source(&page.id)?,
+            "- Edited without explicit id\n",
+        )?;
 
         let blocks = graph.db.list_blocks_for_page(&page.id)?;
         assert_eq!(blocks.len(), 1);

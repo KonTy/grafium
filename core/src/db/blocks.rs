@@ -469,6 +469,16 @@ impl Database {
         properties: Option<&serde_json::Value>,
     ) -> Result<()> {
         let conn = self.conn()?;
+        self.update_block_in_connection(&conn, id, content, properties)
+    }
+
+    pub(crate) fn update_block_in_connection(
+        &self,
+        conn: &Connection,
+        id: &str,
+        content: &str,
+        properties: Option<&serde_json::Value>,
+    ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
 
         if let Some(props) = properties {
@@ -484,7 +494,7 @@ impl Database {
         }
 
         // Update FTS
-        super::fts_replace_block(&conn, id, content)?;
+        super::fts_replace_block(conn, id, content)?;
 
         Ok(())
     }

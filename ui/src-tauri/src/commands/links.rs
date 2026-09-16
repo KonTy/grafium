@@ -83,6 +83,22 @@ pub fn accept_link_candidate(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn resolve_link_candidate(
+    state: State<AppState>,
+    candidate_id: String,
+    target_page_id: Option<String>,
+    create_new: bool,
+    graph_path: String,
+) -> Result<LinkCandidate, String> {
+    let graph = state.graph.lock().map_err(|error| error.to_string())?;
+    if graph.root_dir.to_string_lossy() != graph_path {
+        return Err("The active graph changed; refresh link suggestions.".into());
+    }
+    graph.resolve_link_candidate(&candidate_id, target_page_id.as_deref(), create_new)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn dismiss_link_candidate(
     state: State<AppState>,
     candidate_id: String,

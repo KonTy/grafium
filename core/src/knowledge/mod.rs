@@ -3,12 +3,15 @@
 //! This is the "knowledge OS" layer that sits above individual graphs.
 
 pub mod collections;
+pub mod assistant_scope;
 pub mod conversation;
 pub mod engine;
 pub mod registry;
 pub mod research_intent;
 pub mod retrieval;
 pub mod schemas;
+pub mod scoped_context;
+pub mod source_projection;
 pub mod tree;
 pub mod vector_store;
 

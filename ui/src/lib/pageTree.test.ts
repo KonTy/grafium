@@ -197,6 +197,44 @@ describe("collection projections", () => {
     expect(pageTreeReferencesChanged("#flashcard", "#flashcard")).toBe(false);
     expect(pageTreeReferencesChanged("#old", "#new")).toBe(true);
   });
+
+  it("navigates collection aliases to canonical titles, not display slugs", () => {
+    expect(collectionMembersFromBlocks([
+      { id: "concept", order_index: 0, content: "[[Insulin resistance|#insulin_resistance]]" },
+      { id: "chapter", order_index: 1, content: "`[[Not a member]]` [[ Part\\Two |Chapter 2]]" },
+      { id: "code", order_index: 2, content: "```\n[[Not a member]]\n```" },
+      { id: "date", order_index: 3, content: "[[2025_09_30|Tuesday]]" },
+    ])).toEqual([
+      { block_id: "concept", order_index: 0, page_title: "Insulin resistance" },
+      { block_id: "chapter", order_index: 1, page_title: "Part/Two" },
+      { block_id: "date", order_index: 3, page_title: "2025-09-30" },
+    ]);
+  });
+
+  it("ignores alias-only changes, including fake display hashtags", () => {
+    expect(pageTreeReferencesChanged(
+      "[[Insulin resistance]]",
+      "[[Insulin resistance|#insulin_resistance]]",
+    )).toBe(false);
+    expect(pageTreeReferencesChanged(
+      "[[Insulin resistance|#insulin_resistance]]",
+      "[[Insulin resistance|#健康 and #another_label]]",
+    )).toBe(false);
+    expect(pageTreeReferencesChanged(
+      "[[Insulin resistance|#unchanged]]",
+      "[[Insulin sensitivity|#unchanged]]",
+    )).toBe(true);
+  });
+
+  it("preserves Unicode tag identities and ignores protected reference-like text", () => {
+    expect(pageTreeReferencesChanged("#健康 #café", "#睡眠 #café")).toBe(true);
+    expect(pageTreeReferencesChanged("#cafe\u0301", "#cafe")).toBe(true);
+    expect(pageTreeReferencesChanged("#健康\\睡眠", "#健康/睡眠")).toBe(false);
+    expect(pageTreeReferencesChanged(
+      "`[[Old]] #old` [citation](https://example.com/#old) $x + #old$",
+      "`[[New]] #new` [citation](https://example.com/#new) $x + #new$",
+    )).toBe(false);
+  });
 });
 
 describe("missing page tree commands", () => {

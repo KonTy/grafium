@@ -12,6 +12,12 @@ struct SerializationStats {
 /// Blocks are expected to be sorted by order_index already.
 /// Page-level properties can be prepended separately.
 pub fn serialize_page(page_properties: &serde_json::Value, blocks: &[Block]) -> String {
+    if let Some(content) = crate::graph::reading_notes::serialize_note_page(page_properties, blocks) {
+        return content;
+    }
+    if let Some(content) = super::reading_notes::serialize_inline_page(page_properties, blocks) {
+        return content;
+    }
     serialize_page_internal(page_properties, blocks).0
 }
 

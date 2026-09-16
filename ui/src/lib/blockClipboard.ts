@@ -29,3 +29,30 @@ export function formatBlocksAsPlainText(blocks: readonly ClipboardBlock[]): stri
     .join("\n")
     .trim();
 }
+
+export async function writeClipboardText(text: string): Promise<void> {
+  let clipboardError: unknown;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch (error) {
+    // WebKitGTK can reject the async API; the user-gesture copy command still works.
+    clipboardError = error;
+  }
+  const active = document.activeElement;
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.style.position = "fixed";
+  scratch.style.left = "-9999px";
+  scratch.style.opacity = "0";
+  document.body.appendChild(scratch);
+  try {
+    scratch.select();
+    if (!document.execCommand("copy")) throw new Error("Clipboard text API is unavailable", { cause: clipboardError });
+  } finally {
+    scratch.remove();
+    if (active instanceof HTMLElement && active.isConnected) active.focus({ preventScroll: true });
+  }
+}

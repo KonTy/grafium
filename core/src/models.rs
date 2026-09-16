@@ -11,6 +11,23 @@ pub struct Page {
     pub properties: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageSummary {
+    pub id: String,
+    pub title: String,
+    pub is_journal: bool,
+}
+
+impl From<Page> for PageSummary {
+    fn from(page: Page) -> Self {
+        Self {
+            id: page.id,
+            title: page.title,
+            is_journal: page.is_journal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BlockType {
     Text,
@@ -125,8 +142,12 @@ pub struct LinkCandidate {
     pub from_block_id: String,
     pub from_page_id: String,
     pub from_page_title: String,
-    pub to_page_id: String,
+    pub to_page_id: Option<String>,
     pub to_page_title: String,
+    pub proposed_title: String,
+    pub resolution: String,
+    pub alternatives: Vec<crate::db::EntityCandidate>,
+    pub reason: String,
     pub anchor_text: String,
     pub anchor_start: i64,
     pub anchor_end: i64,

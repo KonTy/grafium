@@ -7,7 +7,7 @@ describe("GraphView3D usability safeguards", () => {
     expect(source).toContain("function nodeValFor(n: Node3D)");
     expect(source).toContain("degreeRatio(n) * (MAX_NODE_VAL - MIN_NODE_VAL)");
     expect(source).not.toContain("three-spritetext");
-    expect(source).not.toContain("nodeThreeObject");
+    expect(source).not.toContain(".nodeThreeObject(");
   });
 
   it("keeps labels out of the 3D scene and fits the camera after load", () => {
@@ -20,7 +20,9 @@ describe("GraphView3D usability safeguards", () => {
     expect(source).toContain("new ForceGraph3D(graphMountEl");
     expect(source).toContain("function scheduleFitToGraph()");
     expect(source).toContain("const MIN_CAMERA_DISTANCE");
-    expect(source).toContain("graph.cameraPosition({ x: 0, y: 0, z: distance }");
+    expect(source).toContain("latestNodes.filter(hasGraphPosition)");
+    expect(source).toContain("halfSize.x / (tanHalfFov * aspect)");
+    expect(source).toContain("z: center.z + distance");
   });
 
   it("uses fuzzy search to glow matches and fly the camera to them", () => {
@@ -34,15 +36,52 @@ describe("GraphView3D usability safeguards", () => {
     expect(source).toContain("visibleSearchGlows");
   });
 
-  it("spreads nodes with explicit 3D force settings", () => {
+  it("keeps detected communities anchored through actual force ticks", () => {
     expect(source).toContain("function configureForces()");
-    expect(source).toContain(".strength?.(-520)");
-    expect(source).toContain("linkForce?.distance?.(180)");
+    expect(source).toContain('from "../lib/graphCommunityLayout"');
+    expect(source).toContain("communityLayout = createCommunityLayout(");
+    expect(source).toContain("communityLinkDistance(");
+    expect(source).toContain('graph.d3Force("community", createCommunityForce())');
+    expect(source).toContain('graph.d3Force("center", null)');
+    expect(source).toContain("isCommunityBridge(link) ? 0.008 : 0.14");
+    expect(source).toContain("force.initialize");
+    expect(source).not.toContain("computeGraphClusters");
+    expect(source).not.toContain("seedNodePositions");
   });
 
-  it("hides date pages by default in 3D", () => {
-    expect(source).toContain("let hideDatePages = $state(true)");
+  it("uses renderer-managed, theme-aware solid spheres without image textures", () => {
+    expect(source).toContain(".nodeOpacity(1)");
+    expect(source).toContain(".nodeResolution(24)");
+    expect(source).toContain("clusterColor(clusterIndexById.get(n.id) ?? 0, isLightTheme)");
+    expect(source).toContain("graph.nodeColor((n) => nodeColorFor(n))");
+    expect(source).toContain('themeObserver.observe(document.documentElement');
+    expect(source).toContain("graph?._destructor()");
+    expect(source).not.toMatch(/TextureLoader|CanvasTexture|planetTextures|loadPlanetTextures|createPlanetObject/);
+  });
+
+  it("does not let suggested links pull communities together", () => {
+    expect(source).toContain("linkForce?.strength((link) => link.suggested ? 0 :");
+  });
+
+  it("keeps fitted spheres and bridges visible at large community extents", () => {
+    expect(source).toContain("const worldPerPixel = 2 * (distance + halfSize.z) * tanHalfFov");
+    expect(source).toContain("graph.nodeRelSize(overviewNodeScale)");
+    expect(source).toContain("width * overviewLinkScale");
+  });
+
+  it("includes date pages by default, matching the 2D graph", () => {
+    expect(source).toContain("let hideDatePages = $state(false)");
     expect(source).toContain("function isDatePageTitle(title: string)");
     expect(source).toContain("bind:checked={hideDatePages}");
+  });
+
+  it("keeps one decorative universe background in both overview and flight", () => {
+    expect(source).toContain('from "../lib/graphUniverse"');
+    expect(source).toContain("universeBackground?.setAppearance({ flying, isLightTheme })");
+    expect(source).toContain("universeBackground.update(graph.camera(), graph.renderer().getPixelRatio())");
+    expect(source).toContain("universeBackground?.dispose()");
+    expect(source).toContain("void background.ready.catch");
+    expect(source).toContain('role="status">{backgroundError}');
+    expect(source).not.toContain("addFlightStars");
   });
 });

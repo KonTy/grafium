@@ -3,17 +3,14 @@
   import Sidebar from "./components/Sidebar.svelte";
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
-  import AllPages from "./components/AllPages.svelte";
-  import GraphView from "./components/GraphView.svelte";
-  import GraphView3D from "./components/GraphView3D.svelte";
-  import Statistics from "./components/Statistics.svelte";
-  import FlashcardReview from "./components/FlashcardReview.svelte";
-  import ChatView from "./components/ChatView.svelte";
-  import Settings from "./components/Settings.svelte";
+  import GoToLink from "./components/GoToLink.svelte";
+  import LazyView from "./components/LazyView.svelte";
+  import { lazyComponent } from "./lib/lazy";
+  import { revealStartupWindow } from "./lib/startupWindow";
+  import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
+  import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import TitleBar from "./components/TitleBar.svelte";
-  import ReferencePanel from "./components/ReferencePanel.svelte";
   import JobActivity from "./components/JobActivity.svelte";
-  import JobsView from "./components/JobsView.svelte";
   import Toaster from "./components/Toaster.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
@@ -21,25 +18,47 @@
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
     dispatchEditPageEnd,
-    personalJournalSnippet,
+    personalDiarySnippet,
     timeStampSnippet,
     tryInsertIntoActiveEditor,
   } from "./lib/editorInsert";
   import { formatBinding, formatBindingList, groupShortcutRows } from "./lib/shortcuts";
   import type { PageNavigationTarget } from "./lib/navigation";
-  import { resolvePageLookup } from "./lib/navigation";
+  import { isPageNotFoundError, resolvePageLookup } from "./lib/navigation";
   import { applyTheme, getThemeById } from "./lib/themes";
   import { attachAppUndoRedoListeners } from "./lib/undoEvents";
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
   import { showToast } from "./lib/toast.svelte";
+  import { setCurrentBlockAnchor } from "./lib/currentBlockAnchor";
+  import { readingSelection } from "./lib/readingSelection";
   import { uiLog } from "./lib/uiLog";
+  import {
+    loadBionicReaderPreference as readBionicReaderPreference,
+    setBionicReaderEnabled,
+  } from "./lib/bionicReader";
   import { listen } from "@tauri-apps/api/event";
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
 
+  const loadAllPages = lazyComponent(() => import("./components/AllPages.svelte"));
+  const loadGraphView = lazyComponent(() => import("./components/GraphView.svelte"));
+  const loadGraphView3D = lazyComponent(() => import("./components/GraphView3D.svelte"));
+  const loadStatistics = lazyComponent(() => import("./components/Statistics.svelte"));
+  const loadFlashcardReview = lazyComponent(() => import("./components/FlashcardReview.svelte"));
+  const loadChatView = lazyComponent(() => import("./components/ChatView.svelte"));
+  const loadSettings = lazyComponent(() => import("./components/Settings.svelte"));
+  const loadJobsView = lazyComponent(() => import("./components/JobsView.svelte"));
+  const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
+  const loadGlobalSearchDialog = lazyComponent(() => import("./components/GlobalSearchDialog.svelte"));
+
   function isAndroidClient(): boolean {
     return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  }
+
+  function openGoToLink() {
+    if (hasKeyboardOverlay(document)) return;
+    goToLinkOpen = true;
   }
 
   let showFolderBrowser = $state(false);
@@ -110,10 +129,23 @@
   // Journals are a scrolling feed, not a single page — this tracks whichever day-entry is
   // currently most visible, so the Reference/Knowledge panel has something to analyze there too.
   let journalActivePage: Page | null = $state(null);
+  const assistantSourcePage = $derived.by((): Page | null => currentView === "page" ? currentPage
+    : currentView === "journal" ? journalActivePage : null);
   let journalEditTodayRequestId = $state(0);
+  let journalCalendarRequested = $state(false);
+  let goToLinkOpen = $state(false);
+  let globalSearchOpen = $state(false);
   let loading = $state(true);
   let error: string | null = $state(null);
+  let chatVisited = $state(false);
+  let expandedConversationId = $state<string | null>(null);
+  const chatActive = $derived.by(() => currentView === "chat" && !loading && !error);
+  $effect(() => {
+    if (chatActive) chatVisited = true;
+  });
   let sidebarVisible = $state(true);
+  const changedLayoutPreferences = new Set<keyof LayoutPreferences>();
+  let layoutSaveQueue: Promise<void> = Promise.resolve();
   let sidebarWidth = $state(260);
   let isResizingSidebar = $state(false);
   let referencePanelWidth = $state(380);
@@ -125,15 +157,21 @@
     refresh: () => Promise<void>;
   } | null = $state(null);
   let showBlockGuides = $state(true);
+  let bionicReaderMode = $state(false);
   let zenMode = $state(false);
   let wideMode = $state(true);
+  const DEFAULT_NARROW_PADDING_PCT = 15;
+  const MIN_NARROW_PADDING_PCT = 0;
+  const MAX_NARROW_PADDING_PCT = 40;
+  let narrowPaddingPct = $state(DEFAULT_NARROW_PADDING_PCT);
   let settingsOpenSection = $state("");
   let commandPaletteOpen = $state(false);
   let commandPaletteQuery = $state("");
   let commandPaletteIndex = $state(0);
   let referencePanelVisible = $state(false);
-  let referencePanelTab = $state<"references" | "search" | "ask">("references");
+  let referencePanelTab = $state<"chat" | "writing" | "notes">("chat");
   let referencePanelFocusTrigger = $state(0);
+  let readingNoteFocus = $state({ pageId: "", label: "", trigger: 0 });
   let mainContentEl: HTMLElement | null = null;
   let restoreTimer: number | null = null;
   let pendingJournalRestore: HistoryEntry | null = $state(null);
@@ -147,10 +185,12 @@
     scrollTop: number;
     sourceBlockId?: string;
     sourcePageTitle?: string;
+    conversationId?: string | null;
   };
 
   type LinkNavigateDetail = {
     pageName: string;
+    pageId?: string;
     sourceBlockId?: string;
     sourcePageTitle?: string;
     targetBlockId?: string;
@@ -227,11 +267,8 @@
     }
   }
 
-  // "Bullet threading" / block hierarchy guide lines — a purely visual
-  // indicator of parent/child nesting (default on). Exposed as a Settings
-  // toggle since it adds a handful of extra DOM nodes per indented block,
-  // so users on lower-end machines can turn it off if it's ever noticeably
-  // slow on very large/deeply nested pages.
+  // Logseq-style bullet threading — L/T elbows from parent bullets into
+  // children (default on). Settings > General can turn it off.
   function loadShowBlockGuidesPreference() {
     try {
       const raw = localStorage.getItem("grafium.pageContent.showBlockGuides");
@@ -248,6 +285,46 @@
     } catch {
       // Ignore localStorage failures.
     }
+  }
+
+  function applyNarrowPadding(pct: number) {
+    const next = Math.max(
+      MIN_NARROW_PADDING_PCT,
+      Math.min(MAX_NARROW_PADDING_PCT, Math.round(Number.isFinite(pct) ? pct : DEFAULT_NARROW_PADDING_PCT)),
+    );
+    narrowPaddingPct = next;
+    document.documentElement.style.setProperty("--narrow-padding-x", `${next}%`);
+  }
+
+  function loadNarrowPaddingPreference() {
+    try {
+      const raw = localStorage.getItem("grafium.ui.narrowPaddingPct");
+      if (raw === null) {
+        applyNarrowPadding(DEFAULT_NARROW_PADDING_PCT);
+        return;
+      }
+      applyNarrowPadding(Number(raw));
+    } catch {
+      applyNarrowPadding(DEFAULT_NARROW_PADDING_PCT);
+    }
+  }
+
+  function setNarrowPaddingPct(value: number) {
+    applyNarrowPadding(value);
+    try {
+      localStorage.setItem("grafium.ui.narrowPaddingPct", String(narrowPaddingPct));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function loadBionicReaderPreference() {
+    bionicReaderMode = readBionicReaderPreference();
+  }
+
+  function toggleBionicReader() {
+    bionicReaderMode = !bionicReaderMode;
+    setBionicReaderEnabled(bionicReaderMode);
   }
 
   function resetSidebarWidth() {
@@ -405,6 +482,8 @@
   }
 
   function errorText(error: unknown): string {
+    if (typeof error === "object" && error !== null && "message" in error &&
+        typeof error.message === "string") return error.message;
     return error instanceof Error ? error.message : String(error);
   }
 
@@ -472,7 +551,7 @@
       return { kind: "settings", scrollTop: currentScrollTop() };
     }
     if (currentView === "chat") {
-      return { kind: "chat", scrollTop: currentScrollTop() };
+      return { kind: "chat", scrollTop: currentScrollTop(), conversationId: expandedConversationId };
     }
     if (currentView === "jobs") {
       return { kind: "jobs", scrollTop: currentScrollTop() };
@@ -644,12 +723,7 @@
     }
 
     if (entry.kind === "chat") {
-      currentView = "chat";
-      currentPage = null;
-      loading = false;
-      error = null;
-      await tick();
-      restoreHistoryState(entry);
+      await navigateToPage("__chat__", false, true, entry);
       return;
     }
 
@@ -674,23 +748,62 @@
     await navigateToHistoryEntry(navHistory[navIndex]);
   }
 
-  // Opens the Knowledge Panel (right pane) on its "Search" tab and focuses the
-  // search input. Works regardless of whether the left sidebar is open/closed,
-  // fixing the old Ctrl+K-does-nothing-when-sidebar-closed bug, since search
-  // now lives in the always-available toolbar/right pane instead of the sidebar.
   function openGlobalSearch() {
-    referencePanelTab = "search";
+    if (hasKeyboardOverlay(document)) return;
+    globalSearchOpen = true;
+  }
+
+  function openReferencePanelTab(tab: "chat" | "writing" | "notes") {
+    referencePanelTab = tab;
     referencePanelFocusTrigger += 1;
     referencePanelVisible = true;
   }
 
-  // Opens (if needed) and switches the right Knowledge Panel to a given tab,
-  // bumping the focus trigger so the tab's own effect re-focuses its input
-  // even if that tab was already active.
-  function openReferencePanelTab(tab: "references" | "search" | "ask") {
-    referencePanelTab = tab;
-    referencePanelFocusTrigger += 1;
-    referencePanelVisible = true;
+  async function expandAssistantConversation(id: string) {
+    try {
+      const { getAssistantConversation } = await import("./lib/assistantConversations");
+      const conversation = getAssistantConversation(id);
+      if (!conversation) throw new Error("This conversation is no longer available.");
+      if ((await getGraphInfo()).path !== conversation.graphPath) {
+        throw new Error("Return to the original graph before opening this conversation.");
+      }
+      referencePanelVisible = false;
+      await navigateToPage("__chat__", false, false, { kind: "chat", scrollTop: 0, conversationId: id });
+    } catch (error) {
+      showToast(`Could not expand Chat: ${errorText(error)}`, "error");
+    }
+  }
+
+  async function restoreLayoutPreferences() {
+    try {
+      const preferences = await getLayoutPreferences();
+      if (!changedLayoutPreferences.has("sidebarVisible")) sidebarVisible = preferences.sidebarVisible;
+      if (!changedLayoutPreferences.has("wideMode")) wideMode = preferences.wideMode;
+    } catch (e) {
+      const message = `Could not restore layout settings: ${errorText(e)}`;
+      console.error(message);
+      showToast(message, "error");
+    }
+  }
+
+  function setLayoutPreferences(preferences: Partial<LayoutPreferences>) {
+    if (preferences.sidebarVisible !== undefined) {
+      changedLayoutPreferences.add("sidebarVisible");
+      sidebarVisible = preferences.sidebarVisible;
+    }
+    if (preferences.wideMode !== undefined) {
+      changedLayoutPreferences.add("wideMode");
+      wideMode = preferences.wideMode;
+    }
+    // Persist explicit choices, not temporary hiding by Zen mode or phone CSS.
+    // Serialize writes so rapid toggles cannot save an older choice last.
+    layoutSaveQueue = layoutSaveQueue
+      .then(() => saveLayoutPreferences(preferences))
+      .catch((e) => {
+        const message = `Could not save layout settings: ${errorText(e)}`;
+        console.error(message);
+        showToast(message, "error");
+      });
   }
 
   // Ctrl+B "seamless" focus/close for the left sidebar:
@@ -700,15 +813,15 @@
   // This mirrors the request that Ctrl+B behave like a real toggle+focus
   // combo instead of only ever opening/focusing and never closing.
   async function focusLeftSidebar() {
-    if (!sidebarVisible) {
+    if (!sidebarVisible || zenMode) {
       if (zenMode) zenMode = false;
-      sidebarVisible = true;
+      setLayoutPreferences({ sidebarVisible: true });
       await tick();
       sidebarRef?.focusSearch();
       return;
     }
     if (sidebarRef?.hasFocus()) {
-      sidebarVisible = false;
+      setLayoutPreferences({ sidebarVisible: false });
       return;
     }
     sidebarRef?.focusSearch();
@@ -733,39 +846,15 @@
     }
   }
 
-  function isNarrowPhoneLayout(): boolean {
-    return typeof window !== "undefined" && window.innerWidth <= 640;
-  }
-
   function defaultAutoThemeId(): string {
-    // Desktop follows smplOS, then Catppuccin. Phones have no smplOS theme file,
-    // so auto would otherwise land on the navy default instead of OLED.
+    // Desktop follows smplOS, then GitHub Light. Phones have no smplOS theme
+    // file, so auto would otherwise land on a light canvas instead of OLED.
     if (typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)) return "oled";
-    return "catppuccin";
-  }
-
-  function loadWideModePreference() {
-    try {
-      if (isNarrowPhoneLayout()) {
-        wideMode = true;
-        sidebarVisible = false;
-        return;
-      }
-      const raw = localStorage.getItem("grafium.ui.wideMode");
-      if (raw === "false") wideMode = false;
-      if (raw === "true") wideMode = true;
-    } catch {
-      // Keep the default (wide).
-    }
+    return "github";
   }
 
   function toggleWideMode() {
-    wideMode = !wideMode;
-    try {
-      localStorage.setItem("grafium.ui.wideMode", String(wideMode));
-    } catch {
-      // Ignore localStorage failures.
-    }
+    setLayoutPreferences({ wideMode: !wideMode });
   }
 
   function focusLocalSearch(): boolean {
@@ -822,7 +911,13 @@
   }
 
   const commandPaletteRows = $derived(
-    groupShortcutRows(keymap_manager.getShortcuts()).filter((row) => {
+    [...groupShortcutRows(keymap_manager.getShortcuts()), {
+      id: "ai-writing", description: "Open writing assistance", category: "Tools",
+      chords: [], modifiers: [],
+    }, {
+      id: "reading-notes", description: "Open reading notes", category: "Reading",
+      chords: [], modifiers: [],
+    }].filter((row) => {
       const q = commandPaletteQuery.trim().toLowerCase();
       if (!q) return true;
       return (
@@ -833,16 +928,31 @@
     }),
   );
 
-  function runCommandPaletteRow(index: number) {
+  async function runCommandPaletteRow(index: number) {
     const row = commandPaletteRows[index];
     if (!row) return;
     const match = keymap_manager.getShortcuts().find((s) => (s.id || s.description) === row.id);
     commandPaletteOpen = false;
+    await tick();
+    if (row.id === "ai-writing") {
+      openReferencePanelTab("writing");
+      return;
+    }
+    if (row.id === "reading-notes") {
+      openReferencePanelTab("notes");
+      return;
+    }
     match?.action();
   }
 
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
+    goLink: openGoToLink,
+    goJournalDate: () => {
+      if (hasKeyboardOverlay(document)) return;
+      journalCalendarRequested = true;
+      if (currentView !== "journal") void navigateToJournal();
+    },
     goJournalEdit: () => { void goJournalAndEdit(); },
     goHome: () => navigateToJournal(),
     goAllPages: () => navigateToPage("__all_pages__"),
@@ -884,11 +994,14 @@
     importMedia: () => openImportMediaDialog(),
     importBooks: () => void openImportBooksDirectory(),
     insertTimeStamp: () => insertEditorSnippet(timeStampSnippet()),
-    insertPersonalJournal: () => insertEditorSnippet(personalJournalSnippet()),
+    insertPersonalDiary: () => insertEditorSnippet(personalDiarySnippet()),
   });
 
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (goToLinkOpen || globalSearchOpen || e.isComposing) return;
+    if (e.key === "Escape" && !hasKeyboardOverlay(document)
+      && (e.target as Element | null)?.closest?.('[data-keyboard-block-selection="true"]')) return;
     if (commandPaletteOpen) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -913,13 +1026,8 @@
       if (!e.ctrlKey && !e.metaKey && !e.altKey) return;
     }
 
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyC") {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      void navigateToPage("__chat__");
-      return;
-    }
+    if (["Escape", "PageUp", "PageDown", "Home", "End"].includes(e.key)
+      && hasKeyboardOverlay(document)) return;
 
     if (e.ctrlKey || e.metaKey) {
       const key = e.key.toLowerCase();
@@ -961,6 +1069,8 @@
 
     if (keymap_manager.handleKeydown(e)) return;
 
+    if (handleMainPanePageKey(e, mainContentEl, currentView)) return;
+
     const target = e.target as HTMLElement | null;
     const editableContainer = target?.closest?.("[contenteditable='true'], [role='textbox']");
     const isNativeInput =
@@ -971,13 +1081,9 @@
       return;
     }
 
-    if (mainContentEl && (e.key === "PageDown" || e.key === "PageUp" || e.key === "Home" || e.key === "End")) {
+    if (mainContentEl && (e.key === "Home" || e.key === "End")) {
       e.preventDefault();
-      if (e.key === "PageDown") {
-        mainContentEl.scrollBy({ top: Math.max(120, mainContentEl.clientHeight * 0.9), behavior: "auto" });
-      } else if (e.key === "PageUp") {
-        mainContentEl.scrollBy({ top: -Math.max(120, mainContentEl.clientHeight * 0.9), behavior: "auto" });
-      } else if (e.key === "Home") {
+      if (e.key === "Home") {
         mainContentEl.scrollTo({ top: 0, behavior: "auto" });
       } else if (e.key === "End") {
         mainContentEl.scrollTo({ top: mainContentEl.scrollHeight, behavior: "auto" });
@@ -1038,7 +1144,6 @@
 
   $effect(() => {
     loadUiZoomPreference();
-    loadWideModePreference();
     window.addEventListener("keydown", handleGlobalKeydown, true);
     window.addEventListener("mouseup", handleMouseNavigation);
     window.addEventListener("wheel", handleWheelZoom, { passive: false });
@@ -1080,8 +1185,22 @@
         error = message;
         loading = false;
       });
-      // Initialize theme
-      initTheme();
+      // Restore the theme and menu before mapping the native window.
+      void Promise.all([initTheme(), restoreLayoutPreferences()]).then(revealStartupWindow).then(() => {
+        requestAnimationFrame(() => {
+          const sidebar = document.querySelector(".sidebar-container");
+          uiLog(`[layout] ${JSON.stringify({
+            sidebarVisible,
+            sidebarDisplayed: !!sidebar && getComputedStyle(sidebar).display !== "none",
+            wideMode,
+            viewportWidth: window.innerWidth,
+          })}`);
+        });
+      }).catch((e) => {
+        const message = `Could not reveal the startup window: ${errorText(e)}`;
+        console.error(message);
+        uiLog(message);
+      });
     }
   });
 
@@ -1345,12 +1464,13 @@
       return;
     }
     if (target === "__chat__") {
+      expandedConversationId = restoreEntry?.conversationId ?? null;
       currentView = "chat";
       currentPage = null;
       error = null;
       loading = false;
       if (!skipHistory) {
-        pushHistoryEntry({ kind: "chat", scrollTop: 0 });
+        pushHistoryEntry({ kind: "chat", scrollTop: 0, conversationId: expandedConversationId });
       }
       await tick();
       if (restoreEntry) {
@@ -1385,6 +1505,12 @@
         currentPage = (await loadLegacyBookIndexPage(pageLookup.title)) ?? currentPage;
       }
     } catch (e) {
+      if (!isPageNotFoundError(e)) {
+        error = `Failed to load page: ${errorText(e)}`;
+        logNav("navigate failed", { pageLookup, error });
+        loading = false;
+        return;
+      }
       currentPage = await loadLegacyBookIndexPage(pageLookup.title);
       if (currentPage) {
         error = null;
@@ -1478,7 +1604,7 @@
     navigateToPage(target);
   }
 
-  async function handleFindLinksForPage(page: Pick<Page, "id">) {
+  async function handleFindLinksForPage(page: Pick<Page, "id">, exactOnly = false) {
     pendingHighlight = "";
     if (currentView !== "page" || currentPage?.id !== page.id) {
       await navigateToPage({ id: page.id });
@@ -1487,7 +1613,7 @@
     }
     if (currentView !== "page" || currentPage?.id !== page.id) return;
     window.dispatchEvent(new CustomEvent("page-content-find-links", {
-      detail: { pageId: page.id },
+      detail: { pageId: page.id, exactOnly },
     }));
   }
 
@@ -1690,6 +1816,16 @@
   }
 
   function handleGraphChanged() {
+    goToLinkOpen = false;
+    globalSearchOpen = false;
+    expandedConversationId = null;
+    void import("./lib/assistantConversations")
+      .then(({ stopAllAssistantConversations }) => stopAllAssistantConversations())
+      .catch((error) => showToast(`Could not stop previous Chat requests: ${errorText(error)}`, "error"));
+    readingNoteFocus = { pageId: "", label: "", trigger: readingNoteFocus.trigger + 1 };
+    readingSelection.set({ selection: null, error: null, pageIds: [] });
+    // Do not carry a previous graph's conversation into the new graph.
+    chatVisited = false;
     // Reload after graph switch — bump request ID so JournalView's $effect re-fires
     journalRestoreRequestId += 1;
     navigateToJournal();
@@ -1702,6 +1838,7 @@
       navigateToPage(detail);
       return;
     }
+    const target: PageNavigationTarget = detail.pageId ? { id: detail.pageId } : detail.pageName;
 
     if (detail.targetBlockId) {
       const restoreEntry: HistoryEntry = {
@@ -1712,7 +1849,7 @@
         sourcePageTitle: detail.sourcePageTitle ?? detail.pageName,
       };
       navigateToPage(
-        detail.pageName,
+        target,
         false,
         false,
         restoreEntry,
@@ -1722,12 +1859,29 @@
       return;
     }
 
-    navigateToPage(detail.pageName, false, false, undefined, detail.sourceBlockId, detail.sourcePageTitle);
+    navigateToPage(target, false, false, undefined, detail.sourceBlockId, detail.sourcePageTitle);
+  }
+
+  function handleReadingNoteNav(event: Event) {
+    const detail = (event as CustomEvent<{ pageId: string; footnoteLabel: string; blockId?: string }>).detail;
+    if (!detail?.pageId || !/^grafium-note-[1-9]\d*$/.test(detail.footnoteLabel)) {
+      showToast("This reading-note reference is invalid.", "error");
+      return;
+    }
+    if (detail.blockId) setCurrentBlockAnchor(detail.pageId, detail.blockId);
+    readingNoteFocus = {
+      pageId: detail.pageId, label: detail.footnoteLabel, trigger: readingNoteFocus.trigger + 1,
+    };
+    openReferencePanelTab("notes");
   }
 
   $effect(() => {
     window.addEventListener("navigate-page", handlePageNav);
-    return () => window.removeEventListener("navigate-page", handlePageNav);
+    window.addEventListener("open-reading-note", handleReadingNoteNav);
+    return () => {
+      window.removeEventListener("navigate-page", handlePageNav);
+      window.removeEventListener("open-reading-note", handleReadingNoteNav);
+    };
   });
 
   $effect(() => {
@@ -1735,6 +1889,8 @@
     loadReferencePanelWidthPreference();
     loadGraphViewModePreference();
     loadShowBlockGuidesPreference();
+    loadNarrowPaddingPreference();
+    loadBionicReaderPreference();
   });
 </script>
 
@@ -1750,6 +1906,8 @@
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
       onOpenSearch={openGlobalSearch}
       onOpenSettings={() => navigateToPage("__settings__")}
+      bionicReaderMode={bionicReaderMode}
+      onToggleBionicReader={toggleBionicReader}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}
@@ -1787,7 +1945,11 @@
     {:else if loading}
       <div class="loading">Loading...</div>
     {:else if currentView === "all-pages"}
-      <AllPages onNavigate={handleNavigate} onPageDeleted={() => { void sidebarRef?.refresh(); }} />
+      <LazyView load={loadAllPages} name="all pages">
+        {#snippet children(AllPages)}
+          <AllPages onNavigate={handleNavigate} onPageDeleted={() => { void sidebarRef?.refresh(); }} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "graph"}
       <div class="graph-view-wrapper">
         <div class="graph-renderer-toggle">
@@ -1795,34 +1957,66 @@
           <button class:active={graphViewMode === "3d"} onclick={() => setGraphViewMode("3d")}>3D</button>
         </div>
         {#if graphViewMode === "3d"}
-          <GraphView3D
-            onNavigate={handleNavigate}
-            currentPageId={currentPage?.id ?? ""}
-            currentPageTitle={currentPage?.title ?? ""}
-          />
+          <LazyView load={loadGraphView3D} name="3D graph">
+            {#snippet children(GraphView3D)}
+              <GraphView3D
+                onNavigate={handleNavigate}
+                currentPageId={currentPage?.id ?? ""}
+                currentPageTitle={currentPage?.title ?? ""}
+              />
+            {/snippet}
+          </LazyView>
         {:else}
-          <GraphView
-            onNavigate={handleNavigate}
-            currentPageId={currentPage?.id ?? ""}
-            currentPageTitle={currentPage?.title ?? ""}
-          />
+          <LazyView load={loadGraphView} name="graph">
+            {#snippet children(GraphView)}
+              <GraphView
+                onNavigate={handleNavigate}
+                currentPageId={currentPage?.id ?? ""}
+                currentPageTitle={currentPage?.title ?? ""}
+              />
+            {/snippet}
+          </LazyView>
         {/if}
       </div>
     {:else if currentView === "statistics"}
-      <Statistics onNavigate={handleNavigate} />
+      <LazyView load={loadStatistics} name="statistics">
+        {#snippet children(Statistics)}
+          <Statistics onNavigate={handleNavigate} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "flashcards"}
-      <FlashcardReview onNavigate={handleNavigate} />
-    {:else if currentView === "chat"}
-      <ChatView onOpenSettings={() => handleNavigate("__settings__")} />
+      <LazyView load={loadFlashcardReview} name="flashcards">
+        {#snippet children(FlashcardReview)}
+          <FlashcardReview onNavigate={handleNavigate} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "settings"}
-      <Settings {showBlockGuides} onSetShowBlockGuides={setShowBlockGuides} openSection={settingsOpenSection} />
+      <LazyView load={loadSettings} name="settings">
+        {#snippet children(Settings)}
+          <Settings
+            {showBlockGuides}
+            onSetShowBlockGuides={setShowBlockGuides}
+            {narrowPaddingPct}
+            onSetNarrowPaddingPct={setNarrowPaddingPct}
+            openSection={settingsOpenSection}
+          />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "jobs"}
-      <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
+      <LazyView load={loadJobsView} name="jobs">
+        {#snippet children(JobsView)}
+          <JobsView onOpenPage={(link) => navigateToPage(link.page_title ? { title: link.page_title } : { id: link.page_id })} />
+        {/snippet}
+      </LazyView>
     {:else if currentView === "journal"}
       <JournalView
+        onGoToLink={openGoToLink}
+        openCalendar={journalCalendarRequested}
+        onCalendarOpened={() => (journalCalendarRequested = false)}
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}
         restoreRequestId={journalRestoreRequestId}
         editTodayRequestId={journalEditTodayRequestId}
+        {showBlockGuides}
         onNavigate={handleNavigate}
         onActivePageChange={(page) => (journalActivePage = page)}
         onPageDeleted={() => { void sidebarRef?.refresh(); }}
@@ -1859,9 +2053,21 @@
         />
       {/key}
     {/if}
+    {#if chatVisited}
+      <div class="chat-session" hidden={!chatActive} inert={!chatActive}>
+        <LazyView load={loadChatView} name="chat">
+          {#snippet children(ChatView)}
+            <ChatView active={chatActive} conversationId={expandedConversationId}
+              onOpenSettings={() => handleNavigate("__settings__")}
+              onNavigate={handleNavigate}
+              onFindLinks={handleFindLinksForPage} />
+          {/snippet}
+        </LazyView>
+      </div>
+    {/if}
     </main>
 
-    <!-- Reference / Knowledge Panel -->
+    <!-- Chat and reading notes -->
     {#if referencePanelVisible}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -1869,23 +2075,33 @@
         class:resizing={isResizingReferencePanel}
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize reference panel"
+        aria-label="Resize right panel"
         style="position:fixed;top:0;bottom:0;right:{referencePanelWidth - 3}px;width:6px;z-index:10000;"
         onpointerdown={startReferencePanelResize}
         ondblclick={resetReferencePanelWidth}
       ></div>
-      <ReferencePanel
-        visible={true}
-        pageId={(currentView === "journal" ? journalActivePage?.id : currentPage?.id) || ""}
-        pageTitle={(currentView === "journal" ? journalActivePage?.title : currentPage?.title) || ""}
-        initialTab={referencePanelTab}
-        focusTrigger={referencePanelFocusTrigger}
-        width={referencePanelWidth}
-        preferFocusedPageForPageScope={currentView === "journal"}
-        onClose={() => (referencePanelVisible = false)}
-        onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
-        onFindLinks={handleFindLinksForPage}
-      />
+      <LazyView load={loadReferencePanel} name="Chat and notes">
+        {#snippet children(ReferencePanel)}
+          <ReferencePanel
+            visible={true}
+            pageId={assistantSourcePage?.id ?? ""}
+            pageTitle={assistantSourcePage?.title ?? ""}
+            initialTab={referencePanelTab}
+            conversationId={currentView === "chat" ? expandedConversationId : null}
+            focusTrigger={referencePanelFocusTrigger}
+            noteFocusPageId={readingNoteFocus.pageId}
+            noteFocusLabel={readingNoteFocus.label}
+            noteFocusTrigger={readingNoteFocus.trigger}
+            width={referencePanelWidth}
+            preferFocusedPageForPageScope={currentView === "journal"}
+            onClose={() => (referencePanelVisible = false)}
+            onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
+            onFindLinks={handleFindLinksForPage}
+            onExpandConversation={expandAssistantConversation}
+            onOpenSettings={() => handleNavigate("__settings__")}
+          />
+        {/snippet}
+      </LazyView>
     {/if}
 
     <!-- Bottom nav for narrow screens -->
@@ -2019,6 +2235,26 @@
     {/if}
   </div>
 </div>
+
+{#if goToLinkOpen}
+  <GoToLink
+    onCancel={() => (goToLinkOpen = false)}
+    onSelect={(page) => {
+      goToLinkOpen = false;
+      handleNavigate({ id: page.id });
+    }}
+  />
+{/if}
+
+{#if globalSearchOpen}
+  <LazyView load={loadGlobalSearchDialog} name="search">
+    {#snippet children(GlobalSearchDialog)}
+      <GlobalSearchDialog open={true} onClose={() => (globalSearchOpen = false)}
+        onNavigate={(target) => { globalSearchOpen = false; handleNavigate(target); }}
+        onOpenSettings={() => { globalSearchOpen = false; handleNavigate("__settings__"); }} />
+    {/snippet}
+  </LazyView>
+{/if}
 
 {#if currentView !== "jobs"}
   <JobActivity />
@@ -2278,6 +2514,15 @@
     word-break: break-word;
     padding: 0;
     margin: 0;
+  }
+
+  .chat-session {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .chat-session[hidden] {
+    display: none;
   }
 
   .app-shell.zen {
@@ -2603,7 +2848,8 @@
       display: none !important;
     }
 
-    .main-content {
+    .main-content,
+    .main-content.zen-content {
       padding-bottom: 60px;
       word-break: normal;
     }

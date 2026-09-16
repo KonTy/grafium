@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,13 @@ use crate::error::{CoreError, Result};
 #[cfg(feature = "media")]
 use crate::media::Transcript;
 
+#[cfg(feature = "media")]
+pub use crate::media::TranscribeProgress as WorkerProgress;
+/// Without transcription support, progress frames have no producible payload.
+#[cfg(not(feature = "media"))]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum WorkerProgress {}
+
 pub const WORKER_ARGUMENT: &str = "--grafium-native-ai-worker";
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
@@ -30,6 +37,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 static WORKER_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 static POOL: OnceLock<Mutex<Option<LiveWorker>>> = OnceLock::new();
@@ -41,6 +49,14 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub enum WorkerRequest {
     #[cfg(feature = "llm-local")]
     Llm {
+        model_path: PathBuf,
+        context_size: u32,
+        gpu_layers: u32,
+        messages: Vec<ChatMessage>,
+        options: CompletionOptions,
+    },
+    #[cfg(feature = "llm-local")]
+    CountPrompt {
         model_path: PathBuf,
         context_size: u32,
         gpu_layers: u32,
@@ -82,6 +98,8 @@ pub enum WorkerOutput {
     #[cfg(feature = "llm-local")]
     Llm(String),
     #[cfg(feature = "llm-local")]
+    PromptTokenCount(usize),
+    #[cfg(feature = "llm-local")]
     Ready,
     #[cfg(feature = "llm-local")]
     Embed(Vec<Vec<f32>>),
@@ -103,12 +121,22 @@ struct WorkerResponse {
     /// keeping that feedback, so a request may now be answered by any number
     /// of progress frames followed by exactly one terminal frame.
     #[serde(default)]
-    progress: Option<crate::media::TranscribeProgress>,
+    progress: Option<WorkerProgress>,
 }
 
 impl WorkerResponse {
     fn is_progress(&self) -> bool {
         self.progress.is_some() && self.output.is_none() && self.error.is_none()
+    }
+
+    fn into_output(self) -> Result<WorkerOutput> {
+        match (self.output, self.error, self.progress) {
+            (Some(output), None, None) => Ok(output),
+            (None, Some(error), None) => Err(CoreError::Other(error)),
+            _ => Err(CoreError::Other(
+                "native AI worker returned an invalid response".to_string(),
+            )),
+        }
     }
 }
 
@@ -134,6 +162,12 @@ impl WorkerKey {
         match request {
             #[cfg(feature = "llm-local")]
             WorkerRequest::Llm {
+                model_path,
+                context_size,
+                gpu_layers,
+                ..
+            }
+            | WorkerRequest::CountPrompt {
                 model_path,
                 context_size,
                 gpu_layers,
@@ -180,8 +214,10 @@ pub fn execute(request: WorkerRequest, timeout: Duration) -> Result<WorkerOutput
 pub fn execute_with_progress(
     request: WorkerRequest,
     timeout: Duration,
-    on_progress: &mut dyn FnMut(crate::media::TranscribeProgress),
+    on_progress: &mut dyn FnMut(WorkerProgress),
 ) -> Result<WorkerOutput> {
+    let cancel = request_cancel(&request);
+    check_cancelled(cancel)?;
     if matches!(request, WorkerRequest::Shutdown) {
         return Err(CoreError::Other(
             "shutdown requests cannot be dispatched by callers".to_string(),
@@ -204,7 +240,7 @@ pub fn execute_with_progress(
     // Serialize concurrent callers so they observe/mutate the pool one at a time
     // and no two workers ever run at once.
     let inflight = inflight();
-    let _inflight = inflight.lock().unwrap_or_else(PoisonError::into_inner);
+    let _inflight = lock_inflight(inflight, cancel)?;
     if SHUTDOWN.load(Ordering::Acquire) {
         return Err(CoreError::Other(
             "Grafium is shutting down; native AI is unavailable".to_string(),
@@ -263,13 +299,7 @@ pub fn execute_with_progress(
                 // a worker while we were out; discard ours to avoid two children.
                 drop(worker);
             }
-            match (response.output, response.error) {
-                (Some(output), None) => Ok(output),
-                (None, Some(error)) => Err(CoreError::Other(error)),
-                _ => Err(CoreError::Other(
-                    "native AI worker returned an invalid response".to_string(),
-                )),
-            }
+            response.into_output()
         }
         Err(error) => {
             // Transport-level failure invalidates the worker; its Drop kills it.
@@ -278,6 +308,40 @@ pub fn execute_with_progress(
         }
     };
     response
+}
+
+fn request_cancel(request: &WorkerRequest) -> Option<&AtomicBool> {
+    match request {
+        #[cfg(feature = "llm-local")]
+        WorkerRequest::CountPrompt { options, .. } | WorkerRequest::Llm { options, .. } => {
+            options.cancel.as_deref()
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(CoreError::Other("AI request cancelled".to_string()));
+    }
+    Ok(())
+}
+
+fn lock_inflight<'a>(
+    lock: &'a Mutex<()>,
+    cancel: Option<&AtomicBool>,
+) -> Result<MutexGuard<'a, ()>> {
+    if cancel.is_none() {
+        return Ok(lock.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+    loop {
+        check_cancelled(cancel)?;
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) => thread::sleep(CANCEL_POLL),
+        }
+    }
 }
 
 pub fn shutdown_pool() {
@@ -352,6 +416,11 @@ fn estimated_working_set(request: &WorkerRequest) -> Result<u64> {
     match request {
         #[cfg(feature = "llm-local")]
         WorkerRequest::Llm {
+            model_path,
+            context_size,
+            ..
+        }
+        | WorkerRequest::CountPrompt {
             model_path,
             context_size,
             ..
@@ -447,6 +516,11 @@ fn memory_limit_for_request(request: &WorkerRequest) -> Result<u64> {
     match request {
         #[cfg(feature = "llm-local")]
         WorkerRequest::Llm {
+            model_path,
+            context_size,
+            ..
+        }
+        | WorkerRequest::CountPrompt {
             model_path,
             context_size,
             ..
@@ -621,6 +695,22 @@ fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutp
         )
         .map(WorkerOutput::Llm),
         #[cfg(feature = "llm-local")]
+        WorkerRequest::CountPrompt {
+            model_path,
+            context_size,
+            gpu_layers,
+            messages,
+            options,
+        } => crate::ai::providers::local_llm::count_prompt_tokens_in_process(
+            &mut state.llm,
+            &model_path,
+            context_size,
+            gpu_layers,
+            &messages,
+            &options,
+        )
+        .map(WorkerOutput::PromptTokenCount),
+        #[cfg(feature = "llm-local")]
         WorkerRequest::ValidateLlm {
             model_path,
             context_size,
@@ -780,8 +870,10 @@ impl LiveWorker {
         &mut self,
         request: &WorkerRequest,
         timeout: Duration,
-        on_progress: &mut dyn FnMut(crate::media::TranscribeProgress),
+        on_progress: &mut dyn FnMut(WorkerProgress),
     ) -> Result<WorkerResponse> {
+        let cancel = request_cancel(request);
+        check_cancelled(cancel)?;
         let payload = serde_json::to_vec(request)
             .map_err(|e| CoreError::Other(format!("cannot encode native AI request: {e}")))?;
         if (payload.len() as u64) > MAX_REQUEST_BYTES {
@@ -803,39 +895,61 @@ impl LiveWorker {
                 CoreError::Other(format!("cannot send request to native AI worker: {e}"))
             })?;
 
-        loop {
-            match self.responses.recv_timeout(timeout) {
-                Ok(Ok(bytes)) => {
-                    let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
-                        CoreError::Other(format!("native AI worker returned invalid data: {e}"))
-                    })?;
-                    if response.is_progress() {
-                        if let Some(progress) = response.progress {
-                            on_progress(progress);
-                        }
-                        // Keep waiting: the timeout covers silence, not the whole
-                        // job, so a long transcription that is visibly advancing
-                        // is never cut off.
-                        continue;
+        receive_response(&self.responses, timeout, cancel, on_progress)
+    }
+}
+
+fn receive_response(
+    responses: &Receiver<io::Result<Vec<u8>>>,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+    on_progress: &mut dyn FnMut(WorkerProgress),
+) -> Result<WorkerResponse> {
+    let mut last_progress = Instant::now();
+    loop {
+        check_cancelled(cancel)?;
+        let remaining = timeout.saturating_sub(last_progress.elapsed());
+        let wait = if cancel.is_some() {
+            remaining.min(CANCEL_POLL)
+        } else {
+            remaining
+        };
+        match responses.recv_timeout(wait) {
+            Ok(Ok(bytes)) => {
+                check_cancelled(cancel)?;
+                let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
+                    CoreError::Other(format!("native AI worker returned invalid data: {e}"))
+                })?;
+                if response.is_progress() {
+                    if let Some(progress) = response.progress {
+                        on_progress(progress);
                     }
-                    return Ok(response);
+                    // Keep waiting: the timeout covers silence, not the whole
+                    // job, so a long transcription that is visibly advancing
+                    // is never cut off.
+                    last_progress = Instant::now();
+                    continue;
                 }
-                Ok(Err(error)) => {
-                    return Err(CoreError::Other(format!(
-                        "native AI worker connection failed: {error}"
-                    )))
+                return Ok(response);
+            }
+            Ok(Err(error)) => {
+                return Err(CoreError::Other(format!(
+                    "native AI worker connection failed: {error}"
+                )))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if last_progress.elapsed() < timeout {
+                    continue;
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(CoreError::Other(format!(
-                        "native AI worker exceeded its {} minute time limit and was stopped",
-                        timeout.as_secs() / 60
-                    )))
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(CoreError::Other(
-                        "native AI worker exited unexpectedly".to_string(),
-                    ))
-                }
+                return Err(CoreError::Other(format!(
+                    "native AI worker exceeded its {} minute time limit and was stopped",
+                    timeout.as_secs() / 60
+                )));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(CoreError::Other(
+                    "native AI worker exited unexpectedly".to_string(),
+                ))
             }
         }
     }
@@ -855,6 +969,227 @@ fn read_response_loop(mut stdout: ChildStdout, tx: Sender<io::Result<Vec<u8>>>) 
                 return;
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "llm-local"))]
+mod prompt_count_tests {
+    use super::*;
+    use crate::ai::traits::MessageRole;
+    use std::sync::Arc;
+
+    fn count_request() -> WorkerRequest {
+        WorkerRequest::CountPrompt {
+            model_path: PathBuf::from("synthetic-model.gguf"),
+            context_size: 6144,
+            gpu_layers: 0,
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "中文 🦀".into(),
+                },
+                ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: "Synthetic history".into(),
+                },
+            ],
+            options: CompletionOptions {
+                system_prompt: Some("Synthetic system".into()),
+                cancel: Some(Arc::new(AtomicBool::new(false))),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn scoped_research_generation_observes_cancellation_without_loading_a_model() {
+        let WorkerRequest::CountPrompt {
+            model_path, context_size, gpu_layers, messages, options,
+        } = count_request() else {
+            unreachable!()
+        };
+        let flag = options.cancel.as_ref().unwrap().clone();
+        let request = WorkerRequest::Llm {
+            model_path, context_size, gpu_layers, messages, options,
+        };
+        let cancel = request_cancel(&request).expect("generation shares cancellable worker waits");
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                flag.store(true, Ordering::Release);
+            });
+            assert!(
+                receive_response(&receiver, Duration::from_secs(60), Some(cancel), &mut |_| {})
+                    .unwrap_err().to_string().contains("cancelled")
+            );
+        });
+        // This must fail before consulting the executable or any model path.
+        assert!(execute(request, Duration::from_secs(60))
+            .unwrap_err().to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn count_request_preserves_prompt_and_shares_generation_pool_key() {
+        let count = count_request();
+        let mut frame = Vec::new();
+        write_framed(&mut frame, &count).unwrap();
+        let decoded: WorkerRequest = read_framed(&mut frame.as_slice()).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&count).unwrap(),
+            serde_json::to_value(&decoded).unwrap()
+        );
+        let WorkerRequest::CountPrompt {
+            model_path,
+            context_size,
+            gpu_layers,
+            messages,
+            options,
+        } = decoded
+        else {
+            panic!("wrong request type")
+        };
+        assert!(options.cancel.is_none(), "live handles cannot cross IPC");
+        let generation = WorkerRequest::Llm {
+            model_path: model_path.clone(),
+            context_size,
+            gpu_layers,
+            messages,
+            options,
+        };
+        let validation = WorkerRequest::ValidateLlm {
+            model_path,
+            context_size,
+            gpu_layers,
+        };
+        assert_eq!(
+            WorkerKey::from_request(&count).unwrap(),
+            WorkerKey::from_request(&generation).unwrap()
+        );
+        assert_eq!(
+            WorkerKey::from_request(&count).unwrap(),
+            WorkerKey::from_request(&validation).unwrap()
+        );
+    }
+
+    #[test]
+    fn prompt_count_terminal_response_round_trips() {
+        let mut frame = Vec::new();
+        write_framed(
+            &mut frame,
+            &WorkerResponse {
+                output: Some(WorkerOutput::PromptTokenCount(8536)),
+                error: None,
+                progress: None,
+            },
+        )
+        .unwrap();
+        let decoded: WorkerResponse = read_framed(&mut frame.as_slice()).unwrap().unwrap();
+        assert!(!decoded.is_progress());
+        assert!(matches!(
+            decoded.into_output().unwrap(),
+            WorkerOutput::PromptTokenCount(8536)
+        ));
+    }
+
+    fn receive_payload(payload: &[u8]) -> Result<WorkerOutput> {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(payload.to_vec())).unwrap();
+        receive_response(&rx, Duration::from_secs(1), None, &mut |_| {})?.into_output()
+    }
+
+    #[test]
+    fn count_errors_and_invalid_responses_are_not_silently_accepted() {
+        let error = receive_payload(
+            br#"{"output":null,"error":"failed to tokenize prompt: synthetic error"}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic error"));
+        for payload in [
+            br#"{"output":null,"error":null}"#.as_slice(),
+            br#"{"output":{"PromptTokenCount":4},"error":"conflict"}"#,
+            br#"{"output":{"PromptTokenCount":-1}}"#,
+            b"not json",
+        ] {
+            assert!(receive_payload(payload).is_err());
+        }
+        assert!(matches!(
+            receive_payload(br#"{"output":{"PromptTokenCount":0},"error":null}"#).unwrap(),
+            WorkerOutput::PromptTokenCount(0)
+        ));
+    }
+
+    #[test]
+    fn prompt_count_cancellation_interrupts_pool_wait_without_model_load() {
+        let lock = Mutex::new(());
+        let _guard = lock.lock().unwrap();
+        let cancel = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(CANCEL_POLL);
+                cancel.store(true, Ordering::Release);
+            });
+            let error = lock_inflight(&lock, Some(&cancel)).unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+        });
+    }
+
+    #[test]
+    fn prompt_count_cancellation_interrupts_silent_worker() {
+        let (_tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(CANCEL_POLL);
+                cancel.store(true, Ordering::Release);
+            });
+            let error = receive_response(&rx, Duration::from_secs(60), Some(&cancel), &mut |_| {})
+                .unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+        });
+    }
+
+    #[test]
+    fn silent_worker_timeout_and_disconnect_are_errors() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let error = receive_response(&rx, Duration::ZERO, Some(&cancel), &mut |_| {}).unwrap_err();
+        assert!(error.to_string().contains("time limit"), "{error}");
+        drop(tx);
+        let error = receive_response(&rx, Duration::from_secs(1), None, &mut |_| {}).unwrap_err();
+        assert!(error.to_string().contains("exited unexpectedly"), "{error}");
+    }
+
+    #[cfg(feature = "media")]
+    #[test]
+    fn progress_frames_still_precede_terminal_responses() {
+        let (tx, rx) = mpsc::channel();
+        for response in [
+            WorkerResponse {
+                output: None,
+                error: None,
+                progress: Some(crate::media::TranscribeProgress {
+                    percent: 50,
+                    message: "Synthetic progress".into(),
+                }),
+            },
+            WorkerResponse {
+                output: Some(WorkerOutput::PromptTokenCount(42)),
+                error: None,
+                progress: None,
+            },
+        ] {
+            tx.send(Ok(serde_json::to_vec(&response).unwrap())).unwrap();
+        }
+        let mut seen = Vec::new();
+        let output = receive_response(&rx, Duration::from_secs(1), None, &mut |progress| {
+            seen.push(progress.percent);
+        })
+        .unwrap()
+        .into_output()
+        .unwrap();
+        assert_eq!(seen, [50]);
+        assert!(matches!(output, WorkerOutput::PromptTokenCount(42)));
     }
 }
 

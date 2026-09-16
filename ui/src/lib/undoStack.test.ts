@@ -13,19 +13,31 @@ vi.mock("./api", () => ({
   createBlocks: vi.fn(),
   deleteBlock: vi.fn(),
   deleteBlocks: vi.fn(),
+  getGraphInfo: vi.fn(),
+  listBlocks: vi.fn(),
   undoLinkCandidateAccept: vi.fn(),
   updateBlock: vi.fn(),
 }));
+
+vi.mock("./toast.svelte", () => ({
+  showToast: vi.fn(),
+  describeError: (error: unknown) => error instanceof Error ? error.message : String(error),
+}));
+vi.mock("./writing", () => ({ applyWritingChanges: vi.fn() }));
+import { applyWritingChanges } from "./writing";
 
 import {
   aiReapplySummaryInsert,
   aiUndoSummaryInsert,
   type SummaryWrapChange,
+  type AiInsertSummaryResult,
 } from "./knowledge";
 import {
   acceptLinkCandidate,
   createBlocks,
   deleteBlocks,
+  getGraphInfo,
+  listBlocks,
   undoLinkCandidateAccept,
   updateBlock,
   type Block,
@@ -39,6 +51,8 @@ import {
   setUndoCallback,
   removeUndoCallback,
 } from "./undoStack";
+import { showToast } from "./toast.svelte";
+import { registerEditorFlush } from "./editorPersistence";
 
 const mockUndo = vi.mocked(aiUndoSummaryInsert);
 const mockReapply = vi.mocked(aiReapplySummaryInsert);
@@ -62,6 +76,26 @@ function block(overrides: Partial<Block> & Pick<Block, "id" | "content">): Block
   };
 }
 
+function summaryReceipt(wrapChanges: SummaryWrapChange[] = []): AiInsertSummaryResult {
+  return {
+    graphPath: "synthetic-graph",
+    pageId: "page-1",
+    insertedBlockId: "b-summary",
+    insertedContent: "Summary body",
+    insertedAfterBlockId: "b-anchor",
+    insertedBlocks: [
+      block({ id: "b-summary", content: "Summary body", order_index: 1 }),
+      block({ id: "b-heading", content: "### Topic", parent_id: "b-summary" }),
+      block({ id: "b-body", content: "Topic body", parent_id: "b-heading" }),
+    ].map((block) => ({ ...block, block_type: "Text" as const, created_at: 0, updated_at: 0 })),
+    siblingOrderBefore: [{ blockId: "b-anchor", orderIndex: 0 }],
+    resolvedTargets: [],
+    createdTargets: [],
+    unlinkedTargets: [],
+    wrapChanges,
+  };
+}
+
 describe("undoStack — insert_summary flow", () => {
   beforeEach(() => {
     (globalThis as any).__undoStack = [];
@@ -73,10 +107,44 @@ describe("undoStack — insert_summary flow", () => {
     mockAcceptLinkCandidate.mockReset();
     mockUndoLinkCandidateAccept.mockReset();
     mockUpdateBlock.mockReset();
+    vi.mocked(listBlocks).mockReset();
+    vi.mocked(getGraphInfo).mockReset().mockResolvedValue({ path: "synthetic-graph" } as any);
+    vi.mocked(showToast).mockClear();
+    vi.mocked(applyWritingChanges).mockReset();
+  });
+
+  it("undoes and redoes a natural rewrite through one guarded native operation", async () => {
+    const changes = [
+      { blockId: "one", beforeContent: "Original one", afterContent: "Natural one" },
+      { blockId: "two", beforeContent: "Original two", afterContent: "Natural two" },
+    ];
+    pushUndo({ type: "rewrite_writing", graphPath: "/tmp/writing", pageId: "page-1", changes });
+    vi.mocked(applyWritingChanges).mockResolvedValue(undefined);
+    expect(await performUndo()).toBe(true);
+    expect(applyWritingChanges).toHaveBeenCalledOnce();
+    expect(applyWritingChanges).toHaveBeenCalledWith("/tmp/writing", "page-1", [
+      { blockId: "one", beforeContent: "Natural one", afterContent: "Original one" },
+      { blockId: "two", beforeContent: "Natural two", afterContent: "Original two" },
+    ]);
+    expect(mockUpdateBlock).not.toHaveBeenCalled();
+    expect(await performRedo()).toBe(true);
+    expect(applyWritingChanges).toHaveBeenLastCalledWith("/tmp/writing", "page-1", changes);
+  });
+
+  it("retains a conflicting rewrite undo and surfaces the failure without partial writes", async () => {
+    pushUndo({
+      type: "rewrite_writing", graphPath: "/tmp/writing", pageId: "page-1",
+      changes: [{ blockId: "one", beforeContent: "Original", afterContent: "Natural" }],
+    });
+    vi.mocked(applyWritingChanges).mockRejectedValue(new Error("The block changed"));
+    expect(await performUndo()).toBe(false);
+    expect(getUndoStackSize()).toBe(1);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("The block changed"), "error");
+    expect(mockUpdateBlock).not.toHaveBeenCalled();
   });
 
   it("reverses the summary insert and calls the page's reload callback", async () => {
-    mockUndo.mockResolvedValue(undefined);
+    mockUndo.mockResolvedValue({ retainedTargets: [] });
     const cb = vi.fn();
     setUndoCallback("page-1", cb);
 
@@ -85,17 +153,13 @@ describe("undoStack — insert_summary flow", () => {
     ];
     pushUndo({
       type: "insert_summary",
-      pageId: "page-1",
-      insertedBlockId: "b-summary",
-      insertedContent: "Summary body",
-      insertedAfterBlockId: "b-anchor",
-      wrapChanges,
+      ...summaryReceipt(wrapChanges),
     });
 
     try {
       const ok = await performUndo();
       expect(ok).toBe(true);
-      expect(mockUndo).toHaveBeenCalledWith("b-summary", wrapChanges);
+      expect(mockUndo).toHaveBeenCalledWith({ type: "insert_summary", ...summaryReceipt(wrapChanges) });
       expect(cb).toHaveBeenCalledTimes(1);
     } finally {
       removeUndoCallback("page-1");
@@ -106,11 +170,7 @@ describe("undoStack — insert_summary flow", () => {
     mockUndo.mockRejectedValue(new Error("boom"));
     pushUndo({
       type: "insert_summary",
-      pageId: "page-1",
-      insertedBlockId: "b-summary",
-      insertedContent: "Summary body",
-      insertedAfterBlockId: null,
-      wrapChanges: [],
+      ...summaryReceipt(),
     });
 
     const ok = await performUndo();
@@ -118,7 +178,7 @@ describe("undoStack — insert_summary flow", () => {
     expect((globalThis as any).__undoStack.length).toBe(1);
   });
 
-  it("redo recreates the summary block and rebinds the undo entry to the fresh id", async () => {
+  it("redo restores the complete tree receipt with stable identities", async () => {
     // Set up: pretend we already went summary-insert → undo, so the redo
     // stack has one entry.
     const wrapChanges: SummaryWrapChange[] = [
@@ -127,20 +187,11 @@ describe("undoStack — insert_summary flow", () => {
     (globalThis as any).__redoStack = [
       {
         type: "insert_summary",
-        pageId: "page-1",
-        insertedBlockId: "b-summary-old",
-        insertedContent: "Summary body",
-        insertedAfterBlockId: "b-anchor",
-        wrapChanges,
+        ...summaryReceipt(wrapChanges),
       },
     ];
 
-    mockReapply.mockResolvedValue({
-      insertedBlockId: "b-summary-new",
-      insertedContent: "Summary body",
-      insertedAfterBlockId: "b-anchor",
-      wrapChanges,
-    });
+    mockReapply.mockResolvedValue(summaryReceipt(wrapChanges));
 
     const cb = vi.fn();
     setUndoCallback("page-1", cb);
@@ -148,17 +199,80 @@ describe("undoStack — insert_summary flow", () => {
     try {
       const ok = await performRedo();
       expect(ok).toBe(true);
-      expect(mockReapply).toHaveBeenCalledWith("page-1", "Summary body", "b-anchor", wrapChanges);
-      // The redo should have flipped the entry back onto the undo stack
-      // with the *new* block id, so a follow-up Ctrl-Z targets what
-      // reapply actually created (not the stale old id).
+      expect(mockReapply).toHaveBeenCalledWith({ type: "insert_summary", ...summaryReceipt(wrapChanges) });
       const undoStack = (globalThis as any).__undoStack;
       expect(undoStack.length).toBe(1);
-      expect(undoStack[0].insertedBlockId).toBe("b-summary-new");
+      expect(undoStack[0]).toEqual({ type: "insert_summary", ...summaryReceipt(wrapChanges) });
       expect(cb).toHaveBeenCalledTimes(1);
     } finally {
       removeUndoCallback("page-1");
     }
+  });
+
+  it("flushes pending source drafts before summary undo and refuses a failed flush", async () => {
+    const receipt = summaryReceipt();
+    const order: string[] = [];
+    let fail = true;
+    const unregister = registerEditorFlush(receipt.pageId, async () => {
+      order.push("flush");
+      if (fail) throw new Error("Unsaved draft could not be persisted");
+    });
+    mockUndo.mockImplementation(async () => { order.push("undo"); return { retainedTargets: [] }; });
+    pushUndo({ type: "insert_summary", ...receipt });
+    try {
+      expect(await performUndo()).toBe(false);
+      expect(mockUndo).not.toHaveBeenCalled();
+      expect(getUndoStackSize()).toBe(1);
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Unsaved draft"), "error");
+      fail = false;
+      expect(await performUndo()).toBe(true);
+      expect(order).toEqual(["flush", "flush", "undo"]);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("keeps stale summary redo retryable without creating flat blocks", async () => {
+    const action = { type: "insert_summary" as const, ...summaryReceipt() };
+    (globalThis as any).__redoStack = [action];
+    mockReapply.mockRejectedValue(new Error("Summary edit is stale: insertion location changed"));
+    expect(await performRedo()).toBe(false);
+    expect((globalThis as any).__redoStack).toEqual([action]);
+    expect(getUndoStackSize()).toBe(0);
+    expect(mockCreateBlocks).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("stale"), "error");
+  });
+
+  it("refuses summary undo on a different graph before flushing any drafts", async () => {
+    const flush = vi.fn(async () => {});
+    const unregister = registerEditorFlush("page-1", flush);
+    vi.mocked(getGraphInfo).mockResolvedValue({ path: "different-graph" } as any);
+    pushUndo({ type: "insert_summary", ...summaryReceipt() });
+    try {
+      expect(await performUndo()).toBe(false);
+      expect(flush).not.toHaveBeenCalled();
+      expect(mockUndo).not.toHaveBeenCalled();
+      expect(getUndoStackSize()).toBe(1);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("reports retained concept pages without losing the successful summary undo", async () => {
+    const receipt = summaryReceipt();
+    receipt.createdTargets = [{
+      id: "created-concept", title: "New concept", file_path: null, created_at: 42, updated_at: 42,
+      is_journal: false, properties: {},
+    }];
+    mockUndo.mockResolvedValue({
+      retainedTargets: [{ pageId: "created-concept", title: "New concept", reason: "Referenced by another note." }],
+    });
+    pushUndo({ type: "insert_summary", ...receipt });
+    expect(await performUndo()).toBe(true);
+    expect(getUndoStackSize()).toBe(0);
+    expect((globalThis as any).__redoStack[0]).toEqual({ type: "insert_summary", ...receipt });
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Kept concept pages edited or used elsewhere: New concept"), "info");
+    expect(mockDeleteBlocks).not.toHaveBeenCalled();
   });
 
   it("undoes and redoes an AI block replacement", async () => {
@@ -378,5 +492,52 @@ describe("undoStack — insert_summary flow", () => {
 
     expect(APP_UNDO_LIMIT).toBe(50);
     expect(getUndoStackSize()).toBe(50);
+  });
+
+  it("retains a failed grouped undo and notifies every affected page", async () => {
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
+    setUndoCallback("page-1", cb1);
+    setUndoCallback("page-2", cb2);
+    vi.mocked(listBlocks).mockRejectedValue(new Error("offline"));
+    pushUndo({
+      type: "delete_block_selection",
+      pageId: "page-1",
+      groups: [
+        { pageId: "page-1", blocks: [block({ id: "a", content: "one" })] },
+        { pageId: "page-2", blocks: [block({ id: "b", page_id: "page-2", content: "two" })] },
+      ],
+      placeholderIds: {},
+    });
+    try {
+      await expect(performUndo()).resolves.toBe(false);
+      expect(getUndoStackSize()).toBe(1);
+      expect((globalThis as any).__redoStack).toHaveLength(0);
+      expect(cb1).toHaveBeenCalledTimes(1);
+      expect(cb2).toHaveBeenCalledTimes(1);
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Undo again to retry"), "error");
+    } finally {
+      removeUndoCallback("page-1");
+      removeUndoCallback("page-2");
+    }
+  });
+
+  it("blocks overlapping undo and redo while an existing action is in flight", async () => {
+    let finish!: () => void;
+    mockUpdateBlock.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    pushUndo({
+      type: "update_block",
+      pageId: "page-1",
+      blockId: "a",
+      beforeContent: "before",
+      afterContent: "after",
+    });
+    const undo = performUndo();
+    await expect(performRedo()).resolves.toBe(false);
+    await expect(performUndo()).resolves.toBe(false);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("still running"), "info");
+    finish();
+    await expect(undo).resolves.toBe(true);
+    expect(mockUpdateBlock).toHaveBeenCalledTimes(1);
   });
 });

@@ -59,8 +59,12 @@ export interface LinkCandidate {
   from_block_id: string;
   from_page_id: string;
   from_page_title: string;
-  to_page_id: string;
+  to_page_id: string | null;
   to_page_title: string;
+  proposed_title?: string | null;
+  resolution?: "reuse" | "new" | "ambiguous";
+  alternatives?: { id: string; title: string }[];
+  reason?: string;
   anchor_text: string;
   anchor_start: number;
   anchor_end: number;
@@ -71,7 +75,17 @@ export interface LinkCandidate {
   updated_at: number;
 }
 
+export function resolveLinkCandidate(
+  candidateId: string, targetPageId: string | null, createNew: boolean, graphPath: string,
+): Promise<LinkCandidate> {
+  return invoke("resolve_link_candidate", { candidateId, targetPageId, createNew, graphPath });
+}
+
 // Pages
+export function listPageSummaries(): Promise<PageSummary[]> {
+  return invoke("list_page_summaries");
+}
+
 export function listPages(limit = 100, offset = 0): Promise<Page[]> {
   return invoke("list_pages", { limit, offset });
 }
@@ -86,6 +100,10 @@ export function listPagesWindow(limit: number, offset: number, sortByTitle: bool
 
 export function listJournalPages(limit = 20, offset = 0): Promise<Page[]> {
   return invoke("list_journal_pages", { limit, offset });
+}
+
+export function listJournalNoteDates(year: number, month: number): Promise<string[]> {
+  return invoke("list_journal_note_dates", { year, month });
 }
 
 export function getNoteEditCounts(days?: number): Promise<[string, number][]> {
@@ -106,8 +124,17 @@ export function getNoteEditsForDay(day: string): Promise<NoteEditDayEntry[]> {
   return invoke("get_note_edits_for_day", { day });
 }
 
-export function getPage(opts: { id?: string; title?: string }): Promise<Page> {
-  return invoke("get_page", opts);
+export async function getPage(opts: { id?: string; title?: string }): Promise<Page> {
+  try {
+    return await invoke("get_page", opts);
+  } catch (error) {
+    if (typeof error === "object" && error !== null
+      && "code" in error && typeof error.code === "string"
+      && "message" in error && typeof error.message === "string") {
+      throw Object.assign(new Error(error.message), { code: error.code });
+    }
+    throw error;
+  }
 }
 
 export function createPage(title: string, isJournal = false): Promise<Page> {
@@ -181,8 +208,10 @@ export function getPageSource(pageId: string): Promise<string> {
   return invoke("get_page_source", { pageId });
 }
 
-export function updatePageSource(pageId: string, content: string): Promise<void> {
-  return invoke("update_page_source", { pageId, content });
+export function updatePageSource(
+  pageId: string, content: string, guard: { expectedSource: string; graphPath: string },
+): Promise<void> {
+  return invoke("update_page_source", { pageId, content, ...guard });
 }
 
 export function getParentPage(title: string): Promise<Page | null> {
@@ -573,6 +602,19 @@ export function getAppTheme(): Promise<string> {
 
 export function setAppTheme(themeId: string): Promise<void> {
   return invoke("set_app_theme", { themeId });
+}
+
+export interface LayoutPreferences {
+  sidebarVisible: boolean;
+  wideMode: boolean;
+}
+
+export function getLayoutPreferences(): Promise<LayoutPreferences> {
+  return invoke("get_layout_preferences", {});
+}
+
+export function saveLayoutPreferences(preferences: Partial<LayoutPreferences>): Promise<void> {
+  return invoke("set_layout_preferences", { preferences });
 }
 
 // Asset management

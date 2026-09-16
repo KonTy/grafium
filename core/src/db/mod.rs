@@ -1,6 +1,8 @@
 mod audio;
 mod blocks;
 mod collections;
+mod entity_adjudication;
+mod entity_resolution;
 mod favorites;
 mod flashcards;
 mod graph_support;
@@ -19,6 +21,8 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 
 pub(crate) use blocks::chat_salient_terms;
+pub use entity_adjudication::{adjudicate_entity_resolution, EntityCandidateContext};
+pub use entity_resolution::{EntityCandidate, EntityDecision, EntityResolution};
 pub(crate) use links::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT;
 pub use retrieval::BlockPageMeta;
 
@@ -51,6 +55,25 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Functi
             PRAGMA mmap_size = 268435456;
             PRAGMA busy_timeout = 5000;
         ",
+        )?;
+
+        conn.create_scalar_function(
+            "entity_key",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(entity_resolution::entity_key(&ctx.get::<String>(0)?)),
+        )?;
+        conn.create_scalar_function(
+            "entity_aliases",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(entity_resolution::entity_aliases(&ctx.get::<String>(0)?)),
+        )?;
+        conn.create_scalar_function(
+            "entity_grams",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(entity_resolution::entity_grams(&ctx.get::<String>(0)?)),
         )?;
 
         conn.create_scalar_function(
@@ -113,6 +136,19 @@ impl Database {
         let db = Self { pool };
         db.initialize()?;
         Ok(db)
+    }
+
+    /// An immutable request's private read snapshot, without reopening a Graph,
+    /// reindexing files, or keeping the live graph's WAL pinned during inference.
+    pub fn read_snapshot(&self) -> Result<Self> {
+        let snapshot = Self::in_memory()?;
+        {
+            let source = self.conn()?;
+            let mut destination = snapshot.conn()?;
+            let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(256, std::time::Duration::from_millis(1), None)?;
+        }
+        Ok(snapshot)
     }
 
     pub(crate) fn conn(&self) -> Result<PooledConnection<SqliteConnectionManager>> {

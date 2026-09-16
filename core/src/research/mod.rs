@@ -31,6 +31,7 @@
 //! [`config::SearchEngineDef`]s defined here.
 
 pub mod agent;
+pub(crate) mod budget;
 pub mod config;
 pub mod ocr;
 

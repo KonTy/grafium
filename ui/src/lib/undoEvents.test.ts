@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./api", () => ({
-  createBlock: vi.fn(),
-  deleteBlock: vi.fn(),
+  createBlocks: vi.fn(),
+  deleteBlocks: vi.fn(),
 }));
 
-import { createBlock } from "./api";
+import { createBlocks, deleteBlocks } from "./api";
 import { attachAppUndoRedoListeners } from "./undoEvents";
 import {
   pushUndo,
@@ -13,7 +13,8 @@ import {
   setUndoCallback,
 } from "./undoStack";
 
-const mockCreateBlock = vi.mocked(createBlock);
+const mockCreateBlocks = vi.mocked(createBlocks);
+const mockDeleteBlocks = vi.mocked(deleteBlocks);
 
 function flushAsyncWork(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -23,7 +24,8 @@ describe("app undo event dispatch", () => {
   beforeEach(() => {
     (globalThis as any).__undoStack = [];
     (globalThis as any).__redoStack = [];
-    mockCreateBlock.mockReset();
+    mockCreateBlocks.mockReset();
+    mockDeleteBlocks.mockReset();
   });
 
   it("dispatches a single undo event to only the targeted page callback once", async () => {
@@ -38,7 +40,8 @@ describe("app undo event dispatch", () => {
       created_at: "0",
       updated_at: "0",
     };
-    mockCreateBlock.mockResolvedValue(restoredBlock);
+    mockCreateBlocks.mockResolvedValue([restoredBlock]);
+    mockDeleteBlocks.mockResolvedValue([restoredBlock]);
 
     const pageACallback = vi.fn();
     const pageBCallback = vi.fn();
@@ -59,7 +62,30 @@ describe("app undo event dispatch", () => {
       await flushAsyncWork();
 
       expect(pageACallback).toHaveBeenCalledTimes(1);
+      expect(pageACallback).toHaveBeenCalledWith({
+        type: "delete_blocks", pageId: "page-a", blocks: [restoredBlock],
+      });
       expect(pageBCallback).not.toHaveBeenCalled();
+      expect(mockCreateBlocks).toHaveBeenCalledTimes(1);
+      expect(mockCreateBlocks).toHaveBeenCalledWith("page-a", [
+        expect.objectContaining({ id: restoredBlock.id, content: restoredBlock.content }),
+      ]);
+
+      target.dispatchEvent(new Event("app-redo"));
+      await flushAsyncWork();
+
+      expect(mockDeleteBlocks).toHaveBeenCalledTimes(1);
+      expect(mockDeleteBlocks).toHaveBeenCalledWith("page-a", [restoredBlock.id]);
+      expect(pageACallback).toHaveBeenCalledTimes(2);
+      expect(pageBCallback).not.toHaveBeenCalled();
+
+      detach();
+      target.dispatchEvent(new Event("app-undo"));
+      target.dispatchEvent(new Event("app-redo"));
+      await flushAsyncWork();
+      expect(mockCreateBlocks).toHaveBeenCalledTimes(1);
+      expect(mockDeleteBlocks).toHaveBeenCalledTimes(1);
+      expect(pageACallback).toHaveBeenCalledTimes(2);
     } finally {
       detach();
       removeUndoCallback("page-a");

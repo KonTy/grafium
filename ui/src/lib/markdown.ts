@@ -1,8 +1,9 @@
 import DOMPurify from "dompurify";
-import { marked } from "marked";
+import { marked, type TokenizerThis } from "marked";
 import katex from "katex";
 import { invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
+import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
 
 // Custom renderer for code blocks with line numbers.
@@ -689,14 +690,38 @@ const pageLinkExtension = {
     const i = src.indexOf("[[");
     return i < 0 ? undefined : i;
   },
-  tokenizer(src: string) {
-    const m = /^\[\[([^\]\n]+)\]\]/.exec(src);
+  tokenizer(this: TokenizerThis, src: string) {
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock) return undefined;
+    const m = /^\[\[([^\[\]\r\n]+)\]\]/.exec(src);
     if (!m) return undefined;
-    return { type: "pageLink", raw: m[0], name: m[1] };
+    const separator = m[1].indexOf("|");
+    const name = separator < 0 ? m[1] : m[1].slice(0, separator);
+    const display = separator < 0 ? undefined : m[1].slice(separator + 1);
+    return { type: "pageLink", raw: m[0], name, display };
   },
-  renderer(token: { name: string }) {
+  renderer(token: { name: string; display?: string; raw: string }) {
     const target = escapeHtml(normalizeHierarchy(token.name));
-    return `<a class="page-link" data-page="${target}">${target}</a>`;
+    if (!target) return escapeHtml(token.raw);
+    const display = token.display === undefined ? target : escapeHtml(token.display);
+    const title = token.display === undefined ? "" : ` title="${target}"`;
+    return `<a class="page-link" data-page="${target}"${title}>${display}</a>`;
+  },
+};
+
+const escapedPageLinkExtension = {
+  name: "escapedPageLink",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.indexOf("\\[[");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const match = /^\\\[\[[^\[\]\r\n]+\]\]/.exec(src);
+    if (!match) return undefined;
+    return { type: "escapedPageLink", raw: match[0] };
+  },
+  renderer(token: { raw: string }) {
+    return escapeHtml(token.raw.slice(1));
   },
 };
 
@@ -722,11 +747,12 @@ const tagExtension = {
   name: "tag",
   level: "inline" as const,
   start(src: string) {
-    const i = src.search(/#[a-zA-Z0-9_/\\-]/);
+    const i = src.search(/#[\p{L}\p{N}]/u);
     return i < 0 ? undefined : i;
   },
-  tokenizer(src: string) {
-    const m = /^#([a-zA-Z0-9_/\\-]+)/.exec(src);
+  tokenizer(this: TokenizerThis, src: string) {
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock) return undefined;
+    const m = /^#([\p{L}\p{N}][\p{L}\p{N}\p{M}_/\\-]*)/u.exec(src);
     if (!m) return undefined;
     return { type: "tag", raw: m[0], name: m[1] };
   },
@@ -737,6 +763,25 @@ const tagExtension = {
   },
 };
 
+const iconShortcodeExtension = {
+  name: "iconShortcode",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.indexOf(":icon-");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src: string) {
+    const match = /^:icon-([a-z0-9-]+):/.exec(src);
+    if (!match) return;
+    const html = iconHtmlForName(match[1]);
+    if (!html) return;
+    return { type: "iconShortcode", raw: match[0], html };
+  },
+  renderer(token: { html: string }) {
+    return token.html;
+  },
+};
+
 const blockRefExtension = {
   name: "blockRef",
   level: "inline" as const,
@@ -744,7 +789,8 @@ const blockRefExtension = {
     const i = src.indexOf("((");
     return i < 0 ? undefined : i;
   },
-  tokenizer(src: string) {
+  tokenizer(this: TokenizerThis, src: string) {
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock) return undefined;
     const m = /^\(\(([^)\n]+)\)\)/.exec(src);
     if (!m) return undefined;
     return { type: "blockRef", raw: m[0], ref: m[1] };
@@ -755,7 +801,96 @@ const blockRefExtension = {
   },
 };
 
-marked.use({ extensions: [pageLinkExtension, priorityExtension, tagExtension, blockRefExtension] });
+const readingNoteReferenceExtension = {
+  name: "readingNoteReference",
+  level: "inline" as const,
+  start(src: string) {
+    const index = src.search(/ ?\[\^grafium-note-/);
+    return index < 0 ? undefined : index;
+  },
+  tokenizer(this: TokenizerThis, src: string) {
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock) return undefined;
+    const match = /^ ?\[\^(grafium-note-([1-9]\d*))\](?!:)/.exec(src);
+    return match ? { type: "readingNoteReference", raw: match[0], label: match[1], number: match[2] } : undefined;
+  },
+  renderer(token: { label: string; number: string }) {
+    return `<sup class="reading-note-ref"><a href="#${token.label}" data-reading-note-label="${token.label}" aria-label="Open reading note ${token.number}" title="Open reading note ${token.number}">${token.number}</a></sup>`;
+  },
+};
+
+const escapedReadingNoteExtension = {
+  name: "escapedReadingNote",
+  level: "inline" as const,
+  start(src: string) {
+    const index = src.indexOf("\\[^grafium-note-");
+    return index < 0 ? undefined : index;
+  },
+  tokenizer(src: string) {
+    const match = /^\\\[\^grafium-note-[1-9]\d*\]/.exec(src);
+    return match ? { type: "escapedReadingNote", raw: match[0] } : undefined;
+  },
+  renderer(token: { raw: string }) { return escapeHtml(token.raw.slice(1)); },
+};
+
+const mathExtension = {
+  name: "math",
+  level: "inline" as const,
+  start(src: string) {
+    const i = src.indexOf("$");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(this: TokenizerThis, src: string) {
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock) return undefined;
+    const display = /^\$\$([\s\S]+?)(?<!\\)\$\$/.exec(src);
+    const inline = display ? null : /^\$([^\n$]+?)(?<!\\)\$/.exec(src);
+    const match = display ?? inline;
+    if (!match) return undefined;
+    return {
+      type: "math",
+      raw: match[0],
+      expression: match[1],
+      displayMode: !!display,
+      plain: !display && !shouldRenderInlineMath(match[1]),
+    };
+  },
+  renderer(token: { raw: string; expression: string; displayMode: boolean; plain?: boolean }) {
+    return token.plain
+      ? escapeHtml(token.raw)
+      : katex.renderToString(token.expression.trim(), { throwOnError: false, displayMode: token.displayMode });
+  },
+};
+
+const displayMathExtension = {
+  name: "displayMath",
+  level: "block" as const,
+  tokenizer(src: string) {
+    const match = /^ {0,3}\$\$([\s\S]+?)(?<!\\)\$\$(?:[ \t]*(?:\n|$))/.exec(src);
+    if (!match) return undefined;
+    return {
+      type: "displayMath",
+      raw: match[0],
+      expression: match[1],
+      displayMode: true,
+    };
+  },
+  renderer: mathExtension.renderer,
+};
+
+marked.use({ extensions: [pageLinkExtension, escapedPageLinkExtension, priorityExtension, tagExtension, iconShortcodeExtension, blockRefExtension, readingNoteReferenceExtension, escapedReadingNoteExtension, mathExtension, displayMathExtension] });
+
+/** Read navigation targets with the same opaque aliases and Markdown rules as rendering. */
+export function extractMarkdownReferences(content: string): { pages: string[]; tags: string[] } {
+  const pages: string[] = [];
+  const tags: string[] = [];
+  marked.walkTokens(marked.lexer(normalizeIndentedFenceDelimiters(content)), (token) => {
+    if (token.type !== "pageLink" && token.type !== "tag") return;
+    const name = normalizeHierarchy(token.name);
+    if (!name) return;
+    if (token.type === "pageLink") pages.push(name);
+    else if (name !== "flashcard") tags.push(name);
+  });
+  return { pages, tags };
+}
 
 // Simple LRU cache to avoid re-parsing unchanged blocks
 const cache = new Map<string, string>();
@@ -780,47 +915,12 @@ function setCache(key: string, val: string): void {
   cache.set(key, val);
 }
 
-function renderMathSegment(text: string): string {
-  // Render display math first so $$...$$ is not consumed by inline matching.
-  const withDisplay = text.replace(/(?<!\\)\$\$([\s\S]+?)(?<!\\)\$\$/g, (_, expr: string) => {
-    return katex.renderToString(expr.trim(), {
-      throwOnError: false,
-      displayMode: true,
-    });
-  });
-
-  return withDisplay.replace(/(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (match: string, expr: string) => {
-    if (!shouldRenderInlineMath(expr)) return match;
-    return katex.renderToString(expr.trim(), {
-      throwOnError: false,
-      displayMode: false,
-    });
-  });
-}
-
 function shouldRenderInlineMath(expr: string): boolean {
   const trimmed = expr.trim();
   if (!trimmed) return false;
   if (/^\d/.test(trimmed) && /[A-Za-z]/.test(trimmed)) return false;
   const proseWords = trimmed.match(/[A-Za-z]{2,}/g) ?? [];
   return proseWords.length < 3;
-}
-
-function renderMathOutsideCodeFences(markdown: string): string {
-  const fenceRe = /```[\s\S]*?```/g;
-  let out = "";
-  let last = 0;
-
-  for (const match of markdown.matchAll(fenceRe)) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    out += renderMathSegment(markdown.slice(last, start));
-    out += match[0];
-    last = end;
-  }
-
-  out += renderMathSegment(markdown.slice(last));
-  return out;
 }
 
 /**
@@ -1008,16 +1108,17 @@ function renderCalloutBlock(content: string): string | null {
 function renderMarkdownContent(content: string): string {
   let processed = normalizeIndentedFenceDelimiters(hideRenderedTaskMetadata(content));
   processed = normalizeLooseMarkdownTables(processed);
-  processed = renderMathOutsideCodeFences(processed);
   processed = stripImageSizeAttributes(processed);
 
   // Unescape outline-style backslash escapes before brackets (e.g. \] → ])
   // so that standard markdown links like [text](url) render correctly.
-  processed = processed.replace(/\\([[\]])/g, "$1");
+  processed = processed.replace(/\\(\[\[|[\[\]])/g, (raw, brackets: string, offset: number) =>
+    brackets === "[[" || processed.startsWith("\\[^grafium-note-", offset) ? raw : brackets
+  );
 
-  // NOTE: [[page links]], #tags and ((block refs)) are NOT transformed here.
+  // NOTE: [[page links]], #tags, icon shortcodes and ((block refs)) are NOT transformed here.
   // They are registered as marked inline tokenizers (see pageLinkExtension /
-  // tagExtension / blockRefExtension above) so they only ever apply to real
+  // tagExtension / iconShortcodeExtension / blockRefExtension above) so they only ever apply to real
   // text tokens — never to link destinations or any code form.
 
   // Handle task markers

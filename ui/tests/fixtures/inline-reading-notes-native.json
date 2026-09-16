@@ -1,0 +1,149 @@
+{
+  "blocks": [
+    {
+      "block_type": "Text",
+      "content": "# A synthetic chapter",
+      "created_at": 1789537463326,
+      "id": "d64eb4f2-6669-49e7-bddf-00e0f5378295",
+      "order_index": 0,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": null,
+      "properties": {},
+      "updated_at": 1789537463326
+    },
+    {
+      "block_type": "Text",
+      "content": "A **short passage** about café and 😀. [^grafium-note-1]",
+      "created_at": 1789537463326,
+      "id": "9cbd0935-89cd-4341-a1ee-184360df1728",
+      "order_index": 0,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": "d64eb4f2-6669-49e7-bddf-00e0f5378295",
+      "properties": {},
+      "updated_at": 1789537463326
+    },
+    {
+      "block_type": "Text",
+      "content": "A second paragraph preserves the author's [^author] reference. [^grafium-note-2]",
+      "created_at": 1789537463327,
+      "id": "b0877b5f-43df-49dc-b523-8677c1e8c15e",
+      "order_index": 1,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": "d64eb4f2-6669-49e7-bddf-00e0f5378295",
+      "properties": {},
+      "updated_at": 1789537463327
+    },
+    {
+      "block_type": "Text",
+      "content": "Final source paragraph.",
+      "created_at": 1789537463327,
+      "id": "e55ae0c7-ae52-4cb2-8496-bf3eb6f18303",
+      "order_index": 1,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": null,
+      "properties": {},
+      "updated_at": 1789537463327
+    },
+    {
+      "block_type": "Text",
+      "content": "[^author]: An author footnote, not a managed annotation.",
+      "created_at": 1789537463327,
+      "id": "28b898fe-4b1e-4b86-8914-c8fe44713a39",
+      "order_index": 2,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": null,
+      "properties": {},
+      "updated_at": 1789537463327
+    },
+    {
+      "block_type": "Text",
+      "content": "# Why this matters\n\nowner:: reader, not metadata\nid:: literal body text\n\n```rust\nlet label = \"body:: not metadata\";\n```\n\nKeep **bold**, café, and 😀.\n",
+      "created_at": 1789537463328,
+      "id": "85af8e1b-b7ef-4a5d-928b-914156fc3614",
+      "order_index": 3,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": null,
+      "properties": {
+        "reading-note": "{\"anchor\":{\"hashMode\":\"annotation-free-v1\",\"kind\":\"source\",\"offsetUnit\":\"utf-16\",\"parts\":[{\"blockId\":\"a458bdf7-1140-4814-82e2-49c5b8d44165\",\"from\":4,\"ordinal\":1,\"persistedId\":false,\"prefix\":\"A **\",\"rawFingerprint\":\"1c6527432c5c005080780459739d50e64be049accac5f07d09404dbeb33ff018\",\"suffix\":\"** about café and 😀.\",\"text\":\"short passage\",\"to\":17}],\"quote\":\"short passage\",\"sourceFileSha256\":\"f6b118e2c56c0872af4d404535dc1a0dbb1ecee78eccab5cb262ce271b87feca\",\"sourcePageId\":\"072b331e-04cc-466a-ab2a-67b319887b5d\",\"sourcePath\":\"pages/Books/Synthetic.md\",\"sourceTitle\":\"Books/Synthetic\"},\"bodyBlockId\":\"85af8e1b-b7ef-4a5d-928b-914156fc3614\",\"createRequestHash\":\"dc3ce626c4f1ccbf7cf4dfcf2075e9b6b07396c2c6b5a563a9b49cbef151dfe2\",\"createdAt\":\"2026-09-16T05:44:23.233920015+00:00\",\"footnoteLabel\":\"grafium-note-1\",\"id\":\"9268fca0-0a47-4d73-bc7b-e322d366fb50\",\"updatedAt\":\"2026-09-16T05:44:23.233920015+00:00\",\"version\":2}",
+        "reading-note-id": "9268fca0-0a47-4d73-bc7b-e322d366fb50",
+        "reading-note-label": "grafium-note-1",
+        "reading-note-storage": "inline"
+      },
+      "updated_at": 1789537463328
+    },
+    {
+      "block_type": "Text",
+      "content": "A second note.\n\n- An ordinary list item\n- Unicode: café 😀\n\n",
+      "created_at": 1789537463329,
+      "id": "277c77a0-2353-4db2-a100-febd44ffde44",
+      "order_index": 4,
+      "page_id": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "parent_id": null,
+      "properties": {
+        "reading-note": "{\"anchor\":{\"hashMode\":\"annotation-free-v1\",\"kind\":\"source\",\"offsetUnit\":\"utf-16\",\"parts\":[{\"blockId\":\"cd6e782b-c8e8-4ffe-8220-0fb88c840f00\",\"from\":2,\"ordinal\":2,\"persistedId\":false,\"prefix\":\"A \",\"rawFingerprint\":\"52ca37541645fc0ba95501fbcede518227a7c523aa1d9ca83790f3f4de512ca3\",\"suffix\":\" preserves the author's [^author] reference.\",\"text\":\"second paragraph\",\"to\":18}],\"quote\":\"second paragraph\",\"sourceFileSha256\":\"f6b118e2c56c0872af4d404535dc1a0dbb1ecee78eccab5cb262ce271b87feca\",\"sourcePageId\":\"072b331e-04cc-466a-ab2a-67b319887b5d\",\"sourcePath\":\"pages/Books/Synthetic.md\",\"sourceTitle\":\"Books/Synthetic\"},\"bodyBlockId\":\"277c77a0-2353-4db2-a100-febd44ffde44\",\"createRequestHash\":\"6f968bae7f7cf0f491f5f7d651eb069931ef66208b7fc9ee9bb53bc656431d7b\",\"createdAt\":\"2026-09-16T05:44:23.260645260+00:00\",\"footnoteLabel\":\"grafium-note-2\",\"id\":\"d5a54d82-dbde-4c53-99a5-dfa7338b9dd0\",\"updatedAt\":\"2026-09-16T05:44:23.260645260+00:00\",\"version\":2}",
+        "reading-note-id": "d5a54d82-dbde-4c53-99a5-dfa7338b9dd0",
+        "reading-note-label": "grafium-note-2",
+        "reading-note-storage": "inline"
+      },
+      "updated_at": 1789537463329
+    }
+  ],
+  "fixtureVersion": 1,
+  "notes": [
+    {
+      "body": "# Why this matters\n\nowner:: reader, not metadata\nid:: literal body text\n\n```rust\nlet label = \"body:: not metadata\";\n```\n\nKeep **bold**, café, and 😀.\n",
+      "createdAt": "2026-09-16T05:44:23.233920015+00:00",
+      "filePath": "pages/Books/Synthetic.md",
+      "footnoteLabel": "grafium-note-1",
+      "id": "9268fca0-0a47-4d73-bc7b-e322d366fb50",
+      "noteBlockId": "85af8e1b-b7ef-4a5d-928b-914156fc3614",
+      "notePageId": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "quote": "short passage",
+      "revision": "28a465bfe81e6e46eda4481a8780330cbe7c3e01c953957414129c6cbc46c808",
+      "source": {
+        "filePath": "pages/Books/Synthetic.md",
+        "pageId": "709d5a42-630a-4308-94dc-42180f6a3313",
+        "pageTitle": "Books/Synthetic"
+      },
+      "status": "recovered",
+      "statusMessage": "Recovered using verified source identity and exact passage evidence.",
+      "storage": "inline",
+      "targetBlockId": "9cbd0935-89cd-4341-a1ee-184360df1728",
+      "updatedAt": "2026-09-16T05:44:23.233920015+00:00"
+    },
+    {
+      "body": "A second note.\n\n- An ordinary list item\n- Unicode: café 😀\n\n",
+      "createdAt": "2026-09-16T05:44:23.260645260+00:00",
+      "filePath": "pages/Books/Synthetic.md",
+      "footnoteLabel": "grafium-note-2",
+      "id": "d5a54d82-dbde-4c53-99a5-dfa7338b9dd0",
+      "noteBlockId": "277c77a0-2353-4db2-a100-febd44ffde44",
+      "notePageId": "709d5a42-630a-4308-94dc-42180f6a3313",
+      "quote": "second paragraph",
+      "revision": "4602315b0cf45149476bc9d013e913b7b03097f68f561bdea0acc30378beb8c2",
+      "source": {
+        "filePath": "pages/Books/Synthetic.md",
+        "pageId": "709d5a42-630a-4308-94dc-42180f6a3313",
+        "pageTitle": "Books/Synthetic"
+      },
+      "status": "recovered",
+      "statusMessage": "Recovered using verified source identity and exact passage evidence.",
+      "storage": "inline",
+      "targetBlockId": "b0877b5f-43df-49dc-b523-8677c1e8c15e",
+      "updatedAt": "2026-09-16T05:44:23.260645260+00:00"
+    }
+  ],
+  "page": {
+    "created_at": 1789537463325,
+    "file_path": "pages/Books/Synthetic.md",
+    "id": "709d5a42-630a-4308-94dc-42180f6a3313",
+    "is_journal": false,
+    "properties": {
+      "category": "synthetic-fixture"
+    },
+    "title": "Books/Synthetic",
+    "updated_at": 1789537463325
+  },
+  "sourceMarkdown": "category:: synthetic-fixture\n\n- # A synthetic chapter\n  - A **short passage** about café and 😀. [^grafium-note-1]\n  - A second paragraph preserves the author's [^author] reference. [^grafium-note-2]\n- Final source paragraph.\n\n[^author]: An author footnote, not a managed annotation.\n\n<!-- grafium-reading-note {\"anchor\":{\"hashMode\":\"annotation-free-v1\",\"kind\":\"source\",\"offsetUnit\":\"utf-16\",\"parts\":[{\"blockId\":\"a458bdf7-1140-4814-82e2-49c5b8d44165\",\"from\":4,\"ordinal\":1,\"persistedId\":false,\"prefix\":\"A **\",\"rawFingerprint\":\"1c6527432c5c005080780459739d50e64be049accac5f07d09404dbeb33ff018\",\"suffix\":\"** about café and 😀.\",\"text\":\"short passage\",\"to\":17}],\"quote\":\"short passage\",\"sourceFileSha256\":\"f6b118e2c56c0872af4d404535dc1a0dbb1ecee78eccab5cb262ce271b87feca\",\"sourcePageId\":\"072b331e-04cc-466a-ab2a-67b319887b5d\",\"sourcePath\":\"pages/Books/Synthetic.md\",\"sourceTitle\":\"Books/Synthetic\"},\"bodyBlockId\":\"85af8e1b-b7ef-4a5d-928b-914156fc3614\",\"createRequestHash\":\"dc3ce626c4f1ccbf7cf4dfcf2075e9b6b07396c2c6b5a563a9b49cbef151dfe2\",\"createdAt\":\"2026-09-16T05:44:23.233920015+00:00\",\"footnoteLabel\":\"grafium-note-1\",\"id\":\"9268fca0-0a47-4d73-bc7b-e322d366fb50\",\"updatedAt\":\"2026-09-16T05:44:23.233920015+00:00\",\"version\":2} -->\n[^grafium-note-1]: # Why this matters\n    \n    owner:: reader, not metadata\n    id:: literal body text\n    \n    ```rust\n    let label = \"body:: not metadata\";\n    ```\n    \n    Keep **bold**, café, and 😀.\n    \n<!-- /grafium-reading-note -->\n\n<!-- grafium-reading-note {\"anchor\":{\"hashMode\":\"annotation-free-v1\",\"kind\":\"source\",\"offsetUnit\":\"utf-16\",\"parts\":[{\"blockId\":\"cd6e782b-c8e8-4ffe-8220-0fb88c840f00\",\"from\":2,\"ordinal\":2,\"persistedId\":false,\"prefix\":\"A \",\"rawFingerprint\":\"52ca37541645fc0ba95501fbcede518227a7c523aa1d9ca83790f3f4de512ca3\",\"suffix\":\" preserves the author's [^author] reference.\",\"text\":\"second paragraph\",\"to\":18}],\"quote\":\"second paragraph\",\"sourceFileSha256\":\"f6b118e2c56c0872af4d404535dc1a0dbb1ecee78eccab5cb262ce271b87feca\",\"sourcePageId\":\"072b331e-04cc-466a-ab2a-67b319887b5d\",\"sourcePath\":\"pages/Books/Synthetic.md\",\"sourceTitle\":\"Books/Synthetic\"},\"bodyBlockId\":\"277c77a0-2353-4db2-a100-febd44ffde44\",\"createRequestHash\":\"6f968bae7f7cf0f491f5f7d651eb069931ef66208b7fc9ee9bb53bc656431d7b\",\"createdAt\":\"2026-09-16T05:44:23.260645260+00:00\",\"footnoteLabel\":\"grafium-note-2\",\"id\":\"d5a54d82-dbde-4c53-99a5-dfa7338b9dd0\",\"updatedAt\":\"2026-09-16T05:44:23.260645260+00:00\",\"version\":2} -->\n[^grafium-note-2]: A second note.\n    \n    - An ordinary list item\n    - Unicode: café 😀\n    \n    \n<!-- /grafium-reading-note -->\n",
+  "warnings": []
+}
