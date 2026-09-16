@@ -83,6 +83,7 @@ function fixture() {
           switch (cmd) {
             case "get_page": throw new Error("Page not found");
             case "get_app_theme": return "tokyo-night";
+            case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "get_graph_info": return { name: "Community test", path: "/synthetic/community-test-graph" };
             case "get_graph_data":
               window.__communityRequests.push(structuredClone(args));

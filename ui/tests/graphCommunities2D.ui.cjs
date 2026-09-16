@@ -49,6 +49,7 @@ async function openGraph(browser, fixture, theme, mobile) {
         switch (cmd) {
           case "get_graph_info": return { name: "Community fixture", path: "/tmp/community-fixture" };
           case "get_app_theme": return theme;
+          case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
           case "get_smplos_theme": return null;
           case "get_graph_data":
             window.__graphCalls++;

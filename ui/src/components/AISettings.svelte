@@ -244,6 +244,7 @@
             : undefined,
       };
       await aiSetConfig(payload);
+      window.dispatchEvent(new CustomEvent("ai-configuration-changed"));
       health = await aiHealthCheck();
       showMessage("Configuration saved!", "success");
     } catch (e: any) {

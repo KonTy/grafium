@@ -1,6 +1,103 @@
 use crate::error::Result;
 use rusqlite::Connection;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::models::{BlockType, LinkCandidateStatus};
+    use rusqlite::params;
+
+    #[test]
+    fn hierarchy_key_migration_rebuilds_only_derived_names_and_keeps_identity() -> Result<()> {
+        let db = Database::in_memory()?;
+        let page = db.create_page("Projects/Alpha", false)?;
+        db.update_page(&page.id, Some("Projects / Alpha"),
+            Some(&serde_json::json!({"alias":r"Work \ Alpha"})))?;
+        let conn = db.conn()?;
+        conn.execute("DELETE FROM entity_names WHERE page_id = ?1", [&page.id])?;
+        conn.execute(
+            "INSERT INTO entity_names(page_id,name_key,name) VALUES(?1,'projects / alpha','Projects / Alpha')",
+            [&page.id],
+        )?;
+        conn.execute("UPDATE entity_index_metadata SET version = 1 WHERE id = 1", [])?;
+        create_entity_index(&conn)?;
+        create_entity_index(&conn)?;
+        assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        drop(conn);
+        assert_eq!(db.find_page_by_name("Projects/Alpha")?.unwrap().id, page.id);
+        assert_eq!(db.find_page_by_name("Work/Alpha")?.unwrap().id, page.id);
+        assert_eq!(db.get_page_by_id(&page.id)?.title, "Projects / Alpha");
+        assert_eq!(db.count_pages()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn link_proposal_migration_preserves_existing_reviews_and_is_idempotent() -> Result<()> {
+        let db = Database::in_memory()?;
+        let source = db.create_page("Source", false)?;
+        let target = db.create_page("Canonical", false)?;
+        let block = db.create_block(
+            &source.id,
+            None,
+            0,
+            "Canonical",
+            BlockType::Text,
+            serde_json::json!({}),
+        )?;
+        let conn = db.conn()?;
+        conn.execute_batch(
+            "DROP TABLE link_candidates;
+             CREATE TABLE link_candidates (
+                id TEXT PRIMARY KEY, from_block_id TEXT NOT NULL,
+                from_page_id TEXT NOT NULL, to_page_id TEXT NOT NULL,
+                anchor_text TEXT NOT NULL, anchor_start INTEGER NOT NULL, anchor_end INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', source TEXT NOT NULL DEFAULT 'exact_title',
+                confidence REAL NOT NULL DEFAULT 1.0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                accepted_at INTEGER, dismissed_at INTEGER, undo_content TEXT,
+                FOREIGN KEY(from_block_id) REFERENCES blocks(id) ON DELETE CASCADE,
+                FOREIGN KEY(from_page_id) REFERENCES pages(id) ON DELETE CASCADE,
+                FOREIGN KEY(to_page_id) REFERENCES pages(id) ON DELETE CASCADE
+             );",
+        )?;
+        for status in ["pending", "accepted", "dismissed"] {
+            conn.execute(
+                "INSERT INTO link_candidates(id, from_block_id, from_page_id, to_page_id,
+                 anchor_text, anchor_start, anchor_end, status, source, created_at, updated_at, undo_content)
+                 VALUES(?1, ?2, ?3, ?4, 'Canonical', 0, 9, ?1, ?1, 1, 2, 'original')",
+                params![status, block.id, source.id, target.id],
+            )?;
+        }
+        create_tables(&conn)?;
+        create_tables(&conn)?;
+        assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM link_candidates", [], |r| r.get(0))?;
+        assert_eq!(count, 3);
+        let undo: String = conn.query_row(
+            "SELECT undo_content FROM link_candidates WHERE id = 'accepted'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(undo, "original");
+        drop(conn);
+        assert_eq!(
+            db.get_link_candidate("accepted")?.status,
+            LinkCandidateStatus::Accepted
+        );
+        assert_eq!(
+            db.get_link_candidate("pending")?.to_page_id,
+            Some(target.id)
+        );
+        assert_eq!(
+            db.get_link_candidate("dismissed")?.proposed_title,
+            "Canonical"
+        );
+        assert_eq!(db.count_pages()?, 2);
+        Ok(())
+    }
+}
+
 pub fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS pages (
@@ -64,7 +161,13 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY,
             from_block_id TEXT NOT NULL,
             from_page_id TEXT NOT NULL,
-            to_page_id TEXT NOT NULL,
+            to_page_id TEXT,
+            proposed_title TEXT NOT NULL DEFAULT '',
+            resolution TEXT NOT NULL DEFAULT 'reuse',
+            alternatives TEXT NOT NULL DEFAULT '[]',
+            reason TEXT NOT NULL DEFAULT '',
+            source_content TEXT,
+            accepted_content TEXT,
             anchor_text TEXT NOT NULL,
             anchor_start INTEGER NOT NULL,
             anchor_end INTEGER NOT NULL,
@@ -305,5 +408,128 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_pending_reindex_marked ON pending_reindex(marked_at);
     ")?;
+    migrate_link_proposals(conn)?;
+    create_entity_index(conn)?;
+    Ok(())
+}
+
+fn migrate_link_proposals(conn: &Connection) -> Result<()> {
+    let legacy: bool = conn.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('link_candidates') WHERE name = 'to_page_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if legacy {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE link_candidates_proposals (
+                id TEXT PRIMARY KEY,
+                from_block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+                from_page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+                to_page_id TEXT REFERENCES pages(id) ON DELETE CASCADE,
+                proposed_title TEXT NOT NULL DEFAULT '',
+                resolution TEXT NOT NULL DEFAULT 'reuse',
+                alternatives TEXT NOT NULL DEFAULT '[]',
+                reason TEXT NOT NULL DEFAULT '',
+                source_content TEXT,
+                accepted_content TEXT,
+                anchor_text TEXT NOT NULL,
+                anchor_start INTEGER NOT NULL,
+                anchor_end INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source TEXT NOT NULL DEFAULT 'exact_title',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                accepted_at INTEGER,
+                dismissed_at INTEGER,
+                undo_content TEXT
+            );
+            INSERT INTO link_candidates_proposals
+                (id, from_block_id, from_page_id, to_page_id, proposed_title,
+                 anchor_text, anchor_start, anchor_end, status, source, confidence,
+                 created_at, updated_at, accepted_at, dismissed_at, undo_content)
+            SELECT c.id, c.from_block_id, c.from_page_id, c.to_page_id,
+                   COALESCE(p.title, ''), c.anchor_text, c.anchor_start, c.anchor_end,
+                   c.status, c.source, c.confidence, c.created_at, c.updated_at,
+                   c.accepted_at, c.dismissed_at, c.undo_content
+            FROM link_candidates c LEFT JOIN pages p ON p.id = c.to_page_id;
+            DROP TABLE link_candidates;
+            ALTER TABLE link_candidates_proposals RENAME TO link_candidates;",
+        )?;
+        tx.commit()?;
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_link_candidates_unique_span
+             ON link_candidates(from_block_id, to_page_id, anchor_start, anchor_end, source);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_link_candidates_proposal_span
+             ON link_candidates(from_block_id, proposed_title, anchor_start, anchor_end, source)
+             WHERE to_page_id IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_link_candidates_status_page
+             ON link_candidates(status, from_page_id, updated_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_link_candidates_to
+             ON link_candidates(to_page_id, status);",
+    )?;
+    Ok(())
+}
+
+fn create_entity_index(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_index_metadata (
+             id INTEGER PRIMARY KEY CHECK(id = 1),
+             version INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS entity_names (
+             page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+             name_key TEXT NOT NULL,
+             name TEXT NOT NULL,
+             PRIMARY KEY(page_id, name_key)
+         );
+         CREATE INDEX IF NOT EXISTS idx_entity_names_key ON entity_names(name_key);
+         CREATE TABLE IF NOT EXISTS entity_name_grams (
+             page_id TEXT NOT NULL,
+             name_key TEXT NOT NULL,
+             gram TEXT NOT NULL,
+             PRIMARY KEY(page_id, name_key, gram),
+             FOREIGN KEY(page_id, name_key) REFERENCES entity_names(page_id, name_key) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_entity_grams ON entity_name_grams(gram);
+         CREATE TRIGGER IF NOT EXISTS entity_names_grams_insert AFTER INSERT ON entity_names BEGIN
+             INSERT OR IGNORE INTO entity_name_grams(page_id, name_key, gram)
+             SELECT NEW.page_id, NEW.name_key, value FROM json_each(entity_grams(NEW.name_key));
+         END;
+         CREATE TRIGGER IF NOT EXISTS entity_page_insert AFTER INSERT ON pages BEGIN
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             VALUES(NEW.id, entity_key(NEW.title), NEW.title);
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             SELECT NEW.id, entity_key(value), value FROM json_each(entity_aliases(NEW.properties));
+         END;
+         CREATE TRIGGER IF NOT EXISTS entity_page_update AFTER UPDATE OF title, properties ON pages BEGIN
+             DELETE FROM entity_names WHERE page_id = NEW.id;
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             VALUES(NEW.id, entity_key(NEW.title), NEW.title);
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             SELECT NEW.id, entity_key(value), value FROM json_each(entity_aliases(NEW.properties));
+         END;",
+    )?;
+    let version: i64 = tx.query_row(
+        "SELECT COALESCE((SELECT version FROM entity_index_metadata WHERE id = 1), 0)",
+        [], |row| row.get(0),
+    )?;
+    if version < 2 {
+        // Only rebuild derived lookup keys. Canonical IDs, titles and approved
+        // alias properties remain untouched as hierarchy normalization evolves.
+        tx.execute_batch(
+            "DELETE FROM entity_names;
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             SELECT id, entity_key(title), title FROM pages;
+             INSERT OR IGNORE INTO entity_names(page_id, name_key, name)
+             SELECT p.id, entity_key(a.value), a.value
+             FROM pages p, json_each(entity_aliases(p.properties)) a;
+             INSERT OR REPLACE INTO entity_index_metadata(id, version) VALUES(1, 2);",
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }

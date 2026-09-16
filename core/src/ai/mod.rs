@@ -41,6 +41,7 @@ pub(crate) fn answer_language_rule_for_question(question: &str) -> &'static str 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn question_with_answer_language_rule(question: &str) -> String {
     question_with_answer_language_rule_in_history(question, std::iter::empty())
 }
@@ -137,6 +138,7 @@ pub mod config;
 pub mod embeddings;
 pub mod gpu_fit;
 pub(crate) mod language;
+pub mod prompt_budget;
 pub mod providers;
 pub mod reasoning;
 pub mod references;
@@ -144,6 +146,7 @@ pub mod resources;
 pub mod text;
 pub mod traits;
 pub mod web_research;
+pub mod writing;
 #[cfg(any(feature = "llm-local", feature = "media"))]
 pub mod worker;
 

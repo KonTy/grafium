@@ -1,113 +1,109 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import panel from "./ReferencePanel.svelte?raw";
+import conversation from "./AssistantConversation.svelte?raw";
+import tools from "./PageAssistantTools.svelte?raw";
+import chat from "./ChatView.svelte?raw";
+import pageContent from "./PageContent.svelte?raw";
+import anchor from "../lib/currentBlockAnchor.ts?raw";
 
-const referencePanelSource = readFileSync(
-  join(process.cwd(), "src/components/ReferencePanel.svelte"),
-  "utf8",
-);
-const appSource = readFileSync(join(process.cwd(), "src/App.svelte"), "utf8");
-const pageContentSource = readFileSync(
-  join(process.cwd(), "src/components/PageContent.svelte"),
-  "utf8",
-);
-const currentBlockAnchorSource = readFileSync(
-  join(process.cwd(), "src/lib/currentBlockAnchor.ts"),
-  "utf8",
-);
-
-describe("ReferencePanel current-block Ask scope", () => {
-  it("exposes a current-block scope in the Ask panel", () => {
-    expect(referencePanelSource).toContain('type AskScope = "block" | "page" | "graph";');
-    expect(referencePanelSource).toContain('let askScope = $state<AskScope>("block");');
-    expect(referencePanelSource).toContain("Current block");
-    expect(referencePanelSource).toContain('class:active={askScope === "block"}');
-    expect(referencePanelSource).toContain("buildCurrentBlockContext");
+describe("Unified conversation components", () => {
+  it("shares one transcript, composer and controller between compact and full Chat", () => {
+    expect(panel).toContain("<AssistantConversation");
+    expect(chat).toContain("<AssistantConversation");
+    expect(conversation).toContain("<ChatMessageBubble");
+    expect(conversation).toContain("sendAssistantQuestion(thread, thread.context, thread.contextLabel)");
+    expect(conversation).toContain("stopAssistantConversation(thread)");
+    expect(chat).not.toContain("aiAskStream");
+    expect(panel).not.toContain("aiAsk(");
+    expect(conversation).not.toContain("shouldUseWebResearchForBlock");
   });
 
-  it("supports cited web fact-checking for the current block", () => {
-    expect(referencePanelSource).toContain("shouldUseWebResearchForBlock");
-    expect(referencePanelSource).toContain("runCurrentBlockWebResearch");
-    expect(referencePanelSource).toContain("aiResearchWeb(");
-    expect(referencePanelSource).toContain("webSourcesFromResearch");
-    expect(referencePanelSource).not.toContain("Fact-check block");
+  it("offers exactly one explicit context and mode picker without keyword routing", () => {
+    expect(conversation.match(/aria-label="Mode"/g)).toHaveLength(1);
+    expect(conversation.match(/aria-label="Context"/g)).toHaveLength(1);
+    for (const kind of ["selection", "block", "section", "page", "book", "graph", "none"]) {
+      expect(conversation).toContain(`<option value="${kind}"`);
+    }
+    expect(conversation).not.toContain('type="checkbox"');
+    expect(conversation).not.toContain("searchedBlockAnchorFromQuestion");
+    expect(conversation).not.toContain("visibleBlockAnchorFromQuestion");
+    expect(conversation).toContain("message.contextLabel");
+    expect(conversation).toContain("message.mode");
   });
 
-  it("receives focused-block anchors from PageContent", () => {
-    expect(currentBlockAnchorSource).toContain('new CustomEvent("page-content-focus-changed"');
-    expect(currentBlockAnchorSource).toContain("getLatestCurrentBlockAnchor");
-    expect(pageContentSource).toContain("setCurrentBlockAnchor(page.id, blockId);");
-    expect(pageContentSource).toContain("emitFocusChanged(blockId);");
-    expect(pageContentSource).toContain("emitFocusChanged(null);");
-    expect(pageContentSource).toContain("onAnchor={handleBlockAnchor}");
+  it("restores explicit block anchors and keeps journal page scope on the focused day", () => {
+    expect(panel).toContain("getLatestCurrentBlockAnchor()");
+    expect(panel).toContain('preferFocusedPageForPageScope ? askBlockAnchor?.pageId ?? pageId : pageId');
+    expect(anchor).toContain('new CustomEvent("page-content-focus-changed"');
+    expect(pageContent).toContain("setCurrentBlockAnchor(page.id, blockId)");
+    expect(conversation).toContain("Block including children");
+    expect(conversation).toContain("Section / Chapter");
+    expect(conversation).toContain('info?.isJournal ? "This day"');
   });
 
-  it("restores the last block anchor when the panel mounts after a block click", () => {
-    expect(referencePanelSource).toContain("getLatestCurrentBlockAnchor()");
-    expect(referencePanelSource).toContain("askBlockAnchor");
+  it("uses only identified book roots for whole-book context", () => {
+    expect(panel).toContain("info.isBook && (!info.book || info.book.pageId === id)");
+    expect(conversation).toContain('context = { kind: "book", pageId: info.book.pageId }');
   });
 
-  it("can recover a visible block from the question text if no click anchor was captured", () => {
-    expect(referencePanelSource).toContain("visibleBlockAnchorFromQuestion");
-    expect(referencePanelSource).toContain("searchedBlockAnchorFromQuestion");
-    expect(referencePanelSource).toContain("searchFts(");
-    expect(referencePanelSource).toContain(".block-item[data-block-id][data-page-id]");
+  it("captures selection explicitly, retains truthful selection errors and disables changes during runs", () => {
+    expect(conversation).toContain("destination.selectionError = captured.error");
+    expect(conversation).toContain("if (untrack(() => assistantConversationRunning(destination))) return");
+    expect(conversation).toContain("blockIds: [...view.selection.blockIds]");
+    expect(conversation).toContain("Use selection");
+    expect(conversation).toContain('value={view.context.kind} disabled={running}');
+    expect(conversation).toContain('value={view.mode} disabled={running}');
   });
 
-  it("keeps Ask answers as a follow-up thread", () => {
-    expect(referencePanelSource).toContain("let askTurns = $state<AskTurn[]>([])");
-    expect(referencePanelSource).toContain("let askMessages = $state<ChatMessageModel[]>([])");
-    expect(referencePanelSource).toContain("formatAskThreadForPrompt");
-    expect(referencePanelSource).toContain("addAskTurn");
-    expect(referencePanelSource).toContain("Summarize answers");
-    expect(referencePanelSource).toContain("Clear thread");
+  it("expands the identical conversation ID without cancelling streams on unmount", () => {
+    expect(conversation).toContain("onExpand?.(thread.id)");
+    expect(chat).toContain("getAssistantConversation(id)");
+    expect(conversation).not.toContain("onDestroy");
+    expect(chat).not.toContain("researchCancel");
+    expect(panel).not.toContain("researchCancel");
   });
 
-  it("passes structured conversation history without replacing the current scope or thread", () => {
-    expect(referencePanelSource).toContain("askTurns.slice(-8).flatMap<ChatTurn>");
-    expect(referencePanelSource).toContain('content: turn.question');
-    expect(referencePanelSource).toContain('content: turn.answer');
-    expect(referencePanelSource).toContain("aiAsk(question, undefined, priorHistory)");
-    expect(referencePanelSource.match(/aiAsk\(scopedQuestion, undefined, priorHistory\)/g)).toHaveLength(2);
-    expect(referencePanelSource).not.toContain("let askTurns = $state<ChatTurn[]>([])");
+  it("retains explicit answer summaries, editable merge previews, canonical tags and safe insertion", () => {
+    for (const label of ["Summarize answers", "Merge answer with block", "Merged block draft", "Replace captured block", "Insert into page"]) {
+      expect(tools).toContain(label);
+    }
+    expect(tools).toContain("bind:value={mergedDraft}");
+    expect(tools).toContain("formatConceptTag(tag.qualified ?? tag.term)");
+    expect(tools).toContain('pushUndo({ type: "insert_summary", ...result })');
+    expect(tools).toContain("expectedBlocks: source.snapshot");
+    expect(tools).toContain("applyWritingChanges(source.graphPath, source.pageId, changes, source.snapshot)");
+    expect(tools).toContain("assertResearchSourceGraph(source)");
+    expect(tools).toContain("withPageEditorsLocked(source.pageId");
+    expect(tools).toContain("await flushPageEditors(source.pageId)");
+    expect(tools).not.toContain("await updateBlock(");
   });
 
-  it("renders Ask with the shared chat bubble and adds pending turns immediately", () => {
-    expect(referencePanelSource).toContain('import ChatMessageBubble from "./ChatMessageBubble.svelte";');
-    expect(referencePanelSource).toContain("beginAskMessage(question, willUseWebResearch)");
-    expect(referencePanelSource).toContain('{ role: "user", content: question }');
-    expect(referencePanelSource).toContain('{ role: "assistant", content: "", webResearch }');
-    expect(referencePanelSource).toContain("askPendingAssistantIndex");
-    expect(referencePanelSource).toContain("<ChatMessageBubble");
-    expect(referencePanelSource).toContain("thinkingLabel={askPendingAssistantIndex === index ? askThinkingLabel : \"\"}");
+  it("keeps only Chat and Notes tabs and exposes other actions under tools", () => {
+    expect(panel.match(/role="tab"/g)).toHaveLength(2);
+    expect(panel).toContain('let activeTab = $state<"chat" | "notes">("chat")');
+    expect(tools).toContain("Page / selection tools");
+    expect(tools).toContain("Writing assistance");
+    expect(tools).toContain("<AIWritingPanel");
   });
 
-  it("can draft and apply an improved current block from the Ask thread", () => {
-    expect(referencePanelSource).toContain("Merge answer with block");
-    expect(referencePanelSource).toContain("Merged block draft");
-    expect(referencePanelSource).toContain("Replace current block");
-    expect(referencePanelSource).toContain('type: "update_block"');
-    expect(referencePanelSource).toContain("Act like a careful code-edit assistant");
+  it("keeps the composer reachable beneath a scrolling transcript in narrow panels", () => {
+    expect(panel).toContain("max-width: calc(100vw - 24px)");
+    expect(conversation).toMatch(/\.conversation-scroll \{[^}]*flex: 1;[^}]*overflow-y: auto/);
+    expect(conversation).toMatch(/\.conversation-controls \{[^}]*flex-shrink: 0/);
+    expect(conversation).toContain("@container (max-width: 380px)");
+    expect(conversation).toContain("resizeComposer");
+    expect(conversation).toContain('role="group" aria-label="Chat composer"');
+    expect(conversation).toContain('aria-label="Message"');
+    expect(conversation).toContain("Math.floor(paneEl.clientHeight / 2) - (footerEl?.offsetHeight");
   });
 
-  it("pins the Ask composer below a scrollable answer thread", () => {
-    expect(referencePanelSource).toContain('class="tab-content ask-tab"');
-    expect(referencePanelSource).toContain('class="ask-scroll"');
-    expect(referencePanelSource).toContain('class="ask-composer"');
-    expect(referencePanelSource).toContain('class="search-form ask-form"');
-    expect(referencePanelSource).toContain("onkeydown={handleAskKeydown}");
-  });
-
-  it("allows the right panel to resize nearly to the viewport edge", () => {
-    expect(appSource).toContain("REFERENCE_PANEL_VIEWPORT_EDGE_GAP");
-    expect(appSource).not.toContain("REFERENCE_PANEL_MAX_WIDTH");
-    expect(referencePanelSource).toContain("max-width: calc(100vw - 24px)");
-  });
-
-  it("keeps journal page-scoped Ask on the focused journal day", () => {
-    expect(appSource).toContain('preferFocusedPageForPageScope={currentView === "journal"}');
-    expect(referencePanelSource).toContain("buildPageContextForAsk");
-    expect(referencePanelSource).toContain("resolvePageContextTarget");
-    expect(referencePanelSource).toContain("not the whole journal feed");
+  it("restores full Chat focus without collapsing transcript or outside-to-inside drag selections", () => {
+    expect(conversation).toContain("selectionIntersectsTranscript(window.getSelection(), scrollEl ?? null)");
+    expect(conversation).toContain("if (pointerDown) { refocusPending = true; return; }");
+    expect(conversation).toContain('document.addEventListener("mousedown", down)');
+    expect(conversation).toContain('document.addEventListener("mouseup", up)');
+    expect(conversation).toContain("if (!active || compact || running)");
+    expect(conversation).toContain('!(afterRun && focused.matches(".send-button"))');
+    expect(conversation).toContain("requestAnimationFrame(() => restoreInputFocus())");
   });
 });

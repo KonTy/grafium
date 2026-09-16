@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 // Raw import (typed by vite/client's `*?raw`) so we can assert on the component
 // source without compiling it.
-import chatViewSource from "../components/ChatView.svelte?raw";
+import chatViewWrapper from "../components/ChatView.svelte?raw";
+import conversationSource from "../components/AssistantConversation.svelte?raw";
+import diagnosticsSource from "../components/AssistantDiagnostics.svelte?raw";
 import chatMessageBubbleSource from "../components/ChatMessageBubble.svelte?raw";
 
 // WHY: status/error/warning/thinking colours must come from the theme palette
@@ -12,6 +14,7 @@ import chatMessageBubbleSource from "../components/ChatMessageBubble.svelte?raw"
 // specific literals from ChatView so a regression can't silently reintroduce
 // them.
 const BANNED = ["#f87171", "#fbbf24", "#a78bfa", "#d9a441"];
+const chatViewSource = chatViewWrapper + conversationSource + diagnosticsSource;
 
 describe("ChatView status colours stay themed", () => {
   for (const hex of BANNED) {

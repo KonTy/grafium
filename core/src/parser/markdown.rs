@@ -68,6 +68,20 @@ pub struct ParsedPage {
 }
 
 pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
+    if let Some(page) = crate::graph::reading_notes::parse_note_page(content, filename) {
+        return page;
+    }
+    let annotations = super::reading_notes::parse_inline_reading_notes(content);
+    if !annotations.notes.is_empty() {
+        let source = super::reading_notes::mask_inline_reading_notes(content, &annotations.notes);
+        let mut page = parse_outline_page(&source, filename);
+        page.blocks.extend(annotations.notes.iter().map(super::reading_notes::parsed_note));
+        return page;
+    }
+    parse_outline_page(content, filename)
+}
+
+fn parse_outline_page(content: &str, filename: &str) -> ParsedPage {
     let lines: Vec<&str> = content.lines().collect();
     let is_journal = canonical_journal_title(filename).is_some();
 

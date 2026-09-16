@@ -165,6 +165,22 @@ describe("primary button foregrounds meet WCAG AA", () => {
   }
 });
 
+describe("assistant accordion headers and boundaries stay distinct in every theme", () => {
+  for (const theme of themes) {
+    it(`${theme.id}: readable titles, markers and enclosing borders`, () => {
+      const c = theme.colors;
+      const border = mixSrgb(c.textPrimary, c.bgPrimary, 75);
+      for (const tint of [0, 8, 14]) {
+        const surface = mixSrgb(c.accentBlue, c.bgPrimary, tint);
+        expect(contrastRatio(c.textPrimary, surface), `title on ${tint}% tint`).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(c.accentBlue, surface), `marker on ${tint}% tint`).toBeGreaterThanOrEqual(3);
+        expect(contrastRatio(border, surface), `border on ${tint}% tint`).toBeGreaterThanOrEqual(3);
+      }
+      expect(contrastRatio(border, c.bgSecondary), "frame against surrounding panel").toBeGreaterThanOrEqual(3);
+    });
+  }
+});
+
 // ── Guard 3: OLED control borders clear the 3:1 non-text contrast minimum
 // True-black surfaces are the point of the OLED theme, but a near-black border
 // (~1.1:1) makes inputs/cards dissolve into the void. A dedicated mid-grey

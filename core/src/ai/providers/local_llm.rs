@@ -26,6 +26,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
 use crate::ai::config::LocalLlmSettings;
@@ -168,12 +169,9 @@ impl LlmProvider for LocalLlm {
                     Duration::from_secs(30 * 60),
                 )? {
                     crate::ai::worker::WorkerOutput::Llm(output) => Ok(output),
-                    crate::ai::worker::WorkerOutput::Ready => Err(CoreError::Other(
-                        "native AI worker returned a health result for an LLM request".to_string(),
-                    )),
-                    #[cfg(feature = "media")]
                     _ => Err(CoreError::Other(
-                        "native AI worker returned a transcription for an LLM request".to_string(),
+                        "native AI worker returned an unexpected result for an LLM request"
+                            .to_string(),
                     )),
                 }
             })
@@ -184,6 +182,51 @@ impl LlmProvider for LocalLlm {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        Some(self.context_size as usize)
+    }
+
+    fn count_prompt_tokens<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        options: &'a CompletionOptions,
+    ) -> BoxFuture<'a, Result<Option<usize>>> {
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
+        let messages = messages.to_vec();
+        let options = options.clone();
+
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::ai::worker::check_cancelled(options.cancel.as_deref())?;
+                let prompt_bytes = messages.iter().fold(
+                    options.system_prompt.as_ref().map_or(0, String::len),
+                    |total, message| total.saturating_add(message.content.len()),
+                );
+                resources::validate_prompt_bytes(prompt_bytes)?;
+                match crate::ai::worker::execute(
+                    crate::ai::worker::WorkerRequest::CountPrompt {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                        messages,
+                        options,
+                    },
+                    Duration::from_secs(10 * 60),
+                )? {
+                    crate::ai::worker::WorkerOutput::PromptTokenCount(count) => Ok(Some(count)),
+                    _ => Err(CoreError::Other(
+                        "native AI worker returned an unexpected result for a prompt count request"
+                            .to_string(),
+                    )),
+                }
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("LLM prompt count task panicked: {e}")))?
+        })
     }
 
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
@@ -307,15 +350,54 @@ pub(crate) fn complete_in_process(
         .expect("slot populated by ensure_slot for completion");
     let ctx_size = NonZeroU32::new(context_size)
         .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
-    let prompt = build_chat_prompt(&slot.model, messages, options)?;
+    let tokens = prepare_prompt_tokens(&slot.model, messages, options)?;
     generate(
         &slot.model,
         &slot.backend,
         ctx_size,
         slot.model_size,
-        &prompt,
+        &tokens,
         options,
     )
+}
+
+pub(crate) fn count_prompt_tokens_in_process(
+    slot: &mut Option<LlmSlot>,
+    model_path: &Path,
+    context_size: u32,
+    gpu_layers: u32,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> Result<usize> {
+    ensure_slot(slot, model_path, context_size, gpu_layers)?;
+    let slot = slot
+        .as_ref()
+        .expect("slot populated by ensure_slot for prompt counting");
+    Ok(prepare_prompt_tokens(&slot.model, messages, options)?.len())
+}
+
+fn prepare_prompt_tokens(
+    model: &LlamaModel,
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> Result<Vec<LlamaToken>> {
+    tokenize_rendered_prompt(
+        build_chat_prompt(model, messages, options),
+        |prompt, bos| {
+            model
+                .str_to_token(prompt, bos)
+                .map_err(|e| CoreError::Other(format!("failed to tokenize prompt: {e}")))
+        },
+    )
+}
+
+fn tokenize_rendered_prompt(
+    prompt: Result<String>,
+    tokenize: impl FnOnce(&str, AddBos) -> Result<Vec<LlamaToken>>,
+) -> Result<Vec<LlamaToken>> {
+    let prompt = prompt?;
+    resources::validate_prompt_size(&prompt)?;
+    tokenize(&prompt, AddBos::Always)
 }
 
 fn load_native_model(
@@ -352,6 +434,23 @@ fn build_chat_prompt(
     messages: &[ChatMessage],
     options: &CompletionOptions,
 ) -> Result<String> {
+    let chat = build_chat_messages(messages, options)?;
+    let template = match model.chat_template(None) {
+        Ok(template) => template,
+        Err(_) => LlamaChatTemplate::new("chatml").map_err(|e| {
+            CoreError::Other(format!("failed to build fallback chat template: {e}"))
+        })?,
+    };
+
+    model
+        .apply_chat_template(&template, &chat, true)
+        .map_err(|e| CoreError::Other(format!("failed to apply chat template: {e}")))
+}
+
+fn build_chat_messages(
+    messages: &[ChatMessage],
+    options: &CompletionOptions,
+) -> Result<Vec<LlamaChatMessage>> {
     let mut chat = Vec::with_capacity(messages.len() + 1);
     if let Some(system) = &options.system_prompt {
         chat.push(new_chat_message("system", system)?);
@@ -365,16 +464,7 @@ fn build_chat_prompt(
         chat.push(new_chat_message(role, &message.content)?);
     }
 
-    let template = match model.chat_template(None) {
-        Ok(template) => template,
-        Err(_) => LlamaChatTemplate::new("chatml").map_err(|e| {
-            CoreError::Other(format!("failed to build fallback chat template: {e}"))
-        })?,
-    };
-
-    model
-        .apply_chat_template(&template, &chat, true)
-        .map_err(|e| CoreError::Other(format!("failed to apply chat template: {e}")))
+    Ok(chat)
 }
 
 fn new_chat_message(role: &str, content: &str) -> Result<LlamaChatMessage> {
@@ -413,7 +503,7 @@ fn build_sampler(model: &LlamaModel, options: &CompletionOptions) -> LlamaSample
     }
 }
 
-/// The single tokenize → batch → decode → sample loop every completion
+/// The single batch → decode → sample loop every completion
 /// (chat-formatted or, in the future, raw) goes through — this is the
 /// manual generation loop `llama-cpp-2` requires (it has no high-level
 /// "generate" helper), written once here rather than duplicated per caller.
@@ -422,10 +512,9 @@ fn generate(
     backend: &LlamaBackend,
     ctx_size: NonZeroU32,
     model_size: u64,
-    prompt: &str,
+    tokens: &[LlamaToken],
     options: &CompletionOptions,
 ) -> Result<String> {
-    resources::validate_prompt_size(prompt)?;
     resources::validate_inference_headroom(
         "local LLM inference",
         resources::estimate_llm_context_bytes(model_size, ctx_size.get()),
@@ -445,10 +534,6 @@ fn generate(
     let mut ctx = model
         .new_context(backend, ctx_params)
         .map_err(|e| CoreError::Other(format!("failed to create llama context: {e}")))?;
-
-    let tokens = model
-        .str_to_token(prompt, AddBos::Always)
-        .map_err(|e| CoreError::Other(format!("failed to tokenize prompt: {e}")))?;
 
     let n_ctx = ctx.n_ctx() as i32;
     if tokens.len() as i32 >= n_ctx {
@@ -613,6 +698,178 @@ mod config_tests {
         for cores in [1usize, 2, 3] {
             let computed = cores.saturating_sub(2).max(1);
             assert!(computed >= 1, "{cores} cores produced {computed} threads");
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_count_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn local_provider() -> LocalLlm {
+        LocalLlm {
+            model_path: PathBuf::from("synthetic-model.gguf"),
+            context_size: 6144,
+            gpu_layers: 0,
+            name: "synthetic".into(),
+        }
+    }
+
+    #[test]
+    fn configured_window_is_reported_without_loading_model() {
+        assert_eq!(local_provider().context_window(), Some(6144));
+    }
+
+    #[tokio::test]
+    async fn cancelled_count_does_not_start_a_worker() {
+        let options = CompletionOptions {
+            cancel: Some(Arc::new(AtomicBool::new(true))),
+            ..Default::default()
+        };
+        let error = local_provider()
+            .count_prompt_tokens(&[], &options)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn oversized_count_keeps_the_existing_prompt_safety_limit() {
+        let options = CompletionOptions {
+            system_prompt: Some("x".repeat(3 * 1024 * 1024)),
+            ..Default::default()
+        };
+        let error = local_provider()
+            .count_prompt_tokens(&[], &options)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("safety limit"), "{error}");
+        let error = tokenize_rendered_prompt(Ok(options.system_prompt.unwrap()), |_, _| {
+            panic!("oversized rendered prompts must not reach the tokenizer")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("safety limit"), "{error}");
+    }
+
+    #[test]
+    fn chat_messages_keep_system_options_history_and_unicode() {
+        let messages = [
+            ChatMessage {
+                role: MessageRole::System,
+                content: "Message system".into(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "中文 🦀".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "Previous answer".into(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Follow-up?".into(),
+            },
+        ];
+        let options = CompletionOptions {
+            system_prompt: Some("Options system".into()),
+            ..Default::default()
+        };
+        let expected = vec![
+            new_chat_message("system", "Options system").unwrap(),
+            new_chat_message("system", "Message system").unwrap(),
+            new_chat_message("user", "中文 🦀").unwrap(),
+            new_chat_message("assistant", "Previous answer").unwrap(),
+            new_chat_message("user", "Follow-up?").unwrap(),
+        ];
+        assert_eq!(build_chat_messages(&messages, &options).unwrap(), expected);
+    }
+
+    #[test]
+    fn invalid_system_or_history_is_an_error_not_a_fallback() {
+        let options = CompletionOptions {
+            system_prompt: Some("Invalid\0system".into()),
+            ..Default::default()
+        };
+        assert!(build_chat_messages(&[], &options).is_err());
+        let messages = [ChatMessage {
+            role: MessageRole::Assistant,
+            content: "Invalid\0history".into(),
+        }];
+        assert!(build_chat_messages(&messages, &CompletionOptions::default()).is_err());
+    }
+
+    #[test]
+    fn shared_tokenization_preserves_rendered_template_and_bos() {
+        let rendered = "<s>[SYSTEM]指示[/SYSTEM][USER]中文 🦀[/USER][ASSISTANT]";
+        let tokens = tokenize_rendered_prompt(Ok(rendered.into()), |prompt, bos| {
+            assert_eq!(prompt, rendered);
+            assert_eq!(bos, AddBos::Always);
+            Ok(vec![LlamaToken::new(1), LlamaToken::new(2)])
+        })
+        .unwrap();
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[test]
+    fn rendering_and_tokenization_errors_propagate() {
+        let error = tokenize_rendered_prompt(
+            Err(CoreError::Other("synthetic template error".into())),
+            |_, _| panic!("must not tokenize a failed template"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic template error"));
+        let error = tokenize_rendered_prompt(Ok("synthetic prompt".into()), |_, _| {
+            Err(CoreError::Other("synthetic tokenizer error".into()))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic tokenizer error"));
+    }
+
+    #[test]
+    #[ignore = "requires GRAFIUM_PROMPT_COUNT_TEST_MODEL and RAM for one native model load"]
+    fn native_count_matches_generation_prompt_tokens() {
+        let path = PathBuf::from(
+            std::env::var_os("GRAFIUM_PROMPT_COUNT_TEST_MODEL")
+                .expect("set GRAFIUM_PROMPT_COUNT_TEST_MODEL to a local GGUF"),
+        );
+        let provider = LocalLlm::load(&path, Some(6144), Some(0)).unwrap();
+        let mut slot = None;
+        let messages = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Explain the synthetic example 中文 🦀.".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "Synthetic history: café, пример.".into(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "Summarize it in English.".into(),
+            },
+        ];
+        for system in [None, Some("Answer the synthetic question concisely.")] {
+            let options = CompletionOptions {
+                system_prompt: system.map(str::to_string),
+                ..Default::default()
+            };
+            let count = count_prompt_tokens_in_process(
+                &mut slot,
+                &path,
+                provider.context_size,
+                provider.gpu_layers,
+                &messages,
+                &options,
+            )
+            .unwrap();
+            let model = &slot.as_ref().unwrap().model;
+            let rendered = build_chat_prompt(model, &messages, &options).unwrap();
+            let expected = model.str_to_token(&rendered, AddBos::Always).unwrap();
+            let generation_input = prepare_prompt_tokens(model, &messages, &options).unwrap();
+            assert_eq!(generation_input, expected);
+            assert_eq!(count, generation_input.len());
         }
     }
 }

@@ -208,6 +208,8 @@ export interface ResearchStreamHandlers {
   onPhase?: (phase: string) => void;
   onNote?: (note: string) => void;
   onStart?: (requestId: string) => void;
+  /** A stopped run can be superseded while the event listeners are still attaching. */
+  shouldContinue?: () => boolean;
 }
 
 /**
@@ -224,6 +226,55 @@ export async function researchDeep(
   history?: ChatTurn[],
   scope: ChatScope = "internet",
 ): Promise<void> {
+  return researchStream("research_deep", { question, graphId, history: history ?? [], scope }, handlers, requestId,
+    () => { if (scope !== "internet") throw new Error("Select Internet scope to use Research."); });
+}
+
+export type ResearchScope = "page" | "block" | "section" | "selection";
+export type ResearchWebMode = "off" | "search" | "research";
+
+export interface ResearchTarget {
+  pageId: string;
+  scope: ResearchScope;
+  blockId?: string;
+  selection?: { blockIds: string[]; text: string };
+}
+
+export interface ResearchScopeInfo {
+  pageId: string;
+  pageTitle: string;
+  isJournal: boolean;
+  isBook: boolean;
+  blockCount: number;
+  section: { title: string; blockId: string } | null;
+}
+
+export function researchScopeInfo(graphPath: string, pageId: string, blockId?: string): Promise<ResearchScopeInfo> {
+  return invoke("research_scope_info", { graphPath, pageId, blockId });
+}
+
+export interface ScopedResearchRequest {
+  question: string;
+  requestId: string;
+  graphPath: string;
+  target: ResearchTarget;
+  history: ChatTurn[];
+  webMode: ResearchWebMode;
+}
+
+/** Scope fields are camelCase data handles, never concatenated into the question. */
+export function researchScoped(request: ScopedResearchRequest, handlers: ResearchStreamHandlers): Promise<void> {
+  const { requestId, ...args } = request;
+  return researchStream("research_scoped", args, handlers, requestId);
+}
+
+export async function researchStream(
+  command: string,
+  args: Record<string, unknown>,
+  handlers: ResearchStreamHandlers,
+  requestId: string,
+  validate?: () => void,
+): Promise<void> {
   handlers.onStart?.(requestId);
 
   // Acquire both listeners inside the guarded block with nullable handles.
@@ -234,7 +285,8 @@ export async function researchDeep(
   let unlistenStream: UnlistenFn | null = null;
   let unlistenSources: UnlistenFn | null = null;
   try {
-    if (scope !== "internet") throw new Error("Select Internet scope to use Research.");
+    validate?.();
+    if (handlers.shouldContinue?.() === false) return;
     unlistenStream = await listen<StreamChunk>("ai://chat_stream", (event) => {
       const payload = event.payload;
       if (!payload || payload.request_id !== requestId) return;
@@ -252,6 +304,7 @@ export async function researchDeep(
       if (payload.done) handlers.onDone();
     });
 
+    if (handlers.shouldContinue?.() === false) return;
     unlistenSources = await listen<SourcesPayload>("ai://chat_sources", (event) => {
       const payload = event.payload;
       if (!payload || payload.request_id !== requestId) return;
@@ -261,7 +314,8 @@ export async function researchDeep(
       }
     });
 
-    await invoke("research_deep", { question, requestId, graphId, history: history ?? [], scope });
+    if (handlers.shouldContinue?.() === false) return;
+    await invoke(command, { ...args, requestId });
   } catch (e: any) {
     // A user Stop rejects the invoke with the canonical cancellation message;
     // that's a normal end to the run, not a failure to surface.

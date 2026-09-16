@@ -1,8 +1,11 @@
 <script lang="ts">
+  import { editorHasDialogFocus } from "../lib/editorDialogFocus";
+  import { readingSelectionCapture, publishSourceReadingSelection, sourceReadingSelection } from "../lib/readingSelection";
+  import type { BlockTextSelection } from "../lib/keyboardBlockSelection.svelte";
   import { onMount, tick } from "svelte";
   import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, tooltips } from "@codemirror/view";
   import { EditorState, EditorSelection, Prec, Transaction } from "@codemirror/state";
-  import { defaultKeymap, indentWithTab, history, historyKeymap, undo, redo } from "@codemirror/commands";
+  import { defaultKeymap, indentWithTab, history, historyKeymap } from "@codemirror/commands";
   import { autocompletion, closeCompletion, startCompletion, completionStatus, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
   import { markdown } from "@codemirror/lang-markdown";
   import { bionicReader } from "../lib/bionicReader";
@@ -39,7 +42,11 @@
   import { keymap_manager } from "../lib/keymap";
   import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
-  import { EDITOR_UNDO_MIN_DEPTH } from "../lib/editorUndo";
+  import { editorWriteLockExtension, registerEditorFlush } from "../lib/editorPersistence";
+  import { openReadingNoteFromEvent, protectReadingNotePointer } from "../lib/readingNoteLinks";
+  import { readingNoteBlockLabel } from "../lib/readingNoteFormat";
+  import { renderReadingNoteFooter } from "../lib/readingNotes";
+  import { EDITOR_UNDO_MIN_DEPTH, markStructuralUndoBoundary, undoEditor, redoEditor } from "../lib/editorUndo";
   import { telemetry } from "../lib/telemetry";
   import type { PasteBlock } from "../lib/htmlToMd";
   import type { Block } from "../lib/api";
@@ -103,6 +110,7 @@
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
+    onSelectBoundary?: (blockId: string, direction: "up" | "down", selection: BlockTextSelection, caretX: number) => void;
     onAnchor?: (blockId: string) => void;
     onBulletClick?: (blockId: string, event: MouseEvent) => void;
     onPasteBlocks?: (
@@ -137,6 +145,7 @@
     onDelete,
     onIndent,
     onNavigate,
+    onSelectBoundary,
     onAnchor,
     onBulletClick,
     onPasteBlocks,
@@ -155,7 +164,9 @@
   let wikiCompletionDismissed = false;
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let isFenceBlock = $derived(isFencedCodeBlock(block.content));
-  let renderedHtml = $derived(renderBlock(block.content, assetBaseDir));
+  const readingNoteLabel = $derived(readingNoteBlockLabel(block));
+  let renderedHtml = $derived(readingNoteLabel
+    ? renderReadingNoteFooter(block.content, readingNoteLabel, assetBaseDir) : renderBlock(block.content, assetBaseDir));
   let isTableBlock = $derived(renderedHtml.includes("<table"));
 
   /**
@@ -328,6 +339,7 @@
   // Query block support
   const QUERY_RE = /^\{\{query\s+([\s\S]+?)\}\}\s*$/;
   let queryExpression = $derived((() => {
+    if (readingNoteLabel) return null;
     const m = block.content.trim().match(QUERY_RE);
     return m ? m[1].trim() : null;
   })());
@@ -617,7 +629,7 @@
         options: pages.map((page) => ({
           label: page.title,
           detail: page.is_journal ? "journal" : "page",
-          apply: wikiLinkReplacement(page.title),
+          apply: wikiLinkReplacement(page.title, line.text.slice(head - line.from)),
         })),
       };
     } catch {
@@ -712,13 +724,34 @@
   }
 
   // Save content on blur
+  const pendingSaves = new Set<Promise<boolean>>();
+
+  $effect(() => registerEditorFlush(pageId, async () => {
+    await Promise.all(pendingSaves);
+    if (editorView) await saveContent(editorView.state.doc.toString());
+    else if (pendingSaveContent !== null) await saveContent(pendingSaveContent);
+  }));
+
+  $effect(() => {
+    const handleRewrite = (event: Event) => {
+      const detail = (event as CustomEvent<{ pageId: string; markUndoBoundary: boolean }>).detail;
+      if (detail?.pageId === pageId && detail.markUndoBoundary && editorView) {
+        markStructuralUndoBoundary(editorView);
+      }
+    };
+    window.addEventListener("grafium-writing-rewritten", handleRewrite);
+    return () => window.removeEventListener("grafium-writing-rewritten", handleRewrite);
+  });
+
   async function saveContent(content: string) {
     content = normalizeTaskPrefix(content);
     const context = buildSaveContext(block.id, pageId, block.content, content);
     telemetry("savecontext", () => (context));
     const beforeContent = block.content;
+    const save = persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
+    pendingSaves.add(save);
     try {
-      const changed = await persistBlockContentIfChanged(block, content, (id, value) => updateBlock(id, value));
+      const changed = await save;
       saveError = null;
       pendingSaveContent = null;
       if (changed) {
@@ -735,6 +768,8 @@
       saveError = `Failed to save changes: ${e instanceof Error ? e.message : String(e)}`;
       console.error("Failed to save block content:", e);
       throw e;
+    } finally {
+      pendingSaves.delete(save);
     }
   }
 
@@ -1170,6 +1205,8 @@
   // Imperative caret target for cross-block Arrow Up/Down navigation. Set by
   // the parent via focusForNav() right before/while the editor opens.
   let navPending: { x: number; edge: "top" | "bottom" } | null = null;
+  let pendingTextSelection: BlockTextSelection | null = null;
+  let pendingStructuralFocus = false;
   let pendingEndCaret = false;
   let pendingInsert: string | null = null;
 
@@ -1186,6 +1223,45 @@
     } else {
       startEditing();
     }
+  }
+
+  export async function prepareBlockSelection(isCurrent: () => boolean): Promise<boolean> {
+    const view = editorView;
+    if (!view) return isCurrent();
+    const doc = view.state.doc;
+    await saveContent(doc.toString());
+    if (!isCurrent() || editorView !== view || view.state.doc !== doc) return false;
+    if (blurTeardownTimer !== undefined) {
+      window.clearTimeout(blurTeardownTimer);
+      blurTeardownTimer = undefined;
+    }
+    teardownEditor(view, true);
+    return true;
+  }
+
+  export function restoreTextSelection(selection: BlockTextSelection) {
+    pendingTextSelection = selection;
+    if (isEditing && editorView) placeTextSelection(editorView);
+    else startEditing();
+  }
+
+  export function focusAfterDelete(edge: "start" | "end") {
+    pendingStructuralFocus = true;
+    if (edge === "start") restoreTextSelection({ anchor: 0, head: 0 });
+    else focusAtEnd();
+    if (editorView) {
+      markStructuralUndoBoundary(editorView);
+      pendingStructuralFocus = false;
+    }
+  }
+
+  function placeTextSelection(view: EditorView) {
+    if (!pendingTextSelection) return;
+    const { anchor, head } = pendingTextSelection;
+    pendingTextSelection = null;
+    const clamp = (pos: number) => Math.max(0, Math.min(view.state.doc.length, pos));
+    view.dispatch({ selection: EditorSelection.range(clamp(anchor), clamp(head)), scrollIntoView: true });
+    view.focus();
   }
 
   /** Open this block for editing and put the caret at the end of its text. */
@@ -1294,6 +1370,7 @@
         doc: block.content,
         extensions: [
           markdown(),
+          editorWriteLockExtension(pageId),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
             override: [emojiIconCompletionSource, slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource],
@@ -1354,15 +1431,15 @@
             },
             {
               key: "Mod-z",
-              run: (view) => undo(view),
+              run: (view) => undoEditor(view),
             },
             {
               key: "Mod-Shift-z",
-              run: (view) => redo(view),
+              run: (view) => redoEditor(view),
             },
             {
               key: "Mod-y",
-              run: (view) => redo(view),
+              run: (view) => redoEditor(view),
             },
             {
               key: "Enter",
@@ -1417,7 +1494,7 @@
                 return true;
               },
             },
-            // Selection-formatting shortcuts. Note: Ctrl+B and Ctrl+Shift+A are
+            // Selection-formatting shortcuts. Note: Ctrl+B and Ctrl+Shift+B are
             // deliberately NOT bound here — they belong to window-level sidebar
             // toggles.
             {
@@ -1425,7 +1502,7 @@
               run: (view) => applyToggleWrap(view, "*"),
             },
             {
-              key: "Mod-Shift-b",
+              key: "Mod-Alt-b",
               run: (view) => applyToggleWrap(view, "**"),
             },
             {
@@ -1480,6 +1557,10 @@
             },
           }),
           EditorView.updateListener.of((update) => {
+            if (update.view.hasFocus && (update.selectionSet || update.docChanged)) {
+              const { from, to } = update.state.selection.main;
+              publishSourceReadingSelection(update.view.dom, sourceReadingSelection(pageId, block.id, update.state.doc.toString(), from, to));
+            }
             if (update.docChanged && !isInsideCodeFence(update.view)) {
               const prev = update.startState.doc.toString();
               const next = update.state.doc.toString();
@@ -1652,13 +1733,19 @@
               blurTeardownTimer = window.setTimeout(() => {
                 if (!editorView || editorView !== view) return;
 
+                const active = document.activeElement;
+                if (editorHasDialogFocus(view.dom)) {
+                  // A temporary navigator must return to this exact editor and selection.
+                  void saveContent(view.state.doc.toString());
+                  return;
+                }
+
                 const completionState = completionStatus(view.state);
                 if (completionState === "active" || completionState === "pending") {
                   view.focus();
                   return;
                 }
 
-                const active = document.activeElement as HTMLElement | null;
                 // Only keep THIS editor alive if focus is still within it (e.g.
                 // its own autocomplete popup). If focus moved to a DIFFERENT
                 // block's editor (cross-block navigation), tear this one down so
@@ -1724,13 +1811,37 @@
         const view = editorView;
         const onArrowKey = (e: KeyboardEvent) => {
           if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-          if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+          if (e.altKey || e.ctrlKey || e.metaKey) return;
+          if (e.isComposing || e.keyCode === 229) return;
           if (!editorView || editorView !== view) return;
           // If the slash/autocomplete popup is open, let CodeMirror handle
           // Up/Down to move the menu selection instead of moving the caret.
           const cstatus = completionStatus(view.state);
           if (cstatus === "active" || cstatus === "pending") return;
           const sel = view.state.selection.main;
+          if (e.shiftKey) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const direction = e.key === "ArrowUp" ? "up" : "down";
+            const edge = direction === "up" ? 0 : view.state.doc.length;
+            const caret = view.coordsAtPos(sel.head);
+            const boundaryCaret = view.coordsAtPos(edge);
+            if (caret && boundaryCaret && Math.abs(caret.top - boundaryCaret.top) <= 1 && onSelectBoundary) {
+              // At the page's outer edge this remains a normal text selection.
+              // If a neighbor exists, the owner promotes it to whole blocks.
+              if (sel.head !== edge) view.dispatch({ selection: EditorSelection.range(sel.anchor, edge) });
+              onSelectBoundary(block.id, direction, { anchor: sel.anchor, head: sel.head }, caret?.left ?? 0);
+              return;
+            }
+            const moved = view.moveVertically(sel, direction === "down");
+            const head = moved.head === sel.head ? edge : moved.head;
+            view.dispatch({
+              selection: EditorSelection.range(sel.anchor, head, moved.goalColumn, moved.bidiLevel ?? undefined, moved.assoc),
+              scrollIntoView: true,
+              userEvent: "select.keyboard",
+            });
+            return;
+          }
           if (!sel.empty) return; // let native handle shift-selection etc.
           const caret = view.coordsAtPos(sel.head);
           if (!caret) return;
@@ -1779,6 +1890,11 @@
       placeNavCaret(editorView);
       placeEndCaret(editorView);
       flushPendingInsert(editorView);
+      placeTextSelection(editorView);
+      if (pendingStructuralFocus) {
+        markStructuralUndoBoundary(editorView);
+        pendingStructuralFocus = false;
+      }
   }
 
   async function stopEditing() {
@@ -1823,6 +1939,7 @@
   });
 
   function handleClick() {
+    if (readingNoteLabel) return;
     if (!isEditing && !queryExpression) {
       startEditing();
     }
@@ -2038,6 +2155,12 @@
   }
 
   function handleRenderedClick(e: MouseEvent) {
+    if (openReadingNoteFromEvent(e, pageId, block.id)) return;
+    if (readingNoteLabel) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const target = e.target as HTMLElement;
 
     if (target instanceof HTMLImageElement && target.classList.contains("fc-img")) {
@@ -2220,6 +2343,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="block-item"
+  use:readingSelectionCapture
   class:bookMode
   class:editing={isEditing}
   class:selected
@@ -2232,9 +2356,10 @@
   class:h5={editorStyleClass === "h5"}
   class:h6={editorStyleClass === "h6"}
   class:table-block={isTableBlock && !isEditing}
-  style="padding-left: {bookMode ? 0 : depth * 24}px"
+  style="padding-left: {bookMode ? 0 : depth * 24}px; --bullet-gutter: {bulletMinHeight}"
   data-block-id={block.id}
   data-page-id={pageId}
+  data-reading-note-footer={readingNoteLabel ? "" : undefined}
   data-depth={depth}
   onpointerdown={markCurrentBlock}
 >
@@ -2373,6 +2498,8 @@
         class="rendered-content"
         use:bionicReader={block.content}
         onclick={handleRenderedClick}
+        onpointerdown={protectReadingNotePointer}
+        data-reading-note-footer={readingNoteLabel ? "" : undefined}
         onkeydown={handleRenderedKeydown}
         oncontextmenu={handleRenderedContextMenu}
         bind:this={renderedEl}
@@ -2488,7 +2615,7 @@
 <style>
   .block-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     min-height: 24px;
     min-width: 0;
     padding-bottom: 2px;
@@ -2506,7 +2633,7 @@
 
   .block-item.editing {
     background: transparent;
-    align-items: center;
+    align-items: flex-start;
   }
 
   @media (max-width: 640px) {
@@ -2559,14 +2686,15 @@
     z-index: 1;
   }
 
-  /* Bullet centers track the row height, excluding its 2px bottom spacing.
-     Keep the lines inside that spacing so adjacent rows meet without clipping. */
+  /* Bullet centers track the first-line gutter, not the full wrapped row.
+     Keep the lines inside the 2px bottom spacing so adjacent rows meet. */
   .indent-guides {
     position: absolute;
     inset: 0;
     overflow: visible;
     pointer-events: none;
     z-index: 0;
+    font-size: 15px;
   }
 
   .indent-guide-line {
@@ -2584,7 +2712,7 @@
   }
 
   .indent-guide-stem {
-    top: calc(50% - 1px);
+    top: calc(var(--bullet-gutter, 24px) / 2);
     width: 2px;
     background: var(--accent);
   }
@@ -2594,7 +2722,7 @@
     box-sizing: border-box;
     top: 0;
     width: 25px;
-    height: 50%;
+    height: calc(var(--bullet-gutter, 24px) / 2 + 1px);
     border-left: 2px solid var(--accent);
     border-bottom: 2px solid var(--accent);
     border-bottom-left-radius: 8px;
@@ -2622,7 +2750,8 @@
     text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
   }
 
-  .block-item.h1 .bullet-container {
+  .block-item.h1 .bullet-container,
+  .block-item.h1 .indent-guides {
     font-size: 1.75em;
   }
 
@@ -2630,7 +2759,8 @@
     color: var(--accent-yellow);
   }
 
-  .block-item.h2 .bullet-container {
+  .block-item.h2 .bullet-container,
+  .block-item.h2 .indent-guides {
     font-size: 1.45em;
   }
 
@@ -2638,7 +2768,8 @@
     color: var(--accent);
   }
 
-  .block-item.h3 .bullet-container {
+  .block-item.h3 .bullet-container,
+  .block-item.h3 .indent-guides {
     font-size: 1.25em;
   }
 
@@ -2648,7 +2779,10 @@
 
   .block-item.h4 .bullet-container,
   .block-item.h5 .bullet-container,
-  .block-item.h6 .bullet-container {
+  .block-item.h6 .bullet-container,
+  .block-item.h4 .indent-guides,
+  .block-item.h5 .indent-guides,
+  .block-item.h6 .indent-guides {
     font-size: 1.08em;
   }
 

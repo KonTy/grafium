@@ -3,22 +3,25 @@ import appSource from "../App.svelte?raw";
 import pageContentSource from "./PageContent.svelte?raw";
 import referencePanelSource from "./ReferencePanel.svelte?raw";
 import sidebarSource from "./Sidebar.svelte?raw";
+import toolsSource from "./PageAssistantTools.svelte?raw";
 
 describe("right-panel find links action", () => {
-  it("routes the References tab action through the existing PageContent suggestion workflow", () => {
+  it("routes the explicit page tools through the existing PageContent suggestion workflow", () => {
     expect(sidebarSource).not.toContain("<span>Find links</span>");
     expect(sidebarSource).not.toContain("onFindLinks");
 
-    expect(referencePanelSource).toContain("onFindLinks?: (page: { id: string; title: string }) => void");
-    expect(referencePanelSource).toContain("function findLinksForCurrentPage()");
-    expect(referencePanelSource).toContain("Find links");
+    expect(referencePanelSource).toContain("onFindLinks?: (page: { id: string; title: string }, exactOnly?: boolean) => void");
+    expect(toolsSource).toContain("async function findLinks(exactOnly = false)");
+    expect(toolsSource).toContain("Find links");
+    expect(toolsSource).toContain("exactOnly || !ready");
 
-    expect(appSource).toContain('function handleFindLinksForPage(page: Pick<Page, "id">)');
+    expect(appSource).toContain('function handleFindLinksForPage(page: Pick<Page, "id">, exactOnly = false)');
     expect(appSource).toContain('new CustomEvent("page-content-find-links"');
     expect(appSource).toContain("onFindLinks={handleFindLinksForPage}");
 
     expect(pageContentSource).toContain('window.addEventListener("page-content-find-links"');
     expect(pageContentSource).toContain("void handleSuggestLinks();");
+    expect(pageContentSource).toContain("if (detail.exactOnly) void handleFindLinks();");
     expect(pageContentSource).toContain("const linkCandidateGroups = $derived.by(() => groupLinkCandidates(linkCandidates));");
     expect(pageContentSource).toContain("{#each linkCandidateGroups as group (group.key)}");
     expect(pageContentSource).toContain("handleAcceptLinkCandidateGroup(group)");

@@ -24,13 +24,13 @@ function elementWithClass(node: Node, className: string): HTMLElement | null {
 
 function safeWikiTarget(value: string | null, fallback: string): string | null {
   const target = (value || fallback).trim().replace(/^\[\[|\]\]$/g, "");
-  if (!target || /[\u0000-\u001f\u007f<>\[\]\n\r]/.test(target)) return null;
+  if (!target || /[\u0000-\u001f\u007f<>\[\]|\n\r]/.test(target)) return null;
   return target.replace(/\\/g, "/");
 }
 
 function safeTagTarget(value: string | null, fallback: string): string | null {
   const tag = (value || fallback).trim().replace(/^#/, "").replace(/\\/g, "/");
-  return /^[a-zA-Z0-9][a-zA-Z0-9_/-]*$/.test(tag) ? tag : null;
+  return /^[\p{L}\p{N}][\p{L}\p{N}\p{M}_/-]*$/u.test(tag) ? tag : null;
 }
 
 function safeBlockRef(value: string | null, fallback: string): string | null {
@@ -53,7 +53,11 @@ turndown.addRule("grafiumPageLink", {
   replacement: (content, node) => {
     const element = node as HTMLElement;
     const target = safeWikiTarget(element.getAttribute("data-page"), content);
-    return target ? `[[${target}]]` : content;
+    if (!target) return content;
+    const label = element.textContent?.trim() ?? "";
+    if (!label || label === target) return `[[${target}]]`;
+    if (/[\u0000-\u001f\u007f<>\[\]\n\r]/.test(label)) return content;
+    return `[[${target}|${label}]]`;
   },
 });
 

@@ -8,6 +8,8 @@ function keyEvent(init: KeyboardEventInit): KeyboardEvent {
 function stubActions() {
   return {
     goJournal: vi.fn(),
+    goJournalDate: vi.fn(),
+    goLink: vi.fn(),
     goJournalEdit: vi.fn(),
     goHome: vi.fn(),
     goAllPages: vi.fn(),
@@ -48,6 +50,29 @@ afterEach(() => {
 });
 
 describe("keymap dual-mode matching", () => {
+  it("opens Go to link while editing and leaves modified variants alone", () => {
+    const actions = stubActions();
+    registerDefaultShortcuts(actions);
+    keymap_manager.isEditing = true;
+    const event = keyEvent({ key: "l", code: "KeyL", ctrlKey: true });
+    expect(keymap_manager.handleKeydown(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.goLink).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "L", code: "KeyL", ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(actions.goLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the date calendar while editing without replacing the graph shortcut", () => {
+    const actions = stubActions();
+    registerDefaultShortcuts(actions);
+    keymap_manager.isEditing = true;
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "g", ctrlKey: true }))).toBe(true);
+    expect(actions.goJournalDate).toHaveBeenCalledTimes(1);
+    expect(actions.goGraph).not.toHaveBeenCalled();
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "G", code: "KeyG", ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(actions.goGraph).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps vim chords nav-only and runs modifier aliases while editing", () => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
@@ -89,20 +114,32 @@ describe("keymap dual-mode matching", () => {
     expect(actions.goPrevJournal).toHaveBeenCalledTimes(1);
   });
 
-  it("matches Ctrl-Shift-C via KeyC", () => {
+  it("opens Chat with Alt-C while editing and ignores the old Ctrl combos", () => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
-    const event = keyEvent({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    keymap_manager.isEditing = true;
+    const event = keyEvent({ key: "c", code: "KeyC", altKey: true });
     expect(keymap_manager.handleKeydown(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(actions.goChat).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "C", code: "KeyC", ctrlKey: true, altKey: true }))).toBe(false);
     expect(actions.goChat).toHaveBeenCalledTimes(1);
   });
 
-  it("matches Ctrl-Alt-B regardless of modifier order", () => {
+  it.each([false, true])("toggles the right pane with Ctrl-Shift-B (editing: %s) and leaves bold to the editor", (editing) => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
-    const event = keyEvent({ key: "b", ctrlKey: true, altKey: true });
+    keymap_manager.isEditing = editing;
+    const event = keyEvent({ key: "B", code: "KeyB", ctrlKey: true, shiftKey: true });
     expect(keymap_manager.handleKeydown(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
     expect(actions.toggleRightSidebar).toHaveBeenCalledTimes(1);
+    expect(actions.toggleSidebar).not.toHaveBeenCalled();
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "b", code: "KeyB", ctrlKey: true, altKey: true }))).toBe(false);
+    expect(actions.toggleRightSidebar).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: ".", code: "Period", ctrlKey: true }))).toBe(true);
+    expect(actions.toggleRightSidebar).toHaveBeenCalledTimes(2);
   });
 
   it("matches Alt-T and Alt-D while editing", () => {

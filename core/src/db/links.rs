@@ -1,28 +1,16 @@
-use super::Database;
-use crate::error::Result;
+use super::{Database, EntityDecision, EntityResolution};
+use crate::error::{CoreError, Result};
 use crate::models::{
     Block, BlockType, GraphEdgeRow, Link, LinkCandidate, LinkCandidateStatus, LinkType, Page,
 };
 use crate::parser::TagTerm;
 use chrono::Utc;
-use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use uuid::Uuid;
-
-static CANDIDATE_WIKI_LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[[^\]]+\]\]").unwrap());
-static CANDIDATE_MARKDOWN_LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[[^\]]+\]\([^)]+\)").unwrap());
-static CANDIDATE_URL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:https?://|mailto:)[^\s<>)\]]+").unwrap());
-static CANDIDATE_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"#([a-zA-Z0-9][a-zA-Z0-9_/\\\-]*)").unwrap());
 
 const LINK_CANDIDATE_SOURCE_EXACT_TITLE: &str = "exact_title";
 pub(crate) const LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT: &str = "semantic_concept";
-const SEMANTIC_CONCEPT_CANDIDATE_CONFIDENCE: f32 = 0.82;
 const LOW_SIGNAL_EXACT_TITLE_WORDS: &[&str] = &[
     "analogy",
     "analogies",
@@ -104,6 +92,10 @@ fn row_to_link_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkCandid
         confidence: row.get::<_, f64>(11)? as f32,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+        proposed_title: row.get(14)?,
+        resolution: row.get(15)?,
+        alternatives: serde_json::from_str(&row.get::<_, String>(16)?).unwrap_or_default(),
+        reason: row.get(17)?,
     })
 }
 
@@ -113,7 +105,7 @@ fn link_candidate_select_sql() -> &'static str {
             c.from_page_id,
             source_page.title AS from_page_title,
             c.to_page_id,
-            target_page.title AS to_page_title,
+            COALESCE(target_page.title, c.proposed_title) AS to_page_title,
             c.anchor_text,
             c.anchor_start,
             c.anchor_end,
@@ -121,15 +113,21 @@ fn link_candidate_select_sql() -> &'static str {
             c.source,
             c.confidence,
             c.created_at,
-            c.updated_at
+            c.updated_at,
+            c.proposed_title,
+            c.resolution,
+            c.alternatives,
+            c.reason
      FROM link_candidates c
      JOIN pages source_page ON source_page.id = c.from_page_id
-     JOIN pages target_page ON target_page.id = c.to_page_id"
+     LEFT JOIN pages target_page ON target_page.id = c.to_page_id"
 }
 
 fn candidate_title_allowed(title: &str) -> bool {
     let title = title.trim();
-    if (title.chars().count() < 4 && !is_short_acronym_title(title))
+    if (title.chars().count() < 4
+        && !is_short_acronym_title(title)
+        && !(title.chars().count() >= 2 && title.contains(['+', '#'])))
         || !title.chars().any(|c| c.is_alphabetic())
     {
         return false;
@@ -297,39 +295,6 @@ fn exact_title_candidate_visible(source: &str, to_page_title: &str) -> bool {
     source != LINK_CANDIDATE_SOURCE_EXACT_TITLE || candidate_title_allowed(to_page_title)
 }
 
-fn protected_spans(content: &str) -> Vec<(usize, usize)> {
-    if content.contains("```") {
-        return vec![(0, content.len())];
-    }
-
-    let mut spans: Vec<(usize, usize)> = CANDIDATE_WIKI_LINK_RE
-        .find_iter(content)
-        .chain(CANDIDATE_MARKDOWN_LINK_RE.find_iter(content))
-        .chain(CANDIDATE_URL_RE.find_iter(content))
-        .chain(CANDIDATE_TAG_RE.find_iter(content))
-        .map(|m| (m.start(), m.end()))
-        .collect();
-
-    let mut in_code = false;
-    let mut start = 0usize;
-    for (idx, ch) in content.char_indices() {
-        if ch == '`' {
-            if in_code {
-                spans.push((start, idx + ch.len_utf8()));
-            } else {
-                start = idx;
-            }
-            in_code = !in_code;
-        }
-    }
-    if in_code {
-        spans.push((start, content.len()));
-    }
-
-    spans.sort_unstable();
-    spans
-}
-
 fn overlaps_any(start: usize, end: usize, spans: &[(usize, usize)]) -> bool {
     spans.iter().any(|&(s, e)| start < e && end > s)
 }
@@ -365,7 +330,7 @@ fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<(u
         }
         let matched = needle_chars.iter().enumerate().all(|(offset, &nc)| {
             let (_, hc) = hay_chars[start + offset];
-            hc.eq_ignore_ascii_case(&nc)
+            hc.to_lowercase().eq(nc.to_lowercase())
         });
         if matched {
             let start_byte = hay_chars[start].0;
@@ -382,12 +347,21 @@ fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<(u
 }
 
 fn find_unlinked_title_matches(content: &str, title: &str) -> Vec<(usize, usize, String)> {
-    let protected = protected_spans(content);
+    let protected = crate::parser::protected_link_spans(content);
     let mut out = Vec::new();
     let mut from = 0usize;
     while let Some((start, end)) = find_case_insensitive(content, title, from) {
         if is_word_boundary(content, start)
             && is_word_boundary(content, end)
+            && !content[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| matches!(c, '/' | '+' | '#'))
+            && !content[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '/' | '+' | '#'))
+            && (title.contains('(') || !content[end..].trim_start().starts_with('('))
             && !overlaps_any(start, end, &protected)
         {
             if let Some(anchor) = content.get(start..end) {
@@ -397,164 +371,6 @@ fn find_unlinked_title_matches(content: &str, title: &str) -> Vec<(usize, usize,
         from = end.max(start + 1);
     }
     out
-}
-
-fn normalized_semantic_candidate_text(text: &str) -> String {
-    text.replace(['_', '-'], " ").trim().to_string()
-}
-
-fn semantic_alias_key(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            if ch.is_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn parenthetical_alias_surfaces(text: &str) -> Vec<String> {
-    let text = text.trim();
-    let Some(open) = text.find('(') else {
-        return Vec::new();
-    };
-    let Some(close_offset) = text[open + 1..].find(')') else {
-        return Vec::new();
-    };
-    let close = open + 1 + close_offset;
-    let head = text[..open].trim();
-    let inner = text[open + 1..close].trim();
-    let mut surfaces = Vec::new();
-    if !head.is_empty() {
-        surfaces.push(head.to_string());
-    }
-    if !inner.is_empty() {
-        surfaces.push(inner.to_string());
-    }
-    surfaces
-}
-
-fn semantic_alias_surfaces(term: &str, target_title: &str) -> Vec<String> {
-    let mut surfaces = Vec::new();
-    for surface in [term, target_title] {
-        let surface = surface.trim();
-        if !surface.is_empty() {
-            surfaces.push(surface.to_string());
-        }
-        surfaces.extend(parenthetical_alias_surfaces(surface));
-    }
-    surfaces
-}
-
-fn semantic_target_alias_surfaces(target_title: &str) -> Vec<String> {
-    let mut surfaces = Vec::new();
-    let target_title = target_title.trim();
-    if !target_title.is_empty() {
-        surfaces.push(target_title.to_string());
-    }
-    surfaces.extend(parenthetical_alias_surfaces(target_title));
-    surfaces
-}
-
-fn edit_distance_chars(a: &str, b: &str) -> usize {
-    if a == b {
-        return 0;
-    }
-    if a.is_empty() {
-        return b.chars().count();
-    }
-    if b.is_empty() {
-        return a.chars().count();
-    }
-
-    let a_chars = a.chars().collect::<Vec<_>>();
-    let b_chars = b.chars().collect::<Vec<_>>();
-    let mut previous = (0..=b_chars.len()).collect::<Vec<_>>();
-    let mut current = vec![0usize; b_chars.len() + 1];
-
-    for (i, a_ch) in a_chars.iter().enumerate() {
-        current[0] = i + 1;
-        for (j, b_ch) in b_chars.iter().enumerate() {
-            let substitution = usize::from(a_ch != b_ch);
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + substitution);
-        }
-        previous.copy_from_slice(&current);
-    }
-
-    previous[b_chars.len()]
-}
-
-fn is_likely_spelling_alias(a: &str, b: &str) -> bool {
-    let a = semantic_alias_key(a);
-    let b = semantic_alias_key(b);
-    if a == b {
-        return true;
-    }
-    let a_len = a.chars().count();
-    let b_len = b.chars().count();
-    if a_len < 4 || b_len < 4 || a.chars().next() != b.chars().next() {
-        return false;
-    }
-
-    let max_len = a_len.max(b_len);
-    let distance = edit_distance_chars(&a, &b);
-    let max_distance = if max_len <= 6 {
-        1
-    } else if max_len <= 12 {
-        2
-    } else {
-        3
-    };
-    distance <= max_distance && distance * 5 <= max_len
-}
-
-fn likely_existing_semantic_alias_page<'a>(
-    term: &str,
-    target_title: &str,
-    existing_pages: &'a [(String, String)],
-) -> Option<&'a (String, String)> {
-    let target_surfaces = semantic_target_alias_surfaces(target_title);
-    let spelling_surfaces = if semantic_alias_key(term) == semantic_alias_key(target_title) {
-        semantic_alias_surfaces(term, target_title)
-    } else {
-        target_surfaces.clone()
-    };
-    existing_pages
-        .iter()
-        .filter(|(_, title)| candidate_title_allowed(title))
-        .filter_map(|page| {
-            let title = page.1.trim();
-            let title_surfaces = semantic_target_alias_surfaces(title);
-            let full_title_match = semantic_alias_key(target_title) == semantic_alias_key(title);
-            let exact_surface = target_surfaces.iter().any(|target_surface| {
-                title_surfaces.iter().any(|title_surface| {
-                    semantic_alias_key(target_surface) == semantic_alias_key(title_surface)
-                })
-            });
-            let spelling_surface = spelling_surfaces.iter().any(|target_surface| {
-                title_surfaces
-                    .iter()
-                    .any(|title_surface| is_likely_spelling_alias(target_surface, title_surface))
-            });
-            if full_title_match {
-                Some((3usize, title.chars().count(), page))
-            } else if exact_surface {
-                Some((2usize, title.chars().count(), page))
-            } else if spelling_surface {
-                Some((1usize, title.chars().count(), page))
-            } else {
-                None
-            }
-        })
-        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
-        .map(|(_, _, page)| page)
 }
 
 impl Database {
@@ -575,6 +391,14 @@ impl Database {
 
     pub fn get_link_candidate(&self, id: &str) -> Result<LinkCandidate> {
         let conn = self.conn()?;
+        self.get_link_candidate_in_connection(&conn, id)
+    }
+
+    pub(crate) fn get_link_candidate_in_connection(
+        &self,
+        conn: &Connection,
+        id: &str,
+    ) -> Result<LinkCandidate> {
         let sql = format!("{} WHERE c.id = ?1", link_candidate_select_sql());
         conn.query_row(&sql, params![id], row_to_link_candidate)
             .map_err(Into::into)
@@ -622,40 +446,53 @@ impl Database {
         let limit = limit.clamp(1, 1_000);
         let now = Utc::now().timestamp_millis();
 
-        let pages: Vec<(String, String)> = {
+        let pages: Vec<(String, String, String)> = {
             let mut stmt = conn.prepare(
-                "SELECT id, title
-                 FROM pages
-                 WHERE is_journal = 0
-                 ORDER BY length(title) DESC, title ASC",
+                "SELECT p.id, p.title, n.name
+                 FROM entity_names n JOIN pages p ON p.id = n.page_id
+                 WHERE p.is_journal = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM entity_names other
+                     WHERE other.name_key = n.name_key AND other.page_id != n.page_id)
+                 ORDER BY length(n.name) DESC, p.title, n.name",
             )?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows.into_iter()
-                .filter(|(_, title)| candidate_title_allowed(title))
+                .filter(|(_, title, name)| {
+                    candidate_title_allowed(title) && candidate_title_allowed(name)
+                })
                 .collect()
         };
 
         let blocks: Vec<(String, String, String, String)> = {
             let mut stmt = conn.prepare(
-                "SELECT b.id, b.page_id, p.title, b.content
+                "SELECT b.id, b.page_id, p.title, b.content, b.parent_id, b.order_index,
+                        b.block_type, b.properties, b.created_at, b.updated_at
                  FROM blocks b
                  JOIN pages p ON p.id = b.page_id
                  WHERE (?1 IS NULL OR b.page_id = ?1)
                  ORDER BY p.updated_at DESC, b.order_index ASC",
             )?;
             let rows = stmt.query_map(params![page_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
+                Ok((Block {
+                    id: row.get(0)?, page_id: row.get(1)?, content: row.get(3)?,
+                    parent_id: row.get(4)?, order_index: row.get(5)?,
+                    block_type: BlockType::from_str(&row.get::<_, String>(6)?),
+                    properties: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+                    created_at: row.get(8)?, updated_at: row.get(9)?,
+                }, row.get::<_, String>(2)?))
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+            let annotations = crate::knowledge::source_projection::reading_note_ids(rows.iter().map(|(block, _)| block));
+            rows.into_iter().filter(|(block, _)| !annotations.contains(&block.id))
+                .map(|(block, title)| (block.id, block.page_id, title, block.content)).collect()
         };
 
         let tx = conn.transaction()?;
@@ -676,8 +513,9 @@ impl Database {
         let mut insert = tx.prepare(
             "INSERT OR IGNORE INTO link_candidates
                 (id, from_block_id, from_page_id, to_page_id, anchor_text, anchor_start, anchor_end,
-                 status, source, confidence, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, 1.0, ?9, ?9)",
+                 status, source, confidence, created_at, updated_at, proposed_title, source_content, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, 1.0, ?9, ?9, ?10, ?11,
+                     'Unique normalized title or approved page alias.')",
         )?;
         let mut dismissed_exists = tx.prepare(
             "SELECT 1
@@ -692,12 +530,12 @@ impl Database {
 
         let mut inserted = 0i64;
         'blocks: for (block_id, from_page_id, _from_title, content) in &blocks {
-            for (to_page_id, to_title) in &pages {
+            for (to_page_id, to_title, name) in &pages {
                 if from_page_id == to_page_id {
                     continue;
                 }
 
-                for (start, end, anchor_text) in find_unlinked_title_matches(content, to_title) {
+                for (start, end, anchor_text) in find_unlinked_title_matches(content, name) {
                     let dismissed = dismissed_exists.exists(params![
                         block_id,
                         to_page_id,
@@ -717,7 +555,9 @@ impl Database {
                         start as i64,
                         end as i64,
                         LINK_CANDIDATE_SOURCE_EXACT_TITLE,
-                        now
+                        now,
+                        to_title,
+                        content
                     ])? as i64;
                     if inserted >= limit {
                         break 'blocks;
@@ -739,36 +579,117 @@ impl Database {
         tags: &[TagTerm],
         limit: i64,
     ) -> Result<usize> {
+        self.persist_semantic_concept_candidates(page_id, tags, limit, None, None, None)
+    }
+
+    pub fn discover_resolved_semantic_concept_candidates(
+        &self,
+        page_id: &str,
+        tags: &[TagTerm],
+        resolutions: &[EntityResolution],
+        expected_blocks: &[Block],
+        limit: i64,
+        cancel: &crate::cancel::CancellationToken,
+    ) -> Result<usize> {
+        self.persist_semantic_concept_candidates(
+            page_id,
+            tags,
+            limit,
+            Some(resolutions),
+            Some(expected_blocks),
+            Some(cancel),
+        )
+    }
+
+    fn persist_semantic_concept_candidates(
+        &self,
+        page_id: &str,
+        tags: &[TagTerm],
+        limit: i64,
+        adjudicated: Option<&[EntityResolution]>,
+        expected_blocks: Option<&[Block]>,
+        cancel: Option<&crate::cancel::CancellationToken>,
+    ) -> Result<usize> {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(CoreError::Cancelled);
+        }
         let mut conn = self.conn()?;
         let limit = limit.clamp(1, 1_000) as usize;
         let now = Utc::now().timestamp_millis();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        let blocks: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, content
-                 FROM blocks
-                 WHERE page_id = ?1
-                 ORDER BY order_index ASC",
-            )?;
-            let rows = stmt
-                .query_map(params![page_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-
-        let existing_pages: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, title
-                 FROM pages
-                 WHERE is_journal = 0",
-            )?;
-            let rows = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-
-        let tx = conn.transaction()?;
+        let snapshot = self.list_blocks_for_page_in_connection(&tx, page_id)?;
+        if let Some(expected) = expected_blocks {
+            if expected.len() != snapshot.len()
+                || expected.iter().any(|expected| {
+                    expected.page_id != page_id
+                        || !snapshot
+                            .iter()
+                            .any(|block| block.id == expected.id && block.content == expected.content)
+                })
+            {
+                return Err(CoreError::Other(
+                    "Source page changed during entity resolution; refresh suggestions.".into(),
+                ));
+            }
+        }
+        // Validate against the complete snapshot before filtering mutation
+        // targets. Source offsets and saved before-content remain unprojected.
+        let annotations = crate::knowledge::source_projection::reading_note_ids(&snapshot);
+        let blocks: Vec<(String, String)> = snapshot.into_iter()
+            .filter(|block| !annotations.contains(&block.id))
+            .map(|block| (block.id, block.content)).collect();
+        let mut resolutions = self.resolve_tag_terms_in_connection(&tx, tags)?;
+        if let Some(adjudicated) = adjudicated {
+            if adjudicated.len() != resolutions.len() {
+                return Err(CoreError::Other(
+                    "Entity resolution batch no longer matches its source terms.".into(),
+                ));
+            }
+            for (current, proposed) in resolutions.iter_mut().zip(adjudicated) {
+                if current.source_phrase != proposed.source_phrase {
+                    return Err(CoreError::Other(
+                        "Entity resolution source phrase changed.".into(),
+                    ));
+                }
+                if current.decision != EntityDecision::Ambiguous {
+                    if current.decision != proposed.decision
+                        || current.target_page_id != proposed.target_page_id
+                        || current.target_title != proposed.target_title
+                    {
+                        return Err(CoreError::Other(
+                            "Entity targets changed during resolution; refresh suggestions.".into(),
+                        ));
+                    }
+                    continue;
+                }
+                if current.candidates != proposed.candidates {
+                    return Err(CoreError::Other(
+                        "The entity shortlist changed; refresh suggestions.".into(),
+                    ));
+                }
+                match proposed.decision {
+                    EntityDecision::Reuse => {
+                        if !current.candidates.iter().any(|candidate| {
+                            proposed.target_page_id.as_deref() == Some(candidate.id.as_str())
+                                && proposed.target_title == candidate.title
+                        }) {
+                            return Err(CoreError::Other("Entity resolution selected a target outside the current shortlist.".into()));
+                        }
+                    }
+                    EntityDecision::New | EntityDecision::Ambiguous => {
+                        if proposed.target_page_id.is_some()
+                            || proposed.target_title != current.target_title
+                        {
+                            return Err(CoreError::Other(
+                                "Entity resolution changed the proposed new identity.".into(),
+                            ));
+                        }
+                    }
+                }
+                *current = proposed.clone();
+            }
+        }
         tx.execute(
             "DELETE FROM link_candidates
              WHERE from_page_id = ?1 AND source = ?2 AND status = 'pending'",
@@ -779,7 +700,8 @@ impl Database {
             "SELECT 1
              FROM link_candidates
              WHERE from_page_id = ?1
-               AND to_page_id = ?2
+               AND ((?2 IS NOT NULL AND to_page_id = ?2)
+                    OR entity_key(proposed_title) = entity_key(?4))
                AND source = ?3
                AND status = 'dismissed'
              LIMIT 1",
@@ -787,18 +709,20 @@ impl Database {
         let mut insert = tx.prepare(
             "INSERT OR IGNORE INTO link_candidates
                 (id, from_block_id, from_page_id, to_page_id, anchor_text, anchor_start, anchor_end,
-                 status, source, confidence, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?10)",
+                 status, source, confidence, created_at, updated_at,
+                 proposed_title, resolution, alternatives, reason, source_content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?10,
+                     ?11, ?12, ?13, ?14, ?15)",
         )?;
 
         let mut inserted = 0usize;
-        for tag in tags {
+        for (tag, resolution) in tags.iter().zip(resolutions) {
             if inserted >= limit {
                 break;
             }
 
-            let term = normalized_semantic_candidate_text(&tag.term);
-            let target_title = normalized_semantic_candidate_text(tag.label());
+            let term = tag.term.trim().to_string();
+            let target_title = resolution.target_title.as_str();
             if term.is_empty() || target_title.is_empty() {
                 continue;
             }
@@ -815,30 +739,27 @@ impl Database {
             let mut matches_for_tag = Vec::new();
             for (block_id, content) in &blocks {
                 for (start, end, anchor_text) in find_unlinked_title_matches(content, &term) {
-                    matches_for_tag.push((block_id, start, end, anchor_text));
+                    matches_for_tag.push((block_id, content, start, end, anchor_text));
                 }
             }
 
             if matches_for_tag.is_empty() {
                 continue;
             };
-            let target_page_id = if let Some((target_page_id, _)) =
-                likely_existing_semantic_alias_page(&term, &target_title, &existing_pages)
-            {
-                target_page_id.clone()
-            } else {
-                self.get_or_create_page_in_connection(&tx, &target_title, false)?
-                    .id
-            };
+            let target_page_id = &resolution.target_page_id;
+            if target_page_id.as_deref() == Some(page_id) {
+                continue;
+            }
             if reviewed_exists.exists(params![
                 page_id,
                 target_page_id,
-                LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT
+                LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT,
+                target_title
             ])? {
                 continue;
             }
 
-            for (block_id, start, end, anchor_text) in matches_for_tag {
+            for (block_id, content, start, end, anchor_text) in matches_for_tag {
                 if inserted >= limit {
                     break;
                 }
@@ -852,14 +773,28 @@ impl Database {
                     start as i64,
                     end as i64,
                     LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT,
-                    SEMANTIC_CONCEPT_CANDIDATE_CONFIDENCE,
-                    now
+                    if resolution.decision == EntityDecision::Reuse
+                        && resolution.candidates.is_empty()
+                    {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    now,
+                    target_title,
+                    resolution.decision.as_str(),
+                    serde_json::to_string(&resolution.candidates)?,
+                    resolution.reason,
+                    content
                 ])?;
             }
         }
 
         drop(insert);
         drop(reviewed_exists);
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(CoreError::Cancelled);
+        }
         tx.commit()?;
         Ok(inserted)
     }
@@ -870,7 +805,7 @@ impl Database {
         conn.execute(
             "UPDATE link_candidates
              SET status = 'dismissed', dismissed_at = ?1, updated_at = ?1
-             WHERE id = ?2",
+             WHERE id = ?2 AND status = 'pending'",
             params![now, id],
         )?;
         Ok(())
@@ -882,7 +817,7 @@ impl Database {
         conn.execute(
             "UPDATE link_candidates
              SET status = 'pending', dismissed_at = NULL, updated_at = ?1
-             WHERE id = ?2",
+             WHERE id = ?2 AND status = 'dismissed'",
             params![now, id],
         )?;
         Ok(())
@@ -1593,6 +1528,32 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn reading_annotations_are_excluded_from_exact_and_semantic_links_without_projecting_mutations() -> Result<()> {
+        let (_dir, graph, source, note) = crate::knowledge::source_projection::tests::annotated_book();
+        let db = &graph.db;
+        db.create_page("Cobalt", false)?;
+        db.create_page("Objection", false)?;
+        let before = db.list_blocks_for_page(&source.id)?;
+        let author = before.iter().find(|block| block.content.contains("author says")).unwrap();
+        let exact = db.discover_link_candidates(Some(&source.id), 100)?;
+        assert!(!exact.is_empty());
+        assert!(exact.iter().all(|candidate| candidate.from_block_id != note.note_block_id.clone().unwrap()));
+        assert!(exact.iter().any(|candidate| candidate.from_block_id == author.id && candidate.anchor_text == "cobalt"));
+        let tags = vec![TagTerm { term: "cobalt".into(), qualified: None }, TagTerm { term: "objection".into(), qualified: None }];
+        assert_eq!(db.persist_semantic_concept_candidates(&source.id, &tags, 100, None, Some(&before), None)?, 1);
+        let candidates = db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 100)?;
+        let semantic = candidates.iter().find(|candidate| candidate.source == super::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT).unwrap();
+        assert_eq!(semantic.from_block_id, author.id);
+        let saved_source: String = db.conn()?.query_row("SELECT source_content FROM link_candidates WHERE id = ?1", [&semantic.id], |row| row.get(0))?;
+        assert_eq!(saved_source, author.content);
+        assert!(author.content.contains("[^1]"));
+        assert_eq!(&author.content[semantic.anchor_start as usize..semantic.anchor_end as usize], semantic.anchor_text);
+        let projected = crate::knowledge::source_projection::without_reading_notes(&before);
+        assert!(db.persist_semantic_concept_candidates(&source.id, &tags, 100, None, Some(&projected), None).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn list_tag_pages_returns_only_tag_link_targets() -> Result<()> {
         let db = Database::in_memory()?;
 
@@ -1662,7 +1623,10 @@ mod tests {
         let candidates = db.discover_link_candidates(Some(&source.id), 10)?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].from_block_id, block.id);
-        assert_eq!(candidates[0].to_page_id, target.id);
+        assert_eq!(
+            candidates[0].to_page_id.as_deref(),
+            Some(target.id.as_str())
+        );
         assert_eq!(candidates[0].anchor_text, "magnesium");
         assert_eq!(candidates[0].status, LinkCandidateStatus::Pending);
         assert!(db.get_links_from_page(&source.id)?.is_empty());
@@ -1689,7 +1653,7 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|candidate| candidate.from_block_id == block.id
-                && candidate.to_page_id == target.id));
+                && candidate.to_page_id.as_deref() == Some(target.id.as_str())));
         let anchors: HashSet<_> = candidates
             .iter()
             .map(|candidate| candidate.anchor_text.as_str())
@@ -1729,7 +1693,7 @@ mod tests {
         let candidates = db.discover_link_candidates(Some(&source.id), 10)?;
         let targets: HashSet<_> = candidates
             .iter()
-            .map(|candidate| candidate.to_page_id.as_str())
+            .filter_map(|candidate| candidate.to_page_id.as_deref())
             .collect();
 
         assert_eq!(candidates.len(), 2);
@@ -1815,7 +1779,20 @@ mod tests {
         assert_eq!(candidates[0].from_block_id, block.id);
         assert_eq!(candidates[0].to_page_title, "Book of Wisdom");
         assert_eq!(candidates[0].anchor_text, "Book of Wisdom");
-        assert!(db.get_page_by_title_ci("Book of Wisdom").is_ok());
+        assert!(candidates[0].to_page_id.is_none());
+        assert_eq!(candidates[0].resolution, "new");
+        assert!(db.get_page_by_title_ci("Book of Wisdom").is_err());
+        db.dismiss_link_candidate(&candidates[0].id)?;
+        assert!(db.get_page_by_title_ci("Book of Wisdom").is_err());
+        assert_eq!(db.count_pages()?, 1);
+        assert_eq!(
+            db.discover_semantic_concept_candidates(
+                &source.id,
+                &[TagTerm::from("Book of Wisdom")],
+                10
+            )?,
+            0
+        );
         Ok(())
     }
 
@@ -1922,9 +1899,14 @@ mod tests {
     }
 
     #[test]
-    fn discover_semantic_concept_candidates_reuses_parenthetical_alias_page() -> Result<()> {
+    fn discover_semantic_concept_candidates_reuses_only_approved_parenthetical_alias() -> Result<()>
+    {
         let db = Database::in_memory()?;
-        db.create_page("Niacin (Vitamin B3)", false)?;
+        let target = db.create_page("Niacin (Vitamin B3)", false)?;
+        db.conn()?.execute(
+            "UPDATE pages SET properties = ?2 WHERE id = ?1",
+            params![target.id, r#"{"aliases":["Niacin","Vitamin B3"]}"#],
+        )?;
         let source = db.create_page("Supplement notes", false)?;
         db.create_block(
             &source.id,
@@ -1958,6 +1940,43 @@ mod tests {
             .iter()
             .all(|candidate| candidate.to_page_title == "Niacin (Vitamin B3)"));
         assert!(db.get_page_by_title_ci("Niacin").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn exact_discovery_uses_approved_aliases_but_not_ambiguous_names_or_partial_senses(
+    ) -> Result<()> {
+        let db = Database::in_memory()?;
+        let target = db.create_page("Niacin", false)?;
+        db.conn()?.execute(
+            "UPDATE pages SET properties = ?2 WHERE id = ?1",
+            params![target.id, r#"{"aliases":["Vitamin B3"]}"#],
+        )?;
+        db.create_page("Mercury", false)?;
+        db.create_page("C++", false)?;
+        db.create_page("C#", false)?;
+        let source = db.create_page("Research source", false)?;
+        db.create_block(&source.id, None, 0,
+            "Vitamin B3 helps. Mercury (planet) orbits. Languages/C++ stays scoped. C++ differs from C#.",
+            BlockType::Text, serde_json::json!({}))?;
+        let candidates = db.discover_link_candidates(Some(&source.id), 20)?;
+        assert_eq!(candidates.len(), 3);
+        let alias = candidates
+            .iter()
+            .find(|c| c.anchor_text == "Vitamin B3")
+            .unwrap();
+        assert_eq!(alias.to_page_id.as_deref(), Some(target.id.as_str()));
+        assert_eq!(alias.to_page_title, "Niacin");
+        let collision = db.create_page("Other nutrient", false)?;
+        db.conn()?.execute(
+            "UPDATE pages SET properties = ?2 WHERE id = ?1",
+            params![collision.id, r#"{"aliases":["Vitamin B3"]}"#],
+        )?;
+        let candidates = db.discover_link_candidates(Some(&source.id), 20)?;
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.anchor_text != "Vitamin B3"));
         Ok(())
     }
 

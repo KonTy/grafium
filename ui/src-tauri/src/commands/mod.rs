@@ -7,17 +7,21 @@ pub mod flashcards;
 pub mod graph;
 pub mod jobs;
 pub mod knowledge;
+pub mod layout;
 pub mod links;
 pub mod media;
 pub mod model_library;
 pub mod pages;
 pub mod query;
+pub mod reading_notes;
 pub mod research;
 pub mod startup;
 pub mod sync;
 pub mod tasks;
 pub mod theme;
 pub mod trees;
+pub mod writing;
+pub mod writing_edits;
 
 /// Bridges frontend diagnostics into the process log, so a WebKitGTK build's
 /// `console.log` (which never reaches stdout) can still be captured when

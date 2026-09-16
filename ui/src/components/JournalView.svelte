@@ -1,15 +1,23 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from "svelte";
+  import { onDestroy, setContext, tick, untrack } from "svelte";
+  import KeyboardSelectionToolbar from "./KeyboardSelectionToolbar.svelte";
+  import { createKeyboardBlockSelection, KEYBOARD_BLOCK_SELECTION, type SelectionDirection } from "../lib/keyboardBlockSelection.svelte";
   import { SvelteSet } from "svelte/reactivity";
   import PageContent from "./PageContent.svelte";
   import DatePicker from "./DatePicker.svelte";
-  import { listJournalPages, createPage, getPage, deletePage } from "../lib/api";
+  import { listJournalPages, listJournalNoteDates, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import { dispatchEditPageEnd } from "../lib/editorInsert";
+  import { MAIN_PANE_SCROLL_INTENT } from "../lib/mainPaneScroll";
+  import { showToast } from "../lib/toast.svelte";
   import { formatLocalIsoDate, insertJournalPageByTitleDesc, isJournalDateTitle } from "../lib/journalDate";
+  import { isPageNotFoundError } from "../lib/navigation";
 
   interface Props {
+    openCalendar?: boolean;
+    onCalendarOpened?: () => void;
+    onGoToLink?: () => void;
     restorePageTitle?: string;
     restoreRequestId?: number;
     editTodayRequestId?: number;
@@ -20,6 +28,9 @@
   }
 
   let {
+    openCalendar = false,
+    onCalendarOpened,
+    onGoToLink,
     restorePageTitle = "",
     restoreRequestId = 0,
     editTodayRequestId = 0,
@@ -38,7 +49,7 @@
   let loadError = $state("");
   let moreError = $state("");
   let dateError = $state("");
-  let refreshing = false;
+  let refreshing = $state(false);
   let destroyed = false;
   let loadRequest = 0;
   const mountedPages = new SvelteSet<string>();
@@ -52,6 +63,128 @@
   let scrollIntent = 0;
   type ScrollAnchor = { node: HTMLElement; top: number; intent: number };
   const pendingAnchors = new Map<string, ScrollAnchor>();
+  const pageEditors: Record<string, PageContent | undefined> = {};
+  type BoundaryNavigation = {
+    pageId: string;
+    direction: "up" | "down";
+    caretX: number;
+    source: Element;
+    selection?: { isCurrent: () => boolean; resolve: (pageId: string | null) => void };
+  };
+  let boundaryNavigation = $state<BoundaryNavigation | null>(null);
+  let focusingBoundary = $state(false);
+  const keyboardSelection = createKeyboardBlockSelection(() => journalFeedEl?.parentElement ?? null, selectAdjacentPage);
+  setContext(KEYBOARD_BLOCK_SELECTION, keyboardSelection);
+  onDestroy(() => {
+    cancelBoundaryNavigation();
+    keyboardSelection.destroy();
+  });
+
+  function cancelBoundaryNavigation() {
+    boundaryNavigation?.selection?.resolve(null);
+    boundaryNavigation = null;
+  }
+
+  function selectAdjacentPage(pageId: string, direction: SelectionDirection, isCurrent: () => boolean): Promise<string | null> {
+    const source = document.activeElement;
+    if (!source || !isCurrent()) return Promise.resolve(null);
+    cancelBoundaryNavigation();
+    scrollIntent += 1;
+    navigationTarget = null;
+    if (direction === "down" && journalPages.at(-1)?.id === pageId) moreError = "";
+    return new Promise((resolve) => {
+      boundaryNavigation = { pageId, direction, caretX: 0, source, selection: { isCurrent, resolve } };
+    });
+  }
+
+  function boundaryIsCurrent(request: BoundaryNavigation): boolean {
+    return !destroyed && boundaryNavigation === request
+      && request.source.isConnected && document.activeElement === request.source
+      && (!request.selection || request.selection.isCurrent());
+  }
+
+  function navigateJournalBoundary(pageId: string, direction: "up" | "down", caretX: number) {
+    const source = document.activeElement;
+    if (!source || !journalFeedEl?.contains(source)) return;
+    if (boundaryNavigation?.pageId === pageId && boundaryNavigation.direction === direction
+      && boundaryIsCurrent(boundaryNavigation)) return;
+    cancelBoundaryNavigation();
+    scrollIntent += 1;
+    navigationTarget = null;
+    if (direction === "down" && journalPages.at(-1)?.id === pageId) moreError = "";
+    boundaryNavigation = { pageId, direction, caretX, source };
+  }
+
+  async function focusJournalBoundary(request: BoundaryNavigation, target: Page) {
+    focusingBoundary = true;
+    try {
+      if (request.selection) {
+        request.selection.resolve(target.id);
+        return;
+      }
+      const editor = pageEditors[target.id];
+      if (!editor) throw new Error("Journal editor is not ready");
+      await editor.focusForNav(request.caretX, request.direction === "down" ? "top" : "bottom",
+        () => boundaryIsCurrent(request));
+    } catch (error) {
+      if (!boundaryIsCurrent(request)) return;
+      const message = `Could not move to ${target.title}: ${String(error)}`;
+      console.error(message);
+      showToast(message, "error");
+    } finally {
+      focusingBoundary = false;
+      if (boundaryNavigation === request) cancelBoundaryNavigation();
+    }
+  }
+
+  $effect(() => {
+    const request = boundaryNavigation;
+    if (!request || loading || loadingMore || goingToDate || refreshing || focusingBoundary) return;
+    if (!boundaryIsCurrent(request) || loadError) {
+      cancelBoundaryNavigation();
+      return;
+    }
+    const index = journalPages.findIndex((page) => page.id === request.pageId);
+    const target = index < 0 ? undefined : journalPages[index + (request.direction === "down" ? 1 : -1)];
+    if (!target) {
+      if (index >= 0 && request.direction === "down" && hasMore && !moreError) {
+        if (!pendingPages.size) untrack(() => void loadMore());
+      } else {
+        cancelBoundaryNavigation();
+      }
+      return;
+    }
+    if (!mountedPages.has(target.id)) {
+      untrack(() => mountPage(target.id, false));
+      return;
+    }
+    if (pendingPages.has(target.id)) return;
+    untrack(() => void focusJournalBoundary(request, target));
+  });
+
+  $effect(() => {
+    // A slow entry must not steal focus after the user types, clicks, or opens a dialog.
+    const cancel = cancelBoundaryNavigation;
+    const onKeydown = (event: KeyboardEvent) => {
+      const request = boundaryNavigation;
+      if (request && event.shiftKey === !!request.selection && !event.altKey && !event.ctrlKey && !event.metaKey
+        && event.key === (request.direction === "down" ? "ArrowDown" : "ArrowUp")) return;
+      cancel();
+    };
+    const onFocus = () => {
+      if (boundaryNavigation && !boundaryIsCurrent(boundaryNavigation)) cancel();
+    };
+    window.addEventListener("keydown", onKeydown, true);
+    window.addEventListener("pointerdown", cancel, true);
+    window.addEventListener("input", cancel, true);
+    window.addEventListener("focusin", onFocus);
+    return () => {
+      window.removeEventListener("keydown", onKeydown, true);
+      window.removeEventListener("pointerdown", cancel, true);
+      window.removeEventListener("input", cancel, true);
+      window.removeEventListener("focusin", onFocus);
+    };
+  });
 
   function captureScrollAnchor(): ScrollAnchor | undefined {
     if (!journalFeedEl) return;
@@ -78,6 +211,7 @@
   function noteScrollIntent() {
     scrollIntent += 1;
     navigationTarget = null;
+    cancelBoundaryNavigation();
   }
 
   function trackScrollIntent(node: HTMLElement) {
@@ -87,11 +221,13 @@
     node.addEventListener("wheel", noteScrollIntent, { passive: true });
     node.addEventListener("pointerdown", noteScrollIntent, { passive: true });
     node.addEventListener("keydown", onKeydown);
+    node.addEventListener(MAIN_PANE_SCROLL_INTENT, noteScrollIntent);
     return {
       destroy() {
         node.removeEventListener("wheel", noteScrollIntent);
         node.removeEventListener("pointerdown", noteScrollIntent);
         node.removeEventListener("keydown", onKeydown);
+        node.removeEventListener(MAIN_PANE_SCROLL_INTENT, noteScrollIntent);
       },
     };
   }
@@ -223,6 +359,10 @@
 
   let lastDate = getLocalDate();
   let goToDatePicker: { x: number; y: number } | null = $state(null);
+  let goToDateButton: HTMLButtonElement | null = $state(null);
+  let calendarSelectedDate = $state(formatLocalIsoDate());
+  let calendarNoteDates: string[] = $state([]);
+  let calendarNotesRequest = 0;
   let goingToDate = $state(false);
   let lastEditTodayHandled = 0;
   let lastRestoreHandled = "";
@@ -418,9 +558,40 @@
     }
   }
 
-  function openGoToDatePicker(event: MouseEvent) {
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  $effect(() => {
+    if (openCalendar && goToDateButton && !loading && !goingToDate) {
+      untrack(() => {
+        openGoToDatePicker();
+        onCalendarOpened?.();
+      });
+    }
+  });
+
+  function openGoToDatePicker() {
+    if (!goToDateButton) return;
+    const rect = goToDateButton.getBoundingClientRect();
+    const top = journalFeedEl?.getBoundingClientRect().top ?? 0;
+    calendarSelectedDate = journalPages.find((page) => {
+      const node = entryNodes.get(page.id);
+      return node && node.getBoundingClientRect().bottom > top;
+    })?.title ?? formatLocalIsoDate();
+    calendarNoteDates = [];
+    calendarNotesRequest += 1;
     goToDatePicker = { x: rect.right - 250, y: rect.bottom + 6 };
+  }
+
+  async function loadCalendarNoteDates(year: number, month: number) {
+    const request = ++calendarNotesRequest;
+    calendarNoteDates = [];
+    try {
+      const dates = await listJournalNoteDates(year, month);
+      if (!destroyed && goToDatePicker && request === calendarNotesRequest) calendarNoteDates = dates;
+    } catch (error) {
+      if (destroyed || !goToDatePicker || request !== calendarNotesRequest) return;
+      const message = `Could not load calendar note markers: ${String(error)}`;
+      console.error(message);
+      showToast(message, "error");
+    }
   }
 
   async function scrollToJournalDate(page: Page) {
@@ -491,7 +662,7 @@
       return await getPage({ title });
     } catch (error) {
       // A locked/unavailable database is not a missing journal.
-      if (!/^(?:Error: )?(?:Database error: Query returned no rows|Page not found)$/.test(String(error))) {
+      if (!isPageNotFoundError(error)) {
         throw error;
       }
       return createPage(title, true);
@@ -535,20 +706,39 @@
   }
 </script>
 
-<div class="journal-view">
+<div class="journal-view" data-keyboard-block-selection={keyboardSelection.active ? "true" : undefined}>
   <div class="journal-toolbar">
     <button
-      class="goto-date-btn"
+      bind:this={goToDateButton}
+      class="journal-nav-btn goto-date-btn"
       type="button"
+      aria-label="Go to date"
+      title="Go to date (Ctrl/Cmd+G)"
       aria-haspopup="dialog"
       aria-expanded={goToDatePicker !== null}
       disabled={loading || goingToDate}
       onclick={openGoToDatePicker}
     >
-      Go to date
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="5" width="18" height="16" rx="2" />
+        <path d="M16 3v4M8 3v4M3 11h18" />
+      </svg>
+    </button>
+    <button
+      class="journal-nav-btn"
+      type="button"
+      aria-label="Go to link"
+      title="Go to link (Ctrl/Cmd+L)"
+      aria-haspopup="dialog"
+      onclick={onGoToLink}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10 13a5 5 0 0 0 7 .2l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7-.2l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+      </svg>
     </button>
   </div>
-  <div class="journal-feed" bind:this={journalFeedEl} use:trackScrollIntent
+  <KeyboardSelectionToolbar selection={keyboardSelection} />
+  <div class="journal-feed" data-main-scroll-pane bind:this={journalFeedEl} use:trackScrollIntent
     role="region" aria-label="Journal entries">
     {#if loading && journalPages.length === 0}
       <div class="loading" role="status">Loading journals...</div>
@@ -574,7 +764,14 @@
           use:trackMount={page.id}
         >
           {#if mountedPages.has(page.id)}
-            <PageContent {page} compact {showBlockGuides} onLoadSettled={() => pageLoadSettled(page)} />
+            <PageContent
+              bind:this={pageEditors[page.id]}
+              {page}
+              compact
+              {showBlockGuides}
+              onLoadSettled={() => pageLoadSettled(page)}
+              onNavigateBoundary={(direction, caretX) => navigateJournalBoundary(page.id, direction, caretX)}
+            />
             {#if pendingPages.has(page.id)}
               <div class="entry-loading" role="status">Loading entry...</div>
             {/if}
@@ -623,6 +820,9 @@
     <DatePicker
       x={goToDatePicker.x}
       y={goToDatePicker.y}
+      selectedDate={calendarSelectedDate}
+      markedDates={calendarNoteDates}
+      onMonthChange={loadCalendarNoteDates}
       showClear={false}
       onSelect={goToJournalDate}
       onCancel={() => (goToDatePicker = null)}
@@ -647,6 +847,7 @@
     z-index: 6;
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
     padding: 8px 12px 6px;
     background: var(--bg-primary);
   }
@@ -657,8 +858,13 @@
     overflow-y: auto;
   }
 
-  .goto-date-btn {
-    padding: 6px 10px;
+  .journal-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-hover);
@@ -667,11 +873,20 @@
     font-size: 13px;
   }
 
-  .goto-date-btn:hover:not(:disabled) {
+  .journal-nav-btn:hover:not(:disabled) {
     background: var(--bg-active);
   }
 
-  .goto-date-btn:disabled {
+  .journal-nav-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media (pointer: coarse) {
+    .journal-nav-btn { width: 44px; height: 44px; }
+  }
+
+  .journal-nav-btn:disabled {
     opacity: 0.6;
     cursor: default;
   }

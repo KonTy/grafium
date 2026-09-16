@@ -24,6 +24,14 @@ use crate::knowledge::vector_store::SqliteVectorStore;
 use crate::models::{Block, Page};
 use crate::parser::TagTerm;
 
+#[path = "ask_budget.rs"]
+mod ask_budget;
+#[path = "reading_scope.rs"]
+pub mod reading_scope;
+#[path = "reading_research.rs"]
+mod reading_research;
+pub use reading_research::ResearchWebMode;
+
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
 pub struct KnowledgeEngine {
     config: AiConfig,
@@ -543,7 +551,8 @@ impl KnowledgeEngine {
 
         let update_plan = {
             let pipeline = self.pipeline.read().await;
-            let chunks = pipeline.chunk_page(page, blocks);
+            let source = crate::knowledge::source_projection::project_source_blocks(blocks);
+            let chunks = pipeline.chunk_page(page, &source);
             pipeline.diff_page_chunks(&page.id, chunks)
         };
 
@@ -707,6 +716,18 @@ impl KnowledgeEngine {
             .map(|f| f.id.clone())
             .collect();
         let metas = db.get_blocks_with_page_meta(&top_ids)?;
+        // Hydrate evidence from current source-only page projections, never
+        // stale annotation embeddings or an unclassified FTS snippet.
+        let mut source_by_id = std::collections::HashMap::new();
+        let mut source_pages = std::collections::HashSet::new();
+        for meta in &metas {
+            if source_pages.insert(meta.page_id.clone()) {
+                let blocks = db.list_blocks_for_page(&meta.page_id)?;
+                for block in crate::knowledge::source_projection::project_source_blocks(&blocks) {
+                    source_by_id.insert(block.id, block.content);
+                }
+            }
+        }
         let score_by_id: std::collections::HashMap<&str, f64> =
             fused.iter().map(|f| (f.id.as_str(), f.score)).collect();
         let meta_by_id: std::collections::HashMap<&str, &crate::db::BlockPageMeta> =
@@ -746,6 +767,10 @@ impl KnowledgeEngine {
             .iter()
             .filter_map(|id| {
                 let meta = meta_by_id.get(id.as_str())?;
+                let source = source_by_id.get(id.as_str())?;
+                if source.trim().is_empty() {
+                    return None;
+                }
                 let (date_ms, note_created_ms) = Self::resolve_hit_dates(meta);
                 let cosine = cosine_by_id.get(id.as_str()).copied();
                 let lexical = fts_set.contains(id.as_str());
@@ -753,7 +778,7 @@ impl KnowledgeEngine {
                     block_id: meta.block_id.clone(),
                     page_id: meta.page_id.clone(),
                     page_title: meta.page_title.clone(),
-                    content: meta.content.clone(),
+                    content: source.clone(),
                     date_ms,
                     note_created_ms,
                     is_journal: meta.is_journal,
@@ -832,7 +857,7 @@ impl KnowledgeEngine {
     pub fn expand_hits(&self, db: &crate::db::Database, hits: &mut [RetrievedHit]) {
         for hit in hits.iter_mut() {
             if let Ok(parents) = db.get_ancestor_chain(&hit.block_id) {
-                hit.parents = parents
+                hit.parents = crate::knowledge::source_projection::project_source_blocks(&parents)
                     .into_iter()
                     .map(|b| retrieval::ContextItem {
                         block_id: b.id,
@@ -841,7 +866,7 @@ impl KnowledgeEngine {
                     .collect();
             }
             if let Ok(children) = db.list_child_blocks(&hit.block_id) {
-                hit.children = children
+                hit.children = crate::knowledge::source_projection::project_source_blocks(&children)
                     .into_iter()
                     .map(|b| retrieval::ContextItem {
                         block_id: b.id,
@@ -876,6 +901,9 @@ impl KnowledgeEngine {
         graph_id: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<PageReferencesMeta> {
+        let blocks: Vec<_> = blocks.iter().map(|(id, content)| {
+            (id.clone(), crate::knowledge::source_projection::source_text(content))
+        }).filter(|(_, content)| !content.trim().is_empty()).collect();
         let llm = self
             .llm
             .as_ref()
@@ -893,7 +921,7 @@ impl KnowledgeEngine {
             .generate_references(
                 page_id,
                 page_title,
-                blocks,
+                &blocks,
                 graph_id,
                 llm.as_ref(),
                 embedder.as_ref(),
@@ -917,6 +945,7 @@ impl KnowledgeEngine {
         full_text: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<PageSummary> {
+        let full_text = crate::knowledge::source_projection::source_text(full_text);
         let llm = self
             .llm
             .as_ref()
@@ -924,7 +953,7 @@ impl KnowledgeEngine {
 
         crate::ai::references::generate_page_summary(
             title,
-            full_text,
+            &full_text,
             llm.as_ref(),
             on_progress,
             &crate::cancel::CancellationToken::new(),
@@ -943,6 +972,7 @@ impl KnowledgeEngine {
         on_progress: &mut (dyn FnMut(&str) + Send),
         cancel: &crate::cancel::CancellationToken,
     ) -> Result<Vec<TagTerm>> {
+        let full_text = crate::knowledge::source_projection::source_text(full_text);
         let llm = self
             .llm
             .as_ref()
@@ -950,7 +980,7 @@ impl KnowledgeEngine {
 
         crate::ai::references::generate_concept_edge_tags(
             title,
-            full_text,
+            &full_text,
             self.config.references.concept_edge_prompt.as_deref(),
             llm.as_ref(),
             on_progress,
@@ -972,6 +1002,7 @@ impl KnowledgeEngine {
         seed_text: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<crate::ai::web_research::WebResearchResult> {
+        let seed_text = crate::knowledge::source_projection::source_text(seed_text);
         let llm = self
             .llm
             .as_ref()
@@ -979,7 +1010,7 @@ impl KnowledgeEngine {
 
         let browser = crate::scraping::HttpBrowserDriver::new();
         crate::ai::web_research::WebResearchEngine::new(llm.as_ref(), &browser)
-            .research(title, seed_text, on_progress)
+            .research(title, &seed_text, on_progress)
             .await
     }
 
@@ -1005,6 +1036,35 @@ impl KnowledgeEngine {
             .build_ask_request(db, llm.as_ref(), question, graph_id, history)
             .await?;
 
+        self.complete_ask_request(llm.as_ref(), question, request)
+            .await
+    }
+
+    pub async fn ask_scoped(
+        &self,
+        db: &crate::db::Database,
+        question: &str,
+        graph_id: Option<&str>,
+        history: &[ChatTurn],
+        target: &crate::knowledge::scoped_context::AskContextTarget,
+    ) -> Result<AskResponse> {
+        let llm = self
+            .llm
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("LLM not initialized".into()))?;
+        let request = self
+            .build_scoped_ask_request(db, llm.as_ref(), question, graph_id, history, target)
+            .await?;
+        self.complete_ask_request(llm.as_ref(), question, request)
+            .await
+    }
+
+    async fn complete_ask_request(
+        &self,
+        llm: &dyn LlmProvider,
+        question: &str,
+        request: AskRequest,
+    ) -> Result<AskResponse> {
         let raw = llm
             .complete(
                 &request.messages,
@@ -1023,7 +1083,7 @@ impl KnowledgeEngine {
             crate::ai::reasoning::ThinkStripResult::Answer(a) => {
                 if crate::ai::language::expects_english(question, std::iter::empty()) {
                     crate::ai::language::repair_english_answer(
-                        llm.as_ref(),
+                        llm,
                         &a,
                         &crate::ai::traits::CompletionOptions {
                             max_tokens: Some(request.output_tokens as u32),
@@ -1493,7 +1553,7 @@ impl KnowledgeEngine {
         } else {
             ASK_RESERVED_OUTPUT_TOKENS
         };
-        let budget = ask_context_budget_with(llm.context_window(), reserved_output);
+        let budget = ask_context_budget_with(Some(self.ask_context_window(llm)), reserved_output);
 
         // Retrieval can't infer the missing anchors in follow-ups like
         // "it/that" or "the drive", so search those under the prior exchange
@@ -1530,65 +1590,15 @@ impl KnowledgeEngine {
             retrieval::assemble_within_budget(&hits, notes_budget)
         };
 
-        let context_block = build_context_block(&entries);
-        let system_prompt = build_system_prompt(&context_block, mode);
-
-        // Calibration hook (opt-in): `GRAFIUM_LOG_PROMPT_TOKENS=1` logs the
-        // assembled prompt's estimated token count, so an over-large RAG
-        // context (transcript pages) is measurable rather than guessed at.
-        if std::env::var_os("GRAFIUM_LOG_PROMPT_TOKENS").is_some() {
-            let est =
-                retrieval::estimate_tokens(&system_prompt) + retrieval::estimate_tokens(question);
-            eprintln!(
-                "[grafium] ask prompt ~{est} tokens — {} context entries, mode {mode:?}, \
-                 reserved_output {reserved_output}, context_budget {budget}",
-                entries.len()
-            );
-        }
-
-        // Replay the conversation so the model can resolve references itself
-        // when it writes the answer — the rewrite above only fixes retrieval.
-        // The thread is never truncated outright: turns too old to replay
-        // verbatim are folded into a recap so a long conversation keeps its
-        // continuity instead of silently forgetting its own beginning.
-        let mut messages = vec![crate::ai::traits::ChatMessage {
-            role: crate::ai::traits::MessageRole::System,
-            content: system_prompt,
-        }];
-        let fitted = conversation::fit_history(history, history_tokens);
-        if fitted.needs_compaction() {
-            messages.push(crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::System,
-                content: conversation::render_compaction(fitted.to_compact),
-            });
-        }
-        for turn in fitted.verbatim {
-            messages.push(crate::ai::traits::ChatMessage {
-                role: if turn.is_user() {
-                    crate::ai::traits::MessageRole::User
-                } else {
-                    crate::ai::traits::MessageRole::Assistant
-                },
-                content: turn.content.clone(),
-            });
-        }
-        messages.push(crate::ai::traits::ChatMessage {
-            role: crate::ai::traits::MessageRole::User,
-            content: crate::ai::question_with_answer_language_rule_in_history(
-                question,
-                history
-                    .iter()
-                    .rev()
-                    .filter(|turn| turn.is_user())
-                    .map(|turn| turn.content.as_str()),
-            ),
-        });
-
-        Ok(AskRequest {
-            messages,
+        self.fit_ask_request(
+            llm,
+            question,
+            history,
             entries,
-            output_tokens: reserved_output,
-        })
+            reserved_output,
+            |context| build_system_prompt(context, mode),
+        )
+        .await
     }
 
     /// Planning for the "From your notes" arm of the two-part research flow:
@@ -1611,7 +1621,7 @@ impl KnowledgeEngine {
         } else {
             ASK_RESERVED_OUTPUT_TOKENS
         };
-        let budget = ask_context_budget_with(llm.context_window(), reserved_output);
+        let budget = ask_context_budget_with(Some(self.ask_context_window(llm)), reserved_output);
 
         let mut hits = self
             .hybrid_search(db, question, ASK_TOP_K, graph_id)
@@ -1627,25 +1637,16 @@ impl KnowledgeEngine {
 
         self.expand_hits(db, &mut hits);
         let entries = retrieval::assemble_within_budget(&hits, budget);
-        let context_block = build_context_block(&entries);
-        let system_prompt = build_notes_only_system_prompt(&context_block);
-
-        let messages = vec![
-            crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::System,
-                content: system_prompt,
-            },
-            crate::ai::traits::ChatMessage {
-                role: crate::ai::traits::MessageRole::User,
-                content: crate::ai::question_with_answer_language_rule(question),
-            },
-        ];
-
-        Ok(Some(AskRequest {
-            messages,
+        self.fit_ask_request(
+            llm,
+            question,
+            &[],
             entries,
-            output_tokens: reserved_output,
-        }))
+            reserved_output,
+            build_notes_only_system_prompt,
+        )
+        .await
+        .map(Some)
     }
 
     /// Get the graph registry (read access).
@@ -2125,7 +2126,10 @@ fn build_context_block(entries: &[ContextEntry]) -> String {
         };
         out.push_str(&format!(
             "[{}] {} — from \"{}\":\n{}\n\n",
-            e.index, label, e.page_title, e.text
+            e.index,
+            label,
+            crate::ai::truncate_to_char_boundary(&e.page_title, 512),
+            e.text
         ));
     }
     out.trim_end().to_string()

@@ -1,31 +1,28 @@
 use crate::AppState;
 use grafium_core::graph::{BulkRenameResult, DeletePageResult};
-use grafium_core::models::Page;
+use grafium_core::models::{Page, PageSummary};
 use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PageSummary {
-    pub id: String,
-    pub title: String,
-    pub is_journal: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct DeleteBookFolderResult {
     pub deleted_pages: usize,
 }
 
-impl From<Page> for PageSummary {
-    fn from(page: Page) -> Self {
-        Self {
-            id: page.id,
-            title: page.title,
-            is_journal: page.is_journal,
-        }
-    }
+#[tauri::command]
+pub async fn list_page_summaries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PageSummary>, String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let graph = crate::open_graph_snapshot(&snapshot)?;
+        graph.db.list_page_summaries().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -71,6 +68,19 @@ pub fn list_journal_pages(
     graph
         .db
         .list_journal_pages(limit.unwrap_or(20), offset.unwrap_or(0))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_journal_note_dates(
+    state: State<AppState>,
+    year: i32,
+    month: u32,
+) -> Result<Vec<String>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .list_journal_note_dates(year, month)
         .map_err(|e| e.to_string())
 }
 
@@ -132,22 +142,77 @@ pub fn get_note_edits_for_day(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct PageLookupError {
+    code: &'static str,
+    message: String,
+}
+
+impl PageLookupError {
+    fn failed(error: impl std::fmt::Display) -> Self {
+        Self { code: "page_lookup_failed", message: error.to_string() }
+    }
+}
+
+fn lookup_page_name(
+    db: &grafium_core::db::Database,
+    title: &str,
+) -> Result<Page, PageLookupError> {
+    db.find_page_by_name(title).map_err(PageLookupError::failed)?
+        .ok_or_else(|| PageLookupError {
+            code: "page_not_found",
+            message: format!("No page has the title or approved alias '{title}'."),
+        })
+}
+
+#[cfg(test)]
+mod page_lookup_tests {
+    use super::*;
+    use grafium_core::db::Database;
+
+    #[test]
+    fn navigation_reuses_alias_identity_and_distinguishes_ambiguity_from_missing() {
+        let db = Database::in_memory().unwrap();
+        let page = db.create_page("Niacin (Vitamin B3)", false).unwrap();
+        db.update_page(&page.id, None, Some(&serde_json::json!({"aliases":["Niacin"]}))).unwrap();
+        assert_eq!(lookup_page_name(&db, "niacin").unwrap().id, page.id);
+        assert_eq!(lookup_page_name(&db, "Absent page").unwrap_err().code, "page_not_found");
+        let other = db.create_page("Another nutrient", false).unwrap();
+        db.update_page(&other.id, None, Some(&serde_json::json!({"aliases":["Niacin"]}))).unwrap();
+        let ambiguous = lookup_page_name(&db, "Niacin").unwrap_err();
+        assert_eq!(ambiguous.code, "page_lookup_failed");
+        assert!(ambiguous.message.contains("ambiguous"));
+        assert!(db.get_page_by_title("Niacin").is_err());
+        assert_eq!(db.count_pages().unwrap(), 2);
+    }
+
+    #[test]
+    fn navigation_normalizes_hierarchy_for_titles_and_approved_aliases() {
+        let db = Database::in_memory().unwrap();
+        let page = db.create_page("Projects / Alpha", false).unwrap();
+        db.update_page(&page.id, None, Some(&serde_json::json!({"alias":r"Work \ Alpha"}))).unwrap();
+        for name in ["Projects/Alpha", r"Projects\Alpha", "Work / Alpha", r"Work\Alpha"] {
+            let result = lookup_page_name(&db, name).unwrap();
+            assert_eq!(result.id, page.id);
+            assert_eq!(result.title, "Projects/Alpha");
+        }
+        assert_eq!(db.count_pages().unwrap(), 1);
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_page(
     state: State<AppState>,
     id: Option<String>,
     title: Option<String>,
-) -> Result<Page, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+) -> Result<Page, PageLookupError> {
+    let graph = state.graph.lock().map_err(PageLookupError::failed)?;
     if let Some(id) = id {
-        graph.db.get_page_by_id(&id).map_err(|e| e.to_string())
+        graph.db.get_page_by_id(&id).map_err(PageLookupError::failed)
     } else if let Some(title) = title {
-        graph
-            .db
-            .get_page_by_title_ci(&title)
-            .map_err(|e| e.to_string())
+        lookup_page_name(&graph.db, &title)
     } else {
-        Err("Must provide id or title".to_string())
+        Err(PageLookupError::failed("Must provide id or title"))
     }
 }
 
@@ -158,6 +223,9 @@ pub fn create_page(
     is_journal: Option<bool>,
 ) -> Result<Page, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = graph.db.find_page_by_name(&title).map_err(|error| error.to_string())? {
+        return Ok(existing);
+    }
     graph
         .create_page(&title, is_journal.unwrap_or(false))
         .map_err(|e| e.to_string())
@@ -322,11 +390,92 @@ pub fn update_page_source(
     state: State<AppState>,
     page_id: String,
     content: String,
+    expected_source: String,
+    graph_path: String,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph
-        .update_page_source(&page_id, &content)
+    update_page_source_in_graph(&graph, &graph_path, &page_id, &expected_source, &content)
+}
+
+fn update_page_source_in_graph(
+    graph: &grafium_core::Graph,
+    graph_path: &str,
+    page_id: &str,
+    expected_source: &str,
+    content: &str,
+) -> Result<(), String> {
+    let mismatch = || "The active graph changed; source was not written".to_string();
+    if graph_path.trim().is_empty()
+        || graph.root_dir.canonicalize().map_err(|_| mismatch())?
+            != Path::new(graph_path).canonicalize().map_err(|_| mismatch())?
+    {
+        return Err(mismatch());
+    }
+    graph.update_page_source_guarded(page_id, expected_source, content)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod source_guard_tests {
+    use super::*;
+    use grafium_core::Graph;
+
+    #[test]
+    fn source_guard_rejects_stale_editor_after_note_create_and_edit() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let graph = Graph::open(directory.path()).unwrap();
+        let graph_path = directory.path().to_str().unwrap();
+        let loaded = "- Original paragraph\n";
+        let page = graph.create_page_with_content("Synthetic", false, loaded).unwrap();
+        let note = graph.reading_note_create(
+            &uuid::Uuid::new_v4().to_string(), &page.id, None, "Preserve B",
+        ).unwrap();
+        let after_create = graph.get_page_source(&page.id).unwrap();
+        let stale = update_page_source_in_graph(
+            &graph, graph_path, &page.id, loaded, "- Stale editor's unrelated change\n",
+        ).unwrap_err();
+        assert!(stale.contains("revision conflict"), "{stale}");
+        assert_eq!(graph.get_page_source(&page.id).unwrap(), after_create);
+        assert!(graph.update_page_source(&page.id, loaded).unwrap_err().to_string().contains("expectedSource"));
+        graph.reading_note_update(&note.id, &note.revision, "Edited B").unwrap();
+        let after_note_edit = graph.get_page_source(&page.id).unwrap();
+        assert!(update_page_source_in_graph(
+            &graph, graph_path, &page.id, &after_create,
+            &after_create.replace("Original paragraph", "Stale paragraph edit"),
+        ).unwrap_err().contains("revision conflict"));
+        assert_eq!(graph.get_page_source(&page.id).unwrap(), after_note_edit);
+        let fresh_edit = after_note_edit.replace("Original paragraph", "Fresh paragraph edit");
+        update_page_source_in_graph(
+            &graph, graph_path, &page.id, &after_note_edit, &fresh_edit,
+        ).unwrap();
+        assert_eq!(graph.get_page_source(&page.id).unwrap(), fresh_edit);
+        let listed = graph.reading_notes_list(None).unwrap();
+        assert!(listed.warnings.is_empty());
+        assert_eq!(listed.notes.len(), 1);
+        assert_eq!(listed.notes[0].body, "Edited B");
+    }
+
+    #[test]
+    fn source_guard_requires_captured_current_graph_and_exact_base_for_plain_pages() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let other = tempfile::tempdir_in(".").unwrap();
+        let graph = Graph::open(directory.path()).unwrap();
+        let original = "- Ordinary unannotated source\n";
+        let page = graph.create_page_with_content("Synthetic", false, original).unwrap();
+        for path in ["", other.path().to_str().unwrap()] {
+            assert!(update_page_source_in_graph(
+                &graph, path, &page.id, original, "- Wrong graph\n",
+            ).unwrap_err().contains("active graph changed"));
+        }
+        assert!(update_page_source_in_graph(
+            &graph, directory.path().to_str().unwrap(), &page.id, "", "- Empty base is not a fallback\n",
+        ).unwrap_err().contains("revision conflict"));
+        assert_eq!(graph.get_page_source(&page.id).unwrap(), original);
+        update_page_source_in_graph(
+            &graph, directory.path().to_str().unwrap(), &page.id, original, "- Fresh ordinary edit\n",
+        ).unwrap();
+        assert_eq!(graph.get_page_source(&page.id).unwrap(), "- Fresh ordinary edit\n");
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -42,6 +42,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
           switch (cmd) {
             case "get_page": throw new Error("Page not found");
             case "get_app_theme": return "tokyo-night";
+            case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "get_graph_info": return { name: "Flight test", path: "/synthetic/flight-test-graph" };
             case "get_graph_data": return structuredClone(window.__flightGraph);
             case "plugin:event|listen": return 1;

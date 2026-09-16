@@ -48,11 +48,11 @@
     const query = settingsQuery;
     if (!root) return;
     const apply = () => {
-      settingsMatchCount = applySettingsSearch(root, query).items;
+      settingsMatchCount = applySettingsSearch(root, query).sections;
     };
     apply();
     const observer = new MutationObserver(apply);
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
     return () => observer.disconnect();
   });
 
@@ -710,6 +710,10 @@
 </div>
 
 <style>
+  .settings-page :global([hidden]) {
+    display: none !important;
+  }
+
   .settings-page {
     padding: 32px 48px;
     max-width: 800px;

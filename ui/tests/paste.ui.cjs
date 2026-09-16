@@ -44,6 +44,7 @@ async function openEditor(browser) {
               throw new Error("Page not found");
             case "get_graph_info": return { name: "Paste test", path: "/tmp/paste-test" };
             case "get_app_theme": return "dark";
+            case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "list_blocks": return structuredClone(state.blocks.filter((block) => block.page_id === args.pageId));
             case "create_block": {
               const block = makeBlock(`created-${++sequence}`, args.parentId ?? null, args.orderIndex, args.content);

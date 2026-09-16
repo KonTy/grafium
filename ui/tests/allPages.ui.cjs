@@ -90,6 +90,7 @@ const EXPECT = {
             case "pages_tag_tree": return tagTree;
             case "get_graph_info": return { path: "/tmp/test-graph", name: "Test" };
             case "get_app_theme": return "dark";
+            case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "get_child_pages": return pages.filter((p) => p.title.startsWith(`${args.parentTitle}/`));
             case "plugin:event|listen": return 0;
             // Anything else the app asks for during boot. Returning `[]`

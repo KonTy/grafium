@@ -20,29 +20,42 @@ export type WikiLinkToken = {
 /**
  * Detect an unclosed wiki-link token immediately before the cursor.
  *
- * Stops at a closed `]]` or a newline so a finished link, or a `[` that is
- * not a wiki opener, never hijacks the slash/`<` menus.
+ * Alias text is not a title query. Stop after `|`, a closing bracket, or a
+ * newline so editing a display label never opens the page picker.
  */
 export function wikiLinkToken(beforeCursor: string): WikiLinkToken | null {
   const start = beforeCursor.lastIndexOf("[[");
   if (start < 0) return null;
+  const escapes = /\\+$/.exec(beforeCursor.slice(0, start))?.[0].length ?? 0;
+  if (escapes % 2 === 1) return null;
   const inner = beforeCursor.slice(start + 2);
-  if (inner.includes("]]") || inner.includes("\n")) return null;
+  if (/[\[\]|\r\n]/.test(inner)) return null;
   return { from: start, query: inner };
 }
 
-export function wikiLinkReplacement(title: string): string {
-  return `[[${title}]]`;
+function wikiLinkSuffix(afterCursor: string): { length: number; alias?: string } {
+  const closed = /^([^\[\]\r\n]*)(\]\]?)/.exec(afterCursor);
+  const unclosedAlias = /^\|[^\[\]\r\n]*$/.exec(afterCursor);
+  const inner = closed?.[1] ?? unclosedAlias?.[0];
+  if (inner === undefined) return { length: 0 };
+  const separator = inner.indexOf("|");
+  return {
+    length: closed?.[0].length ?? inner.length,
+    alias: separator < 0 ? undefined : inner.slice(separator + 1),
+  };
+}
+
+export function wikiLinkReplacement(title: string, afterCursor = ""): string {
+  const { alias } = wikiLinkSuffix(afterCursor);
+  return alias === undefined ? `[[${title}]]` : `[[${title}|${alias}]]`;
 }
 
 /**
- * Extra characters after the cursor that belong to a half-typed closer,
- * so picking a title replaces `[[query]]` instead of producing `[[Title]]]]`.
+ * Consume the existing target suffix, alias, and closer when completing from
+ * anywhere in a title. Pass the same suffix to `wikiLinkReplacement`.
  */
 export function wikiLinkCloseExtra(afterCursor: string): number {
-  if (afterCursor.startsWith("]]")) return 2;
-  if (afterCursor.startsWith("]")) return 1;
-  return 0;
+  return wikiLinkSuffix(afterCursor).length;
 }
 
 export function rankWikiLinkTitles<T extends WikiLinkPage>(

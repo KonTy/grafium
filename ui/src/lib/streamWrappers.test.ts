@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { researchDeep } from "./research";
 import {
+  aiAsk,
   aiAskStream,
   isResearchCancellation,
   RESEARCH_CANCELLED_MESSAGE,
@@ -60,6 +61,21 @@ describe("explicit chat scope", () => {
     await aiAskStream("Search the web for test results", handlers());
     expect(invokeMock).toHaveBeenCalledWith("ai_ask_stream",
       expect.objectContaining({ scope: "local", history: [] }));
+  });
+
+  it("keeps page and block source IDs separate from the actual Ask question", async () => {
+    const question = "What does this video say about training?";
+    const history = [{ role: "user" as const, content: "Tell me about the video" }];
+    for (const contextTarget of [{ pageId: "video-page" }, { pageId: "video-page", blockId: "transcript" }]) {
+      await aiAsk(question, undefined, history, contextTarget);
+      expect(invokeMock).toHaveBeenLastCalledWith("ai_ask", {
+        question, graphId: undefined, history, contextTarget,
+      });
+    }
+    await aiAsk(question, undefined, history);
+    expect(invokeMock).toHaveBeenLastCalledWith("ai_ask", {
+      question, graphId: undefined, history,
+    });
   });
 
   it("passes Internet independently of the research toggle", async () => {

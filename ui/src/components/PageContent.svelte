@@ -1,7 +1,12 @@
 <script lang="ts">
   import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
-  import { onDestroy, tick } from "svelte";
+  import { getContext, onDestroy, tick } from "svelte";
+  import KeyboardSelectionToolbar from "./KeyboardSelectionToolbar.svelte";
+  import {
+    createKeyboardBlockSelection, KEYBOARD_BLOCK_SELECTION,
+    type KeyboardBlockSelection, type BlockTextSelection,
+  } from "../lib/keyboardBlockSelection.svelte";
   import BlockEditor from "./BlockEditor.svelte";
   import UnifiedPageEditor from "./UnifiedPageEditor.svelte";
   import CollectionMembers from "./CollectionMembers.svelte";
@@ -23,6 +28,8 @@
     discoverLinkCandidates,
     listLinkCandidates,
     acceptLinkCandidate,
+    resolveLinkCandidate,
+    getGraphInfo,
     dismissLinkCandidate,
     restoreLinkCandidate,
     undoLinkCandidateAccept,
@@ -40,7 +47,7 @@
   import { renderBlock, assetBaseDirFor, markdownHeadingSlug } from "../lib/markdown";
   import { wrapPageLinkText } from "../lib/editorFormat";
   import { bulletToTodoContent, isTaskContent, taskToBulletContent } from "../lib/taskSyntax";
-  import { formatBlocksAsOutlineMarkdown, formatBlocksAsPlainText } from "../lib/blockClipboard";
+  import { formatBlocksAsOutlineMarkdown, formatBlocksAsPlainText, writeClipboardText } from "../lib/blockClipboard";
   import { bionicReader } from "../lib/bionicReader";
   import { hydrateRenderedMedia } from "../lib/renderedMedia";
   import {
@@ -52,7 +59,9 @@
     type PageLoadRequest,
   } from "../lib/pageContentLoad";
   import type { BacklinkResult, Block, CreateBlockBatchItem, Page } from "../lib/api";
-  import { pushUndo, removeUndoActions, setUndoCallback, removeUndoCallback } from "../lib/undoStack";
+  import { pushUndo, removeUndoActions, setUndoCallback, removeUndoCallback, runUndoOperation } from "../lib/undoStack";
+  import { flushPageEditors, withPageEditorsLocked, registerPageEditorReload } from "../lib/editorPersistence";
+  import { readingSourceBlocks } from "../lib/readingNoteFormat";
   import type { BlockContentChange, UndoAction } from "../lib/undoStack";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import { jobs, isTerminal } from "../lib/jobs.svelte";
@@ -96,9 +105,10 @@
     onPageRenamed?: (page: Page) => void;
     onPageDeleted?: (parentTitle: string | null) => void;
     onLoadSettled?: () => void;
+    onNavigateBoundary?: (direction: "up" | "down", caretX: number) => void;
   }
 
-  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted, onLoadSettled }: Props = $props();
+  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted, onLoadSettled, onNavigateBoundary }: Props = $props();
 
   // Asset references in this page's blocks are resolved relative to the
   // directory its markdown file lives in, so media stored beside a page (and a
@@ -119,6 +129,11 @@
 
   let blocks: Block[] = $state([]);
   let destroyed = false;
+  const sharedKeyboardSelection = getContext<KeyboardBlockSelection | undefined>(KEYBOARD_BLOCK_SELECTION);
+  const keyboardSelection = sharedKeyboardSelection ?? createKeyboardBlockSelection(() => pageContentEl);
+  onDestroy(() => {
+    if (!sharedKeyboardSelection) keyboardSelection.destroy();
+  });
 
   // Highlight after the blocks are in the DOM. Depending on `blocks` as well as
   // `highlight` matters: navigation renders the page before its content loads,
@@ -164,9 +179,120 @@
   type BlockEditorHandle = {
     focusForNav: (x: number, edge: "top" | "bottom") => void;
     focusAtEnd: () => void;
+    focusAfterDelete: (edge: "start" | "end") => void;
     insertText: (text: string) => void;
+    prepareBlockSelection: (isCurrent: () => boolean) => Promise<boolean>;
+    restoreTextSelection: (selection: BlockTextSelection) => void;
   };
   let blockRefs: Record<string, BlockEditorHandle> = {};
+  let unifiedEditor: UnifiedPageEditor | undefined;
+
+  $effect(() => {
+    const pageId = page.id;
+    return keyboardSelection.register(pageId, {
+      visibleIds: () => {
+        if (loadError) throw new Error(loadError);
+        return visibleBlocks.map((block) => block.id);
+      },
+      prepare: async (blockId, isCurrent) => {
+        if (useUnifiedEditorPrototype) {
+          if (!unifiedEditor) throw new Error("Continuous editor is not ready");
+          return unifiedEditor.prepareBlockSelection(isCurrent);
+        }
+        const editor = blockRefs[blockId];
+        if (!editor && blockRenderState.blockById.has(blockId)) return isCurrent();
+        if (!editor) throw new Error("The selected block is not ready");
+        return editor.prepareBlockSelection(isCurrent);
+      },
+      restore: async (blockId, selection, isCurrent) => {
+        if (useUnifiedEditorPrototype) {
+          if (!unifiedEditor) throw new Error("Continuous editor is not ready");
+          await unifiedEditor.restoreTextSelection(blockId, selection, isCurrent);
+        } else {
+          const rendered = await ensureBlockRendered(blockId);
+          if (!isCurrent() || destroyed) return;
+          if (!rendered || !blockRefs[blockId]) throw new Error("Could not restore the text selection");
+          getRenderedBlockEl(blockId)?.scrollIntoView({ block: "nearest" });
+          blockRefs[blockId].restoreTextSelection(selection);
+        }
+      },
+      focusEdge: async (blockId, x, edge, isCurrent) => {
+        if (useUnifiedEditorPrototype) {
+          if (!unifiedEditor) throw new Error("Continuous editor is not ready");
+          await unifiedEditor.focusForNav(x, edge, isCurrent, blockId);
+        } else {
+          const rendered = await ensureBlockRendered(blockId);
+          if (!isCurrent() || destroyed) return;
+          if (!rendered || !blockRefs[blockId]) throw new Error("Could not focus the selected block");
+          getRenderedBlockEl(blockId)?.scrollIntoView({ block: "nearest" });
+          blockRefs[blockId].focusForNav(x, edge);
+        }
+      },
+      focusCursor: async (blockId, edge, isCurrent) => {
+        if (useUnifiedEditorPrototype) {
+          if (!unifiedEditor) throw new Error("Continuous editor is not ready");
+          await unifiedEditor.focusForNav(undefined, edge === "start" ? "top" : "bottom", isCurrent, blockId);
+        } else {
+          const rendered = await ensureBlockRendered(blockId);
+          if (!isCurrent() || destroyed) return;
+          if (!rendered || !blockRefs[blockId]) throw new Error("Could not focus the block after deletion");
+          getRenderedBlockEl(blockId)?.scrollIntoView({ block: "nearest" });
+          blockRefs[blockId].focusAfterDelete(edge);
+          await tick();
+        }
+      },
+      reveal: async (blockId) => {
+        if (useUnifiedEditorPrototype) {
+          if (!unifiedEditor) throw new Error("Continuous editor is not ready");
+          unifiedEditor.revealBlock(blockId);
+        } else if (!await revealBlock(blockId)) {
+          throw new Error("Could not reveal the selected block");
+        }
+      },
+      select: (ids) => {
+        clearBlockSelection();
+        selectedBlockIds = ids;
+      },
+      snapshots: (ids) => blocksWithDescendantsInDocumentOrder(ids).map(snapshotBlock),
+      clipboard: (ids) => blocksWithDescendantsInDocumentOrder(ids)
+        .map((block) => ({ content: block.content, depth: getBlockDepth(block.id) })),
+      reload: async () => {
+        // Do not create placeholders during grouped deletion: undo restores the
+        // original block IDs; a placeholder would become an extra unwanted block.
+        const request = currentPageLoad();
+        const updated = await listBlocks(request.pageId);
+        if (destroyed || !isCurrentPageLoad(pageLoadState, request)) return;
+        blocks = updated;
+        if (useUnifiedEditorPrototype) await unifiedEditor?.reloadSource();
+        refreshCollectionAfterMutation();
+        refreshPageTrees();
+      },
+      indent: handleIndentSelection,
+      focusHost: () => pageContentEl?.focus({ preventScroll: true }),
+    });
+  });
+
+  function handleSelectBoundary(blockId: string, direction: "up" | "down", selection: BlockTextSelection, x: number, headBlockId?: string) {
+    void keyboardSelection.begin(page.id, blockId, direction, selection, x, headBlockId);
+  }
+
+  export async function focusForNav(x: number, edge: "top" | "bottom", isCurrent: () => boolean): Promise<void> {
+    if (destroyed || !isCurrent()) return;
+    if (useUnifiedEditorPrototype) {
+      if (!unifiedEditor) throw new Error("Continuous journal editor is not ready");
+      await unifiedEditor.focusForNav(x, edge, isCurrent);
+      return;
+    }
+    if (loadError) throw new Error(loadError);
+    const target = edge === "top" ? visibleBlocks[0] : visibleBlocks.at(-1);
+    if (!target) throw new Error("Journal entry has no editable block");
+    const rendered = await ensureBlockRendered(target.id);
+    if (destroyed || !isCurrent()) return;
+    const ref = blockRefs[target.id];
+    if (!rendered || !ref) throw new Error("Could not reveal the journal block");
+    getRenderedBlockEl(target.id)?.scrollIntoView({ block: "nearest" });
+    ref.focusForNav(x, edge);
+  }
 
   function pageMatchesEditRequest(detail: EditPageEndDetail): boolean {
     if (detail.pageId && detail.pageId === page.id) return true;
@@ -466,7 +592,7 @@
   }
 
   function canHandleBlockSelectionEvent(event: Event): boolean {
-    return selectedBlockIds.size > 0
+    return !keyboardSelection.active && selectedBlockIds.size > 0
       && isBlockSelectionOwner()
       && !editableTargetOutsideThisPage(event)
       && !nativeSelectionOutsideThisPage();
@@ -619,9 +745,10 @@
   $effect(() => {
     const pageId = page.id;
     const handleFindLinksRequest = (event: Event) => {
-      const detail = (event as CustomEvent<{ pageId: string }>).detail;
+      const detail = (event as CustomEvent<{ pageId: string; exactOnly?: boolean }>).detail;
       if (!detail || detail.pageId !== pageId || compact) return;
-      void handleSuggestLinks();
+      if (detail.exactOnly) void handleFindLinks();
+      else void handleSuggestLinks();
     };
 
     window.addEventListener("page-content-find-links", handleFindLinksRequest);
@@ -901,6 +1028,22 @@
     return capturePageLoad(pageLoadState, page.id, page.title);
   }
 
+  $effect(() => registerPageEditorReload(page.id, async () => {
+    const request = currentPageLoad();
+    const updated = await listBlocks(request.pageId);
+    if (destroyed || !isCurrentPageLoad(pageLoadState, request)) return;
+    for (const block of updated) {
+      window.dispatchEvent(new CustomEvent("grafium-block-content-replaced", {
+        detail: { pageId: request.pageId, blockId: block.id, content: block.content },
+      }));
+    }
+    blocks = updated;
+    if (useUnifiedEditorPrototype) await unifiedEditor?.reloadSource();
+    await tick();
+    refreshCollectionAfterMutation();
+    refreshPageTrees();
+  }));
+
   function setUnifiedEditorPrototype(enabled: boolean) {
     useUnifiedEditorPrototype = enabled;
     try {
@@ -925,10 +1068,20 @@
   $effect(() => {
     if (page?.id) {
       setUndoCallback(page.id, (_action: UndoAction) => {
+        // The selection controller awaits its own reload before placing the
+        // caret. A second unawaited reload could tear down that new editor.
+        if (_action.type === "delete_block_selection" && keyboardSelection.busy) return;
+        if (keyboardSelection.active) keyboardSelection.clear();
         if (_action.type === "accept_link_candidates") {
           lastLinkCandidateAction = null;
         }
         void loadBlocks(currentPageLoad());
+        if (useUnifiedEditorPrototype) {
+          void unifiedEditor?.reloadSource().catch((error) => {
+            console.error("Could not refresh the continuous editor after a block operation:", error);
+            showToast(`Could not refresh the editor: ${String(error)}`, "error");
+          });
+        }
         refreshCollectionAfterMutation();
         refreshPageTrees();
       });
@@ -1307,7 +1460,7 @@
   }
 
   function linkCandidateOccurrenceKey(candidate: LinkCandidate): string {
-    return `${candidate.from_block_id}:${candidate.to_page_id}:${candidate.anchor_start}:${candidate.anchor_end}`;
+    return `${candidate.from_block_id}:${candidate.to_page_id ?? candidate.to_page_title}:${candidate.anchor_start}:${candidate.anchor_end}`;
   }
 
   function uniqueOccurrenceCandidates(candidates: LinkCandidate[]): LinkCandidate[] {
@@ -1335,7 +1488,7 @@
     const groups = new Map<string, LinkCandidateGroup>();
 
     for (const candidate of candidates) {
-      const key = `${candidate.from_page_id}:${candidate.to_page_id}`;
+      const key = `${candidate.from_page_id}:${candidate.to_page_id ?? `${candidate.resolution}:${candidate.to_page_title}`}`;
       const group = groups.get(key);
       if (group) {
         group.candidates.push(candidate);
@@ -1368,36 +1521,59 @@
     return Array.from(groups.values()).sort((a, b) => b.primary.updated_at - a.primary.updated_at);
   }
 
-  async function handleAcceptLinkCandidateGroup(group: LinkCandidateGroup) {
+  async function handleAcceptLinkCandidateGroup(group: LinkCandidateGroup, targetPageId?: string | null) {
+    const request = currentPageLoad();
     linkCandidatesError = "";
     const accepted: LinkCandidate[] = [];
+    let actionError = "";
     try {
-      const candidatesToAccept = sortedCandidatesForAccept(group.candidates);
-      for (const candidate of candidatesToAccept) {
-        accepted.push(await acceptLinkCandidate(candidate.id));
+      await runUndoOperation(() => withPageEditorsLocked(request.pageId, async () => {
+        const graph = await getGraphInfo();
+        await flushPageEditors(request.pageId);
+        if (!isCurrentPageLoad(pageLoadState, request)) {
+          throw new Error("Return to the source page before accepting its links.");
+        }
+        try {
+          for (const candidate of sortedCandidatesForAccept(group.candidates)) {
+            accepted.push(targetPageId === undefined
+              ? await acceptLinkCandidate(candidate.id)
+              : await resolveLinkCandidate(candidate.id, targetPageId, targetPageId === null, graph.path));
+          }
+          const acceptedIds = new Set(accepted.map((candidate) => candidate.id));
+          const duplicates = group.candidates.filter((candidate) => !acceptedIds.has(candidate.id));
+          await Promise.all(duplicates.map((candidate) => dismissLinkCandidate(candidate.id)));
+        } finally {
+          // Each occurrence is atomic; keep successful edits undoable if a later one fails.
+          if (accepted.length > 0) {
+            pushUndo({
+              type: "accept_link_candidates",
+              pageId: request.pageId,
+              candidateIds: accepted.map((candidate) => candidate.id),
+            });
+          }
+        }
+      }));
+    } catch (cause) {
+      actionError = `Could not link suggestion: ${String(cause)}`;
+    } finally {
+      if (isCurrentPageLoad(pageLoadState, request)) {
+        if (accepted.length > 0) lastLinkCandidateAction = { kind: "accepted", candidates: accepted };
+        linkCandidatesRevealed = true;
+        if (accepted.length > 0) await reloadCurrentPageContent({ loadCandidates: true });
+        else await loadLinkCandidates(request, true);
+        if (actionError && isCurrentPageLoad(pageLoadState, request)) linkCandidatesError = actionError;
       }
-      const acceptedIds = new Set(accepted.map((candidate) => candidate.id));
-      const duplicateCandidates = group.candidates.filter((candidate) => !acceptedIds.has(candidate.id));
-      await Promise.all(duplicateCandidates.map((candidate) => dismissLinkCandidate(candidate.id)));
-      lastLinkCandidateAction = { kind: "accepted", candidates: accepted };
       if (accepted.length > 0) {
-        pushUndo({
-          type: "accept_link_candidates",
-          pageId: page.id,
-          candidateIds: accepted.map((candidate) => candidate.id),
-        });
+        refreshPageTrees();
+        window.dispatchEvent(new CustomEvent("page-content-reload-blocks", {
+          detail: { pageId: request.pageId },
+        }));
       }
-      linkCandidatesRevealed = true;
-      await reloadCurrentPageContent({ loadCandidates: true });
-      refreshPageTrees();
-    } catch (e: any) {
-      if (accepted.length > 0) {
-        lastLinkCandidateAction = { kind: "accepted", candidates: accepted };
-      }
-      linkCandidatesError = e?.toString() || "Failed to link suggestion";
-      linkCandidatesRevealed = true;
-      await loadLinkCandidates(currentPageLoad(), true);
     }
+  }
+
+  async function handleResolveLinkCandidateGroup(group: LinkCandidateGroup, targetPageId: string | null) {
+    await handleAcceptLinkCandidateGroup(group, targetPageId);
   }
 
   async function handleDismissLinkCandidateGroup(group: LinkCandidateGroup) {
@@ -1444,6 +1620,7 @@
   }
 
   function navigateToCandidateTarget(candidate: LinkCandidate) {
+    if (!candidate.to_page_id) return;
     window.dispatchEvent(new CustomEvent("navigate-page", { detail: candidate.to_page_title }));
   }
 
@@ -1452,6 +1629,8 @@
   }
 
   function linkCandidateGroupSourceLabel(group: LinkCandidateGroup): string {
+    if (group.primary.resolution === "ambiguous") return "Choose target";
+    if (!group.primary.to_page_id) return "New concept";
     if (group.hasCanonicalTarget) return "Alias match";
     if (group.sources.length > 1) return "Mixed";
     return linkCandidateSourceLabel(group.primary);
@@ -1582,6 +1761,7 @@
   let preEditSnapshots: Map<string, Block> = new Map();
 
   function handleFocus(blockId: string) {
+    if (keyboardSelection.active) keyboardSelection.clear();
     focusedBlockId = blockId;
     threadBlockId = blockId;
     emitFocusChanged(blockId);
@@ -2003,10 +2183,11 @@
   }
 
   function handleNavigate(blockId: string, direction: "up" | "down", caretX?: number) {
-    navigatingBlock = true;
     const idx = blockRenderState.visibleIndexById.get(blockId) ?? -1;
+    if (idx < 0) return;
     const targetIdx = direction === "up" ? idx - 1 : idx + 1;
     if (targetIdx >= 0 && targetIdx < visibleBlocks.length) {
+      navigatingBlock = true;
       const target = visibleBlocks[targetIdx];
       // Moving up lands on the target's BOTTOM line; down lands on its TOP.
       const edge: "top" | "bottom" = direction === "up" ? "bottom" : "top";
@@ -2016,6 +2197,8 @@
         if (!rendered) return;
         blockRefs[target.id]?.focusForNav(caretX ?? 0, edge);
       });
+    } else {
+      onNavigateBoundary?.(direction, caretX ?? 0);
     }
   }
 
@@ -2286,7 +2469,11 @@
     if (selectedBlockIds.size === 0 || analyzingSelection) return;
     // Document order, not click order, so the summary reads coherently
     // regardless of which block the user shift-clicked from.
-    const selected = blocks.filter((b) => selectedBlockIds.has(b.id));
+    const selected = readingSourceBlocks(blocks).filter((b) => selectedBlockIds.has(b.id));
+    if (!selected.length) {
+      analyzeSelectionError = "Select source text, not reading notes, for source analysis.";
+      return;
+    }
     const text = selected.map((b) => b.content).join("\n\n").trim();
     if (!text) return;
 
@@ -2588,30 +2775,6 @@
       selectionCopyMessage = "";
       selectionCopyTimer = undefined;
     }, 1600);
-  }
-
-  async function writeClipboardText(text: string) {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-    } catch {
-      // WebKitGTK can reject the async Clipboard API even from a user gesture.
-    }
-
-    const scratch = document.createElement("textarea");
-    scratch.value = text;
-    scratch.style.position = "fixed";
-    scratch.style.left = "-9999px";
-    scratch.style.opacity = "0";
-    document.body.appendChild(scratch);
-    scratch.select();
-    const copied = document.execCommand("copy");
-    scratch.remove();
-    if (!copied) {
-      throw new Error("clipboard text API is unavailable");
-    }
   }
 
   async function copySelectedBlocks() {
@@ -2918,7 +3081,8 @@
   onclick={closeSelectionMenu}
 />
 
-<div class="page-content" bind:this={pageContentEl} class:compact class:bookPage={isImportedBookPage}>
+<div class="page-content" bind:this={pageContentEl} class:compact class:bookPage={isImportedBookPage}
+  tabindex="-1" data-keyboard-block-selection={keyboardSelection.active ? "true" : undefined}>
   <div class="page-heading">
     <div class="page-title-row">
       {#if renamingTitle}
@@ -3027,7 +3191,10 @@
     </div>
   {/if}
 
-  {#if selectedBlockIds.size > 0}
+  {#if !sharedKeyboardSelection}
+    <KeyboardSelectionToolbar selection={keyboardSelection} />
+  {/if}
+  {#if selectedBlockIds.size > 0 && !keyboardSelection.active}
     <div class="selection-toolbar">
       <span class="selection-count">{selectedBlockIds.size} selected</span>
       <button
@@ -3204,11 +3371,27 @@
                     class="link-candidate-target"
                     type="button"
                     onclick={() => navigateToCandidateTarget(group.primary)}
-                    title="Open suggested target page"
+                    disabled={!group.primary.to_page_id}
+                    title={group.primary.to_page_id ? "Open suggested target page" : "A new page is created only when you accept the link"}
                   >
                     {group.primary.to_page_title}
                   </button>
                 </div>
+                {#if group.primary.reason}
+                  <div class="link-candidate-meta">{group.primary.reason}</div>
+                {/if}
+                {#if group.primary.resolution === "ambiguous"}
+                  <div class="link-candidate-actions" role="group" aria-label="Choose concept target">
+                    {#each group.primary.alternatives ?? [] as target}
+                      <button type="button" onclick={() => handleResolveLinkCandidateGroup(group, target.id)}>
+                        Use {target.title}
+                      </button>
+                    {/each}
+                    <button type="button" onclick={() => handleResolveLinkCandidateGroup(group, null)}>
+                      Create and link new concept
+                    </button>
+                  </div>
+                {/if}
                 <div class="link-candidate-meta">
                   {group.occurrenceCount} occurrence{group.occurrenceCount === 1 ? "" : "s"} on this page
                   {#if group.canFixSpelling}
@@ -3236,7 +3419,7 @@
                 {/if}
               </div>
               <div class="link-candidate-actions">
-                <button type="button" onclick={() => handleAcceptLinkCandidateGroup(group)}>
+                <button type="button" onclick={() => handleAcceptLinkCandidateGroup(group)} disabled={group.primary.resolution === "ambiguous"}>
                   {group.hasCanonicalTarget ? "Fix + link" : group.occurrenceCount > 1 ? "Link all" : "Link"}
                 </button>
                 <button type="button" onclick={() => handleDismissLinkCandidateGroup(group)}>Not an edge</button>
@@ -3258,8 +3441,12 @@
 
   {#if useUnifiedEditorPrototype}
     <UnifiedPageEditor
+      bind:this={unifiedEditor}
       {page}
       {compact}
+      {onNavigateBoundary}
+      onSelectBoundary={handleSelectBoundary}
+      selectedBlockIds={keyboardSelection.active ? selectedBlockIds : undefined}
       onReload={reloadCurrentPageContent}
       onExitPrototype={() => setUnifiedEditorPrototype(false)}
     />
@@ -3299,6 +3486,7 @@
             onEnter={handleEnter}
             onDelete={handleDelete}
             onNavigate={handleNavigate}
+            onSelectBoundary={handleSelectBoundary}
             onAnchor={handleBlockAnchor}
             onIndent={handleIndent}
             onBulletClick={handleBulletClick}

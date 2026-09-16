@@ -19,7 +19,7 @@ export type StreamPhase =
   | "generating"
   | "searching_web"
   | "reading_sources"
-  // Deep-research ("Research" checkbox) phases. Unlike the linear chat phases
+  // Deep web research phases. Unlike the linear chat phases
   // above, these form a *cycle*: plan → search → read → assess → refine →
   // (search again) → … → synthesize. They're driven explicitly by the research
   // backend, which is why the monotonic guard below doesn't apply to them.
@@ -65,6 +65,10 @@ const PHASE_RANK: Record<StreamPhase, number> = {
   refining: 9,
   synthesizing: 10,
 };
+
+export function isStreamPhase(phase: string): phase is StreamPhase {
+  return Object.prototype.hasOwnProperty.call(PHASE_RANK, phase);
+}
 
 // Phases the deep-research workflow drives explicitly and legitimately revisits
 // (refine loops back to searching). Transitions *among* these accept the new

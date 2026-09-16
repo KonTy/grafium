@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { extractMarkdownReferences } from "./markdown";
 import type { PageTreeViewNode } from "./pageTreeState";
 
 // The contract's Rust payloads use serde's default snake_case. If core opts
@@ -161,12 +162,12 @@ export function collectionMembersFromBlocks(
 ): CollectionMember[] {
   const members: CollectionMember[] = [];
   for (const block of blocks) {
-    const match = /\[\[([^\]]+)\]\]/.exec(block.content);
-    if (!match) continue;
+    const target = extractMarkdownReferences(block.content).pages[0];
+    if (!target) continue;
     members.push({
       block_id: block.id,
       order_index: block.order_index,
-      page_title: match[1].replace(/\\/g, "/"),
+      page_title: target,
     });
   }
   return members;
@@ -184,12 +185,12 @@ export function pageTreeReferencesChanged(previous: string, next: string): boole
 
 function collectTreeReferences(content: string): Set<string> {
   const references = new Set<string>();
-  for (const match of content.matchAll(/\[\[([^\]]+)\]\]/g)) {
-    references.add(`page:${match[1].replace(/\\/g, "/").toLowerCase()}`);
+  const { pages, tags } = extractMarkdownReferences(content);
+  for (const target of pages) {
+    references.add(`page:${target.toLowerCase()}`);
   }
-  for (const match of content.matchAll(/#([a-zA-Z0-9_/\\-]+)/g)) {
-    if (match[1] === "flashcard") continue;
-    references.add(`tag:${match[1].replace(/\\/g, "/").toLowerCase()}`);
+  for (const tag of tags) {
+    references.add(`tag:${tag.toLowerCase()}`);
   }
   return references;
 }

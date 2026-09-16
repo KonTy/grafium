@@ -4,6 +4,11 @@ export type PageNavigationTarget = string | { id: string } | { title: string };
 
 export type GetPageFn = (opts: { id?: string; title?: string }) => Promise<Page>;
 
+export function isPageNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    "code" in error && error.code === "page_not_found";
+}
+
 export function resolvePageLookup(target: PageNavigationTarget): { id?: string; title?: string } {
   if (typeof target === "string") {
     return { title: target };

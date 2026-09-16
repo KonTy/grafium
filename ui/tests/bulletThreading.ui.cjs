@@ -54,6 +54,7 @@ async function openOutline(browser, large = false, duplicateOrder = false) {
             throw new Error("Page not found");
           case "get_graph_info": return { name: "Thread test", path: "/tmp/thread-test" };
           case "get_app_theme": return "github";
+          case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
           case "list_blocks": return structuredClone(blocks);
           case "update_block": {
             const block = blocks.find((item) => item.id === args.id);

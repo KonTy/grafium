@@ -358,9 +358,10 @@ export function aiSearch(
 
 export function aiGenerateReferences(
   pageId: string,
-  operationId?: string
+  operationId?: string,
+  guards?: SummarySourceGuards
 ): Promise<PageReferencesMeta> {
-  return invoke("ai_generate_references", { pageId, operationId });
+  return invoke("ai_generate_references", { pageId, operationId, ...guards });
 }
 
 // Summarizes an arbitrary text selection (e.g. concatenated content of
@@ -418,71 +419,82 @@ export function wrapKnownTermsInText(content: string, terms: TagTerm[]): Promise
 
 // Result of a successful `aiInsertPageSummary` call — the fields needed to
 // push a matching entry onto the undo stack (see undoStack.ts) so Ctrl-Z
-// after "Insert into page" cleanly reverses the full change, including
-// the tag-wrap rewrites of unrelated pre-existing blocks.
+// after "Insert into page" reverses the tree and any explicitly requested
+// original-note wrapping together.
 export interface SummaryWrapChange {
   blockId: string;
   previousContent: string;
   newContent: string;
 }
 
+export interface SummaryBlock {
+  id: string;
+  page_id: string;
+  parent_id: string | null;
+  order_index: number;
+  content: string;
+  block_type: "Text" | "Handwriting" | "Audio" | "Mixed" | "Flashcard" | "Query";
+  properties: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SummaryCreatedTarget {
+  id: string;
+  title: string;
+  file_path: string | null;
+  created_at: number;
+  updated_at: number;
+  is_journal: boolean;
+  properties: Record<string, unknown>;
+}
+
+export interface SummaryUndoResult {
+  retainedTargets: { pageId: string; title: string; reason: string }[];
+}
+
 export interface AiInsertSummaryResult {
+  graphPath: string;
+  pageId: string;
   insertedBlockId: string;
   insertedContent: string;
   insertedAfterBlockId: string | null;
+  insertedBlocks: SummaryBlock[];
+  siblingOrderBefore: { blockId: string; orderIndex: number }[];
+  resolvedTargets: { pageId: string; title: string }[];
+  createdTargets: SummaryCreatedTarget[];
+  unlinkedTargets: { sourcePhrase: string; targetTitle: string; reason: string }[];
   wrapChanges: SummaryWrapChange[];
 }
 
-// Inserts an AI-generated page summary as a new block on the page — one
-// heading + paragraph per topic — and wraps each topic's tags in place as
-// `[[wiki-link]]`s across the page's existing blocks. Used by the "Insert
-// into page" button in ReferencePanel.svelte.
-//
-// `afterBlockId` is the id of the block the user last had a caret in on
-// the current page — when provided, the summary is inserted immediately
-// after that block (so it lands "at the cursor" wherever they were
-// reading); when null, it falls back to the top of the page.
-//
-// The returned `AiInsertSummaryResult` carries exactly what undo needs
-// to reverse the write — the id of the freshly-created summary block
-// plus the previous/new content of every block whose text was rewritten
-// during tag-wrap.
+export interface SummarySourceGuards {
+  graphPath: string;
+  expectedBlocks: import("./api").Block[];
+}
+
+// Flush and lock source-page editors before taking expectedBlocks. An explicit
+// wrapExisting opts into rewriting original notes; otherwise only the new tree
+// is linked. Insert accepts unambiguous new concept pages; the receipt owns
+// their IDs and metadata. Display unlinkedTargets to explain ambiguous tags.
+// A missing/stale anchor is an error, never a top-of-page fallback.
 export function aiInsertPageSummary(
   pageId: string,
   titleAnswer: string | null,
   topics: TopicSummary[],
-  afterBlockId: string | null = null
+  afterBlockId: string | null = null,
+  guards?: SummarySourceGuards & { wrapExisting?: boolean }
 ): Promise<AiInsertSummaryResult> {
-  return invoke("ai_insert_page_summary", { pageId, titleAnswer, topics, afterBlockId });
+  return invoke("ai_insert_page_summary", { pageId, titleAnswer, topics, afterBlockId, ...guards });
 }
 
-// Undoes a previous aiInsertPageSummary — deletes the summary block and
-// restores each rewrapped block to its previous content. Best-effort per
-// block: skips any that have since been deleted rather than aborting.
-export function aiUndoSummaryInsert(
-  insertedBlockId: string,
-  wrapChanges: SummaryWrapChange[]
-): Promise<void> {
-  return invoke("ai_undo_summary_insert", { insertedBlockId, wrapChanges });
+// Complete receipt required: stale content/structure/graph rejects atomically.
+export function aiUndoSummaryInsert(receipt: AiInsertSummaryResult): Promise<SummaryUndoResult> {
+  return invoke("ai_undo_summary_insert", { receipt });
 }
 
-// Redoes a previously-undone summary insert — recreates the summary
-// block after the same anchor (falling back to top-of-page if the anchor
-// has since been deleted) and reapplies each wrap change. Returns a
-// fresh AiInsertSummaryResult so the undo stack can flip the redo entry
-// back into an undo entry with the new block id.
-export function aiReapplySummaryInsert(
-  pageId: string,
-  insertedContent: string,
-  insertedAfterBlockId: string | null,
-  wrapChanges: SummaryWrapChange[]
-): Promise<AiInsertSummaryResult> {
-  return invoke("ai_reapply_summary_insert", {
-    pageId,
-    insertedContent,
-    insertedAfterBlockId,
-    wrapChanges,
-  });
+// Redo restores every block with its original identity and hierarchy.
+export function aiReapplySummaryInsert(receipt: AiInsertSummaryResult): Promise<AiInsertSummaryResult> {
+  return invoke("ai_reapply_summary_insert", { receipt });
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
@@ -493,8 +505,17 @@ export interface ChatTurn {
   content: string;
 }
 
-export function aiAsk(question: string, graphId?: string, history?: ChatTurn[]): Promise<AskResult> {
-  return invoke("ai_ask", { question, graphId, history: history ?? [] });
+export interface AskContextTarget {
+  pageId: string;
+  blockId?: string;
+}
+
+export function aiAsk(
+  question: string, graphId?: string, history?: ChatTurn[], contextTarget?: AskContextTarget,
+): Promise<AskResult> {
+  return invoke("ai_ask", {
+    question, graphId, history: history ?? [], ...(contextTarget ? { contextTarget } : {}),
+  });
 }
 
 export async function aiAskStream(

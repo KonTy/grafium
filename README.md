@@ -93,7 +93,7 @@ behind the normal graph. It is decorative, not an astronomical map.
 
 | Feature | What you can do |
 | --- | --- |
-| Block selection | Select, copy, indent, or delete groups of blocks; navigate between blocks with the keyboard. |
+| Block selection | Shift+Up/Down selects text first, then whole blocks at the edge, including across journal days. Reverse direction to shrink the selection; copy, cut, delete, and undo work on the group without merging its stored blocks. Deleting keeps the caret at the gap: start of the next block, end of the previous block if no next block remains, or an editable blank on an emptied page. |
 | Experimental continuous editor | Opt into a one-surface editor for cross-block text selection on an individual page or journal day; switch back to the classic editor at any time. |
 | In-place Markdown | Edit a focused block as source and read it as rendered Markdown when you leave it. |
 | Nested outlines | Indent, outdent, reorder, fold, and expand blocks and their children. |
@@ -110,13 +110,25 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Bionic Speedreader | Toggle the top-bar **B** button to emphasize word beginnings in rendered notes. It changes presentation, not the Markdown, and leaves code and math alone. |
 | Callouts | Insert styled notes, warnings, tips, and other supported callout templates. |
 | Selection actions | Turn selected bullets into TODOs or tasks back into bullets, and make links from selected text. |
+| Reading notes | Open the right panel's **Notes** tab, select a passage and choose **Use selection**, then write and **Save note**. Notes can also apply to the whole current page, book, or journal day. No AI is required. |
+| Self-contained annotations | New notes are Markdown footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Ambiguous or missing passages remain flagged instead of being guessed. |
+
+Reading-note drafts survive navigation during the app session, but **Save note**
+is required before closing the app. Saving adds reference markers and footnote
+definitions without rewriting the book's words. Conflicting external edits leave
+your draft intact. Earlier standalone Markdown note files remain supported and
+are not automatically moved or deleted. Your annotations are kept separate from
+the book evidence used by AI research. A misplaced inline note can be reattached
+within its source file; moving it to a different file is not yet supported.
+For passage selection, use the classic editor when an imported file has no saved
+block IDs; the experimental continuous editor reports this rather than guessing.
 
 ### Journals, calendars, and tasks
 
 | Feature | What you can do |
 | --- | --- |
-| Daily journals | Start with today's page and scroll through older entries in one journal view. |
-| **Go to date calendar** | Jump to a past or future journal; the selected day's page is opened or created for you. |
+| Daily journals | Start with today's page and scroll through older entries in one journal view. Arrow Down/Up continues into the adjacent day when the caret reaches the last/first line. |
+| **Go to date calendar** | Open with **Ctrl/Cmd+G**, navigate with the keyboard, and jump to a past or future journal. Circled days contain notes; the selected day's page is opened or created for you. |
 | Fast month/year navigation | Click the calendar's month or year heading to choose directly, page through years, or return with **Today**. |
 | Journal shortcuts | Move to today's, tomorrow's, previous, or next journal without hunting through the page tree. |
 | Task blocks | Keep `TODO`, `DOING`, `DONE`, and `CANCELED` items inside the notes that give them context. |
@@ -138,12 +150,14 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Tags | Add `#tags` and hierarchical tags to make ideas easier to gather. |
 | Backlinks | See the notes that refer to the current page, with block-level context. |
 | Reviewable link suggestions | Scan exact mentions or ask AI to find concept edges; **Link**, **Link all**, **Fix + link**, or dismiss with **Not an edge**, with undo available. |
+| Consistent concept links | Generated summaries and accepted suggestions display concepts as `#multi_word_name`, stored as `[[Canonical page title|#multi_word_name]]`. The label does not rename the destination. Existing titles and approved aliases are reused; ambiguous candidates require a choice. Discovering or dismissing suggestions does not create pages. |
 | Namespaces | Organize slash-separated titles such as `Projects/Observatory/Checklist` into a navigable tree. |
 | Collections | Mark a page as a book or paper collection from its page menu; navigate its ordered linked members, or convert it back to a regular page. |
 | All Pages | Browse the namespace hierarchy and find pages without remembering their exact location. |
 | Favorites and recent pages | Keep frequently used material close at hand and return to recent work. |
 | Full-text search | Search indexed note content with SQLite FTS5 and ranked results. |
-| Quick navigation | Jump to a page with **Ctrl/Cmd+K** instead of browsing the tree. |
+| Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the journal calendar, to browse all pages with an immediately focused fuzzy search. Arrows browse; Enter opens; Escape cancels. |
+| Global search | Search pages and note content with **Ctrl/Cmd+K**, independently of the right panel. Exact search works without AI; semantic search uses the configured embedding index. |
 | In-page search and history | Find text in the current page and move backward or forward through navigation history. |
 | 2D and 3D graphs | Explore global or local connections, search, pan, zoom, inspect, and drag nodes. |
 | Community layouts | Distinguish dense groups from the bridges between them, using shared clustering in both views. |
@@ -199,20 +213,37 @@ searching, querying, graph exploration, or flashcard review.
 
 | Feature | What you can do |
 | --- | --- |
-| Chat with your graph | Ask questions with relevant notes available as context and source-page citations. |
-| Local graph scope | Retrieve from your notes without enabling web search. |
-| Internet scope | Allow web search alongside your graph for an answer. |
-| Research mode | Plan searches, read sources, assess gaps, refine queries, and synthesize a cited answer through multiple steps. |
+| One Chat, two placements | Use the same conversation interface in the main Chat view or beside your notes. The right panel has **Chat** and **Notes** tabs. Expanding a conversation keeps its identity, messages, draft, and active request rather than starting another chat. |
+| Explicit context | Sidebar Chat starts with the current page, recognized book, or focused journal day. Choose a selected passage, a block and its children, an available heading-defined section, the whole book, or **My graph**. Main Chat starts with **No notes**, which skips note retrieval and excludes earlier note-backed turns from the model's conversation history. |
+| Answer -- no web | Answer from the selected context and the configured model's knowledge without searching the internet. This is the default; asking to "verify" or "research" something does not silently enable browsing. |
+| Web search | Grafium searches the web and supplies retrieved evidence to the configured model for an answer. Context and web permission are separate choices. |
+| Deep web research | Grafium plans searches, reads sources, assesses gaps, refines queries, and synthesizes a cited answer over multiple rounds. This is an explicit mode, not a second checkbox or a promise to read an entire book. |
 | Research controls | Configure search engines, source/round limits, and workflow prompts. |
-| Provider choice | Configure local models, a self-hosted endpoint, or a supported cloud provider. |
+| Source-specific conversations | Each source has its own thread and draft during the app session. Answers continue while the panel is hidden or another page is open. Requests retain their initiating context and mode. Returning restores that source's conversation; **New conversation** clears it and restores the default context and no-web mode. Switching graphs stops active requests. Conversations are not saved across app restarts. |
+| Long-source research | Retrieve bounded excerpts instead of putting an entire book into the question. Prompt fitting accounts for history, model tokens, and answer space while preserving citation labels. Answers disclose partial coverage; targeted questions are supported, not a guaranteed exhaustive review of every chapter. |
+| Provider choice | Configure local models, a self-hosted endpoint, or a supported cloud provider. The model connection is shown separately from context and web mode. |
 | Model settings | Manage generation and embedding configuration separately; local models require suitable weights and hardware. |
 | Embedded or server-based models | On desktop, use embedded llama.cpp with local GGUF files, Ollama, or an OpenAI-compatible endpoint; cloud options include OpenAI and Anthropic. |
 | Page and selection analysis | Run knowledge analysis for the current page or selected blocks instead of processing everything. |
+| Explicit writing tools | Summarize, find links, and open writing assistance from Chat's tools rather than separate competing conversation tabs. Asking a question never silently rewrites your notes; insertions and rewrites require their explicit actions. |
+| Safe summary insertion | Generated summaries remain associated with their source page. **Insert into page** adds a linked block tree after the captured reading position, leaves original text unchanged, and records one undo action. It reuses existing concept pages, creates new concepts only on insertion, and reports ambiguous concepts left unlinked. Code, math, URLs, and existing links are protected. |
+| Ask about long videos and notes | Block context searches the block and its children; page context searches only the selected page or journal day. Chat selects bounded, relevant excerpts from current text rather than pasting the whole transcript into the question. Keyword retrieval works immediately without an embedding index; available, current vector matches improve ranking. Full prompts, history, and answer reserves are fitted to the model context, using the native tokenizer for embedded models. Long sources may be only partially covered. |
+| AI writing assessment | Open **Writing assistance** from Chat's tools or the command palette. **Analyze AI style** uses your connected model to explain formulaic writing patterns, with a subjective 0-100 style score or an inconclusive result and explicit coverage. This is not a validated authorship detector or a probability that AI wrote the text. |
+| Natural rewriting | **Rewrite naturally** makes small wording edits in the selected block or page, including scientific and technical text. Grafium retains protected numbers, citations, and formatting instead of asking the model to reproduce them; this limits sentence rearrangement. Invalid proposals leave the affected wording unchanged and are reported by block and line; validated edits apply together. Block identities and unsupported blocks stay unchanged. Review meaning and scientific details before keeping changes. In journals, Page scope uses only the selected day. Rewrites are guarded against concurrent edits and recorded as one Ctrl+Z undo action; Ctrl+Y redoes them. No guarantee of lower scores from external detectors. |
 
-**Search scope is not a privacy switch for the model.** If you configure a cloud
-provider, prompts and retrieved note context may be sent to that provider even
-when the scope says **Local graph**. Internet research contacts external search
-engines and websites. Model and media downloads also require network access.
+**Grafium owns web access, not the model provider.** Web search and Deep web
+research run Grafium's search and page-reading tools, then pass evidence through
+the configured model's normal API. An OpenAI-compatible DGX Spark or another
+self-hosted model server does not need internet access or provider-native
+browsing. Grafium itself needs network access for web modes; it does not switch
+models to obtain it.
+
+**No web is not a privacy switch for the model connection.** An API-connected
+model still receives your question and selected note evidence, even in Answer
+mode. A configuration called "cloud" can point to a private server; it does not
+mean that server can browse. Web modes send derived queries to external search
+engines and contact websites. Model and media downloads also require network
+access.
 
 ### Your workspace, your files
 
@@ -226,9 +257,9 @@ engines and websites. Model and media downloads also require network access.
 | Sync reporting | See pushed/pulled files, deletions, conflicts, and errors. File sync is not simultaneous collaborative editing; review conflicts and keep backups. |
 | Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark. |
 | Reading width | Adjust narrow-view padding as a percentage on each side; the default is **15% per side**. |
-| Wide mode | Use the full available page width without changing the narrow-view preference. |
-| Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. |
-| Findable settings | Filter settings and open categorized keyboard-shortcut help. |
+| Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. |
+| Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
+| Findable settings | Filter labels and help text with literal search terms, and open categorized keyboard-shortcut help. |
 | Maintenance tools | Manually re-index a graph, inspect asset-cleanup candidates, or preview task-completion backfills before applying them. |
 | Responsive workspace | Use the desktop layout or Android's adapted editor controls. |
 | Theme-aware startup | Apply the saved theme before showing the desktop window; defer optional screens and local embedding-model loading. |
@@ -247,6 +278,12 @@ Sync sends graph files to the destinations you configure; use destinations you t
 | Search within the page | `Ctrl/Cmd+Shift+K` |
 | Command palette | `Ctrl/Cmd+Shift+P` |
 | Today's journal, ready to edit | `Ctrl/Cmd+Shift+J` |
+| Go to date calendar | `Ctrl/Cmd+G` |
+| Go to link (fuzzy page picker) | `Ctrl/Cmd+L` |
+| Chat | `Alt+C` |
+| Left / right sidebar | `Ctrl/Cmd+B` / `Ctrl/Cmd+Shift+B` |
+| Bold selection in the block editor | `Ctrl/Cmd+Alt+B` |
+| Scroll the main page, book, journal, or task pane (even while editing) | `Page Up` / `Page Down` |
 | Graph / Flashcards / Tasks | `Ctrl/Cmd+Shift+G` / `F` / `T` |
 | Previous / next journal | `Ctrl/Cmd+Shift+,` / `Ctrl/Cmd+Shift+.` |
 | Wide / Zen mode | `Alt+W` / `Alt+Z` |
@@ -257,6 +294,10 @@ Sync sends graph files to the destinations you configure; use destinations you t
 Navigation mode also supports sequences such as `g j` (journal), `g g` (graph),
 `g f` (flashcards), and `t w` (wide mode). They do not run as navigation commands
 while you are typing in the editor.
+
+Page Up/Down do not move the note cursor or require a click in the reading pane.
+Modified keys, including Shift+Page Up/Down selection, retain their editor behavior;
+menus and dialogs keep their own keyboard navigation. Graph controls are unchanged.
 
 ## Download
 

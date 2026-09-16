@@ -121,6 +121,55 @@ body {
   overflow: hidden;
 }
 
+.assistant-disclosure {
+  --disclosure-border: color-mix(in srgb, var(--text-primary) 75%, var(--bg-primary));
+  min-width: 0;
+  border: 2px solid var(--disclosure-border);
+  border-inline-start-width: 3px;
+  border-radius: 8px;
+  background: var(--bg-primary);
+}
+
+.assistant-disclosure > summary {
+  min-height: 40px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--bg-primary));
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.assistant-disclosure > summary::marker {
+  color: var(--accent-blue);
+}
+
+.assistant-disclosure > summary:hover {
+  background: color-mix(in srgb, var(--accent-blue) 14%, var(--bg-primary));
+}
+
+.assistant-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -3px;
+}
+
+.assistant-disclosure[open] {
+  border-inline-start-color: var(--accent-blue);
+}
+
+.assistant-disclosure[open] > summary {
+  border-bottom: 1px solid var(--disclosure-border);
+  border-radius: 6px 6px 0 0;
+}
+
+.assistant-disclosure > .assistant-disclosure-body {
+  min-width: 0;
+  padding: 12px;
+}
+
 .app-context-menu {
   position: fixed;
   z-index: 2147483000 !important;
@@ -269,7 +318,8 @@ body {
 }
 
 .main-content {
-  padding: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
   margin: 0 !important;
 }
 
@@ -457,6 +507,17 @@ body {
   text-decoration: none;
   line-height: 1;
 }
+
+.reading-note-ref { margin-inline-start: 0.15em; line-height: 0; }
+.reading-note-ref a, .reading-note-footer-label { color: var(--text-link); cursor: pointer; text-decoration: none; }
+.reading-note-ref a:hover, .reading-note-footer-label:hover { text-decoration: underline; }
+.reading-note-ref a:focus-visible, .reading-note-footer-label:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.reading-note-footer { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; font-size: 0.92em; }
+.reading-note-footer-label { display: inline-block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.reading-note-footer-body { color: var(--text-secondary); overflow-wrap: anywhere; }
+.reading-note-footer-body > :first-child { margin-top: 0; }
+.reading-note-footer-body img, .reading-note-footer-body video { max-width: 100%; height: auto; }
+.reading-note-footer-body pre { overflow-x: auto; }
 
 .rendered-content .task-checkbox {
   display: inline-flex;

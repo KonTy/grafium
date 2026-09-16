@@ -72,6 +72,7 @@ async function openFixture(browser, continuous = false, width = 1400) {
           }
           case "get_graph_info": return { name: "Synthetic Welcome graph", path: "/synthetic/emoji-reader" };
           case "get_app_theme": return "github";
+          case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
           case "get_smplos_theme": return null;
           case "get_parent_page": return null;
           case "list_pages":
