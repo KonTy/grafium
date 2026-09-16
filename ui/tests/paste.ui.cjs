@@ -99,8 +99,10 @@ async function openEditor(browser) {
     await page.locator('[data-block-id="anchor"] .block-content').click();
     await page.locator('[data-block-id="anchor"] .cm-content').fill("[[motorcycle]]");
     await page.keyboard.press("Enter");
-    const child = page.locator('[data-block-id^="created-"] .cm-content');
-    await child.waitFor();
+    const createdEditor = page.locator('[data-block-id^="created-"] .cm-content');
+    await createdEditor.waitFor();
+    const childId = await createdEditor.evaluate((element) => element.closest("[data-block-id]").dataset.blockId);
+    const child = page.locator(`[data-block-id="${childId}"] .cm-content`);
     return { page, child, errors };
 }
 
@@ -222,6 +224,9 @@ async function finishCase({ page, errors }, message) {
       assert.equal(await child.innerText(), PASTE.join("\n"));
       await page.keyboard.press("Escape");
       await page.waitForFunction((text) => window.__pasteState.blocks.some((block) => block.content === text), PASTE.join("\n"));
+      assert.deepEqual(await page.evaluate(() => window.__pasteState.blocks
+        .filter((block) => block.parent_id === "anchor").map((block) => block.content)), [PASTE.join("\n")]);
+      assert.equal(await page.evaluate(() => window.__pasteState.calls.some((call) => call.cmd === "create_blocks")), false);
       assert.equal(await page.locator(".paste-preview").count(), 0);
       await finishCase(fixture, "plain multiline clipboard content remains intact without artificial block splitting");
     }

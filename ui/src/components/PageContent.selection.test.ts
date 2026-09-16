@@ -59,7 +59,10 @@ describe("PageContent block selection cut", () => {
     expect(source).toContain("function makeSelectionLink()");
     expect(source).toContain("selectionMenu.makeLink");
     expect(source).toContain("wrapPageLinkText(block.content");
-    expect(source).toContain("captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId)");
+    expect(source).toContain("if (!pageContentEl?.contains(target)) return;");
+    expect(source).toMatch(
+      /clickedBlock\s*\?\s*captureNativeSelectionMakeLinkAction\(\)\s*\?\?\s*cachedSelectionMakeLinkAction\(blockId!?\)\s*:\s*null/
+    );
   });
 
   it("coordinates pointer drag selection across active block editors", () => {

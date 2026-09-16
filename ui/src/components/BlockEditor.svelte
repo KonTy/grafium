@@ -1657,6 +1657,7 @@
                 view.dispatch({
                   changes: { from, to, insert: md },
                   selection: EditorSelection.cursor(from + md.length),
+                  annotations: Transaction.userEvent.of("input.paste"),
                 });
                 // Download images in background and update content
                 void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {
@@ -1681,6 +1682,7 @@
                 view.dispatch({
                   changes: { from, to, insert: chunks[0].content },
                   selection: EditorSelection.cursor(from + chunks[0].content.length),
+                  annotations: Transaction.userEvent.of("input.paste"),
                 });
                 // Remaining chunks become new blocks (with depth info)
                 if (chunks.length > 1) {

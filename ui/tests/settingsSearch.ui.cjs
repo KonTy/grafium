@@ -105,17 +105,23 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.keyboard.press("Alt+c");
     await page.locator(".chat-view").waitFor();
     await page.waitForFunction(() => document.activeElement === document.querySelector(".chat-view textarea"));
+    await page.locator(".chat-view textarea").fill("Keep this conversation draft");
     await page.keyboard.press("Alt+s");
     await search.waitFor();
+    assert.equal(await page.locator(".chat-session[hidden][inert] .chat-view").count(), 1,
+      "inactive Chat stays mounted to preserve its conversation");
     await search.focus();
     await page.keyboard.press("Control+Shift+c");
-    assert.equal(await page.locator(".chat-view").count(), 0);
+    assert.equal(await page.locator(".chat-view").isVisible(), false);
+    assert.equal(await search.evaluate((el) => el === document.activeElement), true);
     await search.focus();
     await page.keyboard.press("Control+Alt+c");
-    assert.equal(await page.locator(".chat-view").count(), 0);
+    assert.equal(await page.locator(".chat-view").isVisible(), false);
+    assert.equal(await search.evaluate((el) => el === document.activeElement), true);
     await search.focus();
     await page.keyboard.press("Alt+c");
     await page.locator(".chat-view").waitFor();
+    assert.equal(await page.locator(".chat-view textarea").inputValue(), "Keep this conversation draft");
     console.log("PASS Alt+C opens Chat from Settings; old Ctrl combos do not");
     assert.deepEqual(errors, []);
   } finally {

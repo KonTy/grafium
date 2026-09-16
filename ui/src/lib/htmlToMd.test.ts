@@ -48,6 +48,11 @@ describe("HTML to markdown clipboard conversion", () => {
     ]);
   });
 
+  it("keeps plain multiline text in one paste block", () => {
+    const content = "list of motorcycles\n**Honda CRF300L**\n✅✅✅\n$5,599";
+    expect(splitMarkdownIntoBlocks(content)).toEqual([{ content, depth: 0 }]);
+  });
+
   it("splits copied outline markdown into block hierarchy", () => {
     expect(splitMarkdownIntoBlocks([
       "- [[Tech/Android/Backup]]",

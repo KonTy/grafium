@@ -64,6 +64,9 @@ const EXPECT = {
 
   await page.addInitScript(
     ({ pages, nsTree, tagTree }) => {
+      localStorage.setItem("grafium.session.lastLocation", JSON.stringify({
+        kind: "page", title: pages[0].title,
+      }));
       window.__pageCommands = [];
       window.__TAURI_INTERNALS__ = {
         metadata: {
@@ -77,9 +80,14 @@ const EXPECT = {
           switch (cmd) {
             case "get_page": {
               const found = pages.find((p) => p.id === args.id || p.title === args.title);
-              if (!found) throw new Error("Page not found");
+              if (!found) throw { code: "page_not_found", message: "Page not found" };
               return { ...found, properties: {} };
             }
+            case "list_blocks": return [{
+              id: `${args.pageId}-block`, page_id: args.pageId, parent_id: null,
+              order_index: 0, content: "Synthetic page", block_type: "text",
+              properties: {}, created_at: 0, updated_at: 0,
+            }];
             case "count_pages": return pages.length;
             case "list_pages_window": {
               const sorted = [...pages].sort((a, b) =>

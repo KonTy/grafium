@@ -11,8 +11,19 @@ describe("assistant markdown is safe to inject", () => {
   it("does not let an image URL close its own src attribute", () => {
     // Regression: the URL was interpolated into `src` unescaped, so this
     // rendered as `<img src="https://h/x"onerror="alert(1)" …>`.
-    const html = renderAssistantMarkdown('![x](https://h.invalid/x"onerror="alert(1))');
-    expect(html).not.toMatch(/onerror/i);
+    const href = 'https://h.invalid/x"onerror="alert(1)';
+    const host = document.createElement("div");
+    host.innerHTML = renderAssistantMarkdown(`![x](${href})`);
+    expect(host.querySelectorAll("img")).toHaveLength(1);
+    const image = host.querySelector("img")!;
+    expect(image.getAttribute("src")).toBe(href);
+    expect(image.getAttribute("data-markdown-src")).toBe(href);
+    expect(image.getAttribute("alt")).toBe("x");
+    for (const el of Array.from(host.querySelectorAll("*"))) {
+      for (const attr of Array.from(el.attributes)) {
+        expect(attr.name.toLowerCase().startsWith("on")).toBe(false);
+      }
+    }
   });
 
   it("strips raw HTML that survives a mismatched code fence", () => {
