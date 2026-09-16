@@ -147,6 +147,26 @@ pub struct TopicSummary {
     pub tags: Vec<TagTerm>,
 }
 
+/// The tolerant intermediate shape used for both local summaries and web
+/// research synthesis before each caller maps it into its public return type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StructuredTopicJson {
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub tags: Vec<TagJson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct StructuredSummaryJson {
+    #[serde(default)]
+    pub title_answer: Option<String>,
+    #[serde(default)]
+    pub topics: Vec<StructuredTopicJson>,
+}
+
 /// The reference engine — orchestrates AI analysis + vector search.
 pub struct ReferenceEngine {
     config: ReferenceConfig,
@@ -846,7 +866,7 @@ async fn stream_completion(
 }
 
 /// Use the LLM to produce a one-line answer to a title (when it poses a
-/// question/claim), a short prose summary, and topic hashtags for a piece
+/// question/claim), a short plain-text summary, and topic hashtags for a piece
 /// of content. Shared by `ReferenceEngine::generate_references` ("Research
 /// this page") and the media-import pipeline (video/audio transcripts) —
 /// both want the exact same "answer the title, summarize, tag" shape.
@@ -901,7 +921,7 @@ pub async fn generate_page_summary(
             // an aggressively-quantized creative-writing fine-tune
             // just can't stay within a strict JSON schema. Rather than
             // give up, retry with a much simpler prompt that asks for
-            // plain prose — any halfway-functional model can produce
+            // plain text — any halfway-functional model can produce
             // *something* usable this way, and a plain-text summary is
             // strictly better than no summary at all. The one-shot
             // retry never repeats, so a genuinely broken model still
@@ -1297,12 +1317,12 @@ Good:
 Bad:
 ["126mg", "50mg", "1g", "1,000IU", "90 mcg", "5.5mg", "2024-06-15", "energy", "consciousness", "perception", "woman", "body", "matter", "light", "God", "Bible", "Christianity", "concept", "topic"]
 
-Return ONLY the JSON array, no prose."##;
+Return ONLY the JSON array, no extra text."##;
 
 const CONCEPT_EDGE_OUTPUT_SCHEMA_PROMPT: &str = r##"
 
 Mandatory output contract, regardless of any custom instructions above:
-- Return ONLY a JSON array, no prose.
+- Return ONLY a JSON array, no extra text.
 - Return 0-8 objects.
 - Each object must have "term" and "qualified".
 - "term" must be an exact visible phrase from the provided text chunk.
@@ -1323,11 +1343,11 @@ pub fn concept_edge_prompt(custom_prompt: Option<&str>) -> String {
 /// can't be produced by the currently-loaded model — typically because
 /// the chat template auto-injects an unclosed `<think>` block the model
 /// never resolves, or the model is a creative-writing fine-tune that
-/// won't respect a JSON schema. Asks for plain prose so *some* usable
+/// won't respect a JSON schema. Asks for plain text so *some* usable
 /// summary lands in the UI instead of nothing.
 const PLAIN_SUMMARY_PROMPT: &str = r##"You are a careful research assistant. You will be given a title and content (an article, transcript, or similar).
 
-Write a short plain-text summary of the content in 3-6 sentences, in your own words, covering the main points and any distinct topics discussed. Do not use JSON, markdown, or bullet lists — just plain prose paragraphs.
+Write a short plain-text summary of the content in 3-6 sentences, in your own words, covering the main points and any distinct topics discussed. Do not use JSON, markdown, or bullet lists — just plain-text paragraphs.
 
 Return ONLY the summary paragraphs, no preamble like "Here is a summary:" and no meta commentary."##;
 
@@ -1625,6 +1645,160 @@ pub(crate) fn clean_tag_terms(tags: Vec<TagJson>) -> Vec<TagTerm> {
         .collect()
 }
 
+/// Parse the JSON object returned by summary-like prompts, accepting both the
+/// canonical `{title_answer, topics: [...]}` shape and a common model/user-prompt
+/// drift where each topic is emitted as a top-level object keyed by a slug.
+pub(crate) fn parse_summary_json_object(
+    json_str: &str,
+) -> std::result::Result<StructuredSummaryJson, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(json_str)?;
+    Ok(summary_from_json_value(&value))
+}
+
+fn summary_from_json_value(value: &serde_json::Value) -> StructuredSummaryJson {
+    let Some(object) = value.as_object() else {
+        return StructuredSummaryJson::default();
+    };
+
+    let mut out = StructuredSummaryJson {
+        title_answer: string_field(object, "title_answer"),
+        topics: Vec::new(),
+    };
+
+    if let Some(topics_value) = object.get("topics") {
+        append_topics_from_value(None, topics_value, &mut out.topics);
+    }
+
+    if let Some(root_summary) = string_field(object, "summary") {
+        out.topics.push(StructuredTopicJson {
+            topic: string_field(object, "topic").unwrap_or_else(|| "Summary".to_string()),
+            summary: root_summary,
+            tags: tags_from_value(object.get("tags")),
+        });
+    }
+
+    for (key, topic_value) in object {
+        if is_summary_metadata_key(key) {
+            continue;
+        }
+        append_topics_from_value(Some(key), topic_value, &mut out.topics);
+    }
+
+    out
+}
+
+fn append_topics_from_value(
+    key: Option<&str>,
+    value: &serde_json::Value,
+    out: &mut Vec<StructuredTopicJson>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(topic) = topic_from_json_value(None, item) {
+                    out.push(topic);
+                }
+            }
+        }
+        serde_json::Value::Object(items) if key.is_none() => {
+            for (topic_key, topic_value) in items {
+                if let Some(topic) = topic_from_json_value(Some(topic_key), topic_value) {
+                    out.push(topic);
+                }
+            }
+        }
+        _ => {
+            if let Some(topic) = topic_from_json_value(key, value) {
+                out.push(topic);
+            }
+        }
+    }
+}
+
+fn topic_from_json_value(
+    key: Option<&str>,
+    value: &serde_json::Value,
+) -> Option<StructuredTopicJson> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let summary = string_field(object, "summary")
+                .or_else(|| string_field(object, "content"))
+                .or_else(|| string_field(object, "text"))?;
+            Some(StructuredTopicJson {
+                topic: string_field(object, "topic")
+                    .or_else(|| string_field(object, "title"))
+                    .or_else(|| string_field(object, "name"))
+                    .or_else(|| key.map(topic_label_from_key))
+                    .unwrap_or_else(|| "Summary".to_string()),
+                summary,
+                tags: tags_from_value(object.get("tags")),
+            })
+        }
+        serde_json::Value::String(summary) => {
+            let summary = summary.trim();
+            if summary.is_empty() {
+                None
+            } else {
+                Some(StructuredTopicJson {
+                    topic: key
+                        .map(topic_label_from_key)
+                        .unwrap_or_else(|| "Summary".to_string()),
+                    summary: summary.to_string(),
+                    tags: Vec::new(),
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn string_field(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn tags_from_value(value: Option<&serde_json::Value>) -> Vec<TagJson> {
+    value
+        .and_then(|value| serde_json::from_value::<Vec<TagJson>>(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn topic_label_from_key(key: &str) -> String {
+    let label = key
+        .trim()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        "Summary".to_string()
+    } else {
+        label
+    }
+}
+
+fn is_summary_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "title_answer"
+            | "titleAnswer"
+            | "answer"
+            | "direct_answer"
+            | "summary"
+            | "topic"
+            | "topics"
+            | "tags"
+            | "citations"
+            | "sources"
+            | "references"
+            | "metadata"
+    )
+}
+
 fn parse_concept_edge_tags_response(
     response: &str,
     original_content: &str,
@@ -1668,38 +1842,16 @@ fn content_contains_normalized_phrase(content: &str, phrase: &str) -> bool {
 }
 
 fn parse_summary_response(response: &str) -> Result<PageSummary> {
-    #[derive(Deserialize)]
-    struct TopicJson {
-        topic: String,
-        summary: String,
-        #[serde(default)]
-        tags: Vec<TagJson>,
-    }
-
-    #[derive(Deserialize)]
-    struct SummaryJson {
-        #[serde(default)]
-        title_answer: Option<String>,
-        #[serde(default)]
-        topics: Vec<TopicJson>,
-    }
-
     let trimmed = strip_reasoning_block(response.trim());
 
-    // Fallback path: if the model produced free-form prose instead of the
-    // JSON envelope we asked for (common on aggressively-quantized or
-    // creative-writing fine-tuned models that struggle with strict
-    // instruction-following), still surface *something* usable to the
-    // user instead of hiding the summary entirely. Try JSON first; on any
-    // failure at all (no `{...}` found, malformed JSON, empty `topics`),
-    // fall back to wrapping the raw model output as a single "Summary"
-    // topic. Users can then see the summary and know it's what the model
-    // wrote, rather than the whole button silently producing no output.
-    let structured = extract_json_object(trimmed)
-        .ok()
-        .and_then(|json_str| serde_json::from_str::<SummaryJson>(json_str).ok());
-
-    if let Some(parsed) = structured {
+    // Try structured JSON first. The built-in prompt asks for
+    // `{title_answer, topics: [...]}`, but user-edited prompts and smaller
+    // local models sometimes return a fenced object with top-level topic keys
+    // instead. Normalize both before deciding whether to fall back to plain text.
+    if let Ok(json_str) = extract_json_object(trimmed) {
+        let parsed = parse_summary_json_object(json_str).map_err(|error| {
+            summary_parse_error(&format!("invalid page summary JSON: {error}"), trimmed)
+        })?;
         let topics: Vec<TopicSummary> = parsed
             .topics
             .into_iter()
@@ -1729,6 +1881,11 @@ fn parse_summary_response(response: &str) -> Result<PageSummary> {
                 topics,
             });
         }
+
+        return Err(summary_parse_error(
+            "JSON-shaped page summary response contained no recognized summary text",
+            response,
+        ));
     }
 
     // Free-text fallback: use whatever the model produced verbatim. Better
@@ -2069,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_json_object_stops_before_trailing_prose() {
+    fn extract_json_object_stops_before_trailing_text() {
         let response = r#"{"title_answer":null,"topics":[]}
 ---
 Extra text the model should not have emitted."#;
@@ -2401,6 +2558,61 @@ Notes after the JSON."#;
     }
 
     #[test]
+    fn parse_summary_accepts_fenced_dynamic_topic_object() -> Result<()> {
+        let summary = parse_summary_response(
+            r#"```json
+{
+  "title_answer": null,
+  "/no_think": {
+    "topic": "**/no_think** as a cognitive phenomenon",
+    "summary": "The selected content describes /no_think as a state of mental inertia or automaticity where people default to habitual thinking patterns without active cognitive engagement.",
+    "tags": [
+      {"term": "/no_think"},
+      {"term": "cognitive_phenomenon", "qualified": "mental inertia or automaticity"}
+    ]
+  },
+  "dementia_causes_and_prevention": {
+    "topic": "Lifestyle factors in dementia prevention",
+    "summary": "The selected content states that dementia is not solely genetic and highlights lifestyle-related factors as preventable contributors to cognitive decline.",
+    "tags": [
+      {"term": "dementia"},
+      {"term": "lifestyle_related_factors", "qualified": "preventable dementia contributors"}
+    ]
+  }
+}
+```"#,
+        )?;
+
+        assert_eq!(summary.title_answer, None);
+        assert_eq!(summary.topics.len(), 2);
+        assert_eq!(
+            summary.topics[0].topic,
+            "**/no_think** as a cognitive phenomenon"
+        );
+        assert!(!summary.topics[0].summary.contains("```"));
+        assert_eq!(summary.topics[0].tags[0].term, "/no_think");
+        assert_eq!(
+            summary.topics[1].tags[1].qualified.as_deref(),
+            Some("preventable dementia contributors")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_summary_rejects_unrecognized_fenced_json_instead_of_using_it_as_plain_text() {
+        let error = parse_summary_response(
+            r#"```json
+{"title_answer": null, "metadata": {"model": "test"}, "unexpected": {"label": "not a summary"}}
+```"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("JSON-shaped page summary response"));
+        assert!(error.contains("Response snippet"));
+    }
+
+    #[test]
     fn parse_concept_edge_tags_requires_verbatim_surface_phrase() -> Result<()> {
         let content =
             "The Kabbalistic Tree of Life includes ten sephirot and a hidden realm called Daat.";
@@ -2699,7 +2911,7 @@ Notes after the JSON."#;
         let (llm, llm_state) = MockLlm::new([
             "<think>".to_string(),
             "<think>".to_string(),
-            "Last-resort prose summary that finally got produced.".to_string(),
+            "Last-resort plain-text summary that finally got produced.".to_string(),
         ]);
 
         let summary = generate_page_summary(
@@ -2714,7 +2926,7 @@ Notes after the JSON."#;
             summary
                 .topics
                 .iter()
-                .any(|t| t.summary.contains("Last-resort prose summary")),
+                .any(|t| t.summary.contains("Last-resort plain-text summary")),
             "expected the last-resort attempt's response to end up as the summary, \
              got: {:?}",
             summary.topics

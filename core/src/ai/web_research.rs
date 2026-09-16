@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai::reasoning::{strip_think_blocks, ThinkStripResult, REASONING_ONLY_MESSAGE};
 use crate::ai::references::{
     append_no_think_directive, clean_tag_terms, concept_parse_error, extract_json_object,
-    research_parse_error, TagJson,
+    parse_summary_json_object, research_parse_error, StructuredSummaryJson,
 };
 use crate::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
@@ -47,23 +47,7 @@ pub const RESEARCH_CANCELLED: &str = "Web research was cancelled.";
 const SYNTHESIS_MAX_TOKENS: u32 = 4096;
 const SYNTHESIS_FALLBACK_MAX_TOKENS: u32 = 1800;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct TopicJson {
-    #[serde(default)]
-    topic: String,
-    #[serde(default)]
-    summary: String,
-    #[serde(default)]
-    tags: Vec<TagJson>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct SynthesisJson {
-    #[serde(default)]
-    title_answer: Option<String>,
-    #[serde(default)]
-    topics: Vec<TopicJson>,
-}
+type SynthesisJson = StructuredSummaryJson;
 
 /// Whether a (borrowed) cancellation flag has been tripped. `None` means "no
 /// flag supplied" and so is never cancelled — the uncancellable callers.
@@ -493,13 +477,13 @@ impl<'a> WebResearchEngine<'a> {
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
-        let mut parsed: SynthesisJson = match parse_synthesis_response(&raw) {
+        let mut parsed: SynthesisJson = match parse_summary_synthesis_response(&raw) {
             Ok(parsed) => parsed,
             Err(_first_error) => {
                 let retry_prompt = format!(
                     "{prompt}\n\nYour previous response did not contain a valid JSON object. \
 Return exactly one JSON object matching the requested schema. Do not include <think>, analysis, \
-markdown, examples, separators, or any prose before or after the JSON."
+markdown, examples, separators, or any extra text before or after the JSON."
                 );
                 let retry_messages = [ChatMessage {
                     role: MessageRole::User,
@@ -516,7 +500,7 @@ markdown, examples, separators, or any prose before or after the JSON."
                     cancel: None,
                 };
                 let retry_raw = self.llm.complete(&retry_messages, &retry_options).await?;
-                match parse_synthesis_response(&retry_raw) {
+                match parse_summary_synthesis_response(&retry_raw) {
                     Ok(parsed) => parsed,
                     Err(_retry_error) => {
                         return self
@@ -682,7 +666,7 @@ web sources. Return only the user-facing answer text.\n\n{}",
         };
 
         let raw = self.llm.complete(&messages, &options).await?;
-        parse_synthesis_response(&raw)
+        parse_summary_synthesis_response(&raw)
     }
 }
 
@@ -696,15 +680,12 @@ fn clean_structured_response(raw: &str) -> Result<String> {
     }
 }
 
-fn parse_synthesis_response<T>(raw: &str) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
+fn parse_summary_synthesis_response(raw: &str) -> Result<SynthesisJson> {
     let cleaned = clean_structured_response(raw)?;
     let trimmed = cleaned.trim();
     let json_str = extract_json_object(trimmed)
         .map_err(|_| research_parse_error("missing or unterminated synthesis JSON", trimmed))?;
-    serde_json::from_str(json_str)
+    parse_summary_json_object(json_str)
         .map_err(|error| research_parse_error(&format!("invalid synthesis JSON: {error}"), trimmed))
 }
 
@@ -1072,7 +1053,7 @@ The sources may cover a single subject or several related subjects. Identify eve
 
 For source-dependent practical procedures where exact buying advice, compatibility, product specs, material limits, current facts, or safety constraints matter, name the exact item/spec/process only when a numbered source supports it. Include compatibility and safety constraints found in the sources, explicitly say when the sources are too weak to support a safe procedure, and do not turn generic knowledge into a precise buying list or step-by-step process.
 
-Do not write chain-of-thought, analysis, examples, markdown fences, separators, or prose outside the JSON. If your chat template supports thinking controls, treat this as /no_think.
+Do not write chain-of-thought, analysis, examples, markdown fences, separators, or text outside the JSON. If your chat template supports thinking controls, treat this as /no_think.
 
 Return a JSON object with:
 - "title_answer": if the title poses a question, asks for a recommendation, or makes a claim the sources answer/support/refute, one sentence directly answering it, with an inline [n] citation. For recommendation questions, name the best overall pick here. Otherwise null.
@@ -1110,7 +1091,7 @@ Rules:
 - If the sources read are too weak or irrelevant to support any real recommendation, say that directly instead of pretending a bad candidate fits.
 - Every factual claim in the corrected answer must end with an inline citation like [1] or [2][4].
 
-Return ONLY the corrected JSON object, no markdown fences and no prose outside JSON."##;
+Return ONLY the corrected JSON object, no markdown fences and no text outside JSON."##;
 
 const MOTORCYCLE_DOMAIN_INSTRUCTION: &str = "Domain instruction: This question is about \
 motorcycles/MCs, not bicycles, e-bikes, cycling, or pedal cruiser bikes. Interpret words like \
@@ -1589,6 +1570,33 @@ mod tests {
         assert!(err.contains("reasoning-only response hidden"));
         assert!(!err.contains("Okay, let's see"));
         assert!(!err.contains("hidden reasoning"));
+    }
+
+    #[test]
+    fn synthesis_parser_accepts_fenced_dynamic_topic_object() {
+        let parsed = parse_summary_synthesis_response(
+            r#"```json
+{
+  "title_answer": null,
+  "sleep_research": {
+    "topic": "Sleep research",
+    "summary": "The source reports that sleep quality improved after the intervention[1].",
+    "tags": [{"term": "sleep"}]
+  }
+}
+```"#,
+        )
+        .expect("fenced dynamic-topic synthesis JSON should parse");
+
+        assert_eq!(parsed.title_answer, None);
+        assert_eq!(parsed.topics.len(), 1);
+        assert_eq!(parsed.topics[0].topic, "Sleep research");
+        assert_eq!(
+            parsed.topics[0].summary,
+            "The source reports that sleep quality improved after the intervention[1]."
+        );
+        let tags = clean_tag_terms(parsed.topics[0].tags.clone());
+        assert_eq!(tags[0].term, "sleep");
     }
 
     #[tokio::test]

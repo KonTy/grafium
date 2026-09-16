@@ -58,7 +58,8 @@ use serde::Deserialize;
 use super::budget::{Evidence, StepInput};
 use crate::ai::reasoning::{strip_think_blocks, ThinkStripResult};
 use crate::ai::references::{
-    clean_tag_terms, concept_parse_error, extract_json_object, research_parse_error, TagJson,
+    clean_tag_terms, concept_parse_error, extract_json_object, parse_summary_json_object,
+    research_parse_error, StructuredSummaryJson,
 };
 use crate::ai::traits::{ChatMessage, LlmProvider};
 use crate::ai::web_research::{
@@ -675,24 +676,6 @@ impl<'a> DeepResearchEngine<'a> {
         excerpts: &[(usize, String)],
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<(Option<String>, Vec<ResearchTopic>)> {
-        #[derive(Deserialize)]
-        struct TopicJson {
-            #[serde(default)]
-            topic: String,
-            #[serde(default)]
-            summary: String,
-            #[serde(default)]
-            tags: Vec<TagJson>,
-        }
-
-        #[derive(Deserialize)]
-        struct SynthesisJson {
-            #[serde(default)]
-            title_answer: Option<String>,
-            #[serde(default)]
-            topics: Vec<TopicJson>,
-        }
-
         let mut input = StepInput::new(question, format!(
             "The sources above are numbered. Cite their original numbers as [n] in your answer.\nLanguage instruction: {}",
             crate::ai::answer_language_rule_for_question(question)
@@ -708,7 +691,7 @@ impl<'a> DeepResearchEngine<'a> {
                 cancel.clone(),
             )
             .await?;
-        let parsed: SynthesisJson = match parse_synthesis_response(&raw) {
+        let parsed: StructuredSummaryJson = match parse_synthesis_response(&raw) {
             Ok(parsed) => parsed,
             Err(_error) => {
                 return self
@@ -855,15 +838,12 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-fn parse_synthesis_response<T>(raw: &str) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
+fn parse_synthesis_response(raw: &str) -> Result<StructuredSummaryJson> {
     let cleaned = strip_reasoning(raw);
     let trimmed = cleaned.trim();
     let json = extract_json_object(trimmed)
         .map_err(|_| research_parse_error("missing or unterminated synthesis JSON", trimmed))?;
-    serde_json::from_str(json)
+    parse_summary_json_object(json)
         .map_err(|e| research_parse_error(&format!("invalid synthesis JSON: {e}"), trimmed))
 }
 
