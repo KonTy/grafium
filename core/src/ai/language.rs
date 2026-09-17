@@ -282,6 +282,25 @@ mod tests {
     use std::sync::Mutex;
     use tracing::instrument::WithSubscriber;
 
+    /// Runs the guard under a subscriber that throws the output away.
+    ///
+    /// `tracing` caches each callsite's interest *globally*, and the default
+    /// `NoSubscriber` reports `Interest::never()`. So the first test to reach
+    /// the `warn!` in `repair_english_answer` with no subscriber installed
+    /// disables that callsite for the rest of the process -- and the
+    /// log-capture test below then reads an empty buffer and fails. Which test
+    /// gets there first depends on how the parallel test runner schedules
+    /// them, which is exactly why this only failed sometimes. Keeping every
+    /// call under some subscriber keeps the cached interest truthful.
+    fn sink_dispatch() -> tracing::Dispatch {
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::Dispatch::new(subscriber)
+    }
+
     #[derive(Clone)]
     struct LogCapture(std::sync::Arc<Mutex<Vec<u8>>>);
 
@@ -396,7 +415,9 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         assert_eq!(
-            repair_english_answer(&llm, refusal, &CompletionOptions::default()).await,
+            repair_english_answer(&llm, refusal, &CompletionOptions::default())
+                .with_subscriber(sink_dispatch())
+                .await,
             translated
         );
         let calls = llm.calls.lock().unwrap();
@@ -429,6 +450,7 @@ mod tests {
                     "抱歉，我无法帮助处理这个请求。",
                     &CompletionOptions::default()
                 )
+                .with_subscriber(sink_dispatch())
                 .await,
                 REFUSAL_MESSAGE
             );
@@ -444,7 +466,9 @@ mod tests {
         };
         let normal = "I can't help with that request.";
         assert_eq!(
-            repair_english_answer(&llm, normal, &CompletionOptions::default()).await,
+            repair_english_answer(&llm, normal, &CompletionOptions::default())
+                .with_subscriber(sink_dispatch())
+                .await,
             normal
         );
         let options = CompletionOptions {
@@ -454,7 +478,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            repair_english_answer(&llm, "抱歉，我无法帮助处理这个请求。", &options).await,
+            repair_english_answer(&llm, "抱歉，我无法帮助处理这个请求。", &options)
+                .with_subscriber(sink_dispatch())
+                .await,
             ""
         );
         assert!(llm.calls.lock().unwrap().is_empty());
@@ -470,6 +496,12 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         let dispatch = tracing::Dispatch::new(subscriber);
+        // Drop any interest an earlier test cached for the `warn!` callsite and
+        // re-register it against *this* subscriber. The rebuild has to happen
+        // inside `with_default`, because it re-registers against whatever
+        // dispatcher is current -- doing it outside would simply re-cache the
+        // no-op default and disable the callsite all over again.
+        tracing::dispatcher::with_default(&dispatch, tracing::callsite::rebuild_interest_cache);
         for (response, reason) in [
             ("error", "provider_error"),
             ("", "empty_response"),

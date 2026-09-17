@@ -395,6 +395,11 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
             }),
             json_paths: None,
         },
+        // Off by default because it frequently answers an automated client with
+        // a "Robot" challenge rather than results. Left in as a built-in since
+        // it does sometimes work from a residential IP, and the selectors are
+        // here ready if it does; a SearXNG instance is the reliable route to
+        // Startpage's (Google-derived) results.
         SearchEngineDef {
             id: "startpage".to_string(),
             name: "Startpage".to_string(),
@@ -411,6 +416,49 @@ pub fn builtin_engines() -> Vec<SearchEngineDef> {
             }),
             json_paths: None,
         },
+        // Self-hosted only, and deliberately so. Every public SearXNG instance
+        // tried (searx.be, baresearch.org, search.inetol.net, priv.au,
+        // opnxng.com, searxng.site) answers an automated client with a captcha
+        // interstitial, a "making sure you're not a bot" page, or 429 — none
+        // return results. Against your own instance there is no such gate.
+        //
+        // This is also the practical answer to Qwant and Swisscows, which
+        // cannot be scraped directly (see the note below): SearXNG queries them
+        // server-side and hands back plain HTML, so running one instance gets
+        // you those engines *and* Startpage without any of the bot walls.
+        //
+        // Selectors follow searx/templates/simple/macros.html: `result_header`
+        // emits `<article class="result ...">`, an `a.url_header`, and an
+        // `<h3>` wrapping the titled link; the default result template emits
+        // `<p class="content">`, tagged `.empty_element` when a result has no
+        // description, which is excluded so an absent snippet stays absent.
+        SearchEngineDef {
+            id: "searxng".to_string(),
+            name: "SearXNG (self-hosted)".to_string(),
+            kind: EngineKind::Html,
+            url_template: "http://localhost:8080/search?q={query}".to_string(),
+            enabled: false,
+            builtin: true,
+            category: EngineCategory::Web,
+            selectors: Some(HtmlSelectors {
+                result: "article.result".to_string(),
+                link: "h3 a, a.url_header".to_string(),
+                title: "h3 a".to_string(),
+                snippet: "p.content:not(.empty_element)".to_string(),
+            }),
+            json_paths: None,
+        },
+        // Not shipped, and it is worth writing down why so nobody re-adds them:
+        //
+        // - Qwant renders results entirely client-side (its HTML contains no
+        //   result links at all), and its JSON API sits behind DataDome, which
+        //   answers 403 with a "please enable JS" interstitial.
+        // - Swisscows is likewise a client-side app, and its API rejects
+        //   unsigned requests with 400 "The request signature isn't valid".
+        //
+        // Both would therefore need a real JavaScript engine, whereas fetching
+        // here is a plain HTTP client (see scraping::browser). Reach them
+        // through SearXNG above instead.
         // ── Academic (JSON API, no key) ────────────────────────────────────
         SearchEngineDef {
             id: "openalex".to_string(),

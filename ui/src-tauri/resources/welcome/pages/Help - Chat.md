@@ -34,6 +34,41 @@ something else.
 If you prefer reduced motion in your system settings, nothing shimmers; the
 steps and timings still appear.
 
+## Search engines for web research
+
+Deep research does not stop at the search results page. It reads them: every
+result it decides is worth opening is fetched and parsed as a full document —
+HTML, PDFs, and scanned PDFs via OCR — and it repeats that search-read-assess
+cycle over several rounds, refining its queries toward whatever is still
+missing. Citations point at pages it actually read.
+
+**Settings → Research** lists the engines. Brave and DuckDuckGo are on by
+default; academic sources (OpenAlex, Crossref, arXiv, Europe PMC, Semantic
+Scholar, DOAJ, PubMed, Google Patents, Open Library) are free and need no key.
+
+### Privacy-focused engines
+
+Grafium fetches with a plain HTTP client and does not run JavaScript, which
+decides what is reachable:
+
+| Engine | Status |
+| --- | --- |
+| Mojeek | Built in, independent index, scrapes cleanly. Enable it. |
+| SearXNG | Built in, disabled. Point it at **your own** instance. |
+| Startpage | Built in, disabled. Often answers automation with a robot check. |
+| Qwant | Not available — results are rendered in the browser, and its API is behind bot protection. |
+| Swisscows | Not available — same, and its API rejects unsigned requests. |
+
+Running your own **SearXNG** is the way to get the rest. It queries Qwant,
+Startpage, Swisscows, Brave and others server-side and returns plain HTML, so
+one instance gives you all of them with no bot walls and no per-engine
+maintenance. Public instances will not work — every one tested answers an
+automated client with a captcha — so this must be an instance you host.
+
+Enable **SearXNG (self-hosted)** and set its URL to your instance; the default
+assumes `http://localhost:8080`. You can also add any other engine yourself
+under **Add engine** with its URL template and CSS selectors.
+
 ## Asking Chat to change your notes
 
 Chat can also *do* things, not just answer. Ask in plain language:

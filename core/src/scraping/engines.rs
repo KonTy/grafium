@@ -677,6 +677,47 @@ mod tests {
     }
 
     #[test]
+    fn searxng_selectors_parse_real_searxng_markup() {
+        // Markup copied from searx/templates/simple/macros.html (result_header)
+        // and result_templates/default.html, which is what a self-hosted
+        // instance actually serves. Compiling the selectors is not enough --
+        // they have to match this shape.
+        let html = r#"
+        <html><body>
+          <article class="result result-default category-general">
+            <a href="https://plants.test/photosynthesis" class="url_header">
+              <div class="url_wrapper"><span class="url_o1"><span class="url_i1">plants.test</span></span></div>
+            </a>
+            <h3><a href="https://plants.test/photosynthesis">How Photosynthesis Works</a></h3>
+            <p class="content">Plants convert light into chemical energy.</p>
+          </article>
+          <article class="result result-default category-general">
+            <a href="https://bio.test/leaf" class="url_header"></a>
+            <h3><a href="https://bio.test/leaf">Inside A Leaf</a></h3>
+            <p class="content empty_element">This site did not provide any description.</p>
+          </article>
+        </body></html>
+        "#;
+        let engine = builtin_web_engine("searxng").expect("searxng is built in");
+        let selectors = engine.selectors.expect("searxng has selectors");
+        let out = parse_html(html, &selectors, "http://localhost:8080/search", 10, false).unwrap();
+
+        assert_eq!(out.len(), 2, "both results parsed");
+        assert_eq!(out[0].url, "https://plants.test/photosynthesis");
+        assert_eq!(out[0].title, "How Photosynthesis Works");
+        assert_eq!(out[0].snippet, "Plants convert light into chemical energy.");
+        // SearXNG fills `.empty_element` with boilerplate when a result has no
+        // description; that must not be passed off as a real snippet.
+        assert_eq!(out[1].url, "https://bio.test/leaf");
+        assert_eq!(out[1].title, "Inside A Leaf");
+        assert!(
+            out[1].snippet.is_empty(),
+            "placeholder description must not become a snippet, got {:?}",
+            out[1].snippet
+        );
+    }
+
+    #[test]
     fn parse_html_rides_atom_xml_via_element_name_selectors() {
         // arXiv's Atom feed: the link is the <id> element's *text*, not an href.
         let atom = r#"
@@ -920,7 +961,7 @@ mod tests {
     fn builtin_web_engine_selectors_compile() {
         // A built-in with a broken selector would fail silently at runtime
         // (search_one erroring, search_all swallowing it), so assert here.
-        for id in ["brave", "duckduckgo", "mojeek", "startpage"] {
+        for id in ["brave", "duckduckgo", "mojeek", "startpage", "searxng"] {
             let engine = builtin_web_engine(id).expect("built-in exists");
             let selectors = engine.selectors.expect("web engine has selectors");
             compile_selector(&selectors.result).expect("result selector valid");

@@ -419,6 +419,14 @@ export function applyTheme(theme: ThemeColors): void {
   // Update meta color-scheme for scrollbar etc.
   root.style.colorScheme = theme.isLight ? "light" : "dark";
 
+  // The shimmer's highlight. It cannot be derived from the text colours: a
+  // good many themes set textPrimary and textSecondary to the *same* value
+  // (Gruvbox, Everforest, Kanagawa, Catppuccin Mocha), and Matrix inverts them
+  // outright, so a gradient built from those two is invisible or backwards.
+  // Sweeping towards pure white on dark themes and pure black on light ones is
+  // the one choice that always reads as a highlight against the text.
+  root.style.setProperty("--shimmer-peak", theme.isLight ? "#000000" : "#ffffff");
+
   // Toggle optional visual-effects presets. Remove any previous fx-* class,
   // then add the current one (if any) so extra CSS layers can apply.
   root.classList.forEach((cls) => {

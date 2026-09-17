@@ -324,54 +324,67 @@ body {
      readable with no motion at all.
    ============================================================ */
 .shimmer {
+  /* Variant F, run at a third of the tuner's speed.
+     The base stops are `currentColor`, not a theme text variable, so a label
+     keeps exactly the colour it already had and only the highlight is added.
+     That matters because several themes give textPrimary and textSecondary the
+     same value, which made a two-variable gradient invisible. `--shimmer-peak`
+     is set per theme in themes.ts: white on dark, black on light. */
   background-image: linear-gradient(
     100deg,
-    var(--text-secondary) 20%,
-    var(--text-primary) 42%,
-    var(--text-primary) 52%,
-    var(--text-secondary) 74%
+    currentColor 44%,
+    var(--shimmer-peak, #ffffff) 50%,
+    currentColor 56%
   );
-  background-size: 220% 100%;
+  background-size: 260% 100%;
+  /* Critical, and the cause of the flash this replaces: a background image
+     defaults to `repeat`. A tiled gradient puts several highlights on screen
+     at once, and since the travel distance was not a whole number of tile
+     widths, the whole tiled pattern teleported every time the animation
+     looped. That jump is what read as a flash between sweeps.
+     Keeping the position inside 100%..0% means the 260%-wide image always
+     covers the text on its own, so repeating buys nothing and costs the
+     artefact. */
+  background-repeat: no-repeat;
   -webkit-background-clip: text;
   background-clip: text;
-  color: transparent;
+  /* Only the *fill* goes transparent. Setting `color: transparent` as well
+     would drag `currentColor` down with it and leave the gradient — and so the
+     text — fully invisible. */
   -webkit-text-fill-color: transparent;
   /* Deliberately finite. The sweep is a claim that work is progressing
-     normally, so it has to expire: after `--shimmer-cycles` passes (~21s by
+     normally, so it has to expire: after `--shimmer-cycles` passes (~19s by
      default) `shimmer-settle` fills the glyphs back in and the label goes
      still. A frozen label is the honest reading of "this is taking longer than
-     it should" — far better than an animation that happily loops over a wedged
-     request. Indicators driven by real backend events don't need the guess and
-     should use `.shimmer-endless` instead. */
+     it should" -- far better than an animation that happily loops over a
+     wedged request. Indicators driven by real backend events don't need the
+     guess and should use `.shimmer-endless` instead. */
   animation:
-    shimmer-sweep 2.1s linear var(--shimmer-cycles, 10),
-    shimmer-settle 240ms linear calc(2.1s * var(--shimmer-cycles, 10)) forwards;
+    shimmer-sweep var(--shimmer-duration, 6.3s) linear var(--shimmer-cycles, 3),
+    shimmer-settle 240ms linear
+      calc(var(--shimmer-duration, 6.3s) * var(--shimmer-cycles, 3)) forwards;
 }
 
 /* For indicators whose motion is already tied to observed progress. */
 .shimmer-endless {
-  animation:
-    shimmer-sweep 2.1s linear infinite,
-    none;
+  animation: shimmer-sweep var(--shimmer-duration, 6.3s) linear infinite;
 }
 
+/* Both ends sit off the text, so the loop restart is never visible. */
 @keyframes shimmer-sweep {
-  from { background-position: 180% 0; }
-  to { background-position: -80% 0; }
+  from { background-position: 100% 0; }
+  to { background-position: 0% 0; }
 }
 
+/* Restores the label's own colour, whatever it happened to be. */
 @keyframes shimmer-settle {
-  to {
-    color: var(--text-primary);
-    -webkit-text-fill-color: var(--text-primary);
-  }
+  to { -webkit-text-fill-color: currentColor; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer,
   .shimmer-endless {
     background-image: none;
-    color: var(--text-primary);
     -webkit-text-fill-color: currentColor;
     animation: none !important;
   }
