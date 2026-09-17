@@ -69,6 +69,27 @@ Enable **SearXNG (self-hosted)** and set its URL to your instance; the default
 assumes `http://localhost:8080`. You can also add any other engine yourself
 under **Add engine** with its URL template and CSS selectors.
 
+## Follow-up questions
+
+Chat reads the conversation, so you don't have to repeat yourself:
+
+> **You:** tell me about the VIVO X300 Ultra
+> **You:** can you flash a global OS image onto it?
+
+The second question never names the phone, and on its own it would send a web
+search off after generic flashing guides. Grafium resolves "it" against the
+turns before it, so research plans, picks sources and writes its answer knowing
+what you're actually asking about — including when **Deep web research** is on.
+
+Two things worth knowing:
+
+- **A long conversation is summarised, not dropped.** Recent turns are replayed
+  word for word; older ones fold into a recap so the transcript can't crowd out
+  your notes and the sources being read.
+- **Starting a new chat starts a new subject.** If a follow-up gets answered as
+  if it were about something else, the earlier turns are still in scope — start
+  a new chat, or name the subject explicitly in the question.
+
 ## Asking Chat to change your notes
 
 Chat can also *do* things, not just answer. Ask in plain language:

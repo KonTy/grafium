@@ -220,6 +220,7 @@ pub async fn research_deep(
             &effective_question,
             Some(resolved_graph_id.as_str()),
             &config,
+            &history,
             Some(cancel),
             &mut on_event,
         )

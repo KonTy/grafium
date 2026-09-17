@@ -1443,18 +1443,20 @@ impl KnowledgeEngine {
     /// confined to Part 2, and its finer-grained phases (planning, assessing,
     /// refining, synthesizing) are surfaced through the extra [`AskPhase`]
     /// variants.
+    #[allow(clippy::too_many_arguments)]
     pub async fn ask_stream_with_deep_research(
         &self,
         db: &crate::db::Database,
         question: &str,
         graph_id: Option<&str>,
         config: &crate::research::ResearchConfig,
+        history: &[ChatTurn],
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
         on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
     ) -> Result<AskStreamOutcome> {
         let browser = crate::scraping::HttpBrowserDriver::new();
         self.ask_stream_with_deep_research_using(
-            db, question, graph_id, config, &browser, cancel, on_event,
+            db, question, graph_id, config, history, &browser, cancel, on_event,
         )
         .await
     }
@@ -1469,6 +1471,7 @@ impl KnowledgeEngine {
         question: &str,
         graph_id: Option<&str>,
         config: &crate::research::ResearchConfig,
+        history: &[ChatTurn],
         browser: &dyn crate::scraping::browser::BrowserDriver,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
         on_event: &mut (dyn FnMut(AskStreamEvent<'_>) + Send),
@@ -1496,6 +1499,14 @@ impl KnowledgeEngine {
         // ── Part 2: From the web (multi-round Deep Research) ─────────────────
         on_event(AskStreamEvent::Delta("\n\n## From the web\n\n"));
 
+        // Every research step is a model call about the user's question, and a
+        // follow-up is only answerable against the turns before it: "can you
+        // flash a global OS image onto it?" names no subject of its own. Give
+        // the loop the same transcript the notes arm gets, so planning, source
+        // selection and synthesis can all resolve what "it" refers to.
+        // `budget::complete` drops the oldest turns first when a step does not
+        // fit, so a long conversation costs relevance, never a hard failure.
+        let thread = ask_budget::research_history(llm.as_ref(), history);
         let mut web_citations = Vec::new();
         let research = {
             // The agent emits structured phase/note progress; map its phases
@@ -1509,7 +1520,8 @@ impl KnowledgeEngine {
                     on_event(AskStreamEvent::Note(note));
                 }
             };
-            let engine = crate::research::DeepResearchEngine::new(llm.as_ref(), browser, config);
+            let engine = crate::research::DeepResearchEngine::new(llm.as_ref(), browser, config)
+                .with_history(&thread);
             engine
                 .research_cancellable(question, cancel.clone(), &mut on_progress)
                 .await
@@ -3796,6 +3808,119 @@ mod tests {
         Ok(())
     }
 
+    /// Deep Research used to be the only answer path that never saw the
+    /// conversation, so "can you flash a global OS image onto it?" reached the
+    /// planner with no idea what "it" was. Every research step is a model call
+    /// about the user's question and must be able to read the turns before it.
+    #[tokio::test]
+    async fn deep_research_steps_can_read_the_conversation() -> Result<()> {
+        type Recorded = Arc<Mutex<Vec<Vec<crate::ai::traits::ChatMessage>>>>;
+        struct RecordingLlm {
+            seen: Recorded,
+            responses: Mutex<std::collections::VecDeque<String>>,
+        }
+
+        impl LlmProvider for RecordingLlm {
+            fn complete<'a>(
+                &'a self,
+                messages: &'a [crate::ai::traits::ChatMessage],
+                _options: &'a crate::ai::traits::CompletionOptions,
+            ) -> BoxFuture<'a, Result<String>> {
+                self.seen.lock().unwrap().push(messages.to_vec());
+                let response = self
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| "An answer.".to_string());
+                Box::pin(async move { Ok(response) })
+            }
+            fn name(&self) -> &str {
+                "recording"
+            }
+            fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
+                Box::pin(async move { Ok(true) })
+            }
+        }
+
+        let db = crate::db::Database::in_memory()?;
+        let mut config = crate::research::ResearchConfig {
+            max_rounds: 1,
+            ..Default::default()
+        };
+        config.engines.retain(|engine| engine.id == "brave");
+        for engine in &mut config.engines {
+            engine.enabled = true;
+        }
+        let browser = CannedBrowser {
+            search_html: "<html><body><div class=\"snippet\" data-type=\"web\"><a href=\"https://a.example/x\"><div class=\"title\">Flashing guide</div></a><div class=\"generic-snippet\"><div class=\"content\">How to flash.</div></div></div></body></html>".to_string(),
+            pages: HashMap::from([(
+                "https://a.example/x".into(),
+                stub_page_html("Flashing guide", "Instructions for flashing a device."),
+            )]),
+        };
+
+        let seen: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let llm = Box::new(RecordingLlm {
+            seen: Arc::clone(&seen),
+            responses: Mutex::new(
+                [
+                    r#"{"queries":["vivo x300 ultra global rom"]}"#,
+                    r#"{"picks":[0]}"#,
+                    r#"{"title_answer":"Yes.[1]","topics":[]}"#,
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ),
+        });
+        let engine = test_engine_with_llm(llm)?;
+
+        let history = vec![
+            ChatTurn {
+                role: "user".into(),
+                content: "tell me a lot about VIVO x300 ultra what can it do?".into(),
+            },
+            ChatTurn {
+                role: "assistant".into(),
+                content: "The Vivo X300 Ultra is a high-end smartphone.".into(),
+            },
+        ];
+        let mut on_event = |_: AskStreamEvent<'_>| {};
+        engine
+            .ask_stream_with_deep_research_using(
+                &db,
+                "can you flash a global os image onto it?",
+                None,
+                &config,
+                &history,
+                &browser,
+                None,
+                &mut on_event,
+            )
+            .await?;
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "no model calls were recorded");
+        let carried_history = seen.iter().any(|messages| {
+            messages
+                .iter()
+                .any(|message| message.content.contains("VIVO x300 ultra"))
+        });
+        assert!(
+            carried_history,
+            "no research step could see the conversation"
+        );
+        assert!(
+            seen.iter().all(|messages| messages
+                .iter()
+                .all(|message| message.role != crate::ai::traits::MessageRole::System
+                    || !message.content.contains("VIVO x300 ultra"))),
+            "conversation was replayed with system-prompt authority"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn language_guard_repairs_both_web_summaries_without_changing_sources_or_quotes(
     ) -> Result<()> {
@@ -3848,6 +3973,7 @@ mod tests {
                             question,
                             None,
                             &config,
+                            &[],
                             &browser,
                             None,
                             &mut on_event,

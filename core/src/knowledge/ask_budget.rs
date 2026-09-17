@@ -21,6 +21,28 @@ fn excerpt(text: &str, bytes: usize) -> String {
     format!("{head}{OMITTED}{}", &text[tail_start..])
 }
 
+/// The conversation, fitted for the Deep Research loop.
+///
+/// Research steps are model calls like any other, so they get the same
+/// budgeted, compacted transcript an ordinary answer gets. Two differences:
+/// the byte budget is derived from the model's own context window rather than
+/// a caller-supplied slice, and the compaction recap is demoted from `System`
+/// to `User` — a summary of untrusted conversation is still untrusted, and
+/// must not arrive wearing the authority of a system prompt.
+pub(crate) fn research_history(llm: &dyn LlmProvider, history: &[ChatTurn]) -> Vec<ChatMessage> {
+    let context = llm.context_window().unwrap_or(4096);
+    let bytes = conversation::history_budget(context).saturating_mul(4);
+    history_messages(history, bytes)
+        .into_iter()
+        .map(|mut message| {
+            if message.role == MessageRole::System {
+                message.role = MessageRole::User;
+            }
+            message
+        })
+        .collect()
+}
+
 fn history_messages(history: &[ChatTurn], bytes: usize) -> Vec<ChatMessage> {
     if history.is_empty() || bytes == 0 {
         return Vec::new();

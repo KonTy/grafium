@@ -243,12 +243,46 @@ pub fn resolve_followup(question: &str, history: &[ChatTurn]) -> String {
 /// prepend the last real topic so search engines receive both.
 pub fn resolve_research_followup(question: &str, history: &[ChatTurn]) -> String {
     let cleaned = extract_embedded_research_question(question).unwrap_or(question);
-    if is_contextual_research_followup(cleaned) {
+    if is_contextual_research_followup(cleaned) || has_dangling_referent(cleaned) {
         if let Some(topic) = last_substantive_user_turn(history) {
             return format!("{topic}\n\nFollow-up request: {}", cleaned.trim());
         }
     }
     resolve_followup(cleaned, history)
+}
+
+/// Whether `question` leans on a pronoun whose antecedent it never supplies.
+///
+/// `is_self_contained` only asks whether *any* topical word survives, so "can
+/// you flash a global OS image onto it?" passes: `flash`, `global`, `image`
+/// are all real words. They are also the wrong subject entirely — the thing
+/// being flashed lives in the previous turn, and a web search for the words
+/// alone returns generic flashing guides rather than anything about the device
+/// under discussion.
+///
+/// A question that supplies its own anchor is exempt. "what is it like to live
+/// in Tokyo" contains a pronoun too, but `Tokyo` names the subject, so nothing
+/// is dangling. Capitalisation past the first word and digit-bearing tokens
+/// ("X300", "Pixel 9") are the two cheap signals for that, and both survive
+/// the lowercase typing this heuristic mostly has to cope with, because model
+/// names keep their digits however casually they are typed.
+fn has_dangling_referent(question: &str) -> bool {
+    let mut refers_back = false;
+    let mut names_its_own_subject = false;
+    for (index, word) in question.split_whitespace().enumerate() {
+        let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if bare.is_empty() {
+            continue;
+        }
+        if REFERENT_WORDS.contains(&bare.to_ascii_lowercase().as_str()) {
+            refers_back = true;
+        }
+        let proper_noun = index > 0 && bare.chars().next().is_some_and(char::is_uppercase);
+        if proper_noun || bare.chars().any(|c| c.is_ascii_digit()) {
+            names_its_own_subject = true;
+        }
+    }
+    refers_back && !names_its_own_subject
 }
 
 /// Resolve the text that should be handed to note retrieval for `question`.
@@ -286,6 +320,7 @@ fn last_substantive_user_turn(history: &[ChatTurn]) -> Option<&str> {
             !c.is_empty()
                 && is_self_contained(c)
                 && !is_contextual_research_followup(c)
+                && !has_dangling_referent(c)
                 && extract_embedded_research_question(c).is_none_or(|embedded| embedded == *c)
         })
 }
@@ -548,6 +583,84 @@ mod tests {
             role: "assistant".into(),
             content: c.into(),
         }
+    }
+
+    /// The transcript that exposed this: a question about a phone, then "can
+    /// you flash a global os image onto it?". The follow-up passes
+    /// `is_self_contained` (flash / global / image are all topical words) yet
+    /// names no device at all, so research went looking for generic flashing
+    /// guides instead of anything about the phone.
+    #[test]
+    fn a_dangling_pronoun_borrows_the_subject_from_the_previous_turn() {
+        let history = vec![
+            user("tell me a lot about VIVO x300 ultra what can it do?"),
+            assistant("The Vivo X300 Ultra is a high-end smartphone..."),
+        ];
+        let resolved =
+            resolve_research_followup("can you flash a global os image onto it?", &history);
+        assert!(
+            resolved.contains("x300 ultra"),
+            "subject was not recovered: {resolved}"
+        );
+        assert!(
+            resolved.contains("flash a global os image"),
+            "the actual request was lost: {resolved}"
+        );
+    }
+
+    /// A pronoun alone is not enough. A question that names its own subject is
+    /// answerable as written, and prepending an unrelated earlier topic would
+    /// send the search somewhere the user never asked about.
+    #[test]
+    fn a_question_that_names_its_own_subject_is_left_alone() {
+        for question in [
+            "what is it like to live in Tokyo",
+            "how much does the Pixel 9 cost",
+            "is it true that ATP synthase spins",
+        ] {
+            assert!(
+                !has_dangling_referent(question),
+                "wrongly treated as dangling: {question}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pronoun_with_no_antecedent_in_the_question_is_dangling() {
+        for question in [
+            "can you flash a global os image onto it?",
+            "how much does it weigh",
+            "are those available unlocked",
+        ] {
+            assert!(
+                has_dangling_referent(question),
+                "missed a dangling referent: {question}"
+            );
+        }
+    }
+
+    /// With nothing to borrow from, the question must survive unchanged rather
+    /// than being rewritten into something emptier.
+    #[test]
+    fn a_dangling_pronoun_without_history_is_left_as_written() {
+        let question = "can you flash a global os image onto it?";
+        assert_eq!(resolve_research_followup(question, &[]), question);
+    }
+
+    /// Borrowing from one follow-up to resolve another just moves the problem.
+    #[test]
+    fn a_follow_up_is_never_borrowed_as_the_topic() {
+        let history = vec![
+            user("tell me about the VIVO x300 ultra"),
+            assistant("It is a phone."),
+            user("how much does it weigh"),
+            assistant("About 220g."),
+        ];
+        let resolved = resolve_research_followup("can you root it", &history);
+        assert!(
+            resolved.contains("x300 ultra"),
+            "borrowed a follow-up instead of the topic: {resolved}"
+        );
     }
 
     #[test]

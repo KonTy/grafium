@@ -553,7 +553,11 @@ impl<'a> DeepResearchEngine<'a> {
             .complete(
                 &self.config.prompts.plan_queries,
                 StepInput::new(question, ""),
-                200,
+                // A reasoning model spends part of its output budget narrating
+                // before it emits the object, so a cap sized for the queries
+                // alone truncates the JSON it was asked for. Parsing recovers
+                // from that, but it is cheaper not to provoke it.
+                PLAN_TOKENS,
                 0.2,
                 cancel,
             )
@@ -674,7 +678,7 @@ impl<'a> DeepResearchEngine<'a> {
         }
 
         let raw = self
-            .complete(&self.config.prompts.refine_queries, input, 200, 0.2, cancel)
+            .complete(&self.config.prompts.refine_queries, input, PLAN_TOKENS, 0.2, cancel)
             .await?;
         // Drop any refined query that merely repeats one we already ran — a
         // repeat would waste the round it was meant to rescue.
@@ -813,6 +817,66 @@ fn numbered_excerpts(excerpts: &[(usize, String)], max_chars: usize) -> Vec<Evid
 /// Most search queries a single round may run, however many the model returns.
 const MAX_QUERIES_PER_ROUND: usize = 4;
 
+/// Output budget for the two steps that emit a query list.
+const PLAN_TOKENS: u32 = 384;
+
+/// Code-fence language tags and JSON key names that survive when a structured
+/// plan is recovered line by line.
+///
+/// Without this guard the ```` ```json ```` fence opening a truncated response
+/// becomes the literal search query `json`, which is how a question about a
+/// phone once came back with an answer about data-interchange formats: every
+/// engine happily returned json.org and MDN, and those pages then crowded the
+/// real results out of the candidate pool.
+const QUERY_SCAFFOLDING: &[&str] = &[
+    "json", "jsonc", "yaml", "yml", "toml", "xml", "csv", "text", "txt", "plaintext", "markdown",
+    "md", "queries", "query", "search", "searches", "output", "response", "result", "results",
+    "answer", "plan", "example", "note", "notes",
+];
+
+fn is_query_scaffolding(candidate: &str) -> bool {
+    let lower = candidate
+        .trim()
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    QUERY_SCAFFOLDING.contains(&lower.as_str())
+}
+
+/// Every *closed* string literal in `text`, ignoring one left unterminated at
+/// the end.
+///
+/// The planner runs under a small token cap, so a model that narrates before
+/// answering routinely gets cut off mid-object. The queries it already emitted
+/// are perfectly good; only the closing brace is missing. Reading the complete
+/// literals back out recovers them without falling through to the much blunter
+/// line-based recovery.
+fn closed_string_literals(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current: Option<String> = None;
+    let mut escaped = false;
+    for ch in text.chars() {
+        let Some(buffer) = current.as_mut() else {
+            if ch == '"' {
+                current = Some(String::new());
+            }
+            continue;
+        };
+        if escaped {
+            buffer.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            found.push(std::mem::take(buffer));
+            current = None;
+        } else {
+            buffer.push(ch);
+        }
+    }
+    found
+}
+
 fn parse_queries(raw: &str) -> Result<Vec<String>> {
     #[derive(Deserialize)]
     struct QueriesJson {
@@ -837,6 +901,14 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
             queries = parsed;
         }
     }
+    // A response cut off before its closing brace still carries usable queries.
+    // Take them from the literals rather than the lines, so the surrounding
+    // `{`, `"queries":` and fence scaffolding can't be mistaken for topics.
+    if queries.is_empty() {
+        if let Some(key) = trimmed.find("\"queries\"") {
+            queries = closed_string_literals(&trimmed[key + "\"queries\"".len()..]);
+        }
+    }
     if queries.is_empty() {
         queries = trimmed
             .lines()
@@ -849,7 +921,9 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
                     .trim_matches('"')
                     .trim_matches('\'')
                     .trim();
-                (candidate.len() >= 4 && !candidate.contains('{') && !candidate.contains('}'))
+                let structural = candidate.contains(|c: char| matches!(c, '{' | '}' | '[' | ']'))
+                    || candidate.contains("\":");
+                (candidate.len() >= 4 && !structural && !is_query_scaffolding(candidate))
                     .then(|| candidate.to_string())
             })
             .collect();
@@ -1515,5 +1589,74 @@ mod tests {
                 }
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod truncated_plan_tests {
+    use super::*;
+
+    /// The failure that produced an answer about data-interchange formats to a
+    /// question about flashing a phone: the planner was cut off before its
+    /// closing brace, line-based recovery read the ```` ```json ```` fence as a
+    /// topic, and every engine dutifully returned json.org and MDN.
+    #[test]
+    fn truncated_fenced_plan_never_yields_the_fence_as_a_query() {
+        let raw = "```json\n{\n  \"queries\": [\n    \"vivo x300 ultra global rom flash\",\n    \"vivo x300 ultra bootloader unlock\"";
+        let queries = parse_queries(raw).expect("truncated plan should still be usable");
+        assert_eq!(
+            queries,
+            vec![
+                "vivo x300 ultra global rom flash",
+                "vivo x300 ultra bootloader unlock"
+            ]
+        );
+    }
+
+    #[test]
+    fn scaffolding_lines_are_not_search_queries() {
+        for raw in [
+            "```json\njson\nqueries\n\"queries\":\nvivo x300 ultra global rom\n",
+            "Output:\njson\nvivo x300 ultra global rom\n",
+        ] {
+            let queries = parse_queries(raw).expect("a real query survives");
+            assert!(
+                !queries.iter().any(|q| q.eq_ignore_ascii_case("json")
+                    || q.eq_ignore_ascii_case("queries")
+                    || q.eq_ignore_ascii_case("output")),
+                "scaffolding leaked into queries: {queries:?}"
+            );
+            assert!(queries.iter().any(|q| q.contains("vivo")));
+        }
+    }
+
+    #[test]
+    fn well_formed_plans_are_unaffected() {
+        let queries = parse_queries("{\"queries\": [\"json schema validation spec\"]}")
+            .expect("valid plan parses");
+        assert_eq!(queries, vec!["json schema validation spec"]);
+    }
+
+    #[test]
+    fn a_plan_of_pure_scaffolding_is_a_parse_error_not_a_junk_search() {
+        // Better to fall back to searching the user's literal question than to
+        // search for the punctuation the model wrapped its answer in.
+        assert!(parse_queries("```json\n{\n  \"queries\": [\n").is_err());
+    }
+
+    #[test]
+    fn closed_literals_ignore_an_unterminated_tail() {
+        assert_eq!(
+            closed_string_literals(r#": ["alpha", "beta", "gam"#),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn closed_literals_respect_escapes() {
+        assert_eq!(
+            closed_string_literals(r#"["say \"hi\" now"]"#),
+            vec!["say \"hi\" now".to_string()]
+        );
     }
 }
