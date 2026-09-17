@@ -324,7 +324,9 @@ body {
      readable with no motion at all.
    ============================================================ */
 .shimmer {
-  /* Variant F, run at a third of the tuner's speed.
+  /* Variant F at 3.15s. 6.3s read as sluggish rather than busy, so the
+     sweep is twice as quick; `--shimmer-cycles` doubled to match, which keeps
+     the give-up budget below at the same ~19s.
      The base stops are `currentColor`, not a theme text variable, so a label
      keeps exactly the colour it already had and only the highlight is added.
      That matters because several themes give textPrimary and textSecondary the
@@ -332,19 +334,21 @@ body {
      is set per theme in themes.ts: white on dark, black on light. */
   background-image: linear-gradient(
     100deg,
-    currentColor 44%,
+    currentColor 37%,
     var(--shimmer-peak, #ffffff) 50%,
-    currentColor 56%
+    currentColor 63%
   );
-  background-size: 260% 100%;
+  background-size: 300% 100%;
   /* Critical, and the cause of the flash this replaces: a background image
      defaults to `repeat`. A tiled gradient puts several highlights on screen
      at once, and since the travel distance was not a whole number of tile
      widths, the whole tiled pattern teleported every time the animation
      looped. That jump is what read as a flash between sweeps.
-     Keeping the position inside 100%..0% means the 260%-wide image always
+     Keeping the position inside 100%..0% means the 300%-wide image always
      covers the text on its own, so repeating buys nothing and costs the
-     artefact. */
+     artefact. The image is 300% rather than 260% because the wider band needs
+     the extra room: at both ends of the travel the highlight has to sit
+     entirely off the glyphs, or the loop restart shows as a bright edge. */
   background-repeat: no-repeat;
   -webkit-background-clip: text;
   background-clip: text;
@@ -360,14 +364,14 @@ body {
      wedged request. Indicators driven by real backend events don't need the
      guess and should use `.shimmer-endless` instead. */
   animation:
-    shimmer-sweep var(--shimmer-duration, 6.3s) linear var(--shimmer-cycles, 3),
+    shimmer-sweep var(--shimmer-duration, 3.15s) linear var(--shimmer-cycles, 6),
     shimmer-settle 240ms linear
-      calc(var(--shimmer-duration, 6.3s) * var(--shimmer-cycles, 3)) forwards;
+      calc(var(--shimmer-duration, 3.15s) * var(--shimmer-cycles, 6)) forwards;
 }
 
 /* For indicators whose motion is already tied to observed progress. */
 .shimmer-endless {
-  animation: shimmer-sweep var(--shimmer-duration, 6.3s) linear infinite;
+  animation: shimmer-sweep var(--shimmer-duration, 3.15s) linear infinite;
 }
 
 /* Both ends sit off the text, so the loop restart is never visible. */

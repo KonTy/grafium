@@ -13,7 +13,7 @@ describe("global shimmer", () => {
   it("expires by default instead of looping forever", () => {
     const from = css.indexOf(".shimmer {");
     const rule = css.slice(from, css.indexOf("\n}", from));
-    expect(rule).toContain("var(--shimmer-cycles, 3)");
+    expect(rule).toContain("var(--shimmer-cycles, 6)");
     expect(rule).not.toContain("infinite");
   });
 
@@ -26,17 +26,17 @@ describe("global shimmer", () => {
   it("keeps both ends of the sweep off the text so the loop restart is unseen", () => {
     const frames = css.slice(css.indexOf("@keyframes shimmer-sweep"));
     const body = frames.slice(0, frames.indexOf("\n}"));
-    // With a 260%-wide image, 100%..0% is exactly the range over which the
+    // With a 300%-wide image, 100%..0% is exactly the range over which the
     // image still covers the text -- and both ends park the highlight outside.
     expect(body).toContain("background-position: 100% 0");
     expect(body).toContain("background-position: 0% 0");
     expect(body).not.toMatch(/-\d+%/);
   });
 
-  it("runs at a third of the tuner speed", () => {
+  it("runs at 3.15s, twice the speed first tried", () => {
     const from = css.indexOf(".shimmer {");
     const rule = css.slice(from, css.indexOf("\n}", from));
-    expect(rule).toContain("var(--shimmer-duration, 6.3s)");
+    expect(rule).toContain("var(--shimmer-duration, 3.15s)");
   });
 
   it("fills the glyphs back in when the sweep expires", () => {
@@ -51,8 +51,8 @@ describe("global shimmer", () => {
     const rule = css.slice(from, css.indexOf("\n}", from));
     // Several themes give text-primary and text-secondary the same value, so a
     // gradient between those two would be a flat, invisible fill.
-    expect(rule).toContain("currentColor 44%");
-    expect(rule).toContain("currentColor 56%");
+    expect(rule).toContain("currentColor 37%");
+    expect(rule).toContain("currentColor 63%");
     expect(rule).toContain("var(--shimmer-peak, #ffffff)");
     expect(rule).not.toContain("var(--text-secondary)");
   });
