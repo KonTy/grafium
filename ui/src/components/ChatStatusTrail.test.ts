@@ -35,10 +35,14 @@ describe("Status trail wiring", () => {
     expect(bubble).toContain("{#if !hideBubble}");
   });
 
-  it("animates one row at most and respects reduced motion in CSS as well as logic", () => {
+  it("animates one row at most, using the shared app-wide sweep", () => {
     expect(trail).toContain("class:shimmer={row.shimmer}");
-    expect(trail).toContain("@keyframes trail-shimmer");
-    expect(trail).toContain("@media (prefers-reduced-motion: reduce)");
+    // The trail's shimmer is evidence-backed — `statusTrail` already withholds
+    // it for stalled runs — so it opts out of the global sweep's expiry.
+    expect(trail).toContain("class:shimmer-endless={row.shimmer}");
+    // The sweep and its reduced-motion override now live once, in global.css.
+    expect(trail).not.toContain("@keyframes");
+    expect(trail).not.toContain("prefers-reduced-motion");
     // The ticking total must never be re-announced by a screen reader.
     expect(trail).toContain('<span class="trail-meta" aria-hidden="true">{meta || trail.elapsed}</span>');
     expect(trail).toContain('aria-live="polite"');

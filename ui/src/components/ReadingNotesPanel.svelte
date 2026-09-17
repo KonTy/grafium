@@ -216,7 +216,7 @@
   {/if}
 
   {#if !view}
-    {#if !sourceError}<p role="status">Loading notes…</p>{/if}
+    {#if !sourceError}<p class="shimmer" role="status">Loading notes…</p>{/if}
   {:else}
     {#if view.focusError}<div class="notes-error" role="alert">{view.focusError}</div>{/if}
     <div class="notes-toolbar">
@@ -329,7 +329,7 @@
 
     <div class="saved-notes">
       <h3>{view.scope === "all" ? "All saved notes" : "Notes on this source"}</h3>
-      {#if view.loading}<p role="status">Loading saved notes…</p>{/if}
+      {#if view.loading}<p class="shimmer" role="status">Loading saved notes…</p>{/if}
       {#if view.listError}<div class="notes-error" role="alert">{view.listError}</div>{/if}
       {#if view.warnings.length}
         <div class="notes-warning" role="alert">

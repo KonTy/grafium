@@ -1172,7 +1172,7 @@
   {/if}
 
   {#if loading}
-    <div class="prototype-loading">Loading source...</div>
+    <div class="prototype-loading shimmer">Loading source...</div>
   {/if}
 </div>
 

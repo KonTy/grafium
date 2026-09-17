@@ -3,6 +3,7 @@
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import ChatMessageBubble from "./ChatMessageBubble.svelte";
   import ChatStatusTrail from "./ChatStatusTrail.svelte";
+  import { isNearBottom, scrollToBottom } from "../lib/scrollToBottom";
   import { getGraphInfo } from "../lib/api";
   import { aiHealthCheck, type WebSource } from "../lib/knowledge";
   import { researchScopeInfo, type ResearchScope, type ResearchScopeInfo } from "../lib/research";
@@ -121,7 +122,7 @@
     trail.rows.length;
     if (!active || !messages || !followAnswer) return;
     void tick().then(() => {
-      if (active && scrollEl?.isConnected) scrollEl.scrollTop = scrollEl.scrollHeight;
+      if (active) scrollToBottom(scrollEl);
     });
   });
 
@@ -181,7 +182,7 @@
   </header>
 
   <div class="conversation-scroll" bind:this={scrollEl}
-    onscroll={() => { if (scrollEl) followAnswer = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 48; }}>
+    onscroll={() => { followAnswer = isNearBottom(scrollEl); }}>
     {#if !pageId}
       <p class="empty-message">Open a page, book, or journal day to ask about what you’re reading.</p>
     {:else if !view?.messages.length}
@@ -278,7 +279,7 @@
   button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .quiet-button { color: var(--text-secondary); background: var(--bg-primary); border: 1px solid var(--border); padding: 5px 8px; }
   .quiet-button:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-  .conversation-scroll { flex: 1; min-height: 64px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; }
+  .conversation-scroll { flex: 1; min-height: 64px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; padding-bottom: 14px; }
   .conversation-scroll :global(.msg) { min-width: 0; flex-shrink: 0; overflow-wrap: anywhere; }
   .conversation-scroll :global(.msg pre), .conversation-scroll :global(.msg table) { max-width: 100%; overflow-x: auto; }
   .empty-message { padding: 16px 2px; line-height: 1.55; color: var(--text-secondary); }

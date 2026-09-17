@@ -146,7 +146,7 @@
         <div class="conflicts-panel">
           <p>Resolve conflicts by editing the normal note and saving your chosen version.</p>
           {#if conflictsLoading}
-            <p role="status">Loading conflicts…</p>
+            <p class="shimmer" role="status">Loading conflicts…</p>
           {:else if conflicts.length === 0}
             <p role="status">{syncActivity.running > 0 ? "Sync in progress…" : "No unresolved sync conflicts."}</p>
           {:else}

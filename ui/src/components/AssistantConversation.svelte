@@ -6,6 +6,7 @@
   import PageAssistantTools from "./PageAssistantTools.svelte";
   import AIEditPlanCard from "./AIEditPlanCard.svelte";
   import ChatStatusTrail from "./ChatStatusTrail.svelte";
+  import { isNearBottom, scrollToBottom } from "../lib/scrollToBottom";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
   import { listBlocks } from "../lib/api";
   import { aiAsk, aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
@@ -163,7 +164,7 @@
     trail.rows.length;
     if (!active || !followAnswer) return;
     void tick().then(() => {
-      if (active && scrollEl?.isConnected && !window.getSelection()?.toString()) scrollEl.scrollTop = scrollEl.scrollHeight;
+      if (active && !window.getSelection()?.toString()) scrollToBottom(scrollEl);
     });
   });
 
@@ -388,7 +389,7 @@
   </header>
 
   <div class="conversation-scroll chat-log" bind:this={scrollEl}
-    onscroll={() => { if (scrollEl) followAnswer = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 48; }}>
+    onscroll={() => { followAnswer = isNearBottom(scrollEl); }}>
     {#if contextPageId}
       <PageAssistantTools pageId={contextPageId} pageTitle={info?.pageTitle || view.sourcePageTitle}
         blockId={focusedBlockId} {thread} {openTools} active={active} {onFindLinks} {onNavigate} {onOpenSettings} />
@@ -426,7 +427,7 @@
       </div>
     {/each}
     {#if view.error}<p class="error-message" role="alert">{view.error}</p>{/if}
-    {#if planning}<p class="status-message" role="status">Working out what to change…</p>{/if}
+    {#if planning}<p class="status-message" role="status"><span class="shimmer">Working out what to change…</span></p>{/if}
     {#if pendingPlan}
       <AIEditPlanCard request={pendingPlan.request} actions={pendingPlan.actions}
         applying={applyingPlan} error={planError} onApply={applyPlan} onDismiss={dismissPlan} />
@@ -524,7 +525,7 @@
   .model-badge { text-align: left; border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
   .model-badge:hover { color: var(--accent); }
   .model-badge span { display: inline; }
-  .conversation-scroll { flex: 1; min-height: 40px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 12px; overscroll-behavior: contain; }
+  .conversation-scroll { flex: 1; min-height: 40px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 12px; overscroll-behavior: contain; padding-bottom: 14px; }
   .conversation-scroll > :global(*) { flex-shrink: 0; }
   .conversation-turn { min-width: 0; }
   .conversation-scroll :global(.msg) { min-width: 0; overflow-wrap: anywhere; }

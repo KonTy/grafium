@@ -204,7 +204,7 @@
   </p>
 
   {#if isLoading}
-    <div class="loading">Loading research settings…</div>
+    <div class="loading shimmer">Loading research settings…</div>
   {:else if config}
     {#if !backendAvailable}
       <div class="message error" role="status">

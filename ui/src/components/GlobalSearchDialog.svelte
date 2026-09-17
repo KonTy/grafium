@@ -145,7 +145,7 @@
     {:else if !checking && !embedderAvailable}<p>Text search works without AI. <button class="text-button" onclick={() => { onClose(); onOpenSettings(); }}>Configure an embedding model</button> for semantic AI Search.</p>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if !query.trim()}<p>Find a page or passage by typing a title, phrase, or word prefix.</p>
-    {:else if searching}<p role="status">Searching note titles and text…</p>
+    {:else if searching}<p class="shimmer" role="status">Searching note titles and text…</p>
     {:else if hasSearched && !combined.length}<p>No matches. Try a shorter word or a different phrase.</p>{/if}
     {#each combined as entry, index}
       {#if index === 0 && matches.length}<h3>Quick matches</h3>{/if}

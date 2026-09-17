@@ -232,7 +232,7 @@
     {/if}
 
     {#if loading}
-      <div class="state">Loading…</div>
+      <div class="state shimmer">Loading…</div>
     {:else if topics.length === 0}
       <div class="state empty">
         <p class="big">No flashcards yet</p>
@@ -273,7 +273,7 @@
     </header>
 
     {#if loading}
-      <div class="state">Loading…</div>
+      <div class="state shimmer">Loading…</div>
     {:else if cards.length === 0}
       <div class="state empty">
         <p class="big">All caught up 🎉</p>

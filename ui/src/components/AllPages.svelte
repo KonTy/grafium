@@ -867,7 +867,7 @@
   {:else if viewMode === "tree"}
     <div class="tree-browser" aria-busy={pageTreeLoading}>
       {#if pageTreeLoading && pageTree.length === 0}
-        <p class="tree-message">Loading {treeSource === "namespace" ? "namespace" : "tag"} tree…</p>
+        <p class="tree-message shimmer">Loading {treeSource === "namespace" ? "namespace" : "tag"} tree…</p>
       {:else if pageTreeError}
         <div class="tree-error" role="alert">
           <p>Could not load the {treeSource === "namespace" ? "namespace" : "tag"} tree.</p>

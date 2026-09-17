@@ -11,7 +11,7 @@
 </script>
 
 {#await pending}
-  <div class="lazy-view-status" role="status">Loading {name}...</div>
+  <div class="lazy-view-status shimmer" role="status">Loading {name}...</div>
 {:then module}
   {@render children(module.default)}
 {:catch error}

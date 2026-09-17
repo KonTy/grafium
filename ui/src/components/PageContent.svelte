@@ -3428,7 +3428,7 @@
           {/each}
         </div>
       {:else if linkCandidatesLoading}
-        <div class="link-candidates-empty">Scanning for unlinked page mentions...</div>
+        <div class="link-candidates-empty"><span class="shimmer">Scanning for unlinked page mentions...</span></div>
       {:else if conceptEdgeBusy}
         <div class="link-candidates-empty">{conceptEdgeProgress || "Finding concept edges..."}</div>
       {:else if isImportedBookPage}

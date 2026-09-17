@@ -306,6 +306,77 @@ body {
   }
 }
 
+/* ============================================================
+   Shimmer — the shared "this is actually working" indicator.
+
+   A gradient clipped to the glyphs sweeps across the text. Used for any label
+   that describes work in progress, so the whole app signals liveness the same
+   way instead of each screen inventing its own spinner.
+
+   Two rules matter:
+   - Apply it only while work is genuinely running. An indicator that keeps
+     moving after the work has died teaches people the UI lies, which is worse
+     than showing nothing. `BusyLabel.svelte` enforces this by dropping the
+     shimmer once a run passes its deadline without finishing.
+   - The reduced-motion block above freezes every animation, which would strand
+     this text mid-gradient with `color: transparent` and make it partly
+     invisible. The override below restores a solid colour, so the label stays
+     readable with no motion at all.
+   ============================================================ */
+.shimmer {
+  background-image: linear-gradient(
+    100deg,
+    var(--text-secondary) 20%,
+    var(--text-primary) 42%,
+    var(--text-primary) 52%,
+    var(--text-secondary) 74%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* Deliberately finite. The sweep is a claim that work is progressing
+     normally, so it has to expire: after `--shimmer-cycles` passes (~21s by
+     default) `shimmer-settle` fills the glyphs back in and the label goes
+     still. A frozen label is the honest reading of "this is taking longer than
+     it should" — far better than an animation that happily loops over a wedged
+     request. Indicators driven by real backend events don't need the guess and
+     should use `.shimmer-endless` instead. */
+  animation:
+    shimmer-sweep 2.1s linear var(--shimmer-cycles, 10),
+    shimmer-settle 240ms linear calc(2.1s * var(--shimmer-cycles, 10)) forwards;
+}
+
+/* For indicators whose motion is already tied to observed progress. */
+.shimmer-endless {
+  animation:
+    shimmer-sweep 2.1s linear infinite,
+    none;
+}
+
+@keyframes shimmer-sweep {
+  from { background-position: 180% 0; }
+  to { background-position: -80% 0; }
+}
+
+@keyframes shimmer-settle {
+  to {
+    color: var(--text-primary);
+    -webkit-text-fill-color: var(--text-primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer,
+  .shimmer-endless {
+    background-image: none;
+    color: var(--text-primary);
+    -webkit-text-fill-color: currentColor;
+    animation: none !important;
+  }
+}
+
 /* Force full-width content - override any scoped component styles */
 .page-content {
   max-width: 100% !important;

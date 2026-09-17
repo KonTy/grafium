@@ -8,6 +8,17 @@ targets. A filesystem target can be a USB drive or network folder.
 3. Click **Sync Now** for that target.
 4. Sync before disconnecting and after connecting it elsewhere.
 
+A first sync merges both sides: remote-only files come down, local-only files
+go up, and a file that exists on both sides with different contents becomes a
+conflict rather than an overwrite. Nothing is replaced silently. If you want a
+USB graph on its own rather than merged into the graph you already have here,
+create an empty graph first and sync into that.
+
+A target belongs to the graph it was first synced with. Point a graph at a
+location holding a different graph and Grafium stops with an explanation
+instead of merging or deleting. Targets are independent, so a USB drive and a
+file server never have to be connected at the same time.
+
 Grafium never resolves conflicts automatically. When a sync is running — and for
 a few minutes afterwards — a **Conflicts** tab appears in the right panel. It
 also comes back on its own, with a count, whenever conflicts are still

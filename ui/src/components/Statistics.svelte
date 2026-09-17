@@ -453,7 +453,7 @@
   </div>
 
   {#if loading}
-    <div class="loading">Loading statistics...</div>
+    <div class="loading shimmer">Loading statistics...</div>
   {:else}
     <!-- Sticky heatmap section -->
     <div class="heatmap-sticky">
@@ -615,7 +615,7 @@
 
         {#if selectedDay.kind === "note"}
           {#if noteEditsLoading}
-            <div class="empty-state compact">Loading edited notes...</div>
+            <div class="empty-state compact shimmer">Loading edited notes...</div>
           {:else if noteEditsForSelectedDay.length === 0}
             <div class="empty-state compact">No note edits recorded for this day.</div>
           {:else}

@@ -178,7 +178,7 @@
     />
   </div>
   {#if loading}
-    <p class="message" role="status">Loading pages...</p>
+    <p class="message shimmer" role="status">Loading pages...</p>
   {:else if error}
     <div class="message" role="alert">
       <p>{error}</p>

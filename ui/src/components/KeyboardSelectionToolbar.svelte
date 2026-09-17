@@ -9,7 +9,7 @@
     <button type="button" disabled={selection.busy} onclick={selection.copy}>Copy</button>
     <button type="button" disabled={selection.busy} onclick={selection.remove}>Delete</button>
     <button type="button" disabled={selection.busy} onclick={selection.clear}>Clear</button>
-    {#if selection.busy}<span role="status">Saving...</span>{/if}
+    {#if selection.busy}<span class="shimmer" role="status">Saving...</span>{/if}
   </div>
 {/if}
 

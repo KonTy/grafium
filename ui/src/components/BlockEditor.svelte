@@ -2528,7 +2528,7 @@
           <textarea aria-label="Unfinished pasted text" readonly rows="10" value={paste.markdown}
             onclick={(event) => event.stopPropagation()}></textarea>
         {:else}
-          <div class="paste-status" role="status">Saving pasted blocks...</div>
+          <div class="paste-status shimmer" role="status">Saving pasted blocks...</div>
           <pre>{paste.markdown}</pre>
         {/if}
       </div>

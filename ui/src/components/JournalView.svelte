@@ -741,7 +741,7 @@
   <div class="journal-feed" data-main-scroll-pane bind:this={journalFeedEl} use:trackScrollIntent
     role="region" aria-label="Journal entries">
     {#if loading && journalPages.length === 0}
-      <div class="loading" role="status">Loading journals...</div>
+      <div class="loading shimmer" role="status">Loading journals...</div>
     {/if}
     {#if loadError}
       <div class="journal-error" role="alert">
@@ -773,7 +773,7 @@
               onNavigateBoundary={(direction, caretX) => navigateJournalBoundary(page.id, direction, caretX)}
             />
             {#if pendingPages.has(page.id)}
-              <div class="entry-loading" role="status">Loading entry...</div>
+              <div class="entry-loading shimmer" role="status">Loading entry...</div>
             {/if}
           {:else}
             <div class="deferred-entry">
@@ -786,7 +786,7 @@
       {/each}
 
       {#if loadingMore}
-        <div class="loading-more" role="status">Loading more...</div>
+        <div class="loading-more shimmer" role="status">Loading more...</div>
       {/if}
       {#if moreError}
         <div class="journal-error" role="alert">{moreError}</div>

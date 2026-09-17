@@ -1076,7 +1076,7 @@
     {/if}
 
     {#if loading}
-      <div class="graph-overlay">Building graph…</div>
+      <div class="graph-overlay"><span class="shimmer">Building graph…</span></div>
     {:else if errorMsg}
       <div class="graph-overlay error">{errorMsg}</div>
     {:else if stats.nodes === 0}

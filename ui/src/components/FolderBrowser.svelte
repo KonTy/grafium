@@ -59,7 +59,7 @@
 
     <div class="fb-list">
       {#if loading}
-        <div class="fb-loading">Loading...</div>
+        <div class="fb-loading shimmer">Loading...</div>
       {:else}
         {#each entries as entry}
           <button class="fb-entry" onclick={() => navigateTo(entry)}>

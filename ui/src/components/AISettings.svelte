@@ -339,7 +339,7 @@
   <h3>AI / Knowledge Engine</h3>
 
   {#if isLoading}
-    <div class="loading">Loading configuration...</div>
+    <div class="loading shimmer">Loading configuration...</div>
   {:else}
     <!-- Status -->
     {#if health}

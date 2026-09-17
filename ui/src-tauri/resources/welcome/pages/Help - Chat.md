@@ -21,6 +21,13 @@ animating over a wedged request — an indicator that keeps moving after
 something has died is worse than no indicator.
 
 Once an answer is done its steps collapse into a single **Worked for…** line.
+
+The same shimmer is used everywhere in Grafium that something is loading —
+graph building, search, indexing, saving. It always means the same thing:
+work is in flight and behaving normally. Where Grafium has no way to observe
+real progress, the shimmer is deliberately given a time budget of about twenty
+seconds; if the work outlives it the text simply goes still. Still text means
+"this is taking longer than it should", so motion never over-promises.
 Click it to expand the trail for that answer again, even after you have asked
 something else.
 

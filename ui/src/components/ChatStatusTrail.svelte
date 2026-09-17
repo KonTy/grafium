@@ -40,7 +40,7 @@
       {#each trail.rows as row (row.key)}
         <li class="trail-row {row.state}">
           <span class="trail-mark" aria-hidden="true"></span>
-          <span class="trail-label" class:shimmer={row.shimmer}>{row.label}</span>
+          <span class="trail-label" class:shimmer={row.shimmer} class:shimmer-endless={row.shimmer}>{row.label}</span>
           {#if row.state !== "done" && note}
             <span class="trail-note">· {note}</span>
           {:else if row.note}
@@ -105,29 +105,10 @@
 
   .trail-meta { font-variant-numeric: tabular-nums; }
 
-  /* The sweep travels across the glyphs themselves, so the row reads as "this
-     step is running" without a spinner competing for attention. It is applied
-     only to the single active row, and only when `shimmer` is true — which the
-     pure status layer already turns off for reduced motion and stalled runs. */
-  .shimmer {
-    background: linear-gradient(
-      100deg,
-      var(--text-secondary) 20%,
-      var(--text-primary) 42%,
-      var(--text-primary) 52%,
-      var(--text-secondary) 74%
-    );
-    background-size: 220% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: trail-shimmer 2.1s linear infinite;
-  }
-
-  @keyframes trail-shimmer {
-    from { background-position: 180% 0; }
-    to { background-position: -80% 0; }
-  }
+  /* The sweep itself lives in global.css as `.shimmer`, so every progress
+     label in the app moves the same way. Only the single active row gets the
+     class, and the pure status layer already withholds it for reduced motion
+     and for stalled runs. */
 
   .status-trail-collapsed { margin: 4px 0; }
 
@@ -150,9 +131,4 @@
     overflow-wrap: anywhere;
   }
 
-  /* Belt and braces: the shimmer is already gated in `statusTrail`, but a user
-     who prefers reduced motion must never see it even if a caller forgets. */
-  @media (prefers-reduced-motion: reduce) {
-    .shimmer { animation: none; background: none; color: var(--text-primary); -webkit-text-fill-color: currentColor; }
-  }
 </style>

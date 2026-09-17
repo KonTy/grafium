@@ -72,7 +72,7 @@
           <div>
             <strong>Jobs</strong>
             {#if running.length > 0}
-              <span>{running.length} running</span>
+              <span class="shimmer shimmer-endless">{running.length} running</span>
             {:else if failed.length > 0}
               <span>{failed.length} failed</span>
             {:else}

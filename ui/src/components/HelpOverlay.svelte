@@ -29,7 +29,7 @@
       <button class="help-close" aria-label="Close help" onclick={onClose}>×</button>
     </header>
     {#if loading}
-      <p class="help-loading">Loading help…</p>
+      <p class="help-loading shimmer">Loading help…</p>
     {:else}
       <article class="help-content">
         {@html renderAssistantMarkdown(content)}
