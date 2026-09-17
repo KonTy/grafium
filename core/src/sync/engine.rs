@@ -1,6 +1,5 @@
 use super::backend::{compute_hash, FileMetadata, SyncBackend};
-use super::merge;
-use super::state::SyncState;
+use super::state::{SyncState, UnresolvedConflict};
 use crate::error::Result;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -96,6 +95,49 @@ impl SyncEngine {
         }
     }
 
+    /// Construct an engine isolated to one configured sync target.
+    pub fn new_with_target(local_root: PathBuf, target_key: impl AsRef<str>) -> Self {
+        Self::new_with_metadata_dir_and_target(
+            local_root,
+            crate::graph::DEFAULT_METADATA_DIR_NAME,
+            target_key,
+        )
+    }
+
+    pub fn new_with_target_id(local_root: PathBuf, target_id: impl AsRef<str>) -> Self {
+        Self::new_with_target(local_root, target_id)
+    }
+
+    pub fn new_with_metadata_dir_and_target(
+        local_root: PathBuf,
+        metadata_dir_name: &str,
+        target_key: impl AsRef<str>,
+    ) -> Self {
+        let target = compute_hash(target_key.as_ref().as_bytes());
+        let root = local_root
+            .join(metadata_dir_name)
+            .join("sync-targets")
+            .join(target);
+        Self {
+            local_root,
+            state_path: root.join("sync-state.json"),
+            bases_dir: root.join("sync-bases"),
+        }
+    }
+
+    /// Return conflicts still waiting for the user to edit the primary file.
+    pub fn unresolved_conflicts(&self) -> Vec<UnresolvedConflict> {
+        SyncState::load(&self.state_path)
+            .list_unresolved_conflicts()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn last_sync(&self) -> Option<i64> {
+        SyncState::load(&self.state_path).last_sync
+    }
+
     /// Path to the cached base content for a given relative path.
     fn base_path(&self, rel_path: &str) -> PathBuf {
         self.bases_dir.join(rel_path)
@@ -108,11 +150,6 @@ impl SyncEngine {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(&path, content);
-    }
-
-    /// Load the cached base content, if available.
-    fn load_base(&self, rel_path: &str) -> Option<Vec<u8>> {
-        fs::read(self.base_path(rel_path)).ok()
     }
 
     /// Path of the marker file written at the root of every sync target. It
@@ -134,6 +171,9 @@ impl SyncEngine {
     /// this, an href resolving to `pages/../../../etc/passwd` would be joined
     /// onto the graph root and written outside it.
     fn is_syncable_path(rel_path: &str) -> bool {
+        if rel_path.contains(".conflict_") {
+            return false;
+        }
         if !Self::SYNCED_DIRS
             .iter()
             .any(|dir| rel_path.starts_with(dir))
@@ -301,6 +341,18 @@ impl SyncEngine {
             let local_exists = local_files.contains_key(&rel_path);
             let remote_exists = remote_files.contains_key(&rel_path);
             let was_synced = state.files.contains_key(&rel_path);
+
+            if state.unresolved_conflict(&rel_path).is_some()
+                && self.handle_pending_resolution(
+                    backend,
+                    &rel_path,
+                    &mut local_files,
+                    &mut state,
+                    &mut result,
+                )
+            {
+                continue;
+            }
 
             match (local_exists, remote_exists, was_synced) {
                 // Both exist — check for changes
@@ -478,6 +530,50 @@ impl SyncEngine {
         }
     }
 
+    /// Leave an unresolved conflict alone until the user edits the primary
+    /// file. A resolved local file is then the explicit source of truth.
+    fn handle_pending_resolution(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        local_files: &mut HashMap<String, FileMetadata>,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) -> bool {
+        let Some(conflict) = state.unresolved_conflict(rel_path).cloned() else {
+            return false;
+        };
+        let local_path = self.local_root.join(rel_path);
+        let Ok(content) = fs::read(&local_path) else {
+            return true;
+        };
+        let hash = compute_hash(&content);
+        let text = String::from_utf8_lossy(&content);
+        let has_markers =
+            text.contains("<<<<<<<") || text.contains("=======") || text.contains(">>>>>>>");
+        if !state.is_conflict_resolved(rel_path, &hash, has_markers) {
+            return true;
+        }
+        if let Err(e) = backend.write_file(rel_path, &content) {
+            result
+                .errors
+                .push(format!("Push resolved {}: {}", rel_path, e));
+            return true;
+        }
+        let _ = fs::remove_file(self.local_root.join(&conflict.backup_path));
+        let _ = backend.delete_file(&conflict.backup_path);
+        let local_meta = self.current_local_metadata(rel_path).ok();
+        let remote_meta = backend.stat_file(rel_path).ok();
+        state.resolve_unresolved_conflict(rel_path);
+        state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
+        self.save_base(rel_path, &content);
+        if let Some(meta) = local_files.get_mut(rel_path) {
+            meta.hash = Some(hash);
+        }
+        result.pushed.push(rel_path.to_string());
+        true
+    }
+
     /// Both exist but never synced before — compare content.
     fn sync_both_new(
         &self,
@@ -598,110 +694,11 @@ impl SyncEngine {
         }
     }
 
-    /// Handle a conflict using 3-way merge with conflict markers.
-    ///
-    /// If a cached base (common ancestor) is available, performs a true 3-way
-    /// merge: non-overlapping changes are auto-merged, overlapping edits get
-    /// Git-style conflict markers (`<<<<<<< local` / `=======` / `>>>>>>> remote`).
-    ///
-    /// If no base is cached (first sync), falls back to 2-way merge (all
-    /// differing sections get conflict markers).
-    ///
-    /// The merged file (possibly with markers) is written to both local and
-    /// remote so every device sees the same state. A `.conflict_*.md` backup
-    /// of the remote version is still created so no data is ever lost.
-    /// Resolve a conflict between two versions of a non-text file.
-    ///
-    /// Both versions are always preserved. The winner is chosen by content
-    /// hash order rather than by which machine synced first, so two machines
-    /// resolving the same conflict independently arrive at the same result
-    /// instead of ping-ponging. The loser is kept alongside it under a name
-    /// derived from its own hash, which is likewise identical on both sides.
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_binary_conflict(
-        &self,
-        backend: &dyn SyncBackend,
-        rel_path: &str,
-        local_content: &[u8],
-        remote_content: &[u8],
-        remote_meta: Option<FileMetadata>,
-        state: &mut SyncState,
-        result: &mut SyncResult,
-    ) {
-        let local_hash = compute_hash(local_content);
-        let remote_hash = compute_hash(remote_content);
-
-        let (winner, winner_hash, loser, loser_hash) = if local_hash <= remote_hash {
-            (
-                local_content,
-                local_hash.clone(),
-                remote_content,
-                remote_hash.clone(),
-            )
-        } else {
-            (
-                remote_content,
-                remote_hash.clone(),
-                local_content,
-                local_hash.clone(),
-            )
-        };
-
-        let loser_path = make_content_conflict_path(rel_path, &loser_hash);
-        let local_loser_path = self.local_root.join(&loser_path);
-        if let Some(parent) = local_loser_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(e) = crate::fsutil::atomic_write(&local_loser_path, loser) {
-            result
-                .errors
-                .push(format!("Write conflict copy {}: {}", loser_path, e));
-            // Without a preserved copy, overwriting the primary would lose
-            // that version for good, so stop here.
-            return;
-        }
-        if let Err(e) = backend.write_file(&loser_path, loser) {
-            result
-                .errors
-                .push(format!("Push conflict copy {}: {}", loser_path, e));
-            return;
-        }
-
-        let local_path = self.local_root.join(rel_path);
-        if winner_hash != local_hash {
-            if let Err(e) = crate::fsutil::atomic_write(&local_path, winner) {
-                result
-                    .errors
-                    .push(format!("Write winning {}: {}", rel_path, e));
-                return;
-            }
-        }
-        if winner_hash != remote_hash {
-            if let Err(e) = backend.write_file(rel_path, winner) {
-                result
-                    .errors
-                    .push(format!("Push winning {}: {}", rel_path, e));
-                return;
-            }
-        }
-
-        self.save_base(rel_path, winner);
-
-        let local_meta = Self::metadata_for_path(&local_path, &self.local_root).ok();
-        state.record_sync(
-            rel_path,
-            &winner_hash,
-            local_meta.as_ref(),
-            remote_meta.as_ref(),
-        );
-        result.conflicts.push(rel_path.to_string());
-    }
-
     fn handle_conflict(
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
-        remote_meta: Option<FileMetadata>,
+        _remote_meta: Option<FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
@@ -726,39 +723,14 @@ impl SyncEngine {
             }
         };
 
-        // A line-based merge only makes sense for text. Running it over a PNG
-        // or an MP3 would splice the two files together and destroy both.
-        if !is_mergeable(rel_path, &local_content, &remote_content) {
-            self.resolve_binary_conflict(
-                backend,
-                rel_path,
-                &local_content,
-                &remote_content,
-                remote_meta,
-                state,
-                result,
-            );
-            return;
-        }
-
-        let local_text = String::from_utf8_lossy(&local_content);
-        let remote_text = String::from_utf8_lossy(&remote_content);
-        // Attempt 3-way merge if we have a cached base
-        let merge_result = if let Some(base_content) = self.load_base(rel_path) {
-            let base_text = String::from_utf8_lossy(&base_content);
-            merge::three_way_merge(&base_text, &local_text, &remote_text)
-        } else {
-            // No base available — 2-way merge
-            merge::two_way_merge(&local_text, &remote_text)
-        };
-
-        // Always save a .conflict backup of the remote version (no data loss)
-        let conflict_path = make_conflict_path(rel_path);
+        let local_hash = compute_hash(&local_content);
+        let remote_hash = compute_hash(&remote_content);
+        let conflict_path = make_conflict_path(rel_path, &remote_hash);
         let local_conflict_path = self.local_root.join(&conflict_path);
         if let Some(parent) = local_conflict_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Err(e) = fs::write(&local_conflict_path, &remote_content) {
+        if let Err(e) = crate::fsutil::atomic_write(&local_conflict_path, &remote_content) {
             result
                 .errors
                 .push(format!("Write conflict backup {}: {}", conflict_path, e));
@@ -770,37 +742,8 @@ impl SyncEngine {
                 .push(format!("Push conflict backup {}: {}", conflict_path, e));
         }
 
-        // Write the merged content to local and remote
-        let merged_bytes = merge_result.content.as_bytes();
-        let merged_hash = compute_hash(merged_bytes);
-
-        if let Err(e) = fs::write(&local_path, merged_bytes) {
-            result
-                .errors
-                .push(format!("Write merged local {}: {}", rel_path, e));
-            return;
-        }
-        if let Err(e) = backend.write_file(rel_path, merged_bytes) {
-            result
-                .errors
-                .push(format!("Push merged {}: {}", rel_path, e));
-        }
-
-        self.save_base(rel_path, merged_bytes);
-        let local_meta = self.current_local_metadata(rel_path).ok();
-        let fresh_remote_meta = backend.stat_file(rel_path).ok().or(remote_meta);
-        state.record_sync(
-            rel_path,
-            &merged_hash,
-            local_meta.as_ref(),
-            fresh_remote_meta.as_ref(),
-        );
-
-        if merge_result.has_conflicts {
-            result.conflicts.push(rel_path.to_string());
-        } else {
-            result.merged.push(rel_path.to_string());
-        }
+        state.record_unresolved_conflict(rel_path, &local_hash, &remote_hash, &conflict_path);
+        result.conflicts.push(rel_path.to_string());
     }
 
     /// Collect all local graph files with metadata.
@@ -921,15 +864,6 @@ impl SyncEngine {
 }
 
 /// Generate a conflict filename by inserting .conflict before the extension.
-/// e.g. "pages/foo.md" -> "pages/foo.conflict.md"
-/// True when a line-based merge is meaningful for this file: it must be a
-/// note, and both sides must actually be text.
-fn is_mergeable(rel_path: &str, local: &[u8], remote: &[u8]) -> bool {
-    rel_path.ends_with(".md")
-        && std::str::from_utf8(local).is_ok()
-        && std::str::from_utf8(remote).is_ok()
-}
-
 /// Conflict copy name derived from content rather than wall-clock time, so
 /// both machines produce the same filename and converge instead of each
 /// creating its own timestamped duplicate.
@@ -946,18 +880,8 @@ fn make_content_conflict_path(rel_path: &str, hash: &str) -> String {
     }
 }
 
-fn make_conflict_path(rel_path: &str) -> String {
-    if let Some(dot_idx) = rel_path.rfind('.') {
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        format!(
-            "{}.conflict_{}{}",
-            &rel_path[..dot_idx],
-            timestamp,
-            &rel_path[dot_idx..]
-        )
-    } else {
-        format!("{}.conflict", rel_path)
-    }
+fn make_conflict_path(rel_path: &str, hash: &str) -> String {
+    make_content_conflict_path(rel_path, hash)
 }
 
 #[cfg(test)]

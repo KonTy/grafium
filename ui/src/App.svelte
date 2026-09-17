@@ -10,10 +10,10 @@
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import TitleBar from "./components/TitleBar.svelte";
-  import JobActivity from "./components/JobActivity.svelte";
   import Toaster from "./components/Toaster.svelte";
+  import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
@@ -28,6 +28,7 @@
   import { applyTheme, getThemeById } from "./lib/themes";
   import { attachAppUndoRedoListeners } from "./lib/undoEvents";
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
+  import { initSyncActivity } from "./lib/syncActivity.svelte";
   import { showToast } from "./lib/toast.svelte";
   import { setCurrentBlockAnchor } from "./lib/currentBlockAnchor";
   import { readingSelection } from "./lib/readingSelection";
@@ -40,6 +41,7 @@
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
+  import { helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./lib/help";
 
   const loadAllPages = lazyComponent(() => import("./components/AllPages.svelte"));
   const loadGraphView = lazyComponent(() => import("./components/GraphView.svelte"));
@@ -125,6 +127,10 @@
   type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs";
 
   let currentView: View = $state("page");
+  let helpVisible = $state(false);
+  let helpLoading = $state(false);
+  let helpTitle = $state("");
+  let helpContent = $state("");
   let currentPage: Page | null = $state(null);
   // Journals are a scrolling feed, not a single page — this tracks whichever day-entry is
   // currently most visible, so the Reference/Knowledge panel has something to analyze there too.
@@ -169,7 +175,7 @@
   let commandPaletteQuery = $state("");
   let commandPaletteIndex = $state(0);
   let referencePanelVisible = $state(false);
-  let referencePanelTab = $state<"chat" | "writing" | "notes">("chat");
+  let referencePanelTab = $state<"chat" | "writing" | "notes" | "conflicts">("chat");
   let referencePanelFocusTrigger = $state(0);
   let readingNoteFocus = $state({ pageId: "", label: "", trigger: 0 });
   let mainContentEl: HTMLElement | null = null;
@@ -753,7 +759,7 @@
     globalSearchOpen = true;
   }
 
-  function openReferencePanelTab(tab: "chat" | "writing" | "notes") {
+  function openReferencePanelTab(tab: "chat" | "writing" | "notes" | "conflicts") {
     referencePanelTab = tab;
     referencePanelFocusTrigger += 1;
     referencePanelVisible = true;
@@ -997,8 +1003,50 @@
     insertPersonalDiary: () => insertEditorSnippet(personalDiarySnippet()),
   });
 
+  async function openContextualHelp(context: HelpContext) {
+    helpTitle = helpPageTitle(context);
+    helpContent = "";
+    helpVisible = true;
+    helpLoading = true;
+    try {
+      helpContent = await loadHelpPage(context);
+    } catch (error) {
+      helpContent = `# Help unavailable\n\nCould not load the bundled help page.\n\n\`${errorText(error)}\``;
+    } finally {
+      helpLoading = false;
+    }
+  }
+
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const eventTarget = e.target;
+      const section =
+        eventTarget instanceof Element
+          ? eventTarget.closest("details[data-help-context]")?.getAttribute("data-help-context") ?? null
+          : null;
+      const context = isHelpContext(section) ? section : null;
+      const currentContext: HelpContext =
+        context ||
+        ((
+          {
+            page: "editor",
+            journal: "journal",
+            "all-pages": "search",
+            graph: "graph",
+            flashcards: "flashcards",
+            statistics: "tasks",
+            chat: "chat",
+            settings: "settings",
+            jobs: "general",
+          } as Record<string, HelpContext>
+        )[currentView] ?? "general");
+      void openContextualHelp(currentContext);
+      return;
+    }
+
     if (goToLinkOpen || globalSearchOpen || e.isComposing) return;
     if (e.key === "Escape" && !hasKeyboardOverlay(document)
       && (e.target as Element | null)?.closest?.('[data-keyboard-block-selection="true"]')) return;
@@ -1008,6 +1056,7 @@
         commandPaletteOpen = false;
         return;
       }
+
       if (e.key === "ArrowDown") {
         e.preventDefault();
         commandPaletteIndex = Math.min(commandPaletteIndex + 1, Math.max(0, commandPaletteRows.length - 1));
@@ -1135,6 +1184,23 @@
       })
       .catch((e) => {
         showToast(`Could not initialize background jobs: ${e instanceof Error ? e.message : String(e)}`, "error");
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
+  $effect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    initSyncActivity()
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((e) => {
+        console.error("Could not initialize sync activity tracking:", e);
       });
     return () => {
       disposed = true;
@@ -2256,9 +2322,6 @@
   </LazyView>
 {/if}
 
-{#if currentView !== "jobs"}
-  <JobActivity />
-{/if}
 {#if commandPaletteOpen}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2292,6 +2355,15 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if helpVisible}
+  <HelpOverlay
+    title={helpTitle}
+    content={helpContent}
+    loading={helpLoading}
+    onClose={() => (helpVisible = false)}
+  />
 {/if}
 
 <Toaster />

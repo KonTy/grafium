@@ -1,6 +1,8 @@
 <script lang="ts">
   import { jobs, cancelJob, clearFinishedJobs, isTerminal, type Job } from "../lib/jobs.svelte";
 
+  let { toolbar = false }: { toolbar?: boolean } = $props();
+
   const running = $derived(jobs.filter((j) => j.status === "running"));
   const failed = $derived(jobs.filter((j) => j.status === "failed"));
   const recent = $derived([...jobs].reverse());
@@ -47,7 +49,7 @@
 </script>
 
 {#if jobs.length > 0}
-  <div class="job-activity" bind:this={container}>
+  <div class:toolbar class="job-activity" bind:this={container}>
     <button
       type="button"
       class="job-toggle"
@@ -134,6 +136,14 @@
     top: calc(44px + env(safe-area-inset-top, 0px));
     right: 14px;
     z-index: 2900;
+  }
+
+  .job-activity.toolbar {
+    position: relative;
+    top: auto;
+    right: auto;
+    z-index: auto;
+    flex-shrink: 0;
   }
 
   .job-toggle {

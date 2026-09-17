@@ -907,7 +907,7 @@
       onclick={scanSuggestedLinks}
       disabled={scanningSuggestions}
     >
-      {scanningSuggestions ? "Scanning..." : "Scan for suggested links"}
+      {scanningSuggestions ? "Scanning..." : "Find link suggestions (AI when enabled)"}
     </button>
 
     {#if suggestionError}

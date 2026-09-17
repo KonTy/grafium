@@ -1,4 +1,6 @@
-Chat is optional. Set up a provider before expecting AI answers; the core note-taking examples do not require one.
+Chat is optional. Set up a provider before expecting AI answers; the core
+note-taking examples do not require one. Start with [[AI Setup And Privacy]]
+before connecting an account or downloading a model.
 
 ## Choose sources separately from the provider
 
@@ -7,6 +9,22 @@ Chat is optional. Set up a provider before expecting AI answers; the core note-t
 These labels choose **where to search**, not **where the model runs**. With a cloud provider, your prompt and retrieved note context are sent to that provider—even in Local graph scope. Do not include material you are not comfortable sending.
 
 A local provider requires a suitable model, setup, and enough memory and compute. Model downloads and optional services can involve network traffic. Local graph scope is not a promise of “no internet traffic.”
+
+## What AI can do
+
+- Answer questions about a selected page, journal day, block, or your graph.
+- Find relevant blocks and explain how they support an answer.
+- Run multi-step web research with citations when Internet and Research are enabled.
+- Suggest concepts and links for review; suggestions do not become links until you accept them.
+- Help rewrite, summarize, assess writing style, and create study material.
+- Process speech or media when the relevant optional model is installed.
+- File an answer for you: say "add the above answer to today's journal under
+  [[health/supplements]]" or "save that as a new page and find links it can
+  connect to". Grafium shows an editable **Proposed changes** card first, and
+  nothing is written until you press Apply. `Ctrl+Z` undoes it afterwards.
+
+Generated answers are drafts, not authoritative sources. Verify important
+claims and save only checked conclusions back into your notes.
 
 ## Ask a question you can check
 

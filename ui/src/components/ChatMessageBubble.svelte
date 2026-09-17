@@ -143,11 +143,16 @@
       <span class="thinking-dot" class:animate={animateCursor} aria-hidden="true"></span>
       <span>{thinkingLabel}</span>
     </div>
-  {:else if message.role === "assistant" && !streaming}
+  {:else if message.role === "assistant"}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="msg-content markdown" onclick={handleRenderedClick}>
       {@html renderAssistantMarkdown(message.content)}
+      {#if streaming}<span
+        class="type-cursor"
+        class:animate={animateCursor}
+        aria-hidden="true"
+      ></span>{/if}
     </div>
   {:else}
     <div class="msg-content">

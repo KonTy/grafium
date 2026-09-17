@@ -19,6 +19,14 @@ export interface SyncResult {
   errors: string[];
 }
 
+export interface SyncConflict {
+  target_id: string;
+  target_name: string;
+  rel_path: string;
+  backup_path: string;
+  recorded_at: number;
+}
+
 export function listSyncTargets(): Promise<SyncTarget[]> {
   return invoke("sync_list_targets");
 }
@@ -42,6 +50,10 @@ export function removeSyncTarget(targetId: string): Promise<void> {
 
 export function runSyncTarget(targetId: string): Promise<SyncResult> {
   return invoke("sync_run", { targetId });
+}
+
+export function listSyncConflicts(): Promise<SyncConflict[]> {
+  return invoke("sync_list_conflicts");
 }
 
 /**

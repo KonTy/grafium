@@ -7,6 +7,7 @@
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
+  import { beginSyncRun, endSyncRun } from "../lib/syncActivity.svelte";
 
   interface SyncTarget {
     id: string;
@@ -260,6 +261,7 @@
   async function runSync(targetId: string) {
     syncLoading = true;
     syncMessage = "";
+    beginSyncRun();
     try {
       const result: any = await invoke("sync_run", { targetId });
       const parts = [];
@@ -273,6 +275,7 @@
     } catch (e: any) {
       syncMessage = `Sync failed: ${e}`;
     } finally {
+      endSyncRun();
       syncLoading = false;
     }
   }
@@ -296,7 +299,7 @@
   {/if}
 
   <!-- General Section -->
-  <details class="settings-section" open>
+  <details class="settings-section" data-help-context="settings" open>
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
@@ -356,7 +359,7 @@
   </details>
 
   <!-- Sync Section -->
-  <details class="settings-section">
+  <details class="settings-section" data-help-context="sync">
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
@@ -364,7 +367,11 @@
       <span class="section-title">Sync</span>
     </summary>
     <div class="section-content">
-    <p class="section-desc">Sync your notes to a USB drive, network share, or WebDAV server.</p>
+    <p class="section-desc">
+      Sync your notes to one or more independent USB drives, network shares, or WebDAV servers.
+      Add each location separately and sync them whenever it is available. Conflicts are never
+      resolved automatically; open the Conflicts tab in the right panel to review them.
+    </p>
 
     {#if syncMessage}
       <div class="sync-message" class:error={syncMessage.startsWith("Error") || syncMessage.startsWith("Sync failed")}>
@@ -480,7 +487,7 @@
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
       </svg>
-      <span class="section-title">AI / Knowledge Engine</span>
+      <span class="section-title">AI / Knowledge Engine (optional)</span>
     </summary>
     <div class="section-content">
       <AISettings />
@@ -493,7 +500,7 @@
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>
       </svg>
-      <span class="section-title">Research</span>
+      <span class="section-title">AI Research &amp; Web Search</span>
     </summary>
     <div class="section-content">
       <ResearchSettings />

@@ -5,6 +5,7 @@ pub mod books;
 pub mod favorites;
 pub mod flashcards;
 pub mod graph;
+pub mod help;
 pub mod jobs;
 pub mod knowledge;
 pub mod layout;

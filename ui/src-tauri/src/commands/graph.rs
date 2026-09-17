@@ -232,6 +232,19 @@ pub fn open_graph(
         ));
     }
 
+    // The Welcome graph can be opened after startup (for example from F1
+    // contextual help), so apply additive tutorial migrations here too.
+    let is_tutorial_graph = app
+        .path()
+        .app_data_dir()
+        .map(|app_data| graph_path == app_data.join("tutorial-graph"))
+        .unwrap_or(false);
+    if is_tutorial_graph {
+        if let Err(error) = crate::welcome::seed_tutorial_graph(&graph_path, &metadata_dir) {
+            eprintln!("Warning: Welcome graph seeding failed: {error}");
+        }
+    }
+
     let db_path = platform_db_path(&app, &graph_path)?;
 
     // Open the graph. If DB is corrupted, recover by rotating index.db and recreating it.
@@ -635,6 +648,14 @@ pub fn get_default_graph_base(app: AppHandle) -> String {
     let docs = dirs::document_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
     docs.join("grafium").to_string_lossy().to_string()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_tutorial_graph_path(app: AppHandle) -> Result<String, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join("tutorial-graph").to_string_lossy().to_string())
+        .map_err(|error| format!("Failed to get app data directory: {error}"))
 }
 
 /// Notify the Android companion app that a graph has been opened.

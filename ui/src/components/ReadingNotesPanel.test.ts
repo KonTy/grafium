@@ -10,7 +10,7 @@ describe("Notes panel integration", () => {
     expect(notesBranch).toBeGreaterThan(0);
     expect(referencePanel).not.toContain("health?.enabled");
     expect(referencePanel).toContain('<ReadingNotesPanel pageId={sourcePageId}');
-    expect(referencePanel).toContain('let activeTab = $state<"chat" | "notes">');
+    expect(referencePanel).toContain('let activeTab = $state<"chat" | "notes"');
     expect(panel).not.toContain("aiHealthCheck");
     expect(panel).not.toContain("aiGenerate");
     expect(panel).toContain("const captured = untrack(() => get(readingSelection))");

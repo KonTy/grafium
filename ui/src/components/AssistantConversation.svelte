@@ -4,9 +4,15 @@
   import ChatMessageBubble from "./ChatMessageBubble.svelte";
   import AssistantDiagnostics from "./AssistantDiagnostics.svelte";
   import PageAssistantTools from "./PageAssistantTools.svelte";
+  import AIEditPlanCard from "./AIEditPlanCard.svelte";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
   import { listBlocks } from "../lib/api";
-  import { aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
+  import { aiAsk, aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
+  import { buildPlannerPrompt, hydratePlan, looksLikeEditRequest, parseEditPlan, type EditAction } from "../lib/aiActions";
+  import { applyEditPlan, summarizeApplyResult, type BlockTarget } from "../lib/aiActionsApply";
+  import { captureResearchSource } from "../lib/researchSource";
+  import { runUndoOperation } from "../lib/undoStack";
+  import { flushPageEditors, withPageEditorsLocked } from "../lib/editorPersistence";
   import { assistantContextInfo, type AssistantContext, type AssistantContextInfo, type AssistantMode } from "../lib/assistant";
   import {
     assistantConversationChanges, updateAssistantConversation, assistantConversationRunning,
@@ -44,6 +50,12 @@
   let footerEl: HTMLDivElement | undefined;
   let followAnswer = $state(true);
   let blockPreview = $state("");
+  let planning = $state(false);
+  let applyingPlan = $state(false);
+  let planError = $state("");
+  let planResult = $state("");
+  let planLinks = $state<{ id: string; title: string }[]>([]);
+  let pendingPlan = $state<{ request: string; actions: EditAction[] } | null>(null);
   let pointerDown = false;
   let refocusPending = false;
   const view = $derived.by(() => {
@@ -233,10 +245,114 @@
 
   async function send() {
     if (running || checking || !connected || scopeUnavailable || !thread.draft.trim()) return;
+    const request = thread.draft.trim();
     followAnswer = true;
     inputEl?.focus();
+    // An instruction ("add that to my journal") should change notes, not produce
+    // another paragraph of prose. Questions skip this entirely so ordinary chat
+    // keeps its current latency.
+    if (looksLikeEditRequest(request) && (await proposeEdits(request))) return;
     await sendAssistantQuestion(thread, thread.context, thread.contextLabel);
   }
+
+  function lastAnswer(): string {
+    return [...view.messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
+  }
+
+  /**
+   * Ask the model for an edit plan. Returns true when a card is showing.
+   *
+   * Any failure returns false so `send` falls through to a normal answer: the
+   * user asked for something, and a broken planner should never mean silence.
+   */
+  async function proposeEdits(request: string): Promise<boolean> {
+    planning = true;
+    planError = "";
+    try {
+      const answer = lastAnswer();
+      const prompt = buildPlannerPrompt(request, answer, !!focusedBlockId);
+      const response = await aiAsk(prompt, undefined, [],
+        contextPageId ? { pageId: contextPageId, blockId: focusedBlockId ?? undefined } : undefined);
+      const plan = hydratePlan(parseEditPlan(response.answer), answer);
+      if (!plan.actions.length) return false;
+      pendingPlan = { request, actions: plan.actions };
+      thread.draft = "";
+      updateAssistantConversation();
+      return true;
+    } catch (cause) {
+      console.error("Could not plan edits:", cause);
+      return false;
+    } finally {
+      planning = false;
+    }
+  }
+
+  function dismissPlan() {
+    // Hand the request back so a near-miss can be rephrased instead of retyped.
+    if (pendingPlan && !thread.draft.trim()) {
+      thread.draft = pendingPlan.request;
+      updateAssistantConversation();
+    }
+    pendingPlan = null;
+    planError = "";
+    inputEl?.focus();
+  }
+
+  async function captureBlockTarget(actions: EditAction[]): Promise<BlockTarget | null> {
+    if (!actions.some((action) => action.type === "replace_block")) return null;
+    if (!contextPageId || !focusedBlockId) throw new Error("This conversation is not attached to a block.");
+    const source = await captureResearchSource(contextPageId, focusedBlockId);
+    const target = source.snapshot.find((block) => block.id === focusedBlockId);
+    if (!target) throw new Error("The block this conversation was about is no longer there.");
+    return {
+      graphPath: source.graphPath,
+      pageId: source.pageId,
+      blockId: focusedBlockId,
+      content: target.content,
+      snapshot: source.snapshot,
+    };
+  }
+
+  async function applyPlan() {
+    const plan = pendingPlan;
+    if (!plan || applyingPlan) return;
+    applyingPlan = true;
+    planError = "";
+    try {
+      const actions = plan.actions.map((action) => ({ ...action, tags: [...action.tags] }));
+      const blockTarget = await captureBlockTarget(actions);
+      const run = () => applyEditPlan({ actions }, { blockTarget });
+      // Only a block rewrite races an open editor; appends to other pages do not.
+      const result = await runUndoOperation(() =>
+        blockTarget
+          ? withPageEditorsLocked(blockTarget.pageId, async () => {
+              await flushPageEditors(blockTarget.pageId);
+              return run();
+            })
+          : run()
+      );
+
+      for (const touched of new Set(result.applied.map((entry) => entry.pageId))) {
+        window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId: touched } }));
+      }
+      for (const target of result.findLinks) onFindLinks?.({ id: target.pageId, title: target.title });
+
+      if (result.applied.length) {
+        planResult = summarizeApplyResult(result);
+        planLinks = result.applied
+          .filter((entry) => entry.pageTitle)
+          .map((entry) => ({ id: entry.pageId, title: entry.pageTitle }));
+        pendingPlan = null;
+      } else {
+        planError = result.errors.join("; ") || "Nothing was applied.";
+      }
+    } catch (cause) {
+      planError = `Could not apply the changes: ${cause instanceof Error ? cause.message : String(cause)}`;
+    } finally {
+      applyingPlan = false;
+    }
+  }
+
   function shortcut(question: string) {
     if (running) return;
     thread.draft = question;
@@ -295,6 +411,22 @@
       </div>
     {/each}
     {#if view.error}<p class="error-message" role="alert">{view.error}</p>{/if}
+    {#if planning}<p class="status-message" role="status">Working out what to change…</p>{/if}
+    {#if pendingPlan}
+      <AIEditPlanCard request={pendingPlan.request} actions={pendingPlan.actions}
+        applying={applyingPlan} error={planError} onApply={applyPlan} onDismiss={dismissPlan} />
+    {:else if planError}
+      <p class="error-message" role="alert">{planError}</p>
+    {/if}
+    {#if planResult}
+      <p class="status-message" role="status">
+        {planResult}
+        {#each planLinks as link}
+          <button class="text-button" onclick={() => onNavigate({ id: link.id, title: link.title })}>Open {link.title}</button>
+        {/each}
+        <button class="text-button" onclick={() => { planResult = ""; planLinks = []; }}>Dismiss</button>
+      </p>
+    {/if}
     {#if view.state.kind === "cancelled"}<p class="status-message" role="status">Stopped. Any partial answer is kept above.</p>{/if}
     {#if sourceError}<p class="error-message" role="alert">{sourceError}</p>{/if}
     {#if connectionError}<p class="error-message" role="alert">{connectionError}</p>{/if}
@@ -346,7 +478,7 @@
           </select>
         </label>
         {#if running}<button type="button" class="send-button stop-button" onclick={() => void stopAssistantConversation(thread)}>Stop</button>
-        {:else}<button class="send-button" type="submit" disabled={!view.draft.trim() || !connected || checking || scopeUnavailable}>Send</button>{/if}
+        {:else}<button class="send-button" type="submit" disabled={!view.draft.trim() || !connected || checking || scopeUnavailable || planning}>{planning ? "Planning…" : "Send"}</button>{/if}
       </div>
     </form>
     <p class="mode-hint">{assistantModes[view.mode].description}</p>

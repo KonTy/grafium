@@ -186,6 +186,29 @@ fn test_no_changes_second_sync_is_clean() {
 }
 
 #[test]
+fn sync_targets_keep_independent_state_and_bases() {
+    let local = setup_local_graph();
+    write_local(local.path(), "pages/doc.md", "one\n");
+    let first = MockBackend::new("first");
+    let second = MockBackend::new("second");
+    let a = SyncEngine::new_with_target(local.path().to_path_buf(), "first");
+    let b = SyncEngine::new_with_target(local.path().to_path_buf(), "second");
+    a.sync(&first).unwrap();
+    write_local(local.path(), "pages/doc.md", "two\n");
+    b.sync(&second).unwrap();
+    assert_eq!(second.get_file("pages/doc.md").unwrap(), b"two\n");
+    assert!(
+        local
+            .path()
+            .join(".grafium/sync-targets")
+            .read_dir()
+            .unwrap()
+            .count()
+            >= 2
+    );
+}
+
+#[test]
 fn test_local_edit_pushes_to_remote() {
     let local = setup_local_graph();
     write_local(local.path(), "pages/doc.md", "original\n");
@@ -250,7 +273,7 @@ fn test_both_edited_same_content_no_conflict() {
 }
 
 #[test]
-fn test_conflict_creates_markers_and_backup() {
+fn test_conflict_preserves_local_and_records_backup() {
     let local = setup_local_graph();
     write_local(local.path(), "pages/doc.md", "line1\noriginal\nline3\n");
 
@@ -270,44 +293,9 @@ fn test_conflict_creates_markers_and_backup() {
     assert_eq!(r.conflicts.len(), 1);
     assert_eq!(r.conflicts[0], "pages/doc.md");
 
-    // The merged file should contain conflict markers
-    let merged = read_local(local.path(), "pages/doc.md");
-    assert!(
-        merged.contains("<<<<<<< local"),
-        "Missing local marker in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains("local edit"),
-        "Missing local content in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains("======="),
-        "Missing separator in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains("remote edit"),
-        "Missing remote content in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains(">>>>>>> remote"),
-        "Missing remote marker in:\n{}",
-        merged
-    );
-
-    // Unchanged lines should be preserved
-    assert!(
-        merged.contains("line1"),
-        "Missing unchanged line1 in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains("line3"),
-        "Missing unchanged line3 in:\n{}",
-        merged
+    assert_eq!(
+        read_local(local.path(), "pages/doc.md"),
+        "line1\nlocal edit\nline3\n"
     );
 
     // A .conflict backup file should exist
@@ -322,13 +310,38 @@ fn test_conflict_creates_markers_and_backup() {
     let backup = fs::read_to_string(conflict_files[0].path()).unwrap();
     assert_eq!(backup, "line1\nremote edit\nline3\n");
 
-    // Remote should also have the merged version
-    let remote_merged = String::from_utf8(backend.get_file("pages/doc.md").unwrap()).unwrap();
-    assert!(remote_merged.contains("<<<<<<< local"));
+    assert_eq!(
+        backend.get_file("pages/doc.md").unwrap(),
+        b"line1\nremote edit\nline3\n"
+    );
+
+    let state =
+        grafium_core::sync::SyncState::load(&local.path().join(".grafium").join("sync-state.json"));
+    assert_eq!(state.unresolved_conflicts().len(), 1);
+
+    write_local(
+        local.path(),
+        "pages/doc.md",
+        "line1\nchosen locally\nline3\n",
+    );
+    let resolved = engine.sync(&backend).unwrap();
+    assert_eq!(resolved.pushed, vec!["pages/doc.md"]);
+    assert_eq!(
+        backend.get_file("pages/doc.md").unwrap(),
+        b"line1\nchosen locally\nline3\n"
+    );
+    assert_eq!(
+        fs::read_dir(local.path().join("pages"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".conflict_"))
+            .count(),
+        0
+    );
 }
 
 #[test]
-fn test_3way_merge_auto_resolves_non_overlapping_changes() {
+fn test_non_overlapping_changes_are_manual_conflicts() {
     let local = setup_local_graph();
     let base = "header\n\nparagraph 1\n\nparagraph 2\n\nfooter\n";
     write_local(local.path(), "pages/doc.md", base);
@@ -347,31 +360,8 @@ fn test_3way_merge_auto_resolves_non_overlapping_changes() {
 
     let r = engine.sync(&backend).unwrap();
 
-    // Should auto-merge without conflicts
-    assert!(
-        r.conflicts.is_empty(),
-        "Expected auto-merge but got conflicts: {:?}",
-        r.conflicts
-    );
-    assert_eq!(r.merged.len(), 1, "Expected 1 merged file, got: {:?}", r);
-
-    // Merged content should contain both changes
-    let merged = read_local(local.path(), "pages/doc.md");
-    assert!(
-        merged.contains("local paragraph 1"),
-        "Missing local change in:\n{}",
-        merged
-    );
-    assert!(
-        merged.contains("remote paragraph 2"),
-        "Missing remote change in:\n{}",
-        merged
-    );
-    assert!(
-        !merged.contains("<<<<<<< local"),
-        "Should not have conflict markers in:\n{}",
-        merged
-    );
+    assert_eq!(r.conflicts, vec!["pages/doc.md"]);
+    assert_eq!(read_local(local.path(), "pages/doc.md"), local_ver);
 }
 
 #[test]
@@ -951,44 +941,23 @@ fn conflicting_binary_assets_are_never_merged_and_both_survive() {
 }
 
 #[test]
-fn binary_conflict_resolution_converges_on_both_machines() {
+fn binary_conflict_is_not_repeated_or_overwritten() {
+    let local = setup_local_graph();
+    fs::create_dir_all(local.path().join("assets")).unwrap();
+    fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
+    let backend = MockBackend::new("usb");
+    let engine = SyncEngine::new(local.path().to_path_buf());
+    engine.sync(&backend).unwrap();
     let local_version = fake_png(0xA1);
     let remote_version = fake_png(0xB2);
-
-    // Machine A sees local=A1, remote=B2. Machine B sees them the other way
-    // round. Both must end up with the same primary and the same copy name.
-    let mut outcomes = Vec::new();
-    for (mine, theirs) in [
-        (&local_version, &remote_version),
-        (&remote_version, &local_version),
-    ] {
-        let local = setup_local_graph();
-        fs::create_dir_all(local.path().join("assets")).unwrap();
-        fs::write(local.path().join("assets/pic.png"), fake_png(1)).unwrap();
-
-        let backend = MockBackend::new("usb");
-        let engine = SyncEngine::new(local.path().to_path_buf());
-        engine.sync(&backend).unwrap();
-
-        fs::write(local.path().join("assets/pic.png"), mine).unwrap();
-        backend.set_file("assets/pic.png", theirs);
-        engine.sync(&backend).unwrap();
-
-        let mut names: Vec<String> = fs::read_dir(local.path().join("assets"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .collect();
-        names.sort();
-        outcomes.push((
-            fs::read(local.path().join("assets/pic.png")).unwrap(),
-            names,
-        ));
-    }
-
+    fs::write(local.path().join("assets/pic.png"), &local_version).unwrap();
+    backend.set_file("assets/pic.png", &remote_version);
+    assert_eq!(engine.sync(&backend).unwrap().conflicts.len(), 1);
     assert_eq!(
-        outcomes[0], outcomes[1],
-        "two machines resolved the same conflict differently"
+        fs::read(local.path().join("assets/pic.png")).unwrap(),
+        local_version
     );
+    assert!(engine.sync(&backend).unwrap().conflicts.is_empty());
 }
 
 #[test]

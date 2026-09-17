@@ -591,6 +591,10 @@ export function getDefaultGraphBase(): Promise<string> {
   return invoke("get_default_graph_base", {});
 }
 
+export function getTutorialGraphPath(): Promise<string> {
+  return invoke("get_tutorial_graph_path", {});
+}
+
 // Theme
 export function getSmplosTheme(): Promise<string | null> {
   return invoke("get_smplos_theme", {});

@@ -78,11 +78,16 @@ describe("Unified conversation components", () => {
     expect(tools).not.toContain("await updateBlock(");
   });
 
-  it("keeps only Chat and Notes tabs and exposes other actions under tools", () => {
-    expect(panel.match(/role="tab"/g)).toHaveLength(2);
-    expect(panel).toContain('let activeTab = $state<"chat" | "notes">("chat")');
+  it("keeps Chat and Notes tabs permanent, gates Conflicts on sync activity, and exposes other actions under tools", () => {
+    expect(panel.match(/role="tab"/g)).toHaveLength(3);
+    expect(panel).toContain('let activeTab = $state<"chat" | "notes" | "conflicts">("chat")');
+    // The Conflicts tab is noise for a graph that has never conflicted, so it
+    // must stay behind a visibility guard rather than occupying a slot always.
+    expect(panel).toContain("const conflictsTabVisible = $derived(conflictsRequested || shouldShowConflicts())");
+    expect(panel).toContain("{#if conflictsTabVisible}");
+    expect(panel).toContain('if (activeTab === "conflicts" && !conflictsTabVisible) activeTab = "chat"');
     expect(tools).toContain("Page / selection tools");
-    expect(tools).toContain("Writing assistance");
+    expect(tools).toContain("AI writing assistance");
     expect(tools).toContain("<AIWritingPanel");
   });
 

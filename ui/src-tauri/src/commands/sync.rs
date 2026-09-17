@@ -4,18 +4,26 @@ use grafium_core::sync::{
     filesystem::FilesystemBackend,
     state::{BackendConfig, BackendType, SyncConfig, SyncConfigs},
     webdav::WebDavBackend,
-    SyncBackend, SyncEngine,
+    SyncBackend, SyncEngine, UnresolvedConflict,
 };
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::AppHandle;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Serialize)]
 pub struct SyncStatus {
     pub available: bool,
     pub last_sync: Option<i64>,
     pub target_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncConflict {
+    pub target_id: String,
+    pub target_name: String,
+    pub rel_path: String,
+    pub backup_path: String,
+    pub recorded_at: i64,
 }
 
 fn metadata_dir_name(app: &AppHandle) -> String {
@@ -166,17 +174,55 @@ pub fn sync_check_status(
     let backend = create_backend(target)?;
     let available = backend.is_available();
 
-    let state_path = graph
-        .root_dir
-        .join(metadata_dir_name(&app))
-        .join("sync-state.json");
-    let sync_state = grafium_core::sync::state::SyncState::load(&state_path);
+    let engine = SyncEngine::new_with_metadata_dir_and_target(
+        graph.root_dir.clone(),
+        &metadata_dir_name(&app),
+        &target.id,
+    );
 
     Ok(SyncStatus {
         available,
-        last_sync: sync_state.last_sync,
+        last_sync: engine.last_sync(),
         target_name: target.name.clone(),
     })
+}
+
+/// List unresolved conflicts across all configured sync targets.
+#[tauri::command]
+pub fn sync_list_conflicts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<SyncConflict>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let config_path = graph
+        .root_dir
+        .join(metadata_dir_name(&app))
+        .join("sync-config.json");
+    let configs = SyncConfigs::load(&config_path);
+
+    let mut conflicts = Vec::new();
+    for target in configs.targets {
+        let engine = SyncEngine::new_with_metadata_dir_and_target(
+            graph.root_dir.clone(),
+            &metadata_dir_name(&app),
+            &target.id,
+        );
+        conflicts.extend(engine.unresolved_conflicts().into_iter().map(
+            |conflict: UnresolvedConflict| SyncConflict {
+                target_id: target.id.clone(),
+                target_name: target.name.clone(),
+                rel_path: conflict.rel_path,
+                backup_path: conflict.backup_path,
+                recorded_at: conflict.recorded_at,
+            },
+        ));
+    }
+    conflicts.sort_by(|a, b| {
+        a.rel_path
+            .cmp(&b.rel_path)
+            .then(a.target_name.cmp(&b.target_name))
+    });
+    Ok(conflicts)
 }
 
 /// Run sync against a specific target. Returns a summary of what happened.
@@ -200,8 +246,11 @@ pub fn sync_run(
         .ok_or("Sync target not found")?;
 
     let backend = create_backend(target)?;
-    let engine =
-        SyncEngine::new_with_metadata_dir(snapshot.root_dir.clone(), &snapshot.metadata_dir_name);
+    let engine = SyncEngine::new_with_metadata_dir_and_target(
+        snapshot.root_dir.clone(),
+        &snapshot.metadata_dir_name,
+        &target.id,
+    );
 
     let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
 
@@ -218,6 +267,16 @@ pub fn sync_run(
         }
     }
 
+    let _ = app.emit(
+        "sync-completed",
+        serde_json::json!({
+            "target_name": target.name,
+            "pushed": result.pushed.len(),
+            "pulled": result.pulled.len(),
+            "conflicts": result.conflicts.len(),
+        }),
+    );
+
     Ok(result)
 }
 
@@ -231,8 +290,6 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
 
-    let engine =
-        SyncEngine::new_with_metadata_dir(snapshot.root_dir.clone(), &snapshot.metadata_dir_name);
     let mut results = Vec::new();
     let mut needs_reindex = false;
 
@@ -247,6 +304,11 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         if !backend.is_available() {
             continue;
         }
+        let engine = SyncEngine::new_with_metadata_dir_and_target(
+            snapshot.root_dir.clone(),
+            &snapshot.metadata_dir_name,
+            &target.id,
+        );
         match engine.sync(backend.as_ref()) {
             Ok(result) => {
                 if !result.pulled.is_empty()
@@ -274,6 +336,19 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
             Err(e) => eprintln!("Reindex after sync setup failed: {}", e),
         }
     }
+
+    let conflicts = results.iter().map(|result| result.conflicts.len()).sum::<usize>();
+    let pushed = results.iter().map(|result| result.pushed.len()).sum::<usize>();
+    let pulled = results.iter().map(|result| result.pulled.len()).sum::<usize>();
+    let _ = app.emit(
+        "sync-completed",
+        serde_json::json!({
+            "target_name": "all targets",
+            "pushed": pushed,
+            "pulled": pulled,
+            "conflicts": conflicts,
+        }),
+    );
 
     Ok(results)
 }

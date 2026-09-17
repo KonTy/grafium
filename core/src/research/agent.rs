@@ -234,7 +234,12 @@ impl<'a> DeepResearchEngine<'a> {
         let planned = self.plan_queries(question, cancel.clone()).await;
         let mut queries = match planned {
             Ok(queries) => queries,
-            Err(CoreError::Parse(_)) => Vec::new(),
+            Err(CoreError::Parse(_)) => {
+                progress(ResearchProgress::Note(
+                    "The query planner returned an unusable response; searching the question directly across all enabled engines.",
+                ));
+                Vec::new()
+            }
             Err(error)
                 if self.reading_context.is_some() || super::budget::is_context_error(&error) =>
             {
@@ -242,15 +247,26 @@ impl<'a> DeepResearchEngine<'a> {
             }
             Err(_) => Vec::new(),
         };
-        if self.reading_context.is_some() && queries.is_empty() {
-            return Err(CoreError::Parse(
-                "Could not plan searches from the selected source. Try a more specific research question."
-                    .into(),
-            ));
-        }
         queries = normalize_research_queries(queries, question, question, 4);
         if queries.is_empty() {
-            queries = vec![question.trim().to_string()];
+            let mut fallback = question.trim().to_string();
+            if fallback.len() < 12 {
+                if let Some(context) = self.reading_context {
+                    let context_hint = context
+                        .iter()
+                        .map(|(_, text)| text.trim())
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !context_hint.is_empty() {
+                        fallback = format!("{fallback} {}", truncate(&context_hint, 240));
+                    }
+                }
+            }
+            if fallback.is_empty() {
+                fallback = "general information".to_string();
+            }
+            queries = vec![fallback];
         }
 
         // State accumulated across rounds.
@@ -805,13 +821,42 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
     }
 
     let cleaned = strip_reasoning(raw);
-    let json = extract_json_object(cleaned.trim())?;
-    let parsed: QueriesJson = serde_json::from_str(json)
-        .map_err(|e| concept_parse_error(&format!("invalid search-query JSON: {e}"), raw))?;
+    let trimmed = cleaned.trim().trim_matches('`').trim();
+    let mut queries = extract_json_object(trimmed)
+        .ok()
+        .and_then(|json| serde_json::from_str::<QueriesJson>(json).ok())
+        .map(|parsed| parsed.queries)
+        .unwrap_or_default();
+
+    // Models sometimes return a JSON array, fenced text, or a numbered list
+    // despite the structured-output instruction. These are still unambiguous
+    // search plans, so recover them locally instead of spending another model
+    // call to ask an AI to parse an AI response.
+    if queries.is_empty() {
+        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(trimmed) {
+            queries = parsed;
+        }
+    }
+    if queries.is_empty() {
+        queries = trimmed
+            .lines()
+            .filter_map(|line| {
+                let candidate = line
+                    .trim()
+                    .trim_start_matches(|c: char| c == '-' || c == '*' || c == '•')
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim();
+                (candidate.len() >= 4 && !candidate.contains('{') && !candidate.contains('}'))
+                    .then(|| candidate.to_string())
+            })
+            .collect();
+    }
 
     let mut seen = std::collections::HashSet::new();
-    Ok(parsed
-        .queries
+    let queries: Vec<String> = queries
         .into_iter()
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty())
@@ -821,7 +866,11 @@ fn parse_queries(raw: &str) -> Result<Vec<String>> {
         // per enabled engine, per round. The ceiling belongs where the queries
         // are consumed, not in the wording of a prompt someone can rewrite.
         .take(MAX_QUERIES_PER_ROUND)
-        .collect())
+        .collect();
+    if queries.is_empty() {
+        return Err(concept_parse_error("no search queries found", raw));
+    }
+    Ok(queries)
 }
 
 fn parse_synthesis_response(raw: &str) -> Result<StructuredSummaryJson> {

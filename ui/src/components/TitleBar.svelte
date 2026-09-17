@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import AppMenu from "./AppMenu.svelte";
+  import JobActivity from "./JobActivity.svelte";
 
   interface Props {
     sidebarVisible?: boolean;
@@ -84,6 +85,7 @@
         <path d="m21 21-4.35-4.35"></path>
       </svg>
     </button>
+    <JobActivity toolbar />
     <button
       class="titlebar-btn"
       class:active={bionicReaderMode}

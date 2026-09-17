@@ -6,6 +6,8 @@
   import { getSourceConversation, getAssistantConversation, type AssistantThread } from "../lib/assistantConversations";
   import { getLatestCurrentBlockAnchor, type CurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import type { PageNavigationTarget } from "../lib/navigation";
+  import { listSyncConflicts, type SyncConflict } from "../lib/sync";
+  import { refreshConflictCount, setConflictCount, shouldShowConflicts, syncActivity } from "../lib/syncActivity.svelte";
 
   let {
     visible = false, pageId = "", pageTitle = "", conversationId = null, initialTab, focusTrigger = 0,
@@ -14,7 +16,7 @@
     onNavigate = () => {}, onFindLinks, onExpandConversation, onOpenSettings = () => onNavigate("__settings__"),
   }: {
     visible?: boolean; pageId?: string; pageTitle?: string; conversationId?: string | null;
-    initialTab?: "chat" | "notes" | "references" | "ask" | "writing" | "search"; focusTrigger?: number;
+    initialTab?: "chat" | "notes" | "references" | "ask" | "writing" | "search" | "conflicts"; focusTrigger?: number;
     noteFocusLabel?: string | null; noteFocusPageId?: string | null; noteFocusTrigger?: number;
     width?: number; preferFocusedPageForPageScope?: boolean; onClose?: () => void;
     onNavigate?: (target: PageNavigationTarget) => void;
@@ -22,7 +24,12 @@
     onExpandConversation?: (id: string) => void; onOpenSettings?: () => void;
   } = $props();
 
-  let activeTab = $state<"chat" | "notes">("chat");
+  let activeTab = $state<"chat" | "notes" | "conflicts">("chat");
+  let conflicts = $state<SyncConflict[]>([]);
+  let conflictsLoading = $state(false);
+  // An explicit request for the Conflicts tab wins over the automatic rule, so
+  // that a caller can always send the user there (e.g. from a sync report).
+  let conflictsRequested = $state(false);
   let toolsRequested = $state(false);
   let askBlockAnchor = $state<CurrentBlockAnchor | null>(null);
   let thread = $state.raw<AssistantThread | null>(null);
@@ -31,12 +38,48 @@
   const requestedConversation = $derived(conversationId ? getAssistantConversation(conversationId) : undefined);
   const sourcePageId = $derived(requestedConversation?.sourcePageId ?? (preferFocusedPageForPageScope ? askBlockAnchor?.pageId ?? pageId : pageId));
   const sourceBlockId = $derived(askBlockAnchor?.pageId === sourcePageId ? askBlockAnchor.blockId : null);
+  // The Conflicts tab is conditional: it is only worth a permanent slot when a
+  // sync is running, conflicts are outstanding, or a sync just finished.
+  const conflictsTabVisible = $derived(conflictsRequested || shouldShowConflicts());
 
   $effect(() => {
     focusTrigger;
     if (!initialTab) return;
-    activeTab = initialTab === "notes" ? "notes" : "chat";
+    activeTab = initialTab === "notes" ? "notes" : initialTab === "conflicts" ? "conflicts" : "chat";
+    if (initialTab === "conflicts") conflictsRequested = true;
     toolsRequested = initialTab === "writing";
+  });
+  async function loadConflicts() {
+    conflictsLoading = true;
+    try {
+      conflicts = await listSyncConflicts();
+      setConflictCount(conflicts.length);
+    } catch (error) {
+      console.error("Failed to load sync conflicts:", error);
+    } finally {
+      conflictsLoading = false;
+    }
+  }
+  function selectTab(tab: "chat" | "notes" | "conflicts") {
+    activeTab = tab;
+    if (tab === "conflicts") void loadConflicts();
+    else conflictsRequested = false;
+  }
+  $effect(() => {
+    // Opening the panel re-checks conflicts so the tab can reveal itself
+    // without the user having to know it might be there.
+    if (visible) void refreshConflictCount();
+  });
+  $effect(() => {
+    // Reload while the tab is showing, and again whenever a sync lands, so the
+    // list and its badge stay honest without the user re-clicking the tab.
+    syncActivity.lastCompletedAt;
+    if (visible && activeTab === "conflicts") void loadConflicts();
+  });
+  $effect(() => {
+    // Conflicts all resolved and the grace period elapsed — don't strand the
+    // user on a tab that is no longer offered.
+    if (activeTab === "conflicts" && !conflictsTabVisible) activeTab = "chat";
   });
   $effect(() => {
     pageId;
@@ -83,8 +126,13 @@
   <aside class="reference-panel" style:width="{width}px" aria-label="Reading panel">
     <header class="panel-header">
       <div class="panel-tabs" role="tablist" aria-label="Reading panel tabs">
-        <button role="tab" aria-selected={activeTab === "chat"} class:active={activeTab === "chat"} onclick={() => activeTab = "chat"}>Chat</button>
-        <button role="tab" aria-selected={activeTab === "notes"} class:active={activeTab === "notes"} onclick={() => activeTab = "notes"}>Notes</button>
+        <button role="tab" aria-selected={activeTab === "chat"} class:active={activeTab === "chat"} onclick={() => selectTab("chat")}>Chat (AI)</button>
+        <button role="tab" aria-selected={activeTab === "notes"} class:active={activeTab === "notes"} onclick={() => selectTab("notes")}>Notes</button>
+        {#if conflictsTabVisible}
+          <button role="tab" aria-selected={activeTab === "conflicts"} class:active={activeTab === "conflicts"} onclick={() => selectTab("conflicts")}>
+            Conflicts{syncActivity.conflictCount ? ` (${syncActivity.conflictCount})` : ""}
+          </button>
+        {/if}
       </div>
       <button class="close-btn" onclick={onClose} aria-label="Close reading panel">×</button>
     </header>
@@ -93,6 +141,26 @@
         <ReadingNotesPanel pageId={sourcePageId} pageTitle={sourcePageId === pageId ? pageTitle : ""}
           active={visible && activeTab === "notes"} {onNavigate}
           initialNoteLabel={noteFocusLabel} initialNotePageId={noteFocusPageId} {noteFocusTrigger} />
+      {/if}
+      {#if activeTab === "conflicts"}
+        <div class="conflicts-panel">
+          <p>Resolve conflicts by editing the normal note and saving your chosen version.</p>
+          {#if conflictsLoading}
+            <p role="status">Loading conflicts…</p>
+          {:else if conflicts.length === 0}
+            <p role="status">{syncActivity.running > 0 ? "Sync in progress…" : "No unresolved sync conflicts."}</p>
+          {:else}
+            {#each conflicts as conflict}
+              <button
+                class="conflict-item"
+                onclick={() => onNavigate({ title: conflict.rel_path.replace(/^(pages|journals)\//, "").replace(/\.md$/, "") })}
+              >
+                <strong>{conflict.rel_path}</strong>
+                <span>{conflict.target_name}</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
       {/if}
       {#if thread}
         <!-- Keep source-bound tool previews alive across navigation and Notes. -->
@@ -126,4 +194,8 @@
   .conversation-host[hidden] { display: none; }
   p { font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
   .error { color: var(--danger, #c0392b); }
+  .conflicts-panel { overflow: auto; }
+  .conflicts-panel p { margin: 0 0 10px; }
+  .conflict-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; gap: 2px; margin-bottom: 6px; }
+  .conflict-item span { color: var(--text-secondary); font-size: 11px; }
 </style>

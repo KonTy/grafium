@@ -193,15 +193,15 @@
 </script>
 
 <details class="page-tools assistant-disclosure" bind:this={toolsEl}>
-  <summary>Page / selection tools</summary>
+  <summary>Page / selection tools (AI + offline)</summary>
   <div class="tools-content assistant-disclosure-body">
     <p class="tool-source">{pageTitle || "Current source"} · Tools never insert or replace an answer automatically.</p>
     <div class="tool-actions">
       <button onclick={() => findLinks()} disabled={!pageId} title="Find links across this source page, not only the selected passage">Find links in page</button>
       <button onclick={() => findLinks(true)} disabled={!pageId} title="Exact text matches across this source page; no AI required">Exact page links</button>
-      <button onclick={() => summarize("page")} disabled={!ready || unavailable}>Summarize this Page</button>
-      <button onmousedown={(event) => event.preventDefault()} onclick={() => summarize("selection")} disabled={!ready || unavailable || !selected}>Summarize Selection</button>
-      <button onclick={() => summarize("answers")} disabled={!ready || unavailable || !hasAnswers}>Summarize answers</button>
+      <button onclick={() => summarize("page")} disabled={!ready || unavailable}>AI: Summarize this page</button>
+      <button onmousedown={(event) => event.preventDefault()} onclick={() => summarize("selection")} disabled={!ready || unavailable || !selected}>AI: Summarize selection</button>
+      <button onclick={() => summarize("answers")} disabled={!ready || unavailable || !hasAnswers}>AI: Summarize answers</button>
       <button onclick={draftMergedBlock} disabled={!ready || unavailable || !hasAnswers || !blockId}>Merge answer with block</button>
     </div>
     {#if !ready}<p>Exact link discovery works offline without AI. Connect a model for summaries and writing assistance.</p>{/if}
@@ -249,7 +249,7 @@
       </section>
     {/if}
     <details class="writing-tools assistant-disclosure" bind:this={writingEl}>
-      <summary>Writing assistance</summary>
+      <summary>AI writing assistance</summary>
       <div class="assistant-disclosure-body">
         <AIWritingPanel {pageId} {pageTitle} {anchor} {onOpenSettings} />
       </div>

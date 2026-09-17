@@ -16,4 +16,4 @@ pub mod webdav;
 pub use backend::{FileMetadata, SyncBackend};
 pub use engine::SyncEngine;
 pub use merge::{three_way_merge, two_way_merge, MergeResult};
-pub use state::{SyncConfig, SyncState};
+pub use state::{SyncConfig, SyncState, UnresolvedConflict};
