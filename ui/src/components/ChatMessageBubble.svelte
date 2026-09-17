@@ -16,6 +16,9 @@
     animateCursor?: boolean;
     thinkingLabel?: string;
     thinkingTone?: ChatThinkingTone;
+    /** Set when a step trail above this bubble already reports the phase, so
+     *  the placeholder doesn't say "Thinking…" directly under "Thinking". */
+    trailed?: boolean;
     onOpenSource?: (source: ChatSource) => void;
     onOpenWebSource?: (source: WebSource) => void;
   }
@@ -27,6 +30,7 @@
     animateCursor = false,
     thinkingLabel = "Thinking…",
     thinkingTone = "thinking",
+    trailed = false,
     onOpenSource = () => {},
     onOpenWebSource = (source: WebSource) => {
       if (/^https?:\/\//i.test(source.url)) {
@@ -39,7 +43,13 @@
   let copiedTimer: ReturnType<typeof setTimeout> | null = null;
 
   let showThinking = $derived(
-    message.role === "assistant" && streaming && !message.content.trim(),
+    message.role === "assistant" && streaming && !message.content.trim() && !trailed,
+  );
+  // With a step trail above it, an empty bubble adds a second "Grafium AI"
+  // heading and a placeholder that says the same thing the trail already says.
+  // It appears the moment real text arrives.
+  let hideBubble = $derived(
+    message.role === "assistant" && streaming && !message.content.trim() && trailed,
   );
   let isCompletedAssistant = $derived(
     message.role === "assistant" && !streaming && message.content.trim().length > 0,
@@ -111,6 +121,7 @@
   }
 </script>
 
+{#if !hideBubble}
 <div
   class="msg"
   class:user={message.role === "user"}
@@ -196,6 +207,7 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
   .msg {

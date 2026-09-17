@@ -146,6 +146,10 @@ export async function sendAssistantQuestion(
       thread.historyContexts = [...historyContexts, copyAssistantContext(frozenContext), copyAssistantContext(frozenContext)];
       dispatch(thread, { type: "done", at: Date.now() });
     }
+    // Keep what the run did next to the answer it produced; thread.state is
+    // reset by the next question.
+    answer.steps = thread.state.steps.map((step) => ({ ...step }));
+    updateAssistantConversation();
   };
   try {
     if ((await getGraphInfo()).path !== thread.graphPath) throw new Error("The graph changed. Return to the original graph before asking.");
@@ -180,7 +184,7 @@ export async function sendAssistantQuestion(
       onNote(note) {
         if (!live()) return;
         thread.note = note;
-        dispatch(thread, { type: "note", at: Date.now() });
+        dispatch(thread, { type: "note", at: Date.now(), text: note });
       },
       onSources(sources) {
         if (!current()) return;

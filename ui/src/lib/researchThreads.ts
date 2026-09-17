@@ -117,6 +117,8 @@ export async function sendResearchQuestion(thread: ResearchThread, target: Resea
       thread.history.push({ role: "user", content: question }, { role: "assistant", content: answer.content });
       dispatch(thread, { type: "done", at: Date.now() });
     }
+    answer.steps = thread.state.steps.map((step) => ({ ...step }));
+    updateResearchThread();
   };
   try {
     if ((await getGraphInfo()).path !== thread.graphPath) throw new Error("The graph changed. Return to the source graph before asking.");
@@ -138,7 +140,7 @@ export async function sendResearchQuestion(thread: ResearchThread, target: Resea
       onNote(note) {
         if (!live()) return;
         thread.note = note;
-        dispatch(thread, { type: "note", at: Date.now() });
+        dispatch(thread, { type: "note", at: Date.now(), text: note });
       },
       onSources(sources) {
         if (!current()) return;

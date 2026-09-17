@@ -121,13 +121,38 @@ export interface StreamState {
   /** Wall-clock ms the first answer token arrived, or null if none yet. */
   firstTokenAt: number | null;
   errorMessage: string | null;
+  /**
+   * The work done so far, oldest first, so the UI can stack finished steps in
+   * the transcript instead of replacing one line in place. Built here rather
+   * than in the view because it must obey the same evidence rules as the rest
+   * of this module: a step only appears when the backend actually reported that
+   * phase, and only the last open step may animate.
+   */
+  steps: StreamStep[];
 }
+
+/** One reported phase of a single answer. */
+export interface StreamStep {
+  phase: StreamPhase;
+  startedAt: number;
+  /** Wall-clock ms the step finished, or null while it is still the live step. */
+  endedAt: number | null;
+  /** Latest backend progress note for this step ("Reading source 3 of 5"). */
+  note: string;
+}
+
+/**
+ * Upper bound on retained steps. A run is one answer, so this is generous even
+ * for multi-round research; it exists only so a backend that flaps between
+ * phases can't grow the trail without limit. The oldest are dropped.
+ */
+export const MAX_TRAIL_STEPS = 40;
 
 export type StreamEvent =
   | { type: "start"; at: number }
   | { type: "phase"; phase: StreamPhase; at: number }
   | { type: "delta"; chars: number; at: number }
-  | { type: "note"; at: number }
+  | { type: "note"; at: number; text?: string }
   | { type: "done"; at: number }
   | { type: "error"; at: number; message: string }
   | { type: "cancel"; at: number };
@@ -142,12 +167,42 @@ export function initialState(now = 0): StreamState {
     lastEventAt: now,
     firstTokenAt: null,
     errorMessage: null,
+    steps: [],
   };
 }
 
 function isTerminal(kind: StatusKind): boolean {
   return kind === "done" || kind === "error" || kind === "cancelled";
 }
+
+/** Close the open step, if any, without disturbing already-finished ones. */
+function closeSteps(steps: StreamStep[], at: number): StreamStep[] {
+  if (!steps.length) return steps;
+  const last = steps[steps.length - 1];
+  if (last.endedAt !== null) return steps;
+  return [...steps.slice(0, -1), { ...last, endedAt: Math.max(at, last.startedAt) }];
+}
+
+/**
+ * Record a transition into `phase`. Re-entering the phase that is already open
+ * is not a new step — it's the same work continuing — so the trail shows one
+ * row per stretch of work rather than one per event.
+ */
+function advanceSteps(steps: StreamStep[], phase: StreamPhase, at: number): StreamStep[] {
+  const last = steps.length ? steps[steps.length - 1] : null;
+  if (last && last.endedAt === null && last.phase === phase) return steps;
+  const next = [...closeSteps(steps, at), { phase, startedAt: at, endedAt: null, note: "" }];
+  return next.length > MAX_TRAIL_STEPS ? next.slice(next.length - MAX_TRAIL_STEPS) : next;
+}
+
+/** Attach the newest progress note to the step it describes. */
+function noteSteps(steps: StreamStep[], text: string): StreamStep[] {
+  if (!text || !steps.length) return steps;
+  const last = steps[steps.length - 1];
+  if (last.endedAt !== null || last.note === text) return steps;
+  return [...steps.slice(0, -1), { ...last, note: text }];
+}
+
 
 // Fold one event into the state. Pure and total: unknown-order and duplicate
 // events are handled without throwing, and terminal states are sticky (a late
@@ -175,7 +230,15 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
         // out-of-order regression.
         phase = nextRank >= curRank ? e.phase : s.phase;
       }
-      return { ...s, kind: "active", phase, lastEventAt: e.at };
+      // A rejected out-of-order phase leaves the displayed phase alone, so it
+      // must not open a step either — it was evidence of life, not of new work.
+      return {
+        ...s,
+        kind: "active",
+        phase,
+        lastEventAt: e.at,
+        steps: phase ? advanceSteps(s.steps, phase, e.at) : s.steps,
+      };
     }
 
     case "delta": {
@@ -189,6 +252,7 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
         chars: s.chars + Math.max(0, e.chars),
         firstTokenAt: s.firstTokenAt ?? e.at,
         lastEventAt: e.at,
+        steps: advanceSteps(s.steps, "generating", e.at),
       };
     }
 
@@ -198,21 +262,21 @@ export function reduce(s: StreamState, e: StreamEvent): StreamState {
       // liveness clock without touching phase or token counts, so an active
       // multi-source research pass isn't mistaken for a stall.
       if (isTerminal(s.kind)) return s;
-      return { ...s, kind: "active", lastEventAt: e.at };
+      return { ...s, kind: "active", lastEventAt: e.at, steps: noteSteps(s.steps, e.text ?? "") };
 
     case "done":
       if (isTerminal(s.kind)) return s;
-      return { ...s, kind: "done", lastEventAt: e.at };
+      return { ...s, kind: "done", lastEventAt: e.at, steps: closeSteps(s.steps, e.at) };
 
     case "error":
       // An error can arrive at any time and always wins over "active"; but a
       // stray error after a clean finish shouldn't rewrite it.
       if (isTerminal(s.kind)) return s;
-      return { ...s, kind: "error", errorMessage: e.message, lastEventAt: e.at };
+      return { ...s, kind: "error", errorMessage: e.message, lastEventAt: e.at, steps: closeSteps(s.steps, e.at) };
 
     case "cancel":
       if (isTerminal(s.kind)) return s;
-      return { ...s, kind: "cancelled", lastEventAt: e.at };
+      return { ...s, kind: "cancelled", lastEventAt: e.at, steps: closeSteps(s.steps, e.at) };
 
     default:
       return s;
@@ -363,4 +427,92 @@ export function statusDisplay(
   }
   const label = `${announce} ${meta}`;
   return { ...base, kind: "active", label, announce, meta, animate: !reducedMotion, showStop: true };
+}
+
+// ---------------------------------------------------------------------------
+// The step trail: the same evidence, stacked in the transcript.
+//
+// Showing one status line that rewrites itself hides what the assistant
+// actually did, and putting it under the composer puts it where the eye isn't.
+// The trail keeps each finished step visible next to the answer it produced,
+// and animates only the step that is genuinely still running.
+// ---------------------------------------------------------------------------
+
+export type TrailRowState = "done" | "active" | "stalled";
+
+export interface TrailRow {
+  /** Stable across ticks so the list doesn't re-mount and restart animations. */
+  key: string;
+  phase: StreamPhase;
+  label: string;
+  /** Backend progress note for this step, or "". */
+  note: string;
+  /** How long this step took; "" while it is still running or under a second. */
+  meta: string;
+  state: TrailRowState;
+  /** Whether this row should run the shimmer. Only ever one row, never in
+   *  reduced motion, and never once the evidence has dried up. */
+  shimmer: boolean;
+}
+
+export interface TrailDisplay {
+  rows: TrailRow[];
+  /** Ticking total for the run, shown while it is still going. */
+  elapsed: string;
+  /** Total once finished, e.g. for the collapsed summary. */
+  finishedIn: string;
+  running: boolean;
+  /** True when there is something worth rendering. */
+  any: boolean;
+}
+
+/**
+ * Project state + clock into rows. Pure, so "reduced motion never shimmers" and
+ * "a stalled run stops animating" are properties that can be unit-tested rather
+ * than trusted to CSS.
+ */
+export function statusTrail(s: StreamState, now: number, reducedMotion = false): TrailDisplay {
+  const stalled = isStalled(s, now);
+  const running = s.kind === "active" && !stalled;
+  const rows: TrailRow[] = s.steps.map((step, index) => {
+    const open = step.endedAt === null;
+    // Only the final step can still be open; a trailing open step on a finished
+    // run (a dropped done event) is reported as done, not left animating.
+    const live = open && index === s.steps.length - 1 && (s.kind === "active" || stalled);
+    const ended = step.endedAt ?? now;
+    const state: TrailRowState = live ? (stalled ? "stalled" : "active") : "done";
+    return {
+      key: `${index}-${step.phase}-${step.startedAt}`,
+      phase: step.phase,
+      label: PHASE_LABEL[step.phase],
+      note: step.note,
+      // Sub-second steps read as noise, so they carry no timing at all.
+      meta: !live && ended - step.startedAt >= 1000 ? formatElapsed(ended - step.startedAt) : "",
+      state,
+      shimmer: state === "active" && !reducedMotion,
+    };
+  });
+  const total = Math.max(0, now - s.startedAt);
+  const finishedTotal = Math.max(0, (s.lastEventAt || s.startedAt) - s.startedAt);
+  return {
+    rows,
+    elapsed: formatElapsed(total),
+    finishedIn: formatElapsed(finishedTotal),
+    running: running || stalled,
+    any: rows.length > 0,
+  };
+}
+
+/**
+ * Trail for an answer that has already finished, rebuilt from the steps stored
+ * on the message. Nothing here can animate: the run is over.
+ */
+export function finishedTrail(steps: StreamStep[]): TrailDisplay {
+  if (!steps.length) return { rows: [], elapsed: "", finishedIn: "", running: false, any: false };
+  const startedAt = steps[0].startedAt;
+  const endedAt = steps.reduce((last, step) => Math.max(last, step.endedAt ?? step.startedAt), startedAt);
+  return statusTrail(
+    { ...initialState(startedAt), kind: "done", lastEventAt: endedAt, steps },
+    endedAt
+  );
 }

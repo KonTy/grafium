@@ -6,6 +6,27 @@ you want references or a focused answer.
 
 For current outside information, use the research controls and review sources.
 
+## Watching it work
+
+While an answer is being produced, Chat stacks what it is doing in the
+transcript itself, above the answer: `Searching your notes`, `Thinking`,
+`Generating`, and for web research `Planning searches`, `Reading sources`,
+`Refining the search`. The step that is currently running shimmers, and a
+running total ticks beside it. Finished steps stay put with the time each one
+took, so you can see where a slow answer actually spent its time.
+
+Each step appears only when the model or the research engine really reported
+it. If progress stops, the shimmer stops too and the row says so rather than
+animating over a wedged request — an indicator that keeps moving after
+something has died is worse than no indicator.
+
+Once an answer is done its steps collapse into a single **Worked for…** line.
+Click it to expand the trail for that answer again, even after you have asked
+something else.
+
+If you prefer reduced motion in your system settings, nothing shimmers; the
+steps and timings still appear.
+
 ## Asking Chat to change your notes
 
 Chat can also *do* things, not just answer. Ask in plain language:

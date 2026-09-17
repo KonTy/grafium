@@ -2,6 +2,7 @@
   import { tick, untrack } from "svelte";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import ChatMessageBubble from "./ChatMessageBubble.svelte";
+  import ChatStatusTrail from "./ChatStatusTrail.svelte";
   import { getGraphInfo } from "../lib/api";
   import { aiHealthCheck, type WebSource } from "../lib/knowledge";
   import { researchScopeInfo, type ResearchScope, type ResearchScopeInfo } from "../lib/research";
@@ -10,7 +11,7 @@
     getResearchThread, researchThreadChanges, updateResearchThread, researchThreadRunning,
     researchTarget, sendResearchQuestion, stopResearchThread, newResearchConversation, type ResearchThread,
   } from "../lib/researchThreads";
-  import { initialState, statusDisplay } from "../lib/chatStatus";
+  import { initialState, statusDisplay, statusTrail, finishedTrail } from "../lib/chatStatus";
   import type { ChatThinkingTone } from "../lib/chatMessage";
   import type { PageNavigationTarget } from "../lib/navigation";
 
@@ -38,6 +39,7 @@
   });
   const running = $derived(!!view && researchThreadRunning(view));
   const status = $derived(statusDisplay(view?.state ?? initialState(), now, reducedMotion));
+  const trail = $derived(statusTrail(view?.state ?? initialState(), now, reducedMotion));
   const pageLabel = $derived(info?.isJournal ? "This journal day" : info?.isBook ? "This book" : "This page");
   const scopeUnavailable = $derived(!view || (view.scope === "selection" && (!view.selection || !!view.selectionError))
     || (view.scope === "block" && !blockId) || (view.scope === "section" && !info?.section));
@@ -115,6 +117,8 @@
 
   $effect(() => {
     const messages = view?.messages;
+    // New step rows grow the transcript the same way new messages do.
+    trail.rows.length;
     if (!active || !messages || !followAnswer) return;
     void tick().then(() => {
       if (active && scrollEl?.isConnected) scrollEl.scrollTop = scrollEl.scrollHeight;
@@ -187,8 +191,17 @@
       </div>
     {/if}
     {#each view?.messages ?? [] as message, index}
+      {#if message.role === "assistant"}
+        {#if view?.pendingIndex === index}
+          <ChatStatusTrail {trail} note={view?.note ?? ""} meta={status.meta}
+            notice={status.kind === "stalled" || status.kind === "error" ? status.label : ""} />
+        {:else if message.steps?.length}
+          <ChatStatusTrail trail={finishedTrail(message.steps)} collapsed />
+        {/if}
+      {/if}
       <ChatMessageBubble {message} {index} streaming={running && view?.pendingIndex === index}
         animateCursor={status.animate} thinkingLabel={status.announce} {thinkingTone}
+        trailed={view?.pendingIndex === index && trail.any}
         onOpenSource={(source) => onNavigate({ id: source.page_id })}
         onOpenWebSource={openWebSource} />
     {/each}
@@ -246,7 +259,6 @@
         {/if}
       </div>
     </form>
-    {#if running}<p class="status-message" role="status">{status.announce}<span aria-hidden="true"> {status.meta}</span>{view?.note ? ` · ${view.note}` : ""}</p>{/if}
     {#if view?.scope === "section" && info?.section}<p class="scope-detail">Section: {info.section.title}</p>{/if}
     {#if view?.scope === "block" && blockId}<p class="scope-detail">Current block and its children</p>{/if}
     {#if scopeUnavailable && view?.scope !== "page"}<p class="error-message">This scope is no longer available. Select it again in your notes or choose {pageLabel.toLowerCase()}.</p>{/if}

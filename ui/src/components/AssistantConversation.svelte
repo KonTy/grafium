@@ -5,6 +5,7 @@
   import AssistantDiagnostics from "./AssistantDiagnostics.svelte";
   import PageAssistantTools from "./PageAssistantTools.svelte";
   import AIEditPlanCard from "./AIEditPlanCard.svelte";
+  import ChatStatusTrail from "./ChatStatusTrail.svelte";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
   import { listBlocks } from "../lib/api";
   import { aiAsk, aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
@@ -22,7 +23,7 @@
   import { readingSelection } from "../lib/readingSelection";
   import { getLatestCurrentBlockAnchor, type CurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import { selectionIntersectsTranscript } from "../lib/transcriptSelection";
-  import { initialState, statusDisplay } from "../lib/chatStatus";
+  import { initialState, statusDisplay, statusTrail, finishedTrail } from "../lib/chatStatus";
   import type { ChatThinkingTone } from "../lib/chatMessage";
   import type { PageNavigationTarget } from "../lib/navigation";
 
@@ -64,6 +65,7 @@
   });
   const running = $derived(assistantConversationRunning(view));
   const status = $derived(statusDisplay(view.state ?? initialState(), now, reducedMotion));
+  const trail = $derived(statusTrail(view.state ?? initialState(), now, reducedMotion));
   const provider = $derived(assistantProvider(config));
   const contextPageId = $derived(thread.sourcePageId ?? ("pageId" in view.context ? view.context.pageId : null));
   const focusedBlockId = $derived(blockId ?? (anchor?.pageId === contextPageId ? anchor?.blockId : null));
@@ -155,6 +157,10 @@
 
   $effect(() => {
     view.messages;
+    // A new step row grows the transcript just like a new message does, so the
+    // trail has to drive the same follow-scroll or the live step slides out of
+    // view exactly when it matters.
+    trail.rows.length;
     if (!active || !followAnswer) return;
     void tick().then(() => {
       if (active && scrollEl?.isConnected && !window.getSelection()?.toString()) scrollEl.scrollTop = scrollEl.scrollHeight;
@@ -404,8 +410,17 @@
         {#if message.role === "assistant" && (message.contextLabel || message.mode)}
           <div class="answer-badges"><span>{message.contextLabel || "Context recorded for this answer"}</span><span>{assistantModes[message.mode ?? "answer"].label}</span></div>
         {/if}
+        {#if message.role === "assistant"}
+          {#if view.pendingIndex === index}
+            <ChatStatusTrail {trail} note={view.note} meta={status.meta}
+              notice={status.kind === "stalled" || status.kind === "error" ? status.label : ""} />
+          {:else if message.steps?.length}
+            <ChatStatusTrail trail={finishedTrail(message.steps)} collapsed />
+          {/if}
+        {/if}
         <ChatMessageBubble {message} {index} streaming={running && view.pendingIndex === index}
           animateCursor={status.animate} thinkingLabel={status.announce} {thinkingTone}
+          trailed={view.pendingIndex === index && trail.any}
           onOpenSource={(source) => window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: source.page_title, targetBlockId: source.block_id } }))}
           onOpenWebSource={openWebSource} />
       </div>
@@ -482,7 +497,6 @@
       </div>
     </form>
     <p class="mode-hint">{assistantModes[view.mode].description}</p>
-    {#if running}<p class="status-message" role="status">{status.announce} {status.meta}{view.note ? ` · ${view.note}` : ""}</p>{/if}
     <details class="privacy-note assistant-disclosure">
       <summary>Model &amp; web privacy</summary>
       <div class="assistant-disclosure-body">
