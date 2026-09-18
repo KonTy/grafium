@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { PageKindFilter } from "./pageTreeState";
 
 export interface Page {
   id: string;
@@ -90,12 +91,17 @@ export function listPages(limit = 100, offset = 0): Promise<Page[]> {
   return invoke("list_pages", { limit, offset });
 }
 
-export function countPages(): Promise<number> {
-  return invoke("count_pages");
+export function countPages(filter: PageKindFilter = "all"): Promise<number> {
+  return invoke("count_pages", { filter });
 }
 
-export function listPagesWindow(limit: number, offset: number, sortByTitle: boolean): Promise<Page[]> {
-  return invoke("list_pages_window", { limit, offset, sortByTitle });
+export function listPagesWindow(
+  limit: number,
+  offset: number,
+  sortByTitle: boolean,
+  filter: PageKindFilter = "all",
+): Promise<Page[]> {
+  return invoke("list_pages_window", { limit, offset, sortByTitle, filter });
 }
 
 export function listJournalPages(limit = 20, offset = 0): Promise<Page[]> {

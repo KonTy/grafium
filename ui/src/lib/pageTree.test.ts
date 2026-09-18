@@ -67,11 +67,11 @@ describe("page tree commands", () => {
   it("passes command arguments in Tauri camelCase", async () => {
     mockInvoke.mockResolvedValueOnce([]);
     await pagesNamespaceTree();
-    expect(mockInvoke).toHaveBeenCalledWith("pages_namespace_tree");
+    expect(mockInvoke).toHaveBeenCalledWith("pages_namespace_tree", { filter: "all" });
 
     mockInvoke.mockResolvedValueOnce([]);
     await pagesTagTree();
-    expect(mockInvoke).toHaveBeenCalledWith("pages_tag_tree");
+    expect(mockInvoke).toHaveBeenCalledWith("pages_tag_tree", { filter: "all" });
 
     mockInvoke.mockResolvedValueOnce([]);
     await pagesListCollections();

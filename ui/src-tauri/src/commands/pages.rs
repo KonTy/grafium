@@ -1,4 +1,5 @@
 use crate::AppState;
+use grafium_core::db::PageKindFilter;
 use grafium_core::graph::{BulkRenameResult, DeletePageResult};
 use grafium_core::models::{Page, PageSummary};
 use serde::Serialize;
@@ -39,9 +40,15 @@ pub fn list_pages(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn count_pages(state: State<AppState>) -> Result<i64, String> {
+pub fn count_pages(
+    state: State<AppState>,
+    filter: Option<PageKindFilter>,
+) -> Result<i64, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    graph.db.count_regular_pages().map_err(|e| e.to_string())
+    graph
+        .db
+        .count_pages_window(filter.unwrap_or_default())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -50,11 +57,17 @@ pub fn list_pages_window(
     limit: i64,
     offset: i64,
     sort_by_title: Option<bool>,
+    filter: Option<PageKindFilter>,
 ) -> Result<Vec<Page>, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph
         .db
-        .list_pages_window(limit, offset, sort_by_title.unwrap_or(false))
+        .list_pages_window(
+            limit,
+            offset,
+            sort_by_title.unwrap_or(false),
+            filter.unwrap_or_default(),
+        )
         .map_err(|e| e.to_string())
 }
 

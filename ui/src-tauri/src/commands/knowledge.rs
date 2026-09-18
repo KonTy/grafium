@@ -7,6 +7,7 @@ use grafium_core::ai::config::{
 use grafium_core::ai::references::{chunk_blocks_by_content_size, PageReferencesMeta};
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::ai::web_research::Citation;
+use grafium_core::db::PageKindFilter;
 use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
@@ -1304,7 +1305,7 @@ pub async fn ai_index_all_pages(
     while let Some(pages) = cursor.next_batch(|limit, offset| {
         graph
             .db
-            .list_pages_window(limit, offset, false)
+            .list_pages_window(limit, offset, false, PageKindFilter::All)
             .map_err(|e| e.to_string())
     })? {
         let mut pages_and_blocks = Vec::with_capacity(pages.len());

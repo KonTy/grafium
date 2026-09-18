@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { extractMarkdownReferences } from "./markdown";
-import type { PageTreeViewNode } from "./pageTreeState";
+import type { PageKindFilter, PageTreeViewNode } from "./pageTreeState";
 
 // The contract's Rust payloads use serde's default snake_case. If core opts
 // into camelCase later, this is the only value that changes.
@@ -110,13 +110,13 @@ export interface CollectionMember {
   page_title: string;
 }
 
-export async function pagesNamespaceTree(): Promise<TreeNode[]> {
-  const raw = await invoke("pages_namespace_tree");
+export async function pagesNamespaceTree(filter: PageKindFilter = "all"): Promise<TreeNode[]> {
+  const raw = await invoke("pages_namespace_tree", { filter });
   return fromWire<TreeNode[]>(raw);
 }
 
-export async function pagesTagTree(): Promise<TreeNode[]> {
-  const raw = await invoke("pages_tag_tree");
+export async function pagesTagTree(filter: PageKindFilter = "all"): Promise<TreeNode[]> {
+  const raw = await invoke("pages_tag_tree", { filter });
   return fromWire<TreeNode[]>(raw);
 }
 
@@ -129,8 +129,11 @@ export async function pagesListCollections(): Promise<CollectionSummary[]> {
   return fromWire<CollectionSummary[]>(raw);
 }
 
-export function getPageTree(source: PageTreeSource): Promise<TreeNode[]> {
-  return source === "namespace" ? pagesNamespaceTree() : pagesTagTree();
+export function getPageTree(
+  source: PageTreeSource,
+  filter: PageKindFilter = "all",
+): Promise<TreeNode[]> {
+  return source === "namespace" ? pagesNamespaceTree(filter) : pagesTagTree(filter);
 }
 
 /**

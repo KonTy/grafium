@@ -154,6 +154,7 @@ block IDs; the experimental continuous editor reports this rather than guessing.
 | Namespaces | Organize slash-separated titles such as `Projects/Observatory/Checklist` into a navigable tree. |
 | Collections | Mark a page as a book or paper collection from its page menu; navigate its ordered linked members, or convert it back to a regular page. |
 | All Pages | Browse the namespace hierarchy and find pages without remembering their exact location. |
+| Files or placeholders | Filter All Pages, in list and tree view, to every page, only pages with a `.md` file on disk, or only the placeholders a `[[link]]` or `#tag` created but nobody has written. Remembered per graph. |
 | Favorites and recent pages | Keep frequently used material close at hand and return to recent work. |
 | Full-text search | Search indexed note content with SQLite FTS5 and ranked results. |
 | Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the journal calendar, to browse all pages with an immediately focused fuzzy search. Arrows browse; Enter opens; Escape cancels. |
@@ -255,6 +256,7 @@ access.
 | Multiple graphs | Create and switch between separate graph folders. |
 | Portable Markdown | Keep page and journal content as ordinary `.md` files, with graph-relative assets. |
 | Live file watching | Edit files externally and let Grafium reconcile the changes with its index. |
+| Media import inbox | Media imported by URL is filed under `ImportedMedia/` so untriaged material collects in one place instead of scattering. Importing into today's journal is unaffected. |
 | Filesystem and WebDAV sync | Configure USB drives, mounted network folders, or a WebDAV server such as Nextcloud; run **Sync Now** from Settings. |
 | Target availability | Configured auto-sync targets synchronize when the native monitor detects that they have become available. |
 | Sync reporting | See pushed/pulled files, deletions, conflicts, and errors. File sync is not simultaneous collaborative editing; review conflicts and keep backups. |

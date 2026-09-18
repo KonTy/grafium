@@ -59,6 +59,25 @@ interface PersistedExpansion {
 export const SIDEBAR_TREE_STORAGE_KEY = "grafium.pageTree.sidebar.expanded";
 export const ALL_PAGES_TREE_STORAGE_KEY = "grafium.pageTree.allPages.expanded";
 export const ALL_PAGES_SORT_STORAGE_KEY = "grafium.pageTree.allPages.sort";
+export const ALL_PAGES_KIND_STORAGE_KEY = "grafium.pageTree.allPages.kind";
+
+/**
+ * Which kinds of page All Pages is showing. "filed" means a markdown file
+ * exists on disk; "virtual" means the page is only a placeholder, conjured by
+ * a [[link]] or a #tag that nothing has written yet. Mirrors `PageKindFilter`
+ * in core/src/db/pages.rs, whose serde casing is lowercase.
+ */
+export type PageKindFilter = "all" | "filed" | "virtual";
+
+export const PAGE_KIND_FILTERS: readonly PageKindFilter[] = ["all", "filed", "virtual"];
+
+/**
+ * Reads a persisted filter, falling back to "all" for anything unrecognised —
+ * an older build, a hand-edited value, or a key that has since been retired.
+ */
+export function parsePageKindFilter(value: string | null | undefined): PageKindFilter {
+  return PAGE_KIND_FILTERS.includes(value as PageKindFilter) ? (value as PageKindFilter) : "all";
+}
 
 /**
  * Scope a storage key to one graph.

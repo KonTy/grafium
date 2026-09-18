@@ -26,11 +26,14 @@
   import {
     ALL_PAGES_TREE_STORAGE_KEY,
     ALL_PAGES_SORT_STORAGE_KEY,
+    ALL_PAGES_KIND_STORAGE_KEY,
+    parsePageKindFilter,
     graphScopedKey,
     filterTreeByQuery,
     countTreePages,
     sortTree,
     type PageTreeViewNode,
+    type PageKindFilter,
   } from "../lib/pageTreeState";
   import type { BulkRenameResult, Page } from "../lib/api";
 
@@ -72,6 +75,7 @@
 
   let total = $state(0);
   let sortByTitle = $state(false); // false = Recent (updated_at), true = A-Z (title)
+  let kindFilter = $state<PageKindFilter>("all");
   let newPageTitle = $state("");
   let viewMode = $state<"tree" | "list">("tree");
   let treeSource = $state<PageTreeSource>("namespace");
@@ -175,10 +179,35 @@
     }
   });
 
+  // Same reasoning as the sort preference above: which kinds of page you want
+  // to see is a lasting choice, and it is scoped per graph because one graph
+  // may be all files while another is mostly link placeholders.
+  let kindStorageKey = $derived(graphScopedKey(ALL_PAGES_KIND_STORAGE_KEY, graphPath));
+  let restoredKindFor: string | null = $state(null);
+  $effect(() => {
+    if (!graphResolved) return;
+    const key = kindStorageKey;
+    if (restoredKindFor === key) return;
+    restoredKindFor = key;
+    try {
+      const restored = parsePageKindFilter(window.localStorage.getItem(key));
+      if (restored !== kindFilter) {
+        kindFilter = restored;
+        // The rows already fetched were a different set of pages, and the
+        // total they were sized against counted different rows too.
+        resetWindows();
+        void refreshCount();
+      }
+    } catch {
+      // Ignore an unreadable store and keep the default.
+    }
+  });
+
   $effect(() => {
     const source = treeSource;
+    const filter = kindFilter;
     if (viewMode !== "tree") return;
-    void loadPageTree(source);
+    void loadPageTree(source, filter);
   });
 
   // The sidebar listens for this too. All Pages currently reloads on mount and
@@ -249,27 +278,31 @@
     startIndex;
     endIndex;
     sortByTitle;
+    kindFilter;
     ensureVisibleLoaded();
   });
 
   function ensureVisibleLoaded() {
     if (endIndex <= startIndex) return;
     const byTitle = sortByTitle;
+    const filter = kindFilter;
     const firstChunk = Math.floor(startIndex / CHUNK);
     const lastChunk = Math.floor((endIndex - 1) / CHUNK);
     for (let ch = firstChunk; ch <= lastChunk; ch++) {
       if (requested.has(ch)) continue;
       requested.add(ch);
-      void fetchChunk(ch, byTitle);
+      void fetchChunk(ch, byTitle, filter);
     }
   }
 
-  async function fetchChunk(chunk: number, byTitle: boolean) {
+  async function fetchChunk(chunk: number, byTitle: boolean, filter: PageKindFilter) {
     const offset = chunk * CHUNK;
     try {
-      const pages = await listPagesWindow(CHUNK, offset, byTitle);
-      // Ignore late responses from a superseded sort.
-      if (byTitle !== sortByTitle) return;
+      const pages = await listPagesWindow(CHUNK, offset, byTitle, filter);
+      // Ignore late responses from a superseded sort or filter: they describe
+      // a window that no longer exists, and writing them in would interleave
+      // two different result sets at the same row indices.
+      if (byTitle !== sortByTitle || filter !== kindFilter) return;
       for (let k = 0; k < pages.length; k++) rows.set(offset + k, pages[k]);
     } catch (e) {
       requested.delete(chunk); // allow a retry
@@ -279,20 +312,25 @@
 
   async function refreshCount() {
     try {
-      total = await countPages();
+      const filter = kindFilter;
+      const counted = await countPages(filter);
+      // A count that arrives after the filter moved on would size the
+      // scrollbar for the wrong result set.
+      if (filter !== kindFilter) return;
+      total = counted;
     } catch (e) {
       console.error("Failed to count pages:", e);
     }
   }
 
-  async function loadPageTree(source: PageTreeSource) {
+  async function loadPageTree(source: PageTreeSource, filter: PageKindFilter = kindFilter) {
     const request = ++pageTreeRequest;
     pageTreeLoading = true;
     pageTreeError = "";
     pageTree = [];
     try {
       const result = await withMissingCommandFallback(
-        () => getPageTree(source),
+        () => getPageTree(source, filter),
         [],
       );
       if (request !== pageTreeRequest || source !== treeSource) return;
@@ -314,6 +352,29 @@
     rows.clear();
     requested.clear();
     reloadToken++;
+  }
+
+  // Changing the filter changes how many rows exist — often by a lot, since
+  // most graphs have far more placeholders than files. Staying at the old
+  // offset would drop you past the end of the shorter list, so go back to the
+  // top. Sorting deliberately does not do this: the row count is unchanged
+  // there, and keeping your place is the useful behaviour.
+  function scrollListToTop() {
+    const parent = spacerEl?.closest(".main-content") as HTMLElement | null;
+    if (parent) parent.scrollTop = 0;
+  }
+
+  function setKindFilter(filter: PageKindFilter) {
+    if (filter === kindFilter) return;
+    kindFilter = filter;
+    resetWindows();
+    scrollListToTop();
+    void refreshCount();
+    try {
+      window.localStorage.setItem(kindStorageKey, filter);
+    } catch {
+      // A full or disabled store only costs the preference, not the filter.
+    }
   }
 
   function setSort(byTitle: boolean) {
@@ -817,6 +878,36 @@
       </div>
     {/if}
 
+    <div class="control-group" role="group" aria-label="Page kind">
+      <button
+        class="mode-btn"
+        class:active={kindFilter === "all"}
+        aria-pressed={kindFilter === "all"}
+        title="Every page, written or not"
+        onclick={() => setKindFilter("all")}
+      >
+        All
+      </button>
+      <button
+        class="mode-btn"
+        class:active={kindFilter === "filed"}
+        aria-pressed={kindFilter === "filed"}
+        title="Only pages with a markdown file on disk"
+        onclick={() => setKindFilter("filed")}
+      >
+        Files
+      </button>
+      <button
+        class="mode-btn"
+        class:active={kindFilter === "virtual"}
+        aria-pressed={kindFilter === "virtual"}
+        title="Only placeholders — pages a [[link]] or #tag named but nothing has written yet"
+        onclick={() => setKindFilter("virtual")}
+      >
+        Placeholders
+      </button>
+    </div>
+
     <div class="control-group" role="group" aria-label="Sort order">
       <button
         class="mode-btn"
@@ -841,7 +932,13 @@
 
   {#if total === 0}
     <div class="empty-state">
-      <p>No pages yet. Create one above!</p>
+      {#if kindFilter === "filed"}
+        <p>No pages with a file on disk. Every page here is still a placeholder.</p>
+      {:else if kindFilter === "virtual"}
+        <p>No placeholders — every page a link or tag names has been written.</p>
+      {:else}
+        <p>No pages yet. Create one above!</p>
+      {/if}
     </div>
   {:else}
     <!-- Tree view only — see `filterQuery`. -->

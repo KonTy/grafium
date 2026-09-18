@@ -343,7 +343,7 @@ pub async fn media_import_video(
                 .get_or_create_today_journal()
                 .and_then(|page| graph.append_content_to_page(&page.id, &content))
         } else {
-            graph.create_page_with_content(&title, false, &content)
+            graph.create_page_with_content(&imported_media_title(&title), false, &content)
         };
 
         match page_result {
@@ -411,4 +411,90 @@ fn media_job_details(
         out.push_str(title);
     }
     out
+}
+
+/// The folder every media import is filed under.
+///
+/// Imports arrive unsorted — the title comes from whatever the site published,
+/// so a fresh import is rarely where you would have put it. Sending them all
+/// to one place turns that into an inbox you can work through, instead of
+/// scattering half-named pages across the graph. Nothing else writes here.
+pub const IMPORTED_MEDIA_FOLDER: &str = "ImportedMedia";
+
+/// Build the page title for an imported video.
+///
+/// `/` is the namespace separator, so a published title containing one would
+/// otherwise file itself into a folder nobody asked for — a video called
+/// "A/B testing" landing in an `A/` namespace, and a URL fallback exploding
+/// into a whole tree. Flattening first keeps the import to a single page
+/// directly inside the folder, which is the point of having the folder.
+fn imported_media_title(derived: &str) -> String {
+    let flattened = derived
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    // A title that was nothing but separators leaves the folder itself, which
+    // `create_page_with_content` would take as a page called "ImportedMedia".
+    // Fall back so the import still lands somewhere findable.
+    if flattened.is_empty() {
+        return format!("{IMPORTED_MEDIA_FOLDER}/Untitled import");
+    }
+    format!("{IMPORTED_MEDIA_FOLDER}/{flattened}")
+}
+
+#[cfg(test)]
+mod imported_media_title_tests {
+    use super::imported_media_title;
+
+    #[test]
+    fn an_ordinary_title_goes_straight_into_the_folder() {
+        assert_eq!(
+            imported_media_title("How engines work"),
+            "ImportedMedia/How engines work"
+        );
+    }
+
+    #[test]
+    fn a_slash_in_the_title_does_not_become_a_folder() {
+        // Before this, "A/B testing" filed itself under a bogus `A` namespace.
+        assert_eq!(
+            imported_media_title("A/B testing"),
+            "ImportedMedia/A-B testing"
+        );
+    }
+
+    #[test]
+    fn a_backslash_is_flattened_too() {
+        assert_eq!(
+            imported_media_title("AC\\DC live"),
+            "ImportedMedia/AC-DC live"
+        );
+    }
+
+    #[test]
+    fn a_url_fallback_stays_one_page() {
+        let title = imported_media_title("https://youtube.com/watch?v=abc");
+        assert_eq!(title, "ImportedMedia/https:-youtube.com-watch?v=abc");
+        // One folder deep: the folder itself, then the page.
+        assert_eq!(title.matches('/').count(), 1);
+    }
+
+    #[test]
+    fn empty_segments_collapse_rather_than_nest() {
+        assert_eq!(
+            imported_media_title("season 2 //  episode 3"),
+            "ImportedMedia/season 2-episode 3"
+        );
+    }
+
+    #[test]
+    fn a_title_of_only_separators_still_lands_somewhere() {
+        assert_eq!(
+            imported_media_title("///"),
+            "ImportedMedia/Untitled import"
+        );
+        assert_eq!(imported_media_title(""), "ImportedMedia/Untitled import");
+    }
 }

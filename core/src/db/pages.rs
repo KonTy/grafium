@@ -3,6 +3,59 @@ use crate::error::{CoreError, Result};
 use crate::models::{Page, PageSummary};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection};
+
+/// Which pages the All Pages listing should include.
+///
+/// Grafium creates a page row the moment something links to a title, so a
+/// graph contains two kinds of page: ones with a markdown file behind them,
+/// and placeholders that exist only because a link or tag points at them.
+/// Both are useful — the placeholders are how you find "things I've referred
+/// to but never written" — but a list mixing them makes it hard to answer
+/// either question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageKindFilter {
+    /// Everything, as All Pages has always shown it.
+    #[default]
+    All,
+    /// Only pages with a markdown file on disk.
+    Filed,
+    /// Only placeholders created by a link or tag.
+    Virtual,
+}
+
+impl PageKindFilter {
+    /// The extra `WHERE` text, appended to an existing `is_journal = 0`.
+    ///
+    /// These clauses are duplicated verbatim in the partial indexes in
+    /// `schema.rs`. SQLite will only use a partial index when it can prove the
+    /// query's `WHERE` implies the index's, and it does that by structural
+    /// comparison — so rewriting one of these (even to something logically
+    /// equivalent, like `COALESCE(file_path, '') != ''`) silently drops the
+    /// listing back to a full scan. Change both together or neither.
+    fn sql_suffix(self) -> &'static str {
+        match self {
+            Self::All => "",
+            Self::Filed => " AND file_path IS NOT NULL AND file_path != ''",
+            Self::Virtual => " AND (file_path IS NULL OR file_path = '')",
+        }
+    }
+
+    /// Whether a page belongs in this filter, for callers that already hold
+    /// the rows (the tree views build from a full listing rather than a
+    /// windowed query).
+    pub fn matches(self, page: &Page) -> bool {
+        // Deliberately `is_empty` and not `trim().is_empty()`, to mirror the
+        // SQL above exactly. If these two disagree, tree mode and list mode
+        // sort the same page into different buckets.
+        let filed = page.file_path.as_deref().is_some_and(|path| !path.is_empty());
+        match self {
+            Self::All => true,
+            Self::Filed => filed,
+            Self::Virtual => !filed,
+        }
+    }
+}
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -402,23 +455,28 @@ impl Database {
 
     /// Windowed listing of regular pages for the virtualized All Pages view.
     /// Sorts server-side and pages with LIMIT/OFFSET straight off a partial
-    /// index (`idx_pages_title_regular` / `idx_pages_updated_regular`), so any
-    /// window stays fast (~20ms) regardless of how many pages or journals exist.
+    /// index (`idx_pages_title_regular` / `idx_pages_updated_regular`, or the
+    /// `_filed` / `_virtual` pair when filtered), so any window stays fast
+    /// (~20ms) regardless of how many pages or journals exist.
     pub fn list_pages_window(
         &self,
         limit: i64,
         offset: i64,
         sort_by_title: bool,
+        filter: PageKindFilter,
     ) -> Result<Vec<Page>> {
         let conn = self.conn()?;
-        let sql = if sort_by_title {
-            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
-             FROM pages WHERE is_journal = 0 ORDER BY title ASC LIMIT ?1 OFFSET ?2"
+        let order = if sort_by_title {
+            "title ASC"
         } else {
-            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
-             FROM pages WHERE is_journal = 0 ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"
+            "updated_at DESC"
         };
-        let mut stmt = conn.prepare(sql)?;
+        let sql = format!(
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+             FROM pages WHERE is_journal = 0{} ORDER BY {order} LIMIT ?1 OFFSET ?2",
+            filter.sql_suffix()
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let pages = stmt
             .query_map(params![limit, offset.max(0)], |row| {
                 Ok(Page {
@@ -714,6 +772,21 @@ impl Database {
         Ok(count)
     }
 
+    /// How many rows the virtualized All Pages list will page through.
+    ///
+    /// Must stay in step with [`Self::list_pages_window`]: the view sizes its
+    /// scrollbar from this number and fetches windows from that, so a count
+    /// that counts something different produces blank rows at the end.
+    pub fn count_pages_window(&self, filter: PageKindFilter) -> Result<i64> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM pages WHERE is_journal = 0{}",
+            filter.sql_suffix()
+        );
+        let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+        Ok(count)
+    }
+
     pub fn count_file_backed_pages(&self) -> Result<i64> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(
@@ -901,8 +974,9 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::Database;
+    use super::{Database, PageKindFilter};
     use crate::error::Result;
+    use crate::models::Page;
     use chrono::TimeZone;
 
     #[test]
@@ -1177,6 +1251,139 @@ mod tests {
         assert_eq!(edits[0].1, "Beta");
         assert_eq!(edits[1].1, "Alpha");
 
+        Ok(())
+    }
+
+    /// A graph mixing real pages with link-made placeholders, which is the
+    /// only situation where the filter means anything.
+    fn mixed_graph() -> Result<Database> {
+        let db = Database::in_memory()?;
+        db.upsert_page("Alpha", false, Some("pages/Alpha.md"), &serde_json::json!({}))?;
+        db.upsert_page("Beta", false, Some("pages/Beta.md"), &serde_json::json!({}))?;
+        // A link target nobody has written yet.
+        db.upsert_page("Someday", false, None, &serde_json::json!({}))?;
+        // Legacy rows store "" rather than NULL, and must count as virtual too.
+        db.upsert_page("Blank", false, Some(""), &serde_json::json!({}))?;
+        // A journal, which All Pages never lists whatever the filter says.
+        db.upsert_page("2026-09-09", true, Some("journals/2026-09-09.md"), &serde_json::json!({}))?;
+        Ok(db)
+    }
+
+    fn titles(pages: &[Page]) -> Vec<&str> {
+        pages.iter().map(|page| page.title.as_str()).collect()
+    }
+
+    #[test]
+    fn the_filter_splits_real_pages_from_link_placeholders() -> Result<()> {
+        let db = mixed_graph()?;
+
+        let all = db.list_pages_window(100, 0, true, PageKindFilter::All)?;
+        assert_eq!(titles(&all), ["Alpha", "Beta", "Blank", "Someday"]);
+
+        let filed = db.list_pages_window(100, 0, true, PageKindFilter::Filed)?;
+        assert_eq!(titles(&filed), ["Alpha", "Beta"]);
+
+        let virtual_only = db.list_pages_window(100, 0, true, PageKindFilter::Virtual)?;
+        assert_eq!(titles(&virtual_only), ["Blank", "Someday"]);
+        Ok(())
+    }
+
+    /// The scrollbar is sized from the count and the rows come from the
+    /// window; if they disagree the list ends in blank rows.
+    #[test]
+    fn the_count_matches_what_the_window_returns() -> Result<()> {
+        let db = mixed_graph()?;
+        for filter in [
+            PageKindFilter::All,
+            PageKindFilter::Filed,
+            PageKindFilter::Virtual,
+        ] {
+            let rows = db.list_pages_window(1000, 0, true, filter)?;
+            assert_eq!(
+                db.count_pages_window(filter)? as usize,
+                rows.len(),
+                "{filter:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn paging_a_filtered_list_does_not_repeat_or_skip() -> Result<()> {
+        let db = mixed_graph()?;
+        let first = db.list_pages_window(1, 0, true, PageKindFilter::Filed)?;
+        let second = db.list_pages_window(1, 1, true, PageKindFilter::Filed)?;
+        assert_eq!(titles(&first), ["Alpha"]);
+        assert_eq!(titles(&second), ["Beta"]);
+        assert!(db
+            .list_pages_window(1, 2, true, PageKindFilter::Filed)?
+            .is_empty());
+        Ok(())
+    }
+
+    /// The whole point of the partial indexes: if a rewrite stops SQLite
+    /// matching them, the filtered listing quietly becomes a full scan. The
+    /// query plan is the only place that difference is visible.
+    #[test]
+    fn the_filtered_listing_still_uses_its_partial_index() -> Result<()> {
+        let db = mixed_graph()?;
+        let conn = db.conn()?;
+        for (filter, expected) in [
+            (PageKindFilter::Filed, "idx_pages_title_filed"),
+            (PageKindFilter::Virtual, "idx_pages_title_virtual"),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT id, title, file_path, created_at, updated_at, is_journal, properties
+                 FROM pages WHERE is_journal = 0{} ORDER BY title ASC LIMIT 10 OFFSET 0",
+                filter.sql_suffix()
+            );
+            let plan: String = conn.query_row(&sql, [], |row| row.get(3))?;
+            assert!(plan.contains(expected), "{filter:?} planned as: {plan}");
+        }
+        Ok(())
+    }
+
+    // The UI sends these exact strings (see PAGE_KIND_FILTERS in
+    // ui/src/lib/pageTreeState.ts). If the casing here ever drifts, the
+    // command rejects the argument and All Pages stops listing anything —
+    // a failure that no Rust-only test would otherwise catch.
+    #[test]
+    fn the_filter_deserializes_from_the_strings_the_ui_sends() {
+        for (wire, expected) in [
+            ("\"all\"", PageKindFilter::All),
+            ("\"filed\"", PageKindFilter::Filed),
+            ("\"virtual\"", PageKindFilter::Virtual),
+        ] {
+            let parsed: PageKindFilter = serde_json::from_str(wire).expect(wire);
+            assert_eq!(parsed, expected, "wire value {wire}");
+            assert_eq!(serde_json::to_string(&expected).unwrap(), wire);
+        }
+    }
+
+    // Omitting the argument entirely has to keep working: it is what every
+    // caller that does not care about page kind sends.
+    #[test]
+    fn a_missing_filter_defaults_to_showing_everything() {
+        let absent: Option<PageKindFilter> = serde_json::from_str("null").unwrap();
+        assert_eq!(absent.unwrap_or_default(), PageKindFilter::All);
+    }
+
+    #[test]
+    fn matches_agrees_with_the_sql_it_mirrors() -> Result<()> {
+        let db = mixed_graph()?;
+        for filter in [
+            PageKindFilter::All,
+            PageKindFilter::Filed,
+            PageKindFilter::Virtual,
+        ] {
+            let from_sql = db.list_pages_window(1000, 0, true, filter)?;
+            let from_rust: Vec<_> = db
+                .list_pages_window(1000, 0, true, PageKindFilter::All)?
+                .into_iter()
+                .filter(|page| filter.matches(page))
+                .collect();
+            assert_eq!(titles(&from_sql), titles(&from_rust), "{filter:?}");
+        }
         Ok(())
     }
 }

@@ -5,6 +5,20 @@ Grafium keeps notes as local Markdown and indexes them in SQLite for search, lin
 - `assets/` holds shared media, including this graph's original orbit SVG.
 - Graph metadata holds the index and state that does not live in plain note text.
 
+## Pages that are not files
+
+Not every page in this graph has a file behind it. Writing `[[Orbits]]` or `#astronomy` creates the page immediately so the link resolves and backlinks work, but nothing is written to `pages/` until the page has content. These are **placeholders**: real entries in the index, with real backlinks, and no `.md` file on disk.
+
+This is why a page can appear in **All Pages** and in the namespace tree, yet be missing when you look in the folder with another editor. Nothing is lost — there was never a file.
+
+**All Pages** has a filter for exactly this question:
+
+- **All** — everything, placeholders included. The default.
+- **Files** — only pages with a `.md` file on disk. Use this when you want the list to match what a file manager or `git status` shows.
+- **Placeholders** — only pages that a link or tag named and nobody has written. A useful to-do list: each one is somewhere you meant to say something.
+
+The filter applies to list and tree view alike, and is remembered per graph. Note that **Placeholders** empties the namespace tree of most of its structure, and **Files** empties the tag tree almost entirely — tag pages are usually the placeholders.
+
 The file watcher notices external Markdown changes and updates the index. Avoid editing the same page simultaneously in two editors. Watching local edits and synchronizing a graph are separate features.
 
 ## Sync to another location

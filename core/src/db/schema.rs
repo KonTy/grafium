@@ -123,6 +123,22 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         -- an O(journal_count) scan. This index contains only regular pages, so
         -- the listing is O(limit) regardless of how many journals exist.
         CREATE INDEX IF NOT EXISTS idx_pages_updated_regular ON pages(updated_at DESC) WHERE is_journal = 0;
+        -- All Pages can filter to pages that have a file on disk, hiding the
+        -- placeholders that links and tags create. Without a matching partial
+        -- index that filter degrades the same way journals used to: SQLite
+        -- walks the unfiltered index and discards placeholder rows one at a
+        -- time, so a window deep into a graph with many link targets costs
+        -- O(rows skipped) instead of O(limit). SQLite only uses a partial
+        -- index when the query's WHERE implies the index's, so these clauses
+        -- must stay character-for-character in step with `PageKindFilter`.
+        CREATE INDEX IF NOT EXISTS idx_pages_title_filed ON pages(title)
+            WHERE is_journal = 0 AND file_path IS NOT NULL AND file_path != '';
+        CREATE INDEX IF NOT EXISTS idx_pages_updated_filed ON pages(updated_at DESC)
+            WHERE is_journal = 0 AND file_path IS NOT NULL AND file_path != '';
+        CREATE INDEX IF NOT EXISTS idx_pages_title_virtual ON pages(title)
+            WHERE is_journal = 0 AND (file_path IS NULL OR file_path = '');
+        CREATE INDEX IF NOT EXISTS idx_pages_updated_virtual ON pages(updated_at DESC)
+            WHERE is_journal = 0 AND (file_path IS NULL OR file_path = '');
         -- idx_pages_journal_title supersedes the old is_journal-only index: it
         -- covers the same WHERE is_journal=1 filter AND lets journal listing scan
         -- in title order without a sort. Drop the redundant one on older DBs.

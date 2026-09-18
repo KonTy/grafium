@@ -24,6 +24,7 @@ use std::path::Path;
 pub(crate) use blocks::chat_salient_terms;
 pub use chat::{ChatMessageRecord, ChatThreadRecord, ChatThreadWithMessages};
 pub use entity_adjudication::{adjudicate_entity_resolution, EntityCandidateContext};
+pub use pages::PageKindFilter;
 pub use entity_resolution::{EntityCandidate, EntityDecision, EntityResolution};
 pub(crate) use links::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT;
 pub use retrieval::BlockPageMeta;

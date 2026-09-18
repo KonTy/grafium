@@ -10,6 +10,8 @@ import {
   type StorageLike,
   type TreeNavigationItem,
   graphScopedKey,
+  parsePageKindFilter,
+  PAGE_KIND_FILTERS,
   SIDEBAR_TREE_STORAGE_KEY,
   filterTreeByQuery,
   groupRowsByRoot,
@@ -456,5 +458,27 @@ describe("pruneExpansionState idempotency", () => {
     const once = pruneExpansionState(new Set(["a", "b"]), new Set());
     expect(once.size).toBe(0);
     expect(pruneExpansionState(once, new Set()).size).toBe(0);
+  });
+});
+
+describe("parsePageKindFilter", () => {
+  it("keeps each filter it knows", () => {
+    for (const filter of PAGE_KIND_FILTERS) {
+      expect(parsePageKindFilter(filter)).toBe(filter);
+    }
+  });
+
+  it("falls back to all when nothing is stored", () => {
+    expect(parsePageKindFilter(null)).toBe("all");
+    expect(parsePageKindFilter(undefined)).toBe("all");
+  });
+
+  // A stored value survives upgrades and hand-editing, so an unknown one has
+  // to land somewhere harmless. "all" shows every page, which is the one
+  // answer that can never hide a page someone is looking for.
+  it("falls back to all for a value it does not recognise", () => {
+    expect(parsePageKindFilter("files")).toBe("all");
+    expect(parsePageKindFilter("Filed")).toBe("all");
+    expect(parsePageKindFilter("")).toBe("all");
   });
 });

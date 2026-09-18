@@ -15,6 +15,7 @@
 //! the frontend contract is frozen against.
 
 use crate::AppState;
+use grafium_core::db::PageKindFilter;
 use grafium_core::knowledge::{
     build_namespace_tree, build_tag_tree, clear_collection, collection_of, mark_collection,
     TreeNode,
@@ -38,17 +39,35 @@ pub struct CollectionSummary {
 /// `list_pages`, which already drops journals and case-duplicate titles) and
 /// nests it in memory, rather than doing any per-node recursion in SQL.
 #[tauri::command]
-pub fn pages_namespace_tree(state: State<AppState>) -> Result<Vec<TreeNode>, String> {
+pub fn pages_namespace_tree(
+    state: State<AppState>,
+    filter: Option<PageKindFilter>,
+) -> Result<Vec<TreeNode>, String> {
+    let filter = filter.unwrap_or_default();
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let pages = graph.db.list_pages(-1, 0).map_err(|e| e.to_string())?;
+    // Filtered in Rust rather than SQL because the tree is built from the
+    // whole listing anyway; a windowed query would buy nothing here.
+    let pages: Vec<_> = pages
+        .into_iter()
+        .filter(|page| filter.matches(page))
+        .collect();
     Ok(build_namespace_tree(&pages))
 }
 
 /// The tag tree: the pages used as tags, nested by their tag path.
 #[tauri::command]
-pub fn pages_tag_tree(state: State<AppState>) -> Result<Vec<TreeNode>, String> {
+pub fn pages_tag_tree(
+    state: State<AppState>,
+    filter: Option<PageKindFilter>,
+) -> Result<Vec<TreeNode>, String> {
+    let filter = filter.unwrap_or_default();
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     let tag_pages = graph.db.list_tag_pages().map_err(|e| e.to_string())?;
+    let tag_pages: Vec<_> = tag_pages
+        .into_iter()
+        .filter(|page| filter.matches(page))
+        .collect();
     Ok(build_tag_tree(&tag_pages))
 }
 
