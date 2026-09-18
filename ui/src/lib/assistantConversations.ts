@@ -12,7 +12,7 @@ import {
 import {
   acquireChatSlot, cancelChatSlot, currentChatConcurrency, deriveChatTitle, deleteChatThread,
   listChatThreads, loadChatThread, parseContext, parseMode, queueWaitLabel,
-  renameChatThread, saveChatThread, serializeContext,
+  renameChatThread, saveChatThread, serializeContext, shouldApplyChatTitle, suggestChatTitle,
   type StoredChatMessage,
 } from "./chatStore";
 
@@ -141,7 +141,12 @@ export async function sendAssistantQuestion(
     { role: "user", content: question, contextLabel, mode },
     { role: "assistant", content: "", contextLabel, mode, webResearch: mode !== "answer" },
   );
-  if (!thread.titleIsCustom && !thread.title.trim()) thread.title = deriveChatTitle(question);
+  // Name it from the question straight away so the switcher never shows a
+  // blank row, then let the model improve on it once there's an answer to
+  // summarise. Showing the question first is what every other chat app does,
+  // and it means a slow or missing model costs nothing.
+  const shouldAutoName = !thread.titleIsCustom && !thread.title.trim();
+  if (shouldAutoName) thread.title = deriveChatTitle(question);
   thread.pendingIndex = assistantIndex;
   thread.draft = "";
   thread.error = null;
@@ -167,6 +172,7 @@ export async function sendAssistantQuestion(
       thread.history = [...history, { role: "user", content: question }, { role: "assistant", content: answer.content }];
       thread.historyContexts = [...historyContexts, copyAssistantContext(frozenContext), copyAssistantContext(frozenContext)];
       dispatch(thread, { type: "done", at: Date.now() });
+      if (shouldAutoName) void autoNameConversation(thread, question, answer.content, generation);
     }
     // Keep what the run did next to the answer it produced; thread.state is
     // reset by the next question.
@@ -292,6 +298,35 @@ export function newAssistantConversation(thread: AssistantThread): void {
 
 export async function stopAllAssistantConversations(): Promise<void> {
   await Promise.all([...conversations.values()].map(stopAssistantConversation));
+}
+
+/**
+ * Replace the placeholder name with one the model wrote.
+ *
+ * Deliberately fire-and-forget and deliberately late: the chat already has a
+ * usable name from its first question, so this can fail, be slow, or find no
+ * model at all without anyone noticing. It runs after the answer is complete
+ * so the summary has something to summarise, and it takes its turn in the
+ * queue like any other request rather than jumping ahead of a real question.
+ */
+async function autoNameConversation(
+  thread: AssistantThread, question: string, answer: string, generation: number,
+): Promise<void> {
+  const placeholder = thread.title;
+  let suggested: string;
+  try {
+    suggested = await suggestChatTitle(question, answer);
+  } catch {
+    return;
+  }
+  // A name the user typed while this was in flight wins.
+  const applies = shouldApplyChatTitle(suggested, {
+    placeholder, current: thread.title, titleIsCustom: thread.titleIsCustom,
+  });
+  if (!applies || thread.generation !== generation) return;
+  thread.title = suggested.trim();
+  updateAssistantConversation();
+  void persistConversation(thread);
 }
 
 /**

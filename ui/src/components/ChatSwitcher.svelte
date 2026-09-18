@@ -5,6 +5,7 @@
     listAssistantConversations, renameAssistantConversation,
     type AssistantThread,
   } from "../lib/assistantConversations";
+  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
 
   let { graphPath, currentId, onSelect }: {
     graphPath: string;
@@ -14,6 +15,19 @@
 
   let renamingId = $state<string | null>(null);
   let renameDraft = $state("");
+  let menu = $state<{ x: number; y: number; thread: AssistantThread } | null>(null);
+
+  // Any click anywhere else dismisses the menu, including the right-click that
+  // opens a different one.
+  $effect(() => {
+    function close(): void { menu = null; }
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+    };
+  });
 
   // Re-read on every conversation change: the list is derived state, and the
   // store signals rather than exposing a reactive collection.
@@ -49,6 +63,14 @@
     }
   }
 
+  function openMenu(event: MouseEvent, thread: AssistantThread): void {
+    event.preventDefault();
+    // The window listener that closes menus also sees this event, so let it
+    // run first and open afterwards -- otherwise the menu closes itself.
+    const at = contextMenuPositionFromEvent(event, { width: 160, height: 80 });
+    queueMicrotask(() => { menu = { ...at, thread }; });
+  }
+
   async function remove(thread: AssistantThread): Promise<void> {
     await deleteAssistantConversation(thread);
     if (currentId === thread.id) {
@@ -71,7 +93,7 @@
   </div>
   <ul>
     {#each threads as thread (thread.id)}
-      <li class:current={thread.id === currentId}>
+      <li class:current={thread.id === currentId} oncontextmenu={(event) => openMenu(event, thread)}>
         {#if renamingId === thread.id}
           <!-- svelte-ignore a11y_autofocus -->
           <input
@@ -104,6 +126,19 @@
   </ul>
 </div>
 
+{#if menu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="context-menu app-context-menu"
+    style="top:{menu.y}px;left:{menu.x}px;"
+    onclick={(event) => event.stopPropagation()}
+  >
+    <button type="button" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; startRename(t); }}>Rename</button>
+    <button type="button" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; void remove(t); }}>Delete</button>
+  </div>
+{/if}
+
 <style>
   .switcher { display: flex; flex-direction: column; min-height: 0; width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border-color, #ddd); padding-right: 10px; margin-right: 12px; }
   .switcher-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
@@ -123,5 +158,8 @@
   .actions button { background: none; border: 0; padding: 2px 4px; color: var(--text-secondary, #888); cursor: pointer; font-size: 12px; }
   .actions button:hover { color: var(--text-primary); }
   .rename { flex: 1; min-width: 0; margin: 3px 2px; padding: 3px 5px; font-size: 13px; border: 1px solid var(--accent-color, #4a90d9); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }
+  .context-menu { position: fixed; z-index: 2147483000; border-radius: 6px; padding: 4px; min-width: 150px; }
+  .context-menu-item { display: flex; align-items: center; width: 100%; padding: 7px 10px; background: none; border: none; border-radius: 4px; color: var(--text-secondary); font-size: 13px; cursor: pointer; text-align: left; }
+  .context-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
   @media (max-width: 640px) { .switcher { width: 132px; } }
 </style>

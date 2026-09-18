@@ -3,6 +3,7 @@
 use super::knowledge::KnowledgeState;
 use crate::AppState;
 use grafium_core::db::{ChatMessageRecord, ChatThreadRecord, ChatThreadWithMessages};
+use grafium_core::knowledge::chat_title;
 use serde::Serialize;
 use tauri::State;
 
@@ -66,6 +67,31 @@ pub fn delete_chat_thread(state: State<AppState>, thread_id: String) -> Result<(
         .db
         .delete_chat_thread(&thread_id)
         .map_err(|e| e.to_string())
+}
+
+/// Ask the model to name a conversation.
+///
+/// Returns the opening question, cleaned up, when no model is available or the
+/// model's reply is unusable — a chat always has a name, it just gets a better
+/// one when it can. Never errors: a title is a convenience, and failing here
+/// must not surface anywhere near the answer the user asked for.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn suggest_chat_title(
+    state: State<'_, KnowledgeState>,
+    question: String,
+    answer: String,
+) -> Result<String, String> {
+    let guard = state.engine.read().await;
+    let Some(engine) = guard.as_ref() else {
+        return Ok(chat_title::title_from_question(&question));
+    };
+    if !engine.is_llm_ready() {
+        return Ok(chat_title::title_from_question(&question));
+    }
+    let Some(llm) = engine.llm_provider() else {
+        return Ok(chat_title::title_from_question(&question));
+    };
+    Ok(chat_title::generate_title(llm, &question, &answer, None).await)
 }
 
 /// What the UI needs to decide whether a second chat can run now or must wait.

@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   acquireChatSlot, cancelChatSlot, chatQueueDepth, deriveChatTitle, loadChatConcurrency,
   parseContext, parseMode, queueWaitLabel, resetChatConcurrency, resetChatQueue,
-  serializeContext,
+  serializeContext, shouldApplyChatTitle,
 } from "./chatStore";
 
 const invoked = invoke as unknown as ReturnType<typeof vi.fn>;
@@ -202,5 +202,37 @@ describe("stored context", () => {
     expect(parseMode("deep")).toBe("deep");
     expect(parseMode("web")).toBe("web");
     expect(parseMode("something-else")).toBe("answer");
+  });
+});
+
+describe("shouldApplyChatTitle", () => {
+  const placeholder = "Can you flash a global OS image onto it?";
+  const base = { placeholder, current: placeholder, titleIsCustom: false };
+
+  it("replaces the placeholder with the name the model wrote", () => {
+    expect(shouldApplyChatTitle("Flashing a global OS image", base)).toBe(true);
+  });
+
+  it("leaves a name the user typed alone", () => {
+    expect(shouldApplyChatTitle("Flashing a global OS image", {
+      ...base, current: "Phone stuff", titleIsCustom: true,
+    })).toBe(false);
+  });
+
+  // The rename can land while the model is still thinking. Whatever is on
+  // screen then is newer than what we are holding.
+  it("leaves a name that changed while the model was thinking alone", () => {
+    expect(shouldApplyChatTitle("Flashing a global OS image", {
+      ...base, current: "Something else",
+    })).toBe(false);
+  });
+
+  it("ignores an empty or blank suggestion", () => {
+    expect(shouldApplyChatTitle("", base)).toBe(false);
+    expect(shouldApplyChatTitle("   \n ", base)).toBe(false);
+  });
+
+  it("does not churn when the model suggests what is already there", () => {
+    expect(shouldApplyChatTitle(`  ${placeholder}  `, base)).toBe(false);
   });
 });

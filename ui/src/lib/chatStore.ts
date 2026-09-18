@@ -72,6 +72,32 @@ export function chatConcurrency(): Promise<ChatConcurrency> {
   return invoke("chat_concurrency", {});
 }
 
+export function suggestChatTitle(question: string, answer: string): Promise<string> {
+  return invoke("suggest_chat_title", { question, answer });
+}
+
+/**
+ * Whether a name the model wrote should replace the placeholder.
+ *
+ * Titling runs in the background, so by the time it answers the user may have
+ * typed their own name, started a new run, or been given a name by an earlier
+ * attempt. In every one of those cases what is on screen is more current than
+ * what we are holding, and overwriting it would feel like the app fighting
+ * the user.
+ */
+export function shouldApplyChatTitle(
+  suggested: string,
+  { placeholder, current, titleIsCustom }: {
+    placeholder: string; current: string; titleIsCustom: boolean;
+  },
+): boolean {
+  const title = suggested.trim();
+  if (!title) return false;
+  if (titleIsCustom) return false;
+  if (current !== placeholder) return false;
+  return title !== placeholder;
+}
+
 /** Assumed until the backend answers: never make the user wait on a guess. */
 const OPTIMISTIC: ChatConcurrency = { parallel: true, slots: null, provider: "" };
 

@@ -96,8 +96,13 @@ Chat is a list, not a single box. The panel on the left of Chat holds every
 conversation you've started.
 
 - **New chat** starts another one. The old one keeps its transcript.
-- Each chat is named after its first question. Hover it and click **✎** to
-  rename it, or **✕** to delete it.
+- Each chat is named after its first question, then renamed to something
+  shorter once the model has seen the answer — a question about flashing a
+  phone becomes "Flashing a global OS image". If no model is loaded, or it
+  replies with nothing useful, the question stays as the name.
+- **Right-click a chat** to rename or delete it. The same two actions are on
+  the **✎** and **✕** buttons that appear when you hover it.
+- Renaming a chat yourself is final: Grafium won't overwrite a name you typed.
 - Opening Chat from a page gives that page its own conversation, so asking
   about one note doesn't disturb a thread about something else.
 

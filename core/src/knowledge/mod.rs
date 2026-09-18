@@ -4,6 +4,7 @@
 
 pub mod collections;
 pub mod assistant_scope;
+pub mod chat_title;
 pub mod conversation;
 pub mod engine;
 pub mod registry;

@@ -1374,6 +1374,7 @@ pub fn run() {
             commands::chat::rename_chat_thread,
             commands::chat::delete_chat_thread,
             commands::chat::chat_concurrency,
+            commands::chat::suggest_chat_title,
             commands::query::run_query,
             commands::query::get_property_keys,
             commands::query::get_property_values,
