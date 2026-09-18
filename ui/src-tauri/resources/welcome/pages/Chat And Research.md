@@ -18,13 +18,25 @@ A local provider requires a suitable model, setup, and enough memory and compute
 - Suggest concepts and links for review; suggestions do not become links until you accept them.
 - Help rewrite, summarize, assess writing style, and create study material.
 - Process speech or media when the relevant optional model is installed.
-- File an answer for you: say "add the above answer to today's journal under
-  [[health/supplements]]" or "save that as a new page and find links it can
-  connect to". Grafium shows an editable **Proposed changes** card first, and
+- File an answer for you: say `add the above answer to today's journal under
+  [[health/supplements]]` or `save that as a new page and find links it can
+  connect to`. Grafium shows an editable **Proposed changes** card first, and
   nothing is written until you press Apply. `Ctrl+Z` undoes it afterwards.
 
 Generated answers are drafts, not authoritative sources. Verify important
 claims and save only checked conclusions back into your notes.
+
+## What Chat forgets
+
+Chat keeps your conversations and reloads them when you reopen Grafium, but the
+model is not sent all of one. Recent turns go word for word; older ones are cut
+to a single short line each. The cut is mechanical — nothing summarizes your old
+turns, and nothing searches them for the part relevant to your question.
+
+So a detail you mentioned thirty turns ago is likely gone, even though you can
+still scroll up and read it. Your **notes** are searched by meaning and they
+last; a conversation is scratch paper. Ask Chat to save anything worth keeping
+into a page. [[Help - Chat]] sets out exactly what survives and what doesn't.
 
 ## Ask a question you can check
 

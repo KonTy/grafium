@@ -510,7 +510,9 @@ mod tests {
             .iter()
             .filter(|r| r.path.ends_with(".md"))
             .collect();
-        assert_eq!(markdown.len(), 36);
+        // Guards against a page being added to RESOURCES without anyone
+        // checking that its links resolve below.
+        assert_eq!(markdown.len(), 50);
         let titles: HashSet<String> = markdown
             .iter()
             .map(|resource| {

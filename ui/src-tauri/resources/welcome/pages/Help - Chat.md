@@ -83,12 +83,69 @@ what you're actually asking about — including when **Deep web research** is on
 
 Two things worth knowing:
 
-- **A long conversation is summarised, not dropped.** Recent turns are replayed
-  word for word; older ones fold into a recap so the transcript can't crowd out
-  your notes and the sources being read.
+- **A long conversation is shortened, not replayed in full.** Recent turns are
+  sent word for word; older ones are cut down to a recap so the transcript
+  can't crowd out your notes and the sources being read. **What Chat
+  remembers**, below, explains exactly what survives.
 - **Starting a new chat starts a new subject.** If a follow-up gets answered as
   if it were about something else, the earlier turns are still in scope — start
   a new chat, or name the subject explicitly in the question.
+
+## What Chat remembers
+
+A model can only read so much at once, and every conversation competes for that
+space with your notes and any web sources being read.
+
+**While a conversation is short, all of it is sent** — every turn, exactly as
+written. Nothing below applies until the transcript stops fitting. When it
+does, Chat sends:
+
+- **The last four turns.** These arrive as written unless one of them is very
+  long on its own, in which case its middle is dropped and marked *"[... excerpt
+  shortened to fit the model context ...]"* — the beginning and end both
+  survive.
+- **A recap of everything older**, under the heading *"Earlier in this
+  conversation:"*. Each older turn is cut to its **first 220 characters** — one
+  line, speaker labelled. The recap as a whole stops at about **4,000
+  characters**; past that you'll see *"(earlier turns omitted)"*.
+- **Less of both if it still doesn't fit.** The transcript gets roughly a third
+  of the context budget, and if the prompt is still too big Grafium halves the
+  transcript's share, repeatedly, until it does.
+
+### What that means in practice
+
+**The recap is a truncation, not a summary.** No model reads your old turns and
+writes a précis of them. A turn is kept by being *recent*, and shortened by
+being *cut off* — so a detail buried in the middle of a long answer forty turns
+ago is simply gone, not condensed.
+
+**Recall is by recency, not by relevance.** Chat cannot go looking through the
+earlier parts of a conversation for the bit that matters to your current
+question. If it has scrolled out of the last four turns, the only trace left is
+that first 220 characters. Your *notes* are searched by meaning; your
+conversation history is not.
+
+So, concretely:
+
+> **You:** *(turn 3)* the serial number is FQ7-88213-XK
+> **You:** *(turn 40)* what was that serial number again?
+
+Chat will not have it. Turn 3 is long gone from the verbatim window, and if the
+number wasn't in the first 220 characters of that turn it isn't in the recap
+either.
+
+### Working with this rather than against it
+
+- **Keep separate subjects in separate chats.** A short conversation is one
+  where nothing has been cut yet.
+- **Put anything that matters into a note.** Ask Chat to save an answer to a
+  page — notes are searched properly, by meaning, and they last. A conversation
+  is scratch paper.
+- **Say the subject again when you come back to it.** Re-stating "the VIVO
+  X300" costs you a few words and puts it back in the verbatim window.
+- **Reopening an old chat shows you the whole transcript** — the truncation is
+  about what the *model* is sent, not about what you can read. Everything you
+  see on screen is still there.
 
 ## Keeping several conversations
 
