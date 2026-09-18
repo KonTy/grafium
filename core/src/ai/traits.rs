@@ -121,6 +121,42 @@ pub struct AcceleratorStatus {
     pub explicit: bool,
 }
 
+/// How many requests a provider can genuinely serve at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Concurrency {
+    /// Requests may overlap freely. The provider (or the server behind it)
+    /// batches them.
+    Parallel,
+    /// Only `slots` requests can run at once; the rest must wait their turn.
+    /// `slots` is always at least 1.
+    #[serde(rename_all = "camelCase")]
+    Serialized { slots: usize },
+}
+
+impl Concurrency {
+    /// A serialized provider with a sane floor — zero slots would mean "never
+    /// answer", which is never what a caller means.
+    pub fn serialized(slots: usize) -> Self {
+        Self::Serialized {
+            slots: slots.max(1),
+        }
+    }
+
+    /// Whether a second request has to wait for the first to finish.
+    pub fn queues(&self) -> bool {
+        matches!(self, Self::Serialized { .. })
+    }
+
+    /// How many requests can be in flight, or `None` when unbounded.
+    pub fn slots(&self) -> Option<usize> {
+        match self {
+            Self::Parallel => None,
+            Self::Serialized { slots } => Some(*slots),
+        }
+    }
+}
+
 /// LLM provider trait — abstracts over Ollama, OpenAI, Anthropic, etc.
 pub trait LlmProvider: Send + Sync {
     /// Generate a completion from a prompt.
@@ -166,6 +202,21 @@ pub trait LlmProvider: Send + Sync {
     /// model's chat template to detect it.
     fn supports_thinking(&self) -> bool {
         false
+    }
+
+    /// How many requests this provider can genuinely serve at once.
+    ///
+    /// The split is *transport*, not local-vs-cloud. Anything reached over
+    /// HTTP — a cloud API, an Ollama box, a vLLM server, a DGX Spark on the
+    /// LAN — handles its own batching, so several chats can run in parallel.
+    /// The embedded llama.cpp path is different: one worker child, one model
+    /// in VRAM, one request at a time. Asking it for two answers at once
+    /// doesn't fail, it silently blocks, which looks exactly like a hang.
+    ///
+    /// Defaults to `Parallel` because that's true of every provider except
+    /// the embedded one, which overrides it.
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::Parallel
     }
 
     /// Same as `complete`, but reports incremental output through `on_token`

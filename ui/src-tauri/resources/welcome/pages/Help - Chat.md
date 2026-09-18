@@ -90,6 +90,48 @@ Two things worth knowing:
   if it were about something else, the earlier turns are still in scope — start
   a new chat, or name the subject explicitly in the question.
 
+## Keeping several conversations
+
+Chat is a list, not a single box. The panel on the left of Chat holds every
+conversation you've started.
+
+- **New chat** starts another one. The old one keeps its transcript.
+- Each chat is named after its first question. Hover it and click **✎** to
+  rename it, or **✕** to delete it.
+- Opening Chat from a page gives that page its own conversation, so asking
+  about one note doesn't disturb a thread about something else.
+
+This is the practical fix for a follow-up being answered as if it were about an
+earlier subject: keep separate subjects in separate chats, and each one's
+history stays clean.
+
+**Conversations stay on this machine.** They're stored inside the graph's
+`.grafium` folder, which sync never touches. A chat you had here will not
+appear on your phone, on a USB stick, or on a file server, and it can't be
+pulled in from one — deliberately, because a conversation can quote notes the
+other end has no business receiving. Your notes sync; your chats don't.
+
+Grafium keeps the 50 most recent conversations and drops the oldest beyond
+that. Treat them as working notes, not an archive: if an answer matters, ask
+Chat to save it into a page.
+
+## Running more than one at a time
+
+Whether two chats can work at once depends on where your model runs, which you
+set in **Settings → AI / Knowledge Engine**.
+
+- **A model reached over the network** — a cloud provider, or a server you run
+  like Ollama or vLLM — handles several requests at once. Ask in two chats and
+  both work in parallel.
+- **A model running inside Grafium** loads one model into memory and answers
+  one question at a time. A second chat waits its turn.
+
+When a chat is waiting you'll see *"Waiting for the model — next in line"*, and
+the switcher shows how many are ahead of it. Turns are served in the order you
+asked, so nothing gets stuck behind a later question. **Stop** works while
+waiting too: it gives up the place in line immediately instead of holding
+everyone else up.
+
 ## Asking Chat to change your notes
 
 Chat can also *do* things, not just answer. Ask in plain language:

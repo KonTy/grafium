@@ -6,12 +6,13 @@
 //! IPC failure, timeout, cancellation, or parent shutdown, and native crashes
 //! remain contained inside the child.
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -41,7 +42,7 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 static WORKER_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 static POOL: OnceLock<Mutex<Option<LiveWorker>>> = OnceLock::new();
-static INFLIGHT: OnceLock<Mutex<()>> = OnceLock::new();
+static INFLIGHT: OnceLock<InflightQueue> = OnceLock::new();
 static IDLE_MONITOR: OnceLock<()> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -237,10 +238,15 @@ pub fn execute_with_progress(
             )
         })?
         .clone();
-    // Serialize concurrent callers so they observe/mutate the pool one at a time
-    // and no two workers ever run at once.
+    // One worker, one request at a time. The queue is FIFO so the order the
+    // UI shows ("2nd in line") is the order requests actually run in — a
+    // plain mutex gave no such promise and could starve a waiting chat.
     let inflight = inflight();
-    let _inflight = lock_inflight(inflight, cancel)?;
+    let _inflight = enter_inflight(inflight, cancel, |position| {
+        if position > 0 {
+            tracing::debug!(position, "AI request waiting for the model");
+        }
+    })?;
     if SHUTDOWN.load(Ordering::Acquire) {
         return Err(CoreError::Other(
             "Grafium is shutting down; native AI is unavailable".to_string(),
@@ -327,19 +333,159 @@ pub(crate) fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-fn lock_inflight<'a>(
-    lock: &'a Mutex<()>,
-    cancel: Option<&AtomicBool>,
-) -> Result<MutexGuard<'a, ()>> {
-    if cancel.is_none() {
-        return Ok(lock.lock().unwrap_or_else(PoisonError::into_inner));
+/// A fair queue in front of the single worker.
+///
+/// The old guard here was a bare `Mutex<()>`. It was correct in the sense that
+/// only one request ran at a time, but it had two properties that showed
+/// through to the user. A `std::sync::Mutex` makes no ordering promise, so a
+/// waiting chat could be skipped over indefinitely; and there was no way to
+/// ask "how many are ahead of me", so a queued chat could only be shown a
+/// spinner that was indistinguishable from a hang.
+///
+/// This is a ticket lock instead: take a number, wait for it to come up. That
+/// makes the order first-come-first-served and the position a real number the
+/// UI can show. Waiters block on a condvar with a short timeout rather than
+/// spinning, so cancellation stays responsive without burning a core.
+#[derive(Debug, Default)]
+struct QueueState {
+    next_ticket: u64,
+    waiting: VecDeque<u64>,
+    running: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct InflightQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+impl InflightQueue {
+    fn lock_state(&self) -> MutexGuard<'_, QueueState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    loop {
-        check_cancelled(cancel)?;
-        match lock.try_lock() {
-            Ok(guard) => return Ok(guard),
-            Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
-            Err(TryLockError::WouldBlock) => thread::sleep(CANCEL_POLL),
+
+    fn take_ticket(&self) -> u64 {
+        let mut state = self.lock_state();
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        state.waiting.push_back(ticket);
+        ticket
+    }
+
+    /// Requests ahead of `ticket`: 0 means it is running or next to run.
+    ///
+    /// Production code doesn't ask — the UI mirrors the queue itself, and can
+    /// do so correctly precisely because this queue is FIFO. This exists so
+    /// the ordering guarantee is directly testable.
+    #[cfg(test)]
+    fn position(&self, ticket: u64) -> usize {
+        let state = self.lock_state();
+        Self::position_in(&state, ticket)
+    }
+
+    fn position_in(state: &QueueState, ticket: u64) -> usize {
+        if state.running == Some(ticket) {
+            return 0;
+        }
+        let ahead = state
+            .waiting
+            .iter()
+            .position(|queued| *queued == ticket)
+            .unwrap_or(0);
+        ahead + usize::from(state.running.is_some())
+    }
+
+    /// Give up a ticket that never got its turn.
+    fn abandon(&self, ticket: u64) {
+        let mut state = self.lock_state();
+        state.waiting.retain(|queued| *queued != ticket);
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    fn release(&self, ticket: u64) {
+        let mut state = self.lock_state();
+        if state.running == Some(ticket) {
+            state.running = None;
+        }
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// Wait for `ticket`'s turn, reporting queue position as it changes.
+    ///
+    /// Returns `Err` if the caller cancelled while waiting; the ticket is
+    /// dropped from the queue in that case so nobody behind it is stuck.
+    fn acquire(
+        &self,
+        ticket: u64,
+        cancel: Option<&AtomicBool>,
+        mut on_position: impl FnMut(usize),
+    ) -> Result<()> {
+        let mut last_reported: Option<usize> = None;
+        let mut state = self.lock_state();
+        loop {
+            if cancel.is_some() && check_cancelled(cancel).is_err() {
+                state.waiting.retain(|queued| *queued != ticket);
+                drop(state);
+                self.ready.notify_all();
+                return Err(CoreError::Other("AI request cancelled".to_string()));
+            }
+            let is_turn = state.running.is_none() && state.waiting.front() == Some(&ticket);
+            if is_turn {
+                state.waiting.pop_front();
+                state.running = Some(ticket);
+                if last_reported.is_some_and(|position| position > 0) {
+                    on_position(0);
+                }
+                return Ok(());
+            }
+            let position = Self::position_in(&state, ticket);
+            if last_reported != Some(position) {
+                last_reported = Some(position);
+                // Report outside the lock: a callback that touches the queue
+                // (or just takes its time) must not hold up the holder's
+                // release.
+                drop(state);
+                on_position(position);
+                state = self.lock_state();
+                continue;
+            }
+            let (next, _) = self
+                .ready
+                .wait_timeout(state, CANCEL_POLL)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
+    }
+}
+
+/// Holds the worker for one request and releases it on drop, including on an
+/// early `?` return or a panic.
+#[derive(Debug)]
+struct InflightTicket<'a> {
+    queue: &'a InflightQueue,
+    ticket: u64,
+}
+
+impl Drop for InflightTicket<'_> {
+    fn drop(&mut self) {
+        self.queue.release(self.ticket);
+    }
+}
+
+/// Join the queue and wait for a turn.
+fn enter_inflight<'a>(
+    queue: &'a InflightQueue,
+    cancel: Option<&AtomicBool>,
+    on_position: impl FnMut(usize),
+) -> Result<InflightTicket<'a>> {
+    let ticket = queue.take_ticket();
+    match queue.acquire(ticket, cancel, on_position) {
+        Ok(()) => Ok(InflightTicket { queue, ticket }),
+        Err(error) => {
+            queue.abandon(ticket);
+            Err(error)
         }
     }
 }
@@ -382,8 +528,8 @@ fn pool() -> &'static Mutex<Option<LiveWorker>> {
     pool
 }
 
-fn inflight() -> &'static Mutex<()> {
-    INFLIGHT.get_or_init(|| Mutex::new(()))
+fn inflight() -> &'static InflightQueue {
+    INFLIGHT.get_or_init(InflightQueue::default)
 }
 
 /// Admission check for a request. Returns the address-space cap for the child,
@@ -1120,21 +1266,6 @@ mod prompt_count_tests {
     }
 
     #[test]
-    fn prompt_count_cancellation_interrupts_pool_wait_without_model_load() {
-        let lock = Mutex::new(());
-        let _guard = lock.lock().unwrap();
-        let cancel = AtomicBool::new(false);
-        thread::scope(|scope| {
-            scope.spawn(|| {
-                thread::sleep(CANCEL_POLL);
-                cancel.store(true, Ordering::Release);
-            });
-            let error = lock_inflight(&lock, Some(&cancel)).unwrap_err();
-            assert!(error.to_string().contains("cancelled"), "{error}");
-        });
-    }
-
-    #[test]
     fn prompt_count_cancellation_interrupts_silent_worker() {
         let (_tx, rx) = mpsc::channel();
         let cancel = AtomicBool::new(false);
@@ -1378,4 +1509,118 @@ impl Drop for WindowsJob {
             windows_sys::Win32::Foundation::CloseHandle(self.0);
         }
     }
+}
+
+/// Queue behaviour is plain synchronisation logic, so these run without the
+/// native model feature — the failure they guard against (a chat that waits
+/// forever behind later arrivals) has nothing to do with llama.cpp.
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_count_cancellation_interrupts_pool_wait_without_model_load() {
+        let queue = InflightQueue::default();
+        let held = enter_inflight(&queue, None, |_| {}).unwrap();
+        let cancel = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(CANCEL_POLL);
+                cancel.store(true, Ordering::Release);
+            });
+            let error = enter_inflight(&queue, Some(&cancel), |_| {}).unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+        });
+        drop(held);
+    }
+
+    /// The whole point of the ticket lock: a plain mutex could hand the worker
+    /// to whichever thread happened to wake first, so a chat could sit behind
+    /// later arrivals forever.
+    #[test]
+    fn queued_requests_run_in_the_order_they_arrived() {
+        let queue = InflightQueue::default();
+        let held = enter_inflight(&queue, None, |_| {}).unwrap();
+
+        let order = Mutex::new(Vec::new());
+        thread::scope(|scope| {
+            for index in 0..4 {
+                // Take tickets in a known order before any of them can run.
+                let ticket = queue.take_ticket();
+                let queue = &queue;
+                let order = &order;
+                scope.spawn(move || {
+                    queue.acquire(ticket, None, |_| {}).unwrap();
+                    order.lock().unwrap().push(index);
+                    queue.release(ticket);
+                });
+            }
+            thread::sleep(CANCEL_POLL * 2);
+            drop(held);
+        });
+
+        assert_eq!(order.into_inner().unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_waiting_request_learns_how_many_are_ahead_of_it() {
+        let queue = InflightQueue::default();
+        let held = enter_inflight(&queue, None, |_| {}).unwrap();
+        let ahead = queue.take_ticket();
+        let mine = queue.take_ticket();
+
+        assert_eq!(queue.position(mine), 2, "one running, one queued ahead");
+        assert_eq!(queue.position(ahead), 1, "only the running one is ahead");
+
+        drop(held);
+        queue.acquire(ahead, None, |_| {}).unwrap();
+        assert_eq!(queue.position(mine), 1);
+        queue.release(ahead);
+        queue.acquire(mine, None, |_| {}).unwrap();
+        assert_eq!(queue.position(mine), 0, "running means nothing is ahead");
+        queue.release(mine);
+    }
+
+    /// A cancelled request must not leave a gap that blocks everyone behind
+    /// it — the classic ticket-lock failure.
+    #[test]
+    fn cancelling_while_queued_does_not_strand_the_requests_behind_it() {
+        let queue = InflightQueue::default();
+        let held = enter_inflight(&queue, None, |_| {}).unwrap();
+        let cancel = AtomicBool::new(true);
+
+        thread::scope(|scope| {
+            let doomed = scope.spawn(|| enter_inflight(&queue, Some(&cancel), |_| {}).unwrap_err());
+            let error = doomed.join().unwrap();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+        });
+
+        drop(held);
+        let next = enter_inflight(&queue, None, |_| {}).expect("queue moved on");
+        drop(next);
+        assert_eq!(queue.position(queue.take_ticket()), 0);
+    }
+
+    #[test]
+    fn releasing_on_an_early_return_frees_the_worker() {
+        let queue = InflightQueue::default();
+        {
+            let _held = enter_inflight(&queue, None, |_| {}).unwrap();
+            assert!(queue.lock_state().running.is_some());
+        }
+        assert!(
+            queue.lock_state().running.is_none(),
+            "the guard did not release on scope exit"
+        );
+    }
+
+    #[test]
+    fn depth_is_zero_before_any_request() {
+        assert_eq!(
+            InflightQueue::default().lock_state().waiting.len(),
+            0,
+            "a fresh queue should be empty"
+        );
+    }
+
 }

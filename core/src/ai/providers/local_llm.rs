@@ -31,7 +31,9 @@ use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
 use crate::ai::config::LocalLlmSettings;
 use crate::ai::resources::{self, ModelWorkload};
-use crate::ai::traits::{BoxFuture, ChatMessage, CompletionOptions, LlmProvider, MessageRole};
+use crate::ai::traits::{
+    BoxFuture, ChatMessage, CompletionOptions, Concurrency, LlmProvider, MessageRole,
+};
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
 
@@ -186,6 +188,24 @@ impl LlmProvider for LocalLlm {
 
     fn context_window(&self) -> Option<usize> {
         Some(self.context_size as usize)
+    }
+
+    /// One worker child, one model resident in VRAM, one request at a time.
+    ///
+    /// `worker::execute` takes a process-wide lock for every request, and a
+    /// request whose `(model, context, gpu_layers)` key differs evicts the
+    /// running child. So overlapping chats here don't run concurrently — the
+    /// second one blocks, invisibly, until the first finishes. Reporting that
+    /// honestly lets the UI say "waiting for the model" instead of showing a
+    /// spinner that looks broken.
+    ///
+    /// `slots` is 1 rather than something derived from free VRAM because the
+    /// constraint is structural, not capacity: even on a card with room for
+    /// three copies, there is still exactly one worker. Raising it needs a
+    /// multi-slot execution path first, and the number would be a lie until
+    /// then.
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::serialized(1)
     }
 
     fn count_prompt_tokens<'a>(

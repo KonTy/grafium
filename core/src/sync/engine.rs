@@ -1024,6 +1024,37 @@ mod tests {
         Ok(())
     }
 
+    /// Conversations are deliberately unsyncable. They live in
+    /// `.grafium/index.db`, and `collect_local_files` is an allowlist of note
+    /// folders, so a chat cannot reach a USB stick, a file server, or another
+    /// install. This test is the guarantee: if someone ever widens the
+    /// allowlist to "everything under the graph root", it fails here rather
+    /// than leaking a transcript to a shared drive.
+    #[test]
+    fn sync_never_collects_chat_conversations() -> Result<()> {
+        let temp = tempdir()?;
+        write_local_markdown(temp.path(), "pages/real-note.md", "- a real note\n")?;
+
+        let private = temp.path().join(".grafium");
+        fs::create_dir_all(private.join("nested"))?;
+        fs::write(private.join("index.db"), b"sqlite chat threads live here")?;
+        fs::write(private.join("index.db-wal"), b"and here")?;
+        fs::write(private.join("nested/conversations.json"), b"[]")?;
+
+        let backend = MockBackend::default();
+        let engine = SyncEngine::new(temp.path().to_path_buf());
+        let result = engine.sync(&backend)?;
+
+        assert_eq!(result.pushed, vec!["pages/real-note.md".to_string()]);
+        let pushed = backend.files.lock().unwrap();
+        assert!(
+            pushed.keys().all(|path| !path.starts_with(".grafium/")),
+            "sync collected private chat state: {:?}",
+            pushed.keys().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
     #[test]
     fn sync_accepts_remote_knowledge_paths() -> Result<()> {
         let temp = tempdir()?;

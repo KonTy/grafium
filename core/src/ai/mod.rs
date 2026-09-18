@@ -153,7 +153,9 @@ pub mod worker;
 pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;
 pub use references::ReferenceEngine;
-pub use traits::{CompletionOptions, Embedder, LlmProvider, SearchResult, VectorStore};
+pub use traits::{
+    CompletionOptions, Concurrency, Embedder, LlmProvider, SearchResult, VectorStore,
+};
 pub use web_research::{
     Citation, ResearchTopic, WebResearchConfig, WebResearchEngine, WebResearchResult,
 };

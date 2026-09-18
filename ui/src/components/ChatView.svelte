@@ -1,9 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import AssistantConversation from "./AssistantConversation.svelte";
+  import ChatSwitcher from "./ChatSwitcher.svelte";
   import { getGraphInfo } from "../lib/api";
   import {
-    getGlobalConversation, getAssistantConversation,
+    getGlobalConversation, getAssistantConversation, restoreAssistantConversations,
     type AssistantThread,
   } from "../lib/assistantConversations";
   import type { PageNavigationTarget } from "../lib/navigation";
@@ -16,17 +17,32 @@
   let thread = $state.raw<AssistantThread | null>(null);
   let error = $state("");
   let ready = $state(false);
+  let graphPath = $state("");
+  // Stored conversations are read once per graph, not once per mount: Chat is
+  // opened and closed constantly and re-reading would flicker the list.
+  let restored = "";
   $effect(() => {
     const id = conversationId;
     if (!active) return;
     let disposed = false;
     ready = false;
-    void getGraphInfo().then((graph) => {
+    void getGraphInfo().then(async (graph) => {
       if (disposed) return;
+      graphPath = graph.path;
+      if (restored !== graph.path) {
+        restored = graph.path;
+        await restoreAssistantConversations(graph.path);
+        if (disposed) return;
+      }
       const requested = id ? getAssistantConversation(id) : undefined;
       if (id && !requested) throw new Error("This conversation is no longer available. Open Chat to start a general conversation.");
       if (requested && requested.graphPath !== graph.path) throw new Error("Return to the original graph to open this conversation.");
-      const next = requested ?? getGlobalConversation(graph.path);
+      // Reopening Chat must not throw away the conversation the user picked
+      // in the switcher, so a still-valid selection outranks the default.
+      const picked = untrack(() => thread);
+      const held = !id && picked && picked.graphPath === graph.path
+        && getAssistantConversation(picked.id) ? picked : undefined;
+      const next = requested ?? held ?? getGlobalConversation(graph.path);
       if (untrack(() => thread?.id) !== next.id) thread = next;
       error = "";
       ready = true;
@@ -39,6 +55,11 @@
   {#if error}<p role="alert">{error}</p>{/if}
   {#if thread}
     <div class="conversation-host" hidden={!ready} inert={!ready}>
+      <ChatSwitcher
+        {graphPath}
+        currentId={thread.id}
+        onSelect={(next) => { thread = next; error = ""; }}
+      />
       <AssistantConversation {thread} active={active && ready} {onOpenSettings} {onNavigate} {onFindLinks} />
     </div>
   {/if}

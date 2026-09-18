@@ -407,6 +407,53 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_pending_reindex_marked ON pending_reindex(marked_at);
+
+        -- Chat conversations, deliberately scoped to this machine.
+        --
+        -- These live in `.grafium/index.db`, which sync never touches: the
+        -- sync engine collects `pages/`, `journals/`, `knowledge/` and
+        -- `assets/` by name, so nothing here can reach a USB stick, a file
+        -- server or another machine. That is the intended guarantee, not an
+        -- accident of layout -- a conversation is working state, and it can
+        -- quote notes the far side is not entitled to. `sync_never_collects_
+        -- chat_conversations` in the sync engine holds this down.
+        --
+        -- `source_page_id` records the page a conversation was started from so
+        -- it can be reattached on load. It is intentionally NOT a foreign key
+        -- into `pages`: deleting a page should not silently delete the
+        -- conversation about it, and the id survives a reindex that renames
+        -- rows.
+        CREATE TABLE IF NOT EXISTS chat_threads (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            source_page_id TEXT,
+            source_page_title TEXT NOT NULL DEFAULT '',
+            source_is_book INTEGER NOT NULL DEFAULT 0,
+            mode TEXT NOT NULL DEFAULT 'answer',
+            context_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_updated ON chat_threads(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_source ON chat_threads(source_page_id);
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            context_label TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT 'answer',
+            web_research INTEGER NOT NULL DEFAULT 0,
+            sources_json TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_order
+            ON chat_messages(thread_id, position);
     ")?;
     migrate_link_proposals(conn)?;
     create_entity_index(conn)?;

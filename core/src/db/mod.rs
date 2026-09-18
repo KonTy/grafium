@@ -1,5 +1,6 @@
 mod audio;
 mod blocks;
+mod chat;
 mod collections;
 mod entity_adjudication;
 mod entity_resolution;
@@ -21,6 +22,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
 
 pub(crate) use blocks::chat_salient_terms;
+pub use chat::{ChatMessageRecord, ChatThreadRecord, ChatThreadWithMessages};
 pub use entity_adjudication::{adjudicate_entity_resolution, EntityCandidateContext};
 pub use entity_resolution::{EntityCandidate, EntityDecision, EntityResolution};
 pub(crate) use links::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT;
