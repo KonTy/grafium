@@ -43,15 +43,6 @@ impl<T> Paginator<T> {
         self.last_error.as_deref()
     }
 
-    /// Forget everything and start over (e.g. the search query changed).
-    pub fn reset(&mut self, source: Box<dyn PageSource<T>>) {
-        self.source = source;
-        self.items.clear();
-        self.offset = 0;
-        self.has_more = true;
-        self.last_error = None;
-    }
-
     /// Fetch the next page. Returns `true` if new items were appended.
     pub fn load_more(&mut self) -> bool {
         if !self.has_more {

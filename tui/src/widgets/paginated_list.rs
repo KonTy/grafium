@@ -29,14 +29,6 @@ impl<T> PaginatedList<T> {
         }
     }
 
-    /// Replace the underlying data source (e.g. a new search query) and
-    /// reload from scratch, keeping the same widget instance/selection state.
-    pub fn reset(&mut self, source: Box<dyn PageSource<T>>) {
-        self.paginator.reset(source);
-        self.panel.select(None);
-        self.paginator.load_more();
-    }
-
     /// Part of this widget's public surface for callers that need to inspect
     /// the currently loaded window (e.g. to show a count elsewhere); not
     /// every consumer needs it today.

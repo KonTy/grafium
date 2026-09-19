@@ -6,6 +6,7 @@
 //! UI layer trivially mockable/testable, and means that if the underlying
 //! query changes shape, only this file needs to change.
 
+use grafium_core::db::PageKindFilter;
 use grafium_core::models::{Block, Link, Page};
 use grafium_core::Graph;
 use std::collections::{BTreeSet, HashMap};
@@ -80,7 +81,7 @@ impl GraphRepository for CoreRepository {
     fn list_pages(&self, limit: i64, offset: i64) -> RepoResult<Vec<Page>> {
         self.graph
             .db
-            .list_pages_window(limit, offset, false)
+            .list_pages_window(limit, offset, false, PageKindFilter::All)
             .map_err(|e| Self::label_error("list_pages", e))
     }
 

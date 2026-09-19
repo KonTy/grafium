@@ -4,7 +4,7 @@ use grafium_core::sync::engine::SyncEngine;
 use grafium_core::sync::merge::{three_way_merge, two_way_merge};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // In-memory mock backend for testing (no real filesystem needed for remote)
@@ -38,10 +38,6 @@ impl MockBackend {
 
     fn has_file(&self, rel_path: &str) -> bool {
         self.files.lock().unwrap().contains_key(rel_path)
-    }
-
-    fn file_count(&self) -> usize {
-        self.files.lock().unwrap().len()
     }
 
     fn remove_file_directly(&self, rel_path: &str) {

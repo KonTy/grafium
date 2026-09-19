@@ -1,5 +1,6 @@
-//! Embedded sample graph. Existing tutorials are never overwritten; additive
-//! help resources may be installed during a versioned migration.
+//! Embedded, fresh-install-only sample graph. An existing tutorial — any prior
+//! seed marker, or any notes already in the graph — is a permanent opt-out that
+//! is never re-seeded, refreshed, or added to.
 
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
@@ -73,24 +74,6 @@ const RESOURCES: &[Resource] = &[
     resource!("pages/personal/diary.md"),
     resource!("journals/1969_07_20.md"),
     resource!("assets/welcome/orbit.svg"),
-];
-
-const HELP_RESOURCES: &[Resource] = &[
-    resource!("pages/Grafium Help.md"),
-    resource!("pages/Help - Editor.md"),
-    resource!("pages/Help - Journal.md"),
-    resource!("pages/Help - Graph.md"),
-    resource!("pages/Help - Flashcards.md"),
-    resource!("pages/Help - Tasks.md"),
-    resource!("pages/Help - Chat.md"),
-    resource!("pages/Help - Settings.md"),
-    resource!("pages/Help - Sync.md"),
-    resource!("pages/Help - Search.md"),
-];
-
-const HELP_GUIDE_RESOURCES: &[Resource] = &[
-    resource!("pages/Help - Grafium Guide.md"),
-    resource!("pages/Help - Journal Guide.md"),
 ];
 
 fn inspect(path: &Path) -> Result<Option<Metadata>, String> {
@@ -197,56 +180,13 @@ pub(crate) fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Resu
     check_directory(graph_root)?;
     let metadata_path = graph_root.join(metadata_dir);
     check_directory(&metadata_path)?;
-    if inspect(&metadata_path.join("tutorial-seeded-v15"))?.is_some()
-        || inspect(&metadata_path.join("tutorial-seeded-v14"))?.is_some()
-    {
-        return Ok(false);
-    }
-    // Older Welcome graphs can contain several historical markers without
-    // having received the additive help pages. Install only the new guide
-    // files so no existing tutorial or user-edited page is replaced.
-    let has_legacy_marker = (1..SEED_VERSION)
-        .map(|version| inspect(&metadata_path.join(format!("tutorial-seeded-v{version}"))))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .any(|metadata| metadata.is_some());
-    if has_legacy_marker {
-        for resource in HELP_GUIDE_RESOURCES {
-            preflight_destination(graph_root, Path::new(resource.path))?;
-        }
-        let marker = Path::new(metadata_dir).join("tutorial-seeded-v14");
-        preflight_destination(graph_root, &marker)?;
-        for resource in HELP_GUIDE_RESOURCES {
-            write_new_file(&graph_root.join(resource.path), resource.content)?;
-        }
-        write_new_file(&graph_root.join(marker), "seeded_v14\n")?;
-        return Ok(true);
-    }
-    if inspect(&metadata_path.join("tutorial-seeded-v13"))?.is_some() {
-        for resource in HELP_GUIDE_RESOURCES {
-            preflight_destination(graph_root, Path::new(resource.path))?;
-        }
-        let marker = Path::new(metadata_dir).join("tutorial-seeded-v14");
-        preflight_destination(graph_root, &marker)?;
-        for resource in HELP_GUIDE_RESOURCES {
-            write_new_file(&graph_root.join(resource.path), resource.content)?;
-        }
-        write_new_file(&graph_root.join(marker), "seeded_v14\n")?;
-        return Ok(true);
-    }
-    if inspect(&metadata_path.join("tutorial-seeded-v12"))?.is_some() {
-        for resource in HELP_RESOURCES.iter().chain(HELP_GUIDE_RESOURCES) {
-            preflight_destination(graph_root, Path::new(resource.path))?;
-        }
-        let marker = Path::new(metadata_dir).join("tutorial-seeded-v14");
-        preflight_destination(graph_root, &marker)?;
-        for resource in HELP_RESOURCES.iter().chain(HELP_GUIDE_RESOURCES) {
-            write_new_file(&graph_root.join(resource.path), resource.content)?;
-        }
-        write_new_file(&graph_root.join(marker), "seeded_v14\n")?;
-        return Ok(true);
-    }
-    for version in 1..SEED_VERSION {
+    // A marker from any version we have ever shipped is a permanent opt-out:
+    // the graph was seeded once and must never be re-seeded, refreshed, or
+    // added to, even after the user deletes or rearranges the sample pages.
+    // Ranging over `1..=SEED_VERSION` instead of hard-coding the current
+    // version is what stops a later version bump from forgetting a prior
+    // marker and re-seeding an already-established graph.
+    for version in 1..=SEED_VERSION {
         if inspect(&metadata_path.join(format!("tutorial-seeded-v{version}")))?.is_some() {
             return Ok(false);
         }
@@ -273,7 +213,10 @@ pub(crate) fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Resu
     for resource in RESOURCES {
         write_new_file(&graph_root.join(resource.path), resource.content)?;
     }
-    write_new_file(&graph_root.join(marker), "seeded_v15\n")?;
+    write_new_file(
+        &graph_root.join(marker),
+        &format!("seeded_v{SEED_VERSION}\n"),
+    )?;
     Ok(true)
 }
 

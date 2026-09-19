@@ -390,8 +390,6 @@ impl InkSvgParser {
     fn extract_attr(content: &str, attr_name: &str) -> Option<String> {
         let pattern = format!(" {}=\"", attr_name);
         let start = content.find(&pattern).or_else(|| {
-            // Also check for start-of-tag (first attribute)
-            let alt = format!("<{} ", attr_name);
             // If not found with space prefix, try with newline or tab
             content
                 .find(&format!("\t{}=\"", attr_name))

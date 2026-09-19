@@ -91,11 +91,19 @@ fn test_full_workflow() {
     let recent = db.list_recent_pages(10).unwrap();
     assert_eq!(recent.len(), 1);
 
-    // Links
-    db.insert_link(&block1.id, &page.id, LinkType::Page)
+    // Links — a backlink surfaces on the *target* page. A block that links to
+    // its own page is a self-link, which get_backlinks intentionally omits
+    // (see core/tests/graph_regression_test.rs::backlinks_omit_self_links_and_dedupe_wiki_plus_tag),
+    // so the reference has to point at a different page than it lives on.
+    let other = db.create_page("Another Page", false).unwrap();
+    db.insert_link(&block1.id, &other.id, LinkType::Page)
         .unwrap();
-    let backlinks = db.get_backlinks(&page.id).unwrap();
+    let backlinks = db.get_backlinks(&other.id).unwrap();
     assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0].1.id, block1.id);
+    // Drop the scaffolding page so the page-count assertions below still
+    // describe just "My Test Page".
+    db.delete_page(&other.id).unwrap();
 
     // Delete
     db.delete_block(&block1.id).unwrap();

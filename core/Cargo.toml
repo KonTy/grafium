@@ -102,8 +102,39 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "local_llm_smoke_test"
 required-features = ["llm-local"]
 
+# The rest of the local-LLM examples import `ai::providers::local_llm`, which
+# only exists behind `llm-local`; without this they break `--all-targets`
+# builds on a default feature set.
+[[example]]
+name = "classify_check"
+required-features = ["llm-local"]
+
+[[example]]
+name = "debug_llm_repro"
+required-features = ["llm-local"]
+
+[[example]]
+name = "gen_test"
+required-features = ["llm-local"]
+
+[[example]]
+name = "llm_bench"
+required-features = ["llm-local"]
+
+[[example]]
+name = "model_probe"
+required-features = ["llm-local"]
+
+[[example]]
+name = "research_e2e"
+required-features = ["llm-local"]
+
 [[example]]
 name = "media_smoke_test"
+required-features = ["media"]
+
+[[example]]
+name = "whisper_load_check"
 required-features = ["media"]
 
 [[example]]

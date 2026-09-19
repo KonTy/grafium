@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub mod reading_notes;
 mod reading_note_replace;
+pub mod reading_notes;
 mod research_edits;
 pub use research_edits::{
     AiInsertSummaryResult, SummaryLinkPlan, SummaryLinkTarget, SummaryRetainedTarget,
@@ -1035,14 +1035,16 @@ impl Graph {
                 Self::title_from_file_path(&self.knowledge_dir, path, filename)
             )
         } else {
-            canonical_journal_title.or(parsed.title.clone()).unwrap_or_else(|| {
-                let base_dir = if in_journals_dir {
-                    &self.journals_dir
-                } else {
-                    &self.pages_dir
-                };
-                Self::title_from_file_path(base_dir, path, filename)
-            })
+            canonical_journal_title
+                .or(parsed.title.clone())
+                .unwrap_or_else(|| {
+                    let base_dir = if in_journals_dir {
+                        &self.journals_dir
+                    } else {
+                        &self.pages_dir
+                    };
+                    Self::title_from_file_path(base_dir, path, filename)
+                })
         };
 
         // Compute relative path from root_dir
@@ -1320,8 +1322,21 @@ impl Graph {
         // Index the file
         self.index_file(&file_path)?;
 
-        // Return the page from DB
-        self.db.get_page_by_title(title)
+        // Look the page back up under the title indexing actually stored it as.
+        // A journal is indexed under its canonical dashed date regardless of how
+        // the filename spells it, so `journals/2025_01_15.md` becomes the page
+        // "2025-01-15"; looking it up by the raw underscore argument would miss.
+        // Non-journal titles are stored verbatim, so they keep resolving as-is.
+        let lookup_title = if is_journal {
+            file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parser::canonical_journal_title)
+                .unwrap_or_else(|| title.to_string())
+        } else {
+            title.to_string()
+        };
+        self.db.get_page_by_title(&lookup_title)
     }
 
     /// Append `content_to_append` (raw markdown, e.g. blank-line-separated
@@ -1633,10 +1648,15 @@ impl Graph {
         create_new: bool,
     ) -> Result<LinkCandidate> {
         if target_page_id.is_some() == create_new {
-            return Err(CoreError::Other("Choose one existing target or the proposed new page.".into()));
+            return Err(CoreError::Other(
+                "Choose one existing target or the proposed new page.".into(),
+            ));
         }
         self.apply_link_candidate_review_with_selection(
-            candidate_id, false, Some((target_page_id, create_new)), Self::atomic_write,
+            candidate_id,
+            false,
+            Some((target_page_id, create_new)),
+            Self::atomic_write,
         )
     }
 
@@ -1666,7 +1686,9 @@ impl Graph {
     ) -> Result<LinkCandidate> {
         let mut conn = self.db.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut candidate = self.db.get_link_candidate_in_connection(&tx, candidate_id)?;
+        let mut candidate = self
+            .db
+            .get_link_candidate_in_connection(&tx, candidate_id)?;
         let expected_status = if undo {
             LinkCandidateStatus::Accepted
         } else {
@@ -1677,15 +1699,23 @@ impl Graph {
                 "The link suggestion's review state changed; refresh suggestions.".into(),
             ));
         }
-        let page = self.db.get_page_by_id_in_connection(&tx, &candidate.from_page_id)?;
+        let page = self
+            .db
+            .get_page_by_id_in_connection(&tx, &candidate.from_page_id)?;
         let mut blocks = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
         let block_count: usize = tx.query_row(
-            "SELECT count(*) FROM blocks WHERE page_id = ?1", [&page.id], |row| row.get(0),
+            "SELECT count(*) FROM blocks WHERE page_id = ?1",
+            [&page.id],
+            |row| row.get(0),
         )?;
         if blocks.len() != block_count {
-            return Err(CoreError::Other("Page contains unreachable blocks; link review was not applied.".into()));
+            return Err(CoreError::Other(
+                "Page contains unreachable blocks; link review was not applied.".into(),
+            ));
         }
-        let position = blocks.iter().position(|b| b.id == candidate.from_block_id)
+        let position = blocks
+            .iter()
+            .position(|b| b.id == candidate.from_block_id)
             .ok_or_else(|| CoreError::Other("The source block moved or was deleted.".into()))?;
         let block = blocks[position].clone();
         let (source_content, undo_content, accepted_content): (Option<String>, Option<String>, Option<String>) =
@@ -1694,49 +1724,73 @@ impl Graph {
                 [candidate_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
         let after = if undo {
-            let previous = undo_content.ok_or_else(|| CoreError::Other(
-                "This accepted link suggestion has no undo snapshot.".into()))?;
-            let expected = accepted_content.or_else(|| wrap_link_candidate_anchor(
-                &previous, candidate.anchor_start, candidate.anchor_end,
-                link_candidate_target_label(&candidate, &candidate.anchor_text),
-            ));
+            let previous = undo_content.ok_or_else(|| {
+                CoreError::Other("This accepted link suggestion has no undo snapshot.".into())
+            })?;
+            let expected = accepted_content.or_else(|| {
+                wrap_link_candidate_anchor(
+                    &previous,
+                    candidate.anchor_start,
+                    candidate.anchor_end,
+                    link_candidate_target_label(&candidate, &candidate.anchor_text),
+                )
+            });
             if expected.as_deref() != Some(block.content.as_str()) {
                 return Err(CoreError::Other(
                     "This block changed after the link was accepted, so Grafium will not overwrite it.".into()));
             }
             previous
         } else {
-            if source_content.as_deref().is_some_and(|content| content != block.content) {
+            if source_content
+                .as_deref()
+                .is_some_and(|content| content != block.content)
+            {
                 return Err(CoreError::Other(
-                    "This link suggestion is stale because the block changed; refresh suggestions.".into()));
+                    "This link suggestion is stale because the block changed; refresh suggestions."
+                        .into(),
+                ));
             }
             let start = usize::try_from(candidate.anchor_start).unwrap_or(usize::MAX);
             let end = usize::try_from(candidate.anchor_end).unwrap_or(usize::MAX);
             if block.content.get(start..end) != Some(candidate.anchor_text.as_str()) {
                 return Err(CoreError::Other(
-                    "This link suggestion is stale because the block changed; refresh suggestions.".into()));
+                    "This link suggestion is stale because the block changed; refresh suggestions."
+                        .into(),
+                ));
             }
-            if parser::protected_link_spans(&block.content).iter().any(|(s, e)| start < *e && end > *s) {
-                return Err(CoreError::Other("The suggestion overlaps protected source syntax; refresh suggestions.".into()));
+            if parser::protected_link_spans(&block.content)
+                .iter()
+                .any(|(s, e)| start < *e && end > *s)
+            {
+                return Err(CoreError::Other(
+                    "The suggestion overlaps protected source syntax; refresh suggestions.".into(),
+                ));
             }
             if let Some((Some(selected_id), false)) = selection {
                 let selected = self.db.get_page_by_id_in_connection(&tx, selected_id)?;
                 let fresh = self.db.resolve_tag_terms_in_connection(
-                    &tx, &[crate::parser::TagTerm::from(candidate.proposed_title.as_str())])?;
-                let listed = candidate.alternatives.iter().any(|allowed| {
-                    allowed.id == selected.id && allowed.title == selected.title
-                });
-                let current = fresh[0].candidates.iter().any(|allowed| {
-                    allowed.id == selected.id && allowed.title == selected.title
-                }) || (fresh[0].target_page_id.as_deref() == Some(selected_id)
-                    && fresh[0].target_title == selected.title);
+                    &tx,
+                    &[crate::parser::TagTerm::from(
+                        candidate.proposed_title.as_str(),
+                    )],
+                )?;
+                let listed = candidate
+                    .alternatives
+                    .iter()
+                    .any(|allowed| allowed.id == selected.id && allowed.title == selected.title);
+                let current =
+                    fresh[0].candidates.iter().any(|allowed| {
+                        allowed.id == selected.id && allowed.title == selected.title
+                    }) || (fresh[0].target_page_id.as_deref() == Some(selected_id)
+                        && fresh[0].target_title == selected.title);
                 if !listed || !current {
                     return Err(CoreError::Other("The selected page is not in the current allowed shortlist; refresh suggestions.".into()));
                 }
                 candidate.to_page_id = Some(selected.id);
                 candidate.to_page_title = selected.title.clone();
                 candidate.proposed_title = selected.title;
-                candidate.reason = "User selected an existing page from the current identity shortlist.".into();
+                candidate.reason =
+                    "User selected an existing page from the current identity shortlist.".into();
             }
             let explicit_new = selection.is_some_and(|(target, new)| target.is_none() && new);
             if explicit_new {
@@ -1749,40 +1803,73 @@ impl Graph {
             }
             let target = if let Some(id) = &candidate.to_page_id {
                 let target = self.db.get_page_by_id_in_connection(&tx, id)?;
-                if !candidate.proposed_title.is_empty() && candidate.proposed_title != target.title {
-                    return Err(CoreError::Other("The target page was renamed; refresh suggestions.".into()));
+                if !candidate.proposed_title.is_empty() && candidate.proposed_title != target.title
+                {
+                    return Err(CoreError::Other(
+                        "The target page was renamed; refresh suggestions.".into(),
+                    ));
                 }
                 let resolved = self.db.resolve_tag_terms_in_connection(
-                    &tx, &[crate::parser::TagTerm::from(target.title.as_str())])?;
+                    &tx,
+                    &[crate::parser::TagTerm::from(target.title.as_str())],
+                )?;
                 if resolved[0].target_page_id.as_deref() != Some(id.as_str()) {
-                    return Err(CoreError::Other("The target name is now ambiguous; refresh suggestions.".into()));
+                    return Err(CoreError::Other(
+                        "The target name is now ambiguous; refresh suggestions.".into(),
+                    ));
                 }
                 target
             } else {
                 let resolved = self.db.resolve_tag_terms_in_connection(
-                    &tx, &[crate::parser::TagTerm::from(candidate.proposed_title.as_str())])?;
+                    &tx,
+                    &[crate::parser::TagTerm::from(
+                        candidate.proposed_title.as_str(),
+                    )],
+                )?;
                 match resolved[0].decision {
                     crate::db::EntityDecision::Reuse => self.db.get_page_by_id_in_connection(
-                        &tx, resolved[0].target_page_id.as_deref().unwrap())?,
+                        &tx,
+                        resolved[0].target_page_id.as_deref().unwrap(),
+                    )?,
                     crate::db::EntityDecision::New => self.db.get_or_create_page_in_connection(
-                        &tx, &candidate.proposed_title, false)?,
+                        &tx,
+                        &candidate.proposed_title,
+                        false,
+                    )?,
                     crate::db::EntityDecision::Ambiguous
-                        if explicit_new || (candidate.resolution == "new"
-                            && !candidate.alternatives.is_empty()
-                            && candidate.alternatives == resolved[0].candidates) =>
-                        self.db.get_or_create_page_in_connection(&tx, &candidate.proposed_title, false)?,
+                        if explicit_new
+                            || (candidate.resolution == "new"
+                                && !candidate.alternatives.is_empty()
+                                && candidate.alternatives == resolved[0].candidates) =>
+                    {
+                        self.db.get_or_create_page_in_connection(
+                            &tx,
+                            &candidate.proposed_title,
+                            false,
+                        )?
+                    }
                     crate::db::EntityDecision::Ambiguous => return Err(CoreError::Other(
-                        "Similar pages appeared since discovery; refresh and review the target.".into())),
+                        "Similar pages appeared since discovery; refresh and review the target."
+                            .into(),
+                    )),
                 }
             };
             if target.id == candidate.from_page_id {
-                return Err(CoreError::Other("A suggestion cannot link this page to itself.".into()));
+                return Err(CoreError::Other(
+                    "A suggestion cannot link this page to itself.".into(),
+                ));
             }
             candidate.to_page_id = Some(target.id);
             candidate.to_page_title = target.title;
-            let link = parser::format_concept_link(&candidate.to_page_title)
-                .ok_or_else(|| CoreError::Other("The target cannot be represented as a safe page link.".into()))?;
-            format!("{}{}{}", &block.content[..start], link, &block.content[end..])
+            let link = parser::format_concept_link(&candidate.to_page_title).ok_or_else(|| {
+                CoreError::Other("The target cannot be represented as a safe page link.".into())
+            })?;
+            format!(
+                "{}{}{}",
+                &block.content[..start],
+                link,
+                &block.content[end..]
+            )
         };
 
         let relative_path = page.file_path.as_deref().ok_or_else(|| {
@@ -1798,11 +1885,14 @@ impl Graph {
                 "Page file changed outside Grafium; refresh before reviewing links.".into(),
             ));
         }
-        self.db.update_block_in_connection(&tx, &block.id, &after, None)?;
-        self.db.delete_links_from_block_in_connection(&tx, &block.id)?;
+        self.db
+            .update_block_in_connection(&tx, &block.id, &after, None)?;
+        self.db
+            .delete_links_from_block_in_connection(&tx, &block.id)?;
         for link in parser::extract_links(&after) {
             let (target, link_type) = self.resolve_link_target_in_connection(&tx, link)?;
-            self.db.insert_link_in_connection(&tx, &block.id, &target, link_type)?;
+            self.db
+                .insert_link_in_connection(&tx, &block.id, &target, link_type)?;
         }
         self.sync_task_row_in_connection(&tx, &block.id, &after)?;
         let now = Utc::now().timestamp_millis();
@@ -1820,8 +1910,15 @@ impl Graph {
              anchor_end = anchor_end + CASE WHEN anchor_start >= ?2 THEN ?3 ELSE 0 END
              WHERE from_block_id = ?4 AND id != ?5 AND status = 'pending'
                AND source_content = ?6 AND (anchor_end <= ?7 OR anchor_start >= ?2)",
-            rusqlite::params![after, replaced_end, delta, block.id, candidate_id,
-                block.content, candidate.anchor_start],
+            rusqlite::params![
+                after,
+                replaced_end,
+                delta,
+                block.id,
+                candidate_id,
+                block.content,
+                candidate.anchor_start
+            ],
         )?;
         if undo {
             tx.execute(
@@ -1835,20 +1932,31 @@ impl Graph {
                 "UPDATE link_candidates SET status = 'accepted', accepted_at = ?2,
                  updated_at = ?2, undo_content = ?3, accepted_content = ?4, to_page_id = ?5,
                  proposed_title = ?6, resolution = 'reuse', reason = ?7 WHERE id = ?1",
-                rusqlite::params![candidate_id, now, block.content, after,
-                    candidate.to_page_id, candidate.to_page_title, candidate.reason],
+                rusqlite::params![
+                    candidate_id,
+                    now,
+                    block.content,
+                    after,
+                    candidate.to_page_id,
+                    candidate.to_page_title,
+                    candidate.reason
+                ],
             )?;
         }
         blocks[position].content = after;
         let content = parser::serialize_page(&page.properties, &blocks);
-        let backup = path.with_file_name(format!(".link-review-rollback-{}", Uuid::new_v4().as_simple()));
+        let backup = path.with_file_name(format!(
+            ".link-review-rollback-{}",
+            Uuid::new_v4().as_simple()
+        ));
         Self::atomic_write(&backup, &original)?;
         if fs::read_to_string(&path).ok().as_deref() != Some(original.as_str()) {
             let _ = fs::remove_file(&backup);
-            return Err(CoreError::Other("Page file changed while reviewing links.".into()));
+            return Err(CoreError::Other(
+                "Page file changed while reviewing links.".into(),
+            ));
         }
-        let result = write(&path, &content)
-            .and_then(|()| tx.commit().map_err(CoreError::from));
+        let result = write(&path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
         if let Err(error) = result {
             let current = fs::read_to_string(&path).ok();
             if current.as_deref() == Some(original.as_str()) {
@@ -1860,7 +1968,9 @@ impl Graph {
                 )));
             } else if fs::rename(&backup, &path).is_err() {
                 return Err(CoreError::Other(format!(
-                    "Link review rolled back; the original page is saved at {}", backup.display())));
+                    "Link review rolled back; the original page is saved at {}",
+                    backup.display()
+                )));
             }
             self.note_self_write(&path);
             return Err(error);
@@ -2054,7 +2164,12 @@ impl Graph {
         changes: &[WritingContentChange],
         expected_blocks: Option<&[Block]>,
     ) -> Result<()> {
-        self.apply_writing_changes_with_writer(page_id, changes, expected_blocks, Self::atomic_write)
+        self.apply_writing_changes_with_writer(
+            page_id,
+            changes,
+            expected_blocks,
+            Self::atomic_write,
+        )
     }
 
     fn apply_writing_changes_with_writer(
@@ -2228,7 +2343,8 @@ impl Graph {
             let _ = fs::remove_file(&backup_path);
             return Err(error);
         }
-        let result = write(&file_path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
+        let result =
+            write(&file_path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
         if let Err(error) = result {
             // A failed writer normally leaves the old file untouched. Also
             // handle a failure after replacement (including a failed COMMIT).
@@ -2878,9 +2994,7 @@ impl Graph {
     ) -> Result<BulkRenameResult> {
         let from = from.trim();
         if from.is_empty() {
-            return Err(CoreError::Other(
-                "Find text cannot be empty".to_string(),
-            ));
+            return Err(CoreError::Other("Find text cannot be empty".to_string()));
         }
         let to = to.trim();
         let candidates = self.db.list_pages_for_title_rewrite(from)?;
@@ -2901,7 +3015,8 @@ impl Graph {
             }
         }
 
-        let planned_ids: HashSet<String> = planned.iter().map(|(page, _)| page.id.clone()).collect();
+        let planned_ids: HashSet<String> =
+            planned.iter().map(|(page, _)| page.id.clone()).collect();
         let mut title_owner: HashMap<String, (String, String)> = HashMap::new();
         let mut accepted: Vec<(Page, String)> = Vec::new();
         let mut merges: Vec<(Page, String, String)> = Vec::new();
@@ -4305,7 +4420,15 @@ mod tests {
     fn namespace_filesystem_path_rejects_invalid_titles() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
-        for title in ["", "/", ".", "..", "../outside", "Joplin/../../outside", r"..\outside"] {
+        for title in [
+            "",
+            "/",
+            ".",
+            "..",
+            "../outside",
+            "Joplin/../../outside",
+            r"..\outside",
+        ] {
             assert!(graph.namespace_filesystem_path(title).is_err(), "{title}");
         }
         Ok(())
@@ -4742,25 +4865,43 @@ mod tests {
     fn link_candidate_review_revalidates_source_and_target_without_orphan_pages() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
-        let source = graph.create_page_with_content("Research source", false, "- Memory Palace matters\n")?;
+        let source = graph.create_page_with_content(
+            "Research source",
+            false,
+            "- Memory Palace matters\n",
+        )?;
         let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
         let tags = [crate::parser::TagTerm::from("Memory Palace")];
-        graph.db.discover_semantic_concept_candidates(&source.id, &tags, 10)?;
-        let candidate = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        graph
+            .db
+            .discover_semantic_concept_candidates(&source.id, &tags, 10)?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         graph.update_block(&block.id, "Memory Palace now has different context", None)?;
         assert!(graph.accept_link_candidate(&candidate.id).is_err());
         assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
-        assert_eq!(graph.db.get_link_candidate(&candidate.id)?.status, LinkCandidateStatus::Pending);
+        assert_eq!(
+            graph.db.get_link_candidate(&candidate.id)?.status,
+            LinkCandidateStatus::Pending
+        );
 
-        graph.db.discover_semantic_concept_candidates(&source.id, &tags, 10)?;
-        let candidate = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        graph
+            .db
+            .discover_semantic_concept_candidates(&source.id, &tags, 10)?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         let target = graph.create_page("Memory Palace", false)?;
         let accepted = graph.accept_link_candidate(&candidate.id)?;
         assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
         assert_eq!(graph.db.count_pages()?, 2);
         graph.update_block(&block.id, "A later user edit", None)?;
         assert!(graph.undo_link_candidate_accept(&candidate.id).is_err());
-        assert_eq!(graph.db.get_block_by_id(&block.id)?.content, "A later user edit");
+        assert_eq!(
+            graph.db.get_block_by_id(&block.id)?.content,
+            "A later user edit"
+        );
         Ok(())
     }
 
@@ -4769,11 +4910,17 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let source = graph.create_page_with_content(
-            "Research source", false, "- Memory Palace helps. Memory Palace repeats.\n")?;
+            "Research source",
+            false,
+            "- Memory Palace helps. Memory Palace repeats.\n",
+        )?;
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Memory Palace")], 10)?;
-        let mut candidates = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+            &source.id,
+            &[crate::parser::TagTerm::from("Memory Palace")],
+            10,
+        )?;
+        let mut candidates =
+            graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
         candidates.sort_by_key(|candidate| candidate.anchor_start);
         assert_eq!(candidates.len(), 2);
         let first = graph.accept_link_candidate(&candidates[0].id)?;
@@ -4782,8 +4929,10 @@ mod tests {
         assert_eq!(graph.db.count_pages()?, 2);
         graph.undo_link_candidate_accept(&second.id)?;
         graph.undo_link_candidate_accept(&first.id)?;
-        assert_eq!(graph.db.list_blocks_for_page(&source.id)?[0].content,
-            "Memory Palace helps. Memory Palace repeats.");
+        assert_eq!(
+            graph.db.list_blocks_for_page(&source.id)?[0].content,
+            "Memory Palace helps. Memory Palace repeats."
+        );
         Ok(())
     }
 
@@ -4792,12 +4941,19 @@ mod tests {
         for title in ["Projects / Alpha", r"Projects\Alpha"] {
             let temp = tempdir()?;
             let graph = Graph::open(temp.path())?;
-            let source = graph.create_page_with_content("Synthetic source", false, "- Alpha matters\n")?;
-            graph.db.discover_semantic_concept_candidates(&source.id, &[crate::parser::TagTerm {
-                term: "Alpha".into(), qualified: Some(title.into()),
-            }], 10)?;
-            let candidate = graph.list_link_candidates(
-                Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            let source =
+                graph.create_page_with_content("Synthetic source", false, "- Alpha matters\n")?;
+            graph.db.discover_semantic_concept_candidates(
+                &source.id,
+                &[crate::parser::TagTerm {
+                    term: "Alpha".into(),
+                    qualified: Some(title.into()),
+                }],
+                10,
+            )?;
+            let candidate = graph
+                .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+                .remove(0);
             assert_eq!(candidate.proposed_title, "Projects/Alpha");
             let accepted = graph.accept_link_candidate(&candidate.id)?;
             let target = graph.db.find_page_by_name(title)?.unwrap();
@@ -4805,7 +4961,10 @@ mod tests {
             assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
             assert_eq!(graph.db.count_pages()?, 3);
             graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
-            assert_eq!(graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id, target.id);
+            assert_eq!(
+                graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id,
+                target.id
+            );
             assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
             assert_eq!(graph.db.count_pages()?, 3);
         }
@@ -4817,7 +4976,8 @@ mod tests {
         for title in ["Projects / Alpha", r"Projects\Alpha"] {
             let temp = tempdir()?;
             let graph = Graph::open(temp.path())?;
-            let source = graph.create_page_with_content("Synthetic source", false, "- Original source\n")?;
+            let source =
+                graph.create_page_with_content("Synthetic source", false, "- Original source\n")?;
             let before = graph.db.list_blocks_for_page(&source.id)?;
             let plan = SummaryLinkPlan {
                 new_target_titles: vec![title.into()],
@@ -4825,8 +4985,14 @@ mod tests {
                 ..SummaryLinkPlan::default()
             };
             let receipt = graph.insert_research_summary(
-                &source.id, Some("Summary"), &[("Topic".into(), "Explanation.".into())],
-                None, vec![], None, Some(&before), &plan,
+                &source.id,
+                Some("Summary"),
+                &[("Topic".into(), "Explanation.".into())],
+                None,
+                vec![],
+                None,
+                Some(&before),
+                &plan,
             )?;
             assert_eq!(receipt.created_targets.len(), 2);
             let target = graph.db.find_page_by_name(title)?.unwrap();
@@ -4835,7 +5001,10 @@ mod tests {
             drop(graph);
             let graph = Graph::open(temp.path())?;
             graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
-            assert_eq!(graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id, target.id);
+            assert_eq!(
+                graph.db.find_page_by_name("Projects/Alpha")?.unwrap().id,
+                target.id
+            );
             assert_eq!(graph.db.count_pages()?, 3);
             graph.undo_research_summary(&receipt)?;
             assert!(graph.db.find_page_by_name("Projects/Alpha")?.is_none());
@@ -4851,15 +5020,27 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let target = graph.create_page_with_content(
-            "Projects/Alpha", false, "aliases:: Work/Alpha\n- Canonical project\n")?;
+            "Projects/Alpha",
+            false,
+            "aliases:: Work/Alpha\n- Canonical project\n",
+        )?;
         let source = graph.create_page_with_content(
-            "Synthetic source", false, "- [[Work / Alpha]] is an approved alias\n")?;
-        assert_eq!(graph.db.find_page_by_name(r"Work\Alpha")?.unwrap().id, target.id);
+            "Synthetic source",
+            false,
+            "- [[Work / Alpha]] is an approved alias\n",
+        )?;
+        assert_eq!(
+            graph.db.find_page_by_name(r"Work\Alpha")?.unwrap().id,
+            target.id
+        );
         assert!(graph.db.get_page_by_title("Work").is_err());
         assert!(graph.db.get_page_by_title("Work/Alpha").is_err());
         assert_eq!(graph.db.get_backlinks(&target.id)?.len(), 1);
         graph.index_file(&graph.root_dir.join(source.file_path.as_deref().unwrap()))?;
-        assert_eq!(graph.db.find_page_by_name("Work/Alpha")?.unwrap().id, target.id);
+        assert_eq!(
+            graph.db.find_page_by_name("Work/Alpha")?.unwrap().id,
+            target.id
+        );
         assert!(graph.db.get_page_by_title("Work").is_err());
         Ok(())
     }
@@ -4870,19 +5051,33 @@ mod tests {
         let graph = Graph::open(temp.path())?;
         let target = graph.create_page("Niacin", false)?;
         let unrelated = graph.create_page("Mercury", false)?;
-        let source = graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
+        let source =
+            graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
-        let candidate = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
-        assert!(graph.resolve_link_candidate(&candidate.id, Some(&unrelated.id), false).is_err());
-        assert!(graph.resolve_link_candidate(&candidate.id, None, false).is_err());
-        assert!(graph.resolve_link_candidate(&candidate.id, Some(&target.id), true).is_err());
+            &source.id,
+            &[crate::parser::TagTerm::from("Nicin")],
+            10,
+        )?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
+        assert!(graph
+            .resolve_link_candidate(&candidate.id, Some(&unrelated.id), false)
+            .is_err());
+        assert!(graph
+            .resolve_link_candidate(&candidate.id, None, false)
+            .is_err());
+        assert!(graph
+            .resolve_link_candidate(&candidate.id, Some(&target.id), true)
+            .is_err());
         let accepted = graph.resolve_link_candidate(&candidate.id, Some(&target.id), false)?;
         assert_eq!(accepted.to_page_id.as_deref(), Some(target.id.as_str()));
         assert_eq!(graph.db.count_pages()?, 3);
         graph.undo_link_candidate_accept(&candidate.id)?;
-        assert_eq!(graph.db.list_blocks_for_page(&source.id)?[0].content, "Nicin matters");
+        assert_eq!(
+            graph.db.list_blocks_for_page(&source.id)?[0].content,
+            "Nicin matters"
+        );
         Ok(())
     }
 
@@ -4891,11 +5086,19 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         graph.create_page("Mercury (planet)", false)?;
-        let source = graph.create_page_with_content("Synthetic source", false, "- Mercury is our project codename\n")?;
+        let source = graph.create_page_with_content(
+            "Synthetic source",
+            false,
+            "- Mercury is our project codename\n",
+        )?;
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Mercury")], 10)?;
-        let candidate = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            &source.id,
+            &[crate::parser::TagTerm::from("Mercury")],
+            10,
+        )?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         assert_eq!(candidate.resolution, "ambiguous");
         assert!(graph.db.get_page_by_title("Mercury").is_err());
         let accepted = graph.resolve_link_candidate(&candidate.id, None, true)?;
@@ -4910,7 +5113,11 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         graph.create_page("Mercury (planet)", false)?;
-        let source = graph.create_page_with_content("Synthetic source", false, "- Mercury is a distinct project codename\n")?;
+        let source = graph.create_page_with_content(
+            "Synthetic source",
+            false,
+            "- Mercury is a distinct project codename\n",
+        )?;
         let tags = [crate::parser::TagTerm::from("Mercury")];
         let mut resolved = graph.db.resolve_tag_terms(&tags)?;
         assert_eq!(resolved[0].decision, crate::db::EntityDecision::Ambiguous);
@@ -4918,10 +5125,17 @@ mod tests {
         resolved[0].reason = "Contextual AI suggestion: distinct project codename.".into();
         let snapshot = graph.db.list_blocks_for_page(&source.id)?;
         graph.db.discover_resolved_semantic_concept_candidates(
-            &source.id, &tags, &resolved, &snapshot, 10, &crate::cancel::CancellationToken::new())?;
+            &source.id,
+            &tags,
+            &resolved,
+            &snapshot,
+            10,
+            &crate::cancel::CancellationToken::new(),
+        )?;
         assert_eq!(graph.db.count_pages()?, 2);
-        let candidate = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         assert_eq!(candidate.resolution, "new");
         assert!(candidate.to_page_id.is_none());
         graph.accept_link_candidate(&candidate.id)?;
@@ -4934,21 +5148,36 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let target = graph.create_page("Niacin", false)?;
-        let source = graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
+        let source =
+            graph.create_page_with_content("Synthetic source", false, "- Nicin matters\n")?;
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
-        let candidate = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            &source.id,
+            &[crate::parser::TagTerm::from("Nicin")],
+            10,
+        )?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         let block = graph.db.list_blocks_for_page(&source.id)?.remove(0);
         graph.update_block(&block.id, "Nicin source changed", None)?;
-        assert!(graph.resolve_link_candidate(&candidate.id, Some(&target.id), false).is_err());
-        assert!(graph.resolve_link_candidate(&candidate.id, None, true).is_err());
+        assert!(graph
+            .resolve_link_candidate(&candidate.id, Some(&target.id), false)
+            .is_err());
+        assert!(graph
+            .resolve_link_candidate(&candidate.id, None, true)
+            .is_err());
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Nicin")], 10)?;
-        let current = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            &source.id,
+            &[crate::parser::TagTerm::from("Nicin")],
+            10,
+        )?;
+        let current = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         graph.rename_page(&target.id, "Changed nutrient")?;
-        assert!(graph.resolve_link_candidate(&current.id, Some(&target.id), false).is_err());
+        assert!(graph
+            .resolve_link_candidate(&current.id, Some(&target.id), false)
+            .is_err());
         assert!(graph.db.get_page_by_title("Nicin").is_err());
         Ok(())
     }
@@ -4958,26 +5187,46 @@ mod tests {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let source = graph.create_page_with_content(
-            "Research source", false, "- Memory Palace matters\n")?;
+            "Research source",
+            false,
+            "- Memory Palace matters\n",
+        )?;
         graph.db.discover_semantic_concept_candidates(
-            &source.id, &[crate::parser::TagTerm::from("Memory Palace")], 10)?;
-        let candidate = graph.list_link_candidates(
-            Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?.remove(0);
+            &source.id,
+            &[crate::parser::TagTerm::from("Memory Palace")],
+            10,
+        )?;
+        let candidate = graph
+            .list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?
+            .remove(0);
         let path = graph.root_dir.join(source.file_path.as_deref().unwrap());
         let original = fs::read_to_string(&path)?;
         let result = graph.apply_link_candidate_review_with_writer(
-            &candidate.id, false, |path, intended| {
+            &candidate.id,
+            false,
+            |path, intended| {
                 Graph::atomic_write(path, intended)?;
                 fs::write(path, "- Concurrent external edit\n")?;
-                Err(CoreError::Other("Simulated failure after page replacement".into()))
-            });
+                Err(CoreError::Other(
+                    "Simulated failure after page replacement".into(),
+                ))
+            },
+        );
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(&path)?, "- Concurrent external edit\n");
         assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
-        assert_eq!(graph.db.get_link_candidate(&candidate.id)?.status, LinkCandidateStatus::Pending);
+        assert_eq!(
+            graph.db.get_link_candidate(&candidate.id)?.status,
+            LinkCandidateStatus::Pending
+        );
         let backups = fs::read_dir(path.parent().unwrap())?
             .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".link-review-rollback-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".link-review-rollback-")
+            })
             .collect::<Vec<_>>();
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read_to_string(backups[0].path())?, original);
@@ -4988,18 +5237,37 @@ mod tests {
     fn link_candidate_review_rejects_external_source_edits_and_uncertain_spelling() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
-        let source = graph.create_page_with_content("Research source", false, "- Memory Palace matters\n- Nicin matters\n")?;
+        let source = graph.create_page_with_content(
+            "Research source",
+            false,
+            "- Memory Palace matters\n- Nicin matters\n",
+        )?;
         graph.create_page("Niacin", false)?;
-        graph.db.discover_semantic_concept_candidates(&source.id, &[
-            crate::parser::TagTerm::from("Memory Palace"), crate::parser::TagTerm::from("Nicin"),
-        ], 10)?;
-        let candidates = graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
-        let uncertain = candidates.iter().find(|c| c.anchor_text == "Nicin").unwrap();
+        graph.db.discover_semantic_concept_candidates(
+            &source.id,
+            &[
+                crate::parser::TagTerm::from("Memory Palace"),
+                crate::parser::TagTerm::from("Nicin"),
+            ],
+            10,
+        )?;
+        let candidates =
+            graph.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 10)?;
+        let uncertain = candidates
+            .iter()
+            .find(|c| c.anchor_text == "Nicin")
+            .unwrap();
         assert_eq!(uncertain.resolution, "ambiguous");
         assert!(graph.accept_link_candidate(&uncertain.id).is_err());
         assert!(graph.db.get_page_by_title_ci("Nicin").is_err());
-        let new_page = candidates.iter().find(|c| c.anchor_text == "Memory Palace").unwrap();
-        fs::write(graph.root_dir.join(source.file_path.as_deref().unwrap()), "- An external edit\n")?;
+        let new_page = candidates
+            .iter()
+            .find(|c| c.anchor_text == "Memory Palace")
+            .unwrap();
+        fs::write(
+            graph.root_dir.join(source.file_path.as_deref().unwrap()),
+            "- An external edit\n",
+        )?;
         assert!(graph.accept_link_candidate(&new_page.id).is_err());
         assert!(graph.db.get_page_by_title_ci("Memory Palace").is_err());
         assert_eq!(graph.db.count_pages()?, 2);
@@ -5259,10 +5527,7 @@ mod tests {
         assert!(!graph.pages_dir.join("Self/Health.md").exists());
 
         let blocks = graph.db.list_blocks_for_page(&other.id)?;
-        assert_eq!(
-            blocks[0].content,
-            "See [[Health]] and [[Health|vitamins]]"
-        );
+        assert_eq!(blocks[0].content, "See [[Health]] and [[Health|vitamins]]");
         Ok(())
     }
 
@@ -5338,7 +5603,10 @@ mod tests {
         );
         assert_eq!(preview.merged[0].old_title, "Self/Health/Blood Tests");
         assert_eq!(preview.merged[0].new_title, "Health/Blood Tests");
-        assert_eq!(graph.db.get_page_by_id(&source.id)?.title, "Self/Health/Blood Tests");
+        assert_eq!(
+            graph.db.get_page_by_id(&source.id)?.title,
+            "Self/Health/Blood Tests"
+        );
 
         let applied = graph.bulk_rename_pages("self/", "", false)?;
         assert_eq!(applied.merged.len(), 1);
