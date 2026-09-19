@@ -482,6 +482,7 @@
   }
 
   .tree-action {
+    position: relative;
     display: grid;
     place-items: center;
     flex: 0 0 26px;
@@ -501,6 +502,20 @@
 
   .tree-action:hover {
     background: var(--bg-hover);
+  }
+
+  /* A 26px button in a 32px row wastes the slack either side of it. This grows
+     the target to the full row height and across the 4px gap next to it --
+     both dead space -- so it takes no room from the row's own click target and
+     moves no ink. */
+  .tree-action::after {
+    content: "";
+    position: absolute;
+    inset: -3px -4px;
+  }
+
+  .compact .tree-action::after {
+    inset: -1px -4px;
   }
 
   .tree-action:focus-visible {

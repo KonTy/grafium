@@ -105,4 +105,25 @@ describe("narrow-screen guards", () => {
       "position: relative",
     );
   });
+
+  it("grows the tree row action into the space around it", () => {
+    // The button's ink is 26px inside a 32px row with a 4px gap beside it.
+    // Measured: a click 2px to its left used to land on .tree-row-inner --
+    // neither the row nor the action -- and now hits the action.
+    const css = styleOf("PageTree.svelte");
+    expect(ruleIn(css, ".tree-action")).toContain("position: relative");
+    expect(ruleIn(css, ".tree-action::after")).toContain("position: absolute");
+    expect(ruleIn(css, ".tree-action::after")).toContain("inset: -3px -4px");
+    // Compact rows are 28px, so the taller inset would spill onto its neighbours.
+    expect(ruleIn(css, ".compact .tree-action::after")).toContain("inset: -1px -4px");
+  });
+
+  it("keeps the graph dropdown inside a narrow sidebar", () => {
+    // Measured in a 180px container: the fixed floor made the panel 220px and
+    // put 40px of it past the edge, where `body { overflow: hidden }` ate it.
+    const rule = ruleIn(styleOf("GraphMenu.svelte"), ".menu-dropdown");
+    expect(rule).toContain("min-width: min(220px, 100%)");
+    expect(rule, "a fixed floor overflows any container narrower than it")
+      .not.toMatch(/min-width:\s*220px/);
+  });
 });

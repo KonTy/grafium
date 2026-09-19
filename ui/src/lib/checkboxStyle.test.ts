@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const read = (p: string) => readFileSync(join(process.cwd(), "src", p), "utf8");
+const SRC = join(process.cwd(), "src");
+const read = (p: string) => readFileSync(join(SRC, p), "utf8");
 
 const css = read("styles/global.css");
 
@@ -85,11 +86,17 @@ describe("checkbox box", () => {
 });
 
 describe("checkbox styling lives in one place", () => {
-  const components = [
-    "components/ChatSwitcher.svelte",
-    "components/AISettings.svelte",
-    "components/ResearchSettings.svelte",
-  ];
+  // Scanning every component rather than a hand-kept list: PageMenu had been
+  // drawing a literal tick for as long as this test existed, and was simply
+  // not one of the three files named here.
+  const components = readdirSync(join(SRC, "components"))
+    .filter((name: string) => name.endsWith(".svelte"))
+    .map((name: string) => `components/${name}`);
+
+  it("scans every component", () => {
+    expect(components.length).toBeGreaterThan(30);
+    expect(components).toContain("components/PageMenu.svelte");
+  });
 
   it("leaves no component redefining the box or its tick", () => {
     for (const path of components) {

@@ -364,7 +364,10 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     z-index: 100;
     padding: 4px;
-    min-width: 220px;
+    /* left/right:0 already sizes this to the container, so the floor only
+       applies in a sidebar narrower than 220px -- where it pushed the panel
+       past the edge, and `body { overflow: hidden }` clipped it away. */
+    min-width: min(220px, 100%);
   }
 
   .menu-section {

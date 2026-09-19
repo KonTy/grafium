@@ -272,13 +272,24 @@
   }
 
   .page-menu-item[role="menuitemradio"]::before {
+    box-sizing: border-box;
+    flex: 0 0 auto;
     width: 15px;
+    height: 0.58em;
     color: var(--text-link);
     content: "";
   }
 
+  /* Drawn from a rotated border, matching the app's checkboxes. U+2713 is
+     absent from the UI font stacks, so its shape and side bearings changed
+     with whatever symbol font the OS substituted. The tick keeps the same
+     15px slot the empty state reserves, so labels stay aligned. */
   .page-menu-item[role="menuitemradio"][aria-checked="true"]::before {
-    content: "✓";
+    width: 0.3em;
+    margin: 0 calc((15px - 0.3em) / 2);
+    border: solid currentColor;
+    border-width: 0 0.16em 0.16em 0;
+    transform: translateY(-0.05em) rotate(45deg);
   }
 
   .menu-separator {
