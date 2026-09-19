@@ -431,6 +431,7 @@
   let collapsedIds: Set<string> = $state(new Set());
   const pageLoadState = createPageLoadState();
   const UNIFIED_EDITOR_PROTOTYPE_KEY = "grafium.experimental.unifiedPageEditor";
+  const SHOW_UNIFIED_EDITOR_PROTOTYPE = false;
   let useUnifiedEditorPrototype = $state(false);
 
   const BLOCK_SHELL_GAP = 2;
@@ -662,7 +663,8 @@
     if (unifiedEditorPrototypePageId === pageId) return;
     unifiedEditorPrototypePageId = pageId;
     try {
-      useUnifiedEditorPrototype = localStorage.getItem(unifiedEditorPrototypeKey(pageId)) === "1";
+      useUnifiedEditorPrototype = SHOW_UNIFIED_EDITOR_PROTOTYPE
+        && localStorage.getItem(unifiedEditorPrototypeKey(pageId)) === "1";
     } catch {
       useUnifiedEditorPrototype = false;
     }
@@ -3183,14 +3185,16 @@
           {suggestLinksButtonLabel}
         </button>
       {/if}
-      <button
-        class="prototype-toggle"
-        type="button"
-        onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
-        title="Try the experimental one-surface editor for cross-block text selection on this page/day"
-      >
-        {useUnifiedEditorPrototype ? "Classic block editor" : "Experimental continuous editor"}
-      </button>
+      {#if SHOW_UNIFIED_EDITOR_PROTOTYPE}
+        <button
+          class="prototype-toggle"
+          type="button"
+          onclick={() => setUnifiedEditorPrototype(!useUnifiedEditorPrototype)}
+          title="Try the experimental one-surface editor for cross-block text selection on this page/day"
+        >
+          {useUnifiedEditorPrototype ? "Classic block editor" : "Experimental continuous editor"}
+        </button>
+      {/if}
     </div>
   </div>
 

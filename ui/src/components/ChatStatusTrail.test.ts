@@ -43,6 +43,11 @@ describe("Status trail wiring", () => {
     // The sweep and its reduced-motion override now live once, in global.css.
     expect(trail).not.toContain("@keyframes");
     expect(trail).not.toContain("prefers-reduced-motion");
+  });
+
+  it("shimmers the initial AI status before the first trail step arrives", () => {
+    expect(bubble).toContain("class:shimmer={animateCursor}");
+    expect(bubble).toContain("class:shimmer-endless={animateCursor}");
     // The ticking total must never be re-announced by a screen reader.
     expect(trail).toContain('<span class="trail-meta" aria-hidden="true">{meta || trail.elapsed}</span>');
     expect(trail).toContain('aria-live="polite"');

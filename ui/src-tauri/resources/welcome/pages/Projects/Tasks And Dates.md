@@ -13,7 +13,7 @@ Try this:
 
 Open **Tasks** with **Ctrl/Cmd+Shift+T**. Group and sort open tasks by due date or priority instead of visiting each source page.
 
-Interactive completion and note-edit heatmaps let you explore activity. Flow metrics include cycle time, lead time, and on-time completion. These views describe recorded activity; an empty history is not a verdict on your work. Complete a sample task or edit a note, then explore what the view records.
+Choose **Show activity** when you want to load the interactive completion and note-edit heatmaps, completion history, and flow metrics. They stay collapsed and are not queried while you focus on open tasks. These views describe recorded activity; an empty history is not a verdict on your work. Complete a sample task or edit a note, then explore what the view records.
 
 The built-in view and [[Projects/Task Dashboard]] offer two approaches: use the ready-made controls, or write a focused SQL view of your own.
 

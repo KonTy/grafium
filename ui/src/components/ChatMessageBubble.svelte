@@ -170,7 +170,7 @@
   {#if showThinking}
     <div class="msg-content thinking-content" role="status" aria-live="polite">
       <span class="thinking-dot" class:animate={animateCursor} aria-hidden="true"></span>
-      <span>{thinkingLabel}</span>
+      <span class:shimmer={animateCursor} class:shimmer-endless={animateCursor}>{thinkingLabel}</span>
     </div>
   {:else if message.role === "assistant"}
     <div class="msg-content markdown" bind:this={renderedEl}>

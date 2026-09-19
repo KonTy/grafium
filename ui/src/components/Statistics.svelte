@@ -41,7 +41,12 @@
   let openTaskView = $state<OpenTaskView>("date");
   let openTaskSort = $state<OpenTaskSort>("smart");
   let groups = $derived.by(() => groupOpenTasks(openTasks, today, openTaskView, openTaskSort));
-  let loading = $state(true);
+  let tasksLoading = $state(true);
+  let activityExpanded = $state(false);
+  let analyticsLoading = $state(false);
+  let analyticsLoaded = $state(false);
+  let analyticsError = $state("");
+  let loadGeneration = 0;
   let totalCompleted = $state(0);
   let totalEditedNotes = $state(0);
   let hoveredDay: { date: string; count: number; x: number; y: number; label: string } | null = $state(null);
@@ -73,16 +78,17 @@
     loadStats();
   });
 
-  async function loadStats() {
-    loading = true;
+  async function loadAnalytics(generation: number) {
+    analyticsLoading = true;
+    analyticsError = "";
     try {
-      const [counts, tasks, open, stats, noteCounts] = await Promise.all([
+      const [counts, tasks, stats, noteCounts] = await Promise.all([
         getCompletionCounts(HISTORY_DAYS),
         getCompletedTasks(HISTORY_DAYS),
-        listOpenTaskRows(),
         taskFlowStats(12),
         getNoteEditCounts(HISTORY_DAYS),
       ]);
+      if (generation !== loadGeneration) return;
       today = new Date();
       flow = stats;
       const map = new Map<string, number>();
@@ -100,13 +106,41 @@
       }
       noteEditMap = edits;
       completedTasks = tasks;
-      openTasks = open;
       totalCompleted = total;
       totalEditedNotes = editedTotal;
+      analyticsLoaded = true;
     } catch (e) {
-      console.error("Failed to load stats:", e);
+      console.error("Failed to load task analytics:", e);
+      if (generation === loadGeneration) {
+        analyticsError = "Could not load activity history.";
+      }
     } finally {
-      loading = false;
+      if (generation === loadGeneration) analyticsLoading = false;
+    }
+  }
+
+  async function loadStats() {
+    const generation = ++loadGeneration;
+    tasksLoading = true;
+    analyticsLoaded = false;
+    try {
+      const open = await listOpenTaskRows();
+      if (generation !== loadGeneration) return;
+      today = new Date();
+      openTasks = open;
+    } catch (e) {
+      console.error("Failed to load open tasks:", e);
+    } finally {
+      if (generation === loadGeneration) tasksLoading = false;
+    }
+
+    if (generation === loadGeneration && activityExpanded) await loadAnalytics(generation);
+  }
+
+  function toggleActivity() {
+    activityExpanded = !activityExpanded;
+    if (activityExpanded && !analyticsLoaded && !analyticsLoading) {
+      void loadAnalytics(loadGeneration);
     }
   }
 
@@ -424,7 +458,7 @@
   }
 
   $effect(() => {
-    if (loading) {
+    if (!activityExpanded || analyticsLoading || !analyticsLoaded) {
       scrolledHeatmapToEnd = false;
       return;
     }
@@ -438,8 +472,8 @@
       scrollHeatmapToLatest(note);
     });
   });
-  let taskGrid = $derived(generateGrid(completionMap, gridRange));
-  let noteEditGrid = $derived(generateGrid(noteEditMap, gridRange));
+  let taskGrid = $derived(analyticsLoaded ? generateGrid(completionMap, gridRange) : []);
+  let noteEditGrid = $derived(analyticsLoaded ? generateGrid(noteEditMap, gridRange) : []);
   let monthLabels = $derived(getMonthLabels(gridRange));
   let tasksByDate = $derived(groupByDate(completedTasks));
   let sortedDates = $derived([...tasksByDate.keys()].sort((a, b) => b.localeCompare(a)));
@@ -456,14 +490,31 @@
     <h1>Tasks</h1>
   </div>
 
-  {#if loading}
-    <div class="loading shimmer">Loading statistics...</div>
+  {#if tasksLoading}
+    <div class="loading shimmer">Loading tasks...</div>
   {:else}
     <!-- Sticky heatmap section -->
     <div class="heatmap-sticky">
-      <div class="heatmap-row">
-        <!-- Heatmap -->
-        <div class="heatmap-container">
+      <button
+        type="button"
+        class="activity-toggle"
+        aria-expanded={activityExpanded}
+        onclick={toggleActivity}
+      >
+        <span>{activityExpanded ? "Hide activity" : "Show activity"}</span>
+        <span aria-hidden="true">{activityExpanded ? "▴" : "▾"}</span>
+      </button>
+      {#if activityExpanded && analyticsLoading}
+        <div class="analytics-loading shimmer" role="status">Loading activity history...</div>
+      {:else if activityExpanded && analyticsError}
+        <div class="analytics-error" role="alert">
+          <span>{analyticsError}</span>
+          <button type="button" onclick={() => void loadAnalytics(loadGeneration)}>Retry</button>
+        </div>
+      {:else if activityExpanded && analyticsLoaded}
+        <div class="heatmap-row">
+          <!-- Heatmap -->
+          <div class="heatmap-container">
           <div class="activity-heatmaps">
             <div class="activity-heatmap-panel" bind:this={taskHeatmapEl}>
               <div class="heatmap-title-row">
@@ -591,6 +642,7 @@
           </div>
         </div>
       </div>
+      {/if}
     </div>
 
     <!-- Tooltip -->
@@ -605,7 +657,7 @@
       </div>
     {/if}
 
-    {#if selectedDay}
+    {#if activityExpanded && selectedDay}
       <section class="day-detail" aria-live="polite">
         <div class="day-detail-header">
           <div>
@@ -701,7 +753,7 @@
         </div>
       </div>
 
-      {#if flow?.oldest_open_days != null && flow.oldest_open_days > 14}
+      {#if activityExpanded && flow?.oldest_open_days != null && flow.oldest_open_days > 14}
         <p class="oldest-note">
           Your longest-waiting task has been open {flow.oldest_open_days} days.
         </p>
@@ -750,7 +802,7 @@
       {/if}
     </div>
 
-    {#if flow && flow.by_page.length > 1}
+    {#if activityExpanded && flow && flow.by_page.length > 1}
       <div class="by-page">
         <h2 class="section-heading">Where the work went</h2>
         <div class="page-bars">
@@ -768,47 +820,51 @@
       </div>
     {/if}
 
-    <!-- Completed tasks grouped by date -->
-    <div class="completed-tasks">
-      <h2 class="section-heading">Completed Tasks</h2>
-      {#if sortedDates.length === 0}
-        <div class="empty-state">
-          <p>No completed tasks yet. Click a TODO marker to cycle it to DONE.</p>
-        </div>
-      {:else}
-        {#each sortedDates as date}
-          <div class="date-group">
-            <div class="date-header">
-              <span class="date-text">{formatDate(date)}</span>
-              <span class="date-count">{tasksByDate.get(date)?.length ?? 0} task{(tasksByDate.get(date)?.length ?? 0) !== 1 ? "s" : ""}</span>
-            </div>
-            <div class="task-list">
-              {#each tasksByDate.get(date) ?? [] as task}
-                <div class="task-item">
-                  <div class="task-body">
-                    <button
-                      class="task-content task-open"
-                      onclick={(event) => handleRenderedTaskClick(event, task.block_id, task.page_title)}
-                      title={`Open ${task.page_title}`}
-                    >
-                      <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
-                    </button>
-                    <span class="task-meta">
-                      <button
-                        type="button"
-                        class="task-page"
-                        onclick={() => openTaskSource(task.page_title, task.block_id)}
-                      >{task.page_title}</button>
-                      <span class="task-time">{formatTime(task.timestamp)}</span>
-                    </span>
-                  </div>
-                </div>
-              {/each}
-            </div>
+    {#if activityExpanded}
+      <!-- Completed tasks grouped by date -->
+      <div class="completed-tasks">
+        <h2 class="section-heading">Completed Tasks</h2>
+        {#if analyticsLoading}
+          <div class="empty-state compact shimmer">Loading completed tasks...</div>
+        {:else if sortedDates.length === 0}
+          <div class="empty-state">
+            <p>No completed tasks yet. Click a TODO marker to cycle it to DONE.</p>
           </div>
-        {/each}
-      {/if}
-    </div>
+        {:else}
+          {#each sortedDates as date}
+            <div class="date-group">
+              <div class="date-header">
+                <span class="date-text">{formatDate(date)}</span>
+                <span class="date-count">{tasksByDate.get(date)?.length ?? 0} task{(tasksByDate.get(date)?.length ?? 0) !== 1 ? "s" : ""}</span>
+              </div>
+              <div class="task-list">
+                {#each tasksByDate.get(date) ?? [] as task}
+                  <div class="task-item">
+                    <div class="task-body">
+                      <button
+                        class="task-content task-open"
+                        onclick={(event) => handleRenderedTaskClick(event, task.block_id, task.page_title)}
+                        title={`Open ${task.page_title}`}
+                      >
+                        <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
+                      </button>
+                      <span class="task-meta">
+                        <button
+                          type="button"
+                          class="task-page"
+                          onclick={() => openTaskSource(task.page_title, task.block_id)}
+                        >{task.page_title}</button>
+                        <span class="task-time">{formatTime(task.timestamp)}</span>
+                      </span>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -844,6 +900,52 @@
     padding: 48px;
     text-align: center;
     color: var(--text-muted);
+  }
+
+  .analytics-loading {
+    min-height: 96px;
+    display: grid;
+    place-items: center;
+    color: var(--text-muted);
+  }
+
+  .analytics-error {
+    min-height: 96px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--text-muted);
+  }
+
+  .analytics-error button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    padding: 5px 9px;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .activity-toggle {
+    width: 100%;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .activity-toggle:hover,
+  .activity-toggle:focus-visible {
+    color: var(--text-primary);
   }
 
   /* Sticky heatmap */

@@ -11,9 +11,10 @@ For current outside information, use the research controls and review sources.
 While an answer is being produced, Chat stacks what it is doing in the
 transcript itself, above the answer: `Searching your notes`, `Thinking`,
 `Generating`, and for web research `Planning searches`, `Reading sources`,
-`Refining the search`. The step that is currently running shimmers, and a
-running total ticks beside it. Finished steps stay put with the time each one
-took, so you can see where a slow answer actually spent its time.
+`Refining the search`. The current status shimmers immediately, including while
+Chat waits for the first detailed step, and a running total ticks beside it.
+Finished steps stay put with the time each one took, so you can see where a slow
+answer actually spent its time.
 
 Each step appears only when the model or the research engine really reported
 it. If progress stops, the shimmer stops too and the row says so rather than

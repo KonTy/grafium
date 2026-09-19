@@ -28,10 +28,9 @@ The same writing becomes something you can find, follow, act on, and remember.
 
 Grafium keeps each block an **addressable piece of knowledge**. Nest an outline,
 select groups of blocks, and edit Markdown in place: click into a block to work
-with its source, then move away to read the rendered result. For continuous
-cross-block text selection, try the per-page **Experimental continuous editor**;
-the classic editor remains available. Both preserve individual block identities
-in SQLite. A page is not flattened into one giant database record.
+with its source, then move away to read the rendered result. Block identities
+remain preserved in SQLite. A page is not flattened into one giant database
+record.
 
 1. **Open Grafium.** A self-contained Welcome graph gives you real notes, links,
    tasks, tables, queries, and flashcards to explore. No AI setup is needed for the tour.
@@ -94,7 +93,6 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Feature | What you can do |
 | --- | --- |
 | Block selection | Shift+Up/Down selects text first, then whole blocks at the edge, including across journal days. Reverse direction to shrink the selection; copy, cut, delete, and undo work on the group without merging its stored blocks. Deleting keeps the caret at the gap: start of the next block, end of the previous block if no next block remains, or an editable blank on an emptied page. |
-| Experimental continuous editor | Opt into a one-surface editor for cross-block text selection on an individual page or journal day; switch back to the classic editor at any time. |
 | In-place Markdown | Edit a focused block as source and read it as rendered Markdown when you leave it. |
 | Nested outlines | Indent, outdent, reorder, fold, and expand blocks and their children. |
 | Bullet threading | Follow the active outline branch with connected guides and elbows. |
@@ -120,8 +118,8 @@ your draft intact. Earlier standalone Markdown note files remain supported and
 are not automatically moved or deleted. Your annotations are kept separate from
 the book evidence used by AI research. A misplaced inline note can be reattached
 within its source file; moving it to a different file is not yet supported.
-For passage selection, use the classic editor when an imported file has no saved
-block IDs; the experimental continuous editor reports this rather than guessing.
+Passage selection requires saved block IDs; imported files without them are not
+guessed into a different block.
 
 ### Journals, calendars, and tasks
 

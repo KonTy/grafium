@@ -31,7 +31,7 @@ This is a real local SVG, bundled with the sample. A diagram can clarify the geo
 
 ## Emoji and symbolic icons
 
-Type `/emoji rocket` to find an emoji, `/icon star` to find a symbolic icon, or `/em star` to search both sets. Use the completion list to choose. The picker works in the classic and experimental continuous editors.
+Type `/emoji rocket` to find an emoji, `/icon star` to find a symbolic icon, or `/em star` to search both sets. Use the completion list to choose.
 
 🚀 Ready for another observation. :icon-star: Keep a useful idea in view.
 

@@ -85,7 +85,7 @@ describe("busy labels shimmer", () => {
     ["components/JournalView.svelte", "Loading journals"],
     ["components/GoToLink.svelte", "Loading pages"],
     ["components/FolderBrowser.svelte", "Loading..."],
-    ["components/Statistics.svelte", "Loading statistics"],
+    ["components/Statistics.svelte", "Loading tasks"],
     ["components/UnifiedPageEditor.svelte", "Loading source"],
     ["components/ReadingNotesPanel.svelte", "Loading notes"],
     ["components/ReferencePanel.svelte", "Loading conflicts"],
