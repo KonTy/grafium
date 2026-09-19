@@ -29,14 +29,19 @@ claims and save only checked conclusions back into your notes.
 ## What Chat forgets
 
 Chat keeps your conversations and reloads them when you reopen Grafium, but the
-model is not sent all of one. Recent turns go word for word; older ones are cut
-to a single short line each. The cut is mechanical — nothing summarizes your old
-turns, and nothing searches them for the part relevant to your question.
+model is not sent all of one. Recent turns go in full unless one is enormous;
+older ones are cut to a single short line each. The cut is mechanical — nothing
+summarizes your old turns, and nothing searches them for the part relevant to
+your question.
 
 So a detail you mentioned thirty turns ago is likely gone, even though you can
 still scroll up and read it. Your **notes** are searched by meaning and they
 last; a conversation is scratch paper. Ask Chat to save anything worth keeping
-into a page. [[Help - Chat]] sets out exactly what survives and what doesn't.
+into a page.
+
+Clear the scratch paper with the **trash** button above the chat list: it takes
+every chat when nothing is selected, or just the ones you tick. [[Help - Chat]]
+sets out exactly what survives and what doesn't.
 
 ## Ask a question you can check
 

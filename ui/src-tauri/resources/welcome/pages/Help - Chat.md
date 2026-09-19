@@ -163,6 +163,24 @@ conversation you've started.
 - Opening Chat from a page gives that page its own conversation, so asking
   about one note doesn't disturb a thread about something else.
 
+## Clearing chats out
+
+The **trash** button at the top of the chat list does one of two things,
+depending on whether you have anything selected.
+
+- With **nothing selected**, it deletes every chat in the list.
+- **Hover a chat** to reveal a checkbox on its left. Tick one and the trash
+  button switches to deleting only what you ticked. Shift-click a second chat
+  to take everything between the two. The heading changes to "3 selected" so
+  you can see the button's reach before you press it.
+- Either way you're asked to confirm, and the question names exactly what is
+  about to go — "Delete all 7 chats?" or "Delete 3 selected chats?". If any of
+  them are mid-answer, it says so: deleting stops that work.
+- **Escape** clears the selection.
+
+Deleting is permanent. There is no undo and no trash to recover from, so read
+the confirmation rather than clicking through it.
+
 This is the practical fix for a follow-up being answered as if it were about an
 earlier subject: keep separate subjects in separate chats, and each one's
 history stays clean.
