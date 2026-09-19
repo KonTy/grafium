@@ -70,4 +70,39 @@ describe("narrow-screen guards", () => {
     // readable -- the thing WebKitGTK gets wrong for nested flex containers.
     expect(styleOf("AIWritingPanel.svelte")).toContain(".actions button { flex: 1 0 auto; }");
   });
+
+  it("takes the chat list out of flow below the drawer breakpoint", () => {
+    // Measured at a 320px viewport: the inline list left the conversation
+    // 156px of a 300px host. As an off-canvas drawer the conversation gets
+    // the full 300px, and it stays 300px while the drawer is open because
+    // the drawer overlays rather than displaces.
+    const css = styleOf("ChatSwitcher.svelte");
+    const drawer = css.slice(css.indexOf("@media (max-width: 560px)"));
+    expect(drawer, "ChatSwitcher lost its drawer breakpoint").not.toBe("");
+    expect(ruleIn(drawer, ".switcher")).toContain("position: absolute");
+    expect(ruleIn(drawer, ".switcher")).toContain("transform: translateX(-102%)");
+    // Out of flow but still on the page is a tab stop the user cannot see.
+    expect(ruleIn(drawer, ".switcher:not(.open)")).toContain("visibility: hidden");
+    expect(ruleIn(drawer, ".switcher.open")).toContain("transform: translateX(0)");
+  });
+
+  it("only shows the chat drawer toggle where the drawer exists", () => {
+    // The toggle and its scrim are dead weight on a desktop width, where the
+    // list is always beside the conversation.
+    const css = styleOf("ChatView.svelte");
+    expect(ruleIn(css, ".chat-bar")).toContain("display: none");
+    expect(ruleIn(css, ".scrim")).toContain("display: none");
+    const narrow = css.slice(css.indexOf("@media (max-width: 560px)"));
+    expect(narrow, "ChatView lost its drawer breakpoint").not.toBe("");
+    expect(ruleIn(narrow, ".chat-bar")).toContain("display: flex");
+    expect(ruleIn(narrow, ".scrim")).toContain("display: block");
+  });
+
+  it("anchors the chat drawer to the conversation host", () => {
+    // An absolutely positioned drawer with no positioned ancestor escapes to
+    // the viewport and covers the app chrome.
+    expect(ruleIn(styleOf("ChatView.svelte"), ".conversation-host")).toContain(
+      "position: relative",
+    );
+  });
 });

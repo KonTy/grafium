@@ -18,6 +18,9 @@
   let error = $state("");
   let ready = $state(false);
   let graphPath = $state("");
+  // Only meaningful below the drawer breakpoint; above it the list is always
+  // beside the conversation and CSS ignores this.
+  let drawerOpen = $state(false);
   // Stored conversations are read once per graph, not once per mount: Chat is
   // opened and closed constantly and re-reading would flicker the list.
   let restored = "";
@@ -51,15 +54,48 @@
   });
 </script>
 
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === "Escape" && drawerOpen) {
+      drawerOpen = false;
+      event.stopPropagation();
+    }
+  }}
+/>
+
 <div class="chat-view">
   {#if error}<p role="alert">{error}</p>{/if}
   {#if thread}
+    <div class="chat-bar">
+      <button
+        type="button"
+        class="chats-toggle"
+        aria-expanded={drawerOpen}
+        aria-controls="chat-switcher"
+        onclick={() => (drawerOpen = !drawerOpen)}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M3 6h18M3 12h18M3 18h18" />
+        </svg>
+        Chats
+      </button>
+    </div>
     <div class="conversation-host" hidden={!ready} inert={!ready}>
       <ChatSwitcher
         {graphPath}
         currentId={thread.id}
-        onSelect={(next) => { thread = next; error = ""; }}
+        open={drawerOpen}
+        onSelect={(next) => { thread = next; error = ""; drawerOpen = false; }}
       />
+      {#if drawerOpen}
+        <!-- Tapping the conversation is the obvious way to dismiss a drawer. -->
+        <button
+          type="button"
+          class="scrim"
+          aria-label="Close the chat list"
+          onclick={() => (drawerOpen = false)}
+        ></button>
+      {/if}
       <AssistantConversation {thread} active={active && ready} {onOpenSettings} {onNavigate} {onFindLinks} />
     </div>
   {/if}
@@ -68,8 +104,40 @@
 
 <style>
   .chat-view { display: flex; flex-direction: column; box-sizing: border-box; flex: 1; min-width: 0; min-height: 0; height: 100%; padding: 16px 24px; color: var(--text-primary); background: var(--bg-primary); }
-  .conversation-host { display: flex; flex: 1; min-height: 0; min-width: 0; }
+  /* Positions the off-canvas chat list below the drawer breakpoint. */
+  .conversation-host { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .conversation-host[hidden] { display: none; }
   p { margin: 0 0 8px; color: var(--danger, #c0392b); font-size: 13px; }
+  /* The list sits beside the conversation on anything wide enough to hold both,
+     so the toggle and its scrim only exist below the breakpoint. */
+  .chat-bar { display: none; }
+  .scrim { display: none; }
   @media (max-width: 640px) { .chat-view { padding: 10px; } }
+  @media (max-width: 560px) {
+    .chat-bar { display: flex; align-items: center; margin-bottom: 8px; }
+    .chats-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 32px;
+      padding: 4px 10px;
+      border: 1px solid var(--border-color, #ddd);
+      border-radius: 6px;
+      background: var(--bg-secondary, #f5f5f5);
+      color: var(--text-primary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .scrim {
+      display: block;
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: rgba(0, 0, 0, 0.38);
+      cursor: pointer;
+    }
+  }
 </style>

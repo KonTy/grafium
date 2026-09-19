@@ -12,10 +12,12 @@
   } from "../lib/chatSelection";
   import { SvelteSet } from "svelte/reactivity";
 
-  let { graphPath, currentId, onSelect }: {
+  let { graphPath, currentId, onSelect, open = false }: {
     graphPath: string;
     currentId: string | null;
     onSelect: (thread: AssistantThread) => void;
+    /** Only consulted below the drawer breakpoint, where the list is off-canvas. */
+    open?: boolean;
   } = $props();
 
   let renamingId = $state<string | null>(null);
@@ -173,7 +175,7 @@
   }
 </script>
 
-<div class="switcher" class:selecting={selected.size > 0}>
+<div id="chat-switcher" class="switcher" class:selecting={selected.size > 0} class:open>
   <div class="switcher-head">
     <h2>{selected.size > 0 ? `${selected.size} selected` : "Chats"}</h2>
     <button
@@ -302,4 +304,40 @@
   .context-menu-item { display: flex; align-items: center; width: 100%; padding: 7px 10px; background: none; border: none; border-radius: 4px; color: var(--text-secondary); font-size: 13px; cursor: pointer; text-align: left; }
   .context-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
   @media (max-width: 640px) { .switcher { width: 132px; } }
+
+  /* Below this the list and the conversation cannot share a row: 132px of chat
+     list plus its margins left under half a 320px screen for the conversation
+     itself. It becomes an off-canvas drawer that ChatView opens. */
+  @media (max-width: 560px) {
+    .switcher {
+      position: absolute;
+      inset: 0 auto 0 0;
+      z-index: 20;
+      width: min(240px, 78vw);
+      padding: 10px;
+      margin-right: 0;
+      border-right: 1px solid var(--border-color, #ddd);
+      background: var(--bg-primary);
+      box-shadow: 4px 0 18px rgba(0, 0, 0, 0.32);
+      transform: translateX(-102%);
+      /* visibility flips at 0% when opening and 100% when closing, so the
+         panel stays on screen for its slide-out instead of vanishing. */
+      transition: transform 160ms ease, visibility 160ms;
+    }
+
+    .switcher.open {
+      transform: translateX(0);
+    }
+
+    /* A closed drawer must not be a tab stop parked off-screen. */
+    .switcher:not(.open) {
+      visibility: hidden;
+    }
+  }
+
+  @media (max-width: 560px) and (prefers-reduced-motion: reduce) {
+    .switcher {
+      transition: none;
+    }
+  }
 </style>
