@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    emit_build_stamp();
+
     // Must run *before* `tauri_build::build()`: that call validates
     // `bundle.resources` globs from `tauri.conf.json` immediately and fails
     // the build if they don't match anything yet, so the native libraries
@@ -27,6 +29,120 @@ fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
     tauri_build::build();
+}
+
+/// Records the revision the binary was built from, so a running Grafium can
+/// say which code it actually contains.
+///
+/// `CARGO_PKG_VERSION` alone cannot answer that: it is hand-bumped, so it
+/// stays identical across dozens of commits. Without a commit stamp the only
+/// way to check whether a deployed binary is current is to compare file
+/// hashes against a fresh build — and since that is tedious, the real-world
+/// answer is to assume it is current and unknowingly test stale code.
+fn emit_build_stamp() {
+    let sha = git(&["rev-parse", "--short=7", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .map(|status| !status.is_empty())
+        .unwrap_or(false);
+
+    println!("cargo:rustc-env=GRAFIUM_GIT_SHA={sha}");
+    println!(
+        "cargo:rustc-env=GRAFIUM_GIT_DIRTY={}",
+        if dirty { "1" } else { "0" }
+    );
+    println!("cargo:rustc-env=GRAFIUM_BUILD_TIME={}", build_timestamp());
+
+    watch_git_head();
+}
+
+/// Declares the Git files whose contents decide the stamp above.
+///
+/// These are mandatory, not an optimisation. This build script emits other
+/// `rerun-if-changed` lines, which switches Cargo out of its default "rerun
+/// when anything in the package changed" mode and into "rerun only when a
+/// declared path changed". Committing or switching branches modifies no file
+/// inside this package, so without these the stamp would keep reporting
+/// whichever revision was checked out the last time the script happened to
+/// run. A version indicator that silently lies is worse than none at all,
+/// because it actively justifies testing the wrong build.
+fn watch_git_head() {
+    // `--git-path` resolves these correctly inside a linked worktree, where
+    // `.git` is a file and HEAD lives under `.git/worktrees/<name>/`.
+    for path in ["HEAD", "index"] {
+        if let Some(resolved) = git(&["rev-parse", "--git-path", path]) {
+            println!("cargo:rerun-if-changed={resolved}");
+        }
+    }
+    // HEAD only holds `ref: refs/heads/<branch>` on a branch, so committing
+    // moves the ref file rather than HEAD itself.
+    if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(resolved) = git(&["rev-parse", "--git-path", &head_ref]) {
+            println!("cargo:rerun-if-changed={resolved}");
+        }
+    }
+}
+
+/// Runs `git` in the crate directory, returning trimmed stdout on success.
+///
+/// Every failure mode maps to `None` so that building from a source tarball,
+/// or on a machine without Git, still succeeds with an `unknown` revision
+/// rather than breaking the build.
+fn git(args: &[&str]) -> Option<String> {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").ok()?;
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(manifest_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.trim().to_string())
+}
+
+fn build_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since_epoch| since_epoch.as_secs() as i64)
+        .unwrap_or(0);
+    format_utc(seconds)
+}
+
+/// Formats a Unix timestamp as `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// Hand-rolled to keep `[build-dependencies]` at just `tauri-build`: pulling
+/// a date crate in here would add it to every clean build of the app for the
+/// sake of one formatted string. The calendar conversion is Howard
+/// Hinnant's `civil_from_days`, which is exact for all dates in range.
+fn format_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+
+    // Shift the epoch to 0000-03-01 so leap days land at the end of the
+    // cycle, which is what makes the era arithmetic below branch-free.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60
+    )
 }
 
 /// `llama-cpp-2`'s `dynamic-link` feature builds llama.cpp/GGML as shared

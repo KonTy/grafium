@@ -44,6 +44,56 @@ fi
 
 mkdir -p "$bin_dir" "$lib_dir"
 
+# Refuse to install a binary compiled from a different revision than the
+# checkout it is being deployed from.
+#
+# This is the counterpart to the frontend check above, for the same class of
+# invisible failure. Cargo will happily leave an older `target/release/grafium`
+# in place when a rebuild is skipped or fails after the previous one
+# succeeded, and nothing about the resulting deploy looks wrong — you get a
+# working app that is simply not the code you just wrote, which reads as "my
+# change did nothing".
+#
+# The binary reports its own revision via `--version` (see
+# `ui/src-tauri/build.rs`), so this compares what is actually inside it
+# against HEAD rather than trusting timestamps.
+head_sha=""
+version_line=""
+if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+  head_sha="$(git -C "$repo_root" rev-parse --short=7 HEAD)"
+
+  # A binary built before stamping existed does not understand `--version`
+  # and would try to open its GUI instead, so cap how long this can block.
+  runner=(env "LD_LIBRARY_PATH=$build_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+  command -v timeout >/dev/null 2>&1 && runner=(timeout 20s "${runner[@]}")
+  version_line="$("${runner[@]}" "$binary" --version 2>/dev/null </dev/null || true)"
+  built_sha="$(sed -n 's/.*commit \([0-9a-f]\{7,\}\).*/\1/p' <<<"$version_line")"
+
+  if [[ -z "$built_sha" ]]; then
+    echo "warning: $binary does not report a revision; cannot verify it is current" >&2
+  elif [[ "$built_sha" != "$head_sha" ]]; then
+    echo "error: binary was built from commit $built_sha, but this checkout is at $head_sha" >&2
+    echo "       installing it would deploy code that is not what you have checked out" >&2
+    echo "hint:  cd ui && npm run build && cd .. && cargo build --release -p grafium" >&2
+    exit 1
+  fi
+
+  if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=no)" ]]; then
+    echo "warning: working tree has uncommitted changes; the build may not match commit $head_sha" >&2
+  fi
+
+  # Being in sync with the *checkout* still leaves you behind everyone else.
+  # Note this reads the local remote-tracking ref, which a `git fetch` has to
+  # have updated to mean anything.
+  if upstream="$(git -C "$repo_root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+    behind="$(git -C "$repo_root" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)"
+    if [[ "$behind" -gt 0 ]]; then
+      echo "warning: HEAD is $behind commit(s) behind $upstream — you are deploying old code" >&2
+      echo "         (run 'git fetch' first; this compares against the last fetched state)" >&2
+    fi
+  fi
+fi
+
 # The launcher sets LD_LIBRARY_PATH rather than relying on the binary's
 # RPATH, so the libraries can live in a plain ~/.local/lib alongside
 # everything else instead of a Grafium-specific directory.
@@ -87,3 +137,12 @@ if command -v ldd >/dev/null 2>&1; then
 fi
 
 echo "ok: run 'grafium' (or use the desktop entry)"
+
+# Always end by stating exactly what is now installed, so the answer to
+# "which build am I testing?" is visible at deploy time instead of needing to
+# be reconstructed later.
+if [[ -n "$version_line" ]]; then
+  echo "installed build: $version_line"
+elif [[ -n "$head_sha" ]]; then
+  echo "installed build: commit $head_sha (binary predates --version support)"
+fi

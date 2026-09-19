@@ -364,6 +364,39 @@ libraries: distribute the package, not just a bare executable copied elsewhere.
 Keep `custom-protocol` as a crate feature rather than enabling it directly on the
 `tauri` dependency, so development loads Vite and releases embed the built frontend.
 
+### Knowing which build you are running
+
+The release number in `Cargo.toml` is hand-bumped, so it stays the same across
+many commits and cannot tell you whether a binary is current. Every build
+therefore also records the commit it was compiled from:
+
+```bash
+grafium --version
+# Grafium 0.0.123 (commit f8cb86e, built 2026-09-19T05:19:07Z)
+```
+
+The same string appears in the app under **Settings → About**, so you can check
+a running instance without going back to a terminal. A `dirty` marker means the
+build included uncommitted changes and therefore corresponds to no commit at
+all.
+
+`scripts/deploy-local.sh` installs a local build into `~/.local` and enforces
+this. It **refuses** to install when:
+
+- the frontend in `ui/dist` is newer than the binary, which would ship the
+  previous interface embedded in an otherwise-new executable, or
+- the binary's recorded commit differs from the current checkout, which happens
+  whenever a rebuild is skipped or fails after an earlier one succeeded.
+
+It also warns when the working tree is dirty, and when `HEAD` is behind its
+upstream branch — that last one compares against the most recently fetched
+state, so run `git fetch` first for it to mean anything. Each run ends by
+printing the build it installed.
+
+These checks exist because every one of these failures is invisible: the build
+succeeds, the app starts, and it simply is not the code you expected, which
+reads as "my change did nothing" and sends you hunting a bug that is not there.
+
 <details>
 <summary>Optional import tools and other interfaces</summary>
 

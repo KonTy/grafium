@@ -484,7 +484,7 @@ pub fn remove_graph(app: AppHandle, path: String) -> Result<(), String> {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    crate::build_info::short()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,3 +1,4 @@
+pub mod build_info;
 mod commands;
 mod welcome;
 
