@@ -100,7 +100,9 @@
   // Sorted first, then filtered. Filtering preserves order, so ordering the
   // whole tree once per sort change beats re-sorting the filtered result on
   // every keystroke — the sort is the expensive half.
-  let sortedTree = $derived(sortTree(pageTree, sortByTitle ? "name" : "recent"));
+  let sortedTree = $derived(
+    sortTree(pageTree, sortByTitle ? "name" : "recent", treeSource === "namespace"),
+  );
   let visibleTree = $derived(filterTreeByQuery(sortedTree, filterQuery));
   let filteredCount = $derived(countTreePages(visibleTree));
 
@@ -974,6 +976,7 @@
         <PageTree
           nodes={visibleTree}
           columns
+          pinSpecialFolders={treeSource === "namespace"}
           revealToken={filterQuery.trim()}
           {onNavigate}
           onPageContextMenu={handleTreeNodeMenu}

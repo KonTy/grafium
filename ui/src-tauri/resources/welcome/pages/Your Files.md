@@ -19,6 +19,8 @@ This is why a page can appear in **All Pages** and in the namespace tree, yet be
 
 The filter applies to list and tree view alike, and is remembered per graph. Note that **Placeholders** empties the namespace tree of most of its structure, and **Files** empties the tag tree almost entirely — tag pages are usually the placeholders.
 
+The namespace tree keeps Grafium's **Books**, **ImportedMedia**, and **Reading Notes** folders at the top in a fixed order. Their distinct book, media, and note icons make those app-managed locations recognizable. This does not affect the tag tree or same-named folders nested elsewhere.
+
 The file watcher notices external Markdown changes and updates the index. Avoid editing the same page simultaneously in two editors. Watching local edits and synchronizing a graph are separate features.
 
 ## Sync to another location

@@ -5,7 +5,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
-const SEED_VERSION: u8 = 14;
+const SEED_VERSION: u8 = 15;
 
 struct Resource {
     path: &'static str,
@@ -197,7 +197,9 @@ pub(crate) fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Resu
     check_directory(graph_root)?;
     let metadata_path = graph_root.join(metadata_dir);
     check_directory(&metadata_path)?;
-    if inspect(&metadata_path.join("tutorial-seeded-v14"))?.is_some() {
+    if inspect(&metadata_path.join("tutorial-seeded-v15"))?.is_some()
+        || inspect(&metadata_path.join("tutorial-seeded-v14"))?.is_some()
+    {
         return Ok(false);
     }
     // Older Welcome graphs can contain several historical markers without
@@ -271,7 +273,7 @@ pub(crate) fn seed_tutorial_graph(graph_root: &Path, metadata_dir: &str) -> Resu
     for resource in RESOURCES {
         write_new_file(&graph_root.join(resource.path), resource.content)?;
     }
-    write_new_file(&graph_root.join(marker), "seeded_v14\n")?;
+    write_new_file(&graph_root.join(marker), "seeded_v15\n")?;
     Ok(true)
 }
 

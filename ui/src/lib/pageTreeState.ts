@@ -62,6 +62,27 @@ export const ALL_PAGES_SORT_STORAGE_KEY = "grafium.pageTree.allPages.sort";
 export const ALL_PAGES_KIND_STORAGE_KEY = "grafium.pageTree.allPages.kind";
 
 /**
+ * Keep in sync with BOOKS_ROOT in core/src/import/books.rs,
+ * IMPORTED_MEDIA_FOLDER in ui/src-tauri/src/commands/media.rs, and DIRECTORY
+ * in core/src/graph/reading_notes.rs.
+ */
+export const SPECIAL_FOLDERS = [
+  { id: "namespace:Books", icon: "book" },
+  { id: "namespace:ImportedMedia", icon: "media" },
+  { id: "namespace:Reading Notes", icon: "note" },
+] as const;
+
+export type SpecialFolder = (typeof SPECIAL_FOLDERS)[number];
+
+const SPECIAL_FOLDER_BY_ID = new Map<string, SpecialFolder>(
+  SPECIAL_FOLDERS.map((folder) => [folder.id, folder]),
+);
+
+export function getSpecialFolder(id: string): SpecialFolder | undefined {
+  return SPECIAL_FOLDER_BY_ID.get(id);
+}
+
+/**
  * Which kinds of page All Pages is showing. "filed" means a markdown file
  * exists on disk; "virtual" means the page is only a placeholder, conjured by
  * a [[link]] or a #tag that nothing has written yet. Mirrors `PageKindFilter`
@@ -499,6 +520,7 @@ const LABEL_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
 export function sortTree(
   nodes: readonly PageTreeViewNode[],
   mode: PageTreeSortMode,
+  pinSpecialFolders = false,
 ): PageTreeViewNode[] {
   // `sensitivity: "base"` treats `Cafe`/`café` and `Foo`/`foo` as equal, so it
   // cannot order them on its own; the id breaks the remaining tie to give a
@@ -518,20 +540,32 @@ export function sortTree(
     return within(a, b);
   };
 
+  const compareRoot = (a: PageTreeViewNode, b: PageTreeViewNode) => {
+    const aPinned = a.page_id === null ? getSpecialFolder(a.id) : undefined;
+    const bPinned = b.page_id === null ? getSpecialFolder(b.id) : undefined;
+    if (aPinned && bPinned) {
+      return SPECIAL_FOLDERS.indexOf(aPinned) - SPECIAL_FOLDERS.indexOf(bPinned);
+    }
+    if (aPinned || bPinned) return aPinned ? -1 : 1;
+    return compare(a, b);
+  };
+
   // Iterative: depth here is a page title's segment count, which is user data,
   // and a deeply nested tag would overflow the stack on the way down.
   const sorted = nodes.map((node) => ({ ...node, children: [...node.children] }));
-  const stack: PageTreeViewNode[][] = [sorted];
+  const stack: Array<{ level: PageTreeViewNode[]; root: boolean }> = [
+    { level: sorted, root: true },
+  ];
   while (stack.length > 0) {
-    const level = stack.pop()!;
-    level.sort(compare);
+    const { level, root } = stack.pop()!;
+    level.sort(root && pinSpecialFolders ? compareRoot : compare);
     for (const node of level) {
       if (node.children.length === 0) continue;
       node.children = node.children.map((child) => ({
         ...child,
         children: [...child.children],
       }));
-      stack.push(node.children);
+      stack.push({ level: node.children, root: false });
     }
   }
   return sorted;

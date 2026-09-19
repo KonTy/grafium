@@ -341,6 +341,15 @@ describe("sortTree", () => {
   });
 
   const labels = (nodes: PageTreeViewNode[]) => nodes.map((n) => n.label);
+  const folder = (
+    label: string,
+    updated_at: number,
+    source: "namespace" | "tags" = "namespace",
+  ): PageTreeViewNode => ({
+    ...node(label, updated_at, [node(`${label}/child`, updated_at)]),
+    id: `${source}:${label}`,
+    page_id: null,
+  });
 
   it("puts folders first, then names, when sorting by name", () => {
     const sorted = sortTree(
@@ -377,6 +386,53 @@ describe("sortTree", () => {
       "recent",
     );
     expect(labels(sorted)).toEqual(["zzz-new-book", "aaa-old-book", "loose"]);
+  });
+
+  it.each(["name", "recent"] as const)(
+    "pins special folders in declaration order when sorting by %s",
+    (mode) => {
+      const sorted = sortTree(
+        [
+          folder("Reading Notes", 900),
+          folder("Other", 1_000),
+          folder("ImportedMedia", 100),
+          folder("Books", 500),
+        ],
+        mode,
+        true,
+      );
+      expect(labels(sorted)).toEqual(["Books", "ImportedMedia", "Reading Notes", "Other"]);
+    },
+  );
+
+  it("does not pin a nested folder with a special name", () => {
+    const projects = node("Projects", 1_000, [
+      folder("Books", 100),
+      folder("Recent", 900),
+    ]);
+    const sorted = sortTree([projects], "recent", true);
+    expect(labels(sorted[0].children)).toEqual(["Recent", "Books"]);
+  });
+
+  it("does not pin special names in the tag tree", () => {
+    const sorted = sortTree(
+      [
+        folder("Books", 100, "tags"),
+        folder("ImportedMedia", 500, "tags"),
+        folder("Reading Notes", 900, "tags"),
+      ],
+      "recent",
+      true,
+    );
+    expect(labels(sorted)).toEqual(["Reading Notes", "ImportedMedia", "Books"]);
+  });
+
+  it("leaves namespace folders on the normal sort when pinning is disabled", () => {
+    const sorted = sortTree(
+      [folder("Books", 100), folder("ImportedMedia", 500), folder("Reading Notes", 900)],
+      "recent",
+    );
+    expect(labels(sorted)).toEqual(["Reading Notes", "ImportedMedia", "Books"]);
   });
 
   it("sorts children too, at every level", () => {

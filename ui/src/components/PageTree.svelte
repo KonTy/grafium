@@ -9,6 +9,7 @@
     pruneExpansionState,
     reduceTreeNavigation,
     saveExpansionState,
+    getSpecialFolder,
     type PageTreeViewNode,
   } from "../lib/pageTreeState";
 
@@ -31,6 +32,8 @@
     revealToken?: string;
     /** Flow top-level branches into as many columns as the width allows. */
     columns?: boolean;
+    /** Use the special namespace-folder icons in the All Pages tree. */
+    pinSpecialFolders?: boolean;
     onPageContextMenu?: (event: MouseEvent, node: PageTreeViewNode) => void;
     hasPageMenu?: (node: PageTreeViewNode) => boolean;
   }
@@ -45,6 +48,7 @@
     emptyText = "No pages in this tree.",
     revealToken = "",
     columns = false,
+    pinSpecialFolders = false,
     onPageContextMenu,
     hasPageMenu,
   }: Props = $props();
@@ -275,6 +279,9 @@
       {#each rowGroups as group (group[0].id)}
         <div class="tree-group" role="none">
           {#each group as row (row.id)}
+            {@const specialFolder = pinSpecialFolders && row.node.page_id === null
+              ? getSpecialFolder(row.node.id)
+              : undefined}
             <div
               class="tree-row"
               role="none"
@@ -321,7 +328,23 @@
                     <span class="disclosure-spacer" aria-hidden="true"></span>
                   {/if}
                   <span class="node-icon" aria-hidden="true">
-                    {#if row.node.page_id === null}
+                    {#if specialFolder?.icon === "book"}
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M2.25 2.25h3.5A2.25 2.25 0 0 1 8 4.5v9.25A2.25 2.25 0 0 0 5.75 11.5h-3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+                        <path d="M13.75 2.25h-3.5A2.25 2.25 0 0 0 8 4.5v9.25a2.25 2.25 0 0 1 2.25-2.25h3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+                      </svg>
+                    {:else if specialFolder?.icon === "media"}
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <rect x="1.75" y="3" width="12.5" height="10" rx="1.25" stroke="currentColor" stroke-width="1.25" />
+                        <path d="m2.25 10 3-3 2.25 2.25 1.5-1.5 4.75 4.75" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+                        <circle cx="10.75" cy="6.25" r="1.25" stroke="currentColor" stroke-width="1.25" />
+                      </svg>
+                    {:else if specialFolder?.icon === "note"}
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M3 1.75h7l3 3v9.5H3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+                        <path d="M10 1.75v3h3M5.25 7h5.5M5.25 9.5h5.5M5.25 12h3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    {:else if row.node.page_id === null}
                       <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                         <path d="M1.75 4.25h4l1.2 1.5h7.3v6.5a1.5 1.5 0 0 1-1.5 1.5h-11z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
                         <path d="M1.75 4.25v-1a1 1 0 0 1 1-1h2.4l1.2 1.5h6.4a1.5 1.5 0 0 1 1.5 1.5v.5" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
