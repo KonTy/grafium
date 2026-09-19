@@ -85,6 +85,18 @@ describe("checkbox box", () => {
   });
 });
 
+describe("chat selection row", () => {
+  it("does not draw an accent bar beside the checkbox", () => {
+    const chatSwitcher = declarationsOf(read("components/ChatSwitcher.svelte"));
+    const from = chatSwitcher.indexOf("li.picked {");
+    const picked = chatSwitcher.slice(from, chatSwitcher.indexOf("}", from));
+
+    expect(from, "missing selected chat row rule").toBeGreaterThan(-1);
+    expect(picked).toContain("background:");
+    expect(picked).not.toContain("box-shadow");
+  });
+});
+
 describe("checkbox styling lives in one place", () => {
   // Scanning every component rather than a hand-kept list: PageMenu had been
   // drawing a literal tick for as long as this test existed, and was simply

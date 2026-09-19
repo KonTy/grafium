@@ -10,8 +10,15 @@
     reduceTreeNavigation,
     saveExpansionState,
     getSpecialFolder,
+    type FlatTreeNode,
     type PageTreeViewNode,
   } from "../lib/pageTreeState";
+  import {
+    distributeTreeGroups,
+    treeColumnCount,
+    virtualizeTreeColumns,
+  } from "../lib/pageTreeVirtualization";
+  import { fuzzyMatches } from "../lib/fuzzy";
 
   interface Props {
     nodes: PageTreeViewNode[];
@@ -57,7 +64,17 @@
   let focusedId = $state<string | null>(null);
   let revealedPageId = $state<string | null>(null);
   let loadedStorageKey = $state<string | null>(null);
+  let treeElement = $state<HTMLDivElement | null>(null);
+  let treeViewportTop = $state(0);
+  let treeViewportHeight = $state(800);
+  let treeWidth = $state(0);
+  let virtualAnchorId = $state<string | null>(null);
+  let revealedToken = $state("");
   const itemElements = new Map<string, HTMLButtonElement>();
+  const COLUMN_GAP = 28;
+  const MIN_COLUMN_WIDTH = 22 * 16;
+  const MAX_COLUMNS = 4;
+  const VIRTUAL_OVERSCAN_PX = 340;
 
   const revealing = $derived(revealToken !== "");
 
@@ -92,6 +109,26 @@
 
   // Grouped so a folder is never split from its children by a column break.
   const rowGroups = $derived(groupRowsByRoot(visibleRows));
+  const rowStride = $derived(density === "compact" ? 30 : 34);
+  const assignedColumns = $derived(
+    columns
+      ? distributeTreeGroups(
+          rowGroups,
+          treeColumnCount(treeWidth, MIN_COLUMN_WIDTH, COLUMN_GAP, MAX_COLUMNS),
+        )
+      : [],
+  );
+  const virtualColumns = $derived(
+    columns
+      ? virtualizeTreeColumns(assignedColumns, {
+          scrollTop: treeViewportTop,
+          viewportHeight: treeViewportHeight,
+          rowStride,
+          overscanPx: VIRTUAL_OVERSCAN_PX,
+          anchorId: virtualAnchorId ?? focusedId,
+        })
+      : [],
+  );
 
   $effect(() => {
     const key = storageKey ?? null;
@@ -147,10 +184,12 @@
     );
     if (ancestors === null) return;
     revealedPageId = pageId;
-    if (ancestors.length === 0) return;
-    const next = new Set(expanded);
-    for (const id of ancestors) next.add(id);
-    if (next.size !== expanded.size) expanded = next;
+    if (ancestors.length > 0) {
+      const next = new Set(expanded);
+      for (const id of ancestors) next.add(id);
+      if (next.size !== expanded.size) expanded = next;
+    }
+    if (columns) void revealSelectedPage(pageId);
   });
 
   $effect(() => {
@@ -163,6 +202,51 @@
     focusedId =
       rows.find((row) => row.node.page_id === selectedPageId)?.id
       ?? rows[0].id;
+  });
+
+  $effect(() => {
+    if (!columns || !treeElement) return;
+    const scroller = treeElement.closest(".main-content") as HTMLElement | null;
+    if (!scroller) return;
+
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const scrollerRect = scroller.getBoundingClientRect();
+      const treeRect = treeElement!.getBoundingClientRect();
+      treeViewportTop = Math.max(0, scrollerRect.top - treeRect.top);
+      treeViewportHeight = scroller.clientHeight;
+      treeWidth = treeElement!.clientWidth;
+    };
+    const scheduleUpdate = () => {
+      if (frame === 0) frame = requestAnimationFrame(update);
+    };
+
+    update();
+    scroller.addEventListener("scroll", scheduleUpdate, { passive: true });
+    const observer = new ResizeObserver(scheduleUpdate);
+    observer.observe(scroller);
+    observer.observe(treeElement);
+    return () => {
+      scroller.removeEventListener("scroll", scheduleUpdate);
+      observer.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  });
+
+  $effect(() => {
+    const token = revealToken.trim();
+    const rows = visibleRows;
+    if (!columns || !token || token === revealedToken) {
+      if (!token) revealedToken = "";
+      return;
+    }
+    revealedToken = token;
+    const match = rows.find((row) => {
+      const path = row.node.page_title ?? row.node.id;
+      return fuzzyMatches(path, token) || fuzzyMatches(row.node.label, token);
+    });
+    if (match) void revealVirtualItem(match.id, false);
   });
 
   function registerTreeItem(element: HTMLButtonElement, id: string) {
@@ -178,6 +262,29 @@
         itemElements.delete(currentId);
       },
     };
+  }
+
+  async function revealVirtualItem(id: string, focus: boolean) {
+    if (columns) virtualAnchorId = id;
+    await tick();
+    const element = itemElements.get(id);
+    if (!element) {
+      if (virtualAnchorId === id) virtualAnchorId = null;
+      return;
+    }
+    element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (focus) element.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (virtualAnchorId === id) virtualAnchorId = null;
+      });
+    });
+  }
+
+  async function revealSelectedPage(pageId: string) {
+    await tick();
+    const row = visibleRows.find((candidate) => candidate.node.page_id === pageId);
+    if (row) await revealVirtualItem(row.id, false);
   }
 
   function setExpanded(id: string, shouldExpand: boolean) {
@@ -248,8 +355,7 @@
     if (current && result.activate) activateNode(current.node);
 
     focusedId = result.focus_id;
-    await tick();
-    if (focusedId) itemElements.get(focusedId)?.focus();
+    if (focusedId) await revealVirtualItem(focusedId, true);
   }
 
   function emitRowAction(event: MouseEvent, node: PageTreeViewNode) {
@@ -264,6 +370,112 @@
   }
 </script>
 
+{#snippet treeRow(row: FlatTreeNode<PageTreeViewNode>, virtualTop: number | null)}
+  {@const specialFolder = pinSpecialFolders
+    ? getSpecialFolder(row.node.id)
+    : undefined}
+  <div
+    class="tree-row"
+    class:virtual-row={virtualTop !== null}
+    role="none"
+    data-tree-node={row.id}
+    data-special-folder={specialFolder?.icon}
+    style={`--tree-depth: ${Math.min(row.level - 1, 12)}${virtualTop === null ? "" : `; --tree-row-top: ${virtualTop}px`}`}
+    oncontextmenu={(event) => emitRowAction(event, row.node)}
+  >
+    <div class="tree-row-inner">
+      <button
+        type="button"
+        class="tree-item"
+        class:grouping={row.node.page_id === null}
+        class:active={row.node.page_id !== null && row.node.page_id === selectedPageId}
+        role="treeitem"
+        aria-level={row.level}
+        aria-posinset={row.position}
+        aria-setsize={row.set_size}
+        aria-expanded={row.has_children ? effectiveExpanded.has(row.id) : undefined}
+        aria-selected={row.node.page_id !== null ? row.node.page_id === selectedPageId : undefined}
+        tabindex={focusedId === row.id ? 0 : -1}
+        use:registerTreeItem={row.id}
+        onclick={(event) => handleNodeClick(event, row.node, row.id, row.has_children)}
+        onfocus={() => { focusedId = row.id; }}
+      >
+        {#if row.has_children}
+          <span
+            class="disclosure"
+            data-disclosure
+            title={`${effectiveExpanded.has(row.id) ? "Collapse" : "Expand"} ${row.node.label}`}
+            aria-hidden="true"
+          >
+          <svg
+            class:expanded={effectiveExpanded.has(row.id)}
+            width="12"
+            height="12"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          </span>
+        {:else}
+          <span class="disclosure-spacer" aria-hidden="true"></span>
+        {/if}
+        <span class="node-icon" aria-hidden="true">
+          {#if specialFolder?.icon === "book"}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M2.25 2.25h3.5A2.25 2.25 0 0 1 8 4.5v9.25A2.25 2.25 0 0 0 5.75 11.5h-3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+              <path d="M13.75 2.25h-3.5A2.25 2.25 0 0 0 8 4.5v9.25a2.25 2.25 0 0 1 2.25-2.25h3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+            </svg>
+          {:else if specialFolder?.icon === "media"}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="1.75" y="3" width="12.5" height="10" rx="1.25" stroke="currentColor" stroke-width="1.25" />
+              <path d="m2.25 10 3-3 2.25 2.25 1.5-1.5 4.75 4.75" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+              <circle cx="10.75" cy="6.25" r="1.25" stroke="currentColor" stroke-width="1.25" />
+            </svg>
+          {:else if specialFolder?.icon === "note"}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M3 1.75h7l3 3v9.5H3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+              <path d="M10 1.75v3h3M5.25 7h5.5M5.25 9.5h5.5M5.25 12h3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          {:else if row.node.page_id === null}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M1.75 4.25h4l1.2 1.5h7.3v6.5a1.5 1.5 0 0 1-1.5 1.5h-11z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+              <path d="M1.75 4.25v-1a1 1 0 0 1 1-1h2.4l1.2 1.5h6.4a1.5 1.5 0 0 1 1.5 1.5v.5" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+            </svg>
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M3 1.75h6l4 4v8.5H3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+              <path d="M9 1.75v4h4" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+            </svg>
+          {/if}
+        </span>
+        <span class="node-label">{row.node.label}</span>
+        <span
+          class="node-count"
+          aria-label={`${row.node.count} ${row.node.count === 1 ? "page" : "pages"}`}
+        >
+          {row.node.count}
+        </span>
+      </button>
+      {#if nodeHasMenu(row.node)}
+        <button
+          type="button"
+          class="tree-action"
+          title={`Actions for ${row.node.label}`}
+          aria-label={`Actions for ${row.node.label}`}
+          aria-haspopup="menu"
+          tabindex={focusedId === row.id ? 0 : -1}
+          onclick={(event) => emitRowAction(event, row.node)}
+          onkeydown={(event) => {
+            if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+          }}
+        >⋯</button>
+      {/if}
+    </div>
+  </div>
+{/snippet}
+
 <section class="tree-shell" class:compact={density === "compact"}>
   {#if nodes.length === 0}
     <p class="tree-empty">{emptyText}</p>
@@ -275,114 +487,40 @@
       aria-label={ariaLabel}
       tabindex="-1"
       onkeydown={handleTreeKeydown}
+      bind:this={treeElement}
+      style:--tree-column-count={virtualColumns.length}
     >
-      {#each rowGroups as group (group[0].id)}
-        <div class="tree-group" role="none">
-          {#each group as row (row.id)}
-            {@const specialFolder = pinSpecialFolders
-              ? getSpecialFolder(row.node.id)
-              : undefined}
-            <div
-              class="tree-row"
-              role="none"
-              data-tree-node={row.id}
-              style={`--tree-depth: ${Math.min(row.level - 1, 12)}`}
-              oncontextmenu={(event) => emitRowAction(event, row.node)}
-            >
-              <div class="tree-row-inner">
-                <button
-                  type="button"
-                  class="tree-item"
-                  class:grouping={row.node.page_id === null}
-                  class:active={row.node.page_id !== null && row.node.page_id === selectedPageId}
-                  role="treeitem"
-                  aria-level={row.level}
-                  aria-posinset={row.position}
-                  aria-setsize={row.set_size}
-                  aria-expanded={row.has_children ? effectiveExpanded.has(row.id) : undefined}
-                  aria-selected={row.node.page_id !== null ? row.node.page_id === selectedPageId : undefined}
-                  tabindex={focusedId === row.id ? 0 : -1}
-                  use:registerTreeItem={row.id}
-                  onclick={(event) => handleNodeClick(event, row.node, row.id, row.has_children)}
-                  onfocus={() => { focusedId = row.id; }}
-                >
-                  {#if row.has_children}
-                    <span
-                      class="disclosure"
-                      data-disclosure
-                      title={`${effectiveExpanded.has(row.id) ? "Collapse" : "Expand"} ${row.node.label}`}
-                      aria-hidden="true"
-                    >
-                    <svg
-                      class:expanded={effectiveExpanded.has(row.id)}
-                      width="12"
-                      height="12"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      aria-hidden="true"
-                    >
-                      <path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
-                    </span>
-                  {:else}
-                    <span class="disclosure-spacer" aria-hidden="true"></span>
-                  {/if}
-                  <span class="node-icon" aria-hidden="true">
-                    {#if specialFolder?.icon === "book"}
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path d="M2.25 2.25h3.5A2.25 2.25 0 0 1 8 4.5v9.25A2.25 2.25 0 0 0 5.75 11.5h-3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                        <path d="M13.75 2.25h-3.5A2.25 2.25 0 0 0 8 4.5v9.25a2.25 2.25 0 0 1 2.25-2.25h3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                      </svg>
-                    {:else if specialFolder?.icon === "media"}
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <rect x="1.75" y="3" width="12.5" height="10" rx="1.25" stroke="currentColor" stroke-width="1.25" />
-                        <path d="m2.25 10 3-3 2.25 2.25 1.5-1.5 4.75 4.75" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
-                        <circle cx="10.75" cy="6.25" r="1.25" stroke="currentColor" stroke-width="1.25" />
-                      </svg>
-                    {:else if specialFolder?.icon === "note"}
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path d="M3 1.75h7l3 3v9.5H3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                        <path d="M10 1.75v3h3M5.25 7h5.5M5.25 9.5h5.5M5.25 12h3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
-                      </svg>
-                    {:else if row.node.page_id === null}
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path d="M1.75 4.25h4l1.2 1.5h7.3v6.5a1.5 1.5 0 0 1-1.5 1.5h-11z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                        <path d="M1.75 4.25v-1a1 1 0 0 1 1-1h2.4l1.2 1.5h6.4a1.5 1.5 0 0 1 1.5 1.5v.5" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                      </svg>
-                    {:else}
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path d="M3 1.75h6l4 4v8.5H3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                        <path d="M9 1.75v4h4" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                      </svg>
-                    {/if}
-                  </span>
-                  <span class="node-label">{row.node.label}</span>
-                  <span
-                    class="node-count"
-                    aria-label={`${row.node.count} ${row.node.count === 1 ? "page" : "pages"}`}
-                  >
-                    {row.node.count}
-                  </span>
-                </button>
-                {#if nodeHasMenu(row.node)}
-                  <button
-                    type="button"
-                    class="tree-action"
-                    title={`Actions for ${row.node.label}`}
-                    aria-label={`Actions for ${row.node.label}`}
-                    aria-haspopup="menu"
-                    tabindex={focusedId === row.id ? 0 : -1}
-                    onclick={(event) => emitRowAction(event, row.node)}
-                    onkeydown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") event.stopPropagation();
-                    }}
-                  >⋯</button>
-                {/if}
+      {#if columns}
+        {#each virtualColumns as column, columnIndex (columnIndex)}
+          <div
+            class="tree-column"
+            role="none"
+            data-tree-column={columnIndex}
+            style={`height: ${column.height}px`}
+          >
+            {#each column.groups as group (group.id)}
+              <div
+                class="tree-group"
+                role="none"
+                data-tree-group={group.id}
+                style={`top: ${group.top}px; height: ${group.height}px`}
+              >
+                {#each group.visibleRows as rowEntry (rowEntry.row.id)}
+                  {@render treeRow(rowEntry.row, rowEntry.index * rowStride)}
+                {/each}
               </div>
-            </div>
-          {/each}
-        </div>
-      {/each}
+            {/each}
+          </div>
+        {/each}
+      {:else}
+        {#each rowGroups as group (group[0].id)}
+          <div class="tree-group" role="none">
+            {#each group as row (row.id)}
+              {@render treeRow(row, null)}
+            {/each}
+          </div>
+        {/each}
+      {/if}
     </div>
   {/if}
 </section>
@@ -392,16 +530,32 @@
     min-width: 0;
   }
 
-  /* Read top-to-bottom, then left-to-right, keeping branches together. */
+  /* Explicit columns allow viewport windowing while keeping each root group in
+     one column. CSS multicolumn layout needs every row mounted to balance. */
   .tree.columns {
-    display: block;
-    columns: 4 22rem;
-    column-gap: 28px;
+    display: grid;
+    grid-template-columns: repeat(var(--tree-column-count), minmax(0, 1fr));
+    gap: 28px;
+    align-items: start;
+  }
+
+  .tree-column {
+    position: relative;
+    min-width: 0;
   }
 
   .tree.columns .tree-group {
-    break-inside: avoid;
-    margin-bottom: 2px;
+    position: absolute;
+    right: 0;
+    left: 0;
+    display: block;
+  }
+
+  .tree-row.virtual-row {
+    position: absolute;
+    top: var(--tree-row-top);
+    right: 0;
+    left: 0;
   }
 
   .tree-item:focus-visible {

@@ -10,6 +10,7 @@
     deletionPrompt, deletionTakesEverything, deletionTargets,
     pruneSelection, selectRange,
   } from "../lib/chatSelection";
+  import { autofocus } from "../lib/autofocus";
   import { SvelteSet } from "svelte/reactivity";
 
   let { graphPath, currentId, onSelect, open = false }: {
@@ -206,10 +207,9 @@
         oncontextmenu={(event) => openMenu(event, thread)}
       >
         {#if renamingId === thread.id}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
             class="rename"
-            autofocus
+            use:autofocus
             bind:value={renameDraft}
             onkeydown={(event) => onRenameKey(event, thread)}
             onblur={() => void commitRename(thread)}
@@ -272,7 +272,7 @@
   li.current { background: var(--bg-secondary, #eef); }
   /* Listed after .current deliberately: a row that is both open and ticked
      should read as ticked, because that is the state about to be acted on. */
-  li.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+  li.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); }
   li.empty { padding: 6px 4px; font-size: 12px; color: var(--text-secondary, #888); }
   .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; text-align: left; background: none; border: 0; padding: 6px 4px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
   .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -68,6 +68,7 @@ const EXPECT = {
         kind: "page", title: pages[0].title,
       }));
       window.__pageCommands = [];
+      window.__namespaceTree = nsTree;
       window.__TAURI_INTERNALS__ = {
         metadata: {
           currentWindow: { label: "main" },
@@ -94,7 +95,7 @@ const EXPECT = {
                 args.sortByTitle ? a.title.localeCompare(b.title) : b.updated_at - a.updated_at);
               return sorted.slice(args.offset, args.offset + args.limit);
             }
-            case "pages_namespace_tree": return nsTree;
+            case "pages_namespace_tree": return window.__namespaceTree;
             case "pages_tag_tree": return tagTree;
             case "get_graph_info": return { path: "/tmp/test-graph", name: "Test" };
             case "get_app_theme": return "dark";
@@ -133,7 +134,7 @@ const EXPECT = {
   };
 
   const rootLabels = () =>
-    page.locator(".tree > .tree-group > .tree-row .node-label").allTextContents();
+    page.locator(".tree .tree-group > .tree-row .node-label").allTextContents();
   const click = async (label) => {
     await page.locator(`button:text-is("${label}")`).first().click();
     await page.waitForTimeout(700);
@@ -288,6 +289,114 @@ const EXPECT = {
     }).length);
     check(`buttons remain visible inside rows at ${width}px`, clipped, 0);
   }
+
+  console.log("\nlarge tree virtualization");
+  await page.setViewportSize({ width: 2400, height: 900 });
+  const largeTreeStarted = await page.evaluate(() => {
+    const timestamp = Date.now();
+    const makeNode = (key, label, pageId, children, updatedAt, filePath = null) => ({
+      key,
+      label,
+      page_id: pageId,
+      children,
+      descendant_count: 1 + children.length,
+      updated_at: updatedAt,
+      file_path: filePath,
+    });
+    const roots = [
+      makeNode("Books", "Books", "books-page", [
+        makeNode("Books/chapter", "chapter", "books-chapter", [], timestamp - 10_000,
+          "pages/Books/chapter.md"),
+      ], timestamp - 10_000, "pages/Books.md"),
+    ];
+    for (let index = 0; index < 779; index += 1) {
+      const label = `bulk-${String(index).padStart(4, "0")}`;
+      roots.push(makeNode(
+        label,
+        label,
+        `bulk-page-${index}`,
+        [],
+        timestamp + index,
+        index < 305 ? `pages/${label}.md` : null,
+      ));
+    }
+    window.__namespaceTree = roots;
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    return performance.now();
+  });
+  await page.locator('[data-tree-node="namespace:Books"]').waitFor();
+  await page.waitForTimeout(100);
+  const virtualized = await page.evaluate((started) => {
+    const tree = document.querySelector(".tree");
+    const rows = tree?.querySelectorAll(".tree-row").length ?? 0;
+    const firstGroup = tree?.querySelector(".tree-column:first-child .tree-group");
+    return {
+      rows,
+      columns: tree?.querySelectorAll(".tree-column").length ?? 0,
+      firstGroup: firstGroup?.getAttribute("data-tree-group") ?? null,
+      booksIcon: tree?.querySelector('[data-tree-node="namespace:Books"]')
+        ?.getAttribute("data-special-folder") ?? null,
+      filed: window.__namespaceTree.reduce((count, root) =>
+        count + (root.file_path ? 1 : 0)
+        + root.children.filter((child) => child.file_path).length, 0),
+      virtual: window.__namespaceTree.reduce((count, root) =>
+        count + (root.file_path ? 0 : 1)
+        + root.children.filter((child) => !child.file_path).length, 0),
+      elapsedMs: Math.round(performance.now() - started),
+    };
+  }, largeTreeStarted);
+  check("large fixture mirrors filed and virtual page counts",
+    [virtualized.filed, virtualized.virtual], [307, 474]);
+  check("large tree renders a bounded row window", virtualized.rows < 160, true);
+  check("large tree keeps explicit columns", virtualized.columns, 4);
+  check("Books stays first with its own backing page", virtualized.firstGroup, "namespace:Books");
+  check("Books keeps its special icon with its own backing page", virtualized.booksIcon, "book");
+  console.log(`  PERF  tree DOM rows: 780 before windowing -> ${virtualized.rows} after; render ${virtualized.elapsedMs}ms`);
+
+  await page.locator('[data-tree-node="namespace:Books"] [data-disclosure]').click();
+  await page.locator('[data-tree-node="namespace:Books/chapter"]').waitFor();
+  const bookColumns = await page.evaluate(() => [
+    document.querySelector('[data-tree-node="namespace:Books"]')?.closest("[data-tree-column]")
+      ?.getAttribute("data-tree-column"),
+    document.querySelector('[data-tree-node="namespace:Books/chapter"]')?.closest("[data-tree-column]")
+      ?.getAttribute("data-tree-column"),
+  ]);
+  check("a root group and its children stay in one explicit column", bookColumns[0] === bookColumns[1], true);
+
+  await page.locator('[data-tree-node="namespace:Books"] .tree-item').focus();
+  await page.keyboard.press("End");
+  await page.waitForFunction(() =>
+    document.activeElement?.closest('[data-tree-node="namespace:bulk-0000"]'));
+  check("keyboard navigation mounts and focuses an offscreen row",
+    await page.locator('[data-tree-node="namespace:bulk-0000"]').count(), 1);
+
+  await page.locator(".main-content").evaluate((element) => { element.scrollTop = 0; });
+  await page.waitForTimeout(100);
+  const populatedColumns = await page.evaluate(() => {
+    const viewport = document.querySelector(".main-content")?.getBoundingClientRect();
+    if (!viewport) return 0;
+    return [...document.querySelectorAll(".tree-column")].filter((column) =>
+      [...column.querySelectorAll(".tree-row")].some((row) => {
+        const bounds = row.getBoundingClientRect();
+        return bounds.bottom >= viewport.top && bounds.top <= viewport.bottom;
+      })).length;
+  });
+  check("scrolling away from a focused row keeps every visible column populated",
+    populatedColumns, 4);
+
+  await page.locator(".main-content").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await page.waitForTimeout(100);
+  const largeFilter = page.locator('input[placeholder*="Filter"]').first();
+  await largeFilter.fill("bulk-0778");
+  await page.locator('[data-tree-node="namespace:bulk-0778"]').waitFor();
+  const revealed = await page.evaluate(() => {
+    const row = document.querySelector('[data-tree-node="namespace:bulk-0778"]')?.getBoundingClientRect();
+    const viewport = document.querySelector(".main-content")?.getBoundingClientRect();
+    return Boolean(row && viewport && row.bottom >= viewport.top && row.top <= viewport.bottom);
+  });
+  check("filter reveal scrolls an offscreen match into view", revealed, true);
 
   console.log(`\nerrors: ${errors.length ? JSON.stringify(errors, null, 2) : "none"}`);
   if (errors.length) failures.push(`${errors.length} console/page error(s)`);
