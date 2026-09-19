@@ -260,15 +260,17 @@
   .switcher { display: flex; flex-direction: column; min-height: 0; width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border-color, #ddd); padding-right: 10px; margin-right: 12px; }
   .switcher-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
   h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary, #666); }
-  .delete-chats { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; padding: 3px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text-secondary, #888); cursor: pointer; }
-  .delete-chats:hover:not(:disabled) { color: var(--danger-color, #c0392b); border-color: var(--border-color, #ddd); }
+  .delete-chats { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; padding: 3px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text-secondary); cursor: pointer; transition: color 120ms ease, border-color 120ms ease; }
+  .delete-chats:hover:not(:disabled) { color: var(--danger); border-color: var(--border); }
   .delete-chats:disabled { opacity: 0.4; cursor: default; }
   .new-chat { font-size: 11px; padding: 3px 7px; border: 1px solid var(--border-color, #ddd); border-radius: 4px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary); cursor: pointer; }
   .new-chat:disabled { opacity: 0.5; cursor: default; }
   ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
   li { display: flex; align-items: center; gap: 2px; border-radius: 4px; }
   li.current { background: var(--bg-secondary, #eef); }
-  li.picked { box-shadow: inset 2px 0 0 var(--accent-color, #4a90d9); }
+  /* Listed after .current deliberately: a row that is both open and ticked
+     should read as ticked, because that is the state about to be acted on. */
+  li.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
   li.empty { padding: 6px 4px; font-size: 12px; color: var(--text-secondary, #888); }
   .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; text-align: left; background: none; border: 0; padding: 6px 4px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
   .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -276,11 +278,58 @@
   .queued { font-size: 10px; color: var(--text-secondary, #888); border: 1px solid currentColor; border-radius: 8px; padding: 0 4px; }
   .actions { display: none; gap: 2px; }
   li:hover .actions, li.current .actions { display: flex; }
-  /* Hidden until wanted, so a 200px list is not permanently crowded; once
-     anything is selected every box stays visible, because a selection you
-     cannot see is the whole risk of one button doing two jobs. */
-  .select { flex: 0 0 auto; width: 13px; height: 13px; margin: 0 0 0 4px; accent-color: var(--accent-color, #4a90d9); cursor: pointer; visibility: hidden; }
-  li:hover .select, .selecting .select { visibility: visible; }
+  /* Matches the task checkboxes in rendered notes (.task-checkbox in
+     global.css) so a tick means the same thing everywhere. Native rendering is
+     dropped because the platform control cannot take that shape or those
+     theme tokens. */
+  .select {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Border, radius ratio, fill and tick are shared with .task-checkbox so a
+       tick reads the same everywhere. The box itself is a little tighter: that
+       one is content-box beside body text and comes out near 18px, which is
+       oversized in a 200px sidebar next to 13px rows. */
+    box-sizing: border-box;
+    font-size: 13px;
+    width: 15px;
+    height: 15px;
+    margin: 0 1px 0 5px;
+    border: 2px solid color-mix(in srgb, var(--accent) 82%, var(--text-primary));
+    border-radius: 0.28em;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-primary) 34%, transparent);
+    cursor: pointer;
+    /* Faded rather than hidden, so the list is not permanently crowded but the
+       box can still take keyboard focus -- `visibility: hidden` would make it
+       unreachable by Tab, leaving no way to start a selection without a mouse. */
+    opacity: 0;
+    transition: opacity 120ms ease, background 120ms ease, box-shadow 120ms ease;
+  }
+  /* Once anything is ticked every box stays visible: a selection you cannot
+     see is the whole risk of one button doing two jobs. `:checked` is listed
+     in its own right and not left to `.selecting`, so a ticked row shows its
+     tick even if the two ever disagree. */
+  li:hover .select, .selecting .select, .select:checked, .select:focus-visible { opacity: 1; }
+  .select:hover, .select:focus-visible {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+    outline: none;
+  }
+  .select:checked {
+    border-color: var(--accent-secondary);
+    background: var(--accent-secondary);
+  }
+  .select:checked::after {
+    content: "✓";
+    font-size: 0.82em;
+    font-weight: 900;
+    line-height: 1;
+    color: var(--bg-primary);
+  }
   .actions button { background: none; border: 0; padding: 2px 4px; color: var(--text-secondary, #888); cursor: pointer; font-size: 12px; }
   .actions button:hover { color: var(--text-primary); }
   .rename { flex: 1; min-width: 0; margin: 3px 2px; padding: 3px 5px; font-size: 13px; border: 1px solid var(--accent-color, #4a90d9); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }
