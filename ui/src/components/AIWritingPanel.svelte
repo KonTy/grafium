@@ -250,7 +250,7 @@
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.primary, button.chosen { border-color: var(--accent); color: var(--accent); }
-  .actions button { flex: 1; }
+  .actions button { flex: 1 0 auto; }
   .connection-notice, .result, .finding { padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; }
   .connection-notice button { margin-top: 10px; }
   .result { display: flex; flex-direction: column; gap: 12px; }

@@ -825,6 +825,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    /* The value side can be a slider plus a number field. Wrapping lets it drop
+       under the label instead of squeezing both. */
+    flex-wrap: wrap;
     gap: 12px;
   }
 
@@ -864,7 +867,11 @@
   }
 
   .setting-range input[type="range"] {
-    width: 120px;
+    /* Was a hard 120px. With the number field that made 180px of unyielding
+       width in a row whose content box is ~192px on a phone. */
+    flex: 1 1 90px;
+    min-width: 80px;
+    max-width: 120px;
     accent-color: var(--accent);
   }
 
@@ -1378,5 +1385,34 @@
   .orphan-delete:hover {
     background: rgba(255, 80, 80, 0.2);
     color: #ff5050;
+  }
+
+  /* Settings is the most control-dense screen in the app and had no narrow
+     handling at all. 48px of side padding plus the section's own 16px left
+     about 192px of usable width on a 320px phone, which is less than the
+     keymap grid alone reserves. */
+  @media (max-width: 640px) {
+    .settings-page {
+      padding: 20px 14px;
+    }
+
+    .section-content {
+      padding: 12px;
+    }
+
+    /* Stack the shortcut description above its keys: the two key columns have
+       4.5rem and 7.5rem floors, so side by side they claim 200px and push the
+       description past the edge, where `body { overflow: hidden }` makes it
+       unreachable rather than scrollable. */
+    .keymap-row {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+
+    .keymap-keys {
+      grid-template-columns: auto auto;
+      justify-content: start;
+      justify-items: start;
+    }
   }
 </style>

@@ -326,6 +326,8 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-bottom: 24px;
   }
   .review-header h1 {
@@ -634,5 +636,14 @@
   .topic-counts .total {
     color: var(--text-muted, #8a94a6);
     margin-left: 4px;
+  }
+
+  /* Four grade buttons each need roughly 60-70px for the "recalled" hint, so
+     with gaps they claim ~280px and spill out of a phone. `body` cannot scroll
+     sideways, so the fourth button would simply be unreachable. */
+  @media (max-width: 420px) {
+    .grades {
+      grid-template-columns: repeat(2, 1fr);
+    }
   }
 </style>

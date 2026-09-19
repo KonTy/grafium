@@ -81,7 +81,7 @@
   .help-content { padding: 22px 28px 36px; line-height: 1.55; }
   .help-content :global(h2) { margin-top: 1.6em; }
   .help-content :global(code) { color: var(--accent-color); }
-  .help-content :global(table) { border-collapse: collapse; }
+  .help-content :global(table) { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
   .help-content :global(th), .help-content :global(td) {
     padding: 6px 10px;
     border: 1px solid var(--border-color);

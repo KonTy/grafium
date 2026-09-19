@@ -3809,6 +3809,10 @@
     z-index: 5;
     display: flex;
     align-items: center;
+    /* Six children, and the first button's label is progress text that can grow.
+       Without wrapping, Delete and Clear are pushed off the right edge, and
+       `body { overflow: hidden }` means they cannot be scrolled back to. */
+    flex-wrap: wrap;
     gap: 8px;
     background: var(--bg-secondary);
     border: 1px solid var(--accent);
@@ -3830,6 +3834,14 @@
     border: 1px solid var(--border);
     background: var(--bg-secondary);
     color: var(--text-primary);
+    /* Take a new row rather than shrink: a squeezed button is what breaks a
+       label into single letters. The cap keeps a long progress message inside
+       the toolbar instead of spilling out of it. */
+    flex-shrink: 0;
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     cursor: pointer;
   }
 

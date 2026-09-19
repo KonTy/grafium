@@ -400,4 +400,10 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+
+  @media (max-width: 640px) {
+    .jobs-view {
+      padding: 20px 14px;
+    }
+  }
 </style>

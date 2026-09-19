@@ -362,6 +362,8 @@
     color: var(--text-secondary);
     cursor: pointer;
     font-size: 18px;
+    min-width: 32px;
+    min-height: 32px;
     padding: 4px 8px;
     border-radius: 4px;
   }
@@ -519,8 +521,11 @@
 
   .dp-today-btn,
   .dp-clear-btn {
-    flex: 1;
-    padding: 4px 8px;
+    /* This popover ships to a phone; 4px padding on 0.7rem text gave a ~22px
+       tap target. */
+    flex: 1 0 auto;
+    min-height: 32px;
+    padding: 6px 8px;
     font-size: 0.7rem;
     border: none;
     border-radius: 4px;

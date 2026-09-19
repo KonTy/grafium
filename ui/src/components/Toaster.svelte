@@ -31,7 +31,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 380px;
+    /* Anchored to the right with no left bound, a flat 380px put the toast's
+       left edge off-screen on anything narrower than ~396px, hiding the icon
+       and the start of the message. */
+    max-width: min(380px, calc(100vw - 32px));
   }
 
   .toast {
