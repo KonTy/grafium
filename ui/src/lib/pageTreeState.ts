@@ -541,8 +541,8 @@ export function sortTree(
   };
 
   const compareRoot = (a: PageTreeViewNode, b: PageTreeViewNode) => {
-    const aPinned = a.page_id === null ? getSpecialFolder(a.id) : undefined;
-    const bPinned = b.page_id === null ? getSpecialFolder(b.id) : undefined;
+    const aPinned = getSpecialFolder(a.id);
+    const bPinned = getSpecialFolder(b.id);
     if (aPinned && bPinned) {
       return SPECIAL_FOLDERS.indexOf(aPinned) - SPECIAL_FOLDERS.indexOf(bPinned);
     }

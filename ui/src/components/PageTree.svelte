@@ -279,7 +279,7 @@
       {#each rowGroups as group (group[0].id)}
         <div class="tree-group" role="none">
           {#each group as row (row.id)}
-            {@const specialFolder = pinSpecialFolders && row.node.page_id === null
+            {@const specialFolder = pinSpecialFolders
               ? getSpecialFolder(row.node.id)
               : undefined}
             <div

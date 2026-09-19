@@ -405,6 +405,14 @@ describe("sortTree", () => {
     },
   );
 
+  it("pins a special namespace root that also has its own page", () => {
+    const booksWithPage = node("Books", 100, [node("Books/chapter", 100)]);
+    const sorted = sortTree([folder("Recent", 900), booksWithPage], "recent", true);
+
+    expect(booksWithPage.page_id).not.toBeNull();
+    expect(labels(sorted)).toEqual(["Books", "Recent"]);
+  });
+
   it("does not pin a nested folder with a special name", () => {
     const projects = node("Projects", 1_000, [
       folder("Books", 100),
