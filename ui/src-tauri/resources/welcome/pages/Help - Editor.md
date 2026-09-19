@@ -10,8 +10,9 @@ Press **F1** while editing for quick editor help.
 
 Clicking a block's text opens it for editing. Controls inside a rendered block
 act on themselves instead: ticking a task checkbox, sorting a table column, or
-following a link, a page link or a tag does what you clicked without also
-opening the editor. Query result rows are reachable with **Tab** and run with
-**Enter**.
+following a page link, a tag or an in-page anchor does what you clicked without
+also opening the editor. A plain web link still opens the block for editing
+after it follows the link. Query result rows that carry a block reference are
+reachable with **Tab** and open with **Enter**.
 
 See [[Writing]] for more examples.

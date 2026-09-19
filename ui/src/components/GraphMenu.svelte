@@ -3,6 +3,7 @@
   import FolderBrowser from "./FolderBrowser.svelte";
   import { autofocus } from "../lib/autofocus";
   import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
+  import { handleMenuKeydown } from "../lib/menuKeyboard";
   import {
     getGraphInfo,
     listGraphs,
@@ -230,11 +231,18 @@
 
   {#if menuOpen}
     <div class="menu-backdrop" role="presentation" onclick={closeMenu}></div>
-    <div class="menu-dropdown">
+    <div
+      class="menu-dropdown"
+      role="menu"
+      tabindex="-1"
+      use:autofocus
+      onkeydown={(event) => handleMenuKeydown(event, closeMenu)}
+    >
       <div class="menu-section">
         <div class="menu-label">Graphs</div>
         {#each allGraphs as graph}
           <button
+            role="menuitem"
             class="menu-item"
             class:active={graph.path === currentGraph?.path}
             onclick={() => handleSwitchGraph(graph)}
@@ -249,21 +257,21 @@
         {/each}
       </div>
       <div class="menu-divider"></div>
-      <button class="menu-item" onclick={handleCreateNew}>
+      <button role="menuitem" class="menu-item" onclick={handleCreateNew}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="12" y1="5" x2="12" y2="19"></line>
           <line x1="5" y1="12" x2="19" y2="12"></line>
         </svg>
         <span>New Graph</span>
       </button>
-      <button class="menu-item" onclick={handleOpenExisting}>
+      <button role="menuitem" class="menu-item" onclick={handleOpenExisting}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
         </svg>
         <span>Open Folder</span>
       </button>
       <div class="menu-divider"></div>
-      <button class="menu-item" onclick={handleReindex}>
+      <button role="menuitem" class="menu-item" onclick={handleReindex}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="23 4 23 10 17 10"></polyline>
           <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>

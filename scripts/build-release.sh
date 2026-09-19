@@ -80,8 +80,11 @@ build_android() {
   if [[ -z "${NDK_HOME:-}" ]]; then
     # Pick the highest installed NDK rather than pinning a version that
     # quietly stops existing after an SDK manager update.
+    # `|| true` matters: with `set -e -o pipefail` a missing ndk/ directory
+    # makes find exit 1, which would kill the script here and never reach the
+    # diagnostic below -- the exact case that message exists to explain.
     NDK_HOME="$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null |
-      sort -V | tail -1)"
+      sort -V | tail -1 || true)"
   fi
   if [[ -z "$NDK_HOME" || ! -d "$NDK_HOME" ]]; then
     echo "error: no Android NDK found under $ANDROID_HOME/ndk (set NDK_HOME)" >&2

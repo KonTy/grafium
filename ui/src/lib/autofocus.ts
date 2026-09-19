@@ -13,9 +13,20 @@ export function autofocus(node: HTMLElement) {
   node.focus();
   return {
     destroy() {
-      if (previous && previous.isConnected && document.activeElement === node) {
-        previous.focus();
-      }
+      if (!previous || !previous.isConnected) return;
+      // Teardown order is not guaranteed: the node may still be focused, focus
+      // may have moved to a child (arrow keys inside a menu), or the browser
+      // may already have dropped it to <body> because the focused element was
+      // detached. All three mean "this element still owned the focus", and
+      // only then should it be handed back. Checking `activeElement === node`
+      // alone silently skipped the common case and left focus on <body>.
+      const active = node.ownerDocument.activeElement;
+      const ownedFocus =
+        active === node ||
+        node.contains(active) ||
+        active === null ||
+        active === node.ownerDocument.body;
+      if (ownedFocus) previous.focus();
     },
   };
 }
