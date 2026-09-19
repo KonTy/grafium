@@ -8,6 +8,8 @@
   import { listJournalPages, listJournalNoteDates, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { handleMenuKeydown } from "../lib/menuKeyboard";
+  import { autofocus } from "../lib/autofocus";
   import { dispatchEditPageEnd } from "../lib/editorInsert";
   import { MAIN_PANE_SCROLL_INTENT } from "../lib/mainPaneScroll";
   import { showToast } from "../lib/toast.svelte";
@@ -755,6 +757,7 @@
       {#each journalPages as page (page.id)}
         <div
           class="journal-entry"
+          role="article"
           id={`journal-page-${page.title}`}
           data-page-title={page.title}
           class:journal-placeholder={!mountedPages.has(page.id) || pendingPages.has(page.id)}
@@ -800,16 +803,21 @@
       <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
 
       {#if contextMenu}
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <!-- The menu takes focus while it is open so Escape and the arrow keys
+             work; focus returns to the opener when it closes. -->
         <div
           class="context-menu app-context-menu"
+          role="menu"
+          tabindex="-1"
+          use:autofocus
           style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
           onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => handleMenuKeydown(e, () => { contextMenu = null; })}
         >
-          <button class="context-menu-item danger" onclick={handleDeletePage}>
+          <button class="context-menu-item danger" role="menuitem" onclick={handleDeletePage}>
             Delete page
           </button>
-          <button class="context-menu-item" onclick={handleImportMediaClick}>
+          <button class="context-menu-item" role="menuitem" onclick={handleImportMediaClick}>
             Import from Media...
           </button>
         </div>

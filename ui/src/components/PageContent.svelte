@@ -185,7 +185,7 @@
     restoreTextSelection: (selection: BlockTextSelection) => void;
   };
   let blockRefs: Record<string, BlockEditorHandle> = {};
-  let unifiedEditor: UnifiedPageEditor | undefined;
+  let unifiedEditor = $state<UnifiedPageEditor | undefined>();
 
   $effect(() => {
     const pageId = page.id;
@@ -2984,6 +2984,17 @@
     }
   }
 
+  // Drag-to-select is a pointer gesture over presentational chrome; the
+  // keyboard equivalent is the block selection controller driven from the
+  // editor (see `keyboardSelection`). Attaching it here keeps the container
+  // free of markup-level interactivity it cannot expose to assistive tech.
+  $effect(() => {
+    const el = blocksViewportEl;
+    if (!el) return;
+    el.addEventListener("pointerdown", handleBlockSelectionPointerDown);
+    return () => el.removeEventListener("pointerdown", handleBlockSelectionPointerDown);
+  });
+
   function handleBlockSelectionPointerDown(e: PointerEvent) {
     if (useUnifiedEditorPrototype || e.button !== 0) return;
     lastSelectionMakeLinkAction = null;
@@ -3451,7 +3462,7 @@
       onExitPrototype={() => setUnifiedEditorPrototype(false)}
     />
   {:else}
-    <div class="blocks-container" bind:this={blocksViewportEl} onpointerdown={handleBlockSelectionPointerDown}>
+    <div class="blocks-container" bind:this={blocksViewportEl}>
       {#if virtualWindow.topSpacer > 0}
         <div class="virtual-spacer" style={`height: ${virtualWindow.topSpacer}px;`} aria-hidden="true"></div>
       {/if}
@@ -4161,7 +4172,9 @@
     padding-bottom: 0;
   }
 
-  .block-shell.image-menu-shell,
+  /* `image-menu-shell` is applied at runtime by BlockEditor, so the compiler
+     cannot see it on any element here and would prune the rule as unused. */
+  .block-shell:global(.image-menu-shell),
   .block-shell:has(:global(.image-menu-open)) {
     z-index: 3000;
     contain: none;

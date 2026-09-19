@@ -63,6 +63,7 @@
   class="mobile-editor-bar"
   style={`bottom: ${bottomStyle};`}
   role="toolbar"
+  tabindex="-1"
   aria-label="Editor"
   onpointerdown={keepFocus}
 >

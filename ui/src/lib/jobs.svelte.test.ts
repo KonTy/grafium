@@ -16,6 +16,7 @@ function job(overrides: Partial<Job> = {}): Job {
     message: null,
     link: null,
     error: null,
+    details: null,
     cancellable: true,
     started_at: 0,
     finished_at: null,

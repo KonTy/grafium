@@ -6,6 +6,7 @@
   import GoToLink from "./components/GoToLink.svelte";
   import LazyView from "./components/LazyView.svelte";
   import { lazyComponent } from "./lib/lazy";
+  import { autofocus } from "./lib/autofocus";
   import { revealStartupWindow } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
@@ -2335,7 +2336,7 @@
         placeholder="Run a command…"
         bind:value={commandPaletteQuery}
         oninput={() => (commandPaletteIndex = 0)}
-        autofocus
+        use:autofocus
       />
       <div class="command-palette-list">
         {#each commandPaletteRows as row, index}
@@ -2382,7 +2383,7 @@
         placeholder="Page name..."
         bind:value={newPageName}
         onkeydown={handleNewPageKeydown}
-        autofocus
+        use:autofocus
       />
       <div class="dialog-actions">
         <button class="dialog-btn dialog-btn-cancel" onclick={cancelNewPage}>Cancel</button>
@@ -2417,7 +2418,7 @@
         bind:value={importMediaUrl}
         onkeydown={handleImportMediaKeydown}
         disabled={importMediaBusy}
-        autofocus
+        use:autofocus
       />
       {#if importMediaBusy && importMediaProgress}
         <pre class="dialog-progress">{importMediaProgress}</pre>
@@ -2458,7 +2459,7 @@
         placeholder="Graph name..."
         bind:value={newGraphName}
         onkeydown={(e) => { if (e.key === "Enter") confirmCreateGraph(); if (e.key === "Escape") cancelCreateGraph(); }}
-        autofocus
+        use:autofocus
       />
       <div class="dialog-actions">
         <button class="dialog-btn dialog-btn-cancel" onclick={cancelCreateGraph}>Cancel</button>
@@ -2772,46 +2773,6 @@
 
   .dialog-btn-ok:hover {
     background: var(--btn-primary-hover);
-  }
-
-  .graph-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 12px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .graph-list-item {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 10px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    cursor: pointer;
-    text-align: left;
-    transition: background 0.1s;
-  }
-
-  .graph-list-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .graph-list-name {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .graph-list-path {
-    font-size: 11px;
-    color: var(--text-muted);
-    font-family: monospace;
-    word-break: break-all;
   }
 
   /* Bottom nav - hidden by default, shown on narrow screens */

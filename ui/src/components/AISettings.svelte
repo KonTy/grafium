@@ -380,8 +380,8 @@
     {#if enabled}
       <!-- Mode selection -->
       <div class="field-group">
-        <label class="field-label">Mode</label>
-        <div class="choice-row">
+        <span class="field-label" id="ai-mode-label">Mode</span>
+        <div class="choice-row" role="group" aria-labelledby="ai-mode-label">
           <button class="choice-btn" class:active={mode === "local"} onclick={() => (mode = "local")}>Local</button>
           <button class="choice-btn" class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
         </div>
@@ -393,8 +393,8 @@
         <div class="settings-section">
           <h4>Local Provider</h4>
           <div class="field-group">
-            <label class="field-label">Provider</label>
-            <div class="choice-row">
+            <span class="field-label" id="ai-local-provider-label">Provider</span>
+            <div class="choice-row" role="group" aria-labelledby="ai-local-provider-label">
               <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => selectLocalProvider("openai_compatible")}>vLLM / OpenAI-compatible</button>
               <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => selectLocalProvider("ollama")}>Ollama</button>
               <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => selectLocalProvider("huggingface")}>Embedded</button>
@@ -405,9 +405,9 @@
           {#if localProvider === "huggingface"}
             <!-- Embedded (llama.cpp): no server/URL/key involved at all. -->
             <div class="field-group">
-              <label class="field-label">Models Directory</label>
+              <label class="field-label" for="ai-local-models-dir">Models Directory</label>
               <div class="browse-row">
-                <input type="text" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
+                <input type="text" id="ai-local-models-dir" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
                 <button type="button" class="browse-btn" onclick={browseLocalModelsDir}>Browse...</button>
                 <button type="button" class="browse-btn" onclick={refreshLocalModelOptions} title="Re-scan this folder">Refresh</button>
               </div>
@@ -418,9 +418,9 @@
               </p>
             </div>
             <div class="field-group">
-              <label class="field-label">Embedded LLM Model File (GGUF)</label>
+              <label class="field-label" for="ai-local-model-file">Embedded LLM Model File (GGUF)</label>
               {#if localModelOptions.length > 0}
-                <select bind:value={localModelPath} class="field-select">
+                <select id="ai-local-model-file" bind:value={localModelPath} class="field-select">
                   <option value="">Auto-detect (only chat GGUF file in folder)</option>
                   {#each localModelOptions as m (m.file_name)}
                     <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)}){fitSuffix(m)}</option>
@@ -439,9 +439,9 @@
               {/if}
             </div>
             <div class="field-group">
-              <label class="field-label">Embedding Model File (GGUF)</label>
+              <label class="field-label" for="ai-local-embedding-model-file">Embedding Model File (GGUF)</label>
               {#if localEmbeddingModelOptions.length > 0}
-                <select bind:value={localEmbeddingModelPath} class="field-select">
+                <select id="ai-local-embedding-model-file" bind:value={localEmbeddingModelPath} class="field-select">
                   <option value="">Auto-detect (only embedding GGUF file in folder)</option>
                   {#each localEmbeddingModelOptions as m (m.file_name)}
                     <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
@@ -463,22 +463,22 @@
           {:else}
             <!-- Ollama / vLLM-OpenAI-compatible: a real endpoint to reach. -->
             <div class="field-group">
-              <label class="field-label">Base URL</label>
-              <input type="text" bind:value={localBaseUrl} class="field-input" placeholder={LOCAL_BASE_URL_DEFAULTS[localProvider]} />
+              <label class="field-label" for="ai-local-base-url">Base URL</label>
+              <input type="text" id="ai-local-base-url" bind:value={localBaseUrl} class="field-input" placeholder={LOCAL_BASE_URL_DEFAULTS[localProvider]} />
             </div>
             {#if localProvider === "openai_compatible"}
               <div class="field-group">
-                <label class="field-label">API Key (optional)</label>
-                <input type="password" bind:value={localApiKey} class="field-input" placeholder="****** if endpoint requires auth" />
+                <label class="field-label" for="ai-local-api-key">API Key (optional)</label>
+                <input type="password" id="ai-local-api-key" bind:value={localApiKey} class="field-input" placeholder="****** if endpoint requires auth" />
               </div>
             {/if}
             <div class="field-group">
-              <label class="field-label">LLM Model</label>
-              <input type="text" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
+              <label class="field-label" for="ai-local-llm-model">LLM Model</label>
+              <input type="text" id="ai-local-llm-model" bind:value={llmModel} class="field-input" placeholder="qwen2.5-coder-14b-instruct-awq, llama3.2, etc." />
             </div>
             <div class="field-group">
-              <label class="field-label">Embedding Model</label>
-              <input type="text" bind:value={embeddingModel} class="field-input" placeholder="nomic-embed-text" />
+              <label class="field-label" for="ai-local-embedding-model">Embedding Model</label>
+              <input type="text" id="ai-local-embedding-model" bind:value={embeddingModel} class="field-input" placeholder="nomic-embed-text" />
             </div>
           {/if}
         </div>
@@ -489,44 +489,44 @@
         <div class="settings-section">
           <h4>Cloud Provider</h4>
           <div class="field-group">
-            <label class="field-label">Provider</label>
-            <div class="choice-row">
+            <span class="field-label" id="ai-cloud-provider-label">Provider</span>
+            <div class="choice-row" role="group" aria-labelledby="ai-cloud-provider-label">
               <button class="choice-btn" class:active={cloudProvider === "openai"} onclick={() => (cloudProvider = "openai")}>OpenAI</button>
               <button class="choice-btn" class:active={cloudProvider === "anthropic"} onclick={() => (cloudProvider = "anthropic")}>Anthropic</button>
               <button class="choice-btn" class:active={cloudProvider === "openai_compatible"} onclick={() => (cloudProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
             </div>
           </div>
           <div class="field-group">
-            <label class="field-label">Cloud Base URL (optional)</label>
-            <input type="text" bind:value={cloudBaseUrl} class="field-input" placeholder="Leave empty for official provider endpoint" />
+            <label class="field-label" for="ai-cloud-base-url">Cloud Base URL (optional)</label>
+            <input type="text" id="ai-cloud-base-url" bind:value={cloudBaseUrl} class="field-input" placeholder="Leave empty for official provider endpoint" />
           </div>
           <div class="field-group">
-            <label class="field-label">Model</label>
-            <input type="text" bind:value={cloudLlmModel} class="field-input"
+            <label class="field-label" for="ai-cloud-model">Model</label>
+            <input type="text" id="ai-cloud-model" bind:value={cloudLlmModel} class="field-input"
               placeholder={cloudProvider === "openai" ? "gpt-4o" : "claude-sonnet-4-20250514"} />
           </div>
           <div class="field-group">
-            <label class="field-label">API Key</label>
-            <input type="password" bind:value={cloudApiKey} class="field-input" placeholder="sk-..." />
+            <label class="field-label" for="ai-cloud-api-key">API Key</label>
+            <input type="password" id="ai-cloud-api-key" bind:value={cloudApiKey} class="field-input" placeholder="sk-..." />
           </div>
           <div class="field-group">
-            <label class="field-label">Embedding Provider</label>
-            <div class="choice-row">
+            <span class="field-label" id="ai-cloud-embedding-provider-label">Embedding Provider</span>
+            <div class="choice-row" role="group" aria-labelledby="ai-cloud-embedding-provider-label">
               <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai"} onclick={() => (cloudEmbeddingProvider = "openai")}>OpenAI</button>
               <button class="choice-btn" class:active={cloudEmbeddingProvider === "openai_compatible"} onclick={() => (cloudEmbeddingProvider = "openai_compatible")}>vLLM / OpenAI-compatible</button>
             </div>
           </div>
           <div class="field-group">
-            <label class="field-label">Embedding Base URL (optional)</label>
-            <input type="text" bind:value={cloudEmbeddingBaseUrl} class="field-input" placeholder="Defaults to cloud base URL" />
+            <label class="field-label" for="ai-cloud-embedding-base-url">Embedding Base URL (optional)</label>
+            <input type="text" id="ai-cloud-embedding-base-url" bind:value={cloudEmbeddingBaseUrl} class="field-input" placeholder="Defaults to cloud base URL" />
           </div>
           <div class="field-group">
-            <label class="field-label">Embedding Model</label>
-            <input type="text" bind:value={cloudEmbeddingModel} class="field-input" />
+            <label class="field-label" for="ai-cloud-embedding-model">Embedding Model</label>
+            <input type="text" id="ai-cloud-embedding-model" bind:value={cloudEmbeddingModel} class="field-input" />
           </div>
           <div class="field-group">
-            <label class="field-label">Embedding API Key (optional)</label>
-            <input type="password" bind:value={cloudEmbeddingApiKey} class="field-input" placeholder="defaults to cloud API key" />
+            <label class="field-label" for="ai-cloud-embedding-api-key">Embedding API Key (optional)</label>
+            <input type="password" id="ai-cloud-embedding-api-key" bind:value={cloudEmbeddingApiKey} class="field-input" placeholder="defaults to cloud API key" />
           </div>
         </div>
       {/if}
@@ -611,9 +611,9 @@
       </label>
       {#if mediaEnabled}
         <div class="field-group">
-          <label class="field-label">Models Directory</label>
+          <label class="field-label" for="media-models-dir">Models Directory</label>
           <div class="browse-row">
-            <input type="text" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
+            <input type="text" id="media-models-dir" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
             <button type="button" class="browse-btn" onclick={browseMediaModelsDir}>Browse...</button>
             <button type="button" class="browse-btn" onclick={refreshMediaModelOptions} title="Re-scan this folder">Refresh</button>
           </div>
@@ -624,9 +624,9 @@
           </p>
         </div>
         <div class="field-group">
-          <label class="field-label">Whisper Model File</label>
+          <label class="field-label" for="media-model-file">Whisper Model File</label>
           {#if mediaModelOptions.length > 0}
-            <select bind:value={mediaModelPath} class="field-select">
+            <select id="media-model-file" bind:value={mediaModelPath} class="field-select">
               <option value="">Auto-detect (only Whisper model in folder)</option>
               {#each mediaModelOptions as m (m.file_name)}
                 <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
@@ -640,8 +640,8 @@
           {/if}
         </div>
         <div class="field-group">
-          <label class="field-label">Language (optional)</label>
-          <input type="text" bind:value={mediaLanguage} class="field-input" placeholder="en — leave blank to auto-detect" />
+          <label class="field-label" for="media-language">Language (optional)</label>
+          <input type="text" id="media-language" bind:value={mediaLanguage} class="field-input" placeholder="en — leave blank to auto-detect" />
         </div>
       {/if}
       <div class="actions-section">

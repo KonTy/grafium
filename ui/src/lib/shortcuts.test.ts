@@ -22,9 +22,15 @@ describe("formatBinding", () => {
 describe("groupShortcutRows", () => {
   it("groups aliases onto one row with chord and modifier columns", () => {
     const shortcuts: Shortcut[] = [
-      { id: "go-journal", description: "Go to today's journal", category: "navigation", binding: "g j" },
-      { id: "go-journal", description: "Go to today's journal", category: "navigation", binding: "mod+shift+j" },
-      { id: "go-tasks", description: "Go to tasks", category: "navigation", binding: "mod+shift+t" },
+      { id: "go-journal", description: "Go to today's journal", category: "navigation", binding: "g j", action: () => {} },
+      {
+        id: "go-journal",
+        description: "Go to today's journal",
+        category: "navigation",
+        binding: "mod+shift+j",
+        action: () => {},
+      },
+      { id: "go-tasks", description: "Go to tasks", category: "navigation", binding: "mod+shift+t", action: () => {} },
     ];
     const rows = groupShortcutRows(shortcuts);
     expect(rows).toHaveLength(2);

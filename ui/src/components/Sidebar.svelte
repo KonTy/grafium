@@ -7,6 +7,8 @@
     withMissingCommandFallback,
   } from "../lib/pageTree";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { handleMenuKeydown } from "../lib/menuKeyboard";
+  import { autofocus } from "../lib/autofocus";
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
   import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
@@ -484,13 +486,18 @@
   </div>
 
   {#if contextMenu}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <!-- The menu takes focus while it is open so Escape and the arrow keys
+         work; focus returns to the opener when it closes. -->
     <div
       class="context-menu app-context-menu"
+      role="menu"
+      tabindex="-1"
+      use:autofocus
       style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
       onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => handleMenuKeydown(e, () => { contextMenu = null; })}
     >
-      <button class="context-menu-item" onclick={handleToggleFavorite}>
+      <button class="context-menu-item" role="menuitem" onclick={handleToggleFavorite}>
         {#if contextMenu.isFav}
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
@@ -505,6 +512,7 @@
       </button>
       <button
         class="context-menu-item"
+        role="menuitem"
         disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
         onclick={handleToggleCollection}
       >

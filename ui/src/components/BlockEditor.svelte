@@ -153,7 +153,7 @@
     onContentChange,
   }: Props = $props();
 
-  let editorContainer: HTMLDivElement;
+  let editorContainer = $state<HTMLDivElement>();
   let editorView: EditorView | undefined;
   let savedState: EditorState | undefined;
   let blurTeardownTimer: number | undefined;
@@ -1361,6 +1361,7 @@
   }
 
   function initEditor() {
+    if (!editorContainer) return;
       // Reuse saved state if content hasn't changed externally
       let state: EditorState;
       if (savedState && savedState.doc.toString() === block.content) {
@@ -1947,6 +1948,37 @@
     }
   }
 
+  // Click-to-edit is a pointer convenience on a non-focusable content
+  // container. Keyboard users open a block through arrow-key navigation
+  // (`focusForNav`/`focusAtEnd`/`restoreTextSelection`), so the listener is
+  // attached here instead of being declared as markup-level interactivity.
+  $effect(() => {
+    const el = blockContentEl;
+    if (!el) return;
+    el.addEventListener("click", handleClick);
+    return () => el.removeEventListener("click", handleClick);
+  });
+
+  function activateBullet(event: MouseEvent | KeyboardEvent) {
+    event.stopPropagation();
+    // A plain activation of a bullet with children collapses/expands it
+    // (existing behavior). But shift/ctrl/cmd should always select the block
+    // for multi-select — otherwise header/parent blocks (which always have
+    // children) could never be added to a selection, and the "Delete selected"
+    // toolbar button would silently have nothing to act on.
+    if (hasChildren && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      onToggleCollapse?.(block.id);
+    } else if (event instanceof MouseEvent) {
+      onBulletClick?.(block.id, event);
+    }
+  }
+
+  function handleBulletKeydown(event: KeyboardEvent) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    activateBullet(event);
+  }
+
   function markCurrentBlock() {
     onAnchor?.(block.id);
   }
@@ -2387,19 +2419,17 @@
     </div>
   {/if}
   {#if showBlockMarker}
-    <div class="bullet-container" class:has-children={hasChildren} style={`min-height: ${bulletMinHeight};`} onclick={(e) => {
-      e.stopPropagation();
-      // A plain click on a bullet with children collapses/expands it (existing
-      // behavior). But shift/ctrl/cmd-click should always select the block for
-      // multi-select — otherwise header/parent blocks (which always have
-      // children) could never be added to a selection, and the "Delete
-      // selected" toolbar button would silently have nothing to act on.
-      if (hasChildren && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        onToggleCollapse?.(block.id);
-      } else {
-        onBulletClick?.(block.id, e);
-      }
-    }}>
+    <div
+      class="bullet-container"
+      class:has-children={hasChildren}
+      style={`min-height: ${bulletMinHeight};`}
+      role="button"
+      tabindex="-1"
+      aria-expanded={hasChildren ? !collapsed : undefined}
+      aria-label={hasChildren ? (collapsed ? "Expand block" : "Collapse block") : "Select block"}
+      onclick={activateBullet}
+      onkeydown={handleBulletKeydown}
+    >
       {#if hasChildren}
         <span class="collapse-arrow" class:collapsed>
           {#if collapsed || suppressBullet}{collapsed ? "▶" : "▼"}{:else}
@@ -2414,7 +2444,6 @@
   <div
     class="block-content"
     class:quote-block={isQuoteBlock && !isEditing}
-    onclick={handleClick}
     bind:this={blockContentEl}
   >
     {#if isEditing}

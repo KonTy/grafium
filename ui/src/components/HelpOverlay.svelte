@@ -23,7 +23,7 @@
 <div class="help-backdrop" role="presentation" onclick={(event) => {
   if (event.target === event.currentTarget) onClose();
 }}>
-  <section class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
+  <div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
     <header>
       <h1 id="help-title">{title}</h1>
       <button class="help-close" aria-label="Close help" onclick={onClose}>×</button>
@@ -35,7 +35,7 @@
         {@html renderAssistantMarkdown(content)}
       </article>
     {/if}
-  </section>
+  </div>
 </div>
 
 <style>

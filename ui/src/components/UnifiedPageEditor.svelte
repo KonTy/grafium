@@ -1,5 +1,7 @@
 <script lang="ts">
   import { editorHasDialogFocus } from "../lib/editorDialogFocus";
+  import { handleMenuKeydown } from "../lib/menuKeyboard";
+  import { autofocus } from "../lib/autofocus";
   import { readingSelectionCapture, publishContinuousReadingSelection } from "../lib/readingSelection";
   import type { BlockTextSelection } from "../lib/keyboardBlockSelection.svelte";
   import { onDestroy, tick, untrack } from "svelte";
@@ -1154,10 +1156,13 @@
       class="image-size-menu app-context-menu"
       style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
       role="menu"
+      tabindex="-1"
+      use:autofocus
       aria-label="Image size menu"
       onpointerdown={(e) => e.stopPropagation()}
       oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
       onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => handleMenuKeydown(e, () => { imageSizeMenu = null; })}
     >
       <div class="image-size-menu-title">Size</div>
       <button class="image-size-menu-item" type="button" role="menuitem" onclick={resetImageScale}>

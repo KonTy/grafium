@@ -443,7 +443,11 @@
   let monthLabels = $derived(getMonthLabels(gridRange));
   let tasksByDate = $derived(groupByDate(completedTasks));
   let sortedDates = $derived([...tasksByDate.keys()].sort((a, b) => b.localeCompare(a)));
-  let selectedCompletedTasks = $derived(selectedDay?.kind === "task" ? (tasksByDate.get(selectedDay.date) ?? []) : []);
+  let selectedCompletedTasks = $derived.by(() => {
+    const day = selectedDay;
+    if (day?.kind !== "task") return [];
+    return tasksByDate.get(day.date) ?? [];
+  });
   const dayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
 </script>
 
