@@ -664,12 +664,6 @@
     font-size: 13px;
   }
 
-  .engine-enable input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--accent, #7c3aed);
-  }
-
   .engine-name {
     font-weight: 500;
   }
@@ -814,12 +808,6 @@
     cursor: pointer;
     color: var(--text-primary, #fff);
     margin-top: 4px;
-  }
-
-  .toggle-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--accent, #7c3aed);
   }
 
   /* Actions */

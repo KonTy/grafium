@@ -607,47 +607,92 @@ body {
 .reading-note-footer-body img, .reading-note-footer-body video { max-width: 100%; height: auto; }
 .reading-note-footer-body pre { overflow-x: auto; }
 
+/* ---- Checkboxes ---------------------------------------------------------
+   One appearance for every tick in the app: tasks in rendered notes, the chat
+   list, and the native checkboxes in settings and side panels.
+
+   The tick is drawn from a rotated border rather than a "✓" character. U+2713
+   is absent from the UI font stacks -- it measures identically under
+   system-ui, Georgia and monospace, meaning it resolves to whichever symbol
+   font the OS happens to ship -- so its shape, weight and side bearings, and
+   with them whether it looked centred, changed from machine to machine. Asking
+   for font-weight on it only made that worse, since the weight was synthesised
+   by smearing the ink sideways. Geometry has neither problem.
+   ---------------------------------------------------------------------- */
+input[type="checkbox"],
 .rendered-content .task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: inherit;
   width: 1.08em;
   height: 1.08em;
-  margin-right: 0.42em;
   border: 2px solid color-mix(in srgb, var(--accent) 82%, var(--text-primary));
   border-radius: 0.28em;
   background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-primary) 34%, transparent);
   color: var(--bg-primary);
   cursor: pointer;
   line-height: 1;
   vertical-align: -0.15em;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-primary) 34%, transparent);
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
 
-.rendered-content .task-checkbox.unchecked:hover,
-.rendered-content .task-checkbox.unchecked:focus-visible {
+.rendered-content .task-checkbox {
+  margin-right: 0.42em;
+}
+
+/* Tinted on hover only while empty. A ticked box keeps its filled colour,
+   which a plain :hover rule would outrank and wash out. */
+input[type="checkbox"]:not(:checked):hover:not(:disabled),
+.rendered-content .task-checkbox.unchecked:hover {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
-  outline: none;
 }
 
+input[type="checkbox"]:checked,
 .rendered-content .task-checkbox.checked {
   border-color: var(--accent-secondary);
   background: var(--accent-secondary);
-  color: var(--bg-primary);
-  cursor: default;
 }
 
-.rendered-content .task-checkbox.checked::after {
-  content: "✓";
-  font-size: 0.82em;
-  font-weight: 900;
-  line-height: 1;
+.rendered-content .task-checkbox.checked {
+  cursor: default;
 }
 
 .rendered-content .task-checkbox.canceled {
   border-color: var(--text-muted);
   background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+/* A rectangle showing only its right and bottom borders, turned 45deg. Solving
+   the rotated ink box for these dimensions puts it dead centre horizontally and
+   0.05em low, which is precisely what the translate takes back -- so the tick
+   lands in the middle of the box at any size, font or theme. */
+input[type="checkbox"]:checked::after,
+.rendered-content .task-checkbox.checked::after {
+  content: "";
+  box-sizing: border-box;
+  width: 0.3em;
+  height: 0.58em;
+  border: solid currentColor;
+  border-width: 0 0.16em 0.16em 0;
+  transform: translateY(-0.05em) rotate(45deg);
+}
+
+/* Last, so the ring shows over any fill above. */
+input[type="checkbox"]:focus-visible,
+.rendered-content .task-checkbox:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .rendered-content .task-marker,

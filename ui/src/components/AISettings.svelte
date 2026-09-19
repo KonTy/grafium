@@ -732,12 +732,6 @@
     color: var(--text-primary, #fff);
   }
 
-  .toggle-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--accent-color, #7c3aed);
-  }
-
   .settings-section {
     background: var(--bg-tertiary, #252535);
     border-radius: 8px;

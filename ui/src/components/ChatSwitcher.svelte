@@ -278,31 +278,12 @@
   .queued { font-size: 10px; color: var(--text-secondary, #888); border: 1px solid currentColor; border-radius: 8px; padding: 0 4px; }
   .actions { display: none; gap: 2px; }
   li:hover .actions, li.current .actions { display: flex; }
-  /* Matches the task checkboxes in rendered notes (.task-checkbox in
-     global.css) so a tick means the same thing everywhere. Native rendering is
-     dropped because the platform control cannot take that shape or those
-     theme tokens. */
+  /* Reveal-only. The look itself is the shared checkbox styling in global.css,
+     so a tick means the same thing here as in a note. */
   .select {
-    appearance: none;
-    -webkit-appearance: none;
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    /* Border, radius ratio, fill and tick are shared with .task-checkbox so a
-       tick reads the same everywhere. The box itself is a little tighter: that
-       one is content-box beside body text and comes out near 18px, which is
-       oversized in a 200px sidebar next to 13px rows. */
-    box-sizing: border-box;
+    /* Anchors the shared em-based sizing to the row's own text size. */
     font-size: 13px;
-    width: 15px;
-    height: 15px;
     margin: 0 1px 0 5px;
-    border: 2px solid color-mix(in srgb, var(--accent) 82%, var(--text-primary));
-    border-radius: 0.28em;
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-primary) 34%, transparent);
-    cursor: pointer;
     /* Faded rather than hidden, so the list is not permanently crowded but the
        box can still take keyboard focus -- `visibility: hidden` would make it
        unreachable by Tab, leaving no way to start a selection without a mouse. */
@@ -314,22 +295,6 @@
      in its own right and not left to `.selecting`, so a ticked row shows its
      tick even if the two ever disagree. */
   li:hover .select, .selecting .select, .select:checked, .select:focus-visible { opacity: 1; }
-  .select:hover, .select:focus-visible {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
-    outline: none;
-  }
-  .select:checked {
-    border-color: var(--accent-secondary);
-    background: var(--accent-secondary);
-  }
-  .select:checked::after {
-    content: "✓";
-    font-size: 0.82em;
-    font-weight: 900;
-    line-height: 1;
-    color: var(--bg-primary);
-  }
   .actions button { background: none; border: 0; padding: 2px 4px; color: var(--text-secondary, #888); cursor: pointer; font-size: 12px; }
   .actions button:hover { color: var(--text-primary); }
   .rename { flex: 1; min-width: 0; margin: 3px 2px; padding: 3px 5px; font-size: 13px; border: 1px solid var(--accent-color, #4a90d9); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }
