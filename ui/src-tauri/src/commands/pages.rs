@@ -40,10 +40,7 @@ pub fn list_pages(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn count_pages(
-    state: State<AppState>,
-    filter: Option<PageKindFilter>,
-) -> Result<i64, String> {
+pub fn count_pages(state: State<AppState>, filter: Option<PageKindFilter>) -> Result<i64, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph
         .db
@@ -163,15 +160,16 @@ pub struct PageLookupError {
 
 impl PageLookupError {
     fn failed(error: impl std::fmt::Display) -> Self {
-        Self { code: "page_lookup_failed", message: error.to_string() }
+        Self {
+            code: "page_lookup_failed",
+            message: error.to_string(),
+        }
     }
 }
 
-fn lookup_page_name(
-    db: &grafium_core::db::Database,
-    title: &str,
-) -> Result<Page, PageLookupError> {
-    db.find_page_by_name(title).map_err(PageLookupError::failed)?
+fn lookup_page_name(db: &grafium_core::db::Database, title: &str) -> Result<Page, PageLookupError> {
+    db.find_page_by_name(title)
+        .map_err(PageLookupError::failed)?
         .ok_or_else(|| PageLookupError {
             code: "page_not_found",
             message: format!("No page has the title or approved alias '{title}'."),
@@ -187,11 +185,24 @@ mod page_lookup_tests {
     fn navigation_reuses_alias_identity_and_distinguishes_ambiguity_from_missing() {
         let db = Database::in_memory().unwrap();
         let page = db.create_page("Niacin (Vitamin B3)", false).unwrap();
-        db.update_page(&page.id, None, Some(&serde_json::json!({"aliases":["Niacin"]}))).unwrap();
+        db.update_page(
+            &page.id,
+            None,
+            Some(&serde_json::json!({"aliases":["Niacin"]})),
+        )
+        .unwrap();
         assert_eq!(lookup_page_name(&db, "niacin").unwrap().id, page.id);
-        assert_eq!(lookup_page_name(&db, "Absent page").unwrap_err().code, "page_not_found");
+        assert_eq!(
+            lookup_page_name(&db, "Absent page").unwrap_err().code,
+            "page_not_found"
+        );
         let other = db.create_page("Another nutrient", false).unwrap();
-        db.update_page(&other.id, None, Some(&serde_json::json!({"aliases":["Niacin"]}))).unwrap();
+        db.update_page(
+            &other.id,
+            None,
+            Some(&serde_json::json!({"aliases":["Niacin"]})),
+        )
+        .unwrap();
         let ambiguous = lookup_page_name(&db, "Niacin").unwrap_err();
         assert_eq!(ambiguous.code, "page_lookup_failed");
         assert!(ambiguous.message.contains("ambiguous"));
@@ -203,8 +214,18 @@ mod page_lookup_tests {
     fn navigation_normalizes_hierarchy_for_titles_and_approved_aliases() {
         let db = Database::in_memory().unwrap();
         let page = db.create_page("Projects / Alpha", false).unwrap();
-        db.update_page(&page.id, None, Some(&serde_json::json!({"alias":r"Work \ Alpha"}))).unwrap();
-        for name in ["Projects/Alpha", r"Projects\Alpha", "Work / Alpha", r"Work\Alpha"] {
+        db.update_page(
+            &page.id,
+            None,
+            Some(&serde_json::json!({"alias":r"Work \ Alpha"})),
+        )
+        .unwrap();
+        for name in [
+            "Projects/Alpha",
+            r"Projects\Alpha",
+            "Work / Alpha",
+            r"Work\Alpha",
+        ] {
             let result = lookup_page_name(&db, name).unwrap();
             assert_eq!(result.id, page.id);
             assert_eq!(result.title, "Projects/Alpha");
@@ -221,7 +242,10 @@ pub fn get_page(
 ) -> Result<Page, PageLookupError> {
     let graph = state.graph.lock().map_err(PageLookupError::failed)?;
     if let Some(id) = id {
-        graph.db.get_page_by_id(&id).map_err(PageLookupError::failed)
+        graph
+            .db
+            .get_page_by_id(&id)
+            .map_err(PageLookupError::failed)
     } else if let Some(title) = title {
         lookup_page_name(&graph.db, &title)
     } else {
@@ -236,7 +260,11 @@ pub fn create_page(
     is_journal: Option<bool>,
 ) -> Result<Page, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    if let Some(existing) = graph.db.find_page_by_name(&title).map_err(|error| error.to_string())? {
+    if let Some(existing) = graph
+        .db
+        .find_page_by_name(&title)
+        .map_err(|error| error.to_string())?
+    {
         return Ok(existing);
     }
     graph
@@ -289,10 +317,7 @@ pub fn delete_page(state: State<AppState>, id: String) -> Result<DeletePageResul
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_namespace(
-    state: State<AppState>,
-    title: String,
-) -> Result<DeletePageResult, String> {
+pub fn delete_namespace(state: State<AppState>, title: String) -> Result<DeletePageResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph.delete_namespace(&title).map_err(|e| e.to_string())
 }
@@ -319,10 +344,7 @@ pub fn open_page_in_file_browser(state: State<AppState>, id: String) -> Result<(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_namespace_in_file_browser(
-    state: State<AppState>,
-    title: String,
-) -> Result<(), String> {
+pub fn open_namespace_in_file_browser(state: State<AppState>, title: String) -> Result<(), String> {
     let path = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         graph
@@ -420,11 +442,14 @@ fn update_page_source_in_graph(
     let mismatch = || "The active graph changed; source was not written".to_string();
     if graph_path.trim().is_empty()
         || graph.root_dir.canonicalize().map_err(|_| mismatch())?
-            != Path::new(graph_path).canonicalize().map_err(|_| mismatch())?
+            != Path::new(graph_path)
+                .canonicalize()
+                .map_err(|_| mismatch())?
     {
         return Err(mismatch());
     }
-    graph.update_page_source_guarded(page_id, expected_source, content)
+    graph
+        .update_page_source_guarded(page_id, expected_source, content)
         .map_err(|e| e.to_string())
 }
 
@@ -439,28 +464,50 @@ mod source_guard_tests {
         let graph = Graph::open(directory.path()).unwrap();
         let graph_path = directory.path().to_str().unwrap();
         let loaded = "- Original paragraph\n";
-        let page = graph.create_page_with_content("Synthetic", false, loaded).unwrap();
-        let note = graph.reading_note_create(
-            &uuid::Uuid::new_v4().to_string(), &page.id, None, "Preserve B",
-        ).unwrap();
+        let page = graph
+            .create_page_with_content("Synthetic", false, loaded)
+            .unwrap();
+        let note = graph
+            .reading_note_create(
+                &uuid::Uuid::new_v4().to_string(),
+                &page.id,
+                None,
+                "Preserve B",
+            )
+            .unwrap();
         let after_create = graph.get_page_source(&page.id).unwrap();
         let stale = update_page_source_in_graph(
-            &graph, graph_path, &page.id, loaded, "- Stale editor's unrelated change\n",
-        ).unwrap_err();
+            &graph,
+            graph_path,
+            &page.id,
+            loaded,
+            "- Stale editor's unrelated change\n",
+        )
+        .unwrap_err();
         assert!(stale.contains("revision conflict"), "{stale}");
         assert_eq!(graph.get_page_source(&page.id).unwrap(), after_create);
-        assert!(graph.update_page_source(&page.id, loaded).unwrap_err().to_string().contains("expectedSource"));
-        graph.reading_note_update(&note.id, &note.revision, "Edited B").unwrap();
+        assert!(graph
+            .update_page_source(&page.id, loaded)
+            .unwrap_err()
+            .to_string()
+            .contains("expectedSource"));
+        graph
+            .reading_note_update(&note.id, &note.revision, "Edited B")
+            .unwrap();
         let after_note_edit = graph.get_page_source(&page.id).unwrap();
         assert!(update_page_source_in_graph(
-            &graph, graph_path, &page.id, &after_create,
+            &graph,
+            graph_path,
+            &page.id,
+            &after_create,
             &after_create.replace("Original paragraph", "Stale paragraph edit"),
-        ).unwrap_err().contains("revision conflict"));
+        )
+        .unwrap_err()
+        .contains("revision conflict"));
         assert_eq!(graph.get_page_source(&page.id).unwrap(), after_note_edit);
         let fresh_edit = after_note_edit.replace("Original paragraph", "Fresh paragraph edit");
-        update_page_source_in_graph(
-            &graph, graph_path, &page.id, &after_note_edit, &fresh_edit,
-        ).unwrap();
+        update_page_source_in_graph(&graph, graph_path, &page.id, &after_note_edit, &fresh_edit)
+            .unwrap();
         assert_eq!(graph.get_page_source(&page.id).unwrap(), fresh_edit);
         let listed = graph.reading_notes_list(None).unwrap();
         assert!(listed.warnings.is_empty());
@@ -474,20 +521,42 @@ mod source_guard_tests {
         let other = tempfile::tempdir_in(".").unwrap();
         let graph = Graph::open(directory.path()).unwrap();
         let original = "- Ordinary unannotated source\n";
-        let page = graph.create_page_with_content("Synthetic", false, original).unwrap();
+        let page = graph
+            .create_page_with_content("Synthetic", false, original)
+            .unwrap();
         for path in ["", other.path().to_str().unwrap()] {
             assert!(update_page_source_in_graph(
-                &graph, path, &page.id, original, "- Wrong graph\n",
-            ).unwrap_err().contains("active graph changed"));
+                &graph,
+                path,
+                &page.id,
+                original,
+                "- Wrong graph\n",
+            )
+            .unwrap_err()
+            .contains("active graph changed"));
         }
         assert!(update_page_source_in_graph(
-            &graph, directory.path().to_str().unwrap(), &page.id, "", "- Empty base is not a fallback\n",
-        ).unwrap_err().contains("revision conflict"));
+            &graph,
+            directory.path().to_str().unwrap(),
+            &page.id,
+            "",
+            "- Empty base is not a fallback\n",
+        )
+        .unwrap_err()
+        .contains("revision conflict"));
         assert_eq!(graph.get_page_source(&page.id).unwrap(), original);
         update_page_source_in_graph(
-            &graph, directory.path().to_str().unwrap(), &page.id, original, "- Fresh ordinary edit\n",
-        ).unwrap();
-        assert_eq!(graph.get_page_source(&page.id).unwrap(), "- Fresh ordinary edit\n");
+            &graph,
+            directory.path().to_str().unwrap(),
+            &page.id,
+            original,
+            "- Fresh ordinary edit\n",
+        )
+        .unwrap();
+        assert_eq!(
+            graph.get_page_source(&page.id).unwrap(),
+            "- Fresh ordinary edit\n"
+        );
     }
 }
 

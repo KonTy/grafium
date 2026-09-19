@@ -1640,18 +1640,24 @@ pub(crate) fn parse_optional_summary_json(response: &str) -> Result<Option<Struc
         .and_then(|fenced| fenced.split_once('\n').map(|(_, body)| body.trim_start()))
         .unwrap_or(text);
     let json_fence = text.lines().any(|line| {
-        line.trim().strip_prefix("```").is_some_and(|label| label.trim().eq_ignore_ascii_case("json"))
+        line.trim()
+            .strip_prefix("```")
+            .is_some_and(|label| label.trim().eq_ignore_ascii_case("json"))
     });
-    let json_key = text.match_indices('{')
+    let json_key = text
+        .match_indices('{')
         .any(|(offset, _)| text[offset + 1..].trim_start().starts_with('"'));
-    let json_array = candidate.strip_prefix('[').is_some_and(|rest| {
-        rest.trim_start().starts_with(['{', '[', '"', ']'])
-    });
+    let json_array = candidate
+        .strip_prefix('[')
+        .is_some_and(|rest| rest.trim_start().starts_with(['{', '[', '"', ']']));
     if !json_fence && !json_key && !json_array && !candidate.starts_with('{') {
         return Ok(None);
     }
     if candidate.starts_with('[') {
-        return Err(summary_parse_error("expected a summary JSON object, not an array", text));
+        return Err(summary_parse_error(
+            "expected a summary JSON object, not an array",
+            text,
+        ));
     }
     let json = extract_json_object(text)
         .map_err(|_| summary_parse_error("missing or unterminated summary JSON object", text))?;
@@ -2635,9 +2641,13 @@ Notes after the JSON."#;
             responses.push(json.clone());
             let (llm, state) = MockLlm::new(responses);
             let summary = generate_page_summary(
-                "Sleep", expected, &llm, &mut |_| {},
+                "Sleep",
+                expected,
+                &llm,
+                &mut |_| {},
                 &crate::cancel::CancellationToken::disabled(),
-            ).await?;
+            )
+            .await?;
             assert_eq!(summary.topics[0].summary, expected);
             assert_eq!(summary.topics[0].tags[0].term, "sleep");
             assert_eq!(state.lock().unwrap().calls, failed_attempts + 1);
@@ -2648,24 +2658,38 @@ Notes after the JSON."#;
     #[tokio::test]
     async fn summary_json_rejects_invalid_json_on_every_attempt() {
         let response = r#"{"topics": [{"summary": "The selected passage describes several factors that affect sleep quality."#;
-        let (llm, state) = MockLlm::new([response.to_string(), response.to_string(), response.to_string()]);
+        let (llm, state) = MockLlm::new([
+            response.to_string(),
+            response.to_string(),
+            response.to_string(),
+        ]);
         assert!(generate_page_summary(
-            "Sleep", "Synthetic source content for the summary.", &llm, &mut |_| {},
+            "Sleep",
+            "Synthetic source content for the summary.",
+            &llm,
+            &mut |_| {},
             &crate::cancel::CancellationToken::disabled(),
-        ).await.is_err());
+        )
+        .await
+        .is_err());
         assert_eq!(state.lock().unwrap().calls, 3);
     }
 
     #[test]
     fn summary_json_rejects_empty_or_unrecognized_structures_for_all_callers() {
-        for response in [r#"{"topics":null}"#, r#"{"metadata":{"model":"test"}}"#, "[]"] {
+        for response in [
+            r#"{"topics":null}"#,
+            r#"{"metadata":{"model":"test"}}"#,
+            "[]",
+        ] {
             assert!(parse_summary_json_object(response).is_err(), "{response}");
         }
     }
 
     #[test]
     fn summary_json_keeps_ordinary_text_with_mathematical_braces() -> Result<()> {
-        let text = "The set {a, b, c} contains the three possible outcomes described in this passage.";
+        let text =
+            "The set {a, b, c} contains the three possible outcomes described in this passage.";
         assert_eq!(parse_summary_response(text)?.topics[0].summary, text);
         Ok(())
     }

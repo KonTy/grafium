@@ -272,7 +272,10 @@ impl Database {
             ids
         };
         for id in &stale {
-            conn.execute("DELETE FROM chat_messages WHERE thread_id = ?1", params![id])?;
+            conn.execute(
+                "DELETE FROM chat_messages WHERE thread_id = ?1",
+                params![id],
+            )?;
             conn.execute("DELETE FROM chat_threads WHERE id = ?1", params![id])?;
         }
         Ok(stale.len())
@@ -322,11 +325,7 @@ mod tests {
 
         let loaded = db.load_chat_thread("t1")?.expect("thread was saved");
         assert_eq!(loaded.thread.title, "Phones");
-        let contents: Vec<&str> = loaded
-            .messages
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect();
+        let contents: Vec<&str> = loaded.messages.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(contents, vec!["first", "second", "third"]);
         assert!(
             loaded.messages.iter().all(|m| !m.id.is_empty()),
@@ -387,11 +386,7 @@ mod tests {
         db.save_chat_thread(&thread("old", "Old"), &[])?;
         std::thread::sleep(std::time::Duration::from_millis(5));
         db.save_chat_thread(&thread("new", "New"), &[])?;
-        let ids: Vec<String> = db
-            .list_chat_threads()?
-            .into_iter()
-            .map(|t| t.id)
-            .collect();
+        let ids: Vec<String> = db.list_chat_threads()?.into_iter().map(|t| t.id).collect();
         assert_eq!(ids, vec!["new".to_string(), "old".to_string()]);
         Ok(())
     }
@@ -400,18 +395,11 @@ mod tests {
     fn pruning_keeps_the_newest_and_drops_the_rest() -> Result<()> {
         let db = Database::in_memory()?;
         for index in 0..5 {
-            db.save_chat_thread(
-                &thread(&format!("t{index}"), ""),
-                &[message("user", "q")],
-            )?;
+            db.save_chat_thread(&thread(&format!("t{index}"), ""), &[message("user", "q")])?;
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert_eq!(db.prune_chat_threads(2)?, 3);
-        let remaining: Vec<String> = db
-            .list_chat_threads()?
-            .into_iter()
-            .map(|t| t.id)
-            .collect();
+        let remaining: Vec<String> = db.list_chat_threads()?.into_iter().map(|t| t.id).collect();
         assert_eq!(remaining, vec!["t4".to_string(), "t3".to_string()]);
         let orphans: i64 =
             db.conn()?
@@ -438,7 +426,9 @@ mod tests {
 
         db.clear_all()?;
 
-        let loaded = db.load_chat_thread("t1")?.expect("reindex ate the conversation");
+        let loaded = db
+            .load_chat_thread("t1")?
+            .expect("reindex ate the conversation");
         assert_eq!(loaded.thread.title, "Phones");
         assert_eq!(loaded.messages.len(), 1);
         Ok(())

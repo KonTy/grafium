@@ -67,19 +67,32 @@ fn writing_source_inputs(
     db: &grafium_core::db::Database,
     blocks: &[WritingInputBlock],
 ) -> Result<Vec<WritingInputBlock>, String> {
-    let ids = blocks.iter().map(|block| block.id.clone()).collect::<Vec<_>>();
-    let metadata = db.get_blocks_with_page_meta(&ids).map_err(|e| e.to_string())?;
+    let ids = blocks
+        .iter()
+        .map(|block| block.id.clone())
+        .collect::<Vec<_>>();
+    let metadata = db
+        .get_blocks_with_page_meta(&ids)
+        .map_err(|e| e.to_string())?;
     let mut source_ids = std::collections::HashSet::new();
     let pages: std::collections::HashSet<_> = metadata.iter().map(|block| &block.page_id).collect();
     for page in pages {
         let page_blocks = db.list_blocks_for_page(page).map_err(|e| e.to_string())?;
-        source_ids.extend(grafium_core::knowledge::source_projection::without_reading_notes(&page_blocks)
-            .into_iter().map(|block| block.id));
+        source_ids.extend(
+            grafium_core::knowledge::source_projection::without_reading_notes(&page_blocks)
+                .into_iter()
+                .map(|block| block.id),
+        );
     }
     let mut source = Vec::new();
     for block in blocks {
-        if !metadata.iter().any(|saved| saved.block_id == block.id && saved.content == block.content) {
-            return Err("Writing source changed or is no longer available. Refresh before retrying.".into());
+        if !metadata
+            .iter()
+            .any(|saved| saved.block_id == block.id && saved.content == block.content)
+        {
+            return Err(
+                "Writing source changed or is no longer available. Refresh before retrying.".into(),
+            );
         }
         if source_ids.contains(&block.id) {
             // Mutation inputs retain the exact original markers and content.
@@ -89,17 +102,31 @@ fn writing_source_inputs(
     Ok(source)
 }
 
-fn restore_unwritten_blocks(original: &[WritingInputBlock], mut result: WritingRewriteResult) -> WritingRewriteResult {
-    let mut rewritten: HashMap<_, _> = result.blocks.into_iter().map(|block| (block.id.clone(), block)).collect();
-    result.blocks = original.iter().enumerate().map(|(index, block)| {
-        rewritten.remove(&block.id).unwrap_or_else(|| {
-            result.skipped.push(writing::WritingRewriteIssue {
-                block_id: block.id.clone(), block_ordinal: index + 1, line_ordinal: None,
-                reason: "Reading annotation retained unchanged; it is not author/source text.".into(),
-            });
-            block.clone()
+fn restore_unwritten_blocks(
+    original: &[WritingInputBlock],
+    mut result: WritingRewriteResult,
+) -> WritingRewriteResult {
+    let mut rewritten: HashMap<_, _> = result
+        .blocks
+        .into_iter()
+        .map(|block| (block.id.clone(), block))
+        .collect();
+    result.blocks = original
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            rewritten.remove(&block.id).unwrap_or_else(|| {
+                result.skipped.push(writing::WritingRewriteIssue {
+                    block_id: block.id.clone(),
+                    block_ordinal: index + 1,
+                    line_ordinal: None,
+                    reason: "Reading annotation retained unchanged; it is not author/source text."
+                        .into(),
+                });
+                block.clone()
+            })
         })
-    }).collect();
+        .collect();
     result
 }
 
@@ -226,18 +253,46 @@ mod tests {
     fn reading_annotation_inputs_are_preserved_unwritten_in_original_order() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let graph = grafium_core::Graph::open(directory.path()).unwrap();
-        let page = graph.create_page_with_content("Book", false, "- We utilize tools.[^1]\n").unwrap();
-        graph.reading_note_create("d39f3c66-55aa-407a-aecb-04ac4c50d05f", &page.id, None, "USER-ANNOTATION: contradictory claim.").unwrap();
-        let original: Vec<_> = graph.db.list_blocks_for_page(&page.id).unwrap().into_iter()
-            .map(|block| WritingInputBlock { id: block.id, content: block.content }).collect();
+        let page = graph
+            .create_page_with_content("Book", false, "- We utilize tools.[^1]\n")
+            .unwrap();
+        graph
+            .reading_note_create(
+                "d39f3c66-55aa-407a-aecb-04ac4c50d05f",
+                &page.id,
+                None,
+                "USER-ANNOTATION: contradictory claim.",
+            )
+            .unwrap();
+        let original: Vec<_> = graph
+            .db
+            .list_blocks_for_page(&page.id)
+            .unwrap()
+            .into_iter()
+            .map(|block| WritingInputBlock {
+                id: block.id,
+                content: block.content,
+            })
+            .collect();
         let source = writing_source_inputs(&graph.db, &original).unwrap();
         assert_eq!(source.len() + 1, original.len());
-        assert!(source.iter().all(|b| !b.content.contains("USER-ANNOTATION")));
+        assert!(source
+            .iter()
+            .all(|b| !b.content.contains("USER-ANNOTATION")));
         assert!(source.iter().any(|b| b.content.contains("[^grafium-note-")));
-        let restored = restore_unwritten_blocks(&original, WritingRewriteResult {
-            blocks: source.into_iter().map(|mut b| { b.content = b.content.replace("utilize", "use"); b }).collect(),
-            skipped: Vec::new(),
-        });
+        let restored = restore_unwritten_blocks(
+            &original,
+            WritingRewriteResult {
+                blocks: source
+                    .into_iter()
+                    .map(|mut b| {
+                        b.content = b.content.replace("utilize", "use");
+                        b
+                    })
+                    .collect(),
+                skipped: Vec::new(),
+            },
+        );
         assert_eq!(restored.blocks.len(), original.len());
         for (before, after) in original.iter().zip(&restored.blocks) {
             assert_eq!(before.id, after.id);

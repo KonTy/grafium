@@ -506,18 +506,9 @@ fn android_places_listing(app: &AppHandle) -> Option<DirListing> {
     let app_data = app.path().app_data_dir().ok()?;
     let places = [
         ("App storage", app_data.clone()),
-        (
-            "Documents",
-            PathBuf::from("/storage/emulated/0/Documents"),
-        ),
-        (
-            "Download",
-            PathBuf::from("/storage/emulated/0/Download"),
-        ),
-        (
-            "Internal storage",
-            PathBuf::from("/storage/emulated/0"),
-        ),
+        ("Documents", PathBuf::from("/storage/emulated/0/Documents")),
+        ("Download", PathBuf::from("/storage/emulated/0/Download")),
+        ("Internal storage", PathBuf::from("/storage/emulated/0")),
     ];
     let mut entries = Vec::new();
     for (name, p) in places {

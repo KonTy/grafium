@@ -12,15 +12,21 @@ mod tests {
     fn hierarchy_key_migration_rebuilds_only_derived_names_and_keeps_identity() -> Result<()> {
         let db = Database::in_memory()?;
         let page = db.create_page("Projects/Alpha", false)?;
-        db.update_page(&page.id, Some("Projects / Alpha"),
-            Some(&serde_json::json!({"alias":r"Work \ Alpha"})))?;
+        db.update_page(
+            &page.id,
+            Some("Projects / Alpha"),
+            Some(&serde_json::json!({"alias":r"Work \ Alpha"})),
+        )?;
         let conn = db.conn()?;
         conn.execute("DELETE FROM entity_names WHERE page_id = ?1", [&page.id])?;
         conn.execute(
             "INSERT INTO entity_names(page_id,name_key,name) VALUES(?1,'projects / alpha','Projects / Alpha')",
             [&page.id],
         )?;
-        conn.execute("UPDATE entity_index_metadata SET version = 1 WHERE id = 1", [])?;
+        conn.execute(
+            "UPDATE entity_index_metadata SET version = 1 WHERE id = 1",
+            [],
+        )?;
         create_entity_index(&conn)?;
         create_entity_index(&conn)?;
         assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
@@ -578,7 +584,8 @@ fn create_entity_index(conn: &Connection) -> Result<()> {
     )?;
     let version: i64 = tx.query_row(
         "SELECT COALESCE((SELECT version FROM entity_index_metadata WHERE id = 1), 0)",
-        [], |row| row.get(0),
+        [],
+        |row| row.get(0),
     )?;
     if version < 2 {
         // Only rebuild derived lookup keys. Canonical IDs, titles and approved

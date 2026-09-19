@@ -18,29 +18,51 @@ mod tests {
     fn fixture() -> Result<(tempfile::TempDir, Graph, Page, Vec<Block>)> {
         let directory = tempfile::tempdir_in(".")?;
         let graph = Graph::open(directory.path())?;
-        let page = graph.create_page_with_content("Synthetic research", false, concat!(
-            "category:: synthetic\n",
-            "- Original anchor\n  id:: anchor\n  owner:: editor\n",
-            "  - Nested source\n    id:: nested\n",
-            "  - Nested sibling\n    id:: nested-sibling\n",
-            "- Original tail\n  id:: tail\n",
-        ))?;
+        let page = graph.create_page_with_content(
+            "Synthetic research",
+            false,
+            concat!(
+                "category:: synthetic\n",
+                "- Original anchor\n  id:: anchor\n  owner:: editor\n",
+                "  - Nested source\n    id:: nested\n",
+                "  - Nested sibling\n    id:: nested-sibling\n",
+                "- Original tail\n  id:: tail\n",
+            ),
+        )?;
         let blocks = graph.db.list_blocks_for_page(&page.id)?;
         Ok((directory, graph, page, blocks))
     }
 
-    fn insert(graph: &Graph, page: &Page, before: &[Block], anchor: Option<&str>) -> Result<AiInsertSummaryResult> {
+    fn insert(
+        graph: &Graph,
+        page: &Page,
+        before: &[Block],
+        anchor: Option<&str>,
+    ) -> Result<AiInsertSummaryResult> {
         graph.insert_research_summary(
-            &page.id, Some("Summary answer"),
-            &[("First".into(), "First body\n\nSecond paragraph.".into()), ("Second".into(), "Second body".into())],
+            &page.id,
+            Some("Summary answer"),
+            &[
+                ("First".into(), "First body\n\nSecond paragraph.".into()),
+                ("Second".into(), "Second body".into()),
+            ],
             anchor,
-            vec![SummaryWrapChange { block_id: "tail".into(), previous_content: "Original tail".into(), new_content: "Wrapped tail".into() }],
-            Some(&graph.root_dir.to_string_lossy()), Some(before), &SummaryLinkPlan::default(),
+            vec![SummaryWrapChange {
+                block_id: "tail".into(),
+                previous_content: "Original tail".into(),
+                new_content: "Wrapped tail".into(),
+            }],
+            Some(&graph.root_dir.to_string_lossy()),
+            Some(before),
+            &SummaryLinkPlan::default(),
         )
     }
 
     fn assert_same(graph: &Graph, page: &Page, before: &[Block]) -> Result<()> {
-        assert_eq!(serde_json::to_value(graph.db.list_blocks_for_page(&page.id)?)?, serde_json::to_value(before)?);
+        assert_eq!(
+            serde_json::to_value(graph.db.list_blocks_for_page(&page.id)?)?,
+            serde_json::to_value(before)?
+        );
         Ok(())
     }
 
@@ -49,10 +71,19 @@ mod tests {
         let (directory, graph, page, before) = fixture()?;
         let receipt = insert(&graph, &page, &before, Some("nested"))?;
         assert_eq!(receipt.inserted_blocks.len(), 5);
-        assert_eq!(receipt.inserted_blocks[0].parent_id.as_deref(), Some("anchor"));
+        assert_eq!(
+            receipt.inserted_blocks[0].parent_id.as_deref(),
+            Some("anchor")
+        );
         assert_eq!(receipt.inserted_blocks[0].order_index, 1);
-        assert_eq!(receipt.inserted_blocks[1].parent_id.as_deref(), Some(receipt.inserted_block_id.as_str()));
-        assert_eq!(receipt.inserted_blocks[2].parent_id.as_deref(), Some(receipt.inserted_blocks[1].id.as_str()));
+        assert_eq!(
+            receipt.inserted_blocks[1].parent_id.as_deref(),
+            Some(receipt.inserted_block_id.as_str())
+        );
+        assert_eq!(
+            receipt.inserted_blocks[2].parent_id.as_deref(),
+            Some(receipt.inserted_blocks[1].id.as_str())
+        );
         assert_eq!(graph.db.get_block_by_id("nested-sibling")?.order_index, 2);
         let persisted = graph.db.list_blocks_for_page(&page.id)?;
         drop(graph);
@@ -64,7 +95,10 @@ mod tests {
         let restored = reopened.db.list_blocks_for_page(&page.id)?;
         assert!(before.iter().zip(&restored).all(|(a, b)| same_block(a, b)));
         reopened.reapply_research_summary(&receipt)?;
-        assert!(persisted.iter().zip(reopened.db.list_blocks_for_page(&page.id)?).all(|(a, b)| same_block(a, &b)));
+        assert!(persisted
+            .iter()
+            .zip(reopened.db.list_blocks_for_page(&page.id)?)
+            .all(|(a, b)| same_block(a, &b)));
         Ok(())
     }
 
@@ -72,14 +106,27 @@ mod tests {
     fn summary_undo_redo_preserves_unrelated_content_and_properties() -> Result<()> {
         let (_directory, graph, page, before) = fixture()?;
         let receipt = insert(&graph, &page, &before, None)?;
-        graph.update_block("anchor", "User edit retained", Some(&serde_json::json!({"owner":"new editor"})))?;
+        graph.update_block(
+            "anchor",
+            "User edit retained",
+            Some(&serde_json::json!({"owner":"new editor"})),
+        )?;
         graph.undo_research_summary(&receipt)?;
         assert_eq!(graph.db.get_block_by_id("tail")?.content, "Original tail");
-        assert_eq!(graph.db.get_block_by_id("anchor")?.content, "User edit retained");
-        assert_eq!(graph.db.get_block_by_id("anchor")?.properties["owner"], "new editor");
+        assert_eq!(
+            graph.db.get_block_by_id("anchor")?.content,
+            "User edit retained"
+        );
+        assert_eq!(
+            graph.db.get_block_by_id("anchor")?.properties["owner"],
+            "new editor"
+        );
         graph.reapply_research_summary(&receipt)?;
         assert_eq!(graph.db.get_block_by_id("tail")?.content, "Wrapped tail");
-        assert_eq!(graph.db.get_block_by_id("anchor")?.content, "User edit retained");
+        assert_eq!(
+            graph.db.get_block_by_id("anchor")?.content,
+            "User edit retained"
+        );
         Ok(())
     }
 
@@ -90,7 +137,18 @@ mod tests {
         pending_draft[0].content = "Unsaved draft".into();
         assert!(insert(&graph, &page, &pending_draft, None).is_err());
         assert!(insert(&graph, &page, &before, Some("missing")).is_err());
-        assert!(graph.insert_research_summary(&page.id, Some("Summary"), &[], None, vec![], Some("different graph"), Some(&before), &SummaryLinkPlan::default()).is_err());
+        assert!(graph
+            .insert_research_summary(
+                &page.id,
+                Some("Summary"),
+                &[],
+                None,
+                vec![],
+                Some("different graph"),
+                Some(&before),
+                &SummaryLinkPlan::default()
+            )
+            .is_err());
         assert_same(&graph, &page, &before)?;
         graph.update_block("anchor", "A concurrent saved edit", None)?;
         let current = graph.db.list_blocks_for_page(&page.id)?;
@@ -104,11 +162,26 @@ mod tests {
             let (_directory, graph, page, before) = fixture()?;
             let mut receipt = insert(&graph, &page, &before, None)?;
             match conflict {
-                "tree" => graph.update_block(&receipt.inserted_blocks[2].id, "User's summary edit", None)?,
+                "tree" => graph.update_block(
+                    &receipt.inserted_blocks[2].id,
+                    "User's summary edit",
+                    None,
+                )?,
                 "wrap" => graph.update_block("tail", "User's source edit", None)?,
-                "child" => { graph.create_block(&page.id, Some(&receipt.inserted_blocks[1].id), 9, "User's child", BlockType::Text, serde_json::json!({}))?; }
+                "child" => {
+                    graph.create_block(
+                        &page.id,
+                        Some(&receipt.inserted_blocks[1].id),
+                        9,
+                        "User's child",
+                        BlockType::Text,
+                        serde_json::json!({}),
+                    )?;
+                }
                 "graph" => receipt.graph_path = "other graph".into(),
-                _ => { graph.insert_block_at_top(&page.id, "New sibling")?; }
+                _ => {
+                    graph.insert_block_at_top(&page.id, "New sibling")?;
+                }
             }
             let current = graph.db.list_blocks_for_page(&page.id)?;
             let file = graph.root_dir.join(page.file_path.as_ref().unwrap());
@@ -134,13 +207,24 @@ mod tests {
         graph.undo_research_summary(&receipt)?;
         let other = graph.create_page_with_content("Other synthetic page", false, "- Other\n")?;
         graph.db.insert_block_raw(
-            &receipt.inserted_blocks[2].id, &other.id, None, 1,
-            "An unrelated block with the same ID", BlockType::Text, &serde_json::json!({}),
+            &receipt.inserted_blocks[2].id,
+            &other.id,
+            None,
+            1,
+            "An unrelated block with the same ID",
+            BlockType::Text,
+            &serde_json::json!({}),
         )?;
         let current = graph.db.list_blocks_for_page(&page.id)?;
         assert!(graph.reapply_research_summary(&receipt).is_err());
         assert_same(&graph, &page, &current)?;
-        assert_eq!(graph.db.get_block_by_id(&receipt.inserted_blocks[2].id)?.page_id, other.id);
+        assert_eq!(
+            graph
+                .db
+                .get_block_by_id(&receipt.inserted_blocks[2].id)?
+                .page_id,
+            other.id
+        );
         Ok(())
     }
 
@@ -163,24 +247,54 @@ mod tests {
     #[test]
     fn summary_revalidates_selected_target_identity_before_insert_and_redo() -> Result<()> {
         let (_directory, graph, page, before) = fixture()?;
-        let canonical = graph.create_page_with_content("Canonical", false, "- Synthetic target\n")?;
+        let canonical =
+            graph.create_page_with_content("Canonical", false, "- Synthetic target\n")?;
         let targets = SummaryLinkPlan {
-            resolved_targets: vec![SummaryLinkTarget { page_id: canonical.id.clone(), title: canonical.title.clone() }],
+            resolved_targets: vec![SummaryLinkTarget {
+                page_id: canonical.id.clone(),
+                title: canonical.title.clone(),
+            }],
             ..SummaryLinkPlan::default()
         };
         let topics = vec![("Topic".into(), "[[Canonical|#canonical]]".into())];
-        graph.db.conn()?.execute("UPDATE pages SET title = 'Renamed' WHERE id = ?1", [&canonical.id])?;
-        assert!(graph.insert_research_summary(
-            &page.id, Some("Summary"), &topics, None, vec![], None, Some(&before), &targets,
-        ).is_err());
+        graph.db.conn()?.execute(
+            "UPDATE pages SET title = 'Renamed' WHERE id = ?1",
+            [&canonical.id],
+        )?;
+        assert!(graph
+            .insert_research_summary(
+                &page.id,
+                Some("Summary"),
+                &topics,
+                None,
+                vec![],
+                None,
+                Some(&before),
+                &targets,
+            )
+            .is_err());
         assert_same(&graph, &page, &before)?;
-        graph.db.conn()?.execute("UPDATE pages SET title = 'Canonical' WHERE id = ?1", [&canonical.id])?;
+        graph.db.conn()?.execute(
+            "UPDATE pages SET title = 'Canonical' WHERE id = ?1",
+            [&canonical.id],
+        )?;
         let receipt = graph.insert_research_summary(
-            &page.id, Some("Summary"), &topics, None, vec![], None, Some(&before), &targets,
+            &page.id,
+            Some("Summary"),
+            &topics,
+            None,
+            vec![],
+            None,
+            Some(&before),
+            &targets,
         )?;
         graph.undo_research_summary(&receipt)?;
-        graph.db.conn()?.execute("UPDATE pages SET title = 'Renamed again' WHERE id = ?1", [&canonical.id])?;
-        let replacement = graph.create_page_with_content("Canonical", false, "- Replacement target\n")?;
+        graph.db.conn()?.execute(
+            "UPDATE pages SET title = 'Renamed again' WHERE id = ?1",
+            [&canonical.id],
+        )?;
+        let replacement =
+            graph.create_page_with_content("Canonical", false, "- Replacement target\n")?;
         assert_ne!(replacement.id, canonical.id);
         let current = graph.db.list_blocks_for_page(&page.id)?;
         assert!(graph.reapply_research_summary(&receipt).is_err());
@@ -197,18 +311,28 @@ mod tests {
         let inserted_bytes = fs::read(&file)?;
         let failure = |path: &Path, content: &str| -> Result<()> {
             Graph::atomic_write(path, content)?;
-            Err(CoreError::Other("Synthetic disk failure after replacement".into()))
+            Err(CoreError::Other(
+                "Synthetic disk failure after replacement".into(),
+            ))
         };
-        assert!(graph.apply_summary_receipt_with_writer(&receipt, true, None, failure).is_err());
+        assert!(graph
+            .apply_summary_receipt_with_writer(&receipt, true, None, failure)
+            .is_err());
         assert_same(&graph, &page, &inserted)?;
         assert_eq!(fs::read(&file)?, inserted_bytes);
         graph.undo_research_summary(&receipt)?;
         let undone = graph.db.list_blocks_for_page(&page.id)?;
         let undone_bytes = fs::read(&file)?;
-        assert!(graph.apply_summary_receipt_with_writer(&receipt, false, Some(&undone), failure).is_err());
+        assert!(graph
+            .apply_summary_receipt_with_writer(&receipt, false, Some(&undone), failure)
+            .is_err());
         assert_same(&graph, &page, &undone)?;
         assert_eq!(fs::read(&file)?, undone_bytes);
-        assert!(graph.apply_summary_receipt_with_writer(&receipt, false, None, |_, _| Err(CoreError::Other("Synthetic full disk".into()))).is_err());
+        assert!(graph
+            .apply_summary_receipt_with_writer(&receipt, false, None, |_, _| Err(CoreError::Other(
+                "Synthetic full disk".into()
+            )))
+            .is_err());
         assert_same(&graph, &page, &undone)?;
         Ok(())
     }
@@ -217,7 +341,8 @@ mod tests {
     fn summary_rejects_external_disk_edits_without_overwriting_them() -> Result<()> {
         let (_directory, graph, page, before) = fixture()?;
         let file = graph.root_dir.join(page.file_path.as_ref().unwrap());
-        let changed = fs::read_to_string(&file)?.replace("Original anchor", "External unsynced edit");
+        let changed =
+            fs::read_to_string(&file)?.replace("Original anchor", "External unsynced edit");
         fs::write(&file, &changed)?;
         assert!(insert(&graph, &page, &before, None).is_err());
         assert_same(&graph, &page, &before)?;
@@ -231,13 +356,20 @@ mod tests {
         let receipt = insert(&graph, &page, &before, None)?;
         let inserted = graph.db.list_blocks_for_page(&page.id)?;
         let file = graph.root_dir.join(page.file_path.as_ref().unwrap());
-        let error = graph.apply_summary_receipt_with_writer(&receipt, true, None, |path, _| {
-            fs::write(path, "- Synthetic concurrent external edit\n")?;
-            Err(CoreError::Other("Synthetic failure".into()))
-        }).unwrap_err();
-        assert!(error.to_string().contains("concurrent external file edit was preserved"));
+        let error = graph
+            .apply_summary_receipt_with_writer(&receipt, true, None, |path, _| {
+                fs::write(path, "- Synthetic concurrent external edit\n")?;
+                Err(CoreError::Other("Synthetic failure".into()))
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("concurrent external file edit was preserved"));
         assert_same(&graph, &page, &inserted)?;
-        assert_eq!(fs::read_to_string(file)?, "- Synthetic concurrent external edit\n");
+        assert_eq!(
+            fs::read_to_string(file)?,
+            "- Synthetic concurrent external edit\n"
+        );
         Ok(())
     }
 
@@ -251,24 +383,44 @@ mod tests {
         }
     }
 
-    fn insert_with_new_concepts(graph: &Graph, page: &Page, before: &[Block]) -> Result<AiInsertSummaryResult> {
+    fn insert_with_new_concepts(
+        graph: &Graph,
+        page: &Page,
+        before: &[Block],
+    ) -> Result<AiInsertSummaryResult> {
         graph.insert_research_summary(
-            &page.id, Some("Summary"), &[("Topic".into(), "An explanation without literal tags.".into())],
-            None, Vec::new(), None, Some(before), &new_concept_plan(),
+            &page.id,
+            Some("Summary"),
+            &[(
+                "Topic".into(),
+                "An explanation without literal tags.".into(),
+            )],
+            None,
+            Vec::new(),
+            None,
+            Some(before),
+            &new_concept_plan(),
         )
     }
 
     #[test]
-    fn summary_new_concepts_are_atomic_and_persist_stable_identities_through_undo_redo() -> Result<()> {
+    fn summary_new_concepts_are_atomic_and_persist_stable_identities_through_undo_redo(
+    ) -> Result<()> {
         let (directory, graph, page, before) = fixture()?;
         assert!(graph.db.get_page_by_title("New stellar concept").is_err());
         let receipt = insert_with_new_concepts(&graph, &page, &before)?;
         assert_eq!(receipt.created_targets.len(), 2);
         assert_eq!(receipt.inserted_blocks.len(), 4);
-        assert_eq!(receipt.inserted_blocks[3].parent_id, Some(receipt.inserted_blocks[1].id.clone()));
+        assert_eq!(
+            receipt.inserted_blocks[3].parent_id,
+            Some(receipt.inserted_blocks[1].id.clone())
+        );
         assert_eq!(receipt.inserted_blocks[3].order_index, 1);
         for target in &receipt.created_targets {
-            assert_eq!(serde_json::to_value(graph.db.get_page_by_id(&target.id)?)?, serde_json::to_value(target)?);
+            assert_eq!(
+                serde_json::to_value(graph.db.get_page_by_id(&target.id)?)?,
+                serde_json::to_value(target)?
+            );
             assert!(graph.db.list_blocks_for_page(&target.id)?.is_empty());
         }
         drop(graph);
@@ -276,13 +428,19 @@ mod tests {
         for target in &receipt.created_targets {
             assert_eq!(graph.db.get_page_by_title(&target.title)?.id, target.id);
         }
-        assert!(graph.undo_research_summary(&receipt)?.retained_targets.is_empty());
+        assert!(graph
+            .undo_research_summary(&receipt)?
+            .retained_targets
+            .is_empty());
         for target in &receipt.created_targets {
             assert!(graph.db.get_page_by_id(&target.id).is_err());
         }
         graph.reapply_research_summary(&receipt)?;
         for target in &receipt.created_targets {
-            assert_eq!(serde_json::to_value(graph.db.get_page_by_id(&target.id)?)?, serde_json::to_value(target)?);
+            assert_eq!(
+                serde_json::to_value(graph.db.get_page_by_id(&target.id)?)?,
+                serde_json::to_value(target)?
+            );
         }
         Ok(())
     }
@@ -294,25 +452,57 @@ mod tests {
             let receipt = insert_with_new_concepts(&graph, &page, &before)?;
             let target = &receipt.created_targets[0];
             match kind {
-                "link" => graph.update_block("anchor", "[[New stellar concept]] is referenced elsewhere.", None)?,
-                "content" => { graph.create_block(&target.id, None, 0, "User's irreplaceable content", BlockType::Text, serde_json::json!({}))?; }
-                "properties" => { graph.db.conn()?.execute("UPDATE pages SET properties = '{\"owner\":\"user\"}' WHERE id = ?1", [&target.id])?; }
-                "file" => fs::write(graph.pages_dir.join("New stellar concept.md"), "- External target content\n")?,
-                _ => { graph.db.conn()?.execute("INSERT INTO favorites (id,page_id,created_at) VALUES ('summary-test-favorite',?1,0)", [&target.id])?; }
+                "link" => graph.update_block(
+                    "anchor",
+                    "[[New stellar concept]] is referenced elsewhere.",
+                    None,
+                )?,
+                "content" => {
+                    graph.create_block(
+                        &target.id,
+                        None,
+                        0,
+                        "User's irreplaceable content",
+                        BlockType::Text,
+                        serde_json::json!({}),
+                    )?;
+                }
+                "properties" => {
+                    graph.db.conn()?.execute(
+                        "UPDATE pages SET properties = '{\"owner\":\"user\"}' WHERE id = ?1",
+                        [&target.id],
+                    )?;
+                }
+                "file" => fs::write(
+                    graph.pages_dir.join("New stellar concept.md"),
+                    "- External target content\n",
+                )?,
+                _ => {
+                    graph.db.conn()?.execute("INSERT INTO favorites (id,page_id,created_at) VALUES ('summary-test-favorite',?1,0)", [&target.id])?;
+                }
             }
             let result = graph.undo_research_summary(&receipt)?;
             assert_eq!(result.retained_targets.len(), 1, "{kind}");
             assert_eq!(result.retained_targets[0].page_id, target.id);
             assert!(!result.retained_targets[0].reason.is_empty());
             assert!(graph.db.get_page_by_id(&target.id).is_ok());
-            assert!(graph.db.get_page_by_id(&receipt.created_targets[1].id).is_err());
+            assert!(graph
+                .db
+                .get_page_by_id(&receipt.created_targets[1].id)
+                .is_err());
             graph.reapply_research_summary(&receipt)?;
             assert_eq!(graph.db.get_page_by_title(&target.title)?.id, target.id);
             if kind == "content" {
-                assert_eq!(graph.db.list_blocks_for_page(&target.id)?[0].content, "User's irreplaceable content");
+                assert_eq!(
+                    graph.db.list_blocks_for_page(&target.id)?[0].content,
+                    "User's irreplaceable content"
+                );
             }
             if kind == "file" {
-                assert_eq!(fs::read_to_string(graph.pages_dir.join("New stellar concept.md"))?, "- External target content\n");
+                assert_eq!(
+                    fs::read_to_string(graph.pages_dir.join("New stellar concept.md"))?,
+                    "- External target content\n"
+                );
             }
         }
         Ok(())
@@ -329,21 +519,28 @@ mod tests {
         assert!(insert_with_new_concepts(&graph, &page, &before).is_err());
         assert!(graph.db.get_page_by_title("New stellar concept").is_err());
         assert_same(&graph, &page, &before)?;
-        graph.db.conn()?.execute_batch("DROP TRIGGER summary_test_target_failure")?;
+        graph
+            .db
+            .conn()?
+            .execute_batch("DROP TRIGGER summary_test_target_failure")?;
         let receipt = insert_with_new_concepts(&graph, &page, &before)?;
         let after = graph.db.list_blocks_for_page(&page.id)?;
         let failure = |path: &Path, content: &str| -> Result<()> {
             Graph::atomic_write(path, content)?;
             Err(CoreError::Other("Synthetic post-write failure".into()))
         };
-        assert!(graph.apply_summary_receipt_with_writer(&receipt, true, None, failure).is_err());
+        assert!(graph
+            .apply_summary_receipt_with_writer(&receipt, true, None, failure)
+            .is_err());
         assert_same(&graph, &page, &after)?;
         for target in &receipt.created_targets {
             assert!(graph.db.get_page_by_id(&target.id).is_ok());
         }
         graph.undo_research_summary(&receipt)?;
         let undone = graph.db.list_blocks_for_page(&page.id)?;
-        assert!(graph.apply_summary_receipt_with_writer(&receipt, false, None, failure).is_err());
+        assert!(graph
+            .apply_summary_receipt_with_writer(&receipt, false, None, failure)
+            .is_err());
         assert_same(&graph, &page, &undone)?;
         for target in &receipt.created_targets {
             assert!(graph.db.get_page_by_id(&target.id).is_err());
@@ -354,10 +551,17 @@ mod tests {
     #[test]
     fn summary_new_target_plan_rejects_a_concurrently_created_match() -> Result<()> {
         let (_directory, graph, page, before) = fixture()?;
-        let existing = graph.create_page_with_content("New stellar concept", false, "- User created this meanwhile\n")?;
+        let existing = graph.create_page_with_content(
+            "New stellar concept",
+            false,
+            "- User created this meanwhile\n",
+        )?;
         assert!(insert_with_new_concepts(&graph, &page, &before).is_err());
         assert_same(&graph, &page, &before)?;
-        assert_eq!(graph.db.get_page_by_title("New stellar concept")?.id, existing.id);
+        assert_eq!(
+            graph.db.get_page_by_title("New stellar concept")?.id,
+            existing.id
+        );
         assert!(graph.db.get_page_by_title("Unrelated concept").is_err());
         Ok(())
     }
@@ -367,21 +571,36 @@ mod tests {
         let (directory, graph, page, before) = fixture()?;
         let plan = SummaryLinkPlan {
             new_target_titles: vec!["Astronomy/Phenomena/Coronal waves".into()],
-            topic_link_blocks: vec!["[[Astronomy/Phenomena/Coronal waves|#astronomy_phenomena_coronal_waves]]".into()],
+            topic_link_blocks: vec![
+                "[[Astronomy/Phenomena/Coronal waves|#astronomy_phenomena_coronal_waves]]".into(),
+            ],
             ..SummaryLinkPlan::default()
         };
         let receipt = graph.insert_research_summary(
-            &page.id, Some("Summary"), &[("Topic".into(), "Synthetic text".into())],
-            None, vec![], None, Some(&before), &plan,
+            &page.id,
+            Some("Summary"),
+            &[("Topic".into(), "Synthetic text".into())],
+            None,
+            vec![],
+            None,
+            Some(&before),
+            &plan,
         )?;
         assert_eq!(receipt.created_targets.len(), 3);
-        let identities = receipt.created_targets.iter().map(|target| (target.title.clone(), target.id.clone())).collect::<Vec<_>>();
+        let identities = receipt
+            .created_targets
+            .iter()
+            .map(|target| (target.title.clone(), target.id.clone()))
+            .collect::<Vec<_>>();
         drop(graph);
         let graph = Graph::open(directory.path())?;
         for (title, id) in &identities {
             assert_eq!(&graph.db.get_page_by_title(title)?.id, id);
         }
-        assert!(graph.undo_research_summary(&receipt)?.retained_targets.is_empty());
+        assert!(graph
+            .undo_research_summary(&receipt)?
+            .retained_targets
+            .is_empty());
         for (_, id) in &identities {
             assert!(graph.db.get_page_by_id(id).is_err());
         }
@@ -396,8 +615,14 @@ mod tests {
     fn summary_rejects_markup_that_would_lose_tree_structure_and_new_targets() -> Result<()> {
         let (_directory, graph, page, before) = fixture()?;
         let result = graph.insert_research_summary(
-            &page.id, Some("Summary"), &[("Topic".into(), "```\nunclosed code fence".into())],
-            None, vec![], None, Some(&before), &new_concept_plan(),
+            &page.id,
+            Some("Summary"),
+            &[("Topic".into(), "```\nunclosed code fence".into())],
+            None,
+            vec![],
+            None,
+            Some(&before),
+            &new_concept_plan(),
         );
         assert!(result.is_err());
         assert_same(&graph, &page, &before)?;
@@ -410,7 +635,19 @@ mod tests {
         let (_directory, graph, page, before) = fixture()?;
         let receipt = insert(&graph, &page, &before, None)?;
         let value = serde_json::to_value(&receipt)?;
-        for key in ["graphPath", "pageId", "insertedBlockId", "insertedContent", "insertedAfterBlockId", "insertedBlocks", "siblingOrderBefore", "wrapChanges", "resolvedTargets", "createdTargets", "unlinkedTargets"] {
+        for key in [
+            "graphPath",
+            "pageId",
+            "insertedBlockId",
+            "insertedContent",
+            "insertedAfterBlockId",
+            "insertedBlocks",
+            "siblingOrderBefore",
+            "wrapChanges",
+            "resolvedTargets",
+            "createdTargets",
+            "unlinkedTargets",
+        ] {
             assert!(value.get(key).is_some(), "{key}");
         }
         assert_eq!(value["insertedBlocks"].as_array().unwrap().len(), 5);
@@ -483,7 +720,9 @@ pub struct AiInsertSummaryResult {
 }
 
 fn stale(message: &str) -> CoreError {
-    CoreError::Other(format!("Summary edit is stale: {message}; no changes were applied"))
+    CoreError::Other(format!(
+        "Summary edit is stale: {message}; no changes were applied"
+    ))
 }
 
 fn same_block(a: &Block, b: &Block) -> bool {
@@ -505,7 +744,11 @@ fn sibling_order(blocks: &[Block], parent: Option<&str>) -> Vec<SummarySiblingOr
             order_index: block.order_index,
         })
         .collect();
-    siblings.sort_by(|a, b| a.order_index.cmp(&b.order_index).then(a.block_id.cmp(&b.block_id)));
+    siblings.sort_by(|a, b| {
+        a.order_index
+            .cmp(&b.order_index)
+            .then(a.block_id.cmp(&b.block_id))
+    });
     siblings
 }
 
@@ -537,10 +780,14 @@ impl Graph {
         if let Some(expected) = expected {
             if expected.len() != blocks.len()
                 || expected.iter().zip(blocks).any(|(a, b)| {
-                    !same_block(a, b) || a.created_at != b.created_at || a.updated_at != b.updated_at
+                    !same_block(a, b)
+                        || a.created_at != b.created_at
+                        || a.updated_at != b.updated_at
                 })
             {
-                return Err(stale("the source page changed; flush drafts and analyze it again"));
+                return Err(stale(
+                    "the source page changed; flush drafts and analyze it again",
+                ));
             }
         }
         Ok(())
@@ -572,7 +819,10 @@ impl Graph {
         };
         let parent_id = anchor.and_then(|block| block.parent_id.clone());
         let order_index = match anchor {
-            Some(block) => block.order_index.checked_add(1).ok_or_else(|| stale("invalid anchor order"))?,
+            Some(block) => block
+                .order_index
+                .checked_add(1)
+                .ok_or_else(|| stale("invalid anchor order"))?,
             None => 0,
         };
         let now = Utc::now().timestamp_millis();
@@ -590,7 +840,11 @@ impl Graph {
         let root = new_block(
             parent_id.clone(),
             order_index,
-            title_answer.map(str::trim).filter(|text| !text.is_empty()).unwrap_or("Summary").to_string(),
+            title_answer
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("Summary")
+                .to_string(),
         );
         let mut inserted_blocks = vec![root.clone()];
         for (index, (title, body)) in topics.iter().enumerate() {
@@ -603,38 +857,63 @@ impl Graph {
             if !body.trim().is_empty() {
                 inserted_blocks.push(new_block(Some(heading.id.clone()), 0, body.to_string()));
             }
-            if let Some(tags) = links.topic_link_blocks.get(index).filter(|tags| !tags.is_empty()) {
+            if let Some(tags) = links
+                .topic_link_blocks
+                .get(index)
+                .filter(|tags| !tags.is_empty())
+            {
                 inserted_blocks.push(new_block(
-                    Some(heading.id), i32::from(!body.trim().is_empty()), tags.clone(),
+                    Some(heading.id),
+                    i32::from(!body.trim().is_empty()),
+                    tags.clone(),
                 ));
             }
         }
         // Ordinary indexing creates namespace parents. Own those identities
         // now too, so reopening the summary cannot create unreceipted pages.
-        let mut candidate_titles = links.new_target_titles.iter()
-            .map(|title| parser::normalize_page_title(title)).collect::<Vec<_>>();
+        let mut candidate_titles = links
+            .new_target_titles
+            .iter()
+            .map(|title| parser::normalize_page_title(title))
+            .collect::<Vec<_>>();
         for title in candidate_titles.clone() {
             let parts = title.split('/').collect::<Vec<_>>();
             for count in 1..parts.len() {
                 candidate_titles.push(parts[..count].join("/"));
             }
         }
-        let candidates = candidate_titles.iter().map(|title| parser::TagTerm {
-            term: title.clone(), qualified: None,
-        }).collect::<Vec<_>>();
+        let candidates = candidate_titles
+            .iter()
+            .map(|title| parser::TagTerm {
+                term: title.clone(),
+                qualified: None,
+            })
+            .collect::<Vec<_>>();
         let resolutions = self.db.resolve_tag_terms(&candidates)?;
         let mut resolved_targets = links.resolved_targets.clone();
         let mut new_titles = Vec::new();
         let mut seen_titles = HashSet::new();
         for (index, resolution) in resolutions.into_iter().enumerate() {
-            if index < links.new_target_titles.len() && resolution.decision != crate::db::EntityDecision::New {
-                return Err(stale("a proposed target now matches an existing or ambiguous entity"));
+            if index < links.new_target_titles.len()
+                && resolution.decision != crate::db::EntityDecision::New
+            {
+                return Err(stale(
+                    "a proposed target now matches an existing or ambiguous entity",
+                ));
             }
             match resolution.decision {
                 crate::db::EntityDecision::Reuse => {
-                    let page_id = resolution.target_page_id.ok_or_else(|| stale("a namespace target lost its identity"))?;
-                    if !resolved_targets.iter().any(|target| target.page_id == page_id) {
-                        resolved_targets.push(SummaryLinkTarget { page_id, title: resolution.target_title });
+                    let page_id = resolution
+                        .target_page_id
+                        .ok_or_else(|| stale("a namespace target lost its identity"))?;
+                    if !resolved_targets
+                        .iter()
+                        .any(|target| target.page_id == page_id)
+                    {
+                        resolved_targets.push(SummaryLinkTarget {
+                            page_id,
+                            title: resolution.target_title,
+                        });
                     }
                 }
                 crate::db::EntityDecision::New => {
@@ -643,11 +922,14 @@ impl Graph {
                     }
                 }
                 crate::db::EntityDecision::Ambiguous => {
-                    return Err(stale("a proposed target's namespace is ambiguous; clarify its title"));
+                    return Err(stale(
+                        "a proposed target's namespace is ambiguous; clarify its title",
+                    ));
                 }
             }
         }
-        let created_targets = new_titles.iter()
+        let created_targets = new_titles
+            .iter()
             .map(|title| Page {
                 id: Uuid::new_v4().to_string(),
                 title: title.clone(),
@@ -656,7 +938,8 @@ impl Graph {
                 updated_at: now,
                 is_journal: false,
                 properties: serde_json::json!({}),
-            }).collect();
+            })
+            .collect();
         let receipt = AiInsertSummaryResult {
             graph_path: self.root_dir.to_string_lossy().to_string(),
             page_id: page_id.to_string(),
@@ -674,7 +957,10 @@ impl Graph {
         Ok(receipt)
     }
 
-    pub fn undo_research_summary(&self, receipt: &AiInsertSummaryResult) -> Result<SummaryUndoResult> {
+    pub fn undo_research_summary(
+        &self,
+        receipt: &AiInsertSummaryResult,
+    ) -> Result<SummaryUndoResult> {
         self.apply_summary_receipt(receipt, true, None)
     }
 
@@ -701,15 +987,25 @@ impl Graph {
         if self.root_dir.to_string_lossy() != receipt.graph_path {
             return Err(stale("the active graph changed"));
         }
-        let root = receipt.inserted_blocks.first().ok_or_else(|| stale("incomplete insertion receipt"))?;
+        let root = receipt
+            .inserted_blocks
+            .first()
+            .ok_or_else(|| stale("incomplete insertion receipt"))?;
         if root.id != receipt.inserted_block_id || root.content != receipt.inserted_content {
             return Err(stale("invalid insertion receipt"));
         }
-        let mut target_ids = receipt.resolved_targets.iter().map(|target| target.page_id.as_str()).collect::<HashSet<_>>();
+        let mut target_ids = receipt
+            .resolved_targets
+            .iter()
+            .map(|target| target.page_id.as_str())
+            .collect::<HashSet<_>>();
         for target in &receipt.created_targets {
-            if target.id.is_empty() || target.id == receipt.page_id
-                || !target_ids.insert(target.id.as_str()) || target.file_path.is_some()
-                || target.is_journal || target.properties != serde_json::json!({})
+            if target.id.is_empty()
+                || target.id == receipt.page_id
+                || !target_ids.insert(target.id.as_str())
+                || target.file_path.is_some()
+                || target.is_journal
+                || target.properties != serde_json::json!({})
                 || parser::format_concept_link(&target.title).is_none()
             {
                 return Err(stale("invalid created-target receipt"));
@@ -720,7 +1016,11 @@ impl Graph {
         for (index, block) in receipt.inserted_blocks.iter().enumerate() {
             if block.id.is_empty()
                 || block.page_id != receipt.page_id
-                || (index > 0 && !block.parent_id.as_ref().is_some_and(|id| inserted_ids.contains(id)))
+                || (index > 0
+                    && !block
+                        .parent_id
+                        .as_ref()
+                        .is_some_and(|id| inserted_ids.contains(id)))
                 || !inserted_ids.insert(block.id.clone())
             {
                 return Err(stale("invalid insertion tree"));
@@ -728,7 +1028,11 @@ impl Graph {
         }
         let mut sibling_ids = HashSet::new();
         let mut order_before = receipt.sibling_order_before.clone();
-        order_before.sort_by(|a, b| a.order_index.cmp(&b.order_index).then(a.block_id.cmp(&b.block_id)));
+        order_before.sort_by(|a, b| {
+            a.order_index
+                .cmp(&b.order_index)
+                .then(a.block_id.cmp(&b.block_id))
+        });
         for sibling in &order_before {
             if inserted_ids.contains(&sibling.block_id) || !sibling_ids.insert(&sibling.block_id) {
                 return Err(stale("invalid sibling receipt"));
@@ -736,7 +1040,8 @@ impl Graph {
         }
         if let Some(anchor) = &receipt.inserted_after_block_id {
             if !order_before.iter().any(|sibling| {
-                &sibling.block_id == anchor && sibling.order_index.checked_add(1) == Some(root.order_index)
+                &sibling.block_id == anchor
+                    && sibling.order_index.checked_add(1) == Some(root.order_index)
             }) {
                 return Err(stale("invalid insertion anchor"));
             }
@@ -746,20 +1051,34 @@ impl Graph {
         let mut order_after = order_before.clone();
         for sibling in &mut order_after {
             if sibling.order_index >= root.order_index {
-                sibling.order_index = sibling.order_index.checked_add(1).ok_or_else(|| stale("invalid sibling order"))?;
+                sibling.order_index = sibling
+                    .order_index
+                    .checked_add(1)
+                    .ok_or_else(|| stale("invalid sibling order"))?;
             }
         }
-        order_after.push(SummarySiblingOrder { block_id: root.id.clone(), order_index: root.order_index });
-        order_after.sort_by(|a, b| a.order_index.cmp(&b.order_index).then(a.block_id.cmp(&b.block_id)));
+        order_after.push(SummarySiblingOrder {
+            block_id: root.id.clone(),
+            order_index: root.order_index,
+        });
+        order_after.sort_by(|a, b| {
+            a.order_index
+                .cmp(&b.order_index)
+                .then(a.block_id.cmp(&b.block_id))
+        });
 
         let mut conn = self.db.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut create_targets = Vec::new();
         if !undo {
             for target in &receipt.resolved_targets {
-                let resolution = self.db.resolve_tag_terms_in_connection(&tx, &[
-                    parser::TagTerm { term: target.title.clone(), qualified: None },
-                ])?;
+                let resolution = self.db.resolve_tag_terms_in_connection(
+                    &tx,
+                    &[parser::TagTerm {
+                        term: target.title.clone(),
+                        qualified: None,
+                    }],
+                )?;
                 if !resolution.first().is_some_and(|current| {
                     current.decision == crate::db::EntityDecision::Reuse
                         && current.target_page_id.as_deref() == Some(target.page_id.as_str())
@@ -770,41 +1089,76 @@ impl Graph {
             }
             for target in &receipt.created_targets {
                 let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pages WHERE id = ?1)", [&target.id], |row| row.get(0),
+                    "SELECT EXISTS(SELECT 1 FROM pages WHERE id = ?1)",
+                    [&target.id],
+                    |row| row.get(0),
                 )?;
-                let resolution = self.db.resolve_tag_terms_in_connection(&tx, &[
-                    parser::TagTerm { term: target.title.clone(), qualified: None },
-                ])?;
-                let current = resolution.first().ok_or_else(|| stale("a proposed target could not be resolved"))?;
+                let resolution = self.db.resolve_tag_terms_in_connection(
+                    &tx,
+                    &[parser::TagTerm {
+                        term: target.title.clone(),
+                        qualified: None,
+                    }],
+                )?;
+                let current = resolution
+                    .first()
+                    .ok_or_else(|| stale("a proposed target could not be resolved"))?;
                 if exists {
-                    if expected.is_some() || current.decision != crate::db::EntityDecision::Reuse
+                    if expected.is_some()
+                        || current.decision != crate::db::EntityDecision::Reuse
                         || current.target_page_id.as_deref() != Some(target.id.as_str())
                         || current.target_title != target.title
                     {
                         return Err(stale("a created target's identity changed"));
                     }
                 } else {
-                    if current.decision != crate::db::EntityDecision::New || current.target_title != target.title {
-                        return Err(stale("a proposed target now matches an existing or ambiguous entity"));
+                    if current.decision != crate::db::EntityDecision::New
+                        || current.target_title != target.title
+                    {
+                        return Err(stale(
+                            "a proposed target now matches an existing or ambiguous entity",
+                        ));
                     }
-                    if self.pages_dir.join(Self::safe_relative_page_path(&target.title)?).exists() {
-                        return Err(stale("a proposed target has an unindexed page file; refresh first"));
+                    if self
+                        .pages_dir
+                        .join(Self::safe_relative_page_path(&target.title)?)
+                        .exists()
+                    {
+                        return Err(stale(
+                            "a proposed target has an unindexed page file; refresh first",
+                        ));
                     }
                     create_targets.push(target);
                 }
             }
         }
-        let page = self.db.get_page_by_id_in_connection(&tx, &receipt.page_id)?;
+        let page = self
+            .db
+            .get_page_by_id_in_connection(&tx, &receipt.page_id)?;
         let blocks = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
-        let count: usize = tx.query_row("SELECT COUNT(*) FROM blocks WHERE page_id = ?1", [&page.id], |row| row.get(0))?;
+        let count: usize = tx.query_row(
+            "SELECT COUNT(*) FROM blocks WHERE page_id = ?1",
+            [&page.id],
+            |row| row.get(0),
+        )?;
         if count != blocks.len() {
             return Err(stale("the page contains unreachable blocks"));
         }
         Self::check_summary_snapshot(&blocks, expected)?;
-        if sibling_order(&blocks, root.parent_id.as_deref()) != if undo { order_after.clone() } else { order_before.clone() } {
+        if sibling_order(&blocks, root.parent_id.as_deref())
+            != if undo {
+                order_after.clone()
+            } else {
+                order_before.clone()
+            }
+        {
             return Err(stale("the insertion location changed"));
         }
-        if root.parent_id.as_ref().is_some_and(|id| !blocks.iter().any(|block| &block.id == id)) {
+        if root
+            .parent_id
+            .as_ref()
+            .is_some_and(|id| !blocks.iter().any(|block| &block.id == id))
+        {
             return Err(stale("the insertion parent is missing"));
         }
         for inserted in &receipt.inserted_blocks {
@@ -813,15 +1167,25 @@ impl Graph {
                     return Err(stale("an inserted block was edited, moved, or deleted"));
                 }
             } else {
-                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM blocks WHERE id = ?1)", [&inserted.id], |row| row.get(0))?;
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM blocks WHERE id = ?1)",
+                    [&inserted.id],
+                    |row| row.get(0),
+                )?;
                 if exists {
                     return Err(stale("an inserted block identity is already in use"));
                 }
             }
         }
-        if undo && blocks.iter().any(|block| {
-            block.parent_id.as_ref().is_some_and(|id| inserted_ids.contains(id)) && !inserted_ids.contains(&block.id)
-        }) {
+        if undo
+            && blocks.iter().any(|block| {
+                block
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|id| inserted_ids.contains(id))
+                    && !inserted_ids.contains(&block.id)
+            })
+        {
             return Err(stale("new children were added to the summary"));
         }
         let mut wrapped_ids = HashSet::new();
@@ -829,13 +1193,24 @@ impl Graph {
             if inserted_ids.contains(&change.block_id) || !wrapped_ids.insert(&change.block_id) {
                 return Err(stale("invalid wrap receipt"));
             }
-            let expected_content = if undo { &change.new_content } else { &change.previous_content };
-            if !blocks.iter().any(|block| block.id == change.block_id && &block.content == expected_content) {
+            let expected_content = if undo {
+                &change.new_content
+            } else {
+                &change.previous_content
+            };
+            if !blocks
+                .iter()
+                .any(|block| block.id == change.block_id && &block.content == expected_content)
+            {
                 return Err(stale("a wrapped block was edited or deleted"));
             }
         }
 
-        let file_path = self.root_dir.join(page.file_path.as_deref().ok_or_else(|| stale("the page has no file"))?);
+        let file_path = self.root_dir.join(
+            page.file_path
+                .as_deref()
+                .ok_or_else(|| stale("the page has no file"))?,
+        );
         self.ensure_path_inside_graph(&file_path)?;
         let original = fs::read_to_string(&file_path)?;
         self.check_summary_disk(&page, &blocks, &file_path, &original)?;
@@ -854,43 +1229,65 @@ impl Graph {
         } else {
             for block in &receipt.inserted_blocks {
                 self.db.insert_block_raw_in_connection(
-                    &tx, &block.id, &page.id, block.parent_id.as_deref(), block.order_index,
-                    &block.content, block.block_type.clone(), &block.properties,
+                    &tx,
+                    &block.id,
+                    &page.id,
+                    block.parent_id.as_deref(),
+                    block.order_index,
+                    &block.content,
+                    block.block_type.clone(),
+                    &block.properties,
                 )?;
-                tx.execute("UPDATE blocks SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![block.created_at, block.updated_at, block.id])?;
-                self.db.sync_block_properties_in_connection(&tx, &block.id, &block.properties)?;
+                tx.execute(
+                    "UPDATE blocks SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![block.created_at, block.updated_at, block.id],
+                )?;
+                self.db
+                    .sync_block_properties_in_connection(&tx, &block.id, &block.properties)?;
                 self.index_summary_content(&tx, &block.id, &block.content)?;
             }
         }
         for sibling in if undo { &order_before } else { &order_after } {
             if sibling.block_id != root.id {
-                tx.execute("UPDATE blocks SET order_index = ?1 WHERE id = ?2",
-                    params![sibling.order_index, sibling.block_id])?;
+                tx.execute(
+                    "UPDATE blocks SET order_index = ?1 WHERE id = ?2",
+                    params![sibling.order_index, sibling.block_id],
+                )?;
             }
         }
         for change in &receipt.wrap_changes {
-            let content = if undo { &change.previous_content } else { &change.new_content };
-            self.db.update_block_in_connection(&tx, &change.block_id, content, None)?;
+            let content = if undo {
+                &change.previous_content
+            } else {
+                &change.new_content
+            };
+            self.db
+                .update_block_in_connection(&tx, &change.block_id, content, None)?;
             self.index_summary_content(&tx, &change.block_id, content)?;
         }
         let outcome = if undo {
-            SummaryUndoResult { retained_targets: self.cleanup_summary_targets(&tx, &receipt.created_targets)? }
+            SummaryUndoResult {
+                retained_targets: self.cleanup_summary_targets(&tx, &receipt.created_targets)?,
+            }
         } else {
             SummaryUndoResult::default()
         };
         let updated = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
         let content = parser::serialize_page(&page.properties, &updated);
         if !self.summary_markup_matches(&page, &updated, &file_path, &content) {
-            return Err(stale("the generated Markdown cannot preserve the block tree; revise the summary"));
+            return Err(stale(
+                "the generated Markdown cannot preserve the block tree; revise the summary",
+            ));
         }
-        let backup = file_path.with_file_name(format!(".summary-rollback-{}", Uuid::new_v4().as_simple()));
+        let backup =
+            file_path.with_file_name(format!(".summary-rollback-{}", Uuid::new_v4().as_simple()));
         Self::atomic_write(&backup, &original)?;
         if fs::read_to_string(&file_path).ok().as_deref() != Some(original.as_str()) {
             let _ = fs::remove_file(&backup);
             return Err(stale("the page file changed while preparing the edit"));
         }
-        let result = write(&file_path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
+        let result =
+            write(&file_path, &content).and_then(|()| tx.commit().map_err(CoreError::from));
         if let Err(error) = result {
             let current = fs::read_to_string(&file_path).ok();
             if current.as_deref() == Some(original.as_str()) {
@@ -930,14 +1327,19 @@ impl Graph {
         targets.sort_by_key(|target| std::cmp::Reverse(target.title.matches('/').count()));
         for target in targets {
             let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pages WHERE id = ?1)", [&target.id], |row| row.get(0),
+                "SELECT EXISTS(SELECT 1 FROM pages WHERE id = ?1)",
+                [&target.id],
+                |row| row.get(0),
             )?;
             if !exists {
                 continue;
             }
             let current = self.db.get_page_by_id_in_connection(conn, &target.id)?;
             let touched = serde_json::to_value(&current)? != serde_json::to_value(target)?
-                || self.pages_dir.join(Self::safe_relative_page_path(&target.title)?).exists();
+                || self
+                    .pages_dir
+                    .join(Self::safe_relative_page_path(&target.title)?)
+                    .exists();
             let referenced: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM blocks WHERE page_id = ?1)
                     OR EXISTS(SELECT 1 FROM links WHERE to_page_id = ?1)
@@ -967,53 +1369,112 @@ impl Graph {
         Ok(retained)
     }
 
-    fn check_summary_disk(&self, page: &Page, blocks: &[Block], path: &Path, content: &str) -> Result<()> {
+    fn check_summary_disk(
+        &self,
+        page: &Page,
+        blocks: &[Block],
+        path: &Path,
+        content: &str,
+    ) -> Result<()> {
         if self.indexed_content_matches(path, &Self::content_hash(content))
             || content == parser::serialize_page(&page.properties, blocks)
         {
             return Ok(());
         }
         if !self.summary_markup_matches(page, blocks, path, content) {
-            return Err(stale("the page file changed outside Grafium; refresh it first"));
+            return Err(stale(
+                "the page file changed outside Grafium; refresh it first",
+            ));
         }
         Ok(())
     }
 
-    fn summary_markup_matches(&self, page: &Page, blocks: &[Block], path: &Path, content: &str) -> bool {
-        let parsed = parser::parse_page(content, path.file_name().and_then(|name| name.to_str()).unwrap_or("page.md"));
+    fn summary_markup_matches(
+        &self,
+        page: &Page,
+        blocks: &[Block],
+        path: &Path,
+        content: &str,
+    ) -> bool {
+        let parsed = parser::parse_page(
+            content,
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("page.md"),
+        );
         let mut slots: HashMap<BlockSlot, Vec<String>> = HashMap::new();
         for block in blocks {
-            slots.entry((block.parent_id.clone(), block.order_index)).or_default().push(block.id.clone());
+            slots
+                .entry((block.parent_id.clone(), block.order_index))
+                .or_default()
+                .push(block.id.clone());
         }
         let mut indexed = Vec::new();
-        self.flatten_parsed_blocks(&parsed.blocks, None, &mut slots, &mut HashSet::new(), &mut indexed);
-        parsed.properties == page.properties && indexed.len() == blocks.len()
-            && indexed.iter().zip(blocks).all(|(a, b)| a.id == b.id && a.matches_block(b))
+        self.flatten_parsed_blocks(
+            &parsed.blocks,
+            None,
+            &mut slots,
+            &mut HashSet::new(),
+            &mut indexed,
+        );
+        parsed.properties == page.properties
+            && indexed.len() == blocks.len()
+            && indexed
+                .iter()
+                .zip(blocks)
+                .all(|(a, b)| a.id == b.id && a.matches_block(b))
     }
 
-    fn index_summary_content(&self, conn: &rusqlite::Connection, block_id: &str, content: &str) -> Result<()> {
-        self.db.delete_links_from_block_in_connection(conn, block_id)?;
+    fn index_summary_content(
+        &self,
+        conn: &rusqlite::Connection,
+        block_id: &str,
+        content: &str,
+    ) -> Result<()> {
+        self.db
+            .delete_links_from_block_in_connection(conn, block_id)?;
         for link in parser::extract_links(content) {
             // Unlike ordinary typing, generated text must not create target
             // pages as a hidden side effect of insertion or redo.
             let (target, kind) = match link {
                 ExtractedLink::Page(title) => {
-                    let resolution = self.db.resolve_tag_terms_in_connection(conn, &[
-                        parser::TagTerm { term: title, qualified: None },
-                    ])?;
-                    let Some(id) = resolution.into_iter().next().and_then(|item| item.target_page_id) else { continue };
+                    let resolution = self.db.resolve_tag_terms_in_connection(
+                        conn,
+                        &[parser::TagTerm {
+                            term: title,
+                            qualified: None,
+                        }],
+                    )?;
+                    let Some(id) = resolution
+                        .into_iter()
+                        .next()
+                        .and_then(|item| item.target_page_id)
+                    else {
+                        continue;
+                    };
                     (id, LinkType::Page)
                 }
                 ExtractedLink::Tag(title) => {
-                    let resolution = self.db.resolve_tag_terms_in_connection(conn, &[
-                        parser::TagTerm { term: title, qualified: None },
-                    ])?;
-                    let Some(id) = resolution.into_iter().next().and_then(|item| item.target_page_id) else { continue };
+                    let resolution = self.db.resolve_tag_terms_in_connection(
+                        conn,
+                        &[parser::TagTerm {
+                            term: title,
+                            qualified: None,
+                        }],
+                    )?;
+                    let Some(id) = resolution
+                        .into_iter()
+                        .next()
+                        .and_then(|item| item.target_page_id)
+                    else {
+                        continue;
+                    };
                     (id, LinkType::Tag)
                 }
                 ExtractedLink::BlockRef(id) => (id, LinkType::BlockRef),
             };
-            self.db.insert_link_in_connection(conn, block_id, &target, kind)?;
+            self.db
+                .insert_link_in_connection(conn, block_id, &target, kind)?;
         }
         self.sync_task_row_in_connection(conn, block_id, content)?;
         Ok(())

@@ -75,7 +75,12 @@ pub fn parse_page(content: &str, filename: &str) -> ParsedPage {
     if !annotations.notes.is_empty() {
         let source = super::reading_notes::mask_inline_reading_notes(content, &annotations.notes);
         let mut page = parse_outline_page(&source, filename);
-        page.blocks.extend(annotations.notes.iter().map(super::reading_notes::parsed_note));
+        page.blocks.extend(
+            annotations
+                .notes
+                .iter()
+                .map(super::reading_notes::parsed_note),
+        );
         return page;
     }
     parse_outline_page(content, filename)

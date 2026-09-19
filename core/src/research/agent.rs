@@ -63,9 +63,9 @@ use crate::ai::references::{
 };
 use crate::ai::traits::{ChatMessage, LlmProvider};
 use crate::ai::web_research::{
-    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries, parse_synthesis_text_fallback,
-    rerank_research_candidates, research_domain_instruction, truncate, Citation, ResearchTopic,
-    WebResearchResult,
+    cancelled_error, filter_wrong_domain_candidates, is_cancelled, normalize_research_queries,
+    parse_synthesis_text_fallback, rerank_research_candidates, research_domain_instruction,
+    truncate, Citation, ResearchTopic, WebResearchResult,
 };
 use crate::error::{CoreError, Result};
 use crate::research::config::ResearchConfig;
@@ -678,7 +678,13 @@ impl<'a> DeepResearchEngine<'a> {
         }
 
         let raw = self
-            .complete(&self.config.prompts.refine_queries, input, PLAN_TOKENS, 0.2, cancel)
+            .complete(
+                &self.config.prompts.refine_queries,
+                input,
+                PLAN_TOKENS,
+                0.2,
+                cancel,
+            )
             .await?;
         // Drop any refined query that merely repeats one we already ran — a
         // repeat would waste the round it was meant to rescue.
@@ -829,9 +835,31 @@ const PLAN_TOKENS: u32 = 384;
 /// engine happily returned json.org and MDN, and those pages then crowded the
 /// real results out of the candidate pool.
 const QUERY_SCAFFOLDING: &[&str] = &[
-    "json", "jsonc", "yaml", "yml", "toml", "xml", "csv", "text", "txt", "plaintext", "markdown",
-    "md", "queries", "query", "search", "searches", "output", "response", "result", "results",
-    "answer", "plan", "example", "note", "notes",
+    "json",
+    "jsonc",
+    "yaml",
+    "yml",
+    "toml",
+    "xml",
+    "csv",
+    "text",
+    "txt",
+    "plaintext",
+    "markdown",
+    "md",
+    "queries",
+    "query",
+    "search",
+    "searches",
+    "output",
+    "response",
+    "result",
+    "results",
+    "answer",
+    "plan",
+    "example",
+    "note",
+    "notes",
 ];
 
 fn is_query_scaffolding(candidate: &str) -> bool {
@@ -1056,17 +1084,30 @@ mod tests {
 {"sleep": {"summary": "The source reports improved sleep quality after the intervention[4].", "tags": ["sleep"]}}
 ```"#;
         for retry in [false, true] {
-            let responses = if retry { vec![r#"{"topics":null}"#, json] } else { vec![json] };
+            let responses = if retry {
+                vec![r#"{"topics":null}"#, json]
+            } else {
+                vec![json]
+            };
             let llm = StubLlm::new(responses);
-            let browser = MockBrowserDriver { pages: HashMap::new() };
+            let browser = MockBrowserDriver {
+                pages: HashMap::new(),
+            };
             let config = config_with(vec![], 1);
             let engine = DeepResearchEngine::new(&llm, &browser, &config);
-            let (_, topics) = engine.synthesize(
-                "What does the source say about sleep?",
-                &[(4, "Synthetic source about sleep.".into())], None,
-            ).await.unwrap();
+            let (_, topics) = engine
+                .synthesize(
+                    "What does the source say about sleep?",
+                    &[(4, "Synthetic source about sleep.".into())],
+                    None,
+                )
+                .await
+                .unwrap();
             assert_eq!(topics[0].topic, "sleep");
-            assert_eq!(topics[0].summary, "The source reports improved sleep quality after the intervention[4].");
+            assert_eq!(
+                topics[0].summary,
+                "The source reports improved sleep quality after the intervention[4]."
+            );
             assert_eq!(topics[0].tags[0].term, "sleep");
         }
     }

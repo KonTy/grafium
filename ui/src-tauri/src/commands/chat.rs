@@ -115,9 +115,7 @@ pub struct ChatConcurrency {
 /// resident, so a second request waits. Without this the UI cannot tell the
 /// difference and a queued chat looks frozen.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn chat_concurrency(
-    state: State<'_, KnowledgeState>,
-) -> Result<ChatConcurrency, String> {
+pub async fn chat_concurrency(state: State<'_, KnowledgeState>) -> Result<ChatConcurrency, String> {
     let guard = state.engine.read().await;
     let provider = guard.as_ref().and_then(|engine| engine.llm_provider());
     Ok(match provider {

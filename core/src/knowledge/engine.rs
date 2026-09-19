@@ -26,10 +26,10 @@ use crate::parser::TagTerm;
 
 #[path = "ask_budget.rs"]
 mod ask_budget;
-#[path = "reading_scope.rs"]
-pub mod reading_scope;
 #[path = "reading_research.rs"]
 mod reading_research;
+#[path = "reading_scope.rs"]
+pub mod reading_scope;
 pub use reading_research::ResearchWebMode;
 
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
@@ -866,13 +866,14 @@ impl KnowledgeEngine {
                     .collect();
             }
             if let Ok(children) = db.list_child_blocks(&hit.block_id) {
-                hit.children = crate::knowledge::source_projection::project_source_blocks(&children)
-                    .into_iter()
-                    .map(|b| retrieval::ContextItem {
-                        block_id: b.id,
-                        content: b.content,
-                    })
-                    .collect();
+                hit.children =
+                    crate::knowledge::source_projection::project_source_blocks(&children)
+                        .into_iter()
+                        .map(|b| retrieval::ContextItem {
+                            block_id: b.id,
+                            content: b.content,
+                        })
+                        .collect();
             }
         }
     }
@@ -901,9 +902,16 @@ impl KnowledgeEngine {
         graph_id: &str,
         on_progress: &mut (dyn FnMut(&str) + Send),
     ) -> Result<PageReferencesMeta> {
-        let blocks: Vec<_> = blocks.iter().map(|(id, content)| {
-            (id.clone(), crate::knowledge::source_projection::source_text(content))
-        }).filter(|(_, content)| !content.trim().is_empty()).collect();
+        let blocks: Vec<_> = blocks
+            .iter()
+            .map(|(id, content)| {
+                (
+                    id.clone(),
+                    crate::knowledge::source_projection::source_text(content),
+                )
+            })
+            .filter(|(_, content)| !content.trim().is_empty())
+            .collect();
         let llm = self
             .llm
             .as_ref()
@@ -3912,9 +3920,9 @@ mod tests {
             "no research step could see the conversation"
         );
         assert!(
-            seen.iter().all(|messages| messages
-                .iter()
-                .all(|message| message.role != crate::ai::traits::MessageRole::System
+            seen.iter()
+                .all(|messages| messages.iter().all(|message| message.role
+                    != crate::ai::traits::MessageRole::System
                     || !message.content.contains("VIVO x300 ultra"))),
             "conversation was replayed with system-prompt authority"
         );

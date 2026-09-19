@@ -541,10 +541,14 @@ pub async fn analyze_writing(
 ) -> Result<WritingAnalysis> {
     cancel.check()?;
     validate_inputs(blocks)?;
-    let projected: Vec<WritingInputBlock> = blocks.iter().map(|block| WritingInputBlock {
-        id: block.id.clone(),
-        content: crate::knowledge::source_projection::source_text(&block.content),
-    }).filter(|block| !block.content.trim().is_empty()).collect();
+    let projected: Vec<WritingInputBlock> = blocks
+        .iter()
+        .map(|block| WritingInputBlock {
+            id: block.id.clone(),
+            content: crate::knowledge::source_projection::source_text(&block.content),
+        })
+        .filter(|block| !block.content.trim().is_empty())
+        .collect();
     let blocks = projected.as_slice();
     let word_count = blocks.iter().map(|b| word_count(&b.content)).sum();
     if word_count < MIN_ANALYSIS_WORDS {
@@ -1710,7 +1714,10 @@ static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 
 fn protected_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges: Vec<_> = crate::parser::reading_notes::parse_inline_reading_notes(text)
-        .notes.into_iter().map(|note| note.range).collect();
+        .notes
+        .into_iter()
+        .map(|note| note.range)
+        .collect();
     for (event, range) in Parser::new_ext(text, Options::all()).into_offset_iter() {
         if matches!(
             event,
@@ -2063,29 +2070,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reading_note_footer_is_not_analyzed_or_rewritten_and_reference_markers_are_preserved() {
+    async fn reading_note_footer_is_not_analyzed_or_rewritten_and_reference_markers_are_preserved()
+    {
         let (_dir, graph, page, _) = crate::knowledge::source_projection::tests::annotated_book();
         let saved = graph.db.list_blocks_for_page(&page.id).unwrap();
         let raw = crate::parser::serialize_page(&page.properties, &saved);
         let original = format!("We utilize tools.[^1] [^grafium-note-1]\n\n{raw}");
         let llm = Mock::new((0..12).map(|_| Response::Edit("utilize", "use")));
-        let result = rewrite_writing(&llm, &[block("source", &original)], None, &WritingCancellation::default()).await.unwrap();
-        assert_eq!(result[0].content, original.replacen("We utilize tools.", "We use tools.", 1));
+        let result = rewrite_writing(
+            &llm,
+            &[block("source", &original)],
+            None,
+            &WritingCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result[0].content,
+            original.replacen("We utilize tools.", "We use tools.", 1)
+        );
         assert!(result[0].content.contains("USER-ANNOTATION"));
         assert!(result[0].content.contains("[^1] [^grafium-note-1]"));
         assert!(llm.calls() > 0);
         for (messages, _) in llm.requests.lock().unwrap().iter() {
-            assert!(!messages.iter().any(|message| message.content.contains("USER-ANNOTATION")));
+            assert!(!messages
+                .iter()
+                .any(|message| message.content.contains("USER-ANNOTATION")));
         }
-        assert!(validate_protected_source(&original, &original.replace("[^grafium-note-1]", "")).is_err());
+        assert!(
+            validate_protected_source(&original, &original.replace("[^grafium-note-1]", ""))
+                .is_err()
+        );
         assert!(validate_protected_source(&original, &original.replace("[^1]", "")).is_err());
 
-        let analysis_llm = Mock::new((0..12).map(|_| analysis(serde_json::json!(10), serde_json::json!([]))));
+        let analysis_llm =
+            Mock::new((0..12).map(|_| analysis(serde_json::json!(10), serde_json::json!([]))));
         let sample = format!("{}\n{original}", prose().repeat(2));
-        analyze_writing(&analysis_llm, &[block("source", &sample)], None, &WritingCancellation::default()).await.unwrap();
+        analyze_writing(
+            &analysis_llm,
+            &[block("source", &sample)],
+            None,
+            &WritingCancellation::default(),
+        )
+        .await
+        .unwrap();
         assert!(analysis_llm.calls() > 0);
         let requests = analysis_llm.requests.lock().unwrap();
-        let payload = requests.iter().flat_map(|(messages, _)| messages.iter()).map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+        let payload = requests
+            .iter()
+            .flat_map(|(messages, _)| messages.iter())
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(payload.contains("cobalt improves memory.[^1]"));
         assert!(!payload.contains("USER-ANNOTATION"));
         assert!(!payload.contains("grafium-note-"));

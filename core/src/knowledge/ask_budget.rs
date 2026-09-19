@@ -450,8 +450,16 @@ impl KnowledgeEngine {
         output_tokens: usize,
         system: impl Fn(&str) -> String,
     ) -> Result<AskRequest> {
-        self.fit_ask_request_cancellable(llm, question, history, entries, output_tokens, None, system)
-            .await
+        self.fit_ask_request_cancellable(
+            llm,
+            question,
+            history,
+            entries,
+            output_tokens,
+            None,
+            system,
+        )
+        .await
     }
 
     pub(super) async fn fit_ask_request_cancellable(

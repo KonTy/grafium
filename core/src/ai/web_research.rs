@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 use crate::ai::reasoning::{strip_think_blocks, ThinkStripResult, REASONING_ONLY_MESSAGE};
 use crate::ai::references::{
     append_no_think_directive, clean_tag_terms, concept_parse_error, extract_json_object,
-    parse_optional_summary_json, parse_summary_json_object, research_parse_error, StructuredSummaryJson,
+    parse_optional_summary_json, parse_summary_json_object, research_parse_error,
+    StructuredSummaryJson,
 };
 use crate::ai::traits::{ChatMessage, CompletionOptions, LlmProvider, MessageRole};
 use crate::error::{CoreError, Result};
@@ -669,18 +670,25 @@ pub(crate) fn parse_synthesis_text_fallback(
     if let Some(parsed) = parse_optional_summary_json(&answer)? {
         return Ok((
             parsed.title_answer,
-            parsed.topics.into_iter().map(|topic| ResearchTopic {
-                topic: topic.topic,
-                summary: topic.summary,
-                tags: clean_tag_terms(topic.tags),
-            }).collect(),
+            parsed
+                .topics
+                .into_iter()
+                .map(|topic| ResearchTopic {
+                    topic: topic.topic,
+                    summary: topic.summary,
+                    tags: clean_tag_terms(topic.tags),
+                })
+                .collect(),
         ));
     }
-    Ok((None, vec![ResearchTopic {
-        topic: default_topic.to_string(),
-        summary: answer,
-        tags: Vec::new(),
-    }]))
+    Ok((
+        None,
+        vec![ResearchTopic {
+            topic: default_topic.to_string(),
+            summary: answer,
+            tags: Vec::new(),
+        }],
+    ))
 }
 
 fn clean_structured_response(raw: &str) -> Result<String> {
@@ -1619,7 +1627,10 @@ mod tests {
 ```"#;
         let (_, topics) = parse_synthesis_text_fallback(json, "Web research").unwrap();
         assert_eq!(topics[0].topic, "sleep");
-        assert_eq!(topics[0].summary, "The source reports improved sleep quality after the intervention[4].");
+        assert_eq!(
+            topics[0].summary,
+            "The source reports improved sleep quality after the intervention[4]."
+        );
         assert_eq!(topics[0].tags[0].term, "sleep");
 
         let text = "[4] The **observed outcomes** belong to the set {a, b, c}.";

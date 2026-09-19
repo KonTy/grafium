@@ -491,10 +491,7 @@ mod imported_media_title_tests {
 
     #[test]
     fn a_title_of_only_separators_still_lands_somewhere() {
-        assert_eq!(
-            imported_media_title("///"),
-            "ImportedMedia/Untitled import"
-        );
+        assert_eq!(imported_media_title("///"), "ImportedMedia/Untitled import");
         assert_eq!(imported_media_title(""), "ImportedMedia/Untitled import");
     }
 }

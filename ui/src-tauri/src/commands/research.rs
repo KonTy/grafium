@@ -317,7 +317,10 @@ pub async fn research_cancel(
     cancel_research_request(&state, &request_id)
 }
 
-pub(super) fn require_research_graph(root: &std::path::Path, graph_path: &str) -> Result<(), String> {
+pub(super) fn require_research_graph(
+    root: &std::path::Path,
+    graph_path: &str,
+) -> Result<(), String> {
     if graph_path.is_empty() || root != std::path::Path::new(graph_path) {
         return Err("The graph changed. Reopen Research from the current page.".into());
     }

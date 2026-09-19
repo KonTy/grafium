@@ -481,18 +481,32 @@ impl Database {
                  WHERE (?1 IS NULL OR b.page_id = ?1)
                  ORDER BY p.updated_at DESC, b.order_index ASC",
             )?;
-            let rows = stmt.query_map(params![page_id], |row| {
-                Ok((Block {
-                    id: row.get(0)?, page_id: row.get(1)?, content: row.get(3)?,
-                    parent_id: row.get(4)?, order_index: row.get(5)?,
-                    block_type: BlockType::from_str(&row.get::<_, String>(6)?),
-                    properties: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-                    created_at: row.get(8)?, updated_at: row.get(9)?,
-                }, row.get::<_, String>(2)?))
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
-            let annotations = crate::knowledge::source_projection::reading_note_ids(rows.iter().map(|(block, _)| block));
-            rows.into_iter().filter(|(block, _)| !annotations.contains(&block.id))
-                .map(|(block, title)| (block.id, block.page_id, title, block.content)).collect()
+            let rows = stmt
+                .query_map(params![page_id], |row| {
+                    Ok((
+                        Block {
+                            id: row.get(0)?,
+                            page_id: row.get(1)?,
+                            content: row.get(3)?,
+                            parent_id: row.get(4)?,
+                            order_index: row.get(5)?,
+                            block_type: BlockType::from_str(&row.get::<_, String>(6)?),
+                            properties: serde_json::from_str(&row.get::<_, String>(7)?)
+                                .unwrap_or_default(),
+                            created_at: row.get(8)?,
+                            updated_at: row.get(9)?,
+                        },
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let annotations = crate::knowledge::source_projection::reading_note_ids(
+                rows.iter().map(|(block, _)| block),
+            );
+            rows.into_iter()
+                .filter(|(block, _)| !annotations.contains(&block.id))
+                .map(|(block, title)| (block.id, block.page_id, title, block.content))
+                .collect()
         };
 
         let tx = conn.transaction()?;
@@ -623,9 +637,9 @@ impl Database {
             if expected.len() != snapshot.len()
                 || expected.iter().any(|expected| {
                     expected.page_id != page_id
-                        || !snapshot
-                            .iter()
-                            .any(|block| block.id == expected.id && block.content == expected.content)
+                        || !snapshot.iter().any(|block| {
+                            block.id == expected.id && block.content == expected.content
+                        })
                 })
             {
                 return Err(CoreError::Other(
@@ -636,9 +650,11 @@ impl Database {
         // Validate against the complete snapshot before filtering mutation
         // targets. Source offsets and saved before-content remain unprojected.
         let annotations = crate::knowledge::source_projection::reading_note_ids(&snapshot);
-        let blocks: Vec<(String, String)> = snapshot.into_iter()
+        let blocks: Vec<(String, String)> = snapshot
+            .into_iter()
             .filter(|block| !annotations.contains(&block.id))
-            .map(|block| (block.id, block.content)).collect();
+            .map(|block| (block.id, block.content))
+            .collect();
         let mut resolutions = self.resolve_tag_terms_in_connection(&tx, tags)?;
         if let Some(adjudicated) = adjudicated {
             if adjudicated.len() != resolutions.len() {
@@ -1528,28 +1544,77 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn reading_annotations_are_excluded_from_exact_and_semantic_links_without_projecting_mutations() -> Result<()> {
-        let (_dir, graph, source, note) = crate::knowledge::source_projection::tests::annotated_book();
+    fn reading_annotations_are_excluded_from_exact_and_semantic_links_without_projecting_mutations(
+    ) -> Result<()> {
+        let (_dir, graph, source, note) =
+            crate::knowledge::source_projection::tests::annotated_book();
         let db = &graph.db;
         db.create_page("Cobalt", false)?;
         db.create_page("Objection", false)?;
         let before = db.list_blocks_for_page(&source.id)?;
-        let author = before.iter().find(|block| block.content.contains("author says")).unwrap();
+        let author = before
+            .iter()
+            .find(|block| block.content.contains("author says"))
+            .unwrap();
         let exact = db.discover_link_candidates(Some(&source.id), 100)?;
         assert!(!exact.is_empty());
-        assert!(exact.iter().all(|candidate| candidate.from_block_id != note.note_block_id.clone().unwrap()));
-        assert!(exact.iter().any(|candidate| candidate.from_block_id == author.id && candidate.anchor_text == "cobalt"));
-        let tags = vec![TagTerm { term: "cobalt".into(), qualified: None }, TagTerm { term: "objection".into(), qualified: None }];
-        assert_eq!(db.persist_semantic_concept_candidates(&source.id, &tags, 100, None, Some(&before), None)?, 1);
-        let candidates = db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 100)?;
-        let semantic = candidates.iter().find(|candidate| candidate.source == super::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT).unwrap();
+        assert!(exact
+            .iter()
+            .all(|candidate| candidate.from_block_id != note.note_block_id.clone().unwrap()));
+        assert!(exact
+            .iter()
+            .any(|candidate| candidate.from_block_id == author.id
+                && candidate.anchor_text == "cobalt"));
+        let tags = vec![
+            TagTerm {
+                term: "cobalt".into(),
+                qualified: None,
+            },
+            TagTerm {
+                term: "objection".into(),
+                qualified: None,
+            },
+        ];
+        assert_eq!(
+            db.persist_semantic_concept_candidates(
+                &source.id,
+                &tags,
+                100,
+                None,
+                Some(&before),
+                None
+            )?,
+            1
+        );
+        let candidates =
+            db.list_link_candidates(Some(&source.id), Some(LinkCandidateStatus::Pending), 100)?;
+        let semantic = candidates
+            .iter()
+            .find(|candidate| candidate.source == super::LINK_CANDIDATE_SOURCE_SEMANTIC_CONCEPT)
+            .unwrap();
         assert_eq!(semantic.from_block_id, author.id);
-        let saved_source: String = db.conn()?.query_row("SELECT source_content FROM link_candidates WHERE id = ?1", [&semantic.id], |row| row.get(0))?;
+        let saved_source: String = db.conn()?.query_row(
+            "SELECT source_content FROM link_candidates WHERE id = ?1",
+            [&semantic.id],
+            |row| row.get(0),
+        )?;
         assert_eq!(saved_source, author.content);
         assert!(author.content.contains("[^1]"));
-        assert_eq!(&author.content[semantic.anchor_start as usize..semantic.anchor_end as usize], semantic.anchor_text);
+        assert_eq!(
+            &author.content[semantic.anchor_start as usize..semantic.anchor_end as usize],
+            semantic.anchor_text
+        );
         let projected = crate::knowledge::source_projection::without_reading_notes(&before);
-        assert!(db.persist_semantic_concept_candidates(&source.id, &tags, 100, None, Some(&projected), None).is_err());
+        assert!(db
+            .persist_semantic_concept_candidates(
+                &source.id,
+                &tags,
+                100,
+                None,
+                Some(&projected),
+                None
+            )
+            .is_err());
         Ok(())
     }
 

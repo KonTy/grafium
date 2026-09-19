@@ -8,6 +8,7 @@ use grafium_core::ai::references::{chunk_blocks_by_content_size, PageReferencesM
 use grafium_core::ai::traits::SearchResult;
 use grafium_core::ai::web_research::Citation;
 use grafium_core::db::PageKindFilter;
+pub use grafium_core::graph::{AiInsertSummaryResult, SummaryWrapChange};
 use grafium_core::knowledge::conversation::{self, ChatTurn};
 use grafium_core::knowledge::engine::{AskStreamEvent, HealthStatus, IndexStatus, Source};
 use grafium_core::knowledge::registry::{GraphType, RegisteredGraph};
@@ -15,7 +16,6 @@ use grafium_core::knowledge::schemas::Schema;
 use grafium_core::knowledge::{detect_research_intent, KnowledgeEngine};
 use grafium_core::model_library::LocalModelRef;
 use grafium_core::models::Block;
-pub use grafium_core::graph::{AiInsertSummaryResult, SummaryWrapChange};
 use grafium_core::parser::links::ExtractedLink;
 use grafium_core::parser::TagTerm;
 use serde::{Deserialize, Serialize};
@@ -1382,7 +1382,11 @@ impl SummaryOperation {
             return Err("An AI operation with this ID is already running".into());
         }
         registry.insert(id.clone(), flag.clone());
-        Ok(Self { id, flag, registry: state.cancels.clone() })
+        Ok(Self {
+            id,
+            flag,
+            registry: state.cancels.clone(),
+        })
     }
 
     async fn run<T>(
@@ -1411,7 +1415,10 @@ impl SummaryOperation {
 impl Drop for SummaryOperation {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.registry.lock() {
-            if registry.get(&self.id).is_some_and(|flag| Arc::ptr_eq(flag, &self.flag)) {
+            if registry
+                .get(&self.id)
+                .is_some_and(|flag| Arc::ptr_eq(flag, &self.flag))
+            {
                 registry.remove(&self.id);
             }
         }
@@ -1436,7 +1443,10 @@ pub async fn ai_cancel_operation(
     if let Some(flag) = registered {
         let engine = state.engine.read().await;
         let registry = state.cancels.lock().map_err(|error| error.to_string())?;
-        if registry.get(&operation_id).is_some_and(|current| Arc::ptr_eq(current, &flag)) {
+        if registry
+            .get(&operation_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &flag))
+        {
             if let Some(llm) = engine.as_ref().and_then(|engine| engine.llm_provider()) {
                 llm.abort_in_flight();
             }
@@ -1476,7 +1486,10 @@ pub async fn ai_generate_references(
             .map_err(|e| e.to_string())?;
         let graph_id = graph.root_dir.to_string_lossy().to_string();
 
-        let originals: Vec<_> = blocks.iter().map(|b| (b.id.clone(), b.content.clone())).collect();
+        let originals: Vec<_> = blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.content.clone()))
+            .collect();
         let source_hash = grafium_core::graph::Graph::summary_source_hash(&originals);
         let blocks_data = reference_source_projection(&blocks);
 
@@ -1491,24 +1504,34 @@ pub async fn ai_generate_references(
     };
 
     if engine.is_ready() {
-        let mut result = operation.run(engine.generate_references(
-            &page_id,
-            &page_title,
-            &blocks_data,
-            &graph_id,
-            &mut emit_progress,
-        )).await?;
+        let mut result = operation
+            .run(engine.generate_references(
+                &page_id,
+                &page_title,
+                &blocks_data,
+                &graph_id,
+                &mut emit_progress,
+            ))
+            .await?;
         result.content_hash = source_hash;
         return Ok(result);
     }
     // Summarization itself is LLM-only; optional cross-reference retrieval
     // must not disable it when embeddings are absent.
-    let text = blocks_data.iter().map(|(_, content)| content.as_str()).collect::<Vec<_>>().join("\n\n");
-    let summary = operation.run(engine.summarize_text(&page_title, &text, &mut emit_progress)).await?;
+    let text = blocks_data
+        .iter()
+        .map(|(_, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let summary = operation
+        .run(engine.summarize_text(&page_title, &text, &mut emit_progress))
+        .await?;
     Ok(PageReferencesMeta {
         page_id,
-        generated_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?.as_millis() as i64,
+        generated_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis() as i64,
         content_hash: source_hash,
         reference_count: 0,
         references: Vec::new(),
@@ -1519,7 +1542,9 @@ pub async fn ai_generate_references(
 
 fn reference_source_projection(blocks: &[Block]) -> Vec<(String, String)> {
     grafium_core::knowledge::source_projection::project_source_blocks(blocks)
-        .into_iter().map(|block| (block.id, block.content)).collect()
+        .into_iter()
+        .map(|block| (block.id, block.content))
+        .collect()
 }
 
 /// Analyzes arbitrary selected text (one or more selected blocks'
@@ -1554,7 +1579,9 @@ pub async fn ai_summarize_selection(
     };
     let title = title.unwrap_or_else(|| "Selected text".to_string());
 
-    operation.run(engine.summarize_text(&title, &text, &mut emit_progress)).await
+    operation
+        .run(engine.summarize_text(&title, &text, &mut emit_progress))
+        .await
 }
 
 fn concept_edge_job_title(page_title: &str) -> String {
@@ -1799,22 +1826,36 @@ pub async fn ai_create_concept_edges(
         let source_root_for_resolution = source_root.clone();
         let tags_for_resolution = tags.clone();
         let prepared = tauri::async_runtime::spawn_blocking(move || {
-            let graph = graph_for_resolution.lock().map_err(|error| error.to_string())?;
+            let graph = graph_for_resolution
+                .lock()
+                .map_err(|error| error.to_string())?;
             if graph.root_dir != source_root_for_resolution {
-                return Err("The active graph changed; concept discovery was not applied.".to_string());
+                return Err(
+                    "The active graph changed; concept discovery was not applied.".to_string(),
+                );
             }
-            let resolutions = graph.db.resolve_tag_terms(&tags_for_resolution)
+            let resolutions = graph
+                .db
+                .resolve_tag_terms(&tags_for_resolution)
                 .map_err(|error| error.to_string())?;
             let mut descriptions = Vec::new();
-            for resolution in resolutions.iter()
-                .filter(|resolution| resolution.decision == grafium_core::db::EntityDecision::Ambiguous)
+            for resolution in resolutions
+                .iter()
+                .filter(|resolution| {
+                    resolution.decision == grafium_core::db::EntityDecision::Ambiguous
+                })
                 .take(12)
             {
-                descriptions.extend(graph.db.entity_candidate_contexts(resolution)
-                    .map_err(|error| error.to_string())?);
+                descriptions.extend(
+                    graph
+                        .db
+                        .entity_candidate_contexts(resolution)
+                        .map_err(|error| error.to_string())?,
+                );
             }
             Ok::<_, String>((resolutions, descriptions))
-        }).await;
+        })
+        .await;
         let (mut resolutions, descriptions) = match prepared {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(error)) => {
@@ -1829,13 +1870,15 @@ pub async fn ai_create_concept_edges(
         let resolution_cancel = grafium_core::cancel::CancellationToken::new();
         let mut identity_errors = Vec::new();
         if resolve_uncertain.unwrap_or(true) {
-            let source_blocks = grafium_core::knowledge::source_projection::project_source_blocks(&blocks);
+            let source_blocks =
+                grafium_core::knowledge::source_projection::project_source_blocks(&blocks);
             let guard = engine.read().await;
             let provider = guard.as_ref().and_then(|engine| engine.llm_provider());
             let mut adjudicated = 0usize;
             for resolution in &mut resolutions {
                 if resolution.decision != grafium_core::db::EntityDecision::Ambiguous
-                    || resolution.candidates.is_empty() || adjudicated >= 12
+                    || resolution.candidates.is_empty()
+                    || adjudicated >= 12
                 {
                     continue;
                 }
@@ -1845,16 +1888,26 @@ pub async fn ai_create_concept_edges(
                     return;
                 }
                 adjudicated += 1;
-                handle.progress(selected_chunk_count + 1, total_steps,
-                    format!("Reviewing bounded identity shortlist {adjudicated}/12..."));
+                handle.progress(
+                    selected_chunk_count + 1,
+                    total_steps,
+                    format!("Reviewing bounded identity shortlist {adjudicated}/12..."),
+                );
                 let needle = resolution.source_phrase.to_lowercase();
-                let context = source_blocks.iter()
+                let context = source_blocks
+                    .iter()
                     .filter(|block| block.content.to_lowercase().contains(&needle))
                     .take(2)
                     .map(|block| block.content.chars().take(1200).collect::<String>())
-                    .collect::<Vec<_>>().join("\n");
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let mut future = Box::pin(grafium_core::db::adjudicate_entity_resolution(
-                    resolution, &context, &descriptions, provider, &resolution_cancel));
+                    resolution,
+                    &context,
+                    &descriptions,
+                    provider,
+                    &resolution_cancel,
+                ));
                 let result = loop {
                     tokio::select! {
                         result = &mut future => break result,
@@ -1873,7 +1926,8 @@ pub async fn ai_create_concept_edges(
                 match result {
                     Ok(resolved) => *resolution = resolved,
                     Err(error) => {
-                        resolution.reason = format!("Identity model could not resolve this shortlist: {error}");
+                        resolution.reason =
+                            format!("Identity model could not resolve this shortlist: {error}");
                         identity_errors.push(resolution.reason.clone());
                     }
                 }
@@ -1889,7 +1943,9 @@ pub async fn ai_create_concept_edges(
         let mut insert_future = tauri::async_runtime::spawn_blocking(move || {
             let graph = active_graph.lock().map_err(|error| error.to_string())?;
             if graph.root_dir != source_root {
-                return Err("The active graph changed; concept discovery was not applied.".to_string());
+                return Err(
+                    "The active graph changed; concept discovery was not applied.".to_string(),
+                );
             }
             graph
                 .db
@@ -1998,7 +2054,9 @@ pub async fn ai_research_web(
         let _ = app.emit("ai-web-research-progress", message);
     };
 
-    operation.run(engine.research_web(&title, &seed_text, &mut emit_progress)).await
+    operation
+        .run(engine.research_web(&title, &seed_text, &mut emit_progress))
+        .await
 }
 
 /// Wraps the first verbatim, whole-word occurrence of each term found in
@@ -2028,8 +2086,14 @@ pub fn ai_insert_page_summary(
 ) -> Result<AiInsertSummaryResult, String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
     insert_summary_for_graph(
-        &graph, &page_id, title_answer.as_deref(), &topics, after_block_id.as_deref(),
-        graph_path.as_deref(), expected_blocks.as_deref(), wrap_existing.unwrap_or(false),
+        &graph,
+        &page_id,
+        title_answer.as_deref(),
+        &topics,
+        after_block_id.as_deref(),
+        graph_path.as_deref(),
+        expected_blocks.as_deref(),
+        wrap_existing.unwrap_or(false),
     )
 }
 
@@ -2043,11 +2107,17 @@ fn insert_summary_for_graph(
     expected_blocks: Option<&[Block]>,
     wrap_existing: bool,
 ) -> Result<AiInsertSummaryResult, String> {
-    let before = graph.validate_summary_source(
-        page_id, graph_path, expected_blocks,
-    ).map_err(|error| error.to_string())?;
-    let tags = topics.iter().flat_map(|topic| topic.tags.iter().cloned()).collect::<Vec<_>>();
-    let resolutions = graph.db.resolve_tag_terms(&tags).map_err(|error| error.to_string())?;
+    let before = graph
+        .validate_summary_source(page_id, graph_path, expected_blocks)
+        .map_err(|error| error.to_string())?;
+    let tags = topics
+        .iter()
+        .flat_map(|topic| topic.tags.iter().cloned())
+        .collect::<Vec<_>>();
+    let resolutions = graph
+        .db
+        .resolve_tag_terms(&tags)
+        .map_err(|error| error.to_string())?;
     let mut links = grafium_core::graph::SummaryLinkPlan::default();
     let mut accepted = Vec::with_capacity(resolutions.len());
     let mut seen_targets = HashSet::new();
@@ -2057,29 +2127,41 @@ fn insert_summary_for_graph(
             Some(resolution.reason.clone())
         } else if grafium_core::parser::format_concept_link(&resolution.target_title).is_none() {
             Some("This target cannot be represented as a safe concept link.".into())
-        } else if resolution.decision == grafium_core::db::EntityDecision::Reuse && resolution.target_page_id.is_none() {
+        } else if resolution.decision == grafium_core::db::EntityDecision::Reuse
+            && resolution.target_page_id.is_none()
+        {
             Some("The existing target has no stable page identity.".into())
         } else {
             None
         };
         if let Some(reason) = warning {
-            if seen_warnings.insert((resolution.source_phrase.clone(), resolution.target_title.clone())) {
-                links.unlinked_targets.push(grafium_core::graph::SummaryUnlinkedTarget {
-                    source_phrase: resolution.source_phrase,
-                    target_title: resolution.target_title,
-                    reason,
-                });
+            if seen_warnings.insert((
+                resolution.source_phrase.clone(),
+                resolution.target_title.clone(),
+            )) {
+                links
+                    .unlinked_targets
+                    .push(grafium_core::graph::SummaryUnlinkedTarget {
+                        source_phrase: resolution.source_phrase,
+                        target_title: resolution.target_title,
+                        reason,
+                    });
             }
             accepted.push(None);
             continue;
         }
         if seen_targets.insert(resolution.target_title.clone()) {
             if let Some(page_id) = resolution.target_page_id {
-                links.resolved_targets.push(grafium_core::graph::SummaryLinkTarget {
-                    page_id, title: resolution.target_title.clone(),
-                });
+                links
+                    .resolved_targets
+                    .push(grafium_core::graph::SummaryLinkTarget {
+                        page_id,
+                        title: resolution.target_title.clone(),
+                    });
             } else {
-                links.new_target_titles.push(resolution.target_title.clone());
+                links
+                    .new_target_titles
+                    .push(resolution.target_title.clone());
             }
         }
         accepted.push(Some(grafium_core::parser::ResolvedLinkTerm {
@@ -2089,9 +2171,13 @@ fn insert_summary_for_graph(
         }));
     }
     let terms = accepted.iter().flatten().cloned().collect::<Vec<_>>();
-    let wrap = |content: &str| grafium_core::parser::links::wrap_resolved_terms_as_links(content, &terms);
+    let wrap =
+        |content: &str| grafium_core::parser::links::wrap_resolved_terms_as_links(content, &terms);
     let wrapped_title = title_answer.map(wrap);
-    let wrapped_topics = topics.iter().map(|topic| (wrap(&topic.topic), wrap(&topic.summary))).collect::<Vec<_>>();
+    let wrapped_topics = topics
+        .iter()
+        .map(|topic| (wrap(&topic.topic), wrap(&topic.summary)))
+        .collect::<Vec<_>>();
     let mut offset = 0;
     for (topic, (heading, body)) in topics.iter().zip(&wrapped_topics) {
         let present = grafium_core::parser::extract_links(&format!("{heading}\n\n{body}"));
@@ -2109,21 +2195,32 @@ fn insert_summary_for_graph(
         offset += topic.tags.len();
     }
     let wrap_changes = if wrap_existing {
-        grafium_core::knowledge::source_projection::without_reading_notes(&before).iter().filter_map(|block| {
-            let content = wrap(&block.content);
-            (content != block.content).then(|| SummaryWrapChange {
-                block_id: block.id.clone(),
-                previous_content: block.content.clone(),
-                new_content: content,
+        grafium_core::knowledge::source_projection::without_reading_notes(&before)
+            .iter()
+            .filter_map(|block| {
+                let content = wrap(&block.content);
+                (content != block.content).then(|| SummaryWrapChange {
+                    block_id: block.id.clone(),
+                    previous_content: block.content.clone(),
+                    new_content: content,
+                })
             })
-        }).collect()
+            .collect()
     } else {
         Vec::new()
     };
-    graph.insert_research_summary(
-        page_id, wrapped_title.as_deref(), &wrapped_topics, after_block_id,
-        wrap_changes, graph_path, Some(&before), &links,
-    ).map_err(|error| error.to_string())
+    graph
+        .insert_research_summary(
+            page_id,
+            wrapped_title.as_deref(),
+            &wrapped_topics,
+            after_block_id,
+            wrap_changes,
+            graph_path,
+            Some(&before),
+            &links,
+        )
+        .map_err(|error| error.to_string())
 }
 
 // ─── RAG / Ask ───────────────────────────────────────────────────────────────
@@ -2569,19 +2666,38 @@ mod tests {
     fn reading_annotations_are_not_summary_or_concept_sources_and_snapshot_stays_complete() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let graph = grafium_core::Graph::open(directory.path()).unwrap();
-        let page = graph.create_page_with_content("Book", false, "- # Cobalt Therapy\n- Cobalt Therapy improves memory.[^1]\n").unwrap();
+        let page = graph
+            .create_page_with_content(
+                "Book",
+                false,
+                "- # Cobalt Therapy\n- Cobalt Therapy improves memory.[^1]\n",
+            )
+            .unwrap();
         let note = graph.reading_note_create("f847c8c3-98ca-4496-a239-fd278aaedfb7", &page.id, None, "# Contradictory Annotation\nUSER-ANNOTATION: Cobalt Therapy never improves memory.").unwrap();
         let before = graph.db.list_blocks_for_page(&page.id).unwrap();
         let projected = super::reference_source_projection(&before);
         assert_eq!(projected.len() + 1, before.len());
-        assert!(projected.iter().all(|(id, text)| Some(id) != note.note_block_id.as_ref() && !text.contains("USER-ANNOTATION") && !text.contains("grafium-note-")));
+        assert!(projected
+            .iter()
+            .all(|(id, text)| Some(id) != note.note_block_id.as_ref()
+                && !text.contains("USER-ANNOTATION")
+                && !text.contains("grafium-note-")));
         let chunks = concept_edge_text_chunks(&before);
-        assert_eq!(chunks.iter().map(|c| c.block_count).sum::<usize>(), projected.len());
-        assert!(chunks.iter().any(|c| c.text.contains("improves memory.[^1]")));
-        assert!(chunks.iter().all(|c| !c.text.contains("USER-ANNOTATION") && !c.text.contains("grafium-note-")));
+        assert_eq!(
+            chunks.iter().map(|c| c.block_count).sum::<usize>(),
+            projected.len()
+        );
+        assert!(chunks
+            .iter()
+            .any(|c| c.text.contains("improves memory.[^1]")));
+        assert!(chunks
+            .iter()
+            .all(|c| !c.text.contains("USER-ANNOTATION") && !c.text.contains("grafium-note-")));
         let tags = document_concept_edge_seed_tags(&before);
         assert!(tags.iter().any(|tag| tag.label() == "Cobalt Therapy"));
-        assert!(tags.iter().all(|tag| !tag.label().contains("Contradictory")));
+        assert!(tags
+            .iter()
+            .all(|tag| !tag.label().contains("Contradictory")));
         let after = graph.db.list_blocks_for_page(&page.id).unwrap();
         assert_eq!(after.len(), before.len());
         assert!(after.iter().any(|b| b.content.contains("USER-ANNOTATION")));
@@ -3100,7 +3216,9 @@ pub fn ai_undo_summary_insert(
     receipt: AiInsertSummaryResult,
 ) -> Result<grafium_core::graph::SummaryUndoResult, String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-    graph.undo_research_summary(&receipt).map_err(|error| error.to_string())
+    graph
+        .undo_research_summary(&receipt)
+        .map_err(|error| error.to_string())
 }
 
 /// Restore the same block identities and tree, never a flattened replacement.
@@ -3110,7 +3228,9 @@ pub fn ai_reapply_summary_insert(
     receipt: AiInsertSummaryResult,
 ) -> Result<AiInsertSummaryResult, String> {
     let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-    graph.reapply_research_summary(&receipt).map_err(|error| error.to_string())?;
+    graph
+        .reapply_research_summary(&receipt)
+        .map_err(|error| error.to_string())?;
     Ok(receipt)
 }
 
@@ -3128,15 +3248,19 @@ mod summary_safety_tests {
     #[tokio::test]
     async fn summary_operation_registration_cancellation_and_cleanup() {
         let state = state();
-        let operation = SummaryOperation::register(&state, Some("synthetic-summary".into())).unwrap();
+        let operation =
+            SummaryOperation::register(&state, Some("synthetic-summary".into())).unwrap();
         assert!(SummaryOperation::register(&state, Some("synthetic-summary".into())).is_err());
         let flag = state.cancels.lock().unwrap()["synthetic-summary"].clone();
         flag.store(true, Ordering::Release);
-        let result = operation.run(std::future::pending::<Result<(), grafium_core::CoreError>>()).await;
+        let result = operation
+            .run(std::future::pending::<Result<(), grafium_core::CoreError>>())
+            .await;
         assert!(result.unwrap_err().contains("cancelled"));
         drop(operation);
         assert!(state.cancels.lock().unwrap().is_empty());
-        let operation = SummaryOperation::register(&state, Some("synthetic-summary".into())).unwrap();
+        let operation =
+            SummaryOperation::register(&state, Some("synthetic-summary".into())).unwrap();
         assert_eq!(operation.run(async { Ok(42) }).await.unwrap(), 42);
         drop(operation);
         assert!(state.cancels.lock().unwrap().is_empty());
@@ -3146,10 +3270,17 @@ mod summary_safety_tests {
     async fn summary_operation_model_failure_cleans_up_without_any_model() {
         let state = state();
         {
-            let operation = SummaryOperation::register(&state, Some("synthetic-failure".into())).unwrap();
-            assert!(operation.run(async {
-                Err::<(), _>(grafium_core::CoreError::Other("Synthetic model failure".into()))
-            }).await.unwrap_err().contains("Synthetic model failure"));
+            let operation =
+                SummaryOperation::register(&state, Some("synthetic-failure".into())).unwrap();
+            assert!(operation
+                .run(async {
+                    Err::<(), _>(grafium_core::CoreError::Other(
+                        "Synthetic model failure".into(),
+                    ))
+                })
+                .await
+                .unwrap_err()
+                .contains("Synthetic model failure"));
         }
         assert!(state.cancels.lock().unwrap().is_empty());
     }
@@ -3158,8 +3289,16 @@ mod summary_safety_tests {
     fn summary_command_resolves_existing_targets_without_touching_source_by_default() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let graph = grafium_core::graph::Graph::open(directory.path()).unwrap();
-        let canonical = graph.create_page_with_content("solar wind", false, "- Synthetic target\n").unwrap();
-        let page = graph.create_page_with_content("Synthetic source", false, "- Solar wind source\n  id:: source\n").unwrap();
+        let canonical = graph
+            .create_page_with_content("solar wind", false, "- Synthetic target\n")
+            .unwrap();
+        let page = graph
+            .create_page_with_content(
+                "Synthetic source",
+                false,
+                "- Solar wind source\n  id:: source\n",
+            )
+            .unwrap();
         let before = graph.db.list_blocks_for_page(&page.id).unwrap();
         let topics = vec![grafium_core::ai::references::TopicSummary {
             topic: "Solar wind".into(),
@@ -3169,10 +3308,22 @@ mod summary_safety_tests {
                 TagTerm { term: "unknown entity".into(), qualified: None },
             ],
         }];
-        let receipt = insert_summary_for_graph(&graph, &page.id, None, &topics, Some("source"),
-            Some(&graph.root_dir.to_string_lossy()), Some(&before), false).unwrap();
+        let receipt = insert_summary_for_graph(
+            &graph,
+            &page.id,
+            None,
+            &topics,
+            Some("source"),
+            Some(&graph.root_dir.to_string_lossy()),
+            Some(&before),
+            false,
+        )
+        .unwrap();
         assert!(receipt.wrap_changes.is_empty());
-        assert_eq!(graph.db.get_block_by_id("source").unwrap().content, "Solar wind source");
+        assert_eq!(
+            graph.db.get_block_by_id("source").unwrap().content,
+            "Solar wind source"
+        );
         let body = &receipt.inserted_blocks[2].content;
         assert!(body.contains("[[solar wind|#solar_wind]]"));
         assert!(body.contains("`Solar wind`"));
@@ -3182,23 +3333,46 @@ mod summary_safety_tests {
         assert_eq!(receipt.created_targets.len(), 1);
         assert_eq!(receipt.created_targets[0].id, created.id);
         assert!(graph.db.get_page_by_title("solar_wind").is_err());
-        assert_eq!(graph.db.get_page_by_title("solar wind").unwrap().id, canonical.id);
+        assert_eq!(
+            graph.db.get_page_by_title("solar wind").unwrap().id,
+            canonical.id
+        );
         graph.undo_research_summary(&receipt).unwrap();
         assert!(graph.db.get_page_by_title("unknown entity").is_err());
         let refreshed = graph.db.list_blocks_for_page(&page.id).unwrap();
-        let receipt = insert_summary_for_graph(&graph, &page.id, None, &topics, None,
-            Some(&graph.root_dir.to_string_lossy()), Some(&refreshed), true).unwrap();
+        let receipt = insert_summary_for_graph(
+            &graph,
+            &page.id,
+            None,
+            &topics,
+            None,
+            Some(&graph.root_dir.to_string_lossy()),
+            Some(&refreshed),
+            true,
+        )
+        .unwrap();
         assert_eq!(receipt.wrap_changes.len(), 1);
         graph.undo_research_summary(&receipt).unwrap();
-        assert_eq!(graph.db.get_block_by_id("source").unwrap().content, "Solar wind source");
+        assert_eq!(
+            graph.db.get_block_by_id("source").unwrap().content,
+            "Solar wind source"
+        );
     }
 
     #[test]
     fn summary_command_appends_standalone_chips_and_reports_ambiguous_entities() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let graph = grafium_core::graph::Graph::open(directory.path()).unwrap();
-        let existing = graph.create_page_with_content("Insulin resistance", false, "- Existing canonical target\n").unwrap();
-        let page = graph.create_page_with_content("Synthetic source", false, "- Untouched source prose\n  id:: source\n").unwrap();
+        let existing = graph
+            .create_page_with_content("Insulin resistance", false, "- Existing canonical target\n")
+            .unwrap();
+        let page = graph
+            .create_page_with_content(
+                "Synthetic source",
+                false,
+                "- Untouched source prose\n  id:: source\n",
+            )
+            .unwrap();
         let before = graph.db.list_blocks_for_page(&page.id).unwrap();
         let body = "```\nnovel_space_concept\n```\n\n[Insulin resistance](https://example.test/paper)\n\n$x_y$";
         let topics = vec![
@@ -3206,60 +3380,144 @@ mod summary_safety_tests {
                 topic: "First topic".into(),
                 summary: body.into(),
                 tags: vec![
-                    TagTerm { term: "insulin_resistance".into(), qualified: None },
-                    TagTerm { term: "novel_space_concept".into(), qualified: None },
-                    TagTerm { term: "Insuln resistance".into(), qualified: None },
+                    TagTerm {
+                        term: "insulin_resistance".into(),
+                        qualified: None,
+                    },
+                    TagTerm {
+                        term: "novel_space_concept".into(),
+                        qualified: None,
+                    },
+                    TagTerm {
+                        term: "Insuln resistance".into(),
+                        qualified: None,
+                    },
                 ],
             },
             grafium_core::ai::references::TopicSummary {
                 topic: "Second topic".into(),
                 summary: "Different prose, same topic entity.".into(),
-                tags: vec![TagTerm { term: "Novel space concept".into(), qualified: None }],
+                tags: vec![TagTerm {
+                    term: "Novel space concept".into(),
+                    qualified: None,
+                }],
             },
         ];
         assert!(graph.db.get_page_by_title("novel_space_concept").is_err());
-        let receipt = insert_summary_for_graph(&graph, &page.id, None, &topics, None,
-            Some(&graph.root_dir.to_string_lossy()), Some(&before), false).unwrap();
-        assert_eq!(graph.db.get_block_by_id("source").unwrap().content, "Untouched source prose");
+        let receipt = insert_summary_for_graph(
+            &graph,
+            &page.id,
+            None,
+            &topics,
+            None,
+            Some(&graph.root_dir.to_string_lossy()),
+            Some(&before),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            graph.db.get_block_by_id("source").unwrap().content,
+            "Untouched source prose"
+        );
         assert_eq!(receipt.inserted_blocks[2].content, body);
         let first_tags = &receipt.inserted_blocks[3];
-        assert_eq!(first_tags.parent_id, Some(receipt.inserted_blocks[1].id.clone()));
+        assert_eq!(
+            first_tags.parent_id,
+            Some(receipt.inserted_blocks[1].id.clone())
+        );
         assert_eq!(first_tags.order_index, 1);
-        assert!(first_tags.content.contains("[[Insulin resistance|#insulin_resistance]]"));
-        assert!(first_tags.content.contains("[[novel_space_concept|#novel_space_concept]]"));
+        assert!(first_tags
+            .content
+            .contains("[[Insulin resistance|#insulin_resistance]]"));
+        assert!(first_tags
+            .content
+            .contains("[[novel_space_concept|#novel_space_concept]]"));
         assert!(!first_tags.content.contains("Insuln resistance"));
         assert_eq!(receipt.created_targets.len(), 1);
         assert_eq!(receipt.unlinked_targets.len(), 1);
-        assert_eq!(receipt.unlinked_targets[0].source_phrase, "Insuln resistance");
+        assert_eq!(
+            receipt.unlinked_targets[0].source_phrase,
+            "Insuln resistance"
+        );
         assert!(!receipt.unlinked_targets[0].reason.is_empty());
         assert!(graph.db.get_page_by_title("Insuln resistance").is_err());
-        assert_eq!(graph.db.get_page_by_title("Insulin resistance").unwrap().id, existing.id);
-        assert_eq!(receipt.inserted_blocks[6].content, "[[novel_space_concept|#novel_space_concept]]");
+        assert_eq!(
+            graph.db.get_page_by_title("Insulin resistance").unwrap().id,
+            existing.id
+        );
+        assert_eq!(
+            receipt.inserted_blocks[6].content,
+            "[[novel_space_concept|#novel_space_concept]]"
+        );
         let serialized = serde_json::to_value(&receipt).unwrap();
-        assert_eq!(serialized["unlinkedTargets"][0]["sourcePhrase"], "Insuln resistance");
-        assert_eq!(serialized["createdTargets"][0]["id"], receipt.created_targets[0].id);
-        assert!(graph.undo_research_summary(&receipt).unwrap().retained_targets.is_empty());
+        assert_eq!(
+            serialized["unlinkedTargets"][0]["sourcePhrase"],
+            "Insuln resistance"
+        );
+        assert_eq!(
+            serialized["createdTargets"][0]["id"],
+            receipt.created_targets[0].id
+        );
+        assert!(graph
+            .undo_research_summary(&receipt)
+            .unwrap()
+            .retained_targets
+            .is_empty());
         assert!(graph.db.get_page_by_title("novel_space_concept").is_err());
         assert!(graph.db.get_page_by_id(&existing.id).is_ok());
         graph.reapply_research_summary(&receipt).unwrap();
-        assert_eq!(graph.db.get_page_by_title("novel_space_concept").unwrap().id, receipt.created_targets[0].id);
+        assert_eq!(
+            graph
+                .db
+                .get_page_by_title("novel_space_concept")
+                .unwrap()
+                .id,
+            receipt.created_targets[0].id
+        );
     }
 
     #[test]
     fn summary_command_stale_source_does_not_create_concept_pages() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let graph = grafium_core::graph::Graph::open(directory.path()).unwrap();
-        let page = graph.create_page_with_content("Synthetic source", false, "- Original source\n  id:: source\n").unwrap();
+        let page = graph
+            .create_page_with_content(
+                "Synthetic source",
+                false,
+                "- Original source\n  id:: source\n",
+            )
+            .unwrap();
         let before = graph.db.list_blocks_for_page(&page.id).unwrap();
-        graph.update_block("source", "A pending draft was flushed after generation", None).unwrap();
+        graph
+            .update_block(
+                "source",
+                "A pending draft was flushed after generation",
+                None,
+            )
+            .unwrap();
         let topics = vec![grafium_core::ai::references::TopicSummary {
-            topic: "Topic".into(), summary: "Prose without literal tag".into(),
-            tags: vec![TagTerm { term: "new_generated_concept".into(), qualified: None }],
+            topic: "Topic".into(),
+            summary: "Prose without literal tag".into(),
+            tags: vec![TagTerm {
+                term: "new_generated_concept".into(),
+                qualified: None,
+            }],
         }];
-        let result = insert_summary_for_graph(&graph, &page.id, None, &topics, None,
-            Some(&graph.root_dir.to_string_lossy()), Some(&before), false);
+        let result = insert_summary_for_graph(
+            &graph,
+            &page.id,
+            None,
+            &topics,
+            None,
+            Some(&graph.root_dir.to_string_lossy()),
+            Some(&before),
+            false,
+        );
         assert!(result.unwrap_err().contains("stale"));
         assert!(graph.db.get_page_by_title("new_generated_concept").is_err());
-        assert_eq!(graph.db.get_block_by_id("source").unwrap().content, "A pending draft was flushed after generation");
+        assert_eq!(
+            graph.db.get_block_by_id("source").unwrap().content,
+            "A pending draft was flushed after generation"
+        );
     }
 }

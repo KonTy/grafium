@@ -287,10 +287,19 @@ mod tests {
     fn hierarchy_variants_share_lookup_keys_but_preserve_existing_titles() -> Result<()> {
         let db = Database::in_memory()?;
         let page = db.create_page("Projects/Alpha", false)?;
-        db.update_page(&page.id, Some(r"Projects \ Alpha"), Some(&serde_json::json!({
-            "aliases":["Work / Alpha"]
-        })))?;
-        for variant in ["Projects / Alpha", r"Projects\Alpha", "Work/Alpha", r"Work \ Alpha"] {
+        db.update_page(
+            &page.id,
+            Some(r"Projects \ Alpha"),
+            Some(&serde_json::json!({
+                "aliases":["Work / Alpha"]
+            })),
+        )?;
+        for variant in [
+            "Projects / Alpha",
+            r"Projects\Alpha",
+            "Work/Alpha",
+            r"Work \ Alpha",
+        ] {
             let result = resolve(&db, variant)?;
             assert_eq!(result.decision, EntityDecision::Reuse);
             assert_eq!(result.target_page_id.as_deref(), Some(page.id.as_str()));

@@ -35,11 +35,17 @@ pub fn rewrite_wiki_link_targets(
     rewrite: impl Fn(&str) -> Option<String>,
 ) -> String {
     let mut protected = markdown_protected_spans(content);
-    protected.extend(ANY_BLOCK_REF_RE.find_iter(content).map(|m| (m.start(), m.end())));
+    protected.extend(
+        ANY_BLOCK_REF_RE
+            .find_iter(content)
+            .map(|m| (m.start(), m.end())),
+    );
     PAGE_LINK_RE
         .replace_all(content, |caps: &regex::Captures| {
             let span = caps.get(0).unwrap();
-            if is_escaped(content, span.start()) || overlaps_any(span.start(), span.end(), &protected) {
+            if is_escaped(content, span.start())
+                || overlaps_any(span.start(), span.end(), &protected)
+            {
                 return span.as_str().to_string();
             }
             let inner = &caps[1];
@@ -55,7 +61,10 @@ pub fn rewrite_wiki_link_targets(
                         None => format!("[[{new_target}]]"),
                     }
                 }
-                _ => caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                _ => caps
+                    .get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
             }
         })
         .into_owned()
@@ -126,17 +135,14 @@ static DATE_TITLE_RE: LazyLock<Regex> =
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)\b(?:[a-z][a-z0-9+.-]*://|mailto:|www\.)[^\s<>"']+"#).unwrap()
 });
-static MATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)\$\$.*?\$\$|\$[^\n$]+\$|\\\(.*?\\\)|\\\[.*?\\\]").unwrap()
-});
-static REFERENCE_DEFINITION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^ {0,3}\[[^\]\n]+\]:[^\n]*(?:\n[ \t]+[^\n]*)*").unwrap()
-});
+static MATH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)\$\$.*?\$\$|\$[^\n$]+\$|\\\(.*?\\\)|\\\[.*?\\\]").unwrap());
+static REFERENCE_DEFINITION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]\n]+\]:[^\n]*(?:\n[ \t]+[^\n]*)*").unwrap());
 static FOOTNOTE_MARKER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\^(?:\\[^\r\n]|[^\]\\\r\n])+\]").unwrap());
-static HTML_ELEMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<!--.*?-->|<(/?)([a-z][a-z0-9-]*)(?:\s[^>]*|/?)>").unwrap()
-});
+static HTML_ELEMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<!--.*?-->|<(/?)([a-z][a-z0-9-]*)(?:\s[^>]*|/?)>").unwrap());
 static CONCEPT_SEPARATOR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^\p{L}\p{N}\p{M}]+").unwrap());
 static WORD_CHAR_RE: LazyLock<Regex> =
@@ -147,7 +153,13 @@ fn overlaps_any(start: usize, end: usize, spans: &[(usize, usize)]) -> bool {
 }
 
 fn is_escaped(content: &str, at: usize) -> bool {
-    content[..at].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1
+    content[..at]
+        .bytes()
+        .rev()
+        .take_while(|&b| b == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 /// Source byte ranges that are not editable prose. Protect whole Markdown
@@ -156,7 +168,10 @@ fn markdown_protected_spans(content: &str) -> Vec<(usize, usize)> {
     markdown_protected_spans_impl(content, true)
 }
 
-fn markdown_protected_spans_impl(content: &str, protect_footnote_references: bool) -> Vec<(usize, usize)> {
+fn markdown_protected_spans_impl(
+    content: &str,
+    protect_footnote_references: bool,
+) -> Vec<(usize, usize)> {
     // Wiki aliases are opaque display text, not nested Markdown/HTML/math.
     // Keep byte offsets stable while letting Markdown identify outer syntax.
     let mut masked = content.to_string();
@@ -170,13 +185,22 @@ fn markdown_protected_spans_impl(content: &str, protect_footnote_references: boo
     for (event, range) in Parser::new_ext(content, Options::all()).into_offset_iter() {
         if matches!(
             &event,
-            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. } | Tag::FootnoteDefinition(_)) | Event::Code(_)
+            Event::Start(
+                Tag::CodeBlock(_)
+                    | Tag::Link { .. }
+                    | Tag::Image { .. }
+                    | Tag::FootnoteDefinition(_)
+            ) | Event::Code(_)
         ) {
             code_and_links.push((range.start, range.end));
         }
         match event {
             Event::Start(
-                Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::Link { .. } | Tag::Image { .. } | Tag::FootnoteDefinition(_),
+                Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::Link { .. }
+                | Tag::Image { .. }
+                | Tag::FootnoteDefinition(_),
             )
             | Event::Code(_)
             | Event::Html(_) => {
@@ -184,7 +208,9 @@ fn markdown_protected_spans_impl(content: &str, protect_footnote_references: boo
                 opaque.push((range.start, range.end));
             }
             Event::InlineHtml(_) => spans.push((range.start, range.end)),
-            Event::FootnoteReference(_) if protect_footnote_references => spans.push((range.start, range.end)),
+            Event::FootnoteReference(_) if protect_footnote_references => {
+                spans.push((range.start, range.end))
+            }
             _ => {}
         }
     }
@@ -194,12 +220,18 @@ fn markdown_protected_spans_impl(content: &str, protect_footnote_references: boo
     if protect_footnote_references {
         // A block may not contain the definition needed for CommonMark to
         // recognize a reference. Its unresolved label is still not prose.
-        spans.extend(FOOTNOTE_MARKER_RE.find_iter(content).map(|m| (m.start(), m.end())));
+        spans.extend(
+            FOOTNOTE_MARKER_RE
+                .find_iter(content)
+                .map(|m| (m.start(), m.end())),
+        );
     }
     spans.extend(
         MATH_RE
             .find_iter(content)
-            .filter(|m| !is_escaped(content, m.start()) && !overlaps_any(m.start(), m.end(), &opaque))
+            .filter(|m| {
+                !is_escaped(content, m.start()) && !overlaps_any(m.start(), m.end(), &opaque)
+            })
             .map(|m| (m.start(), m.end())),
     );
     // Inline HTML is emitted as separate opening/closing events. Its contents
@@ -222,8 +254,20 @@ fn markdown_protected_spans_impl(content: &str, protect_footnote_references: boo
         } else if !whole.as_str().ends_with("/>")
             && !matches!(
                 name.as_str(),
-                "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
-                    | "link" | "meta" | "param" | "source" | "track" | "wbr"
+                "area"
+                    | "base"
+                    | "br"
+                    | "col"
+                    | "embed"
+                    | "hr"
+                    | "img"
+                    | "input"
+                    | "link"
+                    | "meta"
+                    | "param"
+                    | "source"
+                    | "track"
+                    | "wbr"
             )
         {
             open_elements.push((name, whole.start()));
@@ -249,7 +293,10 @@ pub(crate) fn protected_reference_context_spans(content: &str) -> Vec<(usize, us
     protected_link_spans_impl(content, false)
 }
 
-fn protected_link_spans_impl(content: &str, protect_footnote_references: bool) -> Vec<(usize, usize)> {
+fn protected_link_spans_impl(
+    content: &str,
+    protect_footnote_references: bool,
+) -> Vec<(usize, usize)> {
     let mut spans = markdown_protected_spans_impl(content, protect_footnote_references);
     for re in [&*PAGE_LINK_RE, &*TAG_RE, &*ANY_BLOCK_REF_RE] {
         spans.extend(re.find_iter(content).map(|m| (m.start(), m.end())));
@@ -264,12 +311,18 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
     let wiki_protected = protected
         .iter()
         .copied()
-        .chain(ANY_BLOCK_REF_RE.find_iter(content).map(|m| (m.start(), m.end())))
+        .chain(
+            ANY_BLOCK_REF_RE
+                .find_iter(content)
+                .map(|m| (m.start(), m.end())),
+        )
         .collect::<Vec<_>>();
 
     for cap in PAGE_LINK_RE.captures_iter(content) {
         let span = cap.get(0).unwrap();
-        if is_escaped(content, span.start()) || overlaps_any(span.start(), span.end(), &wiki_protected) {
+        if is_escaped(content, span.start())
+            || overlaps_any(span.start(), span.end(), &wiki_protected)
+        {
             continue;
         }
         let target = cap[1].split_once('|').map_or(&cap[1], |(target, _)| target);
@@ -279,22 +332,27 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
         }
     }
     // An alias is display text, not another graph edge (even if it is #tag).
-    protected.extend(PAGE_LINK_RE.find_iter(content).map(|m| (m.start(), m.end())));
+    protected.extend(
+        PAGE_LINK_RE
+            .find_iter(content)
+            .map(|m| (m.start(), m.end())),
+    );
     let tag_protected = protected
         .iter()
         .copied()
-        .chain(ANY_BLOCK_REF_RE.find_iter(content).map(|m| (m.start(), m.end())))
+        .chain(
+            ANY_BLOCK_REF_RE
+                .find_iter(content)
+                .map(|m| (m.start(), m.end())),
+        )
         .collect::<Vec<_>>();
 
     for cap in TAG_RE.captures_iter(content) {
-        if cap
-            .get(0)
-            .is_some_and(|m| {
-                is_escaped(content, m.start())
-                    || overlaps_any(m.start(), m.end(), &tag_protected)
-                    || is_url_fragment_hash(content, m.start())
-            })
-        {
+        if cap.get(0).is_some_and(|m| {
+            is_escaped(content, m.start())
+                || overlaps_any(m.start(), m.end(), &tag_protected)
+                || is_url_fragment_hash(content, m.start())
+        }) {
             continue;
         }
         let tag = &cap[1];
@@ -309,7 +367,8 @@ pub fn extract_links(content: &str) -> Vec<ExtractedLink> {
 
     for cap in BLOCK_REF_RE.captures_iter(content) {
         let span = cap.get(0).unwrap();
-        if !is_escaped(content, span.start()) && !overlaps_any(span.start(), span.end(), &protected) {
+        if !is_escaped(content, span.start()) && !overlaps_any(span.start(), span.end(), &protected)
+        {
             links.push(ExtractedLink::BlockRef(cap[1].to_string()));
         }
     }
@@ -433,7 +492,7 @@ pub fn format_concept_link(title: &str) -> Option<String> {
         && !display.is_empty()
         && !URL_RE.is_match(title)
         && !ANY_BLOCK_REF_RE.is_match(title))
-        .then(|| format!("[[{title}|{display}]]"))
+    .then(|| format!("[[{title}|{display}]]"))
 }
 
 /// Legacy unresolved terms still preserve their exact source spelling.
@@ -546,10 +605,15 @@ mod tests {
         let spans = protected_link_spans(source);
         for marker in ["[^grafium-note-9]", "[^1]", "[^named-label]"] {
             let start = source.find(marker).unwrap();
-            assert!(spans.iter().any(|&(a, b)| a <= start && b >= start + marker.len()));
+            assert!(spans
+                .iter()
+                .any(|&(a, b)| a <= start && b >= start + marker.len()));
         }
         assert_eq!(
-            wrap_known_terms_as_links(source, &["grafium-note-9".into(), "1".into(), "named-label".into()]),
+            wrap_known_terms_as_links(
+                source,
+                &["grafium-note-9".into(), "1".into(), "named-label".into()]
+            ),
             "[[grafium-note-9]] [^grafium-note-9] [^1] [^named-label]"
         );
     }
@@ -561,9 +625,14 @@ mod tests {
         assert!(wrapped.starts_with("[[Glucose]] [^1]"));
         assert!(wrapped.contains("[^1]: Insulin in the first paragraph."));
         assert!(wrapped.contains("    Insulin in a second paragraph."));
-        assert!(wrapped.ends_with("[[Insulin]] outside the definition."), "{wrapped:?}");
+        assert!(
+            wrapped.ends_with("[[Insulin]] outside the definition."),
+            "{wrapped:?}"
+        );
         let start = source.find("Insulin in a second").unwrap();
-        assert!(markdown_protected_spans(source).iter().any(|&(a, b)| a <= start && b > start));
+        assert!(markdown_protected_spans(source)
+            .iter()
+            .any(|&(a, b)| a <= start && b > start));
     }
 
     #[test]
@@ -679,12 +748,12 @@ mod tests {
             "This article discusses insulin resistance in depth.",
             &["insulin_resistance".into()],
         );
+        assert_eq!(out, "This article discusses insulin resistance in depth.");
         assert_eq!(
-            out,
-            "This article discusses insulin resistance in depth."
-        );
-        assert_eq!(
-            wrap_known_terms_as_links("a-b differs from a b and a_b", &["a-b".into(), "a_b".into()]),
+            wrap_known_terms_as_links(
+                "a-b differs from a b and a_b",
+                &["a-b".into(), "a_b".into()]
+            ),
             "[[a-b]] differs from a b and [[a_b]]"
         );
     }
@@ -818,19 +887,30 @@ mod tests {
     #[test]
     fn test_shared_safety_skips_markdown_and_existing_link_syntax() {
         let protected = [
-            "`insulin`", "``insulin ` inline``", "`<span> insulin`",
-            "```rust\ninsulin\n```", "~~~\ninsulin\n~~~", "    insulin\n",
+            "`insulin`",
+            "``insulin ` inline``",
+            "`<span> insulin`",
+            "```rust\ninsulin\n```",
+            "~~~\ninsulin\n~~~",
+            "    insulin\n",
             "```\n<span> insulin\n```",
             "[insulin](https://example.com/insulin#insulin)",
             "![insulin](assets/insulin.png \"insulin\")",
             "[insulin][source]\n\n[source]: https://example.com/insulin",
             "<https://example.com/insulin>",
             "https://example.com/insulin#insulin",
-            "$insulin$", "$$insulin\n+ insulin$$", r"\(insulin\)", r"\[insulin\]",
+            "$insulin$",
+            "$$insulin\n+ insulin$$",
+            r"\(insulin\)",
+            r"\[insulin\]",
             "<span title=\"insulin\">insulin</span>",
-            "<!-- insulin -->", "<!-- <span> insulin -->", "<div>\ninsulin\n</div>",
+            "<!-- insulin -->",
+            "<!-- <span> insulin -->",
+            "<div>\ninsulin\n</div>",
             "<div>\n\ninsulin\n\n</div>",
-            "[[insulin|#insulin]]", "#insulin", "((insulin))",
+            "[[insulin|#insulin]]",
+            "#insulin",
+            "((insulin))",
         ];
         for source in protected {
             let content = format!("{source}\n\ninsulin follows.");
@@ -886,9 +966,20 @@ mod tests {
             ("Vitamin B12 (cobalamin)", "#vitamin_b12_cobalamin"),
         ] {
             assert_eq!(format_concept_tag(title), display);
-            assert_eq!(format_concept_link(title), Some(format!("[[{}|{display}]]", title.trim())));
+            assert_eq!(
+                format_concept_link(title),
+                Some(format!("[[{}|{display}]]", title.trim()))
+            );
         }
-        for title in ["", "!!!", "Bad|alias", "Bad]]", "Bad\nTitle", "https://example.com/paper", "((abc-123))"] {
+        for title in [
+            "",
+            "!!!",
+            "Bad|alias",
+            "Bad]]",
+            "Bad\nTitle",
+            "https://example.com/paper",
+            "((abc-123))",
+        ] {
             assert_eq!(format_concept_link(title), None);
         }
     }
@@ -924,10 +1015,7 @@ mod tests {
                     .then(|| "Health".to_string())
             },
         );
-        assert_eq!(
-            out,
-            "See [[Health]] and [[Health|vitamins]] plus [[Other]]"
-        );
+        assert_eq!(out, "See [[Health]] and [[Health|vitamins]] plus [[Other]]");
     }
 
     #[test]

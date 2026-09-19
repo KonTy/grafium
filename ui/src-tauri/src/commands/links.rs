@@ -94,7 +94,8 @@ pub fn resolve_link_candidate(
     if graph.root_dir.to_string_lossy() != graph_path {
         return Err("The active graph changed; refresh link suggestions.".into());
     }
-    graph.resolve_link_candidate(&candidate_id, target_page_id.as_deref(), create_new)
+    graph
+        .resolve_link_candidate(&candidate_id, target_page_id.as_deref(), create_new)
         .map_err(|error| error.to_string())
 }
 

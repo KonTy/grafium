@@ -48,7 +48,10 @@ impl PageKindFilter {
         // Deliberately `is_empty` and not `trim().is_empty()`, to mirror the
         // SQL above exactly. If these two disagree, tree mode and list mode
         // sort the same page into different buckets.
-        let filed = page.file_path.as_deref().is_some_and(|path| !path.is_empty());
+        let filed = page
+            .file_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty());
         match self {
             Self::All => true,
             Self::Filed => filed,
@@ -108,7 +111,9 @@ fn create_page_on_conn(conn: &Connection, title: &str, is_journal: bool) -> Resu
 
 fn find_page_by_name_on_conn(conn: &Connection, title: &str) -> Result<Option<Page>> {
     let ids: Vec<String> = conn
-        .prepare("SELECT DISTINCT page_id FROM entity_names WHERE name_key = entity_key(?1) LIMIT 2")?
+        .prepare(
+            "SELECT DISTINCT page_id FROM entity_names WHERE name_key = entity_key(?1) LIMIT 2",
+        )?
         .query_map([title], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     let id = match ids.as_slice() {
@@ -122,12 +127,17 @@ fn find_page_by_name_on_conn(conn: &Connection, title: &str) -> Result<Option<Pa
         "SELECT id, title, file_path, created_at, updated_at, is_journal, properties
          FROM pages WHERE id = ?1",
         [id],
-        |row| Ok(Page {
-            id: row.get(0)?, title: row.get(1)?, file_path: row.get(2)?,
-            created_at: row.get(3)?, updated_at: row.get(4)?,
-            is_journal: row.get::<_, i32>(5)? != 0,
-            properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
-        }),
+        |row| {
+            Ok(Page {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                file_path: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_journal: row.get::<_, i32>(5)? != 0,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        },
     )?))
 }
 
@@ -172,11 +182,7 @@ impl Database {
         self.get_page_by_id_in_connection(&conn, id)
     }
 
-    pub(crate) fn get_page_by_id_in_connection(
-        &self,
-        conn: &Connection,
-        id: &str,
-    ) -> Result<Page> {
+    pub(crate) fn get_page_by_id_in_connection(&self, conn: &Connection, id: &str) -> Result<Page> {
         let page = conn.query_row(
             "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE id = ?1",
             params![id],
@@ -1258,14 +1264,24 @@ mod tests {
     /// only situation where the filter means anything.
     fn mixed_graph() -> Result<Database> {
         let db = Database::in_memory()?;
-        db.upsert_page("Alpha", false, Some("pages/Alpha.md"), &serde_json::json!({}))?;
+        db.upsert_page(
+            "Alpha",
+            false,
+            Some("pages/Alpha.md"),
+            &serde_json::json!({}),
+        )?;
         db.upsert_page("Beta", false, Some("pages/Beta.md"), &serde_json::json!({}))?;
         // A link target nobody has written yet.
         db.upsert_page("Someday", false, None, &serde_json::json!({}))?;
         // Legacy rows store "" rather than NULL, and must count as virtual too.
         db.upsert_page("Blank", false, Some(""), &serde_json::json!({}))?;
         // A journal, which All Pages never lists whatever the filter says.
-        db.upsert_page("2026-09-09", true, Some("journals/2026-09-09.md"), &serde_json::json!({}))?;
+        db.upsert_page(
+            "2026-09-09",
+            true,
+            Some("journals/2026-09-09.md"),
+            &serde_json::json!({}),
+        )?;
         Ok(db)
     }
 

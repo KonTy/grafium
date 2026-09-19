@@ -328,7 +328,8 @@ mod tests {
 
     #[test]
     fn a_reasoning_models_thinking_is_stripped() {
-        let raw = "<think>The user wants a name. I should be brief.</think>\nFlashing a global OS image";
+        let raw =
+            "<think>The user wants a name. I should be brief.</think>\nFlashing a global OS image";
         assert_eq!(
             sanitize(raw, QUESTION).as_deref(),
             Some("Flashing a global OS image")
@@ -358,7 +359,11 @@ mod tests {
     /// real conversation about chats deserves a real name.
     #[test]
     fn a_real_title_that_starts_with_a_junk_word_is_kept() {
-        for raw in ["Chat history export", "Titles in the sidebar", "Conversation backups"] {
+        for raw in [
+            "Chat history export",
+            "Titles in the sidebar",
+            "Conversation backups",
+        ] {
             assert_eq!(sanitize(raw, QUESTION).as_deref(), Some(raw), "{raw}");
         }
     }
@@ -475,7 +480,8 @@ mod generate_tests {
 
     #[tokio::test]
     async fn a_good_reply_names_the_chat() {
-        let title = generate_title(&stub("Flashing a global OS image"), QUESTION, ANSWER, None).await;
+        let title =
+            generate_title(&stub("Flashing a global OS image"), QUESTION, ANSWER, None).await;
         assert_eq!(title, "Flashing a global OS image");
     }
 

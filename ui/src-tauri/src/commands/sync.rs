@@ -337,9 +337,18 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         }
     }
 
-    let conflicts = results.iter().map(|result| result.conflicts.len()).sum::<usize>();
-    let pushed = results.iter().map(|result| result.pushed.len()).sum::<usize>();
-    let pulled = results.iter().map(|result| result.pulled.len()).sum::<usize>();
+    let conflicts = results
+        .iter()
+        .map(|result| result.conflicts.len())
+        .sum::<usize>();
+    let pushed = results
+        .iter()
+        .map(|result| result.pushed.len())
+        .sum::<usize>();
+    let pulled = results
+        .iter()
+        .map(|result| result.pulled.len())
+        .sum::<usize>();
     let _ = app.emit(
         "sync-completed",
         serde_json::json!({

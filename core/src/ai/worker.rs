@@ -1150,13 +1150,22 @@ mod prompt_count_tests {
     #[test]
     fn scoped_research_generation_observes_cancellation_without_loading_a_model() {
         let WorkerRequest::CountPrompt {
-            model_path, context_size, gpu_layers, messages, options,
-        } = count_request() else {
+            model_path,
+            context_size,
+            gpu_layers,
+            messages,
+            options,
+        } = count_request()
+        else {
             unreachable!()
         };
         let flag = options.cancel.as_ref().unwrap().clone();
         let request = WorkerRequest::Llm {
-            model_path, context_size, gpu_layers, messages, options,
+            model_path,
+            context_size,
+            gpu_layers,
+            messages,
+            options,
         };
         let cancel = request_cancel(&request).expect("generation shares cancellable worker waits");
         let (_sender, receiver) = std::sync::mpsc::channel();
@@ -1165,14 +1174,21 @@ mod prompt_count_tests {
                 std::thread::sleep(Duration::from_millis(20));
                 flag.store(true, Ordering::Release);
             });
-            assert!(
-                receive_response(&receiver, Duration::from_secs(60), Some(cancel), &mut |_| {})
-                    .unwrap_err().to_string().contains("cancelled")
-            );
+            assert!(receive_response(
+                &receiver,
+                Duration::from_secs(60),
+                Some(cancel),
+                &mut |_| {}
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
         });
         // This must fail before consulting the executable or any model path.
         assert!(execute(request, Duration::from_secs(60))
-            .unwrap_err().to_string().contains("cancelled"));
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
     }
 
     #[test]
@@ -1622,5 +1638,4 @@ mod queue_tests {
             "a fresh queue should be empty"
         );
     }
-
 }

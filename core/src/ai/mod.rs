@@ -146,9 +146,9 @@ pub mod resources;
 pub mod text;
 pub mod traits;
 pub mod web_research;
-pub mod writing;
 #[cfg(any(feature = "llm-local", feature = "media"))]
 pub mod worker;
+pub mod writing;
 
 pub use config::{AiConfig, AiMode, ProviderConfig};
 pub use embeddings::EmbeddingPipeline;
