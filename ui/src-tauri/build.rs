@@ -163,6 +163,49 @@ fn format_utc(seconds: i64) -> String {
 /// built without them) there's simply nothing to find, and this silently
 /// does nothing.
 fn bundle_native_libs() {
+    copy_native_libs();
+
+    println!("cargo:rerun-if-changed=build.rs");
+
+    // Point the linker at `bundled-libs/` (relative to the final
+    // executable) so the app finds these at runtime without needing
+    // `LD_LIBRARY_PATH` set. Tauri's `resource_dir()` resolves to
+    // `<exe_dir>/../lib/<productName>` for both .deb and AppImage on
+    // Linux, and to `<exe_dir>` itself on Windows (see
+    // tauri-utils::platform::resource_dir_from) — matching where
+    // `tauri.conf.json`'s `bundle.resources` places these files.
+    //
+    // Emitted unconditionally, and deliberately not inside `copy_native_libs`:
+    // every early return in there is a "nothing to copy yet" case, and a build
+    // that silently shipped a binary with no `RPATH` would only fail later, at
+    // runtime, inside the packaged app.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        // `--disable-new-dtags` forces the linker to emit the legacy
+        // `DT_RPATH` tag instead of `DT_RUNPATH`. This matters: `DT_RUNPATH`
+        // on the main executable only applies to resolving *its own* direct
+        // `NEEDED` entries (e.g. `libllama.so.0`) — it is NOT consulted when
+        // resolving `libllama.so.0`'s own transitive dependencies
+        // (`libggml*.so.0`), since those libraries have no rpath of their
+        // own. The older `DT_RPATH`, when set on the main executable, is
+        // used by the dynamic loader as a process-wide fallback search path
+        // for *all* dependency resolution, transitively — exactly what's
+        // needed here. Verified against an actual built `.deb` with `ldd`.
+        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib/Grafium");
+    }
+}
+
+/// Copies whatever llama.cpp/GGML shared libraries exist right now into
+/// `bundled-libs/`.
+///
+/// Cargo only orders a build script against its crate's *build*-dependencies,
+/// and `llama-cpp-sys-2` is a normal dependency of `grafium-core`, so on a cold
+/// build this script can run while that CMake build is still emitting its
+/// `.so`s — leaving `bundled-libs/` with a partial set. `cargo:rerun-if-changed`
+/// on the shared build directory is what makes that self-correcting: the next
+/// build sees the directory changed, re-runs this, and picks up the full set.
+/// Without it the only declared input is `build.rs` itself, so a partial copy
+/// would stay partial until something forced a rebuild.
+fn copy_native_libs() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is always set for build.rs"));
     // OUT_DIR looks like `<target-dir>/<profile>/build/grafium-<hash>/out`;
     // `build_dir` is `<target-dir>/<profile>/build`, where every crate's
@@ -181,20 +224,32 @@ fn bundle_native_libs() {
         .unwrap_or_else(|| dest.clone());
     ensure_tauri_resource_glob_dir(&resource_dest);
 
+    // Re-run whenever a crate's build-script output directory appears or
+    // disappears here, which is what happens when the `llama-cpp-sys-2` build
+    // finally lands its libraries.
+    println!("cargo:rerun-if-changed={}", build_dir.display());
+
     let Ok(entries) = fs::read_dir(build_dir) else {
         return;
     };
-    let sys_crate_dirs = entries.flatten().map(|e| e.path()).filter(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("llama-cpp-sys-2-"))
-            .unwrap_or(false)
-    });
+    let sys_crate_dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("llama-cpp-sys-2-"))
+                .unwrap_or(false)
+        })
+        .collect();
 
     let is_windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let mut copied_any = false;
-    for sys_dir in sys_crate_dirs {
+    for sys_dir in &sys_crate_dirs {
         let search_root = sys_dir.join("out");
+        // Also track the directory the libraries themselves land in, so a
+        // rebuild of llama.cpp alone (same crate dir, new `.so`s) re-copies.
+        println!("cargo:rerun-if-changed={}", search_root.display());
         if !search_root.is_dir() {
             continue;
         }
@@ -218,27 +273,12 @@ fn bundle_native_libs() {
         }
     }
 
-    println!("cargo:rerun-if-changed=build.rs");
-
-    // Point the linker at `bundled-libs/` (relative to the final
-    // executable) so the app finds these at runtime without needing
-    // `LD_LIBRARY_PATH` set. Tauri's `resource_dir()` resolves to
-    // `<exe_dir>/../lib/<productName>` for both .deb and AppImage on
-    // Linux, and to `<exe_dir>` itself on Windows (see
-    // tauri-utils::platform::resource_dir_from) — matching where
-    // `tauri.conf.json`'s `bundle.resources` places these files.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        // `--disable-new-dtags` forces the linker to emit the legacy
-        // `DT_RPATH` tag instead of `DT_RUNPATH`. This matters: `DT_RUNPATH`
-        // on the main executable only applies to resolving *its own* direct
-        // `NEEDED` entries (e.g. `libllama.so.0`) — it is NOT consulted when
-        // resolving `libllama.so.0`'s own transitive dependencies
-        // (`libggml*.so.0`), since those libraries have no rpath of their
-        // own. The older `DT_RPATH`, when set on the main executable, is
-        // used by the dynamic loader as a process-wide fallback search path
-        // for *all* dependency resolution, transitively — exactly what's
-        // needed here. Verified against an actual built `.deb` with `ldd`.
-        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib/Grafium");
+    if !sys_crate_dirs.is_empty() && !copied_any {
+        println!(
+            "cargo:warning=llama-cpp-sys-2 is in the build but produced no shared libraries yet; \
+             bundled-libs/ is incomplete. This build script will re-run and finish the copy on \
+             the next build — repackage after that, or the installer will ship without libllama."
+        );
     }
 }
 

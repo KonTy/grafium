@@ -1,6 +1,9 @@
 # Rust
 target/
-Cargo.lock
+# Cargo.lock is deliberately tracked: this workspace ships applications
+# (grafium, grafium-tui), so the lockfile is what makes a build reproducible.
+# Leaving it untracked let a fresh checkout resolve a different llama-cpp-2
+# patch release than the source expected and fail to compile.
 
 # Node
 ui/node_modules/
