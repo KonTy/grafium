@@ -86,6 +86,24 @@
 
   // Delegated handler for links inside rendered assistant markdown. This keeps
   // Chat and Ask on the same navigation rules for [[page]], #tag, and web links.
+  /**
+   * Rendered assistant markdown is delegated rather than bound per-anchor,
+   * because the anchors come from `{@html}` and are replaced on every stream
+   * tick. The listener is attached imperatively: the only things it acts on
+   * are real `<a>` elements, which are already keyboard-activatable, and
+   * pressing Enter on a focused anchor dispatches a click that bubbles here.
+   * A `role`/`onkeydown` pair on the container would therefore be describing
+   * an interaction the container does not actually own.
+   */
+  let renderedEl = $state<HTMLDivElement>();
+
+  $effect(() => {
+    const el = renderedEl;
+    if (!el) return;
+    el.addEventListener("click", handleRenderedClick);
+    return () => el.removeEventListener("click", handleRenderedClick);
+  });
+
   function handleRenderedClick(e: MouseEvent) {
     const target = e.target instanceof Element ? e.target : null;
     const anchor = target?.closest("a");
@@ -155,9 +173,7 @@
       <span>{thinkingLabel}</span>
     </div>
   {:else if message.role === "assistant"}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="msg-content markdown" onclick={handleRenderedClick}>
+    <div class="msg-content markdown" bind:this={renderedEl}>
       {@html renderAssistantMarkdown(message.content)}
       {#if streaming}<span
         class="type-cursor"

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { getAppVersion } from "../lib/api";
+  import { autofocus } from "../lib/autofocus";
+  import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
 
   interface Props {
     uiZoom?: number;
@@ -75,9 +77,7 @@
   </button>
 
   {#if menuOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="menu-backdrop" onclick={closeMenu}></div>
+    <div class="menu-backdrop" role="presentation" onclick={closeMenu}></div>
     <div class="menu-dropdown">
       <div class="zoom-section">
         <div class="zoom-label">Zoom {Math.round(uiZoom * 100)}%</div>
@@ -109,12 +109,8 @@
 </div>
 
 {#if showAbout}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog-backdrop" onclick={closeAbout}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+  <div class="dialog-backdrop" role="presentation" use:dismissOnBackdrop={closeAbout}>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" tabindex="-1" onkeydown={dialogKeydown(closeAbout)}>
       <div class="about-header">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5">
           <circle cx="12" cy="12" r="3"></circle>
@@ -127,7 +123,7 @@
           <line x1="6" y1="18" x2="10" y2="14"></line>
           <line x1="18" y1="18" x2="14" y2="14"></line>
         </svg>
-        <h2 class="about-title">Grafium</h2>
+        <h2 class="about-title" id="about-title">Grafium</h2>
       </div>
       <div class="about-version">v{appVersion}</div>
       <p class="about-desc">
@@ -149,7 +145,7 @@
         </div>
       </div>
       <div class="about-actions">
-        <button class="btn btn-primary" onclick={closeAbout}>Close</button>
+        <button class="btn btn-primary" onclick={closeAbout} use:autofocus>Close</button>
       </div>
     </div>
   </div>

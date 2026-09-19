@@ -11,6 +11,7 @@
     pruneSelection, selectRange,
   } from "../lib/chatSelection";
   import { autofocus } from "../lib/autofocus";
+  import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { SvelteSet } from "svelte/reactivity";
 
   let { graphPath, currentId, onSelect, open = false }: {
@@ -246,15 +247,17 @@
 </div>
 
 {#if menu}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="context-menu app-context-menu"
+    role="menu"
+    tabindex="-1"
     style="top:{menu.y}px;left:{menu.x}px;"
+    use:autofocus
     onclick={(event) => event.stopPropagation()}
+    onkeydown={(event) => handleMenuKeydown(event, () => (menu = null))}
   >
-    <button type="button" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; startRename(t); }}>Rename</button>
-    <button type="button" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; void remove(t); }}>Delete</button>
+    <button type="button" role="menuitem" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; startRename(t); }}>Rename</button>
+    <button type="button" role="menuitem" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; void remove(t); }}>Delete</button>
   </div>
 {/if}
 

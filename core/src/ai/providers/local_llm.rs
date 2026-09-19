@@ -139,6 +139,23 @@ impl LocalLlm {
             .unwrap_or_else(|| model_library::default_models_dir(data_dir));
         Self::from_settings(&models_dir, &local.local_llm)
     }
+
+    /// The model's raw chat template, for diagnosing reasoning detection.
+    ///
+    /// Unlike completions — which run in an isolated worker child so a native
+    /// llama.cpp fault cannot take the app down — this loads the model in the
+    /// calling process. It is for the `model_probe` example and other offline
+    /// diagnostics, never for the request path. `None` means the GGUF carries
+    /// no template at all, which is itself the interesting answer: a stripped
+    /// template is what made an abliterated Qwen3 build get classified as a
+    /// non-reasoning model and emit raw chain-of-thought as its answer.
+    pub fn chat_template_for_debug(&self) -> Option<String> {
+        let (_backend, model) = load_native_model(&self.model_path, self.gpu_layers).ok()?;
+        model
+            .chat_template(None)
+            .ok()
+            .and_then(|template| template.to_string().ok())
+    }
 }
 
 impl LlmProvider for LocalLlm {

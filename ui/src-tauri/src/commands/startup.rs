@@ -1,5 +1,8 @@
 use std::sync::Mutex;
-use tauri::{Manager, State, WebviewWindow};
+use tauri::{State, WebviewWindow};
+// Only `install_fallback` needs the `Manager` methods, and it is desktop-only.
+#[cfg(desktop)]
+use tauri::Manager;
 
 #[derive(Default)]
 pub struct StartupWindow(Mutex<bool>);

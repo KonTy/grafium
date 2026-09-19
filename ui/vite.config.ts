@@ -15,6 +15,12 @@ export default defineConfig({
     },
   },
   envPrefix: ["VITE_", "TAURI_"],
+  // Under Vitest, Node's `exports` resolution would hand back Svelte's
+  // server build, whose `mount()` throws. Asking for the browser condition
+  // gives tests the client runtime — including real event delegation — so a
+  // component test exercises the code that actually ships. Gated on VITEST so
+  // the production build keeps its normal resolution.
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
   build: {
     target: "esnext",
     minify: "esbuild",

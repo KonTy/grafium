@@ -219,9 +219,85 @@
   let lastEditorPageLinkRange: (TextLinkRange & { capturedAt: number }) | null = null;
   let blockContentEl = $state<HTMLElement | null>(null);
 
+  /**
+   * Block-level pointer bookkeeping. `markCurrentBlock` only records which
+   * block the pointer last went down on so paste/undo can target it; it is
+   * not an action the user performs, so the wrapper must not advertise itself
+   * as interactive. Attached imperatively for that reason.
+   */
+  let blockItemEl = $state<HTMLElement | null>(null);
+
+  $effect(() => {
+    const el = blockItemEl;
+    if (!el) return;
+    el.addEventListener("pointerdown", markCurrentBlock);
+    return () => el.removeEventListener("pointerdown", markCurrentBlock);
+  });
+
   // Rendered-content container, used to hydrate <audio>/<video> media that
   // WebKitGTK can't load from the custom asset scheme.
   let renderedEl = $state<HTMLElement | null>(null);
+
+  /**
+   * Query results delegate their clicks, because the rows are rebuilt on every
+   * re-run. The interactive parts inside a row — task checkboxes, task
+   * markers, page links and tags — are focusable in their own right, and each
+   * row carries `tabindex` plus `activateQueryRow` so navigating to a result
+   * works from the keyboard too. The wrapper itself is only a scroll
+   * container, so it takes no role.
+   */
+  let queryTableWrapEl = $state<HTMLElement | null>(null);
+
+  $effect(() => {
+    const el = queryTableWrapEl;
+    if (!el) return;
+    const onClick = (event: Event) => void handleQueryResultClick(event as MouseEvent);
+    el.addEventListener("click", onClick);
+    return () => el.removeEventListener("click", onClick);
+  });
+
+  /** Enter/Space on a focused result row opens that row's block, matching a click on it. */
+  function activateQueryRow(event: KeyboardEvent) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const row = event.currentTarget as HTMLElement;
+    if (event.target !== row) return;
+    event.preventDefault();
+    row.click();
+  }
+
+  /**
+   * The rendered view of a block delegates its events rather than binding
+   * them per node, because its children come from `{@html}` and are replaced
+   * whenever the block re-renders. Everything the handlers actually act on is
+   * a focusable descendant in its own right — anchors, and the task checkbox
+   * that `handleRenderedKeydown` completes on Enter/Space — so the container
+   * itself is not an interactive control and must not claim a role. The
+   * listeners are attached here instead of in the markup to keep that true.
+   *
+   * Attaching them natively also repairs their `stopPropagation()` calls.
+   * `.block-content` is an ancestor and its click-to-edit `handleClick` is a
+   * native listener too, so while these were Svelte `onclick` attributes they
+   * ran at the delegated dispatcher — long after `handleClick` had already
+   * opened the editor. Ticking a task checkbox, sorting a markdown table or
+   * following an in-page anchor therefore dropped the block into edit mode as
+   * a side effect. Registered here they run first, in real bubbling order, so
+   * claiming a click now actually claims it.
+   * See `BlockEditor.renderedClick.test.ts`.
+   */
+  $effect(() => {
+    const el = renderedEl;
+    if (!el) return;
+    el.addEventListener("click", handleRenderedClick);
+    el.addEventListener("pointerdown", protectReadingNotePointer);
+    el.addEventListener("keydown", handleRenderedKeydown);
+    el.addEventListener("contextmenu", handleRenderedContextMenu);
+    return () => {
+      el.removeEventListener("click", handleRenderedClick);
+      el.removeEventListener("pointerdown", protectReadingNotePointer);
+      el.removeEventListener("keydown", handleRenderedKeydown);
+      el.removeEventListener("contextmenu", handleRenderedContextMenu);
+    };
+  });
   let tableSort: { tableIndex: number; columnIndex: number; direction: TableSortDirection } | null = $state(null);
   $effect(() => {
     void renderedHtml;
@@ -2374,9 +2450,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="block-item"
+  bind:this={blockItemEl}
   use:readingSelectionCapture
   class:bookMode
   class:editing={isEditing}
@@ -2395,7 +2471,6 @@
   data-page-id={pageId}
   data-reading-note-footer={readingNoteLabel ? "" : undefined}
   data-depth={depth}
-  onpointerdown={markCurrentBlock}
 >
   {#if !bookMode && showGuides && (guides.length > 0 || threadElbow || threadContinuationDepth !== null || threadStem)}
     <div class="indent-guides" aria-hidden="true">
@@ -2460,9 +2535,7 @@
       </div>
     {:else if queryExpression !== null}
       <!-- Query block rendered view -->
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="query-block" onclick={(e) => e.stopPropagation()}>
+      <div class="query-block">
         <div class="query-header">
           <button class="query-edit-btn" onclick={(e) => { e.stopPropagation(); startEditing(); }} title="Edit query">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -2477,9 +2550,7 @@
         {:else if queryRows !== null && queryRows.length === 0}
           <div class="query-empty">No results.</div>
         {:else if queryRows !== null}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="query-table-wrap" onclick={handleQueryResultClick}>
+          <div class="query-table-wrap" bind:this={queryTableWrapEl}>
             <table class="query-table">
               <thead>
                 <tr>
@@ -2492,7 +2563,10 @@
               </thead>
               <tbody>
                 {#each visibleQueryRows ?? [] as row}
-                  <tr>
+                  <tr
+                    tabindex={queryBlockIdCol >= 0 ? 0 : undefined}
+                    onkeydown={queryBlockIdCol >= 0 ? activateQueryRow : undefined}
+                  >
                     {#each row as [col, val], i}
                       {#if i !== queryBlockIdCol || col.toLowerCase() !== "_block_id"}
                         <td>
@@ -2523,16 +2597,10 @@
         {/if}
       </div>
     {:else}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="rendered-content"
         use:bionicReader={block.content}
-        onclick={handleRenderedClick}
-        onpointerdown={protectReadingNotePointer}
         data-reading-note-footer={readingNoteLabel ? "" : undefined}
-        onkeydown={handleRenderedKeydown}
-        oncontextmenu={handleRenderedContextMenu}
         bind:this={renderedEl}
       >
         {#if isVisuallyEmpty}
@@ -3662,6 +3730,11 @@
 
   .query-table tbody tr {
     cursor: pointer;
+  }
+  /* Result rows are reachable with Tab, so the focused one has to be visible. */
+  .query-table tbody tr:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   /* CodeMirror autocomplete dropdown theme override */

@@ -655,12 +655,11 @@
                     <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
                   </button>
                   <span class="task-meta">
-                    <!-- svelte-ignore a11y_click_events_have_key_events -->
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <span
+                    <button
+                      type="button"
                       class="task-page"
                       onclick={() => openTaskSource(task.page_title, task.block_id)}
-                    >{task.page_title}</span>
+                    >{task.page_title}</button>
                     <span class="task-time">{formatTime(task.timestamp)}</span>
                   </span>
                 </div>
@@ -731,12 +730,11 @@
                       <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
                     </button>
                     <span class="task-meta">
-                      <!-- svelte-ignore a11y_click_events_have_key_events -->
-                      <!-- svelte-ignore a11y_no_static_element_interactions -->
-                      <span
+                      <button
+                        type="button"
                         class="task-page"
                         onclick={() => openTaskSource(task.page_title, task.block_id)}
-                      >{task.page_title}</span>
+                      >{task.page_title}</button>
                       {#if task.deadline_date}
                         <span class="task-time">due {task.deadline_date}</span>
                       {:else if task.scheduled_date}
@@ -796,12 +794,11 @@
                       <span class="rendered-content" use:hydrateRenderedMedia={task.content}>{@html renderBlock(task.content)}</span>
                     </button>
                     <span class="task-meta">
-                      <!-- svelte-ignore a11y_click_events_have_key_events -->
-                      <!-- svelte-ignore a11y_no_static_element_interactions -->
-                      <span
+                      <button
+                        type="button"
                         class="task-page"
                         onclick={() => openTaskSource(task.page_title, task.block_id)}
-                      >{task.page_title}</span>
+                      >{task.page_title}</button>
                       <span class="task-time">{formatTime(task.timestamp)}</span>
                     </span>
                   </div>
@@ -1459,6 +1456,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    text-align: left;
   }
 
   .task-page:hover {

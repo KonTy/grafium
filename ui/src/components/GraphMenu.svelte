@@ -1,6 +1,8 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import FolderBrowser from "./FolderBrowser.svelte";
+  import { autofocus } from "../lib/autofocus";
+  import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
   import {
     getGraphInfo,
     listGraphs,
@@ -203,9 +205,12 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="graph-menu-container">
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="graph-selector" onclick={toggleMenu}>
+  <button
+    class="graph-selector"
+    onclick={toggleMenu}
+    aria-haspopup="menu"
+    aria-expanded={menuOpen}
+  >
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <circle cx="12" cy="12" r="3"></circle>
       <circle cx="4" cy="4" r="2"></circle>
@@ -221,12 +226,10 @@
     <svg class="chevron" class:open={menuOpen} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <polyline points="6 9 12 15 18 9"></polyline>
     </svg>
-  </div>
+  </button>
 
   {#if menuOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="menu-backdrop" onclick={closeMenu}></div>
+    <div class="menu-backdrop" role="presentation" onclick={closeMenu}></div>
     <div class="menu-dropdown">
       <div class="menu-section">
         <div class="menu-label">Graphs</div>
@@ -280,19 +283,16 @@
 {/if}
 
 {#if showCreateDialog}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog-backdrop" onclick={cancelCreate}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()}>
-      <h3 class="dialog-title">Create New Graph</h3>
+  <div class="dialog-backdrop" role="presentation" use:dismissOnBackdrop={cancelCreate}>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-graph-title" tabindex="-1" onkeydown={dialogKeydown(cancelCreate)}>
+      <h3 class="dialog-title" id="create-graph-title">Create New Graph</h3>
       <p class="dialog-desc">Choose a name for your new graph. You'll then pick a folder location.</p>
       <input
         type="text"
         class="dialog-input"
         placeholder="Graph name..."
         bind:value={newGraphName}
+        use:autofocus
         onkeydown={(e) => { if (e.key === "Enter") confirmCreate(); }}
       />
       <div class="dialog-actions">
@@ -318,6 +318,12 @@
     border-radius: 6px;
     cursor: pointer;
     transition: background-color 0.1s;
+    width: 100%;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
   }
 
   .graph-selector:hover {

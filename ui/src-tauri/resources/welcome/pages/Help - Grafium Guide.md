@@ -17,6 +17,22 @@ you work in another graph.
 Use the command palette to discover commands for journals, dates, timestamps,
 imports, themes, graphs, and navigation. On macOS, `Cmd` replaces `Ctrl`.
 
+## Dialogs and menus
+
+Every dialog can be driven from the keyboard.
+
+| Action | Shortcut |
+| --- | --- |
+| Close the open dialog or menu | `Escape` |
+| Move between a dialog's controls | `Tab` / `Shift+Tab` |
+| Move through a menu | `↑` / `↓` |
+| Choose the highlighted item | `Enter` |
+
+Opening a dialog puts the cursor where you are most likely to start, and `Tab`
+cycles within that dialog rather than wandering into the page behind it. Click
+a dialog's shaded surround to dismiss it; a selection that merely finishes
+outside the dialog will not discard what you typed.
+
 ## AI and privacy
 
 AI is optional. Chat can answer questions about selected notes, retrieve

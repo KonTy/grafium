@@ -4,6 +4,8 @@ use grafium_core::graph::{BulkRenameResult, DeletePageResult};
 use grafium_core::models::{Page, PageSummary};
 use serde::Serialize;
 use std::path::Path;
+// Android has no external file browser to spawn; every other target shells out.
+#[cfg(not(target_os = "android"))]
 use std::process::Command;
 use tauri::{AppHandle, State};
 
@@ -395,7 +397,10 @@ fn open_path_in_file_browser(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "android")]
     {
-        Err("Opening in a system file browser is not supported on Android".to_string())
+        Err(format!(
+            "Opening {} in a system file browser is not supported on Android",
+            path.display()
+        ))
     }
 
     #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]

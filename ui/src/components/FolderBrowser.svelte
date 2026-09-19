@@ -1,5 +1,7 @@
 <script lang="ts">
   import { listDirectory, type DirEntry } from "../lib/api";
+  import { autofocus } from "../lib/autofocus";
+  import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
 
   interface Props {
     onSelect: (path: string) => void;
@@ -44,13 +46,17 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="folder-browser-backdrop" onclick={onCancel}>
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="folder-browser" onclick={(e) => e.stopPropagation()}>
-    <h3 class="fb-title">{title}</h3>
+<div class="folder-browser-backdrop" role="presentation" use:dismissOnBackdrop={onCancel}>
+  <div
+    class="folder-browser"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="fb-title"
+    tabindex="-1"
+    use:autofocus
+    onkeydown={dialogKeydown(onCancel)}
+  >
+    <h3 class="fb-title" id="fb-title">{title}</h3>
     <div class="fb-path">{currentPath || "Loading..."}</div>
 
     {#if error}

@@ -2115,6 +2115,24 @@
     }
   }
 
+  /**
+   * The empty strip under the last block appends a new block when clicked.
+   * It is a pure pointer shortcut: pressing Enter at the end of the last
+   * block already appends a block from the keyboard, so giving this strip a
+   * role and its own key handler would add a second, redundant tab stop
+   * announcing an action the keyboard can already do. The listener is
+   * attached imperatively to keep it out of the accessibility tree.
+   */
+  let clickBelowEl = $state<HTMLDivElement>();
+
+  $effect(() => {
+    const el = clickBelowEl;
+    if (!el) return;
+    const onClick = () => void handleClickBelow();
+    el.addEventListener("click", onClick);
+    return () => el.removeEventListener("click", onClick);
+  });
+
   async function handleClickBelow() {
     try {
       const lastOrder = blocks.length > 0 ? blocks[blocks.length - 1].order_index + 1 : 0;
@@ -3521,9 +3539,7 @@
     </div>
 
     {#if !shouldProgressivelyRenderBook || renderedAllVisibleBlocks}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="click-below" onclick={handleClickBelow}></div>
+      <div class="click-below" bind:this={clickBelowEl}></div>
     {/if}
   {/if}
 
