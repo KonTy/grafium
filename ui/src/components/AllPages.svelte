@@ -1257,6 +1257,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* Four groups do not fit a side panel on one line. Wrapping whole groups
+       keeps every label readable; without it the row either spills past the
+       panel or gets crushed until words break a letter per line. */
+    flex-wrap: wrap;
     gap: 12px;
     margin-bottom: 18px;
     padding-bottom: 12px;
@@ -1266,6 +1270,9 @@
   .control-group {
     display: inline-flex;
     align-items: center;
+    /* Wrap to the next line rather than shrink: a squeezed group is what
+       breaks the labels up. */
+    flex-shrink: 0;
     gap: 2px;
     padding: 2px;
     border: 1px solid var(--border);
@@ -1299,6 +1306,8 @@
     border-radius: 5px;
     color: var(--text-secondary);
     font-size: 12px;
+    /* "A–Z" and "Placeholders" must never split across lines. */
+    white-space: nowrap;
     cursor: pointer;
   }
 
@@ -1628,7 +1637,10 @@
       min-width: 100%;
     }
 
-    .btn-import-media {
+    /* Scoped to the toolbar: `.btn-import-media` doubles as the generic
+       secondary button, so an unscoped rule also stretched the bulk-rename
+       "Preview" across its whole row. */
+    .controls > .btn-import-media {
       flex: 1;
     }
 
@@ -1637,11 +1649,15 @@
     }
 
     .control-group {
-      flex: 1;
+      /* Grow to fill the line, but never below the natural label width. */
+      flex: 1 0 auto;
     }
 
     .mode-btn {
-      flex: 1;
+      /* Basis 0 (`flex: 1`) leans on `min-width: auto` to stay readable, and
+         WebKitGTK gets that wrong for nested flex containers — which is how
+         the labels ended up one letter per line. Grow, never shrink. */
+      flex: 1 0 auto;
       padding-inline: 8px;
     }
   }
