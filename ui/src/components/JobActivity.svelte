@@ -193,6 +193,11 @@
     line-height: 1;
   }
 
+  .job-activity.toolbar .job-badge {
+    top: 1px;
+    right: 1px;
+  }
+
   @media (prefers-reduced-motion: no-preference) {
     .job-toggle.running::after {
       content: "";

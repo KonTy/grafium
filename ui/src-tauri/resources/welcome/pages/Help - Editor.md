@@ -17,7 +17,9 @@ Press **F1** while editing for quick editor help.
   immediately.
 - On Android, tap **Time** in the editor bar to insert the current local time.
   Hold **Time** to request the current location and insert both. Grafium asks
-  for Android location permission only when you use the hold action.
+  for Android location permission only when you use the hold action. In the
+  Journal, **Go to date** and **Go to link** sit in the title bar immediately
+  before Search so the journal itself keeps more room for notes.
 
 Clicking a block's text opens it for editing. Controls inside a rendered block
 act on themselves instead: ticking a task checkbox, sorting a table column, or

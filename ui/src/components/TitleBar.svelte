@@ -11,6 +11,9 @@
     onGoBack?: () => void;
     onGoForward?: () => void;
     onToggleReferencePanel?: () => void;
+    showJournalActions?: boolean;
+    onGoToDate?: () => void;
+    onGoToLink?: () => void;
     onOpenSearch?: () => void;
     onOpenSettings?: () => void;
     bionicReaderMode?: boolean;
@@ -28,6 +31,9 @@
     onGoBack = () => {},
     onGoForward = () => {},
     onToggleReferencePanel = () => {},
+    showJournalActions = false,
+    onGoToDate = () => {},
+    onGoToLink = () => {},
     onOpenSearch = () => {},
     onOpenSettings = () => {},
     bionicReaderMode = false,
@@ -79,6 +85,32 @@
         </svg>
       </button>
     </div>
+    {#if showJournalActions}
+      <button
+        class="titlebar-btn"
+        data-journal-date-action
+        data-tauri-drag-region="false"
+        onclick={onGoToDate}
+        title="Go to date (Ctrl/Cmd+G)"
+        aria-label="Go to date"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M16 3v4M8 3v4M3 11h18" />
+        </svg>
+      </button>
+      <button
+        class="titlebar-btn"
+        data-tauri-drag-region="false"
+        onclick={onGoToLink}
+        title="Go to link (Ctrl/Cmd+L)"
+        aria-label="Go to link"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7 .2l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7-.2l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+        </svg>
+      </button>
+    {/if}
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onOpenSearch} title="Search (Ctrl+K)">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="11" cy="11" r="8"></circle>

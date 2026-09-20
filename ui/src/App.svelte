@@ -69,6 +69,12 @@
     goToLinkOpen = true;
   }
 
+  function openJournalCalendar() {
+    if (hasKeyboardOverlay(document)) return;
+    journalCalendarRequested = true;
+    if (currentView !== "journal") void navigateToJournal();
+  }
+
   let showFolderBrowser = $state(false);
   let folderBrowserTitle = $state("Select Folder");
   let folderBrowserResolve: ((path: string | null) => void) | null = null;
@@ -965,11 +971,7 @@
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
     goLink: openGoToLink,
-    goJournalDate: () => {
-      if (hasKeyboardOverlay(document)) return;
-      journalCalendarRequested = true;
-      if (currentView !== "journal") void navigateToJournal();
-    },
+    goJournalDate: openJournalCalendar,
     goJournalEdit: () => { void goJournalAndEdit(); },
     goHome: () => navigateToJournal(),
     goAllPages: () => navigateToPage("__all_pages__"),
@@ -1996,6 +1998,9 @@
       onGoBack={goBack}
       onGoForward={goForward}
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
+      showJournalActions={isAndroid && currentView === "journal"}
+      onGoToDate={openJournalCalendar}
+      onGoToLink={openGoToLink}
       onOpenSearch={openGlobalSearch}
       onOpenSettings={() => navigateToPage("__settings__")}
       bionicReaderMode={bionicReaderMode}
@@ -2102,6 +2107,7 @@
     {:else if currentView === "journal"}
       <JournalView
         onGoToLink={openGoToLink}
+        showNavigationToolbar={!isAndroid}
         openCalendar={journalCalendarRequested}
         onCalendarOpened={() => (journalCalendarRequested = false)}
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}

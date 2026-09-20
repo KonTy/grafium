@@ -25,6 +25,7 @@
     openCalendar?: boolean;
     onCalendarOpened?: () => void;
     onGoToLink?: () => void;
+    showNavigationToolbar?: boolean;
     restorePageTitle?: string;
     restoreRequestId?: number;
     editTodayRequestId?: number;
@@ -38,6 +39,7 @@
     openCalendar = false,
     onCalendarOpened,
     onGoToLink,
+    showNavigationToolbar = true,
     restorePageTitle = "",
     restoreRequestId = 0,
     editTodayRequestId = 0,
@@ -566,7 +568,7 @@
   }
 
   $effect(() => {
-    if (openCalendar && goToDateButton && !loading && !goingToDate) {
+    if (openCalendar && !loading && !goingToDate) {
       untrack(() => {
         openGoToDatePicker();
         onCalendarOpened?.();
@@ -575,8 +577,9 @@
   });
 
   function openGoToDatePicker() {
-    if (!goToDateButton) return;
-    const rect = goToDateButton.getBoundingClientRect();
+    const anchor = goToDateButton
+      ?? document.querySelector<HTMLElement>("[data-journal-date-action]");
+    const rect = anchor?.getBoundingClientRect();
     const top = journalFeedEl?.getBoundingClientRect().top ?? 0;
     calendarSelectedDate = journalPages.find((page) => {
       const node = entryNodes.get(page.id);
@@ -584,7 +587,9 @@
     })?.title ?? formatLocalIsoDate();
     calendarNoteDates = [];
     calendarNotesRequest += 1;
-    goToDatePicker = { x: rect.right - 250, y: rect.bottom + 6 };
+    goToDatePicker = rect
+      ? { x: rect.right - 250, y: rect.bottom + 6 }
+      : { x: Math.max(8, window.innerWidth - 258), y: 8 };
   }
 
   async function loadCalendarNoteDates(year: number, month: number) {
@@ -714,36 +719,38 @@
 </script>
 
 <div class="journal-view" data-keyboard-block-selection={keyboardSelection.active ? "true" : undefined}>
-  <div class="journal-toolbar">
-    <button
-      bind:this={goToDateButton}
-      class="journal-nav-btn goto-date-btn"
-      type="button"
-      aria-label="Go to date"
-      title="Go to date (Ctrl/Cmd+G)"
-      aria-haspopup="dialog"
-      aria-expanded={goToDatePicker !== null}
-      disabled={loading || goingToDate}
-      onclick={openGoToDatePicker}
-    >
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="5" width="18" height="16" rx="2" />
-        <path d="M16 3v4M8 3v4M3 11h18" />
-      </svg>
-    </button>
-    <button
-      class="journal-nav-btn"
-      type="button"
-      aria-label="Go to link"
-      title="Go to link (Ctrl/Cmd+L)"
-      aria-haspopup="dialog"
-      onclick={onGoToLink}
-    >
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M10 13a5 5 0 0 0 7 .2l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7-.2l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
-      </svg>
-    </button>
-  </div>
+  {#if showNavigationToolbar}
+    <div class="journal-toolbar">
+      <button
+        bind:this={goToDateButton}
+        class="journal-nav-btn goto-date-btn"
+        type="button"
+        aria-label="Go to date"
+        title="Go to date (Ctrl/Cmd+G)"
+        aria-haspopup="dialog"
+        aria-expanded={goToDatePicker !== null}
+        disabled={loading || goingToDate}
+        onclick={openGoToDatePicker}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M16 3v4M8 3v4M3 11h18" />
+        </svg>
+      </button>
+      <button
+        class="journal-nav-btn"
+        type="button"
+        aria-label="Go to link"
+        title="Go to link (Ctrl/Cmd+L)"
+        aria-haspopup="dialog"
+        onclick={onGoToLink}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7 .2l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7-.2l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+        </svg>
+      </button>
+    </div>
+  {/if}
   <KeyboardSelectionToolbar selection={keyboardSelection} />
   <div class="journal-feed" data-main-scroll-pane bind:this={journalFeedEl} use:trackScrollIntent
     role="region" aria-label="Journal entries">
