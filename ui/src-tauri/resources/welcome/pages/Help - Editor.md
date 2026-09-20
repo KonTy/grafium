@@ -7,6 +7,8 @@ Press **F1** while editing for quick editor help.
 - Type `/` for commands.
 - Link pages with `[[Page Title]]` and add tags such as `#project`.
 - Use the right panel for references, search, and questions.
+- Pasting from a web page converts supported rich content to Markdown,
+  including tables, links, formatting, lists, and media.
 - On Android, tap **Time** in the editor bar to insert the current local time.
   Hold **Time** to request the current location and insert both. Grafium asks
   for Android location permission only when you use the hold action.

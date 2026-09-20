@@ -107,6 +107,64 @@ turndown.addRule("fencedCodeBlock", {
   },
 });
 
+function tableCellMarkdown(cell: Element): string {
+  return turndown.turndown(cell.innerHTML)
+    .trim()
+    .replace(/[ \t]*\r?\n+[ \t]*/g, "<br>")
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|");
+}
+
+function tableRowMarkdown(cells: readonly string[]): string {
+  return `| ${cells.join(" | ")} |`;
+}
+
+function expandedCells(cells: readonly Element[]): string[] {
+  return cells.flatMap((cell) => {
+    const content = tableCellMarkdown(cell);
+    const rawSpan = cell.getAttribute("colspan") ?? cell.getAttribute("aria-colspan");
+    const span = Math.max(1, Number.parseInt(rawSpan ?? "1", 10) || 1);
+    return [content, ...Array.from({ length: span - 1 }, () => "")];
+  });
+}
+
+function nativeTableRows(table: HTMLTableElement): string[][] {
+  return Array.from(table.rows).map((row) => expandedCells(Array.from(row.cells)));
+}
+
+function ariaTableRows(table: Element): string[][] {
+  return Array.from(table.querySelectorAll('[role="row"]'))
+    .filter((row) => row.closest('[role="table"], [role="grid"]') === table)
+    .map((row) => expandedCells(Array.from(
+      row.querySelectorAll(':scope > [role="columnheader"], :scope > [role="rowheader"], :scope > [role="cell"], :scope > [role="gridcell"]'),
+    )));
+}
+
+turndown.addRule("table", {
+  filter: (node) => node.nodeName === "TABLE"
+    || (node.nodeType === 1 && ["table", "grid"].includes((node as Element).getAttribute("role") ?? "")),
+  replacement: (_content, node) => {
+    const element = node as Element;
+    const rows = (element.nodeName === "TABLE"
+      ? nativeTableRows(element as HTMLTableElement)
+      : ariaTableRows(element))
+      .filter((cells) => cells.length > 0);
+    if (rows.length === 0) return "";
+
+    const columnCount = Math.max(...rows.map((cells) => cells.length));
+    const normalized = rows.map((cells) => [
+      ...cells,
+      ...Array.from({ length: columnCount - cells.length }, () => ""),
+    ]);
+    const delimiter = Array.from({ length: columnCount }, () => "---");
+    return `\n\n${[
+      tableRowMarkdown(normalized[0]),
+      tableRowMarkdown(delimiter),
+      ...normalized.slice(1).map(tableRowMarkdown),
+    ].join("\n")}\n\n`;
+  },
+});
+
 export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
