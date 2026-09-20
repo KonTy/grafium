@@ -32,7 +32,7 @@ RIGHTS / USAGE
   The guidance permits NASA content in computer graphical simulations and web
   pages, requires acknowledgment of NASA, excludes separately copyrighted third-
   party material, and prohibits implying NASA endorsement.
-  These image assets are not relicensed under Grafium's source-code MIT license.
+  These image assets are not relicensed under Grafium's source-code AGPL license.
 
 LOCAL PROCESSING
   Downloaded from the official URLs above on 2026-09-13.

@@ -453,5 +453,7 @@ Bug reports, focused improvements, and documentation contributions are welcome.
 [Open an issue](https://github.com/KonTy/grafium/issues) with clear reproduction
 steps; use a small sample graph instead of sharing personal notes or credentials.
 
-Grafium is [MIT licensed](LICENSE).
+Grafium is licensed under the
+[GNU Affero General Public License v3.0](LICENSE). Modified versions offered
+over a network must make their corresponding source available to their users.
 Bundled galaxy photography has its own [credits and usage information](ui/public/space/ATTRIBUTION.txt).

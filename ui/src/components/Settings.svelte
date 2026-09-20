@@ -734,7 +734,7 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">License</span>
-        <span class="detail-value">MIT</span>
+        <span class="detail-value">AGPL-3.0</span>
       </div>
     </div>
     </div>

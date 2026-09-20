@@ -23,3 +23,7 @@ when it is available. See [[Sync And Privacy]] before syncing a real graph.
 
 Press **F1** while focused inside a Settings section for section-specific help.
 For sync instructions, focus a control in the Sync section and press F1 again.
+
+Grafium's source code is licensed under the GNU Affero General Public License
+version 3. Modified versions made available over a network must also make their
+corresponding source available to their users.

@@ -1,7 +1,7 @@
 {
   "name": "grafium-ui",
   "private": true,
-  "version": "0.0.125",
+  "version": "0.0.126",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -48,5 +48,5 @@
     "vite": "^6.0.0",
     "vitest": "^2.1.8"
   },
-  "license": "MIT"
+  "license": "AGPL-3.0-only"
 }
