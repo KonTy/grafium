@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { marked, type TokenizerThis } from "marked";
 import katex from "katex";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
@@ -106,7 +106,11 @@ function cleanAssetPath(href: string): string {
 function resolveAssetUrl(href: string): string {
   const h = href.trim();
   if (/^(https?:|data:|blob:|grafium-asset:)/i.test(h)) return h;
-  return `grafium-asset://localhost/${encodePathForUrl(cleanAssetPath(h))}`;
+  const path = cleanAssetPath(h);
+  if ((globalThis as typeof globalThis & { isTauri?: boolean }).isTauri) {
+    return convertFileSrc(path, "grafium-asset");
+  }
+  return `grafium-asset://localhost/${encodePathForUrl(path)}`;
 }
 
 /**
@@ -417,7 +421,8 @@ renderer.image = function ({ href, title, text }: { href: string; title?: string
     return `<video class="fc-video" controls preload="metadata"${titleAttr} data-asset="${rel}"></video>`;
   }
   const src = resolveAssetUrl(href);
-  const srcAttr = src.startsWith("grafium-asset:")
+  const isGraphAsset = !/^(https?:|data:|blob:)/i.test(href.trim());
+  const srcAttr = isGraphAsset
     ? ` data-src="${escapeHtml(src)}"`
     : ` src="${escapeHtml(src)}"`;
   const size = imageSizeHints[index] ?? emptyImageSizeHint();

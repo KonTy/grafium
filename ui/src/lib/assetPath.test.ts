@@ -24,6 +24,32 @@ function renderedImage(markdown: string, baseDir: string): HTMLImageElement {
  * page" for a render to read from.
  */
 describe("asset path resolution", () => {
+  it("uses Tauri's platform-specific custom-protocol URL", () => {
+    const runtime = globalThis as typeof globalThis & {
+      isTauri?: boolean;
+      __TAURI_INTERNALS__?: {
+        convertFileSrc(path: string, protocol: string): string;
+      };
+    };
+    const previousIsTauri = runtime.isTauri;
+    const previousInternals = runtime.__TAURI_INTERNALS__;
+    runtime.isTauri = true;
+    runtime.__TAURI_INTERNALS__ = {
+      convertFileSrc: (path, protocol) =>
+        `http://${protocol}.localhost/${encodeURIComponent(path)}`,
+    };
+
+    try {
+      const image = renderedImage("![photo](assets/photo.png)", "journals");
+      expect(image.getAttribute("data-src")).toBe(
+        "http://grafium-asset.localhost/journals%2Fassets%2Fphoto.png",
+      );
+    } finally {
+      runtime.isTauri = previousIsTauri;
+      runtime.__TAURI_INTERNALS__ = previousInternals;
+    }
+  });
+
   it("keeps legacy ../assets references pointing at the graph root", () => {
     const html = renderBlock("![cover](../assets/tutorial/x.svg)", BOOK);
     expect(html).toContain("assets/tutorial/x.svg");

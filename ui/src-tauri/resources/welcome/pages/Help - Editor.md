@@ -10,7 +10,9 @@ Press **F1** while editing for quick editor help.
 - Pasting from a web page converts supported rich content to Markdown,
   including tables, links, formatting, lists, and images. Copying an image
   directly or pasting a screenshot saves it into the graph's assets, including
-  on desktop webviews that do not expose image clipboard files. A pasted
+  on desktop webviews that do not expose image clipboard files. Page-local
+  images remain portable when the graph is copied between desktop and Android.
+  A pasted
   HTML table leaves edit mode after saving so the rendered table appears
   immediately.
 - On Android, tap **Time** in the editor bar to insert the current local time.
