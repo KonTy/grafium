@@ -20,3 +20,12 @@ Whenever functionality or user-facing behavior changes:
 
 Help documentation is part of the feature acceptance criteria. Do not finish a
 user-facing functionality change while leaving its F1 guidance outdated.
+
+## Bump the version for deployed builds
+
+Before committing any user-facing build that will be deployed or distributed,
+run `./scripts/bump-version.sh`. This bumps the patch version by default and
+keeps the Rust workspace, Tauri application, npm package, and lockfiles in sync.
+
+Bump exactly once per deployable change set. Do not bump for intermediate
+compiles, tests, or rebuilds of the same commit.
