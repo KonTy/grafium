@@ -6,7 +6,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build && ../scripts/prepare-android.sh"
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
