@@ -98,6 +98,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
           # `build.rs` copies the shared libraries the `llm-local` feature
           # needs (libllama/libggml*) into target/release/bundled-libs so
           # tauri.conf.json can bundle them. linuxdeploy (used for the
@@ -121,6 +122,8 @@ jobs:
   build-windows:
     needs: [prepare-version]
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: C:/t
     steps:
       - uses: actions/checkout@v4
 
@@ -146,19 +149,10 @@ jobs:
           (Get-Content ui/package.json) -replace '"version": "\d+\.\d+\.\d+"', $jsonVersionLine | Set-Content ui/package.json
 
       - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          $version = "1.3.296.0"
-          $installer = "$env:RUNNER_TEMP\VulkanSDK.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList @("--accept-licenses", "--default-answer", "--confirm-command", "install") -Wait
-          $sdk = "C:\VulkanSDK\$version"
-          if (-not (Test-Path $sdk)) {
-            $sdk = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
-          }
-          if (-not $sdk) { throw "Vulkan SDK install path not found" }
-          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
-          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.3.296.0
+          cache: true
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -192,8 +186,8 @@ jobs:
         with:
           name: windows-artifacts
           path: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
+            C:/t/release/bundle/nsis/*.exe
+            C:/t/release/bundle/msi/*.msi
 
   build-android:
     needs: [prepare-version]
