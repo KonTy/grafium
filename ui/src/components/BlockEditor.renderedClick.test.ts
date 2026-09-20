@@ -85,4 +85,8 @@ describe("BlockEditor keeps rendered-content handlers native", () => {
     expect(source).toContain('addEventListener("click", handleRenderedClick)');
     expect(source).toContain("const el = renderedEl;");
   });
+
+  it("keeps context menus outside the native click-to-edit container", () => {
+    expect(source).toContain("{/each}\n  </div>\n  {#if imageSizeMenu}");
+  });
 });

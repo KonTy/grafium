@@ -2727,7 +2727,8 @@
         {/if}
       </div>
     {/each}
-    {#if imageSizeMenu}
+  </div>
+  {#if imageSizeMenu}
       <div
         class="image-size-menu app-context-menu"
         style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
@@ -2766,8 +2767,8 @@
           </button>
         {/each}
       </div>
-    {/if}
-    {#if makeLinkMenu}
+  {/if}
+  {#if makeLinkMenu}
       <div
         class="make-link-menu app-context-menu"
         style={`left: ${makeLinkMenu.x}px; top: ${makeLinkMenu.y}px;`}
@@ -2783,8 +2784,7 @@
           Make link
         </button>
       </div>
-    {/if}
-  </div>
+  {/if}
 </div>
 
 {#if showDatePicker}
