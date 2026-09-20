@@ -9,6 +9,10 @@
   import { autofocus } from "./lib/autofocus";
   import { handleMenuKeydown } from "./lib/menuKeyboard";
   import { dismissOnBackdrop, dialogKeydown } from "./lib/modal";
+  import {
+    ANDROID_BACK_EVENT,
+    dismissOverlayForAndroidBack,
+  } from "./lib/androidBack";
   import { hasPersistentStorageAccess, requestPersistentStorageAccess } from "./lib/androidStorageAccess";
   import { revealStartupWindow } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
@@ -761,6 +765,58 @@
     navIndex -= 1;
     logNav("back", { navIndex, entry: navHistory[navIndex] });
     await navigateToHistoryEntry(navHistory[navIndex]);
+  }
+
+  function handleAndroidBack() {
+    const focused = document.activeElement ?? window;
+    if (dismissOverlayForAndroidBack(focused)) return;
+
+    if (goToLinkOpen) {
+      goToLinkOpen = false;
+      return;
+    }
+    if (globalSearchOpen) {
+      globalSearchOpen = false;
+      return;
+    }
+    if (helpVisible) {
+      helpVisible = false;
+      return;
+    }
+    if (showMoreMenu) {
+      showMoreMenu = false;
+      return;
+    }
+    if (referencePanelVisible) {
+      referencePanelVisible = false;
+      return;
+    }
+    if (commandPaletteOpen) {
+      commandPaletteOpen = false;
+      return;
+    }
+    if (zenMode) {
+      zenMode = false;
+      return;
+    }
+    if (showFolderBrowser) {
+      finishFolderBrowser(null);
+      return;
+    }
+    if (showNewPageDialog) {
+      cancelNewPage();
+      return;
+    }
+    if (showImportMediaDialog) {
+      cancelImportMedia();
+      return;
+    }
+    if (showCreateGraphDialog) {
+      showCreateGraphDialog = false;
+      return;
+    }
+
+    if (navIndex > 0) void goBack();
   }
 
   async function goForward() {
@@ -1972,9 +2028,11 @@
   $effect(() => {
     window.addEventListener("navigate-page", handlePageNav);
     window.addEventListener("open-reading-note", handleReadingNoteNav);
+    window.addEventListener(ANDROID_BACK_EVENT, handleAndroidBack);
     return () => {
       window.removeEventListener("navigate-page", handlePageNav);
       window.removeEventListener("open-reading-note", handleReadingNoteNav);
+      window.removeEventListener(ANDROID_BACK_EVENT, handleAndroidBack);
     };
   });
 

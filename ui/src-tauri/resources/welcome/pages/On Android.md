@@ -4,6 +4,11 @@ Choose a graph location the app can access and keep a verified backup before mov
 
 Use the controls available in your installed Android build. Optional desktop import, OCR, transcription, and model workflows can have different availability or requirements.
 
+Swipe inward from either screen edge to go back through pages you opened in
+Grafium. An open dialog or menu closes first. At the beginning of Grafium's
+navigation history, the gesture leaves the current page open instead of exiting
+the app.
+
 The editor bar includes **Time**. Tap it to insert the current local time, just
 like Alt+T on a keyboard. Hold it to request Android location permission and
 insert the time with your current location. Choose OpenStreetMap link, plain

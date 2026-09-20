@@ -17,6 +17,10 @@ you work in another graph.
 Use the command palette to discover commands for journals, dates, timestamps,
 imports, themes, graphs, and navigation. On macOS, `Cmd` replaces `Ctrl`.
 
+On Android, swipe inward from the left or right edge to move back through
+Grafium's page history. If there is no earlier Grafium page, the app stays open.
+When a dialog or menu is open, the same gesture closes that first.
+
 ## Dialogs and menus
 
 Every dialog can be driven from the keyboard.

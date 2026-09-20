@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.window.OnBackInvokedDispatcher
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
@@ -25,6 +26,14 @@ class MainActivity : TauriActivity() {
       val insets = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
       view.setPadding(0, insets.top, 0, 0)
       windowInsets
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      onBackInvokedDispatcher.registerOnBackInvokedCallback(
+        OnBackInvokedDispatcher.PRIORITY_DEFAULT
+      ) {
+        dispatchBackToGrafium()
+      }
     }
 
     folderPickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
@@ -57,6 +66,21 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     webViewRef = webView
     webView.addJavascriptInterface(FolderPickerBridge(), "FolderPickerBridge")
+  }
+
+  @Suppress("DEPRECATION")
+  override fun onBackPressed() {
+    dispatchBackToGrafium()
+  }
+
+  private fun dispatchBackToGrafium() {
+    val webView = webViewRef ?: return
+    webView.post {
+      webView.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('grafium-android-back'))",
+        null
+      )
+    }
   }
 
   inner class FolderPickerBridge {
