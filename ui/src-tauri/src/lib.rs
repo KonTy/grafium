@@ -14,6 +14,8 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -962,7 +964,7 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_geolocation::init())
         .manage(commands::startup::StartupWindow::default())
         .plugin(tauri_plugin_shell::init())
@@ -1471,6 +1473,47 @@ pub fn run() {
             commands::model_library::list_local_models,
             commands::model_library::detect_gpu_info,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    #[cfg(target_os = "linux")]
+    {
+        // `tao` normally ends its Linux event loop with `std::process::exit`.
+        // Native GPU and clipboard libraries have crashed in their process-wide
+        // exit handlers after an otherwise clean Grafium shutdown. Returning
+        // from the loop lets Tauri finish first; the isolated AI worker is then
+        // stopped before `_exit` releases all remaining OS resources.
+        let shutdown_started = Arc::new(AtomicBool::new(false));
+        let shutdown_guard = shutdown_started.clone();
+        let exit_code = app.run_return(move |app_handle, event| {
+            if let tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } = event
+            {
+                api.prevent_close();
+                if !shutdown_guard.swap(true, Ordering::AcqRel) {
+                    let _ = app_handle.emit("app-shutdown-started", ());
+                    let app_handle = app_handle.clone();
+                    thread::spawn(move || {
+                        let started_at = Instant::now();
+                        grafium_core::ai::worker::shutdown_pool();
+
+                        // Keep the status visible long enough to register instead
+                        // of flashing for the common no-model-loaded case.
+                        let minimum_notice = Duration::from_millis(450);
+                        if let Some(remaining) = minimum_notice.checked_sub(started_at.elapsed()) {
+                            thread::sleep(remaining);
+                        }
+                        app_handle.exit(0);
+                    });
+                }
+            }
+        });
+        grafium_core::ai::worker::shutdown_pool();
+        grafium_core::ai::worker::exit_without_native_cleanup(exit_code);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    app.run(|_, _| {});
 }

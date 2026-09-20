@@ -23,7 +23,7 @@ async fn main() {
     // Post-isolation, completions run in a re-exec of this binary, so the
     // harness has to answer worker invocations and register itself as the host.
     if grafium_core::ai::worker::is_worker_invocation() {
-        std::process::exit(grafium_core::ai::worker::run_from_stdio());
+        grafium_core::ai::worker::run_from_stdio();
     }
     grafium_core::ai::worker::configure_current_executable()
         .expect("failed to configure native AI worker");

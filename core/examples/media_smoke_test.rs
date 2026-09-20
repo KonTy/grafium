@@ -9,7 +9,7 @@ use grafium_core::media::{fetch_audio, MediaSource, Transcriber, WhisperTranscri
 
 fn main() {
     if grafium_core::ai::worker::is_worker_invocation() {
-        std::process::exit(grafium_core::ai::worker::run_from_stdio());
+        grafium_core::ai::worker::run_from_stdio();
     }
     grafium_core::ai::worker::configure_current_executable()
         .expect("failed to configure native AI worker");

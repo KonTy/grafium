@@ -58,6 +58,8 @@
   const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
   const loadGlobalSearchDialog = lazyComponent(() => import("./components/GlobalSearchDialog.svelte"));
 
+  let shuttingDown = $state(false);
+
   function isAndroidClient(): boolean {
     return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
   }
@@ -1174,6 +1176,23 @@
   });
 
   onMount(installFrontendDiagnostics);
+
+  $effect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    listen("app-shutdown-started", () => {
+      shuttingDown = true;
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch((error) => {
+      console.error("Could not initialize shutdown status:", error);
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
 
   $effect(() => {
     let disposed = false;
@@ -2373,6 +2392,24 @@
 
 <Toaster />
 
+{#if shuttingDown}
+  <div class="shutdown-backdrop">
+    <div
+      class="shutdown-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="shutdown-title"
+      aria-describedby="shutdown-description"
+    >
+      <div class="shutdown-spinner" aria-hidden="true"></div>
+      <div>
+        <h3 id="shutdown-title">Shutting down Grafium</h3>
+        <p id="shutdown-description">Saving your place and releasing local AI models…</p>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showNewPageDialog}
   <div class="dialog-backdrop" role="presentation" use:dismissOnBackdrop={cancelNewPage}>
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="new-page-title" tabindex="-1" onkeydown={dialogKeydown(cancelNewPage)}>
@@ -2656,6 +2693,65 @@
     align-items: center;
     justify-content: center;
     z-index: 2500;
+  }
+
+  .shutdown-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.56);
+    backdrop-filter: blur(2px);
+  }
+
+  .shutdown-dialog {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: min(360px, calc(100vw - 40px));
+    padding: 22px 24px;
+    color: var(--text-primary);
+    background: var(--surface-overlay);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  }
+
+  .shutdown-dialog h3 {
+    margin: 0 0 5px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .shutdown-dialog p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .shutdown-spinner {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 auto;
+    border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: shutdown-spin 0.8s linear infinite;
+  }
+
+  @keyframes shutdown-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shutdown-spinner {
+      animation: none;
+      border-color: var(--accent);
+    }
   }
 
   .dialog {

@@ -753,26 +753,33 @@ fn init_worker_logging() {
         .try_init();
 }
 
-pub fn run_from_stdio() -> i32 {
+/// Runs the native worker until its IPC stream closes, then terminates without
+/// invoking process-wide native-library destructors.
+///
+/// Local model backends can register GPU/X11 cleanup handlers that crash during
+/// libc `exit` after the worker has otherwise shut down successfully. The worker
+/// owns no durable state, so the OS process boundary is the reliable cleanup
+/// mechanism for its RAM, VRAM, files, and handles.
+pub fn run_from_stdio() -> ! {
     init_worker_logging();
     start_parent_watchdog();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut state = ChildState::default();
-    loop {
+    let exit_code = loop {
         let request: WorkerRequest = {
             let mut stdin = stdin.lock();
             match read_framed(&mut stdin) {
                 Ok(Some(request)) => request,
-                Ok(None) => return 0,
+                Ok(None) => break 0,
                 Err(error) => {
                     eprintln!("native AI worker: cannot read request: {error}");
-                    return 2;
+                    break 2;
                 }
             }
         };
         if matches!(request, WorkerRequest::Shutdown) {
-            return 0;
+            break 0;
         }
         let response = match dispatch(&mut state, request) {
             Ok(output) => WorkerResponse {
@@ -789,9 +796,29 @@ pub fn run_from_stdio() -> i32 {
         let mut stdout = stdout.lock();
         if let Err(error) = write_framed(&mut stdout, &response) {
             eprintln!("native AI worker: cannot write response: {error}");
-            return 2;
+            break 2;
         }
-    }
+    };
+
+    // Native model destruction is deliberately delegated to process teardown.
+    // Dropping it here re-enters vendor GPU cleanup code that has already
+    // produced shutdown SIGSEGVs on Linux.
+    std::mem::forget(state);
+    exit_without_native_cleanup(exit_code);
+}
+
+/// Exits after application-owned work is complete without running unstable
+/// process-wide native-library cleanup handlers.
+#[cfg(unix)]
+pub fn exit_without_native_cleanup(code: i32) -> ! {
+    // SAFETY: this is called only at a process boundary after durable work and
+    // IPC writes have completed. `_exit` atomically releases all OS resources.
+    unsafe { libc::_exit(code) }
+}
+
+#[cfg(not(unix))]
+pub fn exit_without_native_cleanup(code: i32) -> ! {
+    std::process::exit(code)
 }
 
 #[derive(Default)]
@@ -1442,7 +1469,7 @@ fn start_parent_watchdog() {
         let alive = unsafe { libc::kill(parent, 0) == 0 }
             || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
         if !alive {
-            std::process::exit(3);
+            exit_without_native_cleanup(3);
         }
     });
 }

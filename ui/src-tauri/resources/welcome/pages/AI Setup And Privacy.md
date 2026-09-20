@@ -23,6 +23,8 @@ search, imports, and sync work without an AI provider.
 
 Local model setup may require substantial disk space, RAM, and GPU support.
 Vulkan acceleration is optional but can make local inference much faster.
+Grafium runs embedded models in an isolated worker and releases that worker's
+RAM and GPU memory when the app closes.
 
 ## Choose context deliberately
 
