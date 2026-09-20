@@ -19,6 +19,7 @@ urlencoding = "2"
 base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tauri-plugin-geolocation = "2"
 
 # Embedded local transcription (Whisper) + local LLM (llama.cpp) inference.
 # Excluded on Android: cross-compiling their C++ builds (whisper.cpp,

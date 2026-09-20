@@ -3,6 +3,10 @@
 Settings controls Grafium's appearance, graph behavior, indexing, AI features,
 and synchronization.
 
+**Mobile location format** controls what an Android long-press on the editor
+bar's **Time** button inserts. OpenStreetMap link is the default; plain
+coordinates and a device `geo:` map link are also available.
+
 ## AI / Knowledge Engine
 
 Open this section to configure an embedded local model, Ollama, an

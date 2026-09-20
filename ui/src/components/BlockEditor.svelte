@@ -59,7 +59,13 @@
     wikiLinkToken,
   } from "../lib/wikiLinkCompletion";
   import { toggleWrapText, wrapPageLinkText } from "../lib/editorFormat";
-  import { insertAtCursor } from "../lib/editorInsert";
+  import { insertAtCursor, timeStampSnippet } from "../lib/editorInsert";
+  import {
+    readLocationInsertFormat,
+    requestCurrentPosition,
+    timeAndLocationSnippet,
+  } from "../lib/locationInsert";
+  import { describeError, showToast } from "../lib/toast.svelte";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import {
     assetPathFromImageUrl,
@@ -2123,6 +2129,20 @@
     if (complete) startCompletion(view);
   }
 
+  async function handleMobileTimeLocation() {
+    const view = editorView;
+    if (!view) return;
+    try {
+      const position = await requestCurrentPosition();
+      if (editorView !== view) {
+        throw new Error("The block is no longer being edited.");
+      }
+      insertAtCursor(view, timeAndLocationSnippet(position, readLocationInsertFormat()));
+    } catch (error) {
+      showToast(`Could not insert location: ${describeError(error)}`, "error");
+    }
+  }
+
   async function handleTaskComplete() {
     try {
       const beforeContent = block.content;
@@ -2324,6 +2344,15 @@
     }
 
     const bookChapterAnchor = target.closest("a[href]") as HTMLAnchorElement | null;
+    const deviceMapHref = bookChapterAnchor?.getAttribute("href")?.trim() ?? "";
+    if (/^geo:/i.test(deviceMapHref)) {
+      e.stopPropagation();
+      e.preventDefault();
+      void openExternal(deviceMapHref).catch((error) => {
+        showToast(`Could not open the map: ${describeError(error)}`, "error");
+      });
+      return;
+    }
     const bookChapterFragment = bookLocalChapterFragment(bookChapterAnchor);
     if (bookChapterFragment) {
       e.stopPropagation();
@@ -2383,7 +2412,7 @@
   }
 
   function isExternalHref(href: string): boolean {
-    return /^(?:https?:|mailto:|tel:|data:|blob:|grafium-asset:)/i.test(href.trim());
+    return /^(?:https?:|mailto:|tel:|geo:|data:|blob:|grafium-asset:)/i.test(href.trim());
   }
 
   function looksLikeBookLocalHref(href: string): boolean {
@@ -2702,6 +2731,8 @@
 {#if isEditing}
   <MobileEditorBar
     onTodo={() => void handleMobileTodo()}
+    onTime={() => handleMobileInsert(timeStampSnippet())}
+    onTimeLocation={() => void handleMobileTimeLocation()}
     onOutdent={() => handleMobileIndent("out")}
     onIndent={() => handleMobileIndent("in")}
     onLink={handleMobileLink}

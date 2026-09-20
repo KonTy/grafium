@@ -8,6 +8,11 @@
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
   import { beginSyncRun, endSyncRun } from "../lib/syncActivity.svelte";
+  import {
+    readLocationInsertFormat,
+    saveLocationInsertFormat,
+    type LocationInsertFormat,
+  } from "../lib/locationInsert";
 
   interface SyncTarget {
     id: string;
@@ -36,6 +41,13 @@
   let settingsRoot: HTMLDivElement | null = $state(null);
   let settingsQuery = $state("");
   let settingsMatchCount = $state(0);
+  let locationInsertFormat = $state<LocationInsertFormat>(readLocationInsertFormat());
+
+  function setLocationInsertFormat(event: Event) {
+    const format = (event.currentTarget as HTMLSelectElement).value as LocationInsertFormat;
+    locationInsertFormat = format;
+    saveLocationInsertFormat(format);
+  }
 
   $effect(() => {
     if (openSection === "theme" && themeSectionEl && !settingsQuery.trim()) {
@@ -354,6 +366,19 @@
           />
           <span>%</span>
         </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Mobile location format</span>
+        <select
+          class="setting-select"
+          aria-label="Mobile location format"
+          value={locationInsertFormat}
+          onchange={setLocationInsertFormat}
+        >
+          <option value="openstreetmap">OpenStreetMap link</option>
+          <option value="coordinates">Plain coordinates</option>
+          <option value="geo">Device map link (geo:)</option>
+        </select>
       </div>
     </div>
   </details>
@@ -856,6 +881,17 @@
 
   .setting-checkbox input {
     cursor: pointer;
+  }
+
+  .setting-select {
+    max-width: 220px;
+    padding: 6px 28px 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 12px;
   }
 
   .setting-range {

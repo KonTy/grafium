@@ -4,4 +4,11 @@ Choose a graph location the app can access and keep a verified backup before mov
 
 Use the controls available in your installed Android build. Optional desktop import, OCR, transcription, and model workflows can have different availability or requirements.
 
+The editor bar includes **Time**. Tap it to insert the current local time, just
+like Alt+T on a keyboard. Hold it to request Android location permission and
+insert the time with your current location. Choose OpenStreetMap link, plain
+coordinates, or a device `geo:` map link in **Settings → General → Mobile
+location format**. OpenStreetMap is the default. Grafium does not request
+location until you hold the button.
+
 This Welcome Graph is shared learning material, not a promise of desktop/mobile feature parity or automatic synchronization between devices.

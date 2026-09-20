@@ -3,6 +3,8 @@
 
   interface Props {
     onTodo: () => void;
+    onTime: () => void;
+    onTimeLocation: () => void;
     onOutdent: () => void;
     onIndent: () => void;
     onLink: () => void;
@@ -11,10 +13,23 @@
     onHide: () => void;
   }
 
-  let { onTodo, onOutdent, onIndent, onLink, onTag, onSlash, onHide }: Props = $props();
+  let {
+    onTodo,
+    onTime,
+    onTimeLocation,
+    onOutdent,
+    onIndent,
+    onLink,
+    onTag,
+    onSlash,
+    onHide,
+  }: Props = $props();
 
   let host: HTMLDivElement | undefined;
   let keyboardInset = $state(0);
+  let timePressTimer: ReturnType<typeof setTimeout> | undefined;
+  let timeLongPressed = false;
+  const LOCATION_LONG_PRESS_MS = 600;
 
   function keepFocus(event: Event) {
     event.preventDefault();
@@ -25,6 +40,43 @@
       event.preventDefault();
       action();
     };
+  }
+
+  function clearTimePress() {
+    if (timePressTimer !== undefined) clearTimeout(timePressTimer);
+    timePressTimer = undefined;
+  }
+
+  function startTimePress(event: PointerEvent) {
+    event.preventDefault();
+    clearTimePress();
+    timeLongPressed = false;
+    if (Number.isInteger(event.pointerId)) {
+      try {
+        (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort; pointercancel still clears the timer.
+      }
+    }
+    timePressTimer = setTimeout(() => {
+      timePressTimer = undefined;
+      timeLongPressed = true;
+      onTimeLocation();
+    }, LOCATION_LONG_PRESS_MS);
+  }
+
+  function finishTimePress(event: PointerEvent) {
+    event.preventDefault();
+    const shouldInsertTime = timePressTimer !== undefined && !timeLongPressed;
+    clearTimePress();
+    if (shouldInsertTime) onTime();
+    timeLongPressed = false;
+  }
+
+  function cancelTimePress(event: PointerEvent) {
+    event.preventDefault();
+    clearTimePress();
+    timeLongPressed = false;
   }
 
   function keyboardOffset(): number {
@@ -47,6 +99,7 @@
       viewport?.removeEventListener("resize", update);
       viewport?.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
+      clearTimePress();
       host?.remove();
     };
   });
@@ -68,6 +121,17 @@
   onpointerdown={keepFocus}
 >
   <button type="button" title="TODO" aria-label="Turn into TODO" onpointerdown={press(onTodo)}>TODO</button>
+  <button
+    type="button"
+    class="time"
+    title="Insert current time; hold for time and location"
+    aria-label="Insert current time; hold for time and location"
+    onpointerdown={startTimePress}
+    onpointerup={finishTimePress}
+    onpointercancel={cancelTimePress}
+    onlostpointercapture={cancelTimePress}
+    oncontextmenu={(event) => event.preventDefault()}
+  >Time</button>
   <button type="button" title="Unindent" aria-label="Unindent" onpointerdown={press(onOutdent)}>⇤</button>
   <button type="button" title="Indent" aria-label="Indent" onpointerdown={press(onIndent)}>⇥</button>
   <button type="button" title="Page link" aria-label="Insert page link" onpointerdown={press(onLink)}>[[ ]]</button>
@@ -115,6 +179,12 @@
       margin-left: auto;
       font-size: 1.25rem;
       font-weight: 400;
+    }
+
+    .mobile-editor-bar button.time {
+      touch-action: none;
+      user-select: none;
+      -webkit-touch-callout: none;
     }
   }
 </style>
