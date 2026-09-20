@@ -32,6 +32,7 @@
     setTaskDate,
     downloadAsset,
     saveClipboardImage,
+    saveSystemClipboardImage,
     readAssetDataUrl,
     resolveAssetFilePath,
     saveImageToPath,
@@ -44,6 +45,7 @@
   import {
     clipboardImageFile,
     clipboardImageMarkdown,
+    htmlContainsTable,
     htmlToMarkdown,
     splitMarkdownIntoBlocks,
     localizeImages,
@@ -1437,16 +1439,21 @@
     });
   }
 
-  function clipboardMarkdown(data: DataTransfer | null): string | null {
+  function clipboardMarkdown(data: DataTransfer | null): { markdown: string; containsHtmlTable: boolean } | null {
     if (!data) return null;
     const markdown = data.getData("text/markdown").trim();
-    if (markdown) return markdown;
+    if (markdown) return { markdown, containsHtmlTable: false };
 
     const html = data.getData("text/html");
-    if (html.trim()) return htmlToMarkdown(html);
+    if (html.trim()) {
+      return {
+        markdown: htmlToMarkdown(html),
+        containsHtmlTable: htmlContainsTable(html),
+      };
+    }
 
     const text = data.getData("text/plain").trim();
-    return text || null;
+    return text ? { markdown: text, containsHtmlTable: false } : null;
   }
 
   async function pasteClipboardImage(file: File, view: EditorView) {
@@ -1455,7 +1462,24 @@
       if (editorView !== view) {
         throw new Error("The block is no longer being edited.");
       }
+
       const markdown = clipboardImageMarkdown(path, file.name);
+      const { from, to } = view.state.selection.main;
+      view.dispatch({
+        changes: { from, to, insert: markdown },
+        selection: EditorSelection.cursor(from + markdown.length),
+        annotations: Transaction.userEvent.of("input.paste"),
+      });
+    } catch (error) {
+      showToast(`Could not paste image: ${describeError(error)}`, "error");
+    }
+  }
+
+  async function pasteSystemClipboardImage(view: EditorView) {
+    try {
+      const path = await saveSystemClipboardImage(pageId);
+      if (!path || editorView !== view) return;
+      const markdown = clipboardImageMarkdown(path, "Pasted image.png");
       const { from, to } = view.state.selection.main;
       view.dispatch({
         changes: { from, to, insert: markdown },
@@ -1761,8 +1785,13 @@
                 void pasteClipboardImage(image, view);
                 return true;
               }
-              const md = clipboardMarkdown(event.clipboardData);
-              if (!md) return false;
+              const clipboard = clipboardMarkdown(event.clipboardData);
+              if (!clipboard) {
+                event.preventDefault();
+                void pasteSystemClipboardImage(view);
+                return true;
+              }
+              const { markdown: md, containsHtmlTable } = clipboard;
               event.preventDefault();
 
               if (shiftHeld || !onPasteBlocks) {
@@ -1798,6 +1827,9 @@
                   selection: EditorSelection.cursor(from + chunks[0].content.length),
                   annotations: Transaction.userEvent.of("input.paste"),
                 });
+                const renderPastedTable = containsHtmlTable
+                  && !/!\[[^\]]*\]\(https?:\/\//.test(md)
+                  && renderBlock(view.state.doc.toString(), assetBaseDir).includes("<table");
                 // Remaining chunks become new blocks (with depth info)
                 if (chunks.length > 1) {
                   const content = view.state.doc.toString();
@@ -1814,12 +1846,17 @@
                         afterContent: content,
                       }, async () => { await saveContent(content); });
                       pendingPastes = pendingPastes.filter((paste) => paste.id !== pasteId);
+                      if (renderPastedTable && editorView === view) {
+                        teardownEditor(view, true);
+                      }
                     } catch (error) {
                       pendingPastes = pendingPastes.map((paste) => paste.id === pasteId
                         ? { ...paste, error: error instanceof Error ? error.message : String(error) }
                         : paste);
                     }
                   })();
+                } else if (renderPastedTable) {
+                  void closeEditorAfterSave(view, true);
                 }
                 // Download images in all pasted blocks in background
                 void localizeImages(md, (u) => downloadAsset(u, pageId)).then(async (localized) => {

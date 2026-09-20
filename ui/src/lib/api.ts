@@ -636,6 +636,10 @@ export function saveClipboardImage(data: Uint8Array, mimeType: string, pageId?: 
   return invoke("save_clipboard_image", { data: Array.from(data), mimeType, pageId });
 }
 
+export function saveSystemClipboardImage(pageId?: string): Promise<string | null> {
+  return invoke("save_system_clipboard_image", { pageId });
+}
+
 export function readAssetDataUrl(path: string): Promise<string> {
   return invoke("read_asset_data_url", { path });
 }

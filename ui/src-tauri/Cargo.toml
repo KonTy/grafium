@@ -1,6 +1,6 @@
 [package]
 name = "grafium"
-version = "0.0.126"
+version = "0.0.127"
 license = "AGPL-3.0-only"
 edition = "2021"
 
@@ -49,6 +49,12 @@ grafium_core = { path = "../../core", package = "grafium-core", features = ["med
 webkit2gtk = "2.0.2"
 gtk = "0.18"
 gdk = "0.18"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+png = "0.17"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+arboard = "3.6.1"
+png = "0.17"
 
 [target.'cfg(target_os = "android")'.dependencies]
 grafium_core = { path = "../../core", package = "grafium-core" }

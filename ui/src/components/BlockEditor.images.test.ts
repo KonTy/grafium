@@ -11,6 +11,11 @@ describe("BlockEditor rendered images", () => {
     expect(rule?.[1]).toContain("height: auto;");
     expect(rule?.[1]).not.toContain("max-height");
   });
+
+  it("falls back to the native clipboard when WebKit exposes no image file", () => {
+    expect(source).toContain("saveSystemClipboardImage");
+    expect(source).toContain("void pasteSystemClipboardImage(view);");
+  });
 });
 
 describe("BlockEditor empty spacer blocks", () => {
@@ -38,6 +43,11 @@ describe("BlockEditor rendered links and tables", () => {
     expect(source).toContain('let isTableBlock = $derived(renderedHtml.includes("<table"));');
     expect(source).toContain("|| isTableBlock");
     expect(source).toContain("class:table-block={isTableBlock && !isEditing}");
+  });
+
+  it("renders a pasted HTML table immediately after saving it", () => {
+    expect(source).toContain("const renderPastedTable = containsHtmlTable");
+    expect(source).toContain("void closeEditorAfterSave(view, true);");
   });
 });
 

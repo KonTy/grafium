@@ -176,6 +176,60 @@ pub fn save_clipboard_image(
     Ok(reference)
 }
 
+#[cfg(not(target_os = "android"))]
+fn clipboard_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "clipboard image dimensions are too large".to_string())?;
+    if width == 0 || height == 0 || rgba.len() != expected_len {
+        return Err("clipboard image has invalid RGBA data".into());
+    }
+
+    let width = u32::try_from(width).map_err(|_| "clipboard image width is too large")?;
+    let height = u32::try_from(height).map_err(|_| "clipboard image height is too large")?;
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("Could not encode clipboard image: {e}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| format!("Could not encode clipboard image: {e}"))?;
+    }
+    Ok(encoded)
+}
+
+/// Read an image directly from the desktop clipboard when the webview does not
+/// expose image clipboard data as a JavaScript File.
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_system_clipboard_image(
+    state: State<'_, AppState>,
+    page_id: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (state, page_id);
+        Ok(None)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|e| format!("Could not open clipboard: {e}"))?;
+        let image = match clipboard.get_image() {
+            Ok(image) => image,
+            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+            Err(e) => return Err(format!("Could not read clipboard image: {e}")),
+        };
+        let encoded = clipboard_rgba_png(image.width, image.height, image.bytes.as_ref())?;
+        save_clipboard_image(state, encoded, "image/png".into(), page_id).map(Some)
+    }
+}
+
 /// List every media file in the graph, as graph-relative paths.
 ///
 /// Covers both the shared `assets/` folder and the `assets/` folder beside each
@@ -323,6 +377,8 @@ fn chrono_timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "android"))]
+    use super::clipboard_rgba_png;
     use super::extension_from_content_type;
 
     #[test]
@@ -335,5 +391,12 @@ mod tests {
         assert_eq!(extension_from_content_type("image/webp"), Some("webp"));
         assert_eq!(extension_from_content_type("text/html"), None);
         assert_eq!(extension_from_content_type("text/plain; image/png"), None);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn encodes_clipboard_rgba_as_png() {
+        let encoded = clipboard_rgba_png(1, 1, &[255, 0, 0, 255]).unwrap();
+        assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

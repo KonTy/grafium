@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clipboardImageFile,
   clipboardImageMarkdown,
+  htmlContainsTable,
   htmlToMarkdown,
   localizeImages,
   splitMarkdownIntoBlocks,
@@ -133,6 +134,12 @@ describe("HTML to markdown clipboard conversion", () => {
       "| --- | --- |",
       "| **Total: ¥53,000** |  |",
     ].join("\n"));
+  });
+
+  it("recognizes semantic and ARIA tables in pasted HTML", () => {
+    expect(htmlContainsTable("<div><table><tr><td>Cell</td></tr></table></div>")).toBe(true);
+    expect(htmlContainsTable('<div role="grid"><div role="row"></div></div>')).toBe(true);
+    expect(htmlContainsTable("<div>Item | Amount</div>")).toBe(false);
   });
 
   it("recognizes a directly copied image and creates portable Markdown", () => {

@@ -169,6 +169,12 @@ export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
 
+export function htmlContainsTable(html: string): boolean {
+  if (!html.trim()) return false;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  return document.querySelector('table, [role="table"], [role="grid"]') !== null;
+}
+
 export function clipboardImageFile(data: DataTransfer | null): File | null {
   if (!data) return null;
   for (const item of Array.from(data.items)) {
