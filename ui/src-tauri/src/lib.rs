@@ -1406,6 +1406,7 @@ pub fn run() {
             commands::theme::get_app_theme,
             commands::theme::set_app_theme,
             commands::assets::download_asset,
+            commands::assets::save_clipboard_image,
             commands::assets::list_assets,
             commands::assets::read_asset_data_url,
             commands::assets::resolve_asset_file_path,

@@ -15,6 +15,11 @@
   import { showToast } from "../lib/toast.svelte";
   import { formatLocalIsoDate, insertJournalPageByTitleDesc, isJournalDateTitle } from "../lib/journalDate";
   import { isPageNotFoundError } from "../lib/navigation";
+  import {
+    canRequestPersistentStorageAccess,
+    isStoragePermissionError,
+    requestPersistentStorageAccess,
+  } from "../lib/androidStorageAccess";
 
   interface Props {
     openCalendar?: boolean;
@@ -748,6 +753,9 @@
     {#if loadError}
       <div class="journal-error" role="alert">
         {loadError}
+        {#if canRequestPersistentStorageAccess() && isStoragePermissionError(loadError)}
+          <button type="button" onclick={requestPersistentStorageAccess}>Grant persistent file access</button>
+        {/if}
         <button type="button" onclick={loadJournals}>Retry loading journals</button>
       </div>
     {/if}

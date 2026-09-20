@@ -31,6 +31,7 @@
     getBlockPageTitle,
     setTaskDate,
     downloadAsset,
+    saveClipboardImage,
     readAssetDataUrl,
     resolveAssetFilePath,
     saveImageToPath,
@@ -40,7 +41,13 @@
   import type { QueryRow } from "../lib/api";
   import type { BlockContentChange } from "../lib/undoStack";
   import { keymap_manager } from "../lib/keymap";
-  import { htmlToMarkdown, splitMarkdownIntoBlocks, localizeImages } from "../lib/htmlToMd";
+  import {
+    clipboardImageFile,
+    clipboardImageMarkdown,
+    htmlToMarkdown,
+    splitMarkdownIntoBlocks,
+    localizeImages,
+  } from "../lib/htmlToMd";
   import { buildSaveContext, persistBlockContentIfChanged } from "../lib/persistence";
   import { editorWriteLockExtension, registerEditorFlush } from "../lib/editorPersistence";
   import { openReadingNoteFromEvent, protectReadingNotePointer } from "../lib/readingNoteLinks";
@@ -1442,6 +1449,24 @@
     return text || null;
   }
 
+  async function pasteClipboardImage(file: File, view: EditorView) {
+    try {
+      const path = await saveClipboardImage(new Uint8Array(await file.arrayBuffer()), file.type, pageId);
+      if (editorView !== view) {
+        throw new Error("The block is no longer being edited.");
+      }
+      const markdown = clipboardImageMarkdown(path, file.name);
+      const { from, to } = view.state.selection.main;
+      view.dispatch({
+        changes: { from, to, insert: markdown },
+        selection: EditorSelection.cursor(from + markdown.length),
+        annotations: Transaction.userEvent.of("input.paste"),
+      });
+    } catch (error) {
+      showToast(`Could not paste image: ${describeError(error)}`, "error");
+    }
+  }
+
   function initEditor() {
     if (!editorContainer) return;
       // Reuse saved state if content hasn't changed externally
@@ -1730,6 +1755,12 @@
               return true;
             },
             paste: (event, view) => {
+              const image = clipboardImageFile(event.clipboardData);
+              if (image) {
+                event.preventDefault();
+                void pasteClipboardImage(image, view);
+                return true;
+              }
               const md = clipboardMarkdown(event.clipboardData);
               if (!md) return false;
               event.preventDefault();

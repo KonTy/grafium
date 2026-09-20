@@ -1,12 +1,12 @@
 {
   "productName": "Grafium",
-  "version": "0.0.124",
+  "version": "0.0.125",
   "identifier": "com.grafium.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build && ../scripts/prepare-android.sh"
   },
   "app": {
     "windows": [

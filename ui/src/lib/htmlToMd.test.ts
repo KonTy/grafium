@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { htmlToMarkdown, splitMarkdownIntoBlocks } from "./htmlToMd";
+import { describe, expect, it, vi } from "vitest";
+import {
+  clipboardImageFile,
+  clipboardImageMarkdown,
+  htmlToMarkdown,
+  localizeImages,
+  splitMarkdownIntoBlocks,
+} from "./htmlToMd";
 
 describe("HTML to markdown clipboard conversion", () => {
   it("preserves Grafium rendered page links", () => {
@@ -127,6 +133,30 @@ describe("HTML to markdown clipboard conversion", () => {
       "| --- | --- |",
       "| **Total: ¥53,000** |  |",
     ].join("\n"));
+  });
+
+  it("recognizes a directly copied image and creates portable Markdown", () => {
+    const image = new File(["png"], "Trip [map].png", { type: "image/png" });
+    const data = {
+      items: [{ kind: "file", type: "image/png", getAsFile: () => image }],
+      files: [],
+    } as unknown as DataTransfer;
+
+    expect(clipboardImageFile(data)).toBe(image);
+    expect(clipboardImageMarkdown("assets/clipboard.png", image.name))
+      .toBe("![Trip  map](assets/clipboard.png)");
+  });
+
+  it("converts and localizes images copied from websites", async () => {
+    const markdown = htmlToMarkdown(
+      '<p>Route map</p><img src="https://example.com/maps/tokyo.png" alt="Tokyo route">',
+    );
+    expect(markdown).toContain("![Tokyo route](https://example.com/maps/tokyo.png)");
+
+    const download = vi.fn().mockResolvedValue("assets/tokyo.png");
+    await expect(localizeImages(markdown, download))
+      .resolves.toContain("![Tokyo route](assets/tokyo.png)");
+    expect(download).toHaveBeenCalledWith("https://example.com/maps/tokyo.png");
   });
 
   it("splits plain task lines into separate paste blocks", () => {

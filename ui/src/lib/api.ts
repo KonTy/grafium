@@ -632,6 +632,10 @@ export function downloadAsset(url: string, pageId?: string): Promise<string> {
   return invoke("download_asset", { url, pageId });
 }
 
+export function saveClipboardImage(data: Uint8Array, mimeType: string, pageId?: string): Promise<string> {
+  return invoke("save_clipboard_image", { data: Array.from(data), mimeType, pageId });
+}
+
 export function readAssetDataUrl(path: string): Promise<string> {
   return invoke("read_asset_data_url", { path });
 }

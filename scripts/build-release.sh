@@ -101,6 +101,7 @@ build_android() {
   # `android init` is idempotent and gen/ is gitignored, so regenerate rather
   # than assuming a previous run left a usable project behind.
   cargo tauri android init >/dev/null
+  "$repo_root/scripts/prepare-android.sh"
   cargo tauri android build --apk --target aarch64
 }
 

@@ -2,6 +2,8 @@ use crate::AppState;
 use std::{fs, path::PathBuf};
 use tauri::State;
 
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 50 * 1024 * 1024;
+
 fn graph_asset_path(state: &State<AppState>, path: &str) -> Result<PathBuf, String> {
     let rel = path.trim_start_matches('/');
     if rel.is_empty() || rel.split('/').any(|c| c == "..") {
@@ -13,6 +15,44 @@ fn graph_asset_path(state: &State<AppState>, path: &str) -> Result<PathBuf, Stri
         graph.root_dir.clone()
     };
     grafium_core::graph::resolve_asset_path(&root, rel).ok_or_else(|| "asset not found".into())
+}
+
+fn new_asset_location(
+    state: &State<'_, AppState>,
+    page_id: Option<&str>,
+    extension: &str,
+) -> Result<(PathBuf, String), String> {
+    let (assets_dir, reference_prefix) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let page_dir = match page_id {
+            Some(id) => {
+                let page = graph
+                    .db
+                    .get_page_by_id(id)
+                    .map_err(|e| format!("unknown page {id}: {e}"))?;
+                page.file_path
+                    .as_deref()
+                    .and_then(|fp| grafium_core::graph::page_asset_dir(&graph.root_dir, fp))
+            }
+            None => None,
+        };
+        match page_dir {
+            Some(dir) => (dir.join("assets"), "assets".to_string()),
+            None => (graph.root_dir.join("assets"), "../assets".to_string()),
+        }
+    };
+
+    fs::create_dir_all(&assets_dir).map_err(|e| e.to_string())?;
+    let filename = format!(
+        "{}_{}.{}",
+        chrono_timestamp(),
+        &uuid::Uuid::new_v4().to_string()[..8],
+        extension
+    );
+    Ok((
+        assets_dir.join(&filename),
+        format!("{reference_prefix}/{filename}"),
+    ))
 }
 
 /// Read a graph-local asset and return it as a `data:` URL (base64).
@@ -82,38 +122,6 @@ pub async fn download_asset(
     url: String,
     page_id: Option<String>,
 ) -> Result<String, String> {
-    // Store new media beside the page that uses it, when we know which page
-    // that is. A book kept at `pages/mybooks/coolbook/` then carries its own
-    // images, so copying or sharing that folder takes the media with it —
-    // which a single graph-wide `assets/` pile cannot do. Falls back to the
-    // shared folder when there's no page context or the page has no file yet.
-    let (assets_dir, reference_prefix) = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let page_dir = match page_id.as_deref() {
-            // A page id was supplied, so a lookup failure is a real error and
-            // must not quietly deposit the media in the shared folder under a
-            // reference that points at the wrong place.
-            Some(id) => {
-                let page = graph
-                    .db
-                    .get_page_by_id(id)
-                    .map_err(|e| format!("unknown page {id}: {e}"))?;
-                page.file_path
-                    .as_deref()
-                    .and_then(|fp| grafium_core::graph::page_asset_dir(&graph.root_dir, fp))
-            }
-            None => None,
-        };
-        match page_dir {
-            // A plain relative reference, so the link also resolves correctly
-            // in any other markdown tool that opens the folder.
-            Some(dir) => (dir.join("assets"), "assets".to_string()),
-            None => (graph.root_dir.join("assets"), "../assets".to_string()),
-        }
-    };
-
-    fs::create_dir_all(&assets_dir).map_err(|e| e.to_string())?;
-
     // Download the image
     let response = reqwest::get(&url)
         .await
@@ -135,22 +143,37 @@ pub async fn download_asset(
         .or_else(|| extension_from_url(&url))
         .unwrap_or("png");
 
-    // Generate a unique filename
-    let filename = format!(
-        "{}_{}.{}",
-        chrono_timestamp(),
-        &uuid::Uuid::new_v4().to_string()[..8],
-        ext
-    );
-
-    let dest_path = assets_dir.join(&filename);
+    let (dest_path, reference) = new_asset_location(&state, page_id.as_deref(), ext)?;
     let bytes = response
         .bytes()
         .await
         .map_err(|e| format!("Read failed: {}", e))?;
     fs::write(&dest_path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
 
-    Ok(format!("{reference_prefix}/{filename}"))
+    Ok(reference)
+}
+
+/// Save image bytes supplied by the OS clipboard into the active graph.
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_clipboard_image(
+    state: State<'_, AppState>,
+    data: Vec<u8>,
+    mime_type: String,
+    page_id: Option<String>,
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("clipboard image is empty".into());
+    }
+    if data.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err("clipboard image exceeds the 50 MB limit".into());
+    }
+    let ext = extension_from_content_type(&mime_type)
+        .filter(|ext| *ext != "svg")
+        .ok_or_else(|| format!("unsupported clipboard image type: {mime_type}"))?;
+
+    let (dest_path, reference) = new_asset_location(&state, page_id.as_deref(), ext)?;
+    fs::write(dest_path, data).map_err(|e| format!("Write failed: {e}"))?;
+    Ok(reference)
 }
 
 /// List every media file in the graph, as graph-relative paths.
@@ -257,13 +280,15 @@ pub fn delete_assets(state: State<AppState>, filenames: Vec<String>) -> Result<u
 }
 
 fn extension_from_content_type(ct: &str) -> Option<&'static str> {
-    match ct {
-        _ if ct.contains("image/png") => Some("png"),
-        _ if ct.contains("image/jpeg") => Some("jpg"),
-        _ if ct.contains("image/gif") => Some("gif"),
-        _ if ct.contains("image/webp") => Some("webp"),
-        _ if ct.contains("image/svg") => Some("svg"),
-        _ if ct.contains("image/avif") => Some("avif"),
+    let mime = ct.split(';').next()?.trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        "image/avif" => Some("avif"),
+        "image/bmp" => Some("bmp"),
         _ => None,
     }
 }
@@ -294,4 +319,21 @@ fn chrono_timestamp() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{}", secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extension_from_content_type;
+
+    #[test]
+    fn clipboard_image_types_map_to_safe_extensions() {
+        assert_eq!(extension_from_content_type("image/png"), Some("png"));
+        assert_eq!(
+            extension_from_content_type("image/jpeg; charset=binary"),
+            Some("jpg")
+        );
+        assert_eq!(extension_from_content_type("image/webp"), Some("webp"));
+        assert_eq!(extension_from_content_type("text/html"), None);
+        assert_eq!(extension_from_content_type("text/plain; image/png"), None);
+    }
 }

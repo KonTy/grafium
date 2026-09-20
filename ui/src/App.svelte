@@ -9,6 +9,7 @@
   import { autofocus } from "./lib/autofocus";
   import { handleMenuKeydown } from "./lib/menuKeyboard";
   import { dismissOnBackdrop, dialogKeydown } from "./lib/modal";
+  import { hasPersistentStorageAccess, requestPersistentStorageAccess } from "./lib/androidStorageAccess";
   import { revealStartupWindow } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
@@ -88,6 +89,11 @@
   /** Native folder dialog on desktop; in-app browser on Android (no directory picker). */
   async function pickFolder(title = "Select Folder", defaultPath?: string): Promise<string | null> {
     if ((window as any).FolderPickerBridge) {
+      if (!hasPersistentStorageAccess()) {
+        alert("Grafium needs persistent file access to open and save graph folders after the app restarts. Enable “Allow access to manage all files”, then choose the folder again.");
+        requestPersistentStorageAccess();
+        return null;
+      }
       return new Promise<string | null>((resolve) => {
         (window as any).__FOLDER_PICKER_RESOLVE = (result: string | null) => {
           delete (window as any).__FOLDER_PICKER_RESOLVE;

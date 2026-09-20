@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.grafium"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <receiver
+            android:name=".AssistantReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.silentpulse.action.ASSISTANT_CAPABLE" />
+                <action android:name="com.silentpulse.action.EXECUTE_COMMAND" />
+                <action android:name="com.silentpulse.action.REQUEST_SCHEMA" />
+            </intent-filter>
+            <meta-data
+                android:name="com.silentpulse.command_prefixes"
+                android:value="add todo,add task,add to-do,add to do,todo,to-do,to do,task,remind me to,note to self,add journal,add note,journal,note,read todos,read tasks,read my todos,read my tasks,read my journal,read journal,read today's journal,todos today,todos this week,tasks this week,todos due today,todos due tomorrow,todos due this week,due today,due tomorrow,due this week,list todos,list tasks,list my todos,list my tasks,list my top,top todos,top task,top tasks,my top todos,my top tasks,show my todos,show my tasks,what are my todos,what are my tasks,find todo,find task,search todo,search task,mark done,mark doing,mark complete,mark cancelled,mark canceled" />
+        </receiver>
+    </application>
+</manifest>

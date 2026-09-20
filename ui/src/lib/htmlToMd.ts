@@ -169,6 +169,21 @@ export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
 
+export function clipboardImageFile(data: DataTransfer | null): File | null {
+  if (!data) return null;
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== "file" || !item.type.toLowerCase().startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  return Array.from(data.files).find((file) => file.type.toLowerCase().startsWith("image/")) ?? null;
+}
+
+export function clipboardImageMarkdown(path: string, fileName: string): string {
+  const name = fileName.replace(/\.[^.]+$/, "").replace(/[\[\]\\\r\n]/g, " ").trim();
+  return `![${name || "Pasted image"}](${path})`;
+}
+
 /**
  * Find all remote image URLs in markdown and download them to assets/.
  * Rewrites the markdown to use local paths.
