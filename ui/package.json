@@ -1,7 +1,7 @@
 {
   "name": "grafium-ui",
   "private": true,
-  "version": "0.0.138",
+  "version": "0.0.139",
   "type": "module",
   "scripts": {
     "build:reader": "node scripts/build-book-reader.mjs",

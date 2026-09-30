@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { listen } from "@tauri-apps/api/event";
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
@@ -12,6 +13,7 @@ import {
   setConflictCount,
   shouldShowConflicts,
   syncActivity,
+  initSyncActivity,
 } from "./syncActivity.svelte";
 
 describe("sync activity store", () => {
@@ -23,6 +25,7 @@ describe("sync activity store", () => {
   afterEach(() => {
     resetSyncActivity();
     vi.useRealTimers();
+    vi.mocked(listen).mockReset();
   });
 
   it("hides conflicts on a graph that has never synced or conflicted", () => {
@@ -79,5 +82,19 @@ describe("sync activity store", () => {
     markSyncCompleted();
     vi.advanceTimersByTime(RECENT_SYNC_WINDOW_MS - 10);
     expect(shouldShowConflicts()).toBe(true);
+  });
+  it("does not turn annotation merge candidates into file-level conflicts", async () => {
+    const handlers = new Map<string, (event: unknown) => void>();
+    vi.mocked(listen).mockImplementation(async (name, handler) => {
+      handlers.set(name, handler as (event: unknown) => void);
+      return vi.fn();
+    });
+    const unlisten = await initSyncActivity();
+    handlers.get("sync-completed")!({ payload: { annotation_conflicts: 2, conflicts: 0 } });
+    await Promise.resolve();
+    expect(syncActivity.conflictCount).toBe(0);
+    vi.advanceTimersByTime(RECENT_SYNC_WINDOW_MS);
+    expect(shouldShowConflicts()).toBe(false);
+    unlisten();
   });
 });

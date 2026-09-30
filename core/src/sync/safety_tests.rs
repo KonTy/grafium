@@ -519,3 +519,338 @@ fn sync_local_deletion_invalidates_other_inflight_fences() {
     let _publication = fence.lock();
     assert!(!fence.is_current());
 }
+
+fn annotation_fixture() -> (
+    tempfile::TempDir,
+    crate::Graph,
+    crate::graph::books::BookInfo,
+    String,
+) {
+    let source = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let file = source.path().join("1.fb2");
+    fs::write(
+        &file,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description><title-info><book-title>Sync fixture</book-title></title-info></description>
+<body><section><p>Source words stay unchanged.</p></section></body></FictionBook>"#,
+    )
+    .unwrap();
+    let graph = crate::Graph::open(root.path()).unwrap();
+    let book = graph.import_original_book(&file).unwrap();
+    let path = Path::new(&book.file_path)
+        .with_extension("jsonld")
+        .to_string_lossy()
+        .replace('\\', "/");
+    (root, graph, book, path)
+}
+
+fn create_annotation(
+    graph: &crate::Graph,
+    book: &crate::graph::books::BookInfo,
+    body: &str,
+) -> crate::graph::books::BookNote {
+    graph
+        .book_note_save(
+            &book.id,
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            body,
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap()
+}
+
+#[test]
+fn annotation_sync_unions_independent_notes_without_a_common_sync_base() {
+    let (root, graph, book, path) = annotation_fixture();
+    let first = create_annotation(&graph, &book, "Local annotation");
+    let local = fs::read(root.path().join(&path)).unwrap();
+    fs::remove_file(root.path().join(&path)).unwrap();
+    let second = create_annotation(&graph, &book, "Remote annotation");
+    let remote = fs::read(root.path().join(&path)).unwrap();
+    write(root.path(), &path, &local);
+    let backend = Remote::default();
+    backend.set(&path, &remote);
+    let engine = SyncEngine::new(root.path().to_path_buf());
+    let result = engine.sync(&backend).unwrap();
+    assert!(result.errors.is_empty(), "{result:?}");
+    assert!(result.conflicts.is_empty(), "{result:?}");
+    assert!(result.annotation_conflicts.is_empty());
+    assert!(result.merged.contains(&path));
+    assert_eq!(
+        fs::read(root.path().join(&path)).unwrap(),
+        backend.bytes(&path).unwrap()
+    );
+    let notes = graph.book_notes_list(&book.id).unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().any(|note| note.id == first.id));
+    assert!(notes.iter().any(|note| note.id == second.id));
+    let repeated = engine.sync(&backend).unwrap();
+    assert!(repeated.errors.is_empty(), "{repeated:?}");
+    assert!(repeated.merged.is_empty(), "{repeated:?}");
+}
+
+#[test]
+fn annotation_sync_retains_conflicting_edits_until_user_resolves_them() {
+    let (root, graph, book, path) = annotation_fixture();
+    let first = create_annotation(&graph, &book, "Base annotation");
+    let base = fs::read(root.path().join(&path)).unwrap();
+    let backend = Remote::default();
+    let engine = SyncEngine::new(root.path().to_path_buf());
+    assert!(engine.sync(&backend).unwrap().errors.is_empty());
+    graph
+        .book_note_save(
+            &book.id,
+            &first.id,
+            Some(&first.revision),
+            "Local edit",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap();
+    let local = fs::read(root.path().join(&path)).unwrap();
+    write(root.path(), &path, &base);
+    graph
+        .book_note_save(
+            &book.id,
+            &first.id,
+            Some(&first.revision),
+            "Remote edit",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap();
+    backend.set(&path, &fs::read(root.path().join(&path)).unwrap());
+    write(root.path(), &path, &local);
+    let result = engine.sync(&backend).unwrap();
+    assert!(result.errors.is_empty(), "{result:?}");
+    assert!(result.conflicts.is_empty(), "{result:?}");
+    assert_eq!(result.annotation_conflicts, [path.clone()]);
+    assert!(engine.unresolved_conflicts().is_empty());
+    let note = graph.book_notes_list(&book.id).unwrap().remove(0);
+    assert_eq!(note.conflicts.len(), 2);
+    assert!(note
+        .conflicts
+        .iter()
+        .any(|version| version.body == "Local edit"));
+    assert!(note
+        .conflicts
+        .iter()
+        .any(|version| version.body == "Remote edit"));
+    assert!(graph
+        .book_note_save(
+            &book.id,
+            &note.id,
+            Some(&note.revision),
+            "Implicit resolution",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .is_err());
+    let repeated = engine.sync(&backend).unwrap();
+    assert_eq!(repeated.annotation_conflicts, [path.clone()]);
+    graph
+        .book_note_resolve(
+            &book.id,
+            &note.id,
+            &note.revision,
+            "Both ideas, merged by user",
+            "",
+            None,
+            &book.source_sha256,
+            false,
+        )
+        .unwrap();
+    let result = engine.sync(&backend).unwrap();
+    assert!(result.errors.is_empty(), "{result:?}");
+    assert!(result.annotation_conflicts.is_empty(), "{result:?}");
+    assert_eq!(
+        fs::read(root.path().join(&path)).unwrap(),
+        backend.bytes(&path).unwrap()
+    );
+    let merged = graph.book_notes_list(&book.id).unwrap().remove(0);
+    assert!(merged.conflicts.is_empty());
+    assert_eq!(merged.body, "Both ideas, merged by user");
+}
+
+#[test]
+fn annotation_tombstone_survives_a_stale_replica_and_edit_delete_is_a_conflict() {
+    for edit_remote in [false, true] {
+        let (root, graph, book, path) = annotation_fixture();
+        let note = create_annotation(&graph, &book, "Base");
+        let base = fs::read(root.path().join(&path)).unwrap();
+        let backend = Remote::default();
+        let engine = SyncEngine::new(root.path().to_path_buf());
+        assert!(engine.sync(&backend).unwrap().errors.is_empty());
+        if edit_remote {
+            graph
+                .book_note_save(
+                    &book.id,
+                    &note.id,
+                    Some(&note.revision),
+                    "Offline edit",
+                    "",
+                    None,
+                    &book.source_sha256,
+                )
+                .unwrap();
+            backend.set(&path, &fs::read(root.path().join(&path)).unwrap());
+            write(root.path(), &path, &base);
+        }
+        graph
+            .book_note_delete(&book.id, &note.id, &note.revision)
+            .unwrap();
+        assert!(
+            root.path().join(&path).is_file(),
+            "deletion must keep the tombstone"
+        );
+        let result = engine.sync(&backend).unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        let notes = graph.book_notes_list(&book.id).unwrap();
+        if edit_remote {
+            assert_eq!(result.annotation_conflicts, [path.clone()]);
+            assert_eq!(notes.len(), 1);
+            assert!(notes[0].conflicts.iter().any(|candidate| candidate.deleted));
+            assert!(notes[0]
+                .conflicts
+                .iter()
+                .any(|candidate| candidate.body == "Offline edit"));
+        } else {
+            assert!(notes.is_empty());
+            backend.set(&path, &base);
+            let result = engine.sync(&backend).unwrap();
+            assert!(result.errors.is_empty(), "{result:?}");
+            assert!(graph.book_notes_list(&book.id).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn annotation_sidecar_missing_or_invalid_never_discards_the_surviving_notes() {
+    let (root, graph, book, path) = annotation_fixture();
+    create_annotation(&graph, &book, "Keep me");
+    let local = fs::read(root.path().join(&path)).unwrap();
+    let backend = Remote::default();
+    let engine = SyncEngine::new(root.path().to_path_buf());
+    assert!(engine.sync(&backend).unwrap().errors.is_empty());
+    backend.delete(&path);
+    let result = engine.sync(&backend).unwrap();
+    assert_eq!(result.conflicts, [path.clone()]);
+    assert!(result.deleted_local.is_empty());
+    assert_eq!(fs::read(root.path().join(&path)).unwrap(), local);
+    backend.set(&path, b"malformed annotation sidecar");
+    let result = engine.sync(&backend).unwrap();
+    assert!(!result.errors.is_empty());
+    assert_eq!(result.conflicts, [path.clone()]);
+    assert_eq!(fs::read(root.path().join(&path)).unwrap(), local);
+    assert_eq!(
+        backend.bytes(&path).unwrap(),
+        b"malformed annotation sidecar"
+    );
+}
+
+#[test]
+fn annotation_merge_does_not_overwrite_an_edit_during_download() {
+    let (root, graph, book, path) = annotation_fixture();
+    let note = create_annotation(&graph, &book, "Base");
+    let base = fs::read(root.path().join(&path)).unwrap();
+    graph
+        .book_note_save(
+            &book.id,
+            &note.id,
+            Some(&note.revision),
+            "New local edit",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap();
+    let newer = fs::read(root.path().join(&path)).unwrap();
+    let sync_root = tempfile::tempdir().unwrap();
+    write(sync_root.path(), &path, &base);
+    let backend = Arc::new(Remote::default());
+    backend.set(&path, &base);
+    let (ready, proceed) = arm_gate(&backend.download);
+    let directory = sync_root.path().to_path_buf();
+    let remote = backend.clone();
+    let worker =
+        std::thread::spawn(move || SyncEngine::new(directory).sync(remote.as_ref()).unwrap());
+    ready
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    crate::fsutil::atomic_write(&sync_root.path().join(&path), &newer).unwrap();
+    proceed.send(()).unwrap();
+    let result = worker.join().unwrap();
+    assert!(!result.errors.is_empty(), "{result:?}");
+    assert_eq!(fs::read(sync_root.path().join(&path)).unwrap(), newer);
+    assert_eq!(backend.bytes(&path).unwrap(), base);
+    let result = SyncEngine::new(sync_root.path().to_path_buf())
+        .sync(backend.as_ref())
+        .unwrap();
+    assert!(result.errors.is_empty(), "{result:?}");
+    assert!(result.conflicts.is_empty());
+    assert_eq!(
+        backend.bytes(&path).unwrap(),
+        fs::read(sync_root.path().join(&path)).unwrap()
+    );
+}
+
+#[test]
+fn annotation_merge_remote_publication_race_preserves_both_and_retries() {
+    let (root, graph, book, path) = annotation_fixture();
+    let note = create_annotation(&graph, &book, "Base");
+    let base = fs::read(root.path().join(&path)).unwrap();
+    graph
+        .book_note_save(
+            &book.id,
+            &note.id,
+            Some(&note.revision),
+            "Local edit",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap();
+    let local = fs::read(root.path().join(&path)).unwrap();
+    write(root.path(), &path, &base);
+    graph
+        .book_note_save(
+            &book.id,
+            &note.id,
+            Some(&note.revision),
+            "Racing remote edit",
+            "",
+            None,
+            &book.source_sha256,
+        )
+        .unwrap();
+    let newer = fs::read(root.path().join(&path)).unwrap();
+    let sync_root = tempfile::tempdir().unwrap();
+    write(sync_root.path(), &path, &local);
+    let backend = Remote::default();
+    backend.set(&path, &base);
+    backend.set(".grafium-sync-id", uuid::Uuid::new_v4().to_string().as_bytes());
+    *backend.publication_race.lock().unwrap() = Some(newer.clone());
+    let engine = SyncEngine::new(sync_root.path().to_path_buf());
+    let result = engine.sync(&backend).unwrap();
+    assert!(!result.errors.is_empty(), "{result:?}");
+    assert_eq!(fs::read(sync_root.path().join(&path)).unwrap(), local);
+    assert_eq!(backend.bytes(&path).unwrap(), newer);
+    assert!(recovery_contains(sync_root.path(), &path, &local));
+    assert!(recovery_contains(sync_root.path(), &path, &newer));
+    let result = engine.sync(&backend).unwrap();
+    assert!(result.errors.is_empty(), "{result:?}");
+    assert_eq!(result.annotation_conflicts, [path.clone()]);
+    assert!(engine.unresolved_conflicts().is_empty());
+    assert_eq!(
+        backend.bytes(&path).unwrap(),
+        fs::read(sync_root.path().join(&path)).unwrap()
+    );
+}

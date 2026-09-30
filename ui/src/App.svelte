@@ -23,7 +23,7 @@
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import BookImportDialog from "./components/BookImportDialog.svelte";
   import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
-  import { isOriginalBookPage } from "./lib/books";
+  import { isOriginalBookPage, isBookAnnotationPage } from "./lib/books";
   import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
@@ -40,6 +40,7 @@
   import { attachAppUndoRedoListeners } from "./lib/undoEvents";
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
   import { initSyncActivity } from "./lib/syncActivity.svelte";
+  import { initSyncMonitor } from "./lib/sync";
   import { showToast } from "./lib/toast.svelte";
   import { setCurrentBlockAnchor } from "./lib/currentBlockAnchor";
   import { readingSelection } from "./lib/readingSelection";
@@ -65,6 +66,7 @@
   const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
   const loadGlobalSearchDialog = lazyComponent(() => import("./components/GlobalSearchDialog.svelte"));
   const loadOriginalBookPage = lazyComponent(() => import("./components/OriginalBookPage.svelte"));
+  const loadBookAnnotationPage = lazyComponent(() => import("./components/BookAnnotationPage.svelte"));
 
   let shuttingDown = $state(false);
 
@@ -1105,7 +1107,7 @@
         context ||
         ((
           {
-            page: currentPage && isOriginalBookPage(currentPage) ? "books" : "editor",
+            page: currentPage && (isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)) ? "books" : "editor",
             journal: "journal",
             "all-pages": "search",
             graph: "graph",
@@ -1321,18 +1323,20 @@
 
   $effect(() => {
     let disposed = false;
-    let unlisten: (() => void) | null = null;
-    initSyncActivity()
-      .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      })
-      .catch((e) => {
-        console.error("Could not initialize sync activity tracking:", e);
-      });
+    const unlisteners: (() => void)[] = [];
+    for (const initialize of [initSyncActivity, initSyncMonitor]) {
+      initialize()
+        .then((fn) => {
+          if (disposed) fn();
+          else unlisteners.push(fn);
+        })
+        .catch((e) => {
+          console.error("Could not initialize sync activity tracking:", e);
+        });
+    }
     return () => {
       disposed = true;
-      unlisten?.();
+      for (const unlisten of unlisteners) unlisten();
     };
   });
 
@@ -2263,7 +2267,14 @@
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
-        {#if isOriginalBookPage(currentPage)}
+        {#if isBookAnnotationPage(currentPage)}
+          {@const annotationPage = currentPage}
+          <LazyView load={loadBookAnnotationPage} name="book annotation editor">
+            {#snippet children(BookAnnotationPage)}
+              <BookAnnotationPage page={annotationPage} onNavigate={handleNavigate} />
+            {/snippet}
+          </LazyView>
+        {:else if isOriginalBookPage(currentPage)}
           {@const bookPage = currentPage}
           <LazyView load={loadOriginalBookPage} name="book reader">
             {#snippet children(OriginalBookPage)}

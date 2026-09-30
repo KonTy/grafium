@@ -8,6 +8,7 @@
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
   import { beginSyncRun, endSyncRun } from "../lib/syncActivity.svelte";
+  import { runSyncTarget, summarizeSyncResult } from "../lib/sync";
   import {
     readLocationInsertFormat,
     saveLocationInsertFormat,
@@ -275,15 +276,8 @@
     syncMessage = "";
     beginSyncRun();
     try {
-      const result: any = await invoke("sync_run", { targetId });
-      const parts = [];
-      if (result.pushed.length) parts.push(`↑ ${result.pushed.length} pushed`);
-      if (result.pulled.length) parts.push(`↓ ${result.pulled.length} pulled`);
-      if (result.conflicts.length) parts.push(`⚡ ${result.conflicts.length} conflicts`);
-      if (result.deleted_remote.length) parts.push(`🗑 ${result.deleted_remote.length} deleted remote`);
-      if (result.deleted_local.length) parts.push(`🗑 ${result.deleted_local.length} deleted local`);
-      if (result.errors.length) parts.push(`❌ ${result.errors.length} errors`);
-      syncMessage = parts.length ? parts.join(", ") : "Everything in sync ✓";
+      const result = await runSyncTarget(targetId);
+      syncMessage = summarizeSyncResult(result);
     } catch (e: any) {
       syncMessage = `Sync failed: ${e}`;
     } finally {
@@ -394,8 +388,9 @@
     <div class="section-content">
     <p class="section-desc">
       Sync your notes to one or more independent USB drives, network shares, or WebDAV servers.
-      Add each location separately and sync them whenever it is available. Conflicts are never
-      resolved automatically; open the Conflicts tab in the right panel to review them.
+      Add each location separately and sync them whenever it is available. Independent book notes
+      combine automatically; competing versions need a manual merge in that book's Notes tab.
+      Review other file conflicts in the right panel's Conflicts tab.
     </p>
 
     {#if syncMessage}

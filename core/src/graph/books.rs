@@ -1,9 +1,16 @@
 //! Original books are immutable file-backed pages. Only extracted text is cached
-//! in SQLite; reader annotations are independent, portable Markdown sources.
+//! in SQLite; reader annotations live in an adjacent, portable JSON-LD source.
 use super::*;
 use rusqlite::{params, OptionalExtension};
 use std::io::Read;
 use std::path::Component;
+
+#[path = "book_annotations.rs"]
+mod annotations;
+pub use annotations::{
+    annotation_conflict_count, is_annotation_sidecar, merge_annotation_sidecars,
+    validate_annotation_sidecar,
+};
 
 const MAX_ORIGINAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_NOTE_BYTES: u64 = 2 * 1024 * 1024;
@@ -91,6 +98,7 @@ pub struct BookInfo {
     pub format: String,
     pub file_path: String,
     pub source_sha256: String,
+    pub source_available: bool,
     pub reading_location: Option<BookLocation>,
     pub indexing_warning: Option<String>,
 }
@@ -110,6 +118,19 @@ pub struct BookNote {
     pub created_at: String,
     pub updated_at: String,
     pub status: &'static str,
+    pub conflicts: Vec<BookNoteConflict>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookNoteConflict {
+    pub revision: String,
+    pub body: String,
+    pub quote: String,
+    pub locator: Option<BookLocation>,
+    pub source_sha256: String,
+    pub updated_at: String,
+    pub deleted: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,6 +203,9 @@ pub fn supported_original(path: &Path) -> bool {
 
 /// Sync only authoritative originals, identity metadata and reader position.
 pub fn is_portable_book_file(relative: &str) -> bool {
+    if is_annotation_sidecar(relative) {
+        return true;
+    }
     let pieces: Vec<_> = relative.split('/').collect();
     pieces.len() == 3
         && pieces[0] == "books"
@@ -513,6 +537,9 @@ impl Graph {
         // Idempotence is based on the immutable identity's initial file bytes.
         let digest = Sha256::digest(format!("{format}:{source_sha256}").as_bytes());
         let id = Uuid::from_bytes(digest[..16].try_into().unwrap()).to_string();
+        // Validate the portable pair and union histories before changing the
+        // destination, including when restoring a missing original.
+        let annotations = self.prepare_adjacent_annotations(source, &id, &format, &source_sha256)?;
         let manifest = self.book_path(&format!("books/{id}/book.json"))?;
         if manifest.exists() {
             let existing = self.read_book_metadata(&id)?;
@@ -529,6 +556,7 @@ impl Graph {
                 }
                 Err(error) => return Err(error),
             }
+            self.import_adjacent_annotations(&id, annotations)?;
             self.index_original_book(&id)?;
             return self.book_info(&id);
         }
@@ -564,6 +592,7 @@ impl Graph {
             created_at: Utc::now().to_rfc3339(),
         };
         crate::fsutil::atomic_write(&manifest, &serde_json::to_vec_pretty(&metadata)?)?;
+        self.import_adjacent_annotations(&id, annotations)?;
         self.index_original_book(&id)?;
         self.book_info(&id)
     }
@@ -582,6 +611,9 @@ impl Graph {
                 .db
                 .list_pages_by_file_path_prefix(&format!("books/{id}/"))?
             {
+                if page.properties["book-annotation"] == true {
+                    continue;
+                }
                 if let Some(path) = page.file_path {
                     self.deindex_file(&self.root_dir.join(path))?;
                 }
@@ -745,6 +777,9 @@ impl Graph {
                 Err(CoreError::Io(ref error)) if error.kind()==std::io::ErrorKind::NotFound=>{},
                 Err(error)=>errors.push(format!("{id}: {error}")),
             }
+            if let Err(error) = self.reconcile_annotation_sidecars() {
+                errors.push(error.to_string());
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -783,6 +818,7 @@ impl Graph {
             format: metadata.format,
             file_path: metadata.file_path,
             source_sha256: hash,
+            source_available: true,
             reading_location,
             indexing_warning: page.properties["book-indexing-warning"]
                 .as_str()
@@ -899,6 +935,7 @@ impl Graph {
             created_at: metadata.created_at,
             updated_at: metadata.updated_at,
             status: if attached { "attached" } else { "orphaned" },
+            conflicts: Vec::new(),
         })
     }
 
@@ -938,18 +975,15 @@ impl Graph {
                 }
             }
         }
-        Ok(())
+        self.reconcile_annotation_sidecars()
     }
 
     pub fn book_notes_list(&self, book_id: &str) -> Result<Vec<BookNote>> {
         let _operation = self.source_operations.lock();
         valid_id(book_id)?;
         let directory = self.book_path(&format!("pages/Reading Notes/Books/{book_id}"))?;
-        if !directory.exists() {
-            return Ok(Vec::new());
-        }
-        let mut notes = Vec::new();
-        for entry in fs::read_dir(directory)? {
+        let mut notes = self.sidecar_notes_list(book_id)?;
+        for entry in if directory.exists() { Some(fs::read_dir(directory)?) } else { None }.into_iter().flatten() {
             let path = entry?.path();
             if !crate::fsutil::is_authoritative_markdown(Path::new(&path.file_name().unwrap_or_default())) {
                 continue;
@@ -959,6 +993,9 @@ impl Graph {
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| error("Invalid note filename"))?;
             self.index_file(&path)?;
+            if notes.iter().any(|note| note.id == note_id) {
+                return Err(error("Legacy and JSON-LD annotations share an identity; both files preserved"));
+            }
             notes.push(self.read_book_note(book_id, note_id)?);
         }
         notes.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
@@ -978,6 +1015,9 @@ impl Graph {
     ) -> Result<BookNote> {
         let _operation = self.source_operations.lock();
         let path = self.note_path(book_id, note_id)?;
+        if !path.exists() {
+            return self.sidecar_note_save(book_id, note_id, expected_revision, body, quote, locator, source_sha256);
+        }
         let existing_path: Option<Option<String>> = self
             .db
             .conn()?
@@ -1075,8 +1115,9 @@ impl Graph {
         if let Some(expected) = expected {
             let displaced =
                 super::reading_note_replace::replace_preserving_displaced(path, &stage)?;
-            let actual = hash_bytes(&bounded_read(&displaced, MAX_NOTE_BYTES)?);
-            if actual != expected {
+            let actual = bounded_read(&displaced, annotations::MAX_SIDECAR_BYTES)
+                .map(|bytes| hash_bytes(&bytes));
+            if actual.as_deref().ok() != Some(expected) {
                 // Keep both versions if an external writer wins even this recovery race.
                 if fs::read(path)? == source.as_bytes() {
                     let recovery = super::reading_note_replace::replace_preserving_displaced(
@@ -1113,6 +1154,9 @@ impl Graph {
     ) -> Result<()> {
         let _operation = self.source_operations.lock();
         let path = self.note_path(book_id, note_id)?;
+        if !path.exists() {
+            return self.sidecar_note_delete(book_id, note_id, expected_revision);
+        }
         let note = self.read_book_note(book_id, note_id)?;
         if note.revision != expected_revision {
             return Err(error("Annotation changed; reload before deleting"));

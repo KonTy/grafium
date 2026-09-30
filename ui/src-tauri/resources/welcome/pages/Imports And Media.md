@@ -2,13 +2,23 @@ Bring in material when you have a reason to use it. This graph ships only Markdo
 
 ## Books and documents
 
-**Import books** offers two modes. **Original book (read and annotate)** copies
+**Import books** keeps **Convert to editable Markdown** unchecked by default. This copies
 EPUB, PDF, FB2, MOBI, or AZW3 into the graph and keeps the source unchanged.
-Open it under **Books**, add companion Markdown notes, and use extracted text
+Open it under **Books**, add notes in one adjacent JSON-LD file (`1.epub` →
+`1.jsonld`), and use extracted text
 for graph search and AI. Indexing limitations are reported; DRM-protected
 ebooks are not supported.
 
-**Editable Markdown (convert)** retains the existing conversion workflow.
+To carry annotations to another graph, copy the original and its matching
+Grafium JSON-LD file together, then import the book. For `1.epub`, its companion
+must be `1.jsonld`. Valid pairs retain their notes and revision histories;
+reimport combines histories without overwriting local edits or resurrecting
+deleted notes. Invalid or mismatched companions are rejected before import
+writes. Generic JSON-LD from another reader is not guaranteed compatible.
+Referenced note media is not bundled into the sidecar; preserve those files and
+their paths relative to the imported book folder separately.
+
+Check **Convert to editable Markdown** to use the existing conversion workflow.
 Folder import scans supported books recursively, creates editable pages under
 `Books/`, extracts referenced media when available, and leaves the originals
 outside the graph. EPUB, PDF, HTML, Markdown, TXT, and FB2 are supported directly;

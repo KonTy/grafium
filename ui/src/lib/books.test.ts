@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { BOOK_RENDERER_VERSION, compatibleBookLocation, isBookLocation, isOriginalBookPage, selectionForBook, type BookInfo } from "./books";
+import { BOOK_RENDERER_VERSION, compatibleBookLocation, isBookLocation, isOriginalBookPage, selectionForBook, jumpToBookNote, isBookAnnotationPage, bookAnnotationTarget, type BookInfo, type BookNote } from "./books";
 import { BOOK_FRAME_SANDBOX, readerFrameURL, readReaderMessage, sanitizeBookDocument } from "./bookReaderSecurity";
+import { assetBaseDirFor } from "./markdown";
+import { readingNoteRelativePath, renderReadingNoteMarkdown } from "./readingNotes";
 import type { Page } from "./api";
 
 const book: BookInfo = { id: "book", pageId: "page", title: "Book", format: "epub", filePath: "assets/book.epub",
@@ -12,6 +14,20 @@ describe("original book boundaries", () => {
     expect(isOriginalBookPage(page)).toBe(true);
     expect(isOriginalBookPage({ ...page, properties: { "book-id": "book" } })).toBe(false);
   });
+  it("routes only explicit virtual annotation pages and rejects malformed references without treating them as Markdown", () => {
+    const page = { properties: { "book-annotation": true, "book-note": JSON.stringify({ id: "note", bookId: "book" }) } } as unknown as Page;
+    expect(isBookAnnotationPage(page)).toBe(true);
+    expect(bookAnnotationTarget(page)).toEqual({ bookId: "book", noteId: "note" });
+    expect(bookAnnotationTarget({ ...page, properties: { "book-annotation": true,
+      "book-note-id": "direct-note", "book-note-book-page-id": "direct-book" } }))
+      .toEqual({ bookId: "direct-book", noteId: "direct-note" });
+    expect(bookAnnotationTarget({ ...page, properties: { "book-note": page.properties["book-note"] } })).toBeNull();
+    for (const metadata of ["invalid", "null", "{}", '{"id":"note","bookId":false}']) {
+      const broken = { ...page, properties: { ...page.properties, "book-note": metadata } };
+      expect(isBookAnnotationPage(broken)).toBe(true);
+      expect(bookAnnotationTarget(broken)).toBeNull();
+    }
+  });
   it("guards finite normalized unrotated PDF rectangles and one-based pages", () => {
     expect(isBookLocation({ kind: "pdf", page: 1, rects: [{ x: .1, y: .2, width: .3, height: .4 }] })).toBe(true);
     for (const page of [0, -1, 1.2, Infinity]) expect(isBookLocation({ kind: "pdf", page })).toBe(false);
@@ -21,10 +37,30 @@ describe("original book boundaries", () => {
   it("never applies a selection to another graph, source, page, or renderer", () => {
     const selection = { graphPath: "/a", bookId: book.id, pageId: book.pageId, sourceSha256: "hash", quote: "passage", locator };
     expect(selectionForBook(selection, "/a", book)).toEqual(selection);
+    expect(selectionForBook(selection, "/a", { ...book, sourceAvailable: false })).toBeNull();
     expect(selectionForBook(selection, "/b", book)).toBeNull();
     for (const key of ["bookId", "pageId", "sourceSha256"]) expect(selectionForBook({ ...selection, [key]: "other" }, "/a", book)).toBeNull();
     expect(compatibleBookLocation(book, { ...locator, rendererVersion: "old" })).toBe(false);
     expect(compatibleBookLocation(book, { kind: "pdf", page: 1 })).toBe(false);
+  });
+  it("does not choose one conflicting attachment for a passage jump", () => {
+    const candidate = { body: "Note", quote: "Quote", locator, sourceSha256: "hash", updatedAt: "", deleted: false };
+    const note: BookNote = { id: "note", notePageId: "note-page", filePath: "books/book.jsonld",
+      body: "", quote: "", revision: "heads", createdAt: "", updatedAt: "",
+      bookId: book.id, sourceSha256: "hash", status: "attached", locator,
+      conflicts: [{ ...candidate, revision: "first" }, { ...candidate, revision: "second" }] };
+    expect(() => jumpToBookNote("/graph", book, note)).toThrow("passage is unavailable");
+  });
+  it("previews adjacent annotation media from the book folder without changing legacy Markdown paths", () => {
+    for (const [path, expected] of [
+      ["/graph/books/1.jsonld", "books"],
+      ["/graph/pages/Reading Notes/Books/old.md", "pages/Reading%20Notes/Books"],
+    ]) {
+      const base = assetBaseDirFor(readingNoteRelativePath("/graph", path));
+      const html = renderReadingNoteMarkdown("![Figure](assets/figure.png)", base);
+      expect(html).toContain(`grafium-asset://localhost/${expected}/assets/figure.png`);
+      expect(html).not.toContain("/graph/");
+    }
   });
   it("removes active markup and resource links, preserving authored prose and inline layout", () => {
     const html = sanitizeBookDocument(`<html><head><base href="https://evil.test/"><meta http-equiv="refresh" content="0;url=https://evil.test/">

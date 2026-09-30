@@ -62,9 +62,10 @@ pub fn help_get_page(context: String) -> Result<String, String> {
 mod tests {
     #[test]
     fn books_help_distinguishes_originals_from_conversion() {
-        let page = super::help_get_page("books".into()).unwrap();
-        assert!(page.contains("Original book"));
-        assert!(page.contains("Editable Markdown"));
+        let page = super::help_get_page("books".into()).unwrap().to_lowercase();
+        assert!(page.contains("original"));
+        assert!(page.contains("convert to editable markdown"));
+        assert!(page.contains("jsonld"));
         assert!(page.contains("unchanged"));
         assert!(page.contains("index"));
     }

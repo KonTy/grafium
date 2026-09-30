@@ -3,11 +3,22 @@ Grafium keeps notes as local Markdown and indexes them in SQLite for search, lin
 - `pages/` holds ordinary pages; slash namespaces map to nested folders.
 - `journals/` holds daily pages.
 - `assets/` holds shared media, including this graph's original orbit SVG.
-- `books/` holds original-format books and their portable book metadata. Their
-  extracted text is indexed without rewriting the original.
-- `pages/Reading Notes/Books/` holds companion Markdown annotations for originals.
-  Back up these notes along with the books.
+- `books/` holds original-format books, portable book metadata, and one adjacent
+  JSON-LD annotation file per book: `1.epub` → `1.jsonld`. Markdown note bodies,
+  quotes, locators, and revision history live in that file. Extracted book text
+  is indexed without rewriting the original.
+- `pages/Reading Notes/Books/` can hold older standalone Markdown annotations.
+  These remain supported and are not silently migrated. Back up them and the
+  adjacent JSON-LD files along with the books. New note media references are
+  relative to the book folder; existing Markdown references keep their meaning.
 - Graph metadata holds the index and state that does not live in plain note text.
+
+An original book and its matching Grafium JSON-LD file can be copied together
+and imported into another graph. Keep matching basenames, such as `1.epub` and
+`1.jsonld`. Import validates the pair before writing and unions valid revision
+histories on reimport; it does not replace local notes or resurrect deletions.
+Managed graph copies are named `books/<book-id>/original.<extension>` and
+`original.jsonld`.
 
 ## Pages that are not files
 
@@ -45,7 +56,7 @@ source's words. Shared tags, authored pages, favorites, and other owned state
 are not garbage-collected merely because a source stopped mentioning them.
 
 Original-book deletion removes the graph's copy, not the external file it was
-imported from. Companion Markdown notes remain and can become orphaned.
+imported from. Adjacent JSON-LD and legacy Markdown notes remain and can become orphaned.
 Likewise, deleting a source is not secure erasure of quotations you saved in
 other notes, previous Chat answers, or preserved sync-conflict copies.
 Those are separate records and require separate, explicit decisions.
@@ -66,6 +77,10 @@ copy is removed from the index, never silently restored from elsewhere.
 ## Sync to another location
 
 Grafium supports **filesystem** and **WebDAV** sync targets. Configure the target in **Settings**, where **Sync Now** lets you request a sync. The sync monitor starts with the app and can automatically sync a configured target when it becomes available. This is not continuous collaborative editing.
+
+Independent original-book notes combine during sync. Competing edits and
+deletion-versus-edit candidates stay visible in the book's **Notes** until you
+manually merge and explicitly resolve them; see [[Help - Books]].
 
 A WebDAV target involves a remote server: choose one you trust with your notes and configure its access carefully.
 

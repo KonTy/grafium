@@ -4,7 +4,7 @@
   import BookNotesPanel from "./BookNotesPanel.svelte";
   import SyncConflictResolution from "./SyncConflictResolution.svelte";
   import { getGraphInfo, getPage } from "../lib/api";
-  import { isOriginalBookPage } from "../lib/books";
+  import { isOriginalBookPage, isBookAnnotationPage, bookAnnotationTarget } from "../lib/books";
   import { assistantContextInfo } from "../lib/assistant";
   import { getSourceConversation, getAssistantConversation, type AssistantThread } from "../lib/assistantConversations";
   import { getLatestCurrentBlockAnchor, type CurrentBlockAnchor } from "../lib/currentBlockAnchor";
@@ -41,7 +41,7 @@
   let thread = $state.raw<AssistantThread | null>(null);
   let sourceError = $state("");
   let sourceReady = $state(false);
-  let resolvedSource = $state<{ id: string; originalBook: boolean } | null>(null);
+  let resolvedSource = $state<{ id: string; originalBook: boolean; isAnnotation: boolean; annotation: ReturnType<typeof bookAnnotationTarget> } | null>(null);
   const requestedConversation = $derived(conversationId ? getAssistantConversation(conversationId) : undefined);
   const sourcePageId = $derived(requestedConversation?.sourcePageId ?? (preferFocusedPageForPageScope ? askBlockAnchor?.pageId ?? pageId : pageId));
   const sourceBlockId = $derived(askBlockAnchor?.pageId === sourcePageId ? askBlockAnchor.blockId : null);
@@ -125,7 +125,7 @@
         if (id) {
           const page = await getPage({ id });
           if (disposed) return;
-          resolvedSource = { id, originalBook: isOriginalBookPage(page) };
+          resolvedSource = { id, originalBook: isOriginalBookPage(page), isAnnotation: isBookAnnotationPage(page), annotation: bookAnnotationTarget(page) };
         }
         if (requested) {
           if (requested.graphPath !== graph.path) throw new Error("Return to the original graph to open this conversation.");
@@ -164,7 +164,12 @@
     </header>
     <div class="panel-content">
       {#if activeTab === "notes"}
-        {#if (originalBook && sourcePageId === pageId) || (resolvedSource?.id === sourcePageId && resolvedSource.originalBook)}
+        {#if resolvedSource?.id === sourcePageId && resolvedSource.annotation}
+          <BookNotesPanel pageId={resolvedSource.annotation.bookId} {pageTitle}
+            focusNoteId={resolvedSource.annotation.noteId} active={visible} {onNavigate} />
+        {:else if resolvedSource?.id === sourcePageId && resolvedSource.isAnnotation}
+          <p role="alert">This annotation's book reference is unavailable. No file was changed.</p>
+        {:else if (originalBook && sourcePageId === pageId) || (resolvedSource?.id === sourcePageId && resolvedSource.originalBook)}
           <BookNotesPanel pageId={sourcePageId} {pageTitle} active={visible} {onNavigate} />
         {:else if sourcePageId !== pageId && resolvedSource?.id !== sourcePageId}
           <p role={sourceError ? "alert" : "status"}>{sourceError || "Opening reading notes..."}</p>

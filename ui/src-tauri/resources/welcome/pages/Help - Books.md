@@ -1,16 +1,28 @@
 # Books: originals and editable copies
 
 Use **Import books** (`Alt+B`) to choose a file or a folder. Folder imports scan
-subfolders. Choose the mode before importing:
+subfolders. Set **Convert to editable Markdown** before importing:
 
-- **Original book (read and annotate)** copies EPUB, FB2, MOBI, AZW3, or PDF into
+- **Unchecked (default)** copies EPUB, FB2, MOBI, AZW3, or PDF into
   the graph and opens it under **Books**. The copied source stays unchanged.
-- **Editable Markdown (convert)** uses the existing document converter and
+- **Checked** uses the existing document converter and
   creates editable pages under **Books**. The original stays outside the graph.
   Layout, images, and structure may change during conversion.
 
 Neither mode replaces books or annotations you already own. Converting material
 is a separate operation, not a prerequisite for reading an original.
+
+Original-book import also reads a matching adjacent annotation file when present:
+choose `1.epub` beside `1.jsonld` to bring both into another graph. Grafium
+validates the book identity, source fingerprint, and supported sidecar format
+before writing anything. Malformed or mismatched companions reject the import
+rather than silently losing notes. Reimporting a valid pair combines revision
+histories with existing annotations, preserving deletions and unresolved
+conflicts instead of overwriting local notes. The graph's managed copy uses
+`books/<book-id>/original.epub` and `original.jsonld` (with the appropriate book
+extension). Importing a book without a companion does not create an empty
+annotation file. The sidecar does not embed referenced media; copy that media
+separately and preserve its paths relative to the managed book folder.
 
 Original import accepts files up to **128 MiB** and checks EPUB archive expansion
 limits. The extracted index is limited to **16 MiB of text / 20,000 blocks**.
@@ -28,11 +40,48 @@ Select a passage, open the right panel's **Notes** tab, and choose
 to the whole book without a selected passage. Open a saved note's passage to
 return to its location.
 
-Book notes are separate Markdown files under `pages/Reading Notes/Books/`.
+New book notes share one adjacent JSON-LD file: `1.epub` has `1.jsonld`
+(not `1.annotations.jsonld`). Markdown note bodies, quoted text, passage
+locators, source fingerprints, and revision history live there, not in SQLite
+alone. **Open note**, search results, and annotation links open the dedicated
+book-note editor, not a generic Markdown editor for the JSON-LD file.
+**Return to book** opens the original reader. Existing standalone Markdown
+annotations remain supported in their existing locations; they are not
+silently moved, nor are their attachment paths rewritten.
 Saving a note never inserts footnotes into the original EPUB or PDF. Save before
 closing Grafium: unsaved drafts are not a backup. If a note changes externally,
 resolve the conflict instead of overwriting it. If the source changes or
 disappears, notes are preserved but their passage may be marked orphaned.
+Their indexed note pages still open even if the original book page is gone.
+When the source is unavailable, existing note bodies remain editable using
+their saved attachments. New notes, new attachments, and passage navigation
+require restoring the source. For an orphan conflict, explicitly choose a
+candidate attachment before either merging or confirming deletion; the saved
+candidate fingerprint is retained rather than guessed from a missing book.
+
+## Resolve annotation conflicts
+
+Sync combines independent notes and compatible revision histories in the
+adjacent file. Competing edits to the same note, including deletion versus an
+edit, remain distinct candidates in **Notes**. Each candidate shows its Markdown,
+quote, attachment, source fingerprint, update time, and deletion state.
+
+Compare all candidates. **Use candidate … text and attachment** starts from a
+chosen version; **attachment only** keeps your composer text. Edit or combine
+the Markdown yourself. Explicitly choose the intended attachment, **Use
+selection** from the current book, or **Whole-book note**. Then click
+**Resolve with merged note**. To keep a deletion instead, use **Resolve as
+deleted…** and confirm deletion of all reviewed candidates. The deletion record
+uses the current book with no passage attachment when available, or the
+explicitly selected candidate attachment when the original is missing;
+unsaved composer text stays
+in a new draft. Ordinary Save and
+Remove never resolve these conflicts.
+
+If another edit arrives, resolution is refused and the candidates reload.
+Your merged draft stays in this session: review the new versions and choose
+the attachment again before retrying. Navigating away does not save or discard
+that draft. The original book remains unchanged throughout.
 
 Reflowable EPUB, FB2, and MOBI books change pagination with font and window size;
 their original file is still preserved. PDF retains its page layout. Fixed-layout
@@ -73,9 +122,14 @@ See [[AI Setup And Privacy]] before sending book content to a model service.
 
 ## Files, sync, and deletion
 
-Originals and book metadata are stored under `books/` inside the graph; companion
-notes remain ordinary Markdown. Back up and sync both, not just the original
+Originals, book metadata, and adjacent `.jsonld` annotation files are stored under
+`books/` inside the graph. Back up and sync these and any legacy Markdown notes,
+not just the original
 ebook. SQLite and vectors are indexes, not the only copy of your annotations.
+JSON-LD uses Web Annotation concepts plus Grafium's revision data; it does not
+promise that every ebook reader can import the notes or preserve their locators.
+Relative media paths in new notes start beside the book; legacy Markdown
+attachment paths keep their existing interpretation.
 
 Removing an original removes its indexed source content. Companion notes are
 kept, with an unavailable source, unless you explicitly delete those notes too.

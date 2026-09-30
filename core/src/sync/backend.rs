@@ -67,7 +67,7 @@ pub trait SyncBackend: Send + Sync {
     /// Check if the remote is currently reachable/mounted.
     fn is_available(&self) -> bool;
 
-    /// List all .md files on the remote with their metadata.
+    /// List portable graph sources and supporting files with their metadata.
     fn list_files(&self) -> Result<Vec<FileMetadata>>;
 
     /// Fetch metadata for one remote file.

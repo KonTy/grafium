@@ -1275,6 +1275,8 @@ pub fn run() {
             commands::books::book_notes_list,
             commands::books::book_note_save,
             commands::books::book_note_delete,
+            commands::books::book_note_resolve,
+            commands::books::book_notes_context,
             commands::favorites::add_favorite,
             commands::favorites::remove_favorite,
             commands::favorites::list_favorites,

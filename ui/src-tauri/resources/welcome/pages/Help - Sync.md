@@ -19,7 +19,19 @@ location holding a different graph and Grafium stops with an explanation
 instead of merging or deleting. Targets are independent, so a USB drive and a
 file server never have to be connected at the same time.
 
-Grafium never resolves conflicts automatically. When a sync is running — and for
+For adjacent original-book `.jsonld` annotations, sync combines independent notes
+and compatible revisions, but never chooses between competing edits to one note.
+Open that book's **Notes** to compare every candidate, manually combine the
+Markdown, explicitly choose its attachment, and **Resolve with merged note**.
+Deletion versus an edit also needs an explicit choice; **Resolve as deleted…**
+requires confirmation. A stale choice is refused and your draft is kept while
+candidates reload. See [[Help - Books]]. For example, `1.epub` keeps its notes in
+`1.jsonld`; the original book is never rewritten.
+Sync's status reports **books have notes to merge; open Book notes** separately
+from ordinary file conflicts. This is not a request to choose one entire
+JSON-LD file over the other: both sets of note candidates are already retained.
+
+Other file conflicts are not resolved automatically. When a sync is running — and for
 a few minutes afterwards — a **Conflicts** tab appears in the right panel. It
 also comes back on its own, with a count, whenever conflicts are still
 unresolved, including after a restart. Once everything is resolved the tab goes
@@ -45,7 +57,9 @@ writing at exactly the same instant. Avoid simultaneous editing and keep backups
 
 Sync carries your notes: `pages/`, `journals/`, `knowledge/`, `assets/`, and the
 managed originals, metadata, and reading positions in `books/`.
-Companion book notes sync as Markdown. Derived reader caches do not sync.
+Adjacent JSON-LD book annotations and legacy Markdown notes both sync.
+Malformed or incompatible annotation files remain ordinary file conflicts
+instead of being silently replaced. Derived reader caches do not sync.
 It deliberately leaves everything else behind, including the search index and
 your **Chat** conversations. Chats stay on the machine they happened on — a
 transcript can quote notes the other end has no business receiving, and a

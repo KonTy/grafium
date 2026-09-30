@@ -9,7 +9,8 @@
     onClose: () => void;
     onQueued: () => void;
   } = $props();
-  let mode = $state<BookImportMode>("original");
+  let convert = $state(false);
+  const mode = $derived<BookImportMode>(convert ? "markdown" : "original");
   let sourcePath = $state("");
   let busy = $state(false);
   let error = $state("");
@@ -50,15 +51,16 @@
   <div class="book-import-dialog" role="dialog" aria-modal="true" aria-labelledby="book-import-title"
     data-help-context="books" tabindex="-1" onkeydown={dialogKeydown(close)}>
     <h2 id="book-import-title">Import books</h2>
-    <label for="book-import-mode">Import as</label>
-    <select id="book-import-mode" bind:value={mode} disabled={busy} use:autofocus>
-      <option value="original">Original book (read and annotate)</option>
-      <option value="markdown">Editable Markdown (convert)</option>
-    </select>
+    <label class="conversion">
+      <input type="checkbox" bind:checked={convert} disabled={busy} use:autofocus />
+      Convert to editable Markdown
+    </label>
     {#if mode === "original"}
       <p>Copy EPUB, FB2, MOBI, AZW3, or PDF into this graph and read it under Books.
         The original stays unchanged; extracted text is indexed for search and AI.
-        Notes are saved separately. DRM-protected ebooks are not supported.</p>
+        Notes are saved in one adjacent JSON-LD file (1.epub → 1.jsonld).
+        An existing matching Grafium annotation file is imported too.
+        DRM-protected ebooks are not supported.</p>
     {:else}
       <p>Convert supported books and documents into editable Markdown pages under Books.
         The original stays outside the graph. Conversion may change layout and formatting.</p>
@@ -87,12 +89,14 @@
   .book-import-dialog { box-sizing: border-box; width: min(540px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-primary); color: var(--text-primary); box-shadow: 0 12px 40px #0004; }
   h2 { margin: 0 0 20px; font-size: 18px; }
   label { display: block; margin: 14px 0 6px; font-size: 13px; font-weight: 600; }
-  input, select { box-sizing: border-box; width: 100%; padding: 9px; font: inherit; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 5px; }
+  input { box-sizing: border-box; width: 100%; padding: 9px; font: inherit; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); border-radius: 5px; }
+  .conversion { display: flex; align-items: center; gap: 8px; }
+  .conversion input { width: auto; }
   p { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
   button { font: inherit; font-size: 13px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--btn-bg); color: var(--text-primary); cursor: pointer; }
   button:hover:not(:disabled) { background: var(--bg-hover); }
   button:disabled { cursor: default; opacity: .55; }
-  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .source-actions, .actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .source-actions { margin-top: 8px; }
   .actions { justify-content: flex-end; margin-top: 20px; }

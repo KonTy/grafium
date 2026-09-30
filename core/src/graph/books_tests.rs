@@ -12,6 +12,20 @@ fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Graph, BookInfo) {
     (source, root, graph, info)
 }
 
+fn legacy_note(graph: &Graph, info: &BookInfo, id: &str, body: &str) -> BookNote {
+    let path = graph.note_path(&info.id, id).unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let now = Utc::now().to_rfc3339();
+    let metadata = NoteMetadata {
+        version: 1, id: id.into(), book_id: info.id.clone(),
+        source_sha256: info.source_sha256.clone(), locator: None,
+        quote: String::new(), created_at: now.clone(), updated_at: now,
+    };
+    fs::write(&path, format!("book-note:: {}\n\n{body}", serde_json::to_string(&metadata).unwrap())).unwrap();
+    graph.index_file(&path).unwrap();
+    graph.read_book_note(&info.id, id).unwrap()
+}
+
 #[test]
 fn original_text_is_searchable_without_markdown_tasks_or_flashcards() {
     let (source, root, graph, info) = fixture();
@@ -156,17 +170,7 @@ fn epub_original_uses_existing_extractor_and_rejects_unsafe_archives() {
 #[test]
 fn notes_preserve_external_body_metadata_and_validate_revisions() {
     let (_source, root, graph, info) = fixture();
-    let note = graph
-        .book_note_save(
-            &info.id,
-            &Uuid::new_v4().to_string(),
-            None,
-            "First body",
-            "",
-            None,
-            &info.source_sha256,
-        )
-        .unwrap();
+    let note = legacy_note(&graph, &info, &Uuid::new_v4().to_string(), "First body");
     let path = root.path().join(&note.file_path);
     let original = fs::read_to_string(&path).unwrap();
     fs::write(
@@ -234,7 +238,7 @@ fn original_text_blocks_are_bounded_even_for_multiline_prose() {
         .all(|block| block.content.chars().count() <= 2000));
 }
 #[test]
-fn note_index_failure_retries_and_failed_delete_preserves_the_markdown() {
+fn sidecar_index_failure_retries_and_delete_retains_tombstone() {
     let (_source, root, graph, info) = fixture();
     let id = Uuid::new_v4().to_string();
     graph.db.conn().unwrap().execute_batch(
@@ -254,7 +258,7 @@ fn note_index_failure_retries_and_failed_delete_preserves_the_markdown() {
         .is_err());
     let path = root
         .path()
-        .join(format!("pages/Reading Notes/Books/{}/{id}.md", info.id));
+        .join(format!("books/{}/original.jsonld", info.id));
     assert!(path.exists());
     graph
         .db
@@ -274,28 +278,11 @@ fn note_index_failure_retries_and_failed_delete_preserves_the_markdown() {
         )
         .unwrap();
     assert_eq!(note.note_page_id, id);
-    graph.db.conn().unwrap().execute_batch(
-        "CREATE TRIGGER fail_note_delete BEFORE DELETE ON pages
-         WHEN OLD.title LIKE 'Reading Notes/Books/%' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;"
-    ).unwrap();
-    assert!(graph
+    graph
         .book_note_delete(&info.id, &id, &note.revision)
-        .is_err());
+        .unwrap();
     assert!(path.exists());
-    assert_eq!(
-        graph.book_notes_list(&info.id).unwrap()[0].body,
-        "Durable note"
-    );
-    graph
-        .db
-        .conn()
-        .unwrap()
-        .execute_batch("DROP TRIGGER fail_note_delete")
-        .unwrap();
-    graph
-        .book_note_delete(&info.id, &id, &note.revision)
-        .unwrap();
-    assert!(!path.exists());
+    assert!(graph.book_notes_list(&info.id).unwrap().is_empty());
 }
 
 #[test]
@@ -526,7 +513,8 @@ fn annotations_are_portable_revision_checked_and_survive_original_deletion() {
     graph
         .book_note_delete(&info.id, &id, &edited.revision)
         .unwrap();
-    assert!(!root.path().join(&note.file_path).exists());
+    assert!(root.path().join(&note.file_path).exists());
+    assert!(graph.book_notes_list(&info.id).unwrap().is_empty());
     assert!(graph.db.get_page_by_id(&id).is_err());
     assert!(graph
         .db
@@ -552,7 +540,6 @@ fn external_annotation_directory_deletion_deindexes_without_touching_original() 
         .unwrap();
     let path = root.path().join(&note.file_path);
     fs::remove_file(&path).unwrap();
-    fs::remove_dir(path.parent().unwrap()).unwrap();
     graph.reconcile_book_notes().unwrap();
     assert!(graph.db.get_page_by_id(&note.note_page_id).is_err());
     assert!(graph.db.search_fts("erbium", 10).unwrap().is_empty());
@@ -701,4 +688,308 @@ fn symlink_originals_and_note_directories_are_rejected() {
     )
     .unwrap();
     assert!(graph.book_notes_list(&info.id).is_err());
+}
+
+#[test]
+fn adjacent_sidecar_is_authoritative_searchable_read_only_and_portable() {
+    let (_source, root, graph, info) = fixture();
+    let original = graph.book_read_bytes(&info.id).unwrap();
+    let first = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Gadolinium [[Notebook]]", "cobalt", None, &info.source_sha256).unwrap();
+    let second = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Europium", "", None, &info.source_sha256).unwrap();
+    assert_eq!(first.file_path, format!("books/{}/original.jsonld", info.id));
+    assert_eq!(first.file_path, second.file_path);
+    assert!(!root.path().join("pages/Reading Notes/Books").exists());
+    assert!(first.conflicts.is_empty());
+    let indexed = graph.db.get_page_by_id(&first.id).unwrap();
+    assert_eq!(indexed.properties["book-note-id"], first.id);
+    assert_eq!(indexed.properties["book-note-book-page-id"], info.id);
+    assert!(!graph.db.search_fts("Gadolinium", 10).unwrap().is_empty());
+    assert!(!graph.db.get_links_from_page(&first.id).unwrap().is_empty());
+    let block = graph.db.list_blocks_for_page(&first.id).unwrap().remove(0);
+    assert!(graph.update_block(&block.id, "overwrite", None).is_err());
+    assert!(graph.update_page_source(&first.id, "overwrite").is_err());
+    assert!(graph.delete_page(&first.id).is_err());
+    let edited = graph.book_note_save(&info.id, &first.id, Some(&first.revision),
+        "Samarium", &first.quote, None, &info.source_sha256).unwrap();
+    graph.book_note_delete(&info.id, &second.id, &second.revision).unwrap();
+    assert_eq!(graph.book_read_bytes(&info.id).unwrap(), original);
+    let sidecar = root.path().join(&first.file_path);
+    let bytes = fs::read(&sidecar).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["type"], "AnnotationPage");
+    assert_eq!(json["items"].as_array().unwrap().len(), 4);
+    assert!(json["items"].as_array().unwrap().iter().any(|r| r["grafium:deleted"] == true));
+    assert_eq!(merge_annotation_sidecars(&bytes,&bytes).unwrap(), bytes);
+    validate_annotation_sidecar(&first.file_path,&bytes).unwrap();
+    assert!(!is_annotation_sidecar("books/../original.jsonld"));
+    assert!(!is_annotation_sidecar(&format!("books/{}/original.annotations.jsonld",info.id)));
+    assert!(!is_annotation_sidecar(&format!("books/{}/original.jsonld.conflict_123",info.id)));
+
+    // A fresh index needs neither the old database nor companion Markdown.
+    let copy = tempfile::tempdir_in(".").unwrap();
+    let folder = copy.path().join(format!("books/{}",info.id));
+    fs::create_dir_all(&folder).unwrap();
+    for name in ["original.fb2","book.json","original.jsonld"] {
+        fs::copy(sidecar.parent().unwrap().join(name),folder.join(name)).unwrap();
+    }
+    let copied = Graph::open(copy.path()).unwrap();
+    copied.reindex_all().unwrap();
+    let notes = copied.book_notes_list(&info.id).unwrap();
+    assert_eq!(notes.len(),1);
+    assert_eq!(notes[0].body,"Samarium");
+    assert_eq!(notes[0].revision,edited.revision);
+    assert!(!copied.db.search_fts("Samarium",10).unwrap().is_empty());
+    copied.delete_page(&info.id).unwrap();
+    copied.reindex_all().unwrap();
+    assert_eq!(copied.book_notes_list(&info.id).unwrap()[0].status,"orphaned");
+}
+
+#[test]
+fn sidecar_concurrent_edits_deletes_and_resolutions_preserve_every_head() {
+    let (_source, root, graph, info) = fixture();
+    let note = graph.book_note_save(&info.id,&Uuid::new_v4().to_string(),None,
+        "Initial","",None,&info.source_sha256).unwrap();
+    let path = root.path().join(&note.file_path);
+    let base = fs::read(&path).unwrap();
+    let left_note = graph.book_note_save(&info.id,&note.id,Some(&note.revision),
+        "Left","",None,&info.source_sha256).unwrap();
+    let left = fs::read(&path).unwrap();
+    fs::write(&path,&base).unwrap();
+    graph.book_note_save(&info.id,&note.id,Some(&note.revision),
+        "Right","",None,&info.source_sha256).unwrap();
+    let right = fs::read(&path).unwrap();
+    let merged = merge_annotation_sidecars(&left,&right).unwrap();
+    assert_eq!(merge_annotation_sidecars(&right,&left).unwrap(),merged);
+    assert_eq!(merge_annotation_sidecars(&merged,&left).unwrap(),merged);
+    fs::write(&path,&merged).unwrap();
+    let conflict = graph.book_notes_list(&info.id).unwrap().remove(0);
+    assert_eq!(conflict.status,"conflicted");
+    assert!(conflict.body.is_empty());
+    assert_eq!(conflict.conflicts.len(),2);
+    assert_eq!(annotation_conflict_count(&merged).unwrap(),1);
+    assert!(graph.book_note_save(&info.id,&note.id,Some(&conflict.revision),
+        "Implicit winner","",None,&info.source_sha256).is_err());
+    assert!(graph.book_note_delete(&info.id,&note.id,&conflict.revision).is_err());
+    assert!(graph.book_note_resolve(&info.id,&note.id,&left_note.revision,
+        "Stale","",None,&info.source_sha256,false).is_err());
+
+    // Third offline writer deletes the common ancestor.
+    fs::write(&path,&base).unwrap();
+    graph.book_note_delete(&info.id,&note.id,&note.revision).unwrap();
+    let deletion = fs::read(&path).unwrap();
+    let three = merge_annotation_sidecars(&merged,&deletion).unwrap();
+    assert_eq!(merge_annotation_sidecars(&left,&merge_annotation_sidecars(&right,&deletion).unwrap()).unwrap(),three);
+    fs::write(&path,&three).unwrap();
+    assert!(graph.book_note_resolve(&info.id,&note.id,&conflict.revision,
+        "Missed deletion","",None,&info.source_sha256,false).is_err());
+    let conflict = graph.book_notes_list(&info.id).unwrap().remove(0);
+    assert_eq!(conflict.conflicts.len(),3);
+    assert_eq!(conflict.conflicts.iter().filter(|c|c.deleted).count(),1);
+    graph.book_note_resolve(&info.id,&note.id,&conflict.revision,
+        "Explicit merged result","",None,&info.source_sha256,false).unwrap();
+    let resolved = fs::read(&path).unwrap();
+    assert_eq!(merge_annotation_sidecars(&resolved,&three).unwrap(),resolved);
+    let note = graph.book_notes_list(&info.id).unwrap().remove(0);
+    assert!(note.conflicts.is_empty());
+    assert_eq!(note.body,"Explicit merged result");
+    graph.book_note_delete(&info.id,&note.id,&note.revision).unwrap();
+    let deleted = fs::read(&path).unwrap();
+    fs::write(&path,merge_annotation_sidecars(&deleted,&base).unwrap()).unwrap();
+    assert!(graph.book_notes_list(&info.id).unwrap().is_empty());
+
+    // An explicit delete resolution also consumes every concurrent candidate.
+    fs::write(&path,&three).unwrap();
+    let conflict = graph.book_notes_list(&info.id).unwrap().remove(0);
+    graph.book_note_resolve(&info.id,&note.id,&conflict.revision,
+        "User chose deletion","",None,&info.source_sha256,true).unwrap();
+    let deleted_resolution = fs::read(&path).unwrap();
+    assert_eq!(merge_annotation_sidecars(&deleted_resolution,&three).unwrap(),deleted_resolution);
+    assert!(graph.book_notes_list(&info.id).unwrap().is_empty());
+}
+
+#[test]
+fn independent_sidecar_additions_union_and_corruption_is_never_overwritten() {
+    let (_source, root, graph, info) = fixture();
+    let first = graph.book_note_save(&info.id,&Uuid::new_v4().to_string(),None,
+        "One","",None,&info.source_sha256).unwrap();
+    let path = root.path().join(&first.file_path);
+    let left = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    graph.reconcile_book_notes().unwrap();
+    graph.book_note_save(&info.id,&Uuid::new_v4().to_string(),None,
+        "Two","",None,&info.source_sha256).unwrap();
+    let right = fs::read(&path).unwrap();
+    let merged = merge_annotation_sidecars(&left,&right).unwrap();
+    fs::write(&path,&merged).unwrap();
+    assert_eq!(graph.book_notes_list(&info.id).unwrap().len(),2);
+    let mut duplicate: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    duplicate["items"][0]["body"]["value"] = serde_json::json!("Different payload");
+    assert!(merge_annotation_sidecars(&left,&serde_json::to_vec(&duplicate).unwrap()).is_err());
+    let mut wrong_book: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    wrong_book["grafium:bookId"] = serde_json::json!(format!("urn:uuid:{}",Uuid::new_v4()));
+    assert!(merge_annotation_sidecars(&left,&serde_json::to_vec(&wrong_book).unwrap()).is_err());
+    let mut cyclic: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    cyclic["items"][0]["grafium:parents"] = serde_json::json!([cyclic["items"][0]["id"].clone()]);
+    assert!(merge_annotation_sidecars(&left,&serde_json::to_vec(&cyclic).unwrap()).is_err());
+    let mut missing: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    missing["items"][0]["grafium:parents"] = serde_json::json!([format!("urn:uuid:{}",Uuid::new_v4())]);
+    assert!(merge_annotation_sidecars(&left,&serde_json::to_vec(&missing).unwrap()).is_err());
+    let mut future: serde_json::Value = serde_json::from_slice(&left).unwrap();
+    future["grafium:version"] = serde_json::json!(99);
+    for bytes in [b"not JSON".to_vec(),serde_json::to_vec(&future).unwrap()] {
+        fs::write(&path,&bytes).unwrap();
+        assert!(graph.book_notes_list(&info.id).is_err());
+        assert!(graph.book_note_save(&info.id,&first.id,Some(&first.revision),
+            "Overwrite","",None,&info.source_sha256).is_err());
+        assert!(graph.book_note_delete(&info.id,&first.id,&first.revision).is_err());
+        assert_eq!(fs::read(&path).unwrap(),bytes);
+    }
+}
+
+#[test]
+fn legacy_files_coexist_unchanged_and_sidecar_watcher_reindexes_notes() {
+    let (_source, root, graph, info) = fixture();
+    let old = legacy_note(&graph,&info,&Uuid::new_v4().to_string(),"Legacy terbium");
+    let legacy_path = root.path().join(&old.file_path);
+    let legacy_bytes = fs::read(&legacy_path).unwrap();
+    let note = graph.book_note_save(&info.id,&Uuid::new_v4().to_string(),None,
+        "Modern thulium","",None,&info.source_sha256).unwrap();
+    let path = root.path().join(&note.file_path);
+    graph.reindex_all().unwrap();
+    assert_eq!(graph.book_notes_list(&info.id).unwrap().len(),2);
+    assert_eq!(fs::read(&legacy_path).unwrap(),legacy_bytes);
+    let before = fs::read(&path).unwrap();
+    graph.book_note_save(&info.id,&note.id,Some(&note.revision),
+        "Watcher lutetium","",None,&info.source_sha256).unwrap();
+    let after = fs::read(&path).unwrap();
+    fs::write(&path,&before).unwrap();
+    graph.reconcile_book_notes().unwrap();
+    fs::write(&path,&after).unwrap();
+    let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path.clone());
+    assert!(crate::source_events::should_process_event(&event,&graph.pages_dir,&graph.journals_dir,&graph.knowledge_dir));
+    crate::source_events::reconcile_watched_paths(&graph,&HashSet::from([path.clone()]),false).unwrap();
+    assert!(!graph.db.search_fts("lutetium",10).unwrap().is_empty());
+    assert!(graph.db.search_fts("thulium",10).unwrap().is_empty());
+    let current = graph.book_notes_list(&info.id).unwrap().into_iter().find(|n|n.id==note.id).unwrap();
+    graph.book_note_delete(&info.id,&note.id,&current.revision).unwrap();
+    assert_eq!(fs::read(&legacy_path).unwrap(),legacy_bytes);
+    assert_eq!(graph.book_notes_list(&info.id).unwrap().len(),1);
+    let changed = graph.book_note_save(&info.id,&old.id,Some(&old.revision),
+        "Edited legacy","",None,&info.source_sha256).unwrap();
+    assert!(changed.file_path.ends_with(".md"));
+    assert!(graph.book_notes_list(&info.id).unwrap()[0].conflicts.is_empty());
+}
+
+#[test]
+fn importing_copied_original_and_adjacent_sidecar_preserves_and_unions_history() {
+    let (source, root, graph, info) = fixture();
+    let note = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Portable annotation", "", None, &info.source_sha256).unwrap();
+    let external = source.path().join("Exported.fb2");
+    fs::copy(root.path().join(&info.file_path), &external).unwrap();
+    fs::copy(root.path().join(&note.file_path), external.with_extension("jsonld")).unwrap();
+    let copy = tempfile::tempdir_in(".").unwrap();
+    let copied = Graph::open(copy.path()).unwrap();
+    let imported = copied.import_original_book(&external).unwrap();
+    assert_eq!(imported.id, info.id);
+    let notes = copied.book_notes_list(&info.id).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].body, "Portable annotation");
+    assert_eq!(notes[0].revision, note.revision);
+
+    graph.book_note_save(&info.id, &note.id, Some(&note.revision),
+        "Exported edit", "", None, &info.source_sha256).unwrap();
+    copied.book_note_save(&info.id, &note.id, Some(&note.revision),
+        "Local edit", "", None, &info.source_sha256).unwrap();
+    fs::copy(root.path().join(&note.file_path), external.with_extension("jsonld")).unwrap();
+    copied.import_original_book(&external).unwrap();
+    let conflict = copied.book_notes_list(&info.id).unwrap().remove(0);
+    assert_eq!(conflict.conflicts.len(), 2);
+    let sidecar = copy.path().join(&note.file_path);
+    let merged = fs::read(&sidecar).unwrap();
+    copied.import_original_book(&external).unwrap();
+    assert_eq!(fs::read(&sidecar).unwrap(), merged);
+    copied.book_note_resolve(&info.id, &note.id, &conflict.revision, "", "", None,
+        &info.source_sha256, true).unwrap();
+    copied.import_original_book(&external).unwrap();
+    assert!(copied.book_notes_list(&info.id).unwrap().is_empty());
+    assert_eq!(copied.book_read_bytes(&info.id).unwrap(), graph.book_read_bytes(&info.id).unwrap());
+}
+
+#[test]
+fn adjacent_import_rejects_corruption_identity_and_hash_mismatch_before_writing() {
+    let (source, root, graph, info) = fixture();
+    let note = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Keep original annotations", "", None, &info.source_sha256).unwrap();
+    let external = source.path().join("Synthetic.fb2");
+    let sidecar = external.with_extension("jsonld");
+    let original = fs::read(root.path().join(&note.file_path)).unwrap();
+    let mut wrong_hash: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    wrong_hash["items"][0]["target"]["grafium:sourceSha256"] = serde_json::json!("f".repeat(64));
+    let mut wrong_book: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    let other_id = Uuid::new_v4();
+    wrong_book["grafium:bookId"] = serde_json::json!(format!("urn:uuid:{other_id}"));
+    wrong_book["id"] = serde_json::json!(format!("urn:uuid:{other_id}:annotations"));
+    for bytes in [b"{corrupt".to_vec(), serde_json::to_vec(&wrong_hash).unwrap(),
+        serde_json::to_vec(&wrong_book).unwrap()] {
+        fs::write(&sidecar, &bytes).unwrap();
+        let empty = tempfile::tempdir_in(".").unwrap();
+        let destination = Graph::open(empty.path()).unwrap();
+        assert!(destination.import_original_book(&external).is_err());
+        assert_eq!(fs::read_dir(empty.path().join("books")).unwrap().count(), 0);
+        assert_eq!(fs::read(&sidecar).unwrap(), bytes);
+        assert!(graph.import_original_book(&external).is_err());
+        assert_eq!(fs::read(root.path().join(&note.file_path)).unwrap(), original);
+    }
+    fs::remove_file(root.path().join(&info.file_path)).unwrap();
+    assert!(graph.import_original_book(&external).is_err());
+    assert!(!root.path().join(&info.file_path).exists());
+    assert_eq!(graph.book_notes_list(&info.id).unwrap()[0].status, "orphaned");
+}
+
+#[test]
+fn synthetic_non_epub_cfi_is_custom_locator_not_an_original_resource_fragment() {
+    let (_source, root, graph, info) = fixture();
+    let location = BookLocation::Epub {
+        cfi: "epubcfi(/6/2!/4/2:0)".into(), renderer_version: "foliate-js".into(),
+    };
+    let note = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Note", "author's cobalt", Some(location.clone()), &info.source_sha256).unwrap();
+    let bytes = fs::read(root.path().join(&note.file_path)).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let target = &doc["items"][0]["target"];
+    assert_eq!(target["grafium:locator"], serde_json::to_value(location).unwrap());
+    assert_eq!(target["selector"].as_array().unwrap().len(), 1);
+    assert_eq!(target["selector"][0]["type"], "TextQuoteSelector");
+    validate_annotation_sidecar(&note.file_path, &bytes).unwrap();
+}
+
+#[test]
+fn annotation_context_survives_missing_original_and_deleted_manifest() {
+    let (source, root, graph, info) = fixture();
+    let note = graph.book_note_save(&info.id, &Uuid::new_v4().to_string(), None,
+        "Orphan annotation", "cobalt", None, &info.source_sha256).unwrap();
+    let attached = graph.book_notes_context(&info.id).unwrap();
+    assert!(attached.source_available);
+    assert_eq!(attached.source_sha256, info.source_sha256);
+    fs::remove_file(root.path().join(&info.file_path)).unwrap();
+    let missing = graph.book_notes_context(&info.id).unwrap();
+    assert!(!missing.source_available);
+    assert_eq!(missing.title, info.title);
+    assert_eq!(missing.source_sha256, info.source_sha256);
+    assert!(missing.indexing_warning.unwrap().contains("unavailable"));
+    graph.import_original_book(&source.path().join("Synthetic.fb2")).unwrap();
+    graph.delete_page(&info.id).unwrap();
+    graph.reindex_all().unwrap();
+    let orphan = graph.book_notes_context(&info.id).unwrap();
+    assert!(!orphan.source_available);
+    assert_eq!(orphan.id, info.id);
+    assert_eq!(orphan.format, "fb2");
+    assert_eq!(orphan.file_path, info.file_path);
+    assert_eq!(orphan.source_sha256, info.source_sha256);
+    graph.book_note_save(&info.id, &note.id, Some(&note.revision),
+        "Still editable", &note.quote, note.locator, &note.source_sha256).unwrap();
+    assert_eq!(graph.book_notes_list(&info.id).unwrap()[0].body, "Still editable");
 }

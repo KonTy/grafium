@@ -30,7 +30,10 @@ describe("book import modes", () => {
   });
 
   it("defaults to originals and clearly separates supported reader and conversion formats", () => {
-    expect(dialog).toContain('$state<BookImportMode>("original")');
+    expect(dialog).toContain('$state(false)');
+    expect(dialog).toContain('type="checkbox"');
+    expect(dialog).toContain('Convert to editable Markdown');
+    expect(dialog).not.toContain("<select");
     expect(dialog).toContain('data-help-context="books"');
     expect(ORIGINAL_BOOK_EXTENSIONS).toEqual(["epub", "fb2", "mobi", "azw3", "pdf"]);
     expect(CONVERTIBLE_BOOK_EXTENSIONS).toContain("docx");

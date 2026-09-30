@@ -40,8 +40,14 @@ fn completion_payload_never_hides_errors_or_deletions() {
     let mut result = SyncResult::failed("Reconcile failed");
     result.deleted_local.push("pages/deleted.md".into());
     result.deleted_remote.push("books/deleted.pdf".into());
+    result
+        .annotation_conflicts
+        .push("books/book/original.jsonld".into());
+    result.merged.push("books/book/original.jsonld".into());
     let payload = completion_payload("synthetic", &result);
     assert_eq!(payload["errors"], 1);
     assert_eq!(payload["deleted_local"], 1);
     assert_eq!(payload["deleted_remote"], 1);
+    assert_eq!(payload["annotation_conflicts"], 1);
+    assert_eq!(payload["merged"], 1);
 }

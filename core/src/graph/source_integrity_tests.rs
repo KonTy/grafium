@@ -461,27 +461,31 @@ fn referenced_originals_and_notes_restore_their_retired_identities() -> Result<(
     assert_eq!(graph.db.get_backlinks(&book.page_id)?.len(),1);
     assert_eq!(graph.import_original_book(&source)?.page_id, book.page_id);
     assert_eq!(graph.db.get_backlinks(&book.page_id)?.len(),1);
-    graph.book_note_delete(&book.id, &note.id, &note.revision)?;
+    // A missing file retires only the rebuildable index. Restoring the same
+    // authoritative sidecar must restore its identities and incoming links.
+    let sidecar_path = graph.root_dir.join(&note.file_path);
+    let sidecar = fs::read(&sidecar_path)?;
+    fs::remove_file(&sidecar_path)?;
+    graph.reconcile_book_notes()?;
     assert!(graph
         .db
         .get_page_by_id(&note.note_page_id)?
         .file_path
         .is_none());
     assert_eq!(graph.db.get_backlinks(&note.note_page_id)?.len(),1);
-    assert_eq!(
-        graph
-            .book_note_save(
-                &book.id,
-                &note.id,
-                None,
-                "Restored note",
-                "",
-                None,
-                &book.source_sha256
-            )?
-            .note_page_id,
-        note.note_page_id
-    );
+    fs::write(&sidecar_path, &sidecar)?;
+    graph.reconcile_book_notes()?;
+    assert_eq!(graph.book_notes_list(&book.id)?[0].note_page_id, note.note_page_id);
+    assert_eq!(graph.db.get_backlinks(&note.note_page_id)?.len(),1);
+    // API deletion is different: its persistent tombstone must reject stale
+    // creates instead of silently resurrecting the deleted annotation.
+    graph.book_note_delete(&book.id, &note.id, &note.revision)?;
+    let deleted = fs::read(&sidecar_path)?;
+    assert!(graph.book_note_save(
+        &book.id, &note.id, None, "Restored note", "", None, &book.source_sha256
+    ).is_err());
+    assert_eq!(fs::read(&sidecar_path)?, deleted);
+    assert!(graph.db.get_page_by_id(&note.note_page_id)?.file_path.is_none());
     assert_eq!(graph.db.get_backlinks(&note.note_page_id)?.len(),1);
     assert_eq!(
         fs::read(graph.root_dir.join(reader.file_path.unwrap()))?,

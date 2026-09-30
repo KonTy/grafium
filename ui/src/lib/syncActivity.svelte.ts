@@ -26,7 +26,7 @@ export const RECENT_SYNC_WINDOW_MS = 5 * 60 * 1000;
 export const syncActivity = $state({
   /** Sync runs currently in flight. A counter, because targets sync independently. */
   running: 0,
-  /** Unresolved conflicts as of the last refresh, across all targets. */
+  /** File-level conflicts only. Annotation candidates are reviewed in Book notes. */
   conflictCount: 0,
   /** Epoch ms of the most recent sync completion, or null if none observed yet. */
   lastCompletedAt: null as number | null,

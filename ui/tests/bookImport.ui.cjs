@@ -32,7 +32,8 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
     await page.keyboard.press("Alt+b");
     const dialog = page.getByRole("dialog", { name: "Import books" });
     await dialog.waitFor();
-    assert.equal(await dialog.getByLabel("Import as").inputValue(), "original");
+    assert.equal(await dialog.getByRole("checkbox", { name: "Convert to editable Markdown" }).isChecked(), false);
+    assert.equal(await dialog.locator("select").count(), 0);
     await dialog.getByLabel("Book file or folder").fill("/synthetic/book.epub");
     await dialog.getByRole("button", { name: "Add to Books", exact: true }).click();
     await dialog.getByRole("alert").filter({ hasText: "Synthetic graph is read-only" }).waitFor();
@@ -49,7 +50,7 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
 
     await page.keyboard.press("Alt+b");
     await dialog.waitFor();
-    await dialog.getByLabel("Import as").selectOption("markdown");
+    await dialog.getByRole("checkbox", { name: "Convert to editable Markdown" }).check();
     await dialog.getByLabel("Book file or folder").fill("/synthetic/books");
     await dialog.getByRole("button", { name: "Convert and import", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });

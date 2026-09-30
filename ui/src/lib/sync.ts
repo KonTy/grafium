@@ -14,10 +14,28 @@ export interface SyncResult {
   pushed: string[];
   pulled: string[];
   conflicts: string[];
+  /** Adjacent annotation files combined without selecting a conflicting note head. */
+  merged?: string[];
+  /** Books with unresolved annotation heads, not file-level local/remote conflicts. */
+  annotation_conflicts?: string[];
   deleted_remote: string[];
   deleted_local: string[];
   errors: string[];
 }
+export interface SyncCompleted {
+  target_name: string;
+  pushed: number;
+  pulled: number;
+  conflicts: number;
+  merged?: number;
+  annotation_conflicts?: number;
+  deleted_local?: number;
+  deleted_remote?: number;
+  errors?: number;
+}
+
+const annotationMergeNotice = (count: number) =>
+  `${count} ${count === 1 ? "book has" : "books have"} notes to merge; open Book notes`;
 
 export interface SyncConflict {
   target_id: string;
@@ -92,7 +110,9 @@ export function summarizeSyncResult(result: SyncResult): string {
   const parts: string[] = [];
   if (result.pushed.length) parts.push(`↑ ${result.pushed.length} pushed`);
   if (result.pulled.length) parts.push(`↓ ${result.pulled.length} pulled`);
+  if (result.merged?.length) parts.push(`↔ ${result.merged.length} annotation files merged`);
   if (result.conflicts.length) parts.push(`⚡ ${result.conflicts.length} conflicts`);
+  if (result.annotation_conflicts?.length) parts.push(annotationMergeNotice(new Set(result.annotation_conflicts).size));
   if (result.deleted_remote.length) parts.push(`🗑 ${result.deleted_remote.length} deleted remote`);
   if (result.deleted_local.length) parts.push(`🗑 ${result.deleted_local.length} deleted local`);
   if (result.errors.length) parts.push(`❌ ${result.errors.length} errors`);
@@ -101,48 +121,47 @@ export function summarizeSyncResult(result: SyncResult): string {
 
 
 export async function initSyncMonitor(): Promise<UnlistenFn> {
-  const unlistenAvailable = await listen<{ target_id: string; target_name: string }>(
-    "sync-target-available",
-    (event) => {
-      showToast(`Sync target connected: ${event.payload.target_name}`, "info");
-    }
-  );
+  const unlisteners: UnlistenFn[] = [];
+  try {
+    unlisteners.push(await listen<{ target_id: string; target_name: string }>(
+      "sync-target-available",
+      (event) => {
+        showToast(`Sync target connected: ${event.payload.target_name}`, "info");
+      }
+    ));
 
-  const unlistenCompleted = await listen<{
-    target_name: string;
-    pushed: number;
-    pulled: number;
-    conflicts: number;
-    deleted_local?: number;
-    deleted_remote?: number;
-    errors?: number;
-  }>("sync-completed", (event) => {
-    const { target_name, pushed, pulled, conflicts, deleted_local = 0, deleted_remote = 0, errors = 0 } = event.payload;
-    const parts: string[] = [];
-    if (pushed) parts.push(`↑ ${pushed} pushed`);
-    if (pulled) parts.push(`↓ ${pulled} pulled`);
-    if (conflicts) parts.push(`⚡ ${conflicts} conflicts`);
-    if (deleted_local) parts.push(`🗑 ${deleted_local} deleted local`);
-    if (deleted_remote) parts.push(`🗑 ${deleted_remote} deleted remote`);
-    if (errors) parts.push(`❌ ${errors} errors`);
-    const summary = parts.length ? parts.join(", ") : "Everything in sync";
+    unlisteners.push(await listen<SyncCompleted>("sync-completed", (event) => {
+      const { target_name, pushed, pulled, conflicts, merged = 0, annotation_conflicts = 0,
+        deleted_local = 0, deleted_remote = 0, errors = 0 } = event.payload;
+      const parts: string[] = [];
+      if (pushed) parts.push(`↑ ${pushed} pushed`);
+      if (pulled) parts.push(`↓ ${pulled} pulled`);
+      if (merged) parts.push(`↔ ${merged} annotation files merged`);
+      if (conflicts) parts.push(`⚡ ${conflicts} conflicts`);
+      if (annotation_conflicts) parts.push(annotationMergeNotice(annotation_conflicts));
+      if (deleted_local) parts.push(`🗑 ${deleted_local} deleted local`);
+      if (deleted_remote) parts.push(`🗑 ${deleted_remote} deleted remote`);
+      if (errors) parts.push(`❌ ${errors} errors`);
+      const summary = parts.length ? parts.join(", ") : "Everything in sync";
 
-    showToast(
-      `Sync complete (${target_name}): ${summary}`,
-      conflicts > 0 || errors > 0 ? "error" : "success"
-    );
-  });
+      showToast(
+        `Sync complete (${target_name}): ${summary}`,
+        conflicts > 0 || errors > 0 ? "error" : annotation_conflicts > 0 ? "info" : "success"
+      );
+    }));
 
-  const unlistenError = await listen<{ target_name: string; error: string }>(
-    "sync-error",
-    (event) => {
-      showToast(`Auto-sync failed (${event.payload.target_name}): ${event.payload.error}`, "error");
-    }
-  );
+    unlisteners.push(await listen<{ target_name: string; error: string }>(
+      "sync-error",
+      (event) => {
+        showToast(`Auto-sync failed (${event.payload.target_name}): ${event.payload.error}`, "error");
+      }
+    ));
+  } catch (error) {
+    for (const unlisten of unlisteners) unlisten();
+    throw error;
+  }
 
   return () => {
-    unlistenAvailable();
-    unlistenCompleted();
-    unlistenError();
+    for (const unlisten of unlisteners) unlisten();
   };
 }

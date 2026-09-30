@@ -109,7 +109,7 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Callouts | Insert styled notes, warnings, tips, and other supported callout templates. |
 | Selection actions | Turn selected bullets into TODOs or tasks back into bullets, and make links from selected text. |
 | Reading notes | Open the right panel's **Notes** tab, select a passage and choose **Use selection**, then write and **Save note**. Notes can also apply to the whole current page, book, or journal day. No AI is required. |
-| Markdown-source annotations | Notes on Markdown pages are footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Original-format books instead keep companion Markdown notes. Ambiguous or missing passages remain flagged instead of being guessed. |
+| Markdown-source annotations | Notes on Markdown pages are footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Original-format books instead keep one adjacent JSON-LD annotation file. Ambiguous or missing passages remain flagged instead of being guessed. |
 
 Reading-note drafts survive navigation during the app session, but **Save note**
 is required before closing the app. For Markdown sources, saving adds reference
@@ -172,15 +172,30 @@ guessed into a different block.
 | Study topics | Use tags to study one topic or mix cards from across your notes. |
 | Rich flashcards | Include Markdown, mathematics, images, audio, and video in cards. |
 | Anki import | Bring `.apkg` decks and supported media into Grafium's note-and-card workflow. |
-| Original-book library | Copy EPUB, PDF, FB2, MOBI, or AZW3 into the graph, read the original under Books, and keep highlights and notes in companion Markdown files. Source files remain unchanged. Extracted text feeds graph search and configured AI indexing; extraction warnings are shown explicitly. |
-| Optional book conversion | Choose **Editable Markdown (convert)** to retain the existing folder/file conversion workflow for EPUB, PDF, HTML, Markdown, text, FB2, and additional formats through optional Calibre tools. Existing converted books are not migrated. |
+| Original-book library | Copy EPUB, PDF, FB2, MOBI, or AZW3 into the graph, read the original under Books, and keep notes with Markdown bodies in one adjacent JSON-LD file (`1.epub` → `1.jsonld`). Source files remain unchanged. Extracted text feeds graph search and configured AI indexing; extraction warnings are shown explicitly. |
+| Optional book conversion | Check **Convert to editable Markdown** to retain the existing folder/file conversion workflow for EPUB, PDF, HTML, Markdown, text, FB2, and additional formats through optional Calibre tools. Unchecked imports preserve originals. Existing converted books are not migrated. |
 | Reading structure | Keep paragraphs nested under detected chapter and section headings, with referenced media where extraction is supported. |
 | Scanned PDF OCR | Extract text locally with Poppler and Tesseract; optional ImageMagick helps extract figure regions. |
 | Audio/video processing | Turn supported media sources into notes with transcripts; local transcription needs its model and supporting tools. |
 | Background jobs | Follow longer-running imports and processing, cancel supported running jobs, and clear finished entries without blocking the editor. |
 
-Original-format books and metadata live under `books/`; their companion notes
-live under `pages/Reading Notes/Books/`. Back up both. The reader remembers your
+Original-format books, metadata, and adjacent `.jsonld` notes live under `books/`.
+Legacy standalone Markdown notes under `pages/Reading Notes/Books/` remain
+supported without automatic migration. Back up all of them. New annotation media
+paths are relative to the book folder; legacy Markdown paths keep their meaning.
+Copy a book with its matching Grafium sidecar (`1.epub` and `1.jsonld`) and import
+the book to carry annotations into another graph. Import validates the pair
+before writing; reimport combines histories while preserving local edits,
+deletions, and unresolved conflicts. Managed graph copies use
+`books/<book-id>/original.<extension>` and `original.jsonld`.
+Referenced note media must also be preserved separately at its relative paths.
+Sync combines independent notes, but competing edits or deletion-versus-edit
+candidates are shown distinctly for manual review in **Notes**. Choose a
+candidate attachment (or a current selection/whole-book note), edit the merged
+Markdown, and explicitly **Resolve with merged note**, or confirm deletion.
+Stale resolution reloads candidates without discarding your session draft.
+The JSON-LD uses Web Annotation concepts plus Grafium revision data; universal
+cross-reader compatibility is not promised. The reader remembers your
 place and saved notes can return to a passage. DRM-protected ebooks and
 fixed-layout annotation parity are not supported. MOBI/AZW3 text indexing may
 require Calibre; scanned PDF text search requires OCR. Reading an original does

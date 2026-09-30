@@ -37,8 +37,10 @@ pub struct SyncResult {
     pub pulled: Vec<String>,
     /// Files where conflicts were detected (both sides changed)
     pub conflicts: Vec<String>,
-    /// Files that were auto-merged (both sides changed, no overlapping edits)
+    /// Files merged without discarding either side's annotation history.
     pub merged: Vec<String>,
+    /// Annotation sidecars whose concurrent note revisions need a user merge.
+    pub annotation_conflicts: Vec<String>,
     /// Files deleted from remote (local deletion propagated)
     pub deleted_remote: Vec<String>,
     /// Files deleted locally (remote deletion propagated)
@@ -54,6 +56,7 @@ impl SyncResult {
             pulled: Vec::new(),
             conflicts: Vec::new(),
             merged: Vec::new(),
+            annotation_conflicts: Vec::new(),
             deleted_remote: Vec::new(),
             deleted_local: Vec::new(),
             errors: Vec::new(),
@@ -72,6 +75,7 @@ impl SyncResult {
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
             && self.merged.is_empty()
+            && self.annotation_conflicts.is_empty()
             && self.deleted_remote.is_empty()
             && self.deleted_local.is_empty()
             && self.errors.is_empty()
@@ -79,11 +83,12 @@ impl SyncResult {
 
     pub fn summary(&self) -> String {
         format!(
-            "↑{} ↓{} 🔀{} ⚡{} 🗑{}+{} ❌{}",
+            "↑{} ↓{} 🔀{} ⚡{} notes:{} 🗑{}+{} ❌{}",
             self.pushed.len(),
             self.pulled.len(),
             self.merged.len(),
             self.conflicts.len(),
+            self.annotation_conflicts.len(),
             self.deleted_remote.len(),
             self.deleted_local.len(),
             self.errors.len(),
@@ -406,6 +411,25 @@ impl SyncEngine {
             let remote_exists = remote_files.contains_key(&rel_path);
             let was_synced = state.files.contains_key(&rel_path);
 
+            if crate::graph::books::is_annotation_sidecar(&rel_path) {
+                if local_exists && remote_exists {
+                    self.sync_annotation_sidecar(
+                        backend,
+                        &rel_path,
+                        &fence,
+                        &mut state,
+                        &mut result,
+                    );
+                    continue;
+                }
+                // Deleting an entire sidecar is not a per-note tombstone. Keep
+                // its surviving history until the user explicitly chooses.
+                if was_synced && local_exists != remote_exists {
+                    self.handle_conflict(backend, &rel_path, None, &mut state, &mut result);
+                    continue;
+                }
+            }
+
             if state.unresolved_conflict(&rel_path).is_some()
                 && self.handle_pending_resolution(
                     backend,
@@ -500,6 +524,112 @@ impl SyncEngine {
         state.save(&self.state_path)?;
 
         Ok(result)
+    }
+
+    fn sync_annotation_sidecar(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        fence: &SourceMutationFence,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) {
+        let operation = (|| -> Result<()> {
+            let local = {
+                let _source = fence.lock();
+                self.local_snapshot(rel_path)?
+            };
+            let remote = backend.read_snapshot(rel_path)?;
+            let (Some(local_bytes), Some(remote_bytes)) =
+                (local.content.as_deref(), remote.content.as_deref())
+            else {
+                let _source = fence.lock();
+                return self.record_conflict(
+                    rel_path,
+                    &self.local_snapshot(rel_path)?,
+                    &remote,
+                    state,
+                    result,
+                );
+            };
+            let merged = (|| -> Result<Vec<u8>> {
+                crate::graph::books::validate_annotation_sidecar(rel_path, local_bytes)?;
+                crate::graph::books::validate_annotation_sidecar(rel_path, remote_bytes)?;
+                crate::graph::books::merge_annotation_sidecars(local_bytes, remote_bytes)
+            })();
+            let merged = match merged {
+                Ok(merged) => merged,
+                Err(error) => {
+                    let _source = fence.lock();
+                    self.record_conflict(
+                        rel_path,
+                        &self.local_snapshot(rel_path)?,
+                        &remote,
+                        state,
+                        result,
+                    )?;
+                    return Err(error);
+                }
+            };
+            let conflict_count = crate::graph::books::annotation_conflict_count(&merged)?;
+            {
+                let _source = fence.lock();
+                if !fence.is_current() || self.local_snapshot(rel_path)?.hash() != local.hash() {
+                    self.record_conflict(
+                        rel_path,
+                        &self.local_snapshot(rel_path)?,
+                        &remote,
+                        state,
+                        result,
+                    )?;
+                    return Err(revision_changed(rel_path));
+                }
+                if local_bytes != merged || remote_bytes != merged {
+                    self.preserve_copy(rel_path, &local)?;
+                    self.preserve_copy(rel_path, &remote)?;
+                }
+            }
+            if remote_bytes != merged {
+                if let Err(error) = backend.publish_if_unchanged(rel_path, &remote, Some(&merged)) {
+                    self.reopen_after_remote_change(backend, rel_path, &remote, state, result)?;
+                    return Err(error);
+                }
+            }
+            let _source = fence.lock();
+            if !fence.is_current() || self.local_snapshot(rel_path)?.hash() != local.hash() {
+                self.record_conflict(
+                    rel_path,
+                    &self.local_snapshot(rel_path)?,
+                    &FileSnapshot {
+                        content: Some(merged),
+                        ..FileSnapshot::missing()
+                    },
+                    state,
+                    result,
+                )?;
+                return Err(revision_changed(rel_path));
+            }
+            if local_bytes != merged {
+                let path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
+                crate::fsutil::atomic_write(&path, &merged)?;
+            }
+            let local_meta = self.current_local_metadata(rel_path)?;
+            self.save_base(rel_path, &merged);
+            state.record_sync(rel_path, &compute_hash(&merged), Some(&local_meta), None);
+            state.resolve_unresolved_conflict(rel_path);
+            if local_bytes != merged || remote_bytes != merged {
+                result.merged.push(rel_path.into());
+            }
+            if conflict_count > 0 {
+                result.annotation_conflicts.push(rel_path.into());
+            }
+            Ok(())
+        })();
+        if let Err(error) = operation {
+            result
+                .errors
+                .push(format!("Merge annotations {rel_path}: {error}"));
+        }
     }
 
     /// Both local and remote exist and were previously synced — check for changes.
@@ -702,6 +832,12 @@ impl SyncEngine {
             let Some(content) = local.content.as_deref() else {
                 return Err(revision_changed(rel_path));
             };
+            let annotation_conflicts = if crate::graph::books::is_annotation_sidecar(rel_path) {
+                crate::graph::books::validate_annotation_sidecar(rel_path, content)?;
+                crate::graph::books::annotation_conflict_count(content)?
+            } else {
+                0
+            };
             let remote = backend.read_snapshot(rel_path)?;
             let baseline = state.files.get(rel_path).map(|r| r.hash_at_sync.clone());
             if remote.hash() != baseline && remote.hash() != local.hash() {
@@ -750,6 +886,9 @@ impl SyncEngine {
             // edit that arrived while uploading.
             let local_meta = local_files.get(rel_path).cloned();
             state.record_sync(rel_path, &compute_hash(content), local_meta.as_ref(), None);
+            if annotation_conflicts > 0 {
+                result.annotation_conflicts.push(rel_path.into());
+            }
             Ok(())
         })();
         if let Err(e) = operation {
@@ -786,12 +925,21 @@ impl SyncEngine {
             }
             self.preserve_copy(rel_path, &current)?;
             let content = remote.content.as_deref().unwrap();
+            let annotation_conflicts = if crate::graph::books::is_annotation_sidecar(rel_path) {
+                crate::graph::books::validate_annotation_sidecar(rel_path, content)?;
+                crate::graph::books::annotation_conflict_count(content)?
+            } else {
+                0
+            };
             let local_path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
             crate::fsutil::atomic_write(&local_path, content)?;
             self.save_base(rel_path, content);
             let local_meta = self.current_local_metadata(rel_path)?;
             state.record_sync(rel_path, &compute_hash(content), Some(&local_meta), None);
             result.pulled.push(rel_path.to_string());
+            if annotation_conflicts > 0 {
+                result.annotation_conflicts.push(rel_path.into());
+            }
             Ok(())
         })();
         if let Err(e) = operation {

@@ -495,6 +495,7 @@ mod tests {
                 "book.json",
                 "position.json",
                 "original.azw3",
+                "original.jsonld",
                 ".extract-cache/converted.epub",
                 "cached.txt",
             ] {
@@ -510,7 +511,7 @@ mod tests {
                     .parse_propfind_response(&xml, "books")
                     .unwrap()
                     .len(),
-                3
+                4
             );
         }
     }

@@ -36,13 +36,19 @@ describe("contextual help", () => {
   it("routes original books and the import chooser to source-preservation guidance", async () => {
     expect(isHelpContext("books")).toBe(true);
     expect(helpPageTitle("books")).toBe("Help - Books");
-    expect(appSource).toContain('isOriginalBookPage(currentPage) ? "books" : "editor"');
+    expect(appSource).toContain('isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)');
+    expect(appSource).toContain('name="book annotation editor"');
     expect(importDialog).toContain('data-help-context="books"');
     expect(helpIndex).toContain("[[Help - Books]]");
-    expect(booksHelp).toContain("Original book");
-    expect(booksHelp).toContain("Editable Markdown");
+    expect(booksHelp).toContain("Unchecked (default)");
+    expect(booksHelp).toContain("Convert to editable Markdown");
+    expect(booksHelp).toContain("`1.jsonld`");
+    expect(booksHelp).toContain("Resolve with merged note");
+    expect(booksHelp).toContain("deletion versus an");
     expect(booksHelp).toContain("source stays unchanged");
     expect(booksHelp).toContain("rebuildable index");
+    expect(booksHelp).toContain("Reimporting a valid pair combines revision");
+    expect(booksHelp).toContain("Malformed or mismatched companions reject the import");
     await loadHelpPage("books");
     expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "books" });
   });

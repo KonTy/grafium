@@ -4,7 +4,7 @@
   import type { Page } from "../lib/api";
   import {
     bookOpen, bookReadBytes, bookSavePosition, bookNotesList, bookNoteChanges,
-    bookSelection, bookJump, compatibleBookLocation, selectionForBook,
+    bookSelection, bookJump, compatibleBookLocation, selectionForBook, hasBookNoteConflicts,
     type BookInfo, type BookLocation,
   } from "../lib/books";
   import { BOOK_FRAME_SANDBOX, readerFrameURL, readReaderMessage, type BookTocItem } from "../lib/bookReaderSecurity";
@@ -187,7 +187,7 @@
     let cancelled = false;
     void bookNotesList(graph, source.id).then(notes => {
       if (!cancelled) sendCommand("notes", { locations: notes.filter(n =>
-        n.status === "attached" && n.sourceSha256 === source.sourceSha256 && n.locator
+        !hasBookNoteConflicts(n) && n.status === "attached" && n.sourceSha256 === source.sourceSha256 && n.locator
         && compatibleBookLocation(source, n.locator)).map(n => n.locator) });
     }).catch(e => {
       if (!cancelled) {

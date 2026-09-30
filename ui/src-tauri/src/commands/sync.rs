@@ -354,8 +354,10 @@ pub(crate) fn reconcile_sync_outcome(
 pub(crate) fn completion_payload(target_name: &str, result: &SyncResult) -> serde_json::Value {
     serde_json::json!({
         "target_name": target_name, "pushed": result.pushed.len(), "pulled": result.pulled.len(),
+        "merged": result.merged.len(),
         "conflicts": result.conflicts.len(), "deleted_local": result.deleted_local.len(),
         "deleted_remote": result.deleted_remote.len(), "errors": result.errors.len(),
+        "annotation_conflicts": result.annotation_conflicts.len(),
     })
 }
 
@@ -476,7 +478,10 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
             "target_name": "all targets",
             "pushed": pushed,
             "pulled": pulled,
+            "merged": results.iter().map(|r| r.merged.len()).sum::<usize>(),
             "conflicts": conflicts,
+            "annotation_conflicts": results.iter().flat_map(|r| &r.annotation_conflicts)
+                .collect::<std::collections::HashSet<_>>().len(),
             "deleted_local": results.iter().map(|r| r.deleted_local.len()).sum::<usize>(),
             "deleted_remote": results.iter().map(|r| r.deleted_remote.len()).sum::<usize>(),
             "errors": results.iter().map(|r| r.errors.len()).sum::<usize>(),

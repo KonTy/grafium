@@ -81,6 +81,11 @@ pub async fn book_open(app: AppHandle, state: State<'_, AppState>, graph_path: S
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn book_notes_context(app: AppHandle, state: State<'_, AppState>, graph_path: String, book_id: String) -> Result<BookInfo, String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_notes_context(&book_id)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn book_read_bytes(app: AppHandle, state: State<'_, AppState>, graph_path: String, book_id: String) -> Result<tauri::ipc::Response, String> {
     let bytes = with_book_graph(&app, &state, &graph_path, move |g| g.book_read_bytes(&book_id)).await?;
     Ok(tauri::ipc::Response::new(bytes))
@@ -103,6 +108,14 @@ pub async fn book_note_save(app: AppHandle, state: State<'_, AppState>, graph_pa
     quote: String, locator: Option<BookLocation>, source_sha256: String) -> Result<BookNote, String> {
     with_book_graph(&app, &state, &graph_path, move |g| g.book_note_save(
         &book_id, &note_id, expected_revision.as_deref(), &body, &quote, locator, &source_sha256)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_note_resolve(app: AppHandle, state: State<'_, AppState>, graph_path: String,
+    book_id: String, note_id: String, expected_revision: String, body: String,
+    quote: String, locator: Option<BookLocation>, source_sha256: String, delete: bool) -> Result<(), String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_note_resolve(
+        &book_id, &note_id, &expected_revision, &body, &quote, locator, &source_sha256, delete)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

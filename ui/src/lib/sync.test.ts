@@ -4,6 +4,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: ipc.listen }));
 vi.mock("./toast.svelte", () => ({ showToast: ipc.toast }));
 import { summarizeSyncResult, getSyncConflictState, resolveSyncConflict, initSyncMonitor, type SyncResult } from "./sync";
+import settings from "../components/Settings.svelte?raw";
+import app from "../App.svelte?raw";
 
 afterEach(() => {
   ipc.invoke.mockReset();
@@ -54,6 +56,26 @@ describe("summarizeSyncResult", () => {
       unlisten();
       expect(stop).toHaveBeenCalledTimes(3);
     });
+    it("notifies annotation conflicts separately and directs manual review to Book notes", async () => {
+      const handlers = new Map<string, (event: unknown) => void>();
+      ipc.listen.mockImplementation(async (name, handler) => { handlers.set(name, handler); return vi.fn(); });
+      const unlisten = await initSyncMonitor();
+      handlers.get("sync-completed")!({ payload: {
+        target_name: "USB", pushed: 0, pulled: 0, conflicts: 0, annotation_conflicts: 2, merged: 3,
+      } });
+      expect(ipc.toast).toHaveBeenCalledWith(
+        expect.stringContaining("2 books have notes to merge; open Book notes"), "info");
+      expect(ipc.toast.mock.calls[0][0]).toContain("3 annotation files merged");
+      expect(ipc.toast.mock.calls[0][0]).not.toContain("2 conflicts");
+      expect(ipc.invoke).not.toHaveBeenCalled();
+      unlisten();
+    });
+    it("cleans up partial monitor subscriptions when registration fails", async () => {
+      const stop = vi.fn();
+      ipc.listen.mockResolvedValueOnce(stop).mockRejectedValueOnce(new Error("event unavailable"));
+      await expect(initSyncMonitor()).rejects.toThrow("event unavailable");
+      expect(stop).toHaveBeenCalledOnce();
+    });
   });
 
   it("counts pushed and pulled files", () => {
@@ -64,6 +86,21 @@ describe("summarizeSyncResult", () => {
   it("never hides conflicts", () => {
     const summary = summarizeSyncResult(result({ pushed: ["a.md"], conflicts: ["b.md"] }));
     expect(summary).toContain("1 conflicts");
+  });
+  it("does not treat annotation candidates as clean sync or file-level choices", () => {
+    const summary = summarizeSyncResult(result({ annotation_conflicts: ["books/1.jsonld", "books/2.jsonld", "books/1.jsonld"] }));
+    expect(summary).toBe("2 books have notes to merge; open Book notes");
+    expect(summary).not.toContain("Everything in sync");
+    expect(summarizeSyncResult(result({ annotation_conflicts: ["books/1.jsonld"] })))
+      .toBe("1 book has notes to merge; open Book notes");
+  });
+  it("reports compatible annotation merges even without file copies", () => {
+    expect(summarizeSyncResult(result({ merged: ["books/1.jsonld"] }))).toContain("1 annotation files merged");
+  });
+  it("shares the full result summary in Settings and wires completion notifications in App", () => {
+    expect(settings).toContain("syncMessage = summarizeSyncResult(result)");
+    expect(settings).toContain("manual merge in that book's Notes tab");
+    expect(app).toContain("[initSyncActivity, initSyncMonitor]");
   });
 
   it("never hides errors", () => {
@@ -85,6 +122,8 @@ describe("summarizeSyncResult", () => {
         pushed: ["a"],
         pulled: ["b"],
         conflicts: ["c"],
+        annotation_conflicts: ["books/1.jsonld"],
+        merged: ["books/1.jsonld"],
         deleted_remote: ["d"],
         deleted_local: ["e"],
         errors: ["f"],
@@ -94,6 +133,8 @@ describe("summarizeSyncResult", () => {
       "1 pushed",
       "1 pulled",
       "1 conflicts",
+      "1 book has notes to merge",
+      "1 annotation files merged",
       "1 deleted remote",
       "1 deleted local",
       "1 errors",
