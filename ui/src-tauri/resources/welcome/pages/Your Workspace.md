@@ -4,6 +4,10 @@ Choose the next layer only when you need it. The editor, search, journal, task d
 
 Fresh desktop installs start with **GitHub Light**; Android starts with **OLED**. Use **Settings** to choose a theme.
 
+Each theme has colorful headings, tags, and callouts, including bright reds and
+blues. Light themes use deeper shades for contrast; Matrix keeps its green-on-black
+terminal character with a livelier accent palette. See [[Help - Settings]].
+
 By default, narrow page layout leaves 15% padding on each side; you can adjust that padding, or use wide layout for the full page width. Try both on [[Writing/Formatting]].
 
 Bullet threading draws one connected path through the nested branch you are editing, without unrelated guide fragments. Parent headings stay compact and aligned with headings that have no children. Use it with [[Writing/Outline]] to see how a branch holds together.

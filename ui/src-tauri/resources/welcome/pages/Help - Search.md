@@ -1,9 +1,22 @@
 # Help - Search
 
-Use sidebar search or press **Ctrl+K** / **Cmd+K** to search pages and blocks.
-The right panel can also search references and related knowledge.
+Press **Ctrl+K** / **Cmd+K**, or use the title-bar Search button, to open
+**Search your graph**. These open the same dialog, whether the sidebars are
+expanded, collapsed, or hidden.
 
 Search page titles to navigate quickly, or search block content for exact notes.
+Use **Up/Down** to browse results, **Enter** to open one, and **Escape** to close
+the dialog. Ordinary text search needs no AI; **AI Search** adds semantic matches
+when an embedding model is configured.
+
+The left panel is for navigation, favorites, and recent pages, not a separate
+search interface. **Ctrl+B** / **Cmd+B** expands or focuses its navigation;
+press it again while focused there to collapse it. The old sidebar-search
+shortcut **Ctrl+Shift+K** / **Cmd+Shift+K** has been removed.
+
+**Ctrl+F** / **Cmd+F** focuses an existing filter in views such as All Pages,
+Graph, or Settings. Those filters narrow the current view; they do not open
+another graph-search dialog.
 
 ## Files or placeholders in All Pages
 

@@ -548,6 +548,10 @@
           Select a color theme for Grafium.
         {/if}
       </p>
+      <p class="section-desc">
+        Colorful headings, tags, and callouts use each theme's own palette:
+        vivid on dark backgrounds, deeper on light backgrounds for readability.
+      </p>
 
       <div class="theme-grid">
       <button
@@ -569,10 +573,10 @@
           class:active={currentThemeId === theme.id}
           onclick={() => selectTheme(theme.id)}
         >
-          <div class="theme-swatches">
-            <div class="swatch" style="background: {theme.colors.accent}"></div>
-            <div class="swatch" style="background: {theme.colors.bgPrimary}"></div>
-            <div class="swatch" style="background: {theme.colors.textPrimary}"></div>
+          <div class="theme-swatches palette-preview" style="background: {theme.colors.bgPrimary}" aria-hidden="true">
+            {#each [theme.colors.accentRed, theme.colors.accentBlue, theme.colors.accentGreen, theme.colors.accentYellow, theme.colors.accentPurple, theme.colors.accentMagenta] as color}
+              <div class="swatch" style="background: {color}"></div>
+            {/each}
           </div>
           <span class="theme-name">{theme.name}</span>
         </button>
@@ -980,6 +984,18 @@
     height: 24px;
     border-radius: 50%;
     border: 1px solid rgba(128, 128, 128, 0.3);
+  }
+
+  .palette-preview {
+    padding: 8px 6px;
+    border-radius: 6px;
+    gap: 3px;
+  }
+
+  .palette-preview .swatch {
+    width: 15px;
+    height: 20px;
+    border-radius: 4px;
   }
 
   .theme-name {

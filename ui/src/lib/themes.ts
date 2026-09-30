@@ -212,7 +212,7 @@ export const themes: Theme[] = [
     name: "GitHub",
     colors: {
       ...light("#ffffff", "#f6f8fa", "#d0d7de", "#1f2328", "#59636e", "#656d76", "#0969da", "#8250df", "#cf222e", "#1a7f37", "#9a6700",
-        { orange: "#bc4c00", magenta: "#a40e66", green: "#1a7f37", yellow: "#9a6700", blue: "#0969da", cyan: "#1b7c83", purple: "#8250df", red: "#cf222e" }),
+        { orange: "#bc4c00", magenta: "#a40e66", green: "#1a7f37", yellow: "#9a6700", blue: "#075ee8", cyan: "#1b7c83", purple: "#8250df", red: "#d1242f" }),
       textLink: "#0969da",
       textLinkHover: "#0550ae",
       textLinkVisited: "#8250df",
@@ -225,7 +225,7 @@ export const themes: Theme[] = [
     name: "GitHub Dark",
     colors: {
       ...dark("#0d1117", "#161b22", "#21262d", "#e6edf3", "#c9d1d9", "#8b949e", "#4493f8", "#f778ba", "#f85149", "#3fb950", "#d29922",
-        { orange: "#e09b39", magenta: "#f778ba", green: "#3fb950", yellow: "#d29922", blue: "#58a6ff", cyan: "#39c5cf", purple: "#bc8cff", red: "#f85149" }),
+        { orange: "#e09b39", magenta: "#f778ba", green: "#3fb950", yellow: "#d29922", blue: "#4da3ff", cyan: "#39c5cf", purple: "#bc8cff", red: "#ff6257" }),
       textLink: "#4493f8",
       textLinkHover: "#79c0ff",
       textLinkVisited: "#bc8cff",
@@ -236,65 +236,65 @@ export const themes: Theme[] = [
     id: "catppuccin",
     name: "Catppuccin",
     colors: dark("#1e1e2e", "#45475a", "#585b70", "#cdd6f4", "#cdd6f4", "#585b70", "#89b4fa", "#f5c2e7", "#f38ba8", "#a6e3a1", "#f9e2af",
-      { orange: "#fab387", magenta: "#f5c2e7", green: "#a6e3a1", yellow: "#f9e2af", blue: "#92bafa", cyan: "#94e2d5", purple: "#cda9f7", red: "#f5a0b8" }),
+      { orange: "#fab387", magenta: "#f5c2e7", green: "#a6e3a1", yellow: "#f9e2af", blue: "#8fbdff", cyan: "#94e2d5", purple: "#cda9f7", red: "#ff9f95" }),
   },
   {
     id: "catppuccin-latte",
     name: "Catppuccin Latte",
     colors: light("#eff1f5", "#dce0e8", "#ccd0da", "#4c4f69", "#6c6f85", "#acb0be", "#1e66f5", "#ea76cb", "#d20f39", "#40a02b", "#df8e1d",
-      { orange: "#ab3f01", magenta: "#b31b8a", green: "#2d701e", yellow: "#895712", blue: "#0b54e6", cyan: "#116c72", purple: "#7e29ee", red: "#c30e35" }),
+      { orange: "#ab3f01", magenta: "#b31b8a", green: "#2d701e", yellow: "#895712", blue: "#1454ec", cyan: "#116c72", purple: "#7e29ee", red: "#c0112e" }),
   },
   {
     id: "tokyo-night",
     name: "Tokyo Night",
     colors: dark("#1a1b26", "#24283b", "#32344a", "#a9b1d6", "#acb0d0", "#444b6a", "#7aa2f7", "#ad8ee6", "#f7768e", "#9ece6a", "#e0af68",
-      { orange: "#ff9e64", magenta: "#c4a9f9", green: "#9ece6a", yellow: "#e0af68", blue: "#7aa2f7", cyan: "#7dcfff", purple: "#a081d9", red: "#f7768e" }),
+      { orange: "#ff9e64", magenta: "#c4a9f9", green: "#9ece6a", yellow: "#e0af68", blue: "#6c9dff", cyan: "#7dcfff", purple: "#a081d9", red: "#ff6576" }),
   },
   {
     id: "ethereal",
     name: "Ethereal",
     colors: dark("#060B1E", "#141932", "#1e244a", "#ffcead", "#ffcead", "#6d7db6", "#7d82d9", "#c89dc1", "#ED5B5A", "#92a593", "#E9BB4F",
-      { orange: "#ffb38a", magenta: "#e2a3d6", green: "#a7d3a9", yellow: "#e9bb4f", blue: "#8f95e6", cyan: "#7fd6e0", purple: "#b6a3e6", red: "#ed5b5a" }),
+      { orange: "#ffb38a", magenta: "#e2a3d6", green: "#a7d3a9", yellow: "#e9bb4f", blue: "#669fff", cyan: "#7fd6e0", purple: "#b6a3e6", red: "#ff5c63" }),
   },
   {
     id: "everforest",
     name: "Everforest",
     colors: dark("#2d353b", "#374145", "#475258", "#d3c6aa", "#d3c6aa", "#475258", "#7fbbb3", "#d699b6", "#e67e80", "#a7c080", "#dbbc7f",
-      { orange: "#e69a77", magenta: "#d79bb7", green: "#a7c080", yellow: "#dbbc7f", blue: "#7fbbb3", cyan: "#83c092", purple: "#b6a3da", red: "#eb9596" }),
+      { orange: "#e69a77", magenta: "#d79bb7", green: "#a7c080", yellow: "#dbbc7f", blue: "#83b8f5", cyan: "#83c092", purple: "#b6a3da", red: "#ff9291" }),
   },
   {
     id: "flexoki-light",
     name: "Flexoki Light",
     colors: light("#FFFCF0", "#E6E4D9", "#DAD8CE", "#100F0F", "#878580", "#B7B5AC", "#205EA6", "#CE5D97", "#D14D41", "#879A39", "#D0A215",
-      { orange: "#a64812", magenta: "#a63075", green: "#566c09", yellow: "#7f6001", blue: "#205ea6", cyan: "#1f6f68", purple: "#5e409d", red: "#af3029" }),
+      { orange: "#a64812", magenta: "#a63075", green: "#566c09", yellow: "#7f6001", blue: "#1b60c4", cyan: "#1f6f68", purple: "#5e409d", red: "#be2030" }),
   },
   {
     id: "gruvbox",
     name: "Gruvbox",
     colors: dark("#282828", "#3c3836", "#504945", "#d4be98", "#d4be98", "#3c3836", "#7daea3", "#d3869b", "#ea6962", "#a9b665", "#d8a657",
-      { orange: "#fe811a", magenta: "#e08bb0", green: "#b8bb26", yellow: "#fabd2f", blue: "#8bab9f", cyan: "#8ec07c", purple: "#d790a3", red: "#fc7e70" }),
+      { orange: "#fe811a", magenta: "#e08bb0", green: "#b8bb26", yellow: "#fabd2f", blue: "#80b2ff", cyan: "#8ec07c", purple: "#d790a3", red: "#ff8270" }),
   },
   {
     id: "hackerman",
     name: "Hackerman",
-    colors: dark("#0B0C16", "#181a2a", "#252840", "#ddf7ff", "#ddf7ff", "#6a6e95", "#82FB9C", "#86a7df", "#50f872", "#4fe88f", "#50f7d4",
-      { orange: "#ff9e3d", magenta: "#ff6ac1", green: "#50f872", yellow: "#ffd93d", blue: "#5bc0ff", cyan: "#50f7d4", purple: "#b48dff", red: "#ff5f6d" }),
+    colors: dark("#0B0C16", "#181a2a", "#252840", "#ddf7ff", "#ddf7ff", "#6a6e95", "#82FB9C", "#86a7df", "#ff525f", "#4fe88f", "#50f7d4",
+      { orange: "#ff9e3d", magenta: "#ff6ac1", green: "#50f872", yellow: "#ffd93d", blue: "#40b6ff", cyan: "#50f7d4", purple: "#b48dff", red: "#ff525f" }),
   },
   {
     id: "kanagawa",
     name: "Kanagawa",
     colors: dark("#1f1f28", "#2a2a37", "#363646", "#dcd7ba", "#dcd7ba", "#727169", "#7e9cd8", "#957fb8", "#c34043", "#76946a", "#c0a36e",
-      { orange: "#ffa066", magenta: "#d27e99", green: "#98bb6c", yellow: "#e6c384", blue: "#7e9cd8", cyan: "#7fb4ca", purple: "#9e8abe", red: "#e56e7b" }),
+      { orange: "#ffa066", magenta: "#d27e99", green: "#98bb6c", yellow: "#e6c384", blue: "#74a4ff", cyan: "#7fb4ca", purple: "#9e8abe", red: "#ff727f" }),
   },
   {
-    // Monochrome phosphor-green terminal look. Uses a plain system programmer
+    // Phosphor-green terminal with vivid, multi-hue accents. Uses a plain system programmer
     // font stack instead of Syphi's display font, scanline overlay and glow
     // effects, keeping big real graphs crisp and cheaper to repaint.
     id: "matrix",
     name: "Matrix",
     colors: {
-      ...dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#FF9900", "#FF9900", "#00FF00", "#FFCC33",
-        { orange: "#efae58", magenta: "#f383c6", green: "#5def74", yellow: "#efd65d", blue: "#6bc3f0", cyan: "#5defca", purple: "#caa4f6", red: "#f27878" }),
+      ...dark("#000000", "#0D1A0D", "#1A2E1A", "#00FF00", "#66FF66", "#55BB55", "#00FF00", "#42adff", "#ff525f", "#00FF00", "#FFCC33",
+        { orange: "#ff9f32", magenta: "#ff62c4", green: "#39f574", yellow: "#ffdc4a", blue: "#42adff", cyan: "#27e5dc", purple: "#c191ff", red: "#ff525f" }),
       fx: "terminal",
     },
   },
@@ -302,37 +302,37 @@ export const themes: Theme[] = [
     id: "amber",
     name: "Amber",
     colors: dark("#070604", "#15110A", "#231B10", "#FFB347", "#E4A147", "#9B6D2A", "#8FC5FF", "#A9D1FF", "#FF8F1F", "#FFD166", "#FFCF66",
-      { orange: "#ffb347", magenta: "#ff9ec4", green: "#b6d97a", yellow: "#ffd166", blue: "#8fc5ff", cyan: "#86e0d1", purple: "#cda4fe", red: "#ff8f6b" }),
+      { orange: "#ffb347", magenta: "#ff9ec4", green: "#b6d97a", yellow: "#ffd166", blue: "#54a5ff", cyan: "#86e0d1", purple: "#cda4fe", red: "#ff6960" }),
   },
   {
     id: "matte-black",
     name: "Matte Black",
     colors: dark("#121212", "#1e1e1e", "#333333", "#bebebe", "#ffffff", "#8a8a8d", "#e68e0d", "#D35F5F", "#D35F5F", "#FFC107", "#b91c1c",
-      { orange: "#f0973a", magenta: "#e06fae", green: "#7bc47f", yellow: "#ffc107", blue: "#6fabe0", cyan: "#4bc0c0", purple: "#b083e0", red: "#e06666" }),
+      { orange: "#f0973a", magenta: "#e06fae", green: "#7bc47f", yellow: "#ffc107", blue: "#4fa3ff", cyan: "#4bc0c0", purple: "#b083e0", red: "#ff6068" }),
   },
   {
     id: "nord",
     name: "Nord",
     colors: dark("#2e3440", "#3b4252", "#4c566a", "#d8dee9", "#eceff4", "#4c566a", "#81a1c1", "#b48ead", "#bf616a", "#a3be8c", "#ebcb8b",
-      { orange: "#dba391", magenta: "#d2a1c6", green: "#a3be8c", yellow: "#ebcb8b", blue: "#98b3cd", cyan: "#88c0d0", purple: "#c4a7bf", red: "#d9a2a6" }),
+      { orange: "#dba391", magenta: "#d2a1c6", green: "#a3be8c", yellow: "#ebcb8b", blue: "#91b8ff", cyan: "#88c0d0", purple: "#c4a7bf", red: "#ff969d" }),
   },
   {
     id: "osaka-jade",
     name: "Osaka Jade",
     colors: dark("#111c18", "#1a2b22", "#23372B", "#C1C497", "#9eebb3", "#53685B", "#509475", "#D2689C", "#FF5345", "#549e6a", "#459451",
-      { orange: "#e89b5a", magenta: "#d46ea0", green: "#7bcf9a", yellow: "#d8c778", blue: "#6cb3c0", cyan: "#5fd1b0", purple: "#b79be0", red: "#ff5345" }),
+      { orange: "#e89b5a", magenta: "#d46ea0", green: "#7bcf9a", yellow: "#d8c778", blue: "#5caaff", cyan: "#5fd1b0", purple: "#b79be0", red: "#ff6559" }),
   },
   {
     id: "ristretto",
     name: "Ristretto",
     colors: dark("#2c2525", "#3d3535", "#4e4444", "#e6d9db", "#f1e5e7", "#948a8b", "#f38d70", "#a8a9eb", "#fd6883", "#adda78", "#f9cc6c",
-      { orange: "#f38d70", magenta: "#e39ac7", green: "#adda78", yellow: "#f9cc6c", blue: "#85b6da", cyan: "#85dacc", purple: "#a8a9eb", red: "#fd758e" }),
+      { orange: "#f38d70", magenta: "#e39ac7", green: "#adda78", yellow: "#f9cc6c", blue: "#75b4ff", cyan: "#85dacc", purple: "#a8a9eb", red: "#ff817f" }),
   },
   {
     id: "rose-pine",
     name: "Rosé Pine",
     colors: light("#faf4ed", "#f2e9e1", "#e4dcd4", "#575279", "#575279", "#9893a5", "#56949f", "#907aa9", "#b4637a", "#286983", "#ea9d34",
-      { orange: "#99591e", magenta: "#a3277a", green: "#527225", yellow: "#8c5f09", blue: "#286983", cyan: "#2e717d", purple: "#795c97", red: "#a14e65" }),
+      { orange: "#99591e", magenta: "#a3277a", green: "#527225", yellow: "#8c5f09", blue: "#2363c4", cyan: "#2e717d", purple: "#795c97", red: "#b52248" }),
   },
   {
     // Experimental sci-fi / matrix look: neon cyan + green on near-black,
@@ -342,7 +342,7 @@ export const themes: Theme[] = [
     name: "Syphi (Futuristic)",
     colors: {
       ...dark("#02050a", "#061018", "#0c2130", "#c8fff4", "#7ff0e0", "#3d7a72", "#00f0ff", "#39ff88", "#ff2e6b", "#39ff88", "#ffd23f",
-        { orange: "#f19f53", magenta: "#f25ca4", green: "#48f08b", yellow: "#f1ca4d", blue: "#5ab5f2", cyan: "#13dfec", purple: "#b58ef6", red: "#ef3e72" }),
+        { orange: "#f19f53", magenta: "#f25ca4", green: "#48f08b", yellow: "#f1ca4d", blue: "#409fff", cyan: "#13dfec", purple: "#b58ef6", red: "#ff4f64" }),
       fx: "syphi",
     },
   },
@@ -350,13 +350,13 @@ export const themes: Theme[] = [
     // True-black OLED theme: #000000 backgrounds mean the panel's pixels are
     // physically off (power saving + infinite contrast). Raised/overlay
     // surfaces step up to #0a0a0a / #121212 so the UI stays legibly separated
-    // rather than becoming an undifferentiated void. Accents are vibrant but
-    // slightly desaturated to avoid halation/smearing on pure black.
+    // rather than becoming an undifferentiated void. Vivid accents stay confined
+    // to meaningful highlights, with neutral body text and no added glow.
     id: "oled",
     name: "OLED Black",
     colors: {
       ...dark("#000000", "#0a0a0a", "#121212", "#f2f2f2", "#c8c8c8", "#8a8a8a", "#7bb7f0", "#f286c4", "#f07a86", "#63ee91", "#f0d775",
-        { orange: "#efac6e", magenta: "#f286c4", green: "#63ee91", yellow: "#f0d775", blue: "#7bb7f0", cyan: "#5eead4", purple: "#c9a5f5", red: "#f07a86" }),
+        { orange: "#efac6e", magenta: "#f286c4", green: "#63ee91", yellow: "#f0d775", blue: "#54aeff", cyan: "#5eead4", purple: "#c9a5f5", red: "#ff626b" }),
       // On true black the default border (a near-black raised surface) sits at
       // ~1.1:1 and is invisible, so control outlines (inputs, cards) vanish.
       // Use a dedicated mid-grey border that clears the 3:1 non-text contrast

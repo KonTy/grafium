@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderBlock, renderAssistantMarkdown } from "./markdown";
+import { getHeadingLevel } from "./blockLayout";
 import { tagColorVar } from "./tagColor";
 
 describe("markdown tag colouring", () => {
@@ -43,9 +44,33 @@ describe("markdown tag colouring", () => {
     const heading = renderBlock("# THE KABALISTIC TREE OF LIFE");
     const link = renderBlock("[THE KABALISTIC TREE OF LIFE](#the-kabalistic-tree-of-life)");
 
-    expect(heading).toContain('<h1 id="the-kabalistic-tree-of-life">');
+    expect(heading).toContain('<h1 id="the-kabalistic-tree-of-life" ');
     expect(link).toContain('href="#the-kabalistic-tree-of-life"');
     expect(link).not.toContain("external-link");
+  });
+
+  describe("theme-aware heading colours", () => {
+    for (let level = 1; level <= 6; level++) {
+      it(`uses heading-${level} in notes and sanitized assistant answers`, () => {
+        const source = `${"#".repeat(level)} A bright heading`;
+        expect(getHeadingLevel(source)).toBe(level);
+        for (const render of [renderBlock, renderAssistantMarkdown]) {
+          const container = document.createElement("div");
+          container.innerHTML = render(source);
+          const heading = container.querySelector<HTMLHeadingElement>(`h${level}`)!;
+          expect(heading.id).toBe("a-bright-heading");
+          expect(heading.style.getPropertyValue("--heading-accent")).toBe(`var(--heading-${level})`);
+          expect(heading.style.color).toBe("var(--heading-accent)");
+        }
+      });
+    }
+
+    it("does not style tags, fenced code or inline code as headings", () => {
+      for (const source of ["#tag", "####### Too many hashes", "```\n# code\n```", "`# code`"]) {
+        expect(getHeadingLevel(source)).toBe(0);
+        expect(renderBlock(source)).not.toContain("--heading-accent");
+      }
+    });
   });
 
   it("keeps [[page links]] on the page-link token (unchanged)", () => {

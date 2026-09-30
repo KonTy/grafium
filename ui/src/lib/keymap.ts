@@ -214,7 +214,6 @@ export function registerDefaultShortcuts(actions: {
   goForward: () => void;
   goBackward: () => void;
   search: () => void;
-  searchInPage: () => void;
   focusLocalSearch: () => void;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
@@ -330,10 +329,7 @@ export function registerDefaultShortcuts(actions: {
     ...pair("search-global", "Global search", "search", actions.search, [
       { binding: "mod+k", navOnly: false },
     ]),
-    ...pair("search-in-page", "Search in page", "search", actions.searchInPage, [
-      { binding: "mod+shift+k", navOnly: false },
-    ]),
-    ...pair("search-local", "Focus page search", "search", actions.focusLocalSearch, [
+    ...pair("search-local", "Focus current view's filter", "search", actions.focusLocalSearch, [
       { binding: "mod+f", navOnly: false },
     ]),
 

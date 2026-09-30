@@ -18,9 +18,13 @@ async function openSearch(browser, options = {}) {
           content: "Synthetic astronomy explains how nearby stars form clusters." };
         state.pages.push(result);
         state.blocks.push(block);
-        const test = window.__globalSearch = { calls: [], hold: false, pending: [], fail: false };
+        const test = window.__globalSearch = { calls: [], helpRequests: [], hold: false, pending: [], fail: false };
         internals.invoke = async (cmd, args = {}) => {
           if (cmd === "get_layout_preferences") return { sidebarVisible: false, wideMode: true };
+          if (cmd === "help_get_page") {
+            test.helpRequests.push(structuredClone(args));
+            return "# Search help\nUse Ctrl+K to search your graph.";
+          }
           if (cmd === "ai_health_check") {
             if (options.healthFailure) throw new Error("Synthetic model status is unavailable.");
             return {
@@ -59,6 +63,44 @@ async function openSearch(browser, options = {}) {
 }
 
 const cases = [
+  ["left sidebar keeps navigation without its own search UI or shortcut", {}, async (page) => {
+    await page.keyboard.press("Escape");
+    const sidebar = page.locator(".sidebar");
+    const noSidebarSearch = async () => {
+      assert.equal(await sidebar.locator("input, .search-container, .search-results").count(), 0);
+      assert.equal(await sidebar.getByRole("button", { name: /search/i }).count(), 0);
+      assert.equal(await dialog(page).count(), 0);
+    };
+    assert.equal(await sidebar.evaluate((node) => node.classList.contains("collapsed")), true);
+    await noSidebarSearch();
+
+    await page.keyboard.press("Control+b");
+    await page.waitForFunction(() => !document.querySelector(".sidebar").classList.contains("collapsed")
+      && document.activeElement?.matches(".sidebar .nav-item"));
+    await noSidebarSearch();
+
+    await focus(page, "b0");
+    await page.keyboard.press("Control+b");
+    await page.waitForFunction(() => document.activeElement?.matches(".sidebar .nav-item"));
+    assert.equal(await sidebar.evaluate((node) => node.classList.contains("collapsed")), false);
+    await page.keyboard.press("Control+b");
+    await page.waitForFunction(() => document.querySelector(".sidebar").classList.contains("collapsed"));
+    await noSidebarSearch();
+
+    await page.keyboard.press("Control+Shift+k");
+    await noSidebarSearch();
+    assert.deepEqual(await page.evaluate(() => window.__globalSearch.calls), []);
+    await page.keyboard.press("Control+k");
+    await input(page).waitFor();
+    assert.equal(await dialog(page).count(), 1);
+    assert.equal(await sidebar.evaluate((node) => node.classList.contains("collapsed")), true);
+  }],
+  ["search F1 opens graph-search guidance rather than the underlying editor help", {}, async (page) => {
+    await page.keyboard.press("F1");
+    await page.waitForFunction(() => window.__globalSearch.helpRequests.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__globalSearch.helpRequests), [{ context: "search" }]);
+    await page.getByRole("heading", { name: "Search help", exact: true }).waitFor();
+  }],
   ["global exact search works without AI or either sidebar and navigates by source identity", {}, async (page) => {
     assert.equal(await input(page).evaluate((node) => node === document.activeElement), true);
     assert.equal(await page.locator(".reference-panel").count(), 0);

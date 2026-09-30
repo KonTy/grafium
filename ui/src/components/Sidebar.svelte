@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { tick } from "svelte";
   import {
     pagesListCollections,
     pageSetCollection,
@@ -10,10 +9,8 @@
   import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { autofocus } from "../lib/autofocus";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, getPage, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
-  import { createSidebarSearchController, runSidebarSearch } from "../lib/sidebarSearch";
-  import type { Page, PageSummary, Block } from "../lib/api";
-  import type { SidebarSearchResult } from "../lib/sidebarSearch";
+  import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
+  import type { Page } from "../lib/api";
 
   interface Props {
     currentPage?: Page | null;
@@ -42,10 +39,6 @@
 
   let favorites: Page[] = $state([]);
   let recentPages: Page[] = $state([]);
-  let searchQuery = $state("");
-  let searchResults: SidebarSearchResult[] = $state([]);
-  let showSearch = $state(false);
-  let searchInputEl: HTMLInputElement | null = $state(null);
   /// Storage keys are scoped to the open graph: an expansion path only means
   /// something inside the graph it came from.
   let graphPath: string | null = $state(null);
@@ -170,54 +163,10 @@
     favorites = await listFavorites().catch(() => []);
   }
 
-  const searchController = createSidebarSearchController<SidebarSearchResult[]>({
-    debounceMs: 120,
-    run: runSidebarSearch,
-    apply: (_query, results) => {
-      searchResults = results;
-    },
-    clear: () => {
-      searchResults = [];
-    },
-  });
-
-  $effect(() => {
-    return () => {
-      searchController.cancel();
-    };
-  });
-
-  function handleSearchInput() {
-    searchController.submit(searchQuery);
-  }
-
-  function clearSearch(resetQuery = false) {
-    searchController.cancel();
-    if (resetQuery) {
-      searchQuery = "";
-    }
-    searchResults = [];
-  }
-
-  function handleSearchKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      showSearch = false;
-      clearSearch(true);
-    }
-  }
-
-  async function openSearch() {
-    showSearch = true;
-    await tick();
-    searchInputEl?.focus();
-    searchInputEl?.select();
-  }
-
-  // Exposed to App.svelte via `bind:this` so the Ctrl+B "focus left sidebar"
-  // hotkey can jump straight into the sidebar's own search box, regardless
-  // of whether the sidebar was already visible.
-  export function focusSearch() {
-    void openSearch();
+  export function focusNavigation() {
+    const target = rootEl?.querySelector<HTMLButtonElement>(".nav-item.active")
+      ?? rootEl?.querySelector<HTMLButtonElement>(".nav-items .nav-item");
+    target?.focus();
   }
 
   // Exposed to App.svelte: reload favorites + recent pages from disk.
@@ -239,23 +188,6 @@
     return !!rootEl && !!document.activeElement && rootEl.contains(document.activeElement);
   }
 
-  async function toggleSearch() {
-    if (collapsed) {
-      onExpand();
-      await tick();
-    }
-    if (showSearch) {
-      showSearch = false;
-      clearSearch(true);
-      return;
-    }
-    await openSearch();
-  }
-
-  function resetSearchState() {
-    clearSearch(true);
-  }
-
   function handleSidebarGraphChanged() {
     // Drop the outgoing graph's tree *synchronously*, before any await. The
     // tree is a list of page titles, and navigation resolves a title against
@@ -265,7 +197,6 @@
     // write a page into a graph it never belonged to.
     invalidateGraphBoundState();
     void loadSidebar();
-    resetSearchState();
     onGraphChanged();
   }
 
@@ -278,48 +209,8 @@
     contextMenu = null;
   }
 
-  $effect(() => {
-    const handleToggleSearch = () => {
-      toggleSearch();
-    };
-    window.addEventListener("toggle-search", handleToggleSearch);
-    return () => {
-      window.removeEventListener("toggle-search", handleToggleSearch);
-    };
-  });
-
-  // Cache page titles to avoid repeated lookups
-  const pageTitleCache = new Map<string, string>();
-
-  async function navigateToBlock(result: Block) {
-    showSearch = false;
-    clearSearch(true);
-    try {
-      let title = pageTitleCache.get(result.page_id);
-      if (!title) {
-        const page = await getPage({ id: result.page_id });
-        title = page.title;
-        pageTitleCache.set(result.page_id, title);
-      }
-      window.dispatchEvent(new CustomEvent("navigate-page", {
-        detail: {
-          pageName: title,
-          targetBlockId: result.id,
-        },
-      }));
-    } catch (e) {
-      console.error("Search navigation failed:", e);
-    }
-  }
-
   function navigateToJournal() {
     onNavigate("__journal__");
-  }
-
-  function navigateToPageResult(page: PageSummary) {
-    showSearch = false;
-    clearSearch(true);
-    onNavigate(page.title);
   }
 
 </script>
@@ -335,55 +226,14 @@
       </button>
     {:else}
       <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
-    {/if}
-    <div class="sidebar-header-actions">
-      <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)" aria-label="Search pages and blocks">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"></circle>
-          <path d="m21 21-4.35-4.35"></path>
+      <button class="sidebar-toggle" onclick={onCollapse} title="Collapse sidebar (Ctrl+B)" aria-label="Collapse sidebar">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16M16 9l-3 3 3 3" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
-      {#if !collapsed}
-        <button class="sidebar-toggle" onclick={onCollapse} title="Collapse sidebar (Ctrl+B)" aria-label="Collapse sidebar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M9 4v16M16 9l-3 3 3 3" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </button>
-      {/if}
-    </div>
+    {/if}
   </div>
-
-  {#if showSearch && !collapsed}
-    <div class="search-container">
-      <input
-        type="text"
-        class="search-input"
-        placeholder="Search pages & blocks..."
-        bind:this={searchInputEl}
-        bind:value={searchQuery}
-        oninput={handleSearchInput}
-        onkeydown={handleSearchKeydown}
-      />
-      {#if searchResults.length > 0}
-        <div class="search-results">
-          {#each searchResults as result}
-            {#if result.kind === "page"}
-              <button class="search-result-item" onclick={() => navigateToPageResult(result.page)}>
-                <span class="result-kind">Page</span>
-                <span class="result-content">{result.page.title}</span>
-              </button>
-            {:else}
-              <button class="search-result-item" onclick={() => navigateToBlock(result.block)}>
-                <span class="result-kind">Block</span>
-                <span class="result-content">{result.block.content.replace(/^[-*>\s#]+/, "").slice(0, 100) || "(empty block)"}</span>
-              </button>
-            {/if}
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   <nav class="nav-items">
     <button class="nav-item" class:active={currentView === "journal"} onclick={navigateToJournal} title="Journal" aria-label="Journal">
@@ -598,17 +448,6 @@
     margin-bottom: 12px;
   }
 
-  .sidebar-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .sidebar-header.collapsed .sidebar-header-actions {
-    flex-direction: column;
-  }
-
-  .search-toggle,
   .sidebar-toggle {
     background: none;
     border: none;
@@ -623,84 +462,9 @@
     justify-content: center;
   }
 
-  .search-toggle:hover,
   .sidebar-toggle:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
-  }
-
-  .search-container {
-    margin-bottom: 12px;
-  }
-
-  .search-input {
-    width: 100%;
-    padding: 8px 12px;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: 13px;
-    outline: none;
-  }
-
-  .search-input:focus {
-    border-color: var(--accent);
-  }
-
-  .search-results {
-    margin-top: 8px;
-    max-height: 300px;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .search-result-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    text-align: left;
-    padding: 6px 8px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .search-result-item:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .result-kind {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 38px;
-    padding: 1px 6px;
-    font-size: 10px;
-    letter-spacing: 0.2px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg-input);
-    flex-shrink: 0;
-  }
-
-  .result-content {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .nav-items {

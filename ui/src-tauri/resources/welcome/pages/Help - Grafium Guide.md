@@ -21,6 +21,9 @@ imports, themes, graphs, and navigation. On macOS, `Cmd` replaces `Ctrl`.
 Collapsing the left sidebar keeps its main navigation available as an icon rail.
 Use its top button or `Ctrl+B` / `Cmd+B` to expand it again. Zen mode is the
 only layout mode that hides the navigation chrome completely.
+`Ctrl+B` / `Cmd+B` focuses the active navigation item, not a search box.
+The left panel keeps navigation, favorites, and recent pages; use `Ctrl+K` /
+`Cmd+K` for the single graph-search dialog. See [[Help - Search]].
 
 On Android, swipe inward from the left or right edge to move back through
 Grafium's page history. If there is no earlier Grafium page, the app stays open.

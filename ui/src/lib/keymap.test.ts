@@ -23,7 +23,6 @@ function stubActions() {
     goForward: vi.fn(),
     goBackward: vi.fn(),
     search: vi.fn(),
-    searchInPage: vi.fn(),
     focusLocalSearch: vi.fn(),
     toggleSidebar: vi.fn(),
     toggleRightSidebar: vi.fn(),
@@ -88,17 +87,15 @@ describe("keymap dual-mode matching", () => {
     expect(actions.goJournal).not.toHaveBeenCalled();
   });
 
-  it("does not treat Ctrl-K as Ctrl-Shift-K", () => {
+  it("keeps Ctrl-K as the graph search shortcut and removes the old sidebar shortcut", () => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
 
     expect(keymap_manager.handleKeydown(keyEvent({ key: "k", ctrlKey: true }))).toBe(true);
     expect(actions.search).toHaveBeenCalledTimes(1);
-    expect(actions.searchInPage).not.toHaveBeenCalled();
-
-    expect(keymap_manager.handleKeydown(keyEvent({ key: "k", ctrlKey: true, shiftKey: true }))).toBe(true);
-    expect(actions.searchInPage).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "k", ctrlKey: true, shiftKey: true }))).toBe(false);
     expect(actions.search).toHaveBeenCalledTimes(1);
+    expect(keymap_manager.getShortcuts().some(({ id }) => id === "search-in-page")).toBe(false);
   });
 
   it("matches Ctrl-> / Ctrl-< via Period and Comma codes", () => {

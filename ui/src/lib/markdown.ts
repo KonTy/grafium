@@ -462,7 +462,7 @@ renderer.heading = function (
 ): string {
   const text = this.parser.parseInline(tokens);
   const slug = markdownHeadingSlug(plainTextFromHtml(text));
-  return `<h${depth} id="${escapeHtml(slug)}">${text}</h${depth}>`;
+  return `<h${depth} id="${escapeHtml(slug)}" style="--heading-accent:var(--heading-${depth});color:var(--heading-accent)">${text}</h${depth}>`;
 };
 
 export function markdownHeadingSlug(text: string): string {

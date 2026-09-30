@@ -91,6 +91,36 @@ describe("theme metadata", () => {
     expect(oled!.colors.bgPrimary.toLowerCase()).toBe("#000000");
   });
 
+  describe("vivid red and blue accents", () => {
+    for (const theme of themes) {
+      it(`${theme.id}: keeps red and blue saturated rather than grey or pastel`, () => {
+        for (const color of [theme.colors.accentRed, theme.colors.accentBlue]) {
+          const { r, g, b } = parseHex(color);
+          const max = Math.max(r, g, b) / 255;
+          const min = Math.min(r, g, b) / 255;
+          const saturation = (max - min) / (1 - Math.abs(max + min - 1));
+          expect(saturation).toBeGreaterThanOrEqual(0.65);
+        }
+        const red = parseHex(theme.colors.accentRed);
+        const blue = parseHex(theme.colors.accentBlue);
+        expect(red.r - Math.max(red.g, red.b)).toBeGreaterThanOrEqual(60);
+        expect(blue.b - Math.max(blue.r, blue.g)).toBeGreaterThanOrEqual(45);
+      });
+    }
+
+    it("preserves Matrix's green-on-black identity without green danger text", () => {
+      const c = themes.find((theme) => theme.id === "matrix")!.colors;
+      expect(c.bgPrimary).toBe("#000000");
+      expect(c.textPrimary).toBe("#00FF00");
+      expect(c.fx).toBe("terminal");
+      expect(c.danger).toBe(c.accentRed);
+      expect(c.textLink).toBe(c.accentBlue);
+      for (const surface of [c.bgPrimary, c.bgSecondary]) {
+        expect(contrastRatio(c.danger, mixSrgb(c.danger, surface, 14))).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  });
+
   it("includes GitHub Light and GitHub Dark", () => {
     const github = themes.find((t) => t.id === "github");
     const githubDark = themes.find((t) => t.id === "github-dark");
@@ -140,6 +170,13 @@ describe("callout title/background compositions meet WCAG AA", () => {
           ratio,
           `${theme.id} ${kind} callout title (${title}) on bg (${bg}) = ${ratio.toFixed(2)}:1`
         ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+        for (const [hue, headingField] of ACCENT_FIELDS) {
+          const heading = mixSrgb(c[headingField] as string, c.textPrimary, 70);
+          expect(
+            contrastRatio(heading, bg),
+            `${theme.id} ${hue} heading inside ${kind} callout`
+          ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL);
+        }
       }
     });
   }

@@ -6,6 +6,9 @@ Press **F1** while editing for quick editor help.
 - **Tab** indents; **Shift+Tab** outdents.
 - Type `/` for commands.
 - Link pages with `[[Page Title]]` and add tags such as `#project`.
+- Headings from `#` through `######` use theme-aware red, blue, purple, cyan,
+  orange, and pink. Tags and callouts also use the selected theme's palette;
+  change it in **Settings > Theme** without modifying your notes.
 - Use the right panel for references, search, and questions.
 - Pasting from a web page converts supported rich content to Markdown,
   including tables, links, formatting, lists, and images. Copying an image

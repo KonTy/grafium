@@ -15,6 +15,19 @@ older system icon cannot override it. Close and reopen the menu after an update.
 bar's **Time** button inserts. OpenStreetMap link is the default; plain
 coordinates and a device `geo:` map link are also available.
 
+## Theme and colors
+
+Open **Theme** to choose a palette. The color swatches preview its accents on
+its own background. All built-in themes use vivid reds, blues, purples, cyan,
+orange, and pink for headings, tags, and callouts, with deeper shades on light
+surfaces and brighter shades on dark surfaces so the text stays readable.
+
+Markdown heading levels use red, blue, purple, cyan, orange, and pink in order
+from H1 to H6. The colors are presentation only; your Markdown is unchanged.
+Matrix keeps its green text, black canvas, and terminal font, with colorful
+headings and highlights rather than an all-green page. OLED keeps its true-black
+background. Selecting another theme updates these colors immediately.
+
 ## AI / Knowledge Engine
 
 Open this section to configure an embedded local model, Ollama, an

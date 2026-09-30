@@ -124,7 +124,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="global-search-dialog" aria-labelledby="global-search-title"
+<dialog bind:this={dialog} class="global-search-dialog" aria-labelledby="global-search-title" data-help-context="search"
   oncancel={(event) => { event.preventDefault(); onClose(); }}
   onclick={(event) => { if (event.target === dialog) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) onClose(); } }}>
   <header><h2 id="global-search-title">Search your graph</h2><button class="close" onclick={onClose} aria-label="Close search">×</button></header>
