@@ -93,7 +93,7 @@ const DESCRIPTION_KEYS: &[&str] = &[
 
 /// Inspect catalog metadata without loading native code or tensor weights.
 pub fn inspect_metadata(path: &Path) -> Result<ModelMetadata> {
-    let metadata = parse_metadata(std::fs::File::open(path)?.take(MAX_METADATA_BYTES))?;
+    let metadata = parse_metadata(open_metadata(path)?)?;
     let mut values = Vec::new();
     for key in DESCRIPTION_KEYS {
         if let Some(value) = metadata
@@ -113,7 +113,7 @@ pub fn inspect_metadata(path: &Path) -> Result<ModelMetadata> {
 }
 
 pub fn read_transformer_shape(path: &Path) -> Result<Option<TransformerShape>> {
-    let metadata = parse_metadata(std::fs::File::open(path)?.take(MAX_METADATA_BYTES))?;
+    let metadata = parse_metadata(open_metadata(path)?)?;
     let get = |suffix| {
         metadata
             .numbers
@@ -141,13 +141,21 @@ pub fn read_transformer_shape(path: &Path) -> Result<Option<TransformerShape>> {
 }
 
 pub fn read_embedding_metadata(path: &Path) -> Result<EmbeddingMetadata> {
-    let file = std::fs::File::open(path)?;
-    parse(file.take(MAX_METADATA_BYTES)).map_err(|error| {
+    parse(open_metadata(path)?).map_err(|error| {
         RuntimeError::Other(format!(
             "Invalid embedding model metadata in {}: {error}",
             path.display()
         ))
     })
+}
+
+/// Tokenizer arrays hold hundreds of thousands of tiny values; buffering turns
+/// what would be a syscall per value into a handful of large reads.
+fn open_metadata(path: &Path) -> Result<Take<std::io::BufReader<std::fs::File>>> {
+    Ok(
+        std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path)?)
+            .take(MAX_METADATA_BYTES),
+    )
 }
 
 fn invalid(message: &str) -> RuntimeError {
