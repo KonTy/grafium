@@ -88,6 +88,7 @@
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitImeEnterContent } from "../lib/taskSyntax";
   import { isFencedCodeBlock } from "../lib/codeFence";
+  import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
   import DatePicker from "./DatePicker.svelte";
   import MobileEditorBar from "./MobileEditorBar.svelte";
@@ -101,12 +102,6 @@
     assetBaseDir?: string;
     bookMode?: boolean;
     depth?: number;
-    /// Per-ancestor-level flags for drawing the vertical "thread" guide line
-    /// (see `getAncestorGuides` in pageContentVirtualization.ts). Index i
-    /// corresponds to indent level i; true draws a full-height line at that
-    /// level's column, false/undefined draws nothing (that ancestor has no
-    /// more siblings below, so there's nothing to visually connect to).
-    guides?: boolean[];
     /// Colored L into this bullet when it sits on the focused path.
     threadElbow?: boolean;
     /// Column continued through a preceding sibling and all its descendants.
@@ -145,7 +140,6 @@
     assetBaseDir = "",
     bookMode = false,
     depth = 0,
-    guides = [],
     threadElbow = false,
     threadContinuationDepth = null,
     threadStem = false,
@@ -744,32 +738,9 @@
     return { lang, code };
   }
 
-  function getHeadingLevel(content: string): number {
-    const trimmed = content.trimStart();
-    const match = trimmed.match(/^(#{1,6})\s+/);
-    return match ? match[1].length : 0;
-  }
-
   function isVisuallyEmptyBlock(content: string): boolean {
     const normalized = content.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
     return normalized === "" || /^[-*+]$/.test(normalized);
-  }
-
-  function getBulletMinHeight(content: string): string {
-    switch (getHeadingLevel(content)) {
-      case 1:
-        return "2.7em";
-      case 2:
-        return "2.25em";
-      case 3:
-        return "1.875em";
-      case 4:
-      case 5:
-      case 6:
-        return "1.65em";
-      default:
-        return "24px";
-    }
   }
 
   function getEditorStyleClass(content: string): string {
@@ -2569,13 +2540,8 @@
   data-reading-note-footer={readingNoteLabel ? "" : undefined}
   data-depth={depth}
 >
-  {#if !bookMode && showGuides && (guides.length > 0 || threadElbow || threadContinuationDepth !== null || threadStem)}
+  {#if !bookMode && showGuides && (threadElbow || threadContinuationDepth !== null || threadStem)}
     <div class="indent-guides" aria-hidden="true">
-      {#each guides as active, level (level)}
-        {#if active && level !== threadContinuationDepth && !(threadElbow && level === depth - 1)}
-          <span class="indent-guide-line" style={`left: ${level * 24 + 10}px`}></span>
-        {/if}
-      {/each}
       {#if threadElbow}
         <span
           class="indent-guide-elbow"

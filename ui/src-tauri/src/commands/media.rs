@@ -3,7 +3,7 @@ use crate::commands::knowledge::KnowledgeState;
 use crate::{current_graph_snapshot, open_graph_snapshot, AppState};
 use grafium_core::media::{fetch_metadata, transcript_to_markdown, MediaConfig};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
 
 #[cfg(not(target_os = "android"))]
@@ -138,6 +138,12 @@ fn fetch_transcript_blocking(
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(Transcript, TranscriptSource), String> {
     if !media_config.enabled {
+        if is_local_media(url) {
+            return Err(
+                "Local media needs Whisper transcription. Enable it in Settings → AI / Knowledge Engine, then try again."
+                    .to_string(),
+            );
+        }
         return grafium_core::media::fetch_captions_with_progress(url, workdir, lang, on_progress)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
@@ -178,6 +184,12 @@ fn fetch_transcript_blocking(
     ),
     String,
 > {
+    if is_local_media(url) {
+        return Err(
+            "Local media transcription is currently available in Grafium's desktop builds."
+                .to_string(),
+        );
+    }
     grafium_core::media::fetch_captions_with_progress(url, workdir, lang, on_progress)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
@@ -264,7 +276,11 @@ pub async fn media_import_video(
             let mut emit_progress =
                 |message: &str| progress_handle.progress(0, 0, message.to_string());
             emit_progress("Fetching media info...");
-            let metadata = fetch_metadata(&url_for_blocking).unwrap_or_default();
+            let metadata = if is_local_media(&url_for_blocking) {
+                Default::default()
+            } else {
+                fetch_metadata(&url_for_blocking).unwrap_or_default()
+            };
             let transcript_result = fetch_transcript_blocking(
                 &url_for_blocking,
                 &workdir_for_blocking,
@@ -300,6 +316,7 @@ pub async fn media_import_video(
         let title = page_title
             .filter(|t| !t.trim().is_empty())
             .or_else(|| metadata.title.clone())
+            .or_else(|| local_media_title(&url))
             .unwrap_or_else(|| url.clone());
 
         let summary = {
@@ -421,6 +438,22 @@ fn media_job_details(
 /// scattering half-named pages across the graph. Nothing else writes here.
 pub const IMPORTED_MEDIA_FOLDER: &str = "ImportedMedia";
 
+fn local_media_title(input: &str) -> Option<String> {
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return None;
+    }
+    Path::new(input)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn is_local_media(input: &str) -> bool {
+    !input.starts_with("http://") && !input.starts_with("https://")
+}
+
 /// Build the page title for an imported video.
 ///
 /// `/` is the namespace separator, so a published title containing one would
@@ -446,7 +479,7 @@ fn imported_media_title(derived: &str) -> String {
 
 #[cfg(test)]
 mod imported_media_title_tests {
-    use super::imported_media_title;
+    use super::{imported_media_title, is_local_media, local_media_title};
 
     #[test]
     fn an_ordinary_title_goes_straight_into_the_folder() {
@@ -493,5 +526,18 @@ mod imported_media_title_tests {
     fn a_title_of_only_separators_still_lands_somewhere() {
         assert_eq!(imported_media_title("///"), "ImportedMedia/Untitled import");
         assert_eq!(imported_media_title(""), "ImportedMedia/Untitled import");
+    }
+
+    #[test]
+    fn local_file_title_uses_only_the_file_name() {
+        assert_eq!(
+            local_media_title(
+                "/run/media/blin/6TWDBACKUP/old_backup/4 Easy STROBE EFFECTS You SHOULD Know! [3R8PL_eH8s0].webm"
+            ),
+            Some("4 Easy STROBE EFFECTS You SHOULD Know! [3R8PL_eH8s0]".to_string())
+        );
+        assert_eq!(local_media_title("https://example.com/video.webm"), None);
+        assert!(is_local_media("/run/media/example.webm"));
+        assert!(!is_local_media("https://example.com/video.webm"));
     }
 }

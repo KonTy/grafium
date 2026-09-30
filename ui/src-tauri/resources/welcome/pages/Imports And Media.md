@@ -14,7 +14,7 @@ Tool availability and the source document determine what can be extracted; these
 
 ## Rich media and voice
 
-Attach real local images, audio, or video to your notes. Supported links can render rich media in place; local paths must point to files you actually have.
+Attach real local images, audio, or video to your notes. In **Import media**, paste a supported web URL, type an absolute local path, or use **Choose file…** to select audio/video from a local or mounted drive. Local imports read the original in place for transcription; Grafium does not duplicate the potentially large source file into the graph.
 
 Media imported by URL is filed under `ImportedMedia/`, not scattered across the graph. The title comes from whatever the site published, so a fresh import is rarely where you would have filed it yourself — collecting them in one folder gives you an inbox to work through. Move a page out once you have read it and decided where it belongs; nothing else writes to that folder, so whatever is still sitting there is still untriaged.
 

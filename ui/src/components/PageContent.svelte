@@ -40,7 +40,6 @@
     buildBlockRenderState,
     buildBulletThreadRoles,
     computeVirtualWindow,
-    getAncestorGuides,
     NO_THREAD,
     nextProgressiveRenderLimit,
   } from "../lib/pageContentVirtualization";
@@ -833,20 +832,6 @@
         }
       }, 2200);
     });
-  }
-
-  // Shared empty array for the disabled and depth-0 cases, so rendering a
-  // page does not allocate one per block per frame.
-  const NO_GUIDES: boolean[] = [];
-
-  function getBlockGuides(blockId: string): boolean[] {
-    if (!showBlockGuides) return NO_GUIDES;
-    return getAncestorGuides(
-      blockId,
-      blockRenderState.parentById,
-      blockRenderState.depthById,
-      blockRenderState.isLastChildById,
-    );
   }
 
   const threadById = $derived.by(() => {
@@ -3504,7 +3489,6 @@
             pageTitle={page.title}
             {assetBaseDir}
             bookMode={isImportedBookPage}
-            guides={getBlockGuides(block.id)}
             threadElbow={thread.elbow}
             threadContinuationDepth={thread.continuationDepth}
             threadStem={thread.stem}

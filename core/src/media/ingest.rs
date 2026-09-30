@@ -38,6 +38,22 @@ impl MediaSource {
     }
 }
 
+#[cfg(test)]
+mod media_source_tests {
+    use super::MediaSource;
+    use std::path::PathBuf;
+
+    #[test]
+    fn local_paths_with_spaces_stay_local_files() {
+        assert_eq!(
+            MediaSource::parse("/run/media/blin/6TWDBACKUP/old_backup/4 Easy STROBE EFFECTS.webm"),
+            MediaSource::LocalFile(PathBuf::from(
+                "/run/media/blin/6TWDBACKUP/old_backup/4 Easy STROBE EFFECTS.webm"
+            ))
+        );
+    }
+}
+
 /// Downloads (if remote) and normalizes `source` into a 16kHz mono 16-bit
 /// PCM WAV file inside `workdir`, returning its path.
 ///

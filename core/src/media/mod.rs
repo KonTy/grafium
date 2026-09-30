@@ -92,17 +92,23 @@ pub fn fetch_transcript(
 /// surface live status instead of a silent multi-second/minute wait.
 #[cfg(feature = "media")]
 pub fn fetch_transcript_with_progress(
-    url: &str,
+    input: &str,
     workdir: &Path,
     lang: &str,
     transcriber: &dyn Transcriber,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(Transcript, TranscriptSource)> {
-    if let Some(result) = captions::fetch_captions_with_progress(url, workdir, lang, on_progress)? {
-        return Ok(result);
+    let source = MediaSource::parse(input);
+    if matches!(source, MediaSource::Url(_)) {
+        if let Some(result) =
+            captions::fetch_captions_with_progress(input, workdir, lang, on_progress)?
+        {
+            return Ok(result);
+        }
+        on_progress("No captions available — falling back to local transcription.");
+    } else {
+        on_progress("Reading local media file...");
     }
-    on_progress("No captions available — falling back to local transcription.");
-    let source = MediaSource::parse(url);
     let wav_path = ingest::fetch_audio_with_progress(&source, workdir, on_progress)?;
     // Route whisper.cpp's own periodic percent updates through the
     // caller's plain-text progress channel so the UI can show

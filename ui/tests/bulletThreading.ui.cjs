@@ -176,6 +176,10 @@ function assertConnected(rows, startId, endId) {
     await page.evaluate(() => { document.body.style.zoom = "1.25"; });
     await focusBlock(page, "heading-child");
     assertConnected(await readPath(page), "root", "heading-child");
+    const headingHeight = await page.locator('.block-item[data-block-id="heading"]').evaluate(
+      (element) => element.getBoundingClientRect().height / 1.25,
+    );
+    assert.ok(headingHeight <= 36, `heading parent should stay compact, got ${headingHeight}px`);
     await focusBlock(page, "root");
     assert.equal((await readPath(page)).flatMap((row) => row.segments).length, 0);
     assert.deepEqual(errors, []);
