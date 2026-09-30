@@ -494,11 +494,14 @@
     contextMenu = { ...contextMenuPositionFromEvent(e, { width: 190, height: 100 }), page };
   }
 
-  async function handleDeletePage() {
+  function handleDeletePage() {
     if (!contextMenu) return;
     const pageToDelete = contextMenu.page;
     contextMenu = null;
+    void deleteJournalPage(pageToDelete);
+  }
 
+  async function deleteJournalPage(pageToDelete: Page) {
     const confirmed = window.confirm(`Delete journal page '${pageToDelete.title}'? This will delete the .md file from disk.`);
     if (!confirmed) return;
 
@@ -788,6 +791,7 @@
               compact
               {showBlockGuides}
               onLoadSettled={() => pageLoadSettled(page)}
+              onDeleteJournalEntry={() => void deleteJournalPage(page)}
               onNavigateBoundary={(direction, caretX) => navigateJournalBoundary(page.id, direction, caretX)}
             />
             {#if pendingPages.has(page.id)}

@@ -104,10 +104,12 @@
     onPageRenamed?: (page: Page) => void;
     onPageDeleted?: (parentTitle: string | null) => void;
     onLoadSettled?: () => void;
+    /** Journal feeds pass this to show a delete button beside the day label. */
+    onDeleteJournalEntry?: () => void;
     onNavigateBoundary?: (direction: "up" | "down", caretX: number) => void;
   }
 
-  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted, onLoadSettled, onNavigateBoundary }: Props = $props();
+  let { page, compact = false, highlight = "", showBlockGuides = true, onPageRenamed, onPageDeleted, onLoadSettled, onDeleteJournalEntry, onNavigateBoundary }: Props = $props();
 
   // Asset references in this page's blocks are resolved relative to the
   // directory its markdown file lives in, so media stored beside a page (and a
@@ -3150,6 +3152,23 @@
             </svg>
           </button>
         {/if}
+        {#if onDeleteJournalEntry && page.is_journal}
+          <button
+            class="rename-page-btn icon danger journal-delete-btn"
+            type="button"
+            title="Delete journal page"
+            aria-label="Delete journal page"
+            onclick={onDeleteJournalEntry}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+          </button>
+        {/if}
       {/if}
     </div>
     <div class="page-heading-actions">
@@ -3683,6 +3702,22 @@
   .rename-page-btn.icon.danger:hover:not(:disabled) {
     color: var(--danger);
     border-color: var(--danger);
+  }
+
+  /* Revealed on hover so a feed of day labels stays quiet; always shown on touch. */
+  .journal-delete-btn {
+    opacity: 0;
+  }
+
+  .page-title-row:hover .journal-delete-btn,
+  .journal-delete-btn:focus-visible {
+    opacity: 0.55;
+  }
+
+  @media (hover: none) {
+    .journal-delete-btn {
+      opacity: 0.55;
+    }
   }
 
   .rename-page-btn:disabled {

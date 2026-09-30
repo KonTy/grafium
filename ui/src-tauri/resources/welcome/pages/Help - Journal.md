@@ -40,6 +40,9 @@ related pages show how an idea connects without requiring folders.
 
 - Journal pages are dated automatically. Use the calendar or **Go to time** to
   jump to another day.
+- To delete a day, hover its date label and click the trash button (always
+  visible on touch screens), or right-click the date and choose **Delete page**.
+  This removes that day's `.md` file after you confirm.
 - Use **Ctrl+Shift+P** / **Cmd+Shift+P** to open the command palette, then search
   for time, journal, insert, or navigation commands.
 - Use the toolbar timestamp command to insert the current local date and time.

@@ -637,6 +637,28 @@ async function expectFocusedBlock(page, id) {
     await failure.page.close();
     console.log("PASS journal-list, entry and pagination failures remain visible and retryable; scrolling loads the next batch");
 
+    {
+      const { page, errors } = await openJournal(browser, { navigation: true });
+      await loaded(page, 1);
+      page.on("dialog", (dialog) => dialog.accept());
+      const title = entry(page, 1).locator(".page-title").first();
+      await title.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Delete page", exact: true }).click();
+      await page.waitForFunction(() => window.__journalState.calls.some(
+        (call) => call.cmd === "delete_page" && call.args.id === "day-1"));
+      await entry(page, 1).waitFor({ state: "detached" });
+      await loaded(page, 0);
+      const button = entry(page, 0).getByRole("button", { name: "Delete journal page", exact: true });
+      await entry(page, 0).locator(".page-title").first().hover();
+      await button.click();
+      await page.waitForFunction(() => window.__journalState.calls.some(
+        (call) => call.cmd === "delete_page" && call.args.id === "day-0"));
+      await entry(page, 0).waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+      await page.close();
+      console.log("PASS journal day labels delete through the visible button and the right-click menu");
+    }
+
     const delayedEdit = await openJournal(browser, { holdFirst: true });
     await delayedEdit.page.waitForFunction(() => typeof window.__releaseFirstJournal === "function");
     await delayedEdit.page.keyboard.press("Control+Shift+J");
