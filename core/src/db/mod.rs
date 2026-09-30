@@ -113,6 +113,18 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Functi
     }
 }
 
+/// Begin a write transaction that takes the write lock up front. Schema setup
+/// reads before it writes; a deferred transaction that later upgrades to a
+/// writer fails at once with "database is locked" when another connection is
+/// writing, because SQLite skips the busy handler for that upgrade. Starting
+/// immediate waits out `busy_timeout` instead, so a second connection opened
+/// at startup (background reconcile, FTS backfill) no longer fails outright.
+pub(crate) fn immediate_transaction(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
@@ -343,6 +355,26 @@ mod tests {
         let db = Database::new(db_path.as_path())?;
 
         assert_eq!(db.count_pages()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn opening_waits_for_a_concurrent_writer_instead_of_failing() -> Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join("index.db");
+        let first = Database::new(db_path.as_path())?;
+
+        let writer = first.conn()?;
+        writer.execute_batch("BEGIN IMMEDIATE; DELETE FROM fts_ink;")?;
+        let path = db_path.clone();
+        let second = std::thread::spawn(move || Database::new(path.as_path()).map(|_| ()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        writer.execute_batch("COMMIT")?;
+
+        second
+            .join()
+            .expect("second open thread panicked")
+            .expect("second connection must wait for the writer, not report a locked database");
         Ok(())
     }
 
