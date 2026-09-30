@@ -63,11 +63,23 @@ because the only other option would be deleting one side.
 Grafium does not silently choose a winner. Conflicting edits remain available
 for manual review in the right-panel **Conflicts** tab, which appears while a
 sync runs and stays available — with a count — for as long as anything is
-unresolved. Keep the normal local note, compare the preserved conflict copy,
-edit the note into the version you want, and sync again.
+unresolved. Compare the normal local file and preserved versions, then click
+**Resolve**. Choose the current **Local** or **Remote** version and confirm.
+You can edit a Markdown note before choosing it, but editing alone does not
+authorize an overwrite. Binary books and images keep their exact selected bytes.
+
+The dialog shows missing files as **deleted**; choosing a deleted side confirms
+deletion on the other side. If either version changes while you decide, reload
+and choose again. Available versions are retained in the graph metadata folder's
+`sync-recovery/` directory, outside the normal index and sync inventory.
 
 Do not treat an empty or unmounted target as a valid source. Verify the target
 path and sync summary before accepting deletion changes.
+
+An HTTP error or invalid WebDAV inventory is an error, not an empty graph.
+Conditional WebDAV replacements need a strong server ETag. Filesystem targets
+recheck the file revision and keep recovery copies, but cannot prevent every
+race with another application writing at exactly the same instant.
 
 ## Privacy
 

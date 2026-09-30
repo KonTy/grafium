@@ -1,21 +1,25 @@
 <script lang="ts">
   import AssistantConversation from "./AssistantConversation.svelte";
   import ReadingNotesPanel from "./ReadingNotesPanel.svelte";
-  import { getGraphInfo } from "../lib/api";
+  import BookNotesPanel from "./BookNotesPanel.svelte";
+  import SyncConflictResolution from "./SyncConflictResolution.svelte";
+  import { getGraphInfo, getPage } from "../lib/api";
+  import { isOriginalBookPage } from "../lib/books";
   import { assistantContextInfo } from "../lib/assistant";
   import { getSourceConversation, getAssistantConversation, type AssistantThread } from "../lib/assistantConversations";
   import { getLatestCurrentBlockAnchor, type CurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import type { PageNavigationTarget } from "../lib/navigation";
   import { listSyncConflicts, type SyncConflict } from "../lib/sync";
+  import { syncConflictTarget } from "../lib/syncConflictTarget";
   import { refreshConflictCount, setConflictCount, shouldShowConflicts, syncActivity } from "../lib/syncActivity.svelte";
 
   let {
-    visible = false, pageId = "", pageTitle = "", conversationId = null, initialTab, focusTrigger = 0,
+    visible = false, pageId = "", pageTitle = "", originalBook = false, conversationId = null, initialTab, focusTrigger = 0,
     noteFocusLabel = null, noteFocusPageId = null, noteFocusTrigger = 0,
     width = 380, preferFocusedPageForPageScope = false, onClose = () => {},
     onNavigate = () => {}, onFindLinks, onExpandConversation, onOpenSettings = () => onNavigate("__settings__"),
   }: {
-    visible?: boolean; pageId?: string; pageTitle?: string; conversationId?: string | null;
+    visible?: boolean; pageId?: string; pageTitle?: string; originalBook?: boolean; conversationId?: string | null;
     initialTab?: "chat" | "notes" | "references" | "ask" | "writing" | "search" | "conflicts"; focusTrigger?: number;
     noteFocusLabel?: string | null; noteFocusPageId?: string | null; noteFocusTrigger?: number;
     width?: number; preferFocusedPageForPageScope?: boolean; onClose?: () => void;
@@ -27,6 +31,8 @@
   let activeTab = $state<"chat" | "notes" | "conflicts">("chat");
   let conflicts = $state<SyncConflict[]>([]);
   let conflictsLoading = $state(false);
+  let conflictError = $state("");
+  let resolvingConflict = $state<SyncConflict | null>(null);
   // An explicit request for the Conflicts tab wins over the automatic rule, so
   // that a caller can always send the user there (e.g. from a sync report).
   let conflictsRequested = $state(false);
@@ -35,6 +41,7 @@
   let thread = $state.raw<AssistantThread | null>(null);
   let sourceError = $state("");
   let sourceReady = $state(false);
+  let resolvedSource = $state<{ id: string; originalBook: boolean } | null>(null);
   const requestedConversation = $derived(conversationId ? getAssistantConversation(conversationId) : undefined);
   const sourcePageId = $derived(requestedConversation?.sourcePageId ?? (preferFocusedPageForPageScope ? askBlockAnchor?.pageId ?? pageId : pageId));
   const sourceBlockId = $derived(askBlockAnchor?.pageId === sourcePageId ? askBlockAnchor.blockId : null);
@@ -51,13 +58,26 @@
   });
   async function loadConflicts() {
     conflictsLoading = true;
+    conflictError = "";
     try {
       conflicts = await listSyncConflicts();
       setConflictCount(conflicts.length);
     } catch (error) {
+      conflictError = `Could not load sync conflicts: ${String(error)}`;
       console.error("Failed to load sync conflicts:", error);
     } finally {
       conflictsLoading = false;
+    }
+  }
+  async function openConflict(conflict: SyncConflict) {
+    const target = syncConflictTarget(conflict.rel_path);
+    if (!target) return;
+    conflictError = "";
+    try {
+      const page = await getPage(target);
+      onNavigate({ id: page.id });
+    } catch (cause) {
+      conflictError = `This conflict's source is unavailable. Compare the preserved files in the graph folder. ${String(cause)}`;
     }
   }
   function selectTab(tab: "chat" | "notes" | "conflicts") {
@@ -96,11 +116,17 @@
     let disposed = false;
     sourceError = "";
     sourceReady = false;
+    resolvedSource = null;
     if (!id && !requested) { thread = null; return; }
     void (async () => {
       try {
         const graph = await getGraphInfo();
         if (disposed) return;
+        if (id) {
+          const page = await getPage({ id });
+          if (disposed) return;
+          resolvedSource = { id, originalBook: isOriginalBookPage(page) };
+        }
         if (requested) {
           if (requested.graphPath !== graph.path) throw new Error("Return to the original graph to open this conversation.");
           thread = requested;
@@ -138,26 +164,38 @@
     </header>
     <div class="panel-content">
       {#if activeTab === "notes"}
+        {#if (originalBook && sourcePageId === pageId) || (resolvedSource?.id === sourcePageId && resolvedSource.originalBook)}
+          <BookNotesPanel pageId={sourcePageId} {pageTitle} active={visible} {onNavigate} />
+        {:else if sourcePageId !== pageId && resolvedSource?.id !== sourcePageId}
+          <p role={sourceError ? "alert" : "status"}>{sourceError || "Opening reading notes..."}</p>
+        {:else}
         <ReadingNotesPanel pageId={sourcePageId} pageTitle={sourcePageId === pageId ? pageTitle : ""}
           active={visible && activeTab === "notes"} {onNavigate}
           initialNoteLabel={noteFocusLabel} initialNotePageId={noteFocusPageId} {noteFocusTrigger} />
+        {/if}
       {/if}
       {#if activeTab === "conflicts"}
         <div class="conflicts-panel">
-          <p>Resolve conflicts by editing the normal note and saving your chosen version.</p>
+          <p>Compare the files, then choose Resolve to explicitly keep the current local or remote version, including a deletion. Editing a note alone does not resolve its conflict.</p>
+          {#if conflictError}<p class="error" role="alert">{conflictError}</p>{/if}
           {#if conflictsLoading}
             <p class="shimmer" role="status">Loading conflicts…</p>
           {:else if conflicts.length === 0}
             <p role="status">{syncActivity.running > 0 ? "Sync in progress…" : "No unresolved sync conflicts."}</p>
           {:else}
             {#each conflicts as conflict}
-              <button
-                class="conflict-item"
-                onclick={() => onNavigate({ title: conflict.rel_path.replace(/^(pages|journals)\//, "").replace(/\.md$/, "") })}
-              >
-                <strong>{conflict.rel_path}</strong>
-                <span>{conflict.target_name}</span>
-              </button>
+              <div class="conflict-entry">
+                <button
+                  class="conflict-item"
+                  disabled={!syncConflictTarget(conflict.rel_path)}
+                  onclick={() => openConflict(conflict)}
+                >
+                  <strong>{conflict.rel_path}</strong>
+                  <span>{conflict.target_name}</span>
+                  <span>Preserved copy: {conflict.backup_path}</span>
+                </button>
+                <button onclick={() => (resolvingConflict = conflict)} aria-label={`Resolve ${conflict.rel_path}`}>Resolve</button>
+              </div>
             {/each}
           {/if}
         </div>
@@ -180,6 +218,15 @@
   </aside>
 {/if}
 
+{#if visible && resolvingConflict}
+  <SyncConflictResolution conflict={resolvingConflict}
+    onClose={() => (resolvingConflict = null)}
+    onResolved={() => {
+      resolvingConflict = null;
+      void loadConflicts();
+    }} />
+{/if}
+
 <style>
   .reference-panel { position: fixed; top: 0; right: 0; bottom: 0; max-width: calc(100vw - 24px); background: var(--bg-secondary); border-left: 1px solid var(--border); display: flex; flex-direction: column; z-index: 1000; overflow: hidden; }
   .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -198,4 +245,5 @@
   .conflicts-panel p { margin: 0 0 10px; }
   .conflict-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; gap: 2px; margin-bottom: 6px; }
   .conflict-item span { color: var(--text-secondary); font-size: 11px; }
+  .conflict-entry { padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
 </style>

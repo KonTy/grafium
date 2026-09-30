@@ -324,17 +324,33 @@ impl EmbeddingPipeline {
         embedder: &dyn Embedder,
         store: &dyn VectorStore,
     ) -> Result<usize> {
-        if chunks.is_empty() {
-            return Ok(0);
+        let embeddings = self.embed_chunks(chunks, graph_id, embedder).await?;
+        let count = embeddings.len();
+        if !embeddings.is_empty() {
+            store.upsert(&embeddings).await?;
         }
+        Ok(count)
+    }
 
-        let mut total = 0;
-        let batch_size = self.config.batch_size;
-
+    /// Prepare a complete update before publishing any evidence to the store.
+    pub async fn embed_chunks(
+        &self,
+        chunks: &[TextChunk],
+        graph_id: &str,
+        embedder: &dyn Embedder,
+    ) -> Result<Vec<ChunkEmbedding>> {
+        let mut output = Vec::with_capacity(chunks.len());
+        let batch_size = self.config.batch_size.max(1);
         for batch in chunks.chunks(batch_size) {
             let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
 
             let embeddings = embedder.embed_documents(&texts).await?;
+            if embeddings.len() != batch.len() {
+                return Err(crate::error::CoreError::Other(format!(
+                    "Embedder returned {} vectors for {} chunks; nothing was published",
+                    embeddings.len(), batch.len(),
+                )));
+            }
 
             let chunk_embeddings: Vec<ChunkEmbedding> = batch
                 .iter()
@@ -353,11 +369,10 @@ impl EmbeddingPipeline {
                 })
                 .collect();
 
-            store.upsert(&chunk_embeddings).await?;
-            total += chunk_embeddings.len();
+            output.extend(chunk_embeddings);
         }
 
-        Ok(total)
+        Ok(output)
     }
 
     /// Split a large block into bounded, overlapping chunks.

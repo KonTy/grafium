@@ -14,6 +14,7 @@ mod properties;
 mod raw_query;
 mod retrieval;
 mod schema;
+mod source_lifecycle;
 pub mod tasks;
 
 use crate::error::Result;
@@ -112,6 +113,7 @@ impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for Functi
     }
 }
 
+#[derive(Clone)]
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -170,6 +172,7 @@ impl Database {
         ",
         )?;
         schema::create_tables(&conn)?;
+        source_lifecycle::initialize(&conn)?;
 
         // Migration: recreate task_events without CASCADE to preserve history across reindexes
         let has_fk: bool = conn
@@ -281,16 +284,9 @@ impl Database {
             cursor = rows.last().map(|(id, _)| *id).unwrap_or(cursor);
 
             let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare(
-                    "INSERT OR IGNORE INTO fts_block_rowid (block_id, fts_rowid) VALUES (?1, ?2)",
-                )?;
-                for (rowid, block_id) in &rows {
-                    stmt.execute(rusqlite::params![block_id, rowid])?;
-                }
-            }
+            let inserted = fts_backfill_rows(&tx, &rows)?;
             tx.commit()?;
-            total += rows.len();
+            total += inserted;
             drop(conn);
 
             // Yield so block edits and UI queries aren't starved, and so the WAL
@@ -300,6 +296,20 @@ impl Database {
 
         Ok(total)
     }
+}
+
+fn fts_backfill_rows(conn: &rusqlite::Connection, rows: &[(i64, String)]) -> Result<usize> {
+    let mut statement = conn.prepare(
+        "INSERT OR IGNORE INTO fts_block_rowid(block_id, fts_rowid)
+         SELECT f.block_id, f.rowid FROM fts_blocks f JOIN blocks b ON b.id=f.block_id
+         WHERE f.rowid=?1 AND f.block_id=?2",
+    )?;
+    let mut inserted = 0;
+    for (rowid, block_id) in rows {
+        // A full rebuild can reuse FTS rowids after the batch was read.
+        inserted += statement.execute(rusqlite::params![rowid, block_id])?;
+    }
+    Ok(inserted)
 }
 
 /// Insert a block into the FTS index and record its rowid in `fts_block_rowid`.
@@ -333,6 +343,33 @@ mod tests {
         let db = Database::new(db_path.as_path())?;
 
         assert_eq!(db.count_pages()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_backfill_cannot_assign_a_rebuilt_row_to_a_deleted_block() -> Result<()> {
+        let root = tempdir()?;
+        let graph = crate::Graph::open(root.path())?;
+        let old = graph.create_page_with_content("Old", false, "- Old cobalt record.")?;
+        let live = graph.create_page_with_content("Live", false, "- Live zirconium record.")?;
+        let old_block = graph.db.list_blocks_for_page(&old.id)?.remove(0);
+        let live_block = graph.db.list_blocks_for_page(&live.id)?.remove(0);
+        let conn = graph.db.conn()?;
+        let old_rowid: i64 = conn.query_row(
+            "SELECT fts_rowid FROM fts_block_rowid WHERE block_id=?1", [&old_block.id], |r| r.get(0),
+        )?;
+        graph.delete_page(&old.id)?;
+        graph.db.rebuild_text_search_indexes()?;
+        let live_rowid: i64 = conn.query_row(
+            "SELECT fts_rowid FROM fts_block_rowid WHERE block_id=?1", [&live_block.id], |r| r.get(0),
+        )?;
+        assert_eq!(live_rowid, old_rowid);
+        assert_eq!(super::fts_backfill_rows(&conn, &[(old_rowid, old_block.id.clone())])?, 0);
+        let wrong: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fts_block_rowid WHERE block_id=?1)", [&old_block.id], |r| r.get(0),
+        )?;
+        assert!(!wrong);
+        assert_eq!(graph.db.search_fts("zirconium", 10)?.len(), 1);
         Ok(())
     }
 

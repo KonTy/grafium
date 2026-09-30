@@ -24,4 +24,9 @@ another graph-search dialog.
 
 Use the **All / Files / Placeholders** control to choose which you see. **Files** matches what you would find in the folder; **Placeholders** is a list of pages you meant to write. The choice is remembered per graph.
 
+Deleting a source removes its searchable content, but its title may remain as
+a placeholder if another document still links to it. Shared tags and other
+documents' references are preserved. See [[Your Files]] for deletion, index
+cleanup, and the difference between removing a source and erasing saved quotations.
+
 In the namespace tree, Grafium keeps **Books**, **ImportedMedia**, and **Reading Notes** at the top in that order, whether you sort by name or recent activity. Their book, media, and note icons distinguish these app-managed folders from ordinary folders. The tag tree still follows the selected sort normally.

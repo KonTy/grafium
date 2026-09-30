@@ -394,12 +394,14 @@ async function expectFocusedBlock(page, id) {
       await page.keyboard.press("ArrowUp");
       await page.waitForFunction(() => document.activeElement?.closest(".journal-entry")?.dataset.pageId === "day-1");
       assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.lineAt(
-        window.__activeEditorView.state.selection.main.head).text), "- Journal 1, note 13");
+        window.__activeEditorView.state.selection.main.head).text), "Journal 1, note 13");
+      assert.equal(await page.locator(".unified-page-editor").count(), 0,
+        "obsolete prototype preferences must not enable a disabled user-facing editor");
       await page.keyboard.press("ArrowDown");
       await expectFocusedBlock(page, "day-2-block-0");
       assert.deepEqual(errors, []);
       await page.close();
-      console.log("PASS navigation between classic and continuous journal entries in both directions");
+      console.log("PASS legacy prototype preferences preserve supported classic journal navigation in both directions");
     }
 
     {

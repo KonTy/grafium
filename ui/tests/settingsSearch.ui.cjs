@@ -53,7 +53,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await search.fill("chat");
     await page.waitForFunction(() => [...document.querySelectorAll(".settings-page > details.settings-section")]
       .filter((el) => !el.hidden).length === 3);
-    assert.deepEqual(await titles(), ["AI / Knowledge Engine", "Research", "Keyboard Shortcuts"]);
+    assert.deepEqual(await titles(), ["AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts"]);
     const shortcuts = page.locator(".keymap-row:visible");
     assert.equal(await shortcuts.count(), 1);
     assert.match(await shortcuts.innerText(), /Go to Chat tab/);

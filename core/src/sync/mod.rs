@@ -4,7 +4,9 @@
 //! network mount, WebDAV/Nextcloud). Works offline — edits are cached locally
 //! and merged when the remote becomes available again.
 //!
-//! Conflict strategy: keep both versions (creates `.conflict.md` files).
+//! Conflict strategy: preserve both byte-exact versions under the target's
+//! metadata `sync-recovery/` folder, then require an explicit revision-checked
+//! local/remote choice, including when either side was deleted.
 
 pub mod backend;
 pub mod engine;
@@ -17,3 +19,6 @@ pub use backend::{FileMetadata, SyncBackend};
 pub use engine::SyncEngine;
 pub use merge::{three_way_merge, two_way_merge, MergeResult};
 pub use state::{SyncConfig, SyncState, UnresolvedConflict};
+
+#[cfg(test)]
+mod safety_tests;

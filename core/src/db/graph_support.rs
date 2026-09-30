@@ -15,20 +15,16 @@ fn upsert_page_on_conn(
     file_path: Option<&str>,
     properties: &serde_json::Value,
 ) -> Result<Page> {
+    let normalized_path = file_path.map(|path| path.replace('\\', "/"));
+    let file_path = normalized_path.as_deref();
     let now = Utc::now().timestamp_millis();
 
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM pages WHERE title = ?1",
-            params![title],
-            |row| row.get(0),
-        )
-        .ok();
+    let existing = super::source_lifecycle::source_identity(conn, title, file_path)?;
 
     let id = if let Some(existing_id) = existing {
         conn.execute(
-            "UPDATE pages SET file_path = ?1, updated_at = ?2, is_journal = ?3, properties = ?4 WHERE id = ?5",
-            params![file_path, now, is_journal as i32, properties.to_string(), existing_id],
+            "UPDATE pages SET file_path = ?1, updated_at = ?2, is_journal = ?3, properties = ?4, title=?6 WHERE id = ?5",
+            params![file_path, now, is_journal as i32, properties.to_string(), existing_id,title],
         )?;
         existing_id
     } else {
@@ -40,6 +36,7 @@ fn upsert_page_on_conn(
         new_id
     };
 
+    super::source_lifecycle::enforce_unique_source_paths(conn)?;
     Ok(Page {
         id,
         title: title.to_string(),
@@ -51,7 +48,7 @@ fn upsert_page_on_conn(
     })
 }
 
-fn delete_blocks_for_page_on_conn(conn: &Connection, page_id: &str) -> Result<()> {
+pub(super) fn delete_blocks_for_page_on_conn(conn: &Connection, page_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM block_properties WHERE block_id IN (SELECT id FROM blocks WHERE page_id = ?1)",
         params![page_id],
@@ -113,13 +110,17 @@ impl Database {
         file_path: Option<&str>,
         properties: &serde_json::Value,
     ) -> Result<Page> {
-        let conn = self.conn()?;
-        upsert_page_on_conn(&conn, title, is_journal, file_path, properties)
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let page = upsert_page_on_conn(&tx, title, is_journal, file_path, properties)?;
+        tx.commit()?;
+        Ok(page)
     }
 
     /// Set the file_path for a page.
     pub fn set_page_file_path(&self, page_id: &str, file_path: &str) -> Result<()> {
         let conn = self.conn()?;
+        let file_path = file_path.replace('\\', "/");
         conn.execute(
             "UPDATE pages SET file_path = ?1 WHERE id = ?2",
             params![file_path, page_id],
@@ -196,13 +197,40 @@ impl Database {
         )
     }
 
-    /// Clear all indexed data (for full re-index).
+    /// Rebuild search-only tables, retaining block identities and recognition/review data.
+    pub fn rebuild_text_search_indexes(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DELETE FROM fts_blocks;
+             DELETE FROM fts_block_rowid;
+             INSERT INTO fts_blocks(block_id, content) SELECT id, content FROM blocks;
+             INSERT INTO fts_block_rowid(block_id, fts_rowid) SELECT block_id, rowid FROM fts_blocks;
+             DELETE FROM fts_ink;
+             INSERT INTO fts_ink(ink_id, recognized_text)
+                 SELECT id, recognized_text FROM ink_pages WHERE recognized_text IS NOT NULL;",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Destructively clear graph data. Normal reindex must not call this.
     pub fn clear_all(&self) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute_batch(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO pending_reindex(page_id, marked_at, vectors_invalidated)
+             SELECT id, ?1, 0 FROM pages WHERE true
+             ON CONFLICT(page_id) DO UPDATE SET
+               marked_at = max(pending_reindex.marked_at + 1, excluded.marked_at),
+               vectors_invalidated = 0",
+            [Utc::now().timestamp_millis()],
+        )?;
+        tx.execute_batch(
             "
             DELETE FROM fts_blocks;
             DELETE FROM fts_block_rowid;
+            DELETE FROM fts_ink;
             DELETE FROM link_candidates;
             DELETE FROM links;
             DELETE FROM tasks;
@@ -211,9 +239,9 @@ impl Database {
             DELETE FROM page_properties;
             DELETE FROM blocks;
             DELETE FROM pages;
-            DELETE FROM pending_reindex;
         ",
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -226,11 +254,48 @@ impl Database {
         let conn = self.conn()?;
         let now = Utc::now().timestamp_millis();
         conn.execute(
-            "INSERT INTO pending_reindex (page_id, marked_at) VALUES (?1, ?2)
-             ON CONFLICT(page_id) DO UPDATE SET marked_at = ?2",
+            "INSERT INTO pending_reindex (page_id, marked_at, vectors_invalidated) VALUES (?1, ?2, 0)
+             ON CONFLICT(page_id) DO UPDATE SET
+               marked_at = max(pending_reindex.marked_at + 1, excluded.marked_at),
+               vectors_invalidated = 0",
             params![page_id, now],
         )?;
         Ok(())
+    }
+
+    pub fn page_index_snapshot(&self, page_id: &str) -> Result<Option<(Page, Vec<Block>)>> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        let page = match self.get_page_by_id_in_connection(&tx, page_id) {
+            Ok(page) => page,
+            Err(crate::CoreError::Database(rusqlite::Error::QueryReturnedNoRows)) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let blocks = self.list_blocks_for_page_in_connection(&tx, page_id)?;
+        tx.commit()?;
+        Ok(Some((page, blocks)))
+    }
+
+    /// Cleanup is independent of model readiness and has no typing debounce.
+    pub fn list_pending_vector_cleanup(&self, limit: i64) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT page_id, marked_at FROM pending_reindex
+             WHERE vectors_invalidated = 0 ORDER BY marked_at LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map([limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn mark_pending_vectors_invalidated(&self, page_id: &str, marked_at: i64) -> Result<bool> {
+        Ok(self.conn()?.execute(
+            "UPDATE pending_reindex SET vectors_invalidated = 1 WHERE page_id = ?1 AND marked_at = ?2",
+            params![page_id, marked_at],
+        )? > 0)
     }
 
     /// Pages that have been quiescent for at least `debounce_ms` (i.e. not

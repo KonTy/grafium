@@ -18,6 +18,116 @@ const MANIFEST_FILE: &str = ".grafium-book.json";
 const MAX_GENERATED_BLOCK_CHARS: usize = 2_000;
 const PDF_OCR_RENDER_DPI: &str = "200";
 
+pub(crate) struct OriginalBookText {
+    pub blocks: Vec<String>,
+    pub warning: Option<String>,
+}
+
+/// Reuse the conversion parsers without writing a Markdown source or assets.
+/// The derived text is deliberately bounded independently of the original.
+pub(crate) fn extract_original_text(path: &Path) -> Result<OriginalBookText> {
+    const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mut document = match ext {
+        "epub" => {
+            validate_original_epub(path)?;
+            load_epub_document(path, None)?
+        }
+        "fb2" => load_fb2_document(path)?,
+        "pdf" => {
+            let text = pdf_extract::extract_text(path)
+                .map_err(|e| CoreError::Other(format!("PDF text extraction failed: {e}")))?;
+            BookDocument {
+                title: String::new(),
+                chapters: split_blocks_into_chapters(pdf_text_to_blocks(&text), "Part"),
+                assets: Vec::new(),
+                notes: vec!["Only the embedded PDF text layer is indexed; image-only pages need the explicit Markdown/OCR import.".into()],
+            }
+        }
+        "mobi" | "azw3" => {
+            if !tool_on_path("ebook-convert") {
+                return Err(CoreError::Other(
+                    "Text is not indexed: install Calibre's ebook-convert, then reindex. The original remains available to read.".into(),
+                ));
+            }
+            let directory = path.parent().ok_or_else(|| CoreError::Other("Book has no directory".into()))?
+                .join(format!(".extract-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&directory)?;
+            let converted = directory.join("converted.epub");
+            let result = (|| {
+                let output = Command::new("ebook-convert").arg(path).arg(&converted).output()?;
+                if !output.status.success() {
+                    return Err(CoreError::Other(format!(
+                        "Calibre extraction failed: {}",
+                        String::from_utf8_lossy(&output.stderr).chars().take(1000).collect::<String>()
+                    )));
+                }
+                validate_original_epub(&converted)?;
+                load_epub_document(&converted, None)
+            })();
+            fs::remove_dir_all(&directory)?;
+            result?
+        }
+        _ => return Err(CoreError::Other("Unsupported original book format".into())),
+    };
+    normalize_document(&mut document);
+    let mut blocks = Vec::new();
+    let mut size = 0usize;
+    let mut truncated = false;
+    'chapters: for chapter in document.chapters {
+        let heading = (!chapter.title.is_empty() && !chapter.generated_title)
+            .then(|| format!("# {}", chapter.title));
+        for block in heading.into_iter().chain(chapter.blocks) {
+            let mut remaining = block.as_str();
+            while !remaining.is_empty() {
+                let end = remaining.char_indices().nth(MAX_GENERATED_BLOCK_CHARS)
+                    .map(|(index, _)| index).unwrap_or(remaining.len());
+                let part = &remaining[..end];
+                size = size.saturating_add(part.len());
+                if size > MAX_TEXT_BYTES || blocks.len() >= 20_000 {
+                    truncated = true;
+                    break 'chapters;
+                }
+                blocks.push(part.to_owned());
+                remaining = &remaining[end..];
+            }
+        }
+    }
+    if blocks.is_empty() {
+        return Err(CoreError::Other("No readable text was extracted; the original remains available. Scanned PDFs require the explicit Markdown/OCR import.".into()));
+    }
+    if truncated {
+        document.notes.push("Indexing is partial: the 16 MiB / 20,000 block text limit was reached.".into());
+    }
+    Ok(OriginalBookText {
+        blocks,
+        warning: (!document.notes.is_empty()).then(|| document.notes.join(" ")),
+    })
+}
+
+pub(crate) fn validate_original_epub(path: &Path) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(File::open(path)?)
+        .map_err(|e| CoreError::Other(format!("Invalid EPUB archive: {e}")))?;
+    if archive.len() > 10_000 {
+        return Err(CoreError::Other("EPUB has too many archive entries".into()));
+    }
+    let mut total = 0u64;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)
+            .map_err(|e| CoreError::Other(format!("Invalid EPUB entry: {e}")))?;
+        total = total.saturating_add(entry.size());
+        if entry.enclosed_name().is_none()
+            || entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000)
+            || entry.size() > 32 * 1024 * 1024
+            || total > 128 * 1024 * 1024
+            || entry.size() > entry.compressed_size().saturating_mul(1000).max(1024 * 1024)
+        {
+            return Err(CoreError::Other("EPUB contains an unsafe or oversized archive entry".into()));
+        }
+    }
+    Ok(())
+}
+
 static ROOTFILE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?is)<rootfile\b([^>]*)>"#).unwrap());
 static ITEM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?is)<item\b([^>]*)>"#).unwrap());
@@ -192,6 +302,10 @@ struct BookImportManifest {
     source_format: BookFormat,
     generated_pages: Vec<String>,
     assets: Vec<String>,
+    #[serde(default)]
+    generated_sha256: HashMap<String,String>,
+    #[serde(default)]
+    assets_sha256: HashMap<String,String>,
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +705,9 @@ fn import_one_book(
         });
     }
 
-    let output = resolve_output_location(graph, &document.title, &source_hash)?;
+    let operations=graph.source_operation_lock();
+    let _operation=operations.lock();
+    let output = resolve_output_location(graph, &document.title, &source_hash, &document.assets)?;
     if let OutputLocation::Unchanged { manifest, page_id } = output {
         return Ok(BookImportItem {
             source_file,
@@ -678,9 +794,11 @@ fn resolve_output_location(
     graph: &Graph,
     title: &str,
     source_hash: &str,
+    new_assets: &[BookAsset],
 ) -> Result<OutputLocation> {
     let base = sanitize_path_segment(title);
     let books_dir = graph.pages_dir.join(BOOKS_ROOT);
+    graph.ensure_path_inside_graph(&books_dir)?;
     fs::create_dir_all(&books_dir)?;
     let mut folder_name = base.clone();
     let hash_suffix = &source_hash[..source_hash.len().min(8)];
@@ -697,13 +815,19 @@ fn resolve_output_location(
         let manifest_path = dir.join(MANIFEST_FILE);
         if let Some(manifest) = read_manifest(&manifest_path) {
             if manifest.source_sha256 == source_hash {
-                if !manifest_is_current(&manifest) {
+                let assets_compatible=new_assets.iter().try_fold(true,|compatible,asset|->Result<bool>{
+                    let path=dir.join(&asset.relative_path);
+                    Ok(compatible&&(!path.exists()||fs::read(path)?==asset.bytes))
+                })?;
+                if !manifest_is_current(&manifest) && assets_compatible
+                    && generated_import_is_pristine(graph,&dir,&manifest)? {
                     return Ok(OutputLocation::Replace {
                         folder_name,
                         dir,
                         manifest,
                     });
                 }
+                if !manifest_is_current(&manifest) { continue; }
                 let index_page_title = manifest_index_page_title(&manifest);
                 let page_id = index_page_title
                     .as_deref()
@@ -739,27 +863,39 @@ fn cleanup_generated_import(
     dir: &Path,
     manifest: &BookImportManifest,
 ) -> Result<()> {
+    if !generated_import_is_pristine(graph,dir,manifest)? {
+        return Err(CoreError::Other("Generated book changed; existing files were preserved".into()));
+    }
     for page_title in &manifest.generated_pages {
-        if let Ok(page) = graph.db.get_page_by_title(page_title) {
-            graph.delete_page(&page.id)?;
-        } else if let Some(path) = generated_page_file_path(graph, page_title) {
-            remove_file_if_exists(&path)?;
+        if let Some(path) = generated_page_file_path(graph, page_title) {
+            graph.delete_source_file(&path)?;
         }
     }
     for asset in &manifest.assets {
         if let Some(path) = generated_asset_file_path(dir, asset) {
-            remove_file_if_exists(&path)?;
+            graph.remove_unreferenced_media(&path)?;
         }
     }
     Ok(())
 }
 
-fn remove_file_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
+fn generated_import_is_pristine(graph:&Graph,dir:&Path,manifest:&BookImportManifest)->Result<bool> {
+    if manifest.generated_pages.is_empty(){return Ok(false);}
+    let namespace=dir.strip_prefix(&graph.pages_dir)
+        .map_err(|_|CoreError::Other("Generated import directory is outside pages".into()))?
+        .to_string_lossy().replace('\\',"/");
+    for title in &manifest.generated_pages {
+        if title!=&namespace&&!title.starts_with(&format!("{namespace}/")) {return Ok(false);}
+        let Some(path)=generated_page_file_path(graph,title) else {return Ok(false);};
+        let Some(expected)=manifest.generated_sha256.get(title) else {return Ok(false);};
+        if !path.is_file() || sha256_file(&path)?!=*expected {return Ok(false);}
     }
+    for asset in &manifest.assets {
+        let Some(path)=generated_asset_file_path(dir,asset) else {return Ok(false);};
+        let Some(expected)=manifest.assets_sha256.get(asset) else {return Ok(false);};
+        if !path.is_file() || sha256_file(&path)?!=*expected {return Ok(false);}
+    }
+    Ok(true)
 }
 
 fn generated_page_file_path(graph: &Graph, title: &str) -> Option<PathBuf> {
@@ -914,12 +1050,18 @@ fn write_document(
             .to_string(),
         source_sha256: source_hash.to_string(),
         source_format,
-        generated_pages,
+        generated_pages: generated_pages.clone(),
         assets: document
             .assets
             .iter()
             .map(|asset| asset.relative_path.clone())
             .collect(),
+        generated_sha256: generated_pages.iter().map(|title| {
+            let path=generated_page_file_path(graph,title).ok_or_else(||CoreError::Other("Invalid generated source".into()))?;
+            Ok((title.clone(),sha256_file(&path)?))
+        }).collect::<Result<HashMap<_,_>>>()?,
+        assets_sha256: document.assets.iter().map(|asset|
+            (asset.relative_path.clone(),format!("{:x}",Sha256::digest(&asset.bytes)))).collect(),
     };
     fs::write(
         dir.join(MANIFEST_FILE),
@@ -5158,14 +5300,14 @@ fn decode_entities(input: &str) -> String {
     out
 }
 
-fn percent_decode_lossy(input: &str) -> String {
+pub(crate) fn percent_decode_lossy(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
-                out.push(value);
+            if let (Some(high),Some(low))=((bytes[i+1] as char).to_digit(16),(bytes[i+2] as char).to_digit(16)) {
+                out.push((high*16+low) as u8);
                 i += 3;
                 continue;
             }
@@ -5833,7 +5975,71 @@ mod tests {
     }
 
     #[test]
-    fn reimports_old_multipage_epub_as_single_book_page() {
+    fn proven_conversion_upgrade_preserves_unlisted_user_descendants() -> Result<()> {
+        let graph_dir=tempfile::tempdir_in(".")?;
+        let source_dir=tempfile::tempdir_in(".")?;
+        fs::write(source_dir.path().join("Synthetic.txt"),"A synthetic source paragraph.")?;
+        let graph=graph_in(graph_dir.path());
+        let first=import_books_directory(&graph,source_dir.path(),|_|{},||false)?;
+        let title=first.items[0].index_page_title.as_ref().unwrap();
+        let directory=graph.pages_dir.join(title);
+        let mut manifest=read_manifest(&directory.join(MANIFEST_FILE)).unwrap();
+        assert!(!manifest.generated_sha256.is_empty());
+        manifest.importer_version="grafium-book-import-v1".into();
+        fs::write(directory.join(MANIFEST_FILE),serde_json::to_vec(&manifest)?)?;
+        let child=graph.create_page_with_content(&format!("{title}/My annotations"),false,"- Irreplaceable personal annotation\n")?;
+        let path=graph.root_dir.join(child.file_path.unwrap());
+        let bytes=fs::read(&path)?;
+        let report=import_books_directory(&graph,source_dir.path(),|_|{},||false)?;
+        assert_eq!(report.imported,1);
+        assert_eq!(report.items[0].index_page_title.as_ref(),Some(title));
+        assert_eq!(fs::read(path)?,bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn edited_generated_sources_are_retained_instead_of_replaced() -> Result<()> {
+        let graph_dir=tempfile::tempdir_in(".")?;
+        let source_dir=tempfile::tempdir_in(".")?;
+        fs::write(source_dir.path().join("Synthetic.txt"),"A synthetic source paragraph.")?;
+        let graph=graph_in(graph_dir.path());
+        let first=import_books_directory(&graph,source_dir.path(),|_|{},||false)?;
+        let title=first.items[0].index_page_title.as_ref().unwrap();
+        let directory=graph.pages_dir.join(title);
+        let mut manifest=read_manifest(&directory.join(MANIFEST_FILE)).unwrap();
+        manifest.importer_version="grafium-book-import-v1".into();
+        fs::write(directory.join(MANIFEST_FILE),serde_json::to_vec(&manifest)?)?;
+        let path=generated_page_file_path(&graph,title).unwrap();
+        let edited=format!("{}\n- My own annotation\n",fs::read_to_string(&path)?);
+        fs::write(&path,&edited)?;
+        let report=import_books_directory(&graph,source_dir.path(),|_|{},||false)?;
+        assert_eq!(report.imported,1);
+        assert_ne!(report.items[0].index_page_title.as_ref(),Some(title));
+        assert_eq!(fs::read_to_string(path)?,edited);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_asset_cleanup_preserves_surviving_relative_references() -> Result<()> {
+        let graph_dir=tempfile::tempdir_in(".")?;
+        let source_dir=tempfile::tempdir_in(".")?;
+        fs::write(source_dir.path().join("Synthetic.html"),"<html><title>Synthetic</title><body><p>Source</p><img src='picture.png'></body></html>")?;
+        fs::write(source_dir.path().join("picture.png"),b"synthetic image")?;
+        let graph=graph_in(graph_dir.path());
+        let first=import_book_files(&graph,&[source_dir.path().join("Synthetic.html")],|_|{},||false)?;
+        let title=first.items[0].index_page_title.as_ref().unwrap();
+        let directory=graph.pages_dir.join(title);
+        let manifest=read_manifest(&directory.join(MANIFEST_FILE)).unwrap();
+        let asset=directory.join(&manifest.assets[0]);
+        let relative=asset.strip_prefix(&graph.pages_dir).unwrap().to_string_lossy();
+        graph.create_page_with_content("Survivor",false,&format!("- ![shared]({relative})\n"))?;
+        cleanup_generated_import(&graph,&directory,&manifest)?;
+        assert_eq!(fs::read(asset)?,b"synthetic image");
+        Ok(())
+    }
+
+    #[test]
+    fn reimports_legacy_epub_without_overwriting_unproven_generated_files() {
         let graph_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
         let epub = source_dir.path().join("sample.epub");
@@ -5866,6 +6072,8 @@ mod tests {
                     "Books/Sample Book/001-opening".to_string(),
                 ],
                 assets: vec!["assets/pic.png".to_string()],
+                generated_sha256: HashMap::new(),
+                assets_sha256: HashMap::new(),
             })
             .unwrap(),
         )
@@ -5876,17 +6084,21 @@ mod tests {
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped, 0);
         assert!(graph_dir.path().join("pages/Books/Sample Book.md").exists());
-        assert!(!graph_dir
+        assert!(graph_dir
             .path()
             .join("pages/Books/Sample Book/001-opening.md")
             .exists());
-        let book = fs::read_to_string(graph_dir.path().join("pages/Books/Sample Book.md")).unwrap();
+        let new_title=report.items[0].index_page_title.as_ref().unwrap();
+        assert_ne!(new_title,"Books/Sample Book");
+        assert!(fs::read_to_string(graph_dir.path().join("pages/Books/Sample Book.md")).unwrap()
+            .contains("[[Books/Sample Book/001-opening]]"));
+        let book = fs::read_to_string(generated_page_file_path(&graph,new_title).unwrap()).unwrap();
         assert!(book.contains("- # Opening"));
         assert!(book.contains("  - Hello *world*."));
         assert!(!book.contains("[[Books/Sample Book/001-opening]]"));
-        let manifest = read_manifest(&book_dir.join(MANIFEST_FILE)).unwrap();
+        let manifest = read_manifest(&graph.pages_dir.join(new_title).join(MANIFEST_FILE)).unwrap();
         assert_eq!(manifest.importer_version, IMPORTER_VERSION);
-        assert_eq!(manifest.generated_pages, vec!["Books/Sample Book"]);
+        assert_eq!(manifest.generated_pages, vec![new_title.clone()]);
     }
 
     #[test]

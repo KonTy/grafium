@@ -13,6 +13,7 @@ async function installAssistantFixture(page, options = {}) {
     return route.abort("blockedbyclient");
   });
   await page.addInitScript((options) => {
+    if (window !== window.top) return;
     function install(internals) {
       const state = window.__selectionState;
       const original = internals.invoke;
@@ -66,6 +67,8 @@ async function installAssistantFixture(page, options = {}) {
         { name: "Other test graph", path: "/synthetic/assistant-other" },
       ];
       let graph = graphs[0];
+      const threadStores = new Map(graphs.map(({ path }) => [path, new Map()]));
+      fixture.titleSuggestions = [];
       fixture.emit = (event, payload) => {
         for (const [id, listener] of listeners) {
           if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
@@ -101,6 +104,33 @@ async function installAssistantFixture(page, options = {}) {
           graph = graphs.find(({ path }) => path === args.path);
           if (!graph) throw new Error("Unknown synthetic graph");
           return structuredClone(graph);
+        }
+        if (cmd === "chat_concurrency") return { parallel: true, slots: null, provider: "synthetic" };
+        if (cmd === "suggest_chat_title") {
+          if (typeof args.question !== "string" || typeof args.answer !== "string")
+            throw new Error("Title suggestion requires string question and answer");
+          fixture.titleSuggestions.push(structuredClone(args));
+          return "Synthetic conversation";
+        }
+        if (cmd === "save_chat_thread") {
+          if (typeof args.thread?.id !== "string" || typeof args.thread?.title !== "string" || !Array.isArray(args.messages))
+            throw new Error("Invalid stored chat thread fixture request");
+          threadStores.get(graph.path).set(args.thread.id, structuredClone({ ...args.thread, messages: args.messages }));
+          return;
+        }
+        if (cmd === "list_chat_threads")
+          return [...threadStores.get(graph.path).values()].map(({ messages, ...thread }) => structuredClone(thread));
+        if (cmd === "load_chat_thread") return structuredClone(threadStores.get(graph.path).get(args.threadId) ?? null);
+        if (cmd === "rename_chat_thread" || cmd === "delete_chat_thread") {
+          const threads = threadStores.get(graph.path);
+          const thread = threads.get(args.threadId);
+          if (!thread) throw new Error("Missing synthetic chat thread");
+          if (cmd === "delete_chat_thread") threads.delete(args.threadId);
+          else {
+            if (typeof args.title !== "string") throw new Error("Chat title must be a string");
+            thread.title = args.title;
+          }
+          return;
         }
         if (cmd === "ai_health_check") {
           fixture.healthChecks++;
@@ -202,7 +232,7 @@ async function openAssistant(browser, options = {}) {
     } else if (options.unifiedPage) await focusContinuous(page, "selection-page", "b0");
     else await focus(page, "b0");
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("toggle-reference-panel")));
-    await page.getByRole("tab", { name: "Chat", exact: true }).click();
+    await page.getByRole("tab", { name: "Chat (AI)", exact: true }).click();
   }
   await input(page).waitFor();
   await page.waitForFunction(() => window.__assistantFixture.healthChecks > 0 && window.__assistantFixture.configChecks > 0);
@@ -229,7 +259,8 @@ async function runCases(cases, open = openAssistant) {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   let passed = 0, failed = 0;
   try {
-    for (const [name, options, run] of cases) {
+    const { applicationEditorCases } = require("./appEditorCases.cjs");
+    for (const [name, options, run] of applicationEditorCases(cases)) {
       if (process.env.UI_TEST_CASE && !process.env.UI_TEST_CASE.split("|").some((part) => name.includes(part))) continue;
       let fixture;
       try {
@@ -237,6 +268,7 @@ async function runCases(cases, open = openAssistant) {
         await run(fixture.page);
         await frames(fixture.page);
         assert.deepEqual(fixture.errors, []);
+        assert.deepEqual(await fixture.page.evaluate(() => window.__selectionState.unhandledIpc), []);
         assert.deepEqual(fixture.page.assistantExternalRequests, [], "all model/search transport goes through native IPC");
         const safety = await fixture.page.evaluate(() => ({
           legacyCalls: window.__assistantFixture.legacyCalls,

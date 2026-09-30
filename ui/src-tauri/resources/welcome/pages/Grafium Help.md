@@ -18,6 +18,7 @@ separate graph.
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery
 - [[Help - Sync]]
 - [[Help - Search]]
+- [[Help - Books]] - read original books, annotate, or convert to editable Markdown
 - [[Help - Grafium Guide]]
 - [[Help - Journal Guide]]
 

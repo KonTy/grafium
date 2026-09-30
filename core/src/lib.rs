@@ -17,6 +17,7 @@ pub mod models;
 pub mod parser;
 pub mod research;
 pub mod scraping;
+pub mod source_events;
 pub mod sync;
 
 pub use assistant::{handle_command as handle_assistant_command, AssistantResponse};

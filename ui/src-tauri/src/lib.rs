@@ -12,8 +12,10 @@ mod android_jni;
 
 use commands::graph::GraphConfig;
 use grafium_core::Graph;
+use grafium_core::source_events::{
+    is_book_source_event_path, is_note_source_event_path, reconcile_watched_paths, should_process_event,
+};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -52,29 +54,28 @@ impl GraphWatcherHandle {
 }
 
 impl AppState {
-    pub fn restart_graph_watcher(&self) -> Result<(), String> {
+    pub fn restart_graph_watcher(&self, app: &tauri::AppHandle) -> Result<(), String> {
         if let Ok(mut guard) = self.watcher.lock() {
             if let Some(existing) = guard.take() {
                 existing.stop();
             }
         }
 
-        let (pages_dir, journals_dir, knowledge_dir, self_writes) = {
+        let (pages_dir, journals_dir, knowledge_dir) = {
             let graph = self.graph.lock().map_err(|e| e.to_string())?;
             (
                 graph.pages_dir.clone(),
                 graph.journals_dir.clone(),
                 graph.knowledge_dir.clone(),
-                graph.self_write_tracker(),
             )
         };
 
         let handle = start_graph_watcher(
+            app.clone(),
             self.graph.clone(),
             pages_dir,
             journals_dir,
             knowledge_dir,
-            self_writes,
         )?;
         let mut guard = self.watcher.lock().map_err(|e| e.to_string())?;
         *guard = Some(handle);
@@ -120,45 +121,19 @@ pub(crate) fn open_graph_snapshot(snapshot: &GraphRuntimeSnapshot) -> Result<Gra
     .map_err(|e| e.to_string())
 }
 
-fn should_process_event(
-    event: &Event,
-    pages_dir: &std::path::Path,
-    journals_dir: &std::path::Path,
-    knowledge_dir: &std::path::Path,
-) -> bool {
-    event.paths.iter().any(|p| {
-        p.extension().and_then(|e| e.to_str()) == Some("md")
-            && (p.starts_with(pages_dir)
-                || p.starts_with(journals_dir)
-                || p.starts_with(knowledge_dir))
-    })
-}
-
-/// Returns true if `path` was written by the app itself within the last few
-/// seconds. Used to ignore self-inflicted filesystem events so a normal block
-/// save doesn't get mistaken for an external edit.
-fn was_recent_self_write(self_writes: &Arc<Mutex<HashMap<PathBuf, Instant>>>, path: &Path) -> bool {
-    if let Ok(mut map) = self_writes.lock() {
-        let now = Instant::now();
-        map.retain(|_, t| now.duration_since(*t).as_secs() < 30);
-        if let Some(t) = map.get(path) {
-            return now.duration_since(*t).as_secs() < 10;
-        }
-    }
-    false
-}
-
 fn start_graph_watcher(
+    app: tauri::AppHandle,
     graph: Arc<Mutex<Graph>>,
     pages_dir: PathBuf,
     journals_dir: PathBuf,
     knowledge_dir: PathBuf,
-    self_writes: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 ) -> Result<GraphWatcherHandle, String> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (event_tx, event_rx) = mpsc::channel::<notify::Result<Event>>();
 
     let join_handle = thread::spawn(move || {
+        let graph_root = pages_dir.parent().unwrap_or(&pages_dir).to_path_buf();
+        let books_dir = graph_root.join("books");
         let mut watcher = match RecommendedWatcher::new(
             move |res| {
                 let _ = event_tx.send(res);
@@ -172,22 +147,15 @@ fn start_graph_watcher(
             }
         };
 
-        if let Err(e) = watcher.watch(&pages_dir, RecursiveMode::Recursive) {
-            eprintln!("watch pages dir failed: {}", e);
-            return;
-        }
-        if let Err(e) = watcher.watch(&journals_dir, RecursiveMode::Recursive) {
-            eprintln!("watch journals dir failed: {}", e);
-            return;
-        }
-        if let Err(e) = watcher.watch(&knowledge_dir, RecursiveMode::Recursive) {
-            eprintln!("watch knowledge dir failed: {}", e);
+        if let Err(e) = watcher.watch(&graph_root, RecursiveMode::Recursive) {
+            eprintln!("watch graph root failed: {}", e);
             return;
         }
 
         let debounce = Duration::from_millis(400);
         let mut pending_files = std::collections::HashSet::<PathBuf>::new();
         let mut last_event_at: Option<Instant> = None;
+        let mut rescan = false;
 
         loop {
             if stop_rx.try_recv().is_ok() {
@@ -196,20 +164,25 @@ fn start_graph_watcher(
 
             match event_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(event)) => {
+                    if event.need_rescan() {
+                        rescan = true;
+                        last_event_at = Some(Instant::now());
+                        continue;
+                    }
                     if !should_process_event(&event, &pages_dir, &journals_dir, &knowledge_dir) {
                         continue;
                     }
 
                     for path in event.paths {
-                        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                        if path.starts_with(&books_dir) {
+                            if !is_book_source_event_path(&path, &books_dir) {
+                                continue;
+                            }
+                        } else if !is_note_source_event_path(&path, &[&pages_dir, &journals_dir, &knowledge_dir]) {
                             continue;
                         }
-                        // Ignore writes the app just made itself. Without this,
-                        // every block save (which rewrites the page's .md file)
-                        // would be re-processed as an external change.
-                        if was_recent_self_write(&self_writes, &path) {
-                            continue;
-                        }
+                        // Content hashes deduplicate app writes; a recent save
+                        // must never suppress a real external deletion.
                         pending_files.insert(path);
                     }
 
@@ -232,34 +205,43 @@ fn start_graph_watcher(
                 continue;
             }
 
-            let g = match graph.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    eprintln!("watch lock error: {}", e);
+            let active_graph = match graph.lock() {
+                Ok(active) if active.root_dir == graph_root => active.clone(),
+                Ok(_) => {
                     pending_files.clear();
                     last_event_at = None;
+                    rescan = false;
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("watch graph handle failed: {error}");
                     continue;
                 }
             };
-
-            // Incremental indexing only. We deliberately NEVER call
-            // `reindex_all()` from the watcher: it runs `clear_all()` (wiping
-            // the entire index) followed by a full disk rescan. On a large
-            // graph that both freezes the app for a long time and — if the
-            // on-disk .md files are not a complete mirror of the index — can
-            // destroy data. Index only the changed files. Deletions are left
-            // alone (a stale entry is harmless; an explicit re-index fixes it).
-            for path in pending_files.drain() {
-                if path.exists() {
-                    if let Err(e) = g.index_file(&path) {
-                        eprintln!("watch index file failed ({}): {}", path.display(), e);
-                    }
+            let paths = std::mem::take(&mut pending_files);
+            let result = reconcile_watched_paths(&active_graph, &paths, rescan);
+            if let Err(error) = result {
+                eprintln!("watch source reconciliation failed: {error}");
+                if let Err(emit_error) = app.emit("graph-index-error", serde_json::json!({
+                    "graphPath": active_graph.root_dir, "message": error.to_string(),
+                })) {
+                    eprintln!("could not notify source indexing failure: {emit_error}");
                 }
             }
-
-            drop(g);
-            pending_files.clear();
+            if rescan || paths.iter().any(|path| path.starts_with(&books_dir)) {
+                if let Err(e) = app.emit("book-source-changed", serde_json::json!({
+                    "graphPath": active_graph.root_dir,
+                })) {
+                    eprintln!("could not notify book reader of source change: {e}");
+                }
+            }
+            if let Err(error) = app.emit("graph-sources-changed", serde_json::json!({
+                "graphPath": active_graph.root_dir,
+            })) {
+                eprintln!("could not notify source changes: {error}");
+            }
             last_event_at = None;
+            rescan = false;
         }
     });
 
@@ -325,7 +307,7 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
     };
 
     thread::spawn(move || {
-        let mut was_available: std::collections::HashMap<String, bool> =
+        let mut was_available: std::collections::HashMap<(PathBuf, String), bool> =
             std::collections::HashMap::new();
         let check_interval = Duration::from_secs(5);
 
@@ -371,7 +353,8 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                 };
 
                 let now_available = backend.is_available();
-                let previously_available = was_available.get(&target.id).copied().unwrap_or(false);
+                let availability_key = (snapshot.root_dir.clone(), target.id.clone());
+                let previously_available = was_available.get(&availability_key).copied().unwrap_or(false);
 
                 if now_available && !previously_available {
                     // Target just became available!
@@ -388,11 +371,14 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 
                     // Auto-sync if enabled
                     if target.auto_sync {
-                        let engine = SyncEngine::new_with_metadata_dir(
+                        let engine = SyncEngine::new_with_metadata_dir_and_target(
                             snapshot.root_dir.clone(),
                             &snapshot.metadata_dir_name,
+                            &target.id,
                         );
-                        match engine.sync(backend.as_ref()) {
+                        match commands::sync::reconcile_sync_outcome(
+                            &app_handle, &snapshot, engine.sync(backend.as_ref()),
+                        ) {
                             Ok(result) => {
                                 eprintln!(
                                     "[sync-monitor] Auto-sync '{}': {}",
@@ -400,24 +386,11 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                                     result.summary()
                                 );
 
-                                // Reindex if we pulled files
-                                if !result.pulled.is_empty()
-                                    || !result.conflicts.is_empty()
-                                    || !result.deleted_local.is_empty()
-                                {
-                                    if let Ok(detached_graph) = open_graph_snapshot(&snapshot) {
-                                        let _ = detached_graph.reindex_all();
-                                    }
-                                    // Notify frontend to refresh
-                                    let _ = app_handle.emit(
-                                        "sync-completed",
-                                        serde_json::json!({
-                                            "target_name": target.name,
-                                            "pushed": result.pushed.len(),
-                                            "pulled": result.pulled.len(),
-                                            "conflicts": result.conflicts.len(),
-                                        }),
-                                    );
+                                if let Err(error) = app_handle.emit(
+                                    "sync-completed",
+                                    commands::sync::completion_payload(&target.name, &result),
+                                ) {
+                                    eprintln!("[sync-monitor] Could not report completion: {error}");
                                 }
                             }
                             Err(e) => {
@@ -446,7 +419,7 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                     );
                 }
 
-                was_available.insert(target.id.clone(), now_available);
+                was_available.insert(availability_key, now_available);
             }
         }
     });
@@ -479,8 +452,8 @@ const REINDEX_MAX_PER_CYCLE: i64 = 8;
 /// - Page-level granularity: an ancestor edit changes descendants' breadcrumbs,
 ///   so the whole page is re-chunked — but the content-hash diff means only
 ///   genuinely-changed chunks are re-embedded.
-/// - Degrades to a silent no-op when AI isn't fully configured (no embedder /
-///   engine not ready): never an error toast, never a retry storm.
+/// - Purges invalidated evidence without requiring an embedding model.
+///   Re-embedding waits until an embedder is configured.
 /// - Deletions: a pending id that no longer resolves to a page is treated as a
 ///   removal and its vectors are purged, so Chat never cites a deleted page.
 fn start_reindex_drainer(
@@ -490,117 +463,63 @@ fn start_reindex_drainer(
 ) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REINDEX_STARTUP_DELAY).await;
+        let mut reconciled_graph = None;
 
         loop {
             tokio::time::sleep(REINDEX_CYCLE).await;
-
-            // No-op unless AI is fully ready. Pending rows wait harmlessly
-            // until an embedder is configured, then get picked up.
-            let ready = {
-                let guard = engine.read().await;
-                guard.as_ref().map(|e| e.can_index()).unwrap_or(false)
-            };
-            if !ready {
-                continue;
-            }
-
-            // Snapshot the due set + graph id under the sync lock, then drop it
-            // before any await — holding a std Mutex across .await is unsound.
-            let snapshot = {
+            // Keep the database pool with its graph ID. A graph switch cannot
+            // redirect source reads or queue acknowledgements into another graph.
+            let (db, graph_id) = {
                 let g = match graph.lock() {
                     Ok(g) => g,
                     Err(_) => continue,
                 };
-                let graph_id = g.root_dir.to_string_lossy().to_string();
-                match g
-                    .db
-                    .list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE)
-                {
-                    Ok(due) => Some((graph_id, due)),
-                    Err(e) => {
-                        eprintln!("reindex drainer: could not list pending pages: {e}");
-                        None
-                    }
-                }
+                (g.db.clone(), g.root_dir.to_string_lossy().into_owned())
             };
-            let (graph_id, due) = match snapshot {
-                Some((graph_id, due)) if !due.is_empty() => (graph_id, due),
-                _ => continue,
-            };
-
-            // Restore the hash cache once so a fresh process re-embeds only
-            // genuinely-changed chunks, not whole pages, after a restart.
-            {
-                let guard = engine.read().await;
-                if let Some(e) = guard.as_ref() {
-                    if let Err(err) = e.restore_hash_cache(&graph_id).await {
-                        eprintln!("reindex drainer: hash cache restore failed: {err}");
+            let guard = engine.read().await;
+            let Some(e) = guard.as_ref() else { continue; };
+            if reconciled_graph.as_deref() != Some(graph_id.as_str()) {
+                match e.reconcile_deleted_vector_pages(&db, &graph_id).await {
+                    Ok(_) => reconciled_graph = Some(graph_id.clone()),
+                    Err(error) => {
+                        eprintln!("reindex drainer: orphan cleanup failed: {error}");
+                        continue;
                     }
                 }
             }
-
-            let mut changed = false;
-            for (page_id, marked_at) in due {
-                // Load the page + its blocks under the sync lock, then drop it.
-                // A page that no longer exists is a deletion → purge vectors.
-                enum Work {
-                    Reindex(grafium_core::models::Page, Vec<grafium_core::models::Block>),
-                    Remove,
-                    Skip,
+            let mut changed = match e.cleanup_pending_vectors(&db, &graph_id, 64).await {
+                Ok(count) => count > 0,
+                Err(error) => {
+                    eprintln!("reindex drainer: vector cleanup failed: {error}");
+                    continue;
                 }
-                let work = {
-                    let g = match graph.lock() {
-                        Ok(g) => g,
-                        Err(_) => break,
-                    };
-                    match g.db.get_page_by_id(&page_id) {
-                        Ok(page) => match g.db.list_blocks_for_page(&page_id) {
-                            Ok(blocks) => Work::Reindex(page, blocks),
-                            Err(e) => {
-                                eprintln!(
-                                    "reindex drainer: list blocks failed for '{page_id}': {e}"
-                                );
-                                Work::Skip
+            };
+            if e.can_index() {
+                let due = match db.list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE) {
+                    Ok(due) => due,
+                    Err(error) => {
+                        eprintln!("reindex drainer: could not list pending pages: {error}");
+                        continue;
+                    }
+                };
+                for (page_id, marked_at) in due {
+                    match e.index_page_from_database(&db, &page_id, &graph_id).await {
+                        Ok(_) => {
+                            if let Err(error) = db.clear_pending_reindex(&page_id, marked_at) {
+                                eprintln!("reindex drainer: could not acknowledge '{page_id}': {error}");
                             }
-                        },
-                        Err(_) => Work::Remove,
-                    }
-                };
-
-                let result = {
-                    let guard = engine.read().await;
-                    let e = match guard.as_ref() {
-                        Some(e) => e,
-                        None => break,
-                    };
-                    match &work {
-                        Work::Reindex(page, blocks) => {
-                            e.index_page(page, blocks, &graph_id).await.map(|_| ())
+                            changed = true;
                         }
-                        Work::Remove => e.remove_page(&graph_id, &page_id).await,
-                        Work::Skip => continue,
-                    }
-                };
-
-                match result {
-                    Ok(()) => {
-                        // Clear only if no newer edit bumped marked_at while we
-                        // were embedding; otherwise leave it for the next cycle.
-                        if let Ok(g) = graph.lock() {
-                            let _ = g.db.clear_pending_reindex(&page_id, marked_at);
+                        Err(error) => {
+                            eprintln!("reindex drainer: reindex of '{page_id}' failed: {error}");
                         }
-                        changed = true;
-                    }
-                    Err(e) => {
-                        // Leave the row pending; the next cycle retries. Silent.
-                        eprintln!("reindex drainer: reindex of '{page_id}' failed: {e}");
                     }
                 }
             }
-
             if changed {
-                // Nudge the UI to refresh its coverage / "N pages pending".
-                let _ = app_handle.emit("ai-index-updated", ());
+                if let Err(error) = app_handle.emit("ai-index-updated", ()) {
+                    eprintln!("reindex drainer: could not notify UI: {error}");
+                }
             }
         }
     });
@@ -1019,8 +938,10 @@ pub fn run() {
                 &graph_dir,
                 &db_path,
                 &metadata_dir,
-            )
-                .expect("Failed to initialize graph");
+            ).map_err(|error| std::io::Error::other(format!(
+                "Could not initialize graph '{}': {error}. Existing source and database files were preserved.",
+                graph_dir.display(),
+            )))?;
 
             let should_seed_tutorial = graph_dir == default_graph_dir;
             if should_seed_tutorial {
@@ -1035,39 +956,11 @@ pub fn run() {
                 }
             }
 
-            // Keep startup responsive. If DB is empty (first run or recovered),
-            // rebuild in the background instead of blocking app initialization.
-            // Use a cheap existence probe — a full page listing here would scan
-            // the whole table and freeze the UI thread on very large graphs.
-            if graph.needs_startup_reindex().unwrap_or(true) {
-                let graph_dir_clone = graph_dir.clone();
-                let db_path_clone = db_path.clone();
-                let metadata_dir_clone = metadata_dir.clone();
-                thread::spawn(move || {
-                    match Graph::open_with_db_path_and_metadata_dir(
-                        &graph_dir_clone,
-                        &db_path_clone,
-                        &metadata_dir_clone,
-                    ) {
-                        Ok(g) => {
-                            if let Err(e) = g.reconcile_files_from_disk() {
-                                eprintln!(
-                                    "Warning: background startup file reconcile failed for '{}': {}",
-                                    graph_dir_clone.display(),
-                                    e
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Warning: background startup reindex could not open '{}': {}",
-                                graph_dir_clone.display(),
-                                e
-                            );
-                        }
-                    }
-                });
-            }
+            // File counts cannot detect replacements or balanced add/delete
+            // changes while closed. Reconcile every startup in the background.
+            commands::graph::schedule_background_reconcile(
+                app.handle().clone(), graph_dir.clone(), db_path.clone(), metadata_dir.clone(),
+            );
 
             // One-time (per graph): map existing FTS rows to their rowids.
             // `fts_blocks.block_id` is UNINDEXED, so deleting a block's FTS row
@@ -1118,7 +1011,7 @@ pub fn run() {
                 graph: Arc::new(Mutex::new(graph)),
                 watcher: Mutex::new(None),
             };
-            state.restart_graph_watcher().expect("Failed to start graph watcher");
+            state.restart_graph_watcher(app.handle()).expect("Failed to start graph watcher");
 
             // Start sync monitor (checks for USB/mount availability)
             let sync_graph = state.graph.clone();
@@ -1375,6 +1268,13 @@ pub fn run() {
             commands::flashcards::grade_flashcard,
             commands::flashcards::import_anki_apkg,
             commands::books::books_import_directory,
+            commands::books::books_import_originals,
+            commands::books::book_open,
+            commands::books::book_read_bytes,
+            commands::books::book_save_position,
+            commands::books::book_notes_list,
+            commands::books::book_note_save,
+            commands::books::book_note_delete,
             commands::favorites::add_favorite,
             commands::favorites::remove_favorite,
             commands::favorites::list_favorites,
@@ -1409,6 +1309,8 @@ pub fn run() {
             commands::sync::sync_remove_target,
             commands::sync::sync_check_status,
             commands::sync::sync_list_conflicts,
+            commands::sync::sync_get_conflict_state,
+            commands::sync::sync_resolve_conflict,
             commands::sync::sync_run,
             commands::sync::sync_run_all,
             commands::theme::get_smplos_theme,

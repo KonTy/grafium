@@ -39,6 +39,12 @@ const metrics = (page) => composer(page).evaluate((node) => {
       const rect = control.getBoundingClientRect();
       return control.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
     }),
+    obscured: [...node.querySelectorAll("select, button")].flatMap((control) => {
+      const rect = control.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return control.contains(hit) ? [] : [{ control: control.getAttribute("aria-label") || control.textContent,
+        rect: rect.toJSON(), hit: hit?.outerHTML.slice(0, 200) }];
+    }),
   };
 });
 
@@ -134,10 +140,11 @@ const cases = [
     assert.equal(await button(page, "Send").evaluate((node) => node === document.activeElement), true);
   }],
   ["Chat caps the whole composer at half the pane across themes sizes and soft wrapping", { global: true }, async (page) => {
-    if (await page.locator(".sidebar").isVisible()) {
+    if (await page.locator(".sidebar:not(.collapsed)").isVisible()) {
       await page.locator(".sidebar button").first().focus();
       await page.keyboard.press("Control+b");
-      await page.locator(".sidebar").waitFor({ state: "hidden" });
+      await page.locator(".sidebar.collapsed").waitFor();
+      assert.equal(await page.locator(".sidebar").isVisible(), true, "collapsed navigation retains its rail");
     }
     for (const [width, height, theme] of [[1200, 900, "github-dark"], [420, 620, "github"], [760, 480, "github-dark"]]) {
       await page.setViewportSize({ width, height });
@@ -154,7 +161,7 @@ const cases = [
       assert.ok(size.scrollHeight > size.inputHeight);
       assert.ok(size.transcriptHeight > 60, "transcript remains visible");
       assert.equal(size.contained, true);
-      assert.equal(size.unobscured, true, "bottom navigation must not cover controls");
+      assert.equal(size.unobscured, true, `${width}x${height}: controls remain reachable: ${JSON.stringify(size.obscured)}`);
       const draft = await input(page).inputValue();
       await page.setViewportSize({ width: Math.max(320, width - 160), height: height - 100 });
       await frames(page);
@@ -303,7 +310,7 @@ const cases = [
     await page.evaluate(() => { window.__assistantFixture.hold = true; });
     const call = await send(page, "This context belongs only to the old graph", true);
     await page.locator(".graph-selector").click();
-    await page.getByRole("button", { name: "Other test graph", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Other test graph", exact: true }).click();
     await page.waitForFunction(() => window.__assistantFixture.cancellations.length === 1
       && window.__assistantFixture.listenerCount() === 0);
     assert.deepEqual(await page.evaluate(() => window.__assistantFixture.cancellations), [call.args.requestId]);

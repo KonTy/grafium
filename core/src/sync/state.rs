@@ -32,8 +32,9 @@ pub struct FileSyncRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnresolvedConflict {
     pub rel_path: String,
-    pub local_hash: String,
-    pub remote_hash: String,
+    /// None means this side was deleted, not that its hash is unknown.
+    pub local_hash: Option<String>,
+    pub remote_hash: Option<String>,
     pub backup_path: String,
     pub recorded_at: i64,
 }
@@ -50,7 +51,7 @@ pub struct SyncState {
     /// different (or empty/unmounted) one before we propagate any deletions.
     #[serde(default)]
     pub remote_id: Option<String>,
-    /// Conflicts awaiting an explicit local edit/resolution.
+    /// Conflicts awaiting an explicit revision-checked side selection.
     #[serde(default)]
     pub unresolved_conflicts: HashMap<String, UnresolvedConflict>,
 }
@@ -167,19 +168,6 @@ impl SyncState {
         self.list_unresolved_conflicts()
     }
 
-    /// Whether the supplied local content is an explicit, marker-free
-    /// resolution of a recorded conflict.
-    pub fn is_conflict_resolved(
-        &self,
-        rel_path: &str,
-        current_hash: &str,
-        contains_conflict_markers: bool,
-    ) -> bool {
-        self.unresolved_conflict(rel_path).is_some_and(|conflict| {
-            conflict.local_hash != current_hash && !contains_conflict_markers
-        })
-    }
-
     pub fn unresolved_conflict(&self, rel_path: &str) -> Option<&UnresolvedConflict> {
         self.unresolved_conflicts.get(rel_path)
     }
@@ -187,16 +175,16 @@ impl SyncState {
     pub fn record_unresolved_conflict(
         &mut self,
         rel_path: &str,
-        local_hash: &str,
-        remote_hash: &str,
+        local_hash: Option<String>,
+        remote_hash: Option<String>,
         backup_path: &str,
     ) {
         self.unresolved_conflicts.insert(
             rel_path.to_string(),
             UnresolvedConflict {
                 rel_path: rel_path.to_string(),
-                local_hash: local_hash.to_string(),
-                remote_hash: remote_hash.to_string(),
+                local_hash,
+                remote_hash,
                 backup_path: backup_path.to_string(),
                 recorded_at: chrono::Utc::now().timestamp(),
             },

@@ -12,6 +12,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.clock.setFixedTime(new Date("2026-09-13T12:00:00"));
   await page.addInitScript((options) => {
+    if (window !== window.top) return;
     localStorage.setItem("grafium.ui.zoom", "100");
     localStorage.setItem("grafium.session.lastLocation", JSON.stringify(options.journal ? { kind: "journal" }
       : { kind: "page", title: options.book ? "Books/Keyboard selection" : "Keyboard selection" }));
@@ -54,6 +55,9 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
     let sequence = 0;
     const state = window.__selectionState = {
       pages: [note, ...days], blocks: [...standalone, ...journal], calls: [], completed: [],
+      unhandledIpc: [],
+      layout: { sidebarVisible: true, wideMode: true },
+      chatThreads: new Map(),
       holdUpdate: false, failUpdate: false, updateWaiters: [],
       holdBlocks: options.holdBlocks ?? null, holdListOffset: options.holdListOffset ?? null,
       clipboard: [], clipboardRequests: [], clipboardWaiters: [], holdClipboard: false, failClipboard: false,
@@ -86,12 +90,38 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       invoke: async (cmd, args = {}) => {
         state.calls.push({ cmd, args: structuredClone(args) });
         switch (cmd) {
+          case "get_app_version": return "0.0.0-fixture";
+          case "plugin:window|is_maximized": return false;
           case "get_graph_info": return { name: "Keyboard selection fixture", path: "/synthetic/keyboard-selection" };
+          case "list_graphs": return [{ name: "Keyboard selection fixture", path: "/synthetic/keyboard-selection" }];
+          case "list_favorites": case "list_recent_pages": case "jobs_list": case "get_backlinks":
+          case "get_child_pages": case "pages_list_collections": case "sync_list_conflicts":
+          case "discover_link_candidates": case "list_link_candidates":
+            return [];
+          case "ui_log": case "record_page_open": case "reveal_startup_window":
+          case "plugin:event|unlisten":
+            return;
           case "ai_get_config": return { enabled: false, mode: "local" };
           case "ai_health_check": return {
             enabled: false, llm_available: false, embedder_available: false,
             vector_store_available: false, vector_count: 0, mode: "local",
           };
+          case "ai_index_status": return {
+            indexed_chunks: 0, total_blocks: state.blocks.length, pending_pages: 0,
+            embedder_ready: false, llm_ready: false, accelerator: null,
+          };
+          case "chat_concurrency": return { parallel: true, slots: null, provider: "synthetic" };
+          case "suggest_chat_title":
+            if (typeof args.question !== "string" || typeof args.answer !== "string") throw new Error("Invalid synthetic title request");
+            return "Synthetic conversation";
+          case "list_chat_threads":
+            return [...state.chatThreads.values()].map(({ messages, ...thread }) => structuredClone(thread));
+          case "save_chat_thread":
+            if (typeof args.thread?.id !== "string" || !Array.isArray(args.messages)) throw new Error("Invalid synthetic chat thread");
+            state.chatThreads.set(args.thread.id, structuredClone({ ...args.thread, messages: args.messages }));
+            return;
+          case "load_chat_thread": return structuredClone(state.chatThreads.get(args.threadId) ?? null);
+          case "reading_notes_list": return { notes: [], warnings: [] };
           case "assistant_context_info": {
             const source = state.pages.find(({ id }) => id === args.pageId);
             if (!source) throw new Error("The synthetic source page no longer exists.");
@@ -106,7 +136,14 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "set_app_theme": state.theme = args.themeId; return;
           case "get_smplos_theme": return null;
           case "research_get_config": throw new Error("unknown command research_get_config");
-          case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
+          case "get_layout_preferences": return structuredClone(state.layout);
+          case "set_layout_preferences":
+            for (const [key, value] of Object.entries(args.preferences ?? {})) {
+              if (!["sidebarVisible", "wideMode"].includes(key) || typeof value !== "boolean")
+                throw new Error("Invalid synthetic layout preference");
+              state.layout[key] = value;
+            }
+            return;
           case "get_page": {
             const found = state.pages.find((note) => note.id === args.id || note.title === args.title);
             if (!found) throw new Error("Database error: Query returned no rows");
@@ -114,6 +151,32 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           }
           case "get_parent_page": return null;
           case "list_pages": return structuredClone(state.pages);
+          case "count_pages": return matchingPages(args.filter).length;
+          case "list_pages_window": {
+            const pages = matchingPages(args.filter);
+            if (args.sortByTitle) pages.sort((a, b) => a.title.localeCompare(b.title));
+            return structuredClone(pages.slice(args.offset ?? 0, (args.offset ?? 0) + args.limit));
+          }
+          case "pages_namespace_tree": {
+            const roots = [];
+            for (const page of matchingPages(args.filter)) {
+              let siblings = roots;
+              let prefix = "";
+              const parts = page.title.split("/");
+              parts.forEach((label, index) => {
+                prefix = prefix ? `${prefix}/${label}` : label;
+                let node = siblings.find(node => node.key === prefix);
+                if (!node) {
+                  node = { key: prefix, label, page_id: null, children: [], descendant_count: 0, updated_at: page.updated_at };
+                  siblings.push(node);
+                }
+                if (index === parts.length - 1) node.page_id = page.id;
+                else node.descendant_count++;
+                siblings = node.children;
+              });
+            }
+            return roots;
+          }
           case "list_journal_note_dates":
             return days.filter((note) => note.title.startsWith(`${args.year}-${String(args.month).padStart(2, "0")}-`))
               .filter((note) => state.blocks.some((block) => block.page_id === note.id && block.content.trim()))
@@ -207,12 +270,18 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
             state.clipboard.push(args.text);
             return;
           case "plugin:event|listen": return ++sequence;
-          default: return [];
+          default:
+            state.unhandledIpc.push(cmd);
+            throw new Error(`Unhandled synthetic IPC command: ${cmd}`);
         }
       },
     };
     function assertUnusedId(id) {
       if (id && state.blocks.some((block) => block.id === id)) throw new Error(`Duplicate restored ID ${id}`);
+    }
+    function matchingPages(filter = "all") {
+      if (!["all", "files", "placeholders"].includes(filter)) throw new Error(`Invalid page filter ${filter}`);
+      return state.pages.filter(page => filter === "all" || (filter === "files" ? !!page.file_path : !page.file_path));
     }
     function nativeBlockType(value) {
       return { handwriting: "Handwriting", audio: "Audio", mixed: "Mixed", flashcard: "Flashcard", query: "Query" }[value] ?? "Text";
@@ -246,7 +315,8 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
     }
   }, options);
   if (beforeNavigate) await beforeNavigate(page);
-  await page.goto(BASE_URL, { waitUntil: "networkidle" });
+  await page.goto(options.componentHarness ? new URL("tests/fixtures/unified-editor.html", BASE_URL).href : BASE_URL,
+    { waitUntil: "networkidle" });
   try {
     if (!options.journal) {
       const initialBlockId = options.initialBlockId ?? (options.blockCount ? "large-0" : "b0");
@@ -267,6 +337,19 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
 const row = (page, id) => page.locator(`.block-item[data-block-id="${id}"]`);
 const frames = (page) => page.evaluate(() => new Promise((resolve) =>
   requestAnimationFrame(() => requestAnimationFrame(resolve))));
+async function externalInput(page) {
+  // The retired sidebar search is not a product control anymore. A separate
+  // fixture textbox preserves the generic external-focus/typing regression.
+  await page.evaluate(() => {
+    if (document.querySelector("[data-fixture-external-input]")) return;
+    const input = document.createElement("input");
+    input.dataset.fixtureExternalInput = "";
+    input.setAttribute("aria-label", "Independent fixture input");
+    input.style.cssText = "position:fixed;top:8px;right:20px;width:190px;z-index:100";
+    document.body.append(input);
+  });
+  return page.getByRole("textbox", { name: "Independent fixture input", exact: true });
+}
 async function focus(page, id, anchor = "end") {
   await row(page, id).locator(".block-content").click();
   await page.waitForFunction((id) => document.activeElement?.closest(".block-item")?.dataset.blockId === id, id);
@@ -531,7 +614,7 @@ const cases = [
     await focus(page, "b0");
     await shift(page, "Down", ["b0", "b1"]);
     const before = await snapshot(page);
-    const search = page.locator(".sidebar input").first();
+    const search = await externalInput(page);
     await search.click();
     await search.fill("find this");
     await search.press("Control+a");
@@ -802,7 +885,7 @@ const cases = [
     await nativeArrow(page, "down");
     await selected(page, ["b0", "b1"]);
     const before = await snapshot(page);
-    const search = page.locator(".sidebar input").first();
+    const search = await externalInput(page);
     await search.fill("independent input");
     for (const direction of ["down", "down", "up"]) await nativeArrow(page, direction);
     assert.equal(await search.evaluate((node) => node === document.activeElement), true);
@@ -1013,7 +1096,7 @@ const cases = [
       await page.keyboard.press("Delete");
       await page.waitForFunction((phase) => phase === "delete"
         ? window.__selectionState.deleteWaiters.length > 0 : typeof window.__releaseReload === "function", phase);
-      const search = page.locator(".sidebar input").first();
+      const search = await externalInput(page);
       if (interaction === "dialog") {
         await page.keyboard.press("Control+g");
         await page.getByRole("dialog", { name: "Choose date" }).waitFor();
@@ -1091,14 +1174,16 @@ if (require.main === module) (async () => {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   let failures = 0;
   try {
-    for (const [name, options, run] of cases) {
+    const { applicationEditorCases } = require("./appEditorCases.cjs");
+    for (const [name, options, run] of applicationEditorCases(cases, { standaloneComponent: true })) {
       if (process.env.UI_TEST_CASE && !process.env.UI_TEST_CASE.split("|").some((filter) => name.includes(filter))) continue;
       let fixture;
       try {
-        fixture = await openEditor(browser, options);
+        fixture = await openEditor(browser, { ...options, componentHarness: !!options.unifiedPage });
         await run(fixture.page);
         assert.deepEqual(fixture.errors, [], "no uncaught browser errors");
-        console.log(`PASS ${name}`);
+        assert.deepEqual(await fixture.page.evaluate(() => window.__selectionState.unhandledIpc), []);
+        console.log(`PASS ${options.unifiedPage ? "[isolated component] " : ""}${name}`);
       } catch (error) {
         failures++;
         console.error(`FAIL ${name}\n${error.stack ?? error}`);

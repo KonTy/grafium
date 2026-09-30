@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "grafium"
-version = "0.0.136"
+version = "0.0.138"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "grafium-core"
-version = "0.0.136"
+version = "0.0.138"
 dependencies = [
  "chrono",
  "encoding_rs",
@@ -1839,12 +1839,14 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "once_cell",
+ "parking_lot",
  "pdf-extract",
  "pulldown-cmark",
  "r2d2",
  "r2d2_sqlite",
  "regex",
  "reqwest 0.12.28",
+ "roxmltree",
  "rusqlite",
  "scraper",
  "serde",
@@ -1867,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "grafium-tui"
-version = "0.0.136"
+version = "0.0.138"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2975,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "model-runtime"
-version = "0.0.136"
+version = "0.0.138"
 dependencies = [
  "fs2",
  "libc",
@@ -4416,6 +4418,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

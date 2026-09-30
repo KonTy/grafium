@@ -364,7 +364,7 @@ const cases = [
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("toggle-reference-panel")));
     await page.locator(".reference-panel summary").filter({ hasText: "Page / selection tools" }).click();
     const panel = page.locator(".reference-panel");
-    await panel.getByRole("button", { name: "Summarize this Page", exact: true }).click();
+    await panel.getByRole("button", { name: "AI: Summarize this page", exact: true }).click();
     await panel.getByRole("region", { name: "Page summary", exact: true }).waitFor();
     const captured = await page.evaluate(() => window.__researchLinksFixture.calls
       .find(({ cmd }) => cmd === "ai_generate_references").args);
@@ -420,7 +420,8 @@ if (require.main === module) (async () => {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   let failed = 0;
   try {
-    for (const [name, options, run] of cases) {
+    const { applicationEditorCases } = require("./appEditorCases.cjs");
+    for (const [name, options, run] of applicationEditorCases(cases)) {
       let fixture;
       try {
         fixture = await openEditor(browser, {

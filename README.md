@@ -109,11 +109,12 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Callouts | Insert styled notes, warnings, tips, and other supported callout templates. |
 | Selection actions | Turn selected bullets into TODOs or tasks back into bullets, and make links from selected text. |
 | Reading notes | Open the right panel's **Notes** tab, select a passage and choose **Use selection**, then write and **Save note**. Notes can also apply to the whole current page, book, or journal day. No AI is required. |
-| Self-contained annotations | New notes are Markdown footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Ambiguous or missing passages remain flagged instead of being guessed. |
+| Markdown-source annotations | Notes on Markdown pages are footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Original-format books instead keep companion Markdown notes. Ambiguous or missing passages remain flagged instead of being guessed. |
 
 Reading-note drafts survive navigation during the app session, but **Save note**
-is required before closing the app. Saving adds reference markers and footnote
-definitions without rewriting the book's words. Conflicting external edits leave
+is required before closing the app. For Markdown sources, saving adds reference
+markers and footnote definitions without rewriting the book's words. Original
+book files are never rewritten by annotation saves. Conflicting external edits leave
 your draft intact. Earlier standalone Markdown note files remain supported and
 are not automatically moved or deleted. Your annotations are kept separate from
 the book evidence used by AI research. A misplaced inline note can be reattached
@@ -152,7 +153,7 @@ guessed into a different block.
 | Namespaces | Organize slash-separated titles such as `Projects/Observatory/Checklist` into a navigable tree. |
 | Collections | Mark a page as a book or paper collection from its page menu; navigate its ordered linked members, or convert it back to a regular page. |
 | All Pages | Browse the namespace hierarchy and find pages without remembering their exact location. |
-| Files or placeholders | Filter All Pages, in list and tree view, to every page, only pages with a `.md` file on disk, or only the placeholders a `[[link]]` or `#tag` created but nobody has written. Remembered per graph. |
+| Files or placeholders | Filter All Pages, in list and tree view, to every page, only pages with a source file on disk (Markdown or an original book), or only the placeholders a `[[link]]` or `#tag` created but nobody has written. Remembered per graph. |
 | Favorites and recent pages | Keep frequently used material close at hand and return to recent work. |
 | Full-text search | Search indexed note content with SQLite FTS5 and ranked results. |
 | Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the journal calendar, to browse all pages with an immediately focused fuzzy search. Arrows browse; Enter opens; Escape cancels. |
@@ -171,11 +172,19 @@ guessed into a different block.
 | Study topics | Use tags to study one topic or mix cards from across your notes. |
 | Rich flashcards | Include Markdown, mathematics, images, audio, and video in cards. |
 | Anki import | Bring `.apkg` decks and supported media into Grafium's note-and-card workflow. |
-| Book imports | Import folders containing EPUB, PDF, HTML, Markdown, text, and FB2 books into editable book pages. |
+| Original-book library | Copy EPUB, PDF, FB2, MOBI, or AZW3 into the graph, read the original under Books, and keep highlights and notes in companion Markdown files. Source files remain unchanged. Extracted text feeds graph search and configured AI indexing; extraction warnings are shown explicitly. |
+| Optional book conversion | Choose **Editable Markdown (convert)** to retain the existing folder/file conversion workflow for EPUB, PDF, HTML, Markdown, text, FB2, and additional formats through optional Calibre tools. Existing converted books are not migrated. |
 | Reading structure | Keep paragraphs nested under detected chapter and section headings, with referenced media where extraction is supported. |
 | Scanned PDF OCR | Extract text locally with Poppler and Tesseract; optional ImageMagick helps extract figure regions. |
 | Audio/video processing | Turn supported media sources into notes with transcripts; local transcription needs its model and supporting tools. |
 | Background jobs | Follow longer-running imports and processing, cancel supported running jobs, and clear finished entries without blocking the editor. |
+
+Original-format books and metadata live under `books/`; their companion notes
+live under `pages/Reading Notes/Books/`. Back up both. The reader remembers your
+place and saved notes can return to a passage. DRM-protected ebooks and
+fixed-layout annotation parity are not supported. MOBI/AZW3 text indexing may
+require Calibre; scanned PDF text search requires OCR. Reading an original does
+not require an AI model, and does not guarantee complete text extraction.
 
 ### Live queries
 
@@ -264,7 +273,7 @@ access.
 | Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. |
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
 | Findable settings | Filter labels and help text with literal search terms, and open categorized keyboard-shortcut help. |
-| Maintenance tools | Manually re-index a graph, inspect asset-cleanup candidates, or preview task-completion backfills before applying them. |
+| Maintenance tools | Manually re-index Markdown and every original book copied into the graph, retrying extraction while preserving identities, annotations, favorites, review progress, and handwriting recognition. Rebuild search data and queue vector refresh; inspect asset-cleanup candidates or preview task-completion backfills separately. |
 | Responsive workspace | Use the desktop layout or Android's adapted editor controls. |
 | Theme-aware startup | Apply the saved theme before showing the desktop window; defer optional screens and local embedding-model loading. |
 
@@ -448,6 +457,12 @@ npm run test:ui
 Browser tests start their own dev server and use Tauri IPC fixtures rather than a
 personal graph. They exercise interactions that unit tests alone cannot cover,
 including startup, journals, selection, tables, and graph rendering.
+
+The isolated book reader has synthetic EPUB, FB2, MOBI, and PDF fixtures:
+`npm --prefix ui run test:books:ui` runs them in Chromium. On Linux,
+`npm --prefix ui run test:books:webkit` exercises the installed WebKitGTK 4.1
+engine using Python 3/PyGObject and Xvfb, without opening a personal graph.
+The reader runtime and dependency notices are generated by `predev`/`prebuild`.
 
 ### Under the hood
 

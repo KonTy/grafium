@@ -13,6 +13,7 @@
     renamePage,
     getChildPages,
     getGraphInfo,
+    getPage,
     openBookFolderInFileBrowser,
     openNamespaceInFileBrowser,
     openPageInFileBrowser,
@@ -36,6 +37,7 @@
     type PageKindFilter,
   } from "../lib/pageTreeState";
   import type { BulkRenameResult, Page } from "../lib/api";
+  import { isOriginalBookPage } from "../lib/books";
 
   interface PageActionMenu {
     x: number;
@@ -497,7 +499,7 @@
     const total = childCount + (pageId ? 1 : 0);
     const confirmed = await askConfirm(
       `Delete folder '${title}' and ${total} page${total === 1 ? "" : "s"} under it? `
-      + `This removes notes, markdown files, and media that nothing else uses. `
+      + `This removes source files (including original books), notes in this folder, and media that nothing else uses. `
       + `This cannot be undone.`,
     );
     if (!confirmed) return;
@@ -680,7 +682,10 @@
     if (!target) return;
     actionMenu = null;
     try {
-      if (target.bookTitle) {
+      const page = target.pageId ? await getPage({ id: target.pageId }) : null;
+      if (page && isOriginalBookPage(page)) {
+        await openPageInFileBrowser(page.id);
+      } else if (target.bookTitle) {
         await openBookFolderInFileBrowser(target.bookTitle);
       } else if (target.folder) {
         await openNamespaceInFileBrowser(target.title);
@@ -697,6 +702,27 @@
     const target = actionMenu;
     if (!target) return;
     actionMenu = null;
+
+    if (target.pageId) {
+      try {
+        const page = await getPage({ id: target.pageId });
+        if (isOriginalBookPage(page)) {
+          const confirmed = await askConfirm(
+            `Delete original book '${page.title}' from this graph? This removes the graph's copy and its indexed source content. `
+            + `Your companion notes are kept, but their source will be unavailable. The external file you imported is not touched. This cannot be undone.`,
+            "Delete book",
+          );
+          if (!confirmed) return;
+          await deletePage(page.id);
+          await refreshAfterDeletion();
+          return;
+        }
+      } catch (e) {
+        console.error("Could not inspect or delete original book:", e);
+        alert(`Could not delete page: ${errorMessage(e)}`);
+        return;
+      }
+    }
 
     if (target.bookTitle) {
       const confirmed = await askConfirm(
@@ -894,7 +920,7 @@
         class="mode-btn"
         class:active={kindFilter === "filed"}
         aria-pressed={kindFilter === "filed"}
-        title="Only pages with a markdown file on disk"
+        title="Only pages with a source file on disk, including original books"
         onclick={() => setKindFilter("filed")}
       >
         Files

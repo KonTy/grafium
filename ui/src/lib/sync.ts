@@ -27,6 +27,31 @@ export interface SyncConflict {
   recorded_at: number;
 }
 
+export interface SyncConflictState {
+  graph_path: string;
+  rel_path: string;
+  /** null means deleted; an empty file has a non-null hash and size 0. */
+  local_hash: string | null;
+  remote_hash: string | null;
+  local_size: number | null;
+  remote_size: number | null;
+}
+
+export type SyncConflictSide = "local" | "remote";
+
+export function getSyncConflictState(targetId: string, relPath: string): Promise<SyncConflictState> {
+  return invoke("sync_get_conflict_state", { targetId, relPath });
+}
+
+export function resolveSyncConflict(
+  targetId: string, snapshot: SyncConflictState, chosen: SyncConflictSide,
+): Promise<SyncResult> {
+  return invoke("sync_resolve_conflict", {
+    graphPath: snapshot.graph_path, targetId, relPath: snapshot.rel_path,
+    expectedLocalHash: snapshot.local_hash, expectedRemoteHash: snapshot.remote_hash, chosen,
+  });
+}
+
 export function listSyncTargets(): Promise<SyncTarget[]> {
   return invoke("sync_list_targets");
 }
@@ -88,17 +113,23 @@ export async function initSyncMonitor(): Promise<UnlistenFn> {
     pushed: number;
     pulled: number;
     conflicts: number;
+    deleted_local?: number;
+    deleted_remote?: number;
+    errors?: number;
   }>("sync-completed", (event) => {
-    const { target_name, pushed, pulled, conflicts } = event.payload;
+    const { target_name, pushed, pulled, conflicts, deleted_local = 0, deleted_remote = 0, errors = 0 } = event.payload;
     const parts: string[] = [];
     if (pushed) parts.push(`↑ ${pushed} pushed`);
     if (pulled) parts.push(`↓ ${pulled} pulled`);
     if (conflicts) parts.push(`⚡ ${conflicts} conflicts`);
+    if (deleted_local) parts.push(`🗑 ${deleted_local} deleted local`);
+    if (deleted_remote) parts.push(`🗑 ${deleted_remote} deleted remote`);
+    if (errors) parts.push(`❌ ${errors} errors`);
     const summary = parts.length ? parts.join(", ") : "Everything in sync";
 
     showToast(
-      `Auto-sync complete (${target_name}): ${summary}`,
-      conflicts > 0 ? "error" : "success"
+      `Sync complete (${target_name}): ${summary}`,
+      conflicts > 0 || errors > 0 ? "error" : "success"
     );
   });
 
