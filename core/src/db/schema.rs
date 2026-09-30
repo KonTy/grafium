@@ -501,7 +501,7 @@ fn migrate_link_proposals(conn: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if legacy {
-        let tx = conn.unchecked_transaction()?;
+        let tx = super::immediate_transaction(conn)?;
         tx.execute_batch(
             "CREATE TABLE link_candidates_proposals (
                 id TEXT PRIMARY KEY,
@@ -555,7 +555,7 @@ fn migrate_link_proposals(conn: &Connection) -> Result<()> {
 }
 
 fn create_entity_index(conn: &Connection) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = super::immediate_transaction(conn)?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS entity_index_metadata (
              id INTEGER PRIMARY KEY CHECK(id = 1),

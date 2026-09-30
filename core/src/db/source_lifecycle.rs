@@ -3,7 +3,7 @@ use crate::error::{CoreError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = super::immediate_transaction(conn)?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS generated_page_origins(
              page_id TEXT PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
