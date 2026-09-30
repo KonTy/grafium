@@ -372,7 +372,8 @@ impl KnowledgeEngine {
 
     /// Index a single page — embed its blocks and store vectors.
     pub async fn index_page(&self, page: &Page, blocks: &[Block], graph_id: &str) -> Result<usize> {
-        self.index_snapshot(page, blocks, graph_id, None).await
+        self.index_snapshot(page, blocks, graph_id, None, &mut |_, _| {})
+            .await
     }
 
     /// Remove a page's vectors from the index — used when a page is deleted so

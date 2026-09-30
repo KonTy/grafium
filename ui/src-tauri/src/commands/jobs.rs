@@ -26,6 +26,15 @@ pub const JOB_EVENT: &str = "job://update";
 const MAX_RETAINED_JOBS: usize = 50;
 const MAX_RUNNING_JOBS: usize = 2;
 
+/// Automatic AI search indexing after imports, syncs and rebuilds. It is owned
+/// by the app, not the user, so it never takes one of the user's job slots and
+/// never blocks one from starting.
+pub const BACKGROUND_INDEX_JOB_KIND: &str = "ai_index_background";
+
+fn counts_against_limit(kind: &str) -> bool {
+    kind != BACKGROUND_INDEX_JOB_KIND
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobStatus {
@@ -132,25 +141,8 @@ impl JobRegistry {
 
         {
             let mut entries = self.entries.lock().map_err(|e| e.to_string())?;
-            let running = entries
-                .iter()
-                .filter(|entry| entry.job.status == JobStatus::Running)
-                .count();
-            if running >= MAX_RUNNING_JOBS {
-                return Err(format!(
-                    "Grafium is already running {running} background jobs. \
-                     Wait for one to finish or cancel it before starting another."
-                ));
-            }
-            if job.kind == "ai_index_all"
-                && entries.iter().any(|entry| {
-                    entry.job.status == JobStatus::Running && entry.job.kind == "ai_index_all"
-                })
-            {
-                return Err("A full AI index is already running".to_string());
-            }
-            if is_duplicate_concept_edge_job(&job, &entries) {
-                return Err("Concept edge discovery is already running for this page".to_string());
+            if let Some(error) = admission_error(&job, &entries) {
+                return Err(error);
             }
             entries.push(JobEntry {
                 job: job.clone(),
@@ -216,6 +208,38 @@ impl JobRegistry {
         f(&mut entry.job);
         Some(entry.job.clone())
     }
+}
+
+/// Why `job` may not start alongside `entries`, if it may not.
+fn admission_error(job: &Job, entries: &[JobEntry]) -> Option<String> {
+    let running_like = |kind: &str| {
+        entries
+            .iter()
+            .any(|entry| entry.job.status == JobStatus::Running && entry.job.kind == kind)
+    };
+    if !counts_against_limit(&job.kind) {
+        return running_like(&job.kind)
+            .then(|| "Automatic AI search indexing is already running".to_string());
+    }
+    let running = entries
+        .iter()
+        .filter(|entry| {
+            entry.job.status == JobStatus::Running && counts_against_limit(&entry.job.kind)
+        })
+        .count();
+    if running >= MAX_RUNNING_JOBS {
+        return Some(format!(
+            "Grafium is already running {running} background jobs. \
+             Wait for one to finish or cancel it before starting another."
+        ));
+    }
+    if job.kind == "ai_index_all" && running_like("ai_index_all") {
+        return Some("A full AI index is already running".to_string());
+    }
+    if is_duplicate_concept_edge_job(job, entries) {
+        return Some("Concept edge discovery is already running for this page".to_string());
+    }
+    None
 }
 
 fn is_duplicate_concept_edge_job(job: &Job, entries: &[JobEntry]) -> bool {
@@ -396,6 +420,28 @@ mod tests {
             },
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn background_indexing_neither_uses_nor_needs_a_user_job_slot() {
+        let running = |id: &str, kind: &str| {
+            let mut e = entry(id, JobStatus::Running);
+            e.job.kind = kind.into();
+            e
+        };
+        let background = running("bg", BACKGROUND_INDEX_JOB_KIND).job;
+        let user = running("new", "book_import").job;
+
+        let full = vec![running("a", "book_import"), running("b", "ai_index_all")];
+        assert!(admission_error(&background, &full).is_none());
+        assert!(admission_error(&user, &full).is_some());
+
+        let with_background = vec![
+            running("a", "book_import"),
+            running("bg", BACKGROUND_INDEX_JOB_KIND),
+        ];
+        assert!(admission_error(&user, &with_background).is_none());
+        assert!(admission_error(&background, &with_background).is_some());
     }
 
     #[test]

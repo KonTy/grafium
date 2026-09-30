@@ -1,8 +1,77 @@
-use std::sync::Mutex;
+use std::io::Write;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{State, WebviewWindow};
-// Only `install_fallback` needs the `Manager` methods, and it is desktop-only.
-#[cfg(desktop)]
 use tauri::Manager;
+
+/// Startups slower than this leave a phase report in `startup-slow.log` in the
+/// app data directory, so a stall that can't be reproduced on demand still
+/// says where the time went.
+const SLOW_STARTUP: Duration = Duration::from_secs(3);
+const MAX_SLOW_LOG_BYTES: u64 = 64 * 1024;
+
+static PHASES: OnceLock<(Instant, Mutex<Vec<(&'static str, Duration)>>)> = OnceLock::new();
+
+/// Record that a startup phase finished. The first call starts the clock.
+pub fn mark(phase: &'static str) {
+    let (started, phases) = PHASES.get_or_init(|| (Instant::now(), Mutex::new(Vec::new())));
+    if let Ok(mut phases) = phases.lock() {
+        phases.push((phase, started.elapsed()));
+    }
+}
+
+fn phase_report() -> Option<(Duration, String)> {
+    let (started, phases) = PHASES.get()?;
+    let total = started.elapsed();
+    let phases = phases.lock().ok()?;
+    Some((total, format_phases(&phases, total)))
+}
+
+fn format_phases(phases: &[(&str, Duration)], total: Duration) -> String {
+    let mut previous = Duration::ZERO;
+    let mut out = String::new();
+    for (phase, at) in phases {
+        out.push_str(&format!(
+            "{phase} +{}ms (at {}ms); ",
+            at.saturating_sub(previous).as_millis(),
+            at.as_millis()
+        ));
+        previous = *at;
+    }
+    out.push_str(&format!("window shown at {}ms", total.as_millis()));
+    out
+}
+
+fn report_startup(app_data: Option<&Path>, how: &str) {
+    let Some((total, report)) = phase_report() else {
+        return;
+    };
+    if total < SLOW_STARTUP {
+        tracing::info!("Startup timing ({how}): {report}");
+        return;
+    }
+    tracing::warn!("Slow startup ({how}): {report}");
+    let Some(dir) = app_data else {
+        return;
+    };
+    let path = dir.join("startup-slow.log");
+    let truncate = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SLOW_LOG_BYTES);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(!truncate)
+        .truncate(truncate)
+        .open(&path);
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let line = format!("unix={unix} {how}: {report}\n");
+    if let Err(error) = file.and_then(|mut f| f.write_all(line.as_bytes())) {
+        tracing::warn!("Could not record slow startup in {}: {error}", path.display());
+    }
+}
 
 #[derive(Default)]
 pub struct StartupWindow(Mutex<bool>);
@@ -43,6 +112,7 @@ pub fn reveal_startup_window(
         #[cfg(mobile)]
         let _ = background;
         tracing::info!("Startup window ready");
+        report_startup(window.app_handle().path().app_data_dir().ok().as_deref(), "ready");
         Ok(())
     })
 }
@@ -67,7 +137,9 @@ pub fn install_fallback(app: &tauri::AppHandle) {
             ) {
                 tracing::warn!("Could not display startup recovery message: {error}");
             }
-            show(&window, [30, 30, 46])
+            let shown = show(&window, [30, 30, 46]);
+            report_startup(app.path().app_data_dir().ok().as_deref(), "fallback");
+            shown
         });
         if let Err(error) = result {
             tracing::error!("Could not reveal startup recovery window: {error}");
@@ -77,7 +149,20 @@ pub fn install_fallback(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::StartupWindow;
+    use super::{format_phases, StartupWindow};
+    use std::time::Duration;
+
+    #[test]
+    fn phase_report_shows_each_phase_duration() {
+        let phases = [
+            ("graph opened", Duration::from_millis(120)),
+            ("setup finished", Duration::from_millis(12_400)),
+        ];
+        assert_eq!(
+            format_phases(&phases, Duration::from_millis(13_000)),
+            "graph opened +120ms (at 120ms); setup finished +12280ms (at 12400ms); window shown at 13000ms"
+        );
+    }
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,

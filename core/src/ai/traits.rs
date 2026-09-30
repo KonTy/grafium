@@ -273,6 +273,16 @@ pub trait VectorStore: Send + Sync {
         let _ = graph_id;
         Box::pin(async move { Ok(Vec::new()) })
     }
+
+    /// Every graph that has stored vectors. Default: none known.
+    fn list_graph_ids<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Return space freed by deletions to the filesystem. Default: no-op.
+    fn compact<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[cfg(test)]

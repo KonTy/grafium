@@ -1,5 +1,6 @@
 pub mod build_info;
 mod commands;
+mod index_activity;
 #[cfg(not(target_os = "android"))]
 mod shutdown;
 mod welcome;
@@ -431,9 +432,13 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 const REINDEX_DEBOUNCE_MS: i64 = 15_000;
 /// How often the drainer wakes to look for quiesced pages.
 const REINDEX_CYCLE: Duration = Duration::from_secs(5);
-/// Gentle startup delay so we don't hammer the embedder the instant the app
-/// opens while the user is trying to read something.
-const REINDEX_STARTUP_DELAY: Duration = Duration::from_secs(20);
+/// Background indexing waits this long after launch so opening the app never
+/// competes with loading the embedding model. Deleted-page cleanup, which needs
+/// no model, starts after [`REINDEX_CYCLE`].
+const REINDEX_STARTUP_DELAY: Duration = Duration::from_secs(60);
+/// How often the vector index returns deleted space and truncates its WAL,
+/// in addition to each time a graph is opened.
+const VECTOR_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Cap pages reindexed per cycle so a crash-recovered backlog drains gradually
 /// rather than saturating the embedder worker in one burst.
 const REINDEX_MAX_PER_CYCLE: i64 = 8;
@@ -462,8 +467,11 @@ fn start_reindex_drainer(
     engine: Arc<tokio::sync::RwLock<Option<grafium_core::KnowledgeEngine>>>,
 ) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(REINDEX_STARTUP_DELAY).await;
+        let started = std::time::Instant::now();
+        let mut last_compaction = started;
+        let mut compact_now = false;
         let mut reconciled_graph = None;
+        let mut activity = index_activity::IndexActivity::default();
 
         loop {
             tokio::time::sleep(REINDEX_CYCLE).await;
@@ -480,11 +488,25 @@ fn start_reindex_drainer(
             let Some(e) = guard.as_ref() else { continue; };
             if reconciled_graph.as_deref() != Some(graph_id.as_str()) {
                 match e.reconcile_deleted_vector_pages(&db, &graph_id).await {
-                    Ok(_) => reconciled_graph = Some(graph_id.clone()),
+                    Ok(_) => {
+                        reconciled_graph = Some(graph_id.clone());
+                        compact_now = true;
+                    }
                     Err(error) => {
                         eprintln!("reindex drainer: orphan cleanup failed: {error}");
                         continue;
                     }
+                }
+            }
+            if compact_now || last_compaction.elapsed() >= VECTOR_COMPACTION_INTERVAL {
+                compact_now = false;
+                last_compaction = std::time::Instant::now();
+                // Graph IDs are absolute graph roots. Legacy relative IDs can
+                // never be searched again. A missing folder is kept: it may be
+                // an unplugged drive that returns.
+                let is_live = |id: &str| std::path::Path::new(id).is_absolute();
+                if let Err(error) = e.prune_and_compact_vectors(&is_live).await {
+                    eprintln!("reindex drainer: vector compaction failed: {error}");
                 }
             }
             let mut changed = match e.cleanup_pending_vectors(&db, &graph_id, 64).await {
@@ -494,7 +516,9 @@ fn start_reindex_drainer(
                     continue;
                 }
             };
-            if e.can_index() {
+            if started.elapsed() < REINDEX_STARTUP_DELAY {
+                // Leave the model unloaded while the app is opening.
+            } else if e.can_index() {
                 let due = match db.list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE) {
                     Ok(due) => due,
                     Err(error) => {
@@ -503,18 +527,41 @@ fn start_reindex_drainer(
                     }
                 };
                 for (page_id, marked_at) in due {
-                    match e.index_page_from_database(&db, &page_id, &graph_id).await {
-                        Ok(_) => {
+                    let title = db
+                        .get_page_titles(std::slice::from_ref(&page_id))
+                        .ok()
+                        .and_then(|mut titles| titles.remove(&page_id))
+                        .unwrap_or_default();
+                    let result = e
+                        .index_page_from_database_with_progress(
+                            &db,
+                            &page_id,
+                            &graph_id,
+                            &mut |done, total| {
+                                activity.progress(&app_handle, &page_id, &title, done, total)
+                            },
+                        )
+                        .await;
+                    match result {
+                        Ok(embedded) => {
+                            activity.page_indexed(&page_id, embedded);
                             if let Err(error) = db.clear_pending_reindex(&page_id, marked_at) {
                                 eprintln!("reindex drainer: could not acknowledge '{page_id}': {error}");
                             }
                             changed = true;
                         }
                         Err(error) => {
+                            activity.page_failed(&page_id, &error.to_string());
                             eprintln!("reindex drainer: reindex of '{page_id}' failed: {error}");
                         }
                     }
                 }
+                match db.count_pending_reindex() {
+                    Ok(pending) => activity.finish_if_idle(pending),
+                    Err(error) => eprintln!("reindex drainer: could not count pending pages: {error}"),
+                }
+            } else {
+                activity.pause();
             }
             if changed {
                 if let Err(error) = app_handle.emit("ai-index-updated", ()) {
@@ -843,6 +890,7 @@ where
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    commands::startup::mark("process started");
     // Without this, every `tracing::info!`/`tracing::warn!` call throughout
     // the codebase (including grafium-core) silently went nowhere -- a real
     // observability gap that hampered debugging the OOM-crash investigation.
@@ -903,6 +951,7 @@ pub fn run() {
                     "Native AI supervision could not start; native inference is unavailable: {error}"
                 ));
             }
+            commands::startup::mark("native AI supervision configured");
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -943,6 +992,7 @@ pub fn run() {
                 graph_dir.display(),
             )))?;
 
+            commands::startup::mark("graph opened");
             let should_seed_tutorial = graph_dir == default_graph_dir;
             if should_seed_tutorial {
                 match seed_tutorial_graph(&graph_dir, &metadata_dir) {
@@ -1012,6 +1062,7 @@ pub fn run() {
                 watcher: Mutex::new(None),
             };
             state.restart_graph_watcher(app.handle()).expect("Failed to start graph watcher");
+            commands::startup::mark("graph watcher started");
 
             // Start sync monitor (checks for USB/mount availability)
             let sync_graph = state.graph.clone();
@@ -1051,6 +1102,7 @@ pub fn run() {
                     cancels: Default::default(),
                 }
             };
+            commands::startup::mark("knowledge engine configured");
             // Keep the vector index fresh automatically as the graph changes.
             start_reindex_drainer(
                 app.handle().clone(),
@@ -1195,6 +1247,7 @@ pub fn run() {
                 }
             }
 
+            commands::startup::mark("setup finished");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
