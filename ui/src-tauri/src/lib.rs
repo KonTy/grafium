@@ -1,5 +1,6 @@
 pub mod build_info;
 mod commands;
+mod index_activity;
 #[cfg(not(target_os = "android"))]
 mod shutdown;
 mod welcome;
@@ -464,6 +465,7 @@ fn start_reindex_drainer(
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REINDEX_STARTUP_DELAY).await;
         let mut reconciled_graph = None;
+        let mut activity = index_activity::IndexActivity::default();
 
         loop {
             tokio::time::sleep(REINDEX_CYCLE).await;
@@ -503,18 +505,41 @@ fn start_reindex_drainer(
                     }
                 };
                 for (page_id, marked_at) in due {
-                    match e.index_page_from_database(&db, &page_id, &graph_id).await {
-                        Ok(_) => {
+                    let title = db
+                        .get_page_titles(std::slice::from_ref(&page_id))
+                        .ok()
+                        .and_then(|mut titles| titles.remove(&page_id))
+                        .unwrap_or_default();
+                    let result = e
+                        .index_page_from_database_with_progress(
+                            &db,
+                            &page_id,
+                            &graph_id,
+                            &mut |done, total| {
+                                activity.progress(&app_handle, &page_id, &title, done, total)
+                            },
+                        )
+                        .await;
+                    match result {
+                        Ok(embedded) => {
+                            activity.page_indexed(&page_id, embedded);
                             if let Err(error) = db.clear_pending_reindex(&page_id, marked_at) {
                                 eprintln!("reindex drainer: could not acknowledge '{page_id}': {error}");
                             }
                             changed = true;
                         }
                         Err(error) => {
+                            activity.page_failed(&page_id, &error.to_string());
                             eprintln!("reindex drainer: reindex of '{page_id}' failed: {error}");
                         }
                     }
                 }
+                match db.count_pending_reindex() {
+                    Ok(pending) => activity.finish_if_idle(pending),
+                    Err(error) => eprintln!("reindex drainer: could not count pending pages: {error}"),
+                }
+            } else {
+                activity.pause();
             }
             if changed {
                 if let Err(error) = app_handle.emit("ai-index-updated", ()) {

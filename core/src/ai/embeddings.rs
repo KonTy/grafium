@@ -339,6 +339,19 @@ impl EmbeddingPipeline {
         graph_id: &str,
         embedder: &dyn Embedder,
     ) -> Result<Vec<ChunkEmbedding>> {
+        self.embed_chunks_with_progress(chunks, graph_id, embedder, &mut |_| {})
+            .await
+    }
+
+    /// [`Self::embed_chunks`], reporting the running count of embedded chunks
+    /// after each batch.
+    pub async fn embed_chunks_with_progress(
+        &self,
+        chunks: &[TextChunk],
+        graph_id: &str,
+        embedder: &dyn Embedder,
+        on_batch: &mut (dyn FnMut(usize) + Send),
+    ) -> Result<Vec<ChunkEmbedding>> {
         let mut output = Vec::with_capacity(chunks.len());
         let batch_size = self.config.batch_size.max(1);
         for batch in chunks.chunks(batch_size) {
@@ -370,6 +383,7 @@ impl EmbeddingPipeline {
                 .collect();
 
             output.extend(chunk_embeddings);
+            on_batch(output.len());
         }
 
         Ok(output)
