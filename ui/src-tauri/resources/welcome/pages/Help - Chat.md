@@ -26,6 +26,11 @@ activity list as **Building AI search index**; answers about content that is
 still being embedded may miss semantic matches until it reports **AI search
 index is up to date**.
 
+To keep startup fast, background embedding waits about a minute after Grafium
+opens; models load only when Chat, summaries, or indexing need them. The AI
+search index stores compact 8-bit vectors and returns space freed by deleted
+or changed content when a graph opens and about hourly afterwards.
+
 Original books use extracted, read-only source text for page/book context.
 Write your own annotations in **Notes**, not into the original.
 See [[Help - Books]] for extraction limits and source-preserving import.

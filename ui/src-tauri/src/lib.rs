@@ -432,9 +432,13 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 const REINDEX_DEBOUNCE_MS: i64 = 15_000;
 /// How often the drainer wakes to look for quiesced pages.
 const REINDEX_CYCLE: Duration = Duration::from_secs(5);
-/// Gentle startup delay so we don't hammer the embedder the instant the app
-/// opens while the user is trying to read something.
-const REINDEX_STARTUP_DELAY: Duration = Duration::from_secs(20);
+/// Background indexing waits this long after launch so opening the app never
+/// competes with loading the embedding model. Deleted-page cleanup, which needs
+/// no model, starts after [`REINDEX_CYCLE`].
+const REINDEX_STARTUP_DELAY: Duration = Duration::from_secs(60);
+/// How often the vector index returns deleted space and truncates its WAL,
+/// in addition to each time a graph is opened.
+const VECTOR_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Cap pages reindexed per cycle so a crash-recovered backlog drains gradually
 /// rather than saturating the embedder worker in one burst.
 const REINDEX_MAX_PER_CYCLE: i64 = 8;
@@ -463,7 +467,9 @@ fn start_reindex_drainer(
     engine: Arc<tokio::sync::RwLock<Option<grafium_core::KnowledgeEngine>>>,
 ) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(REINDEX_STARTUP_DELAY).await;
+        let started = std::time::Instant::now();
+        let mut last_compaction = started;
+        let mut compact_now = false;
         let mut reconciled_graph = None;
         let mut activity = index_activity::IndexActivity::default();
 
@@ -484,18 +490,23 @@ fn start_reindex_drainer(
                 match e.reconcile_deleted_vector_pages(&db, &graph_id).await {
                     Ok(_) => {
                         reconciled_graph = Some(graph_id.clone());
-                        // Graph IDs are absolute graph roots. Legacy relative
-                        // IDs can never be searched again. A missing folder is
-                        // kept: it may be an unplugged drive that returns.
-                        let is_live = |id: &str| std::path::Path::new(id).is_absolute();
-                        if let Err(error) = e.prune_and_compact_vectors(&is_live).await {
-                            eprintln!("reindex drainer: vector compaction failed: {error}");
-                        }
+                        compact_now = true;
                     }
                     Err(error) => {
                         eprintln!("reindex drainer: orphan cleanup failed: {error}");
                         continue;
                     }
+                }
+            }
+            if compact_now || last_compaction.elapsed() >= VECTOR_COMPACTION_INTERVAL {
+                compact_now = false;
+                last_compaction = std::time::Instant::now();
+                // Graph IDs are absolute graph roots. Legacy relative IDs can
+                // never be searched again. A missing folder is kept: it may be
+                // an unplugged drive that returns.
+                let is_live = |id: &str| std::path::Path::new(id).is_absolute();
+                if let Err(error) = e.prune_and_compact_vectors(&is_live).await {
+                    eprintln!("reindex drainer: vector compaction failed: {error}");
                 }
             }
             let mut changed = match e.cleanup_pending_vectors(&db, &graph_id, 64).await {
@@ -505,7 +516,9 @@ fn start_reindex_drainer(
                     continue;
                 }
             };
-            if e.can_index() {
+            if started.elapsed() < REINDEX_STARTUP_DELAY {
+                // Leave the model unloaded while the app is opening.
+            } else if e.can_index() {
                 let due = match db.list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE) {
                     Ok(due) => due,
                     Err(error) => {
