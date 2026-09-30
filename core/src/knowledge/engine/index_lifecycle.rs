@@ -245,6 +245,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pruning_drops_only_rejected_graphs_and_never_the_active_one() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (graph, engine, store, _) = setup(root.path())?;
+        let page = graph.create_page_with_content("Kept", false, "- Stays searchable.")?;
+        for id in ["live", "stale", "active"] {
+            engine
+                .index_page_from_database(&graph.db, &page.id, id)
+                .await?;
+        }
+        // "active" was indexed last, so the engine is working in it.
+        let removed = engine.prune_and_compact_vectors(&|id| id == "live").await?;
+        assert_eq!(removed, 1);
+        let mut left = store.list_graph_ids().await?;
+        left.sort();
+        assert_eq!(left, ["active", "live"]);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reconciliation_removes_legacy_orphans_without_a_pending_row() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (graph, mut engine, store, _) = setup(root.path())?;
@@ -525,6 +544,28 @@ impl KnowledgeEngine {
             processed += 1;
         }
         Ok(processed)
+    }
+
+    /// Drop vectors of graphs `is_live` rejects, then return free space to
+    /// the filesystem. Callers must only reject graphs that can never be
+    /// opened again. Returns the number of graphs dropped.
+    pub async fn prune_and_compact_vectors(
+        &self,
+        is_live: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Result<usize> {
+        let state = self.index_state.lock().await;
+        let Some(store) = self.maintenance_store()? else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for graph_id in store.list_graph_ids().await? {
+            if !is_live(&graph_id) && state.graph_id.as_deref() != Some(graph_id.as_str()) {
+                store.delete_by_graph(&graph_id).await?;
+                removed += 1;
+            }
+        }
+        store.compact().await?;
+        Ok(removed)
     }
 
     /// Repair legacy orphan vectors that have no queue entry, without generating embeddings.
