@@ -19,21 +19,8 @@ const blockContents = [
     for (const continuous of [false, true]) {
       const { page, errors } = await openEditor(browser, {
         unifiedPage: continuous,
+        componentHarness: continuous,
         blockContents,
-        beforeNavigate: async (page) => {
-          if (!continuous) return;
-          // Exercise the retained prototype without exposing it in the shipped app.
-          await page.route(/\/src\/components\/PageContent\.svelte(?:\?|$)/, async (route) => {
-            if (new URL(route.request().url()).searchParams.has("type")) return route.continue();
-            const response = await route.fetch();
-            const source = await response.text();
-            assert.match(source, /const SHOW_UNIFIED_EDITOR_PROTOTYPE = false;/);
-            await route.fulfill({
-              response,
-              body: source.replace("const SHOW_UNIFIED_EDITOR_PROTOTYPE = false;", "const SHOW_UNIFIED_EDITOR_PROTOTYPE = true;"),
-            });
-          });
-        },
       });
       const content = continuous ? ".unified-rendered-content" : ".rendered-content";
       const themes = await page.evaluate(async () => (await import("/src/lib/themes.ts")).themes.map(({ id }) => id));
@@ -120,13 +107,15 @@ const blockContents = [
           return color;
         }, level);
         assert.equal(actual, expected, `source H${level} matches its preview`);
-        await page.getByTitle("Bionic Speedreader", { exact: true }).focus();
+        if (continuous) await page.locator(".fixture-banner").click();
+        else await page.getByTitle("Bionic Speedreader", { exact: true }).focus();
         await page.locator(`${content} h${level}`).first().waitFor();
       }
       assert.deepEqual(await page.evaluate(() => window.__selectionState.blocks
         .filter(({ page_id }) => page_id === "selection-page").map(({ content }) => content)), blockContents);
       console.log(`PASS heading colors survive editing without rewriting Markdown (${continuous ? "continuous" : "classic"})`);
 
+      if (!continuous) {
       await page.keyboard.press("Alt+s");
       const search = page.getByRole("searchbox", { name: "Filter settings", exact: true });
       await search.fill("theme");
@@ -143,6 +132,7 @@ const blockContents = [
             && document.documentElement.style.getPropertyValue("--accent-blue") === colors.accentBlue;
         }, id);
         assert.ok(matches, `${name} selection applies its palette`);
+      }
       }
       assert.deepEqual(errors, [], "no uncaught browser errors");
       await page.close();

@@ -42,6 +42,20 @@ next attempt; it does not disable memory admission. **Request GPU for Chat**
 requests offload for the selected chat model. Active native jobs must finish
 before their worker can be evicted for a retry.
 
+## Re-indexing the graph
+
+**Re-index Graph (Manual)** and the graph menu's **Re-index** rebuild search data
+from Markdown pages, journals, graph knowledge, and all imported originals in
+`books/`. Companion reading notes are included. The graph's book copies are the
+sources; their former external locations are not needed.
+
+Reindex retries original-book extraction even for unchanged files and queues
+vector refresh for the configured embedding model. Existing page identities,
+favorites, annotations, review progress, and handwriting recognition are
+preserved. Removed sources are cleaned from the index, not recreated.
+An invalid source is reported without erasing unrelated books or notes.
+See [[Help - Books]] for format and extraction limits.
+
 ## Sync
 
 Add filesystem or WebDAV targets here. USB drives and file-server folders are

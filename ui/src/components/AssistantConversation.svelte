@@ -8,7 +8,8 @@
   import ChatStatusTrail from "./ChatStatusTrail.svelte";
   import { isNearBottom, scrollToBottom } from "../lib/scrollToBottom";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
-  import { listBlocks } from "../lib/api";
+  import { getPage, listBlocks } from "../lib/api";
+  import { isOriginalBookPage } from "../lib/books";
   import { aiAsk, aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
   import { buildPlannerPrompt, hydratePlan, looksLikeEditRequest, parseEditPlan, type EditAction } from "../lib/aiActions";
   import { applyEditPlan, summarizeApplyResult, type BlockTarget } from "../lib/aiActionsApply";
@@ -39,6 +40,8 @@
 
   let info = $state<AssistantContextInfo | null>(null);
   let sourceError = $state("");
+  let readOnlySource = $state(true);
+  let sourceVerified = $state(false);
   let connected = $state(false);
   let checking = $state(true);
   let connectionError = $state("");
@@ -110,12 +113,14 @@
     const block = focusedBlockId;
     if (!active) return;
     let disposed = false;
-    info = null; sourceError = "";
+    info = null; sourceError = ""; sourceVerified = false;
     if (!id) return;
-    void assistantContextInfo(graphPath, id, block ?? undefined).then((result) => {
+    void Promise.all([assistantContextInfo(graphPath, id, block ?? undefined), getPage({ id })]).then(([result, page]) => {
       if (disposed) return;
       if (result.pageId !== id) throw new Error("Source page changed. Select the context again.");
       info = result;
+      readOnlySource = isOriginalBookPage(page);
+      sourceVerified = true;
     }).catch((cause) => { if (!disposed) sourceError = `Could not read context: ${String(cause)}`; });
     return () => { disposed = true; };
   });
@@ -390,9 +395,13 @@
 
   <div class="conversation-scroll chat-log" bind:this={scrollEl}
     onscroll={() => { followAnswer = isNearBottom(scrollEl); }}>
-    {#if contextPageId}
-      <PageAssistantTools pageId={contextPageId} pageTitle={info?.pageTitle || view.sourcePageTitle}
-        blockId={focusedBlockId} {thread} {openTools} active={active} {onFindLinks} {onNavigate} {onOpenSettings} />
+    {#if contextPageId && !readOnlySource}
+      <div hidden={!sourceVerified} inert={!sourceVerified}>
+        <PageAssistantTools pageId={contextPageId} pageTitle={info?.pageTitle || view.sourcePageTitle}
+          blockId={focusedBlockId} {thread} {openTools} active={active && sourceVerified} {onFindLinks} {onNavigate} {onOpenSettings} />
+      </div>
+    {:else if contextPageId && info && readOnlySource}
+      <p>Original books are read-only. Chat uses indexed book text; save your own writing in Notes rather than rewriting the book.</p>
     {/if}
     <AssistantDiagnostics {active} {running} {onOpenSettings} />
     {#if !view.messages.length}

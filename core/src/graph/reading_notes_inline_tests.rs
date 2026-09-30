@@ -130,7 +130,7 @@ fn inline_notes_survive_single_file_copy_reopen_reindex_and_note_only_edits() ->
     let restored = notes(&graph);
     assert!(restored
         .iter()
-        .all(|n| n.status == ReadingNoteStatus::Recovered));
+        .all(|n| n.status == ReadingNoteStatus::Attached));
     assert_ne!(restored[0].target_block_id, restored[1].target_block_id);
     let fresh = tempfile::tempdir_in(".")?;
     let other = Graph::open(fresh.path())?;
@@ -212,7 +212,7 @@ fn inline_real_passage_changes_are_ambiguous_not_nearest_position() -> Result<()
     fs::write(&file, content)?;
     graph.reindex_all()?;
     let ambiguous = notes(&graph).remove(0);
-    assert_eq!(ambiguous.status, ReadingNoteStatus::Ambiguous);
+    assert_eq!(ambiguous.status, ReadingNoteStatus::Ambiguous, "{ambiguous:?}");
     assert!(ambiguous.target_block_id.is_none());
     assert_eq!(ambiguous.body, "keep");
     Ok(())
@@ -668,7 +668,7 @@ fn inline_rendered_selection_ignores_existing_managed_references() -> Result<()>
     graph.reindex_all()?;
     assert!(notes(&graph)
         .iter()
-        .all(|note| note.status == ReadingNoteStatus::Recovered));
+        .all(|note| note.status == ReadingNoteStatus::Attached));
     Ok(())
 }
 

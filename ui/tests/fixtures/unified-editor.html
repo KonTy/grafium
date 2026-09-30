@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Isolated continuous-editor component fixture</title></head>
+  <body>
+    <div id="fixture"></div>
+    <script type="module">
+      import "/src/styles/global.css";
+      import "katex/dist/katex.min.css";
+      import { mount } from "svelte";
+      import { EditorView } from "@codemirror/view";
+      import Harness from "./UnifiedEditorHarness.svelte";
+      window.__handleNativeVerticalArrow = (direction, extend) => {
+        const target = document.activeElement;
+        if (!(target instanceof HTMLElement) || EditorView.findFromDOM(target)?.composing) return false;
+        const key = direction === "up" ? "ArrowUp" : "ArrowDown";
+        return !target.dispatchEvent(new KeyboardEvent("keydown", {
+          key, code: key, shiftKey: extend, bubbles: true, cancelable: true,
+        }));
+      };
+      mount(Harness, { target: document.getElementById("fixture") });
+    </script>
+  </body>
+</html>

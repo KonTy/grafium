@@ -2,7 +2,17 @@ Bring in material when you have a reason to use it. This graph ships only Markdo
 
 ## Books and documents
 
-Folder import scans supported books recursively: **EPUB, PDF, HTML, Markdown, TXT, and FB2**. It creates editable pages under `Books/`, extracts referenced media when available, and leaves the original files outside the graph.
+**Import books** offers two modes. **Original book (read and annotate)** copies
+EPUB, PDF, FB2, MOBI, or AZW3 into the graph and keeps the source unchanged.
+Open it under **Books**, add companion Markdown notes, and use extracted text
+for graph search and AI. Indexing limitations are reported; DRM-protected
+ebooks are not supported.
+
+**Editable Markdown (convert)** retains the existing conversion workflow.
+Folder import scans supported books recursively, creates editable pages under
+`Books/`, extracts referenced media when available, and leaves the originals
+outside the graph. EPUB, PDF, HTML, Markdown, TXT, and FB2 are supported directly;
+additional formats use optional Calibre tools.
 
 Imported books use a long page with paragraph blocks nested beneath detected chapter or section headings. Inspect the result: complex layouts and OCR can need correction.
 
@@ -11,6 +21,9 @@ Imported books use a long page with paragraph blocks nested beneath detected cha
 - **ImageMagick** can help crop obvious figure regions from scanned pages.
 
 Tool availability and the source document determine what can be extracted; these are not guaranteed lossless conversions. Back up first and keep the originals.
+
+See [[Help - Books]] for reader controls, notes, indexing, and the difference
+between preserving a source and converting it.
 
 ## Rich media and voice
 

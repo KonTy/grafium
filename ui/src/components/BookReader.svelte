@@ -1,0 +1,270 @@
+<script lang="ts">
+  import { get } from "svelte/store";
+  import { listen } from "@tauri-apps/api/event";
+  import type { Page } from "../lib/api";
+  import {
+    bookOpen, bookReadBytes, bookSavePosition, bookNotesList, bookNoteChanges,
+    bookSelection, bookJump, compatibleBookLocation, selectionForBook,
+    type BookInfo, type BookLocation,
+  } from "../lib/books";
+  import { BOOK_FRAME_SANDBOX, readerFrameURL, readReaderMessage, type BookTocItem } from "../lib/bookReaderSecurity";
+  import { showToast } from "../lib/toast.svelte";
+
+  let { page, graphPath }: { page: Page; graphPath: string } = $props();
+  let frame = $state<HTMLIFrameElement>();
+  let url = $state("");
+  let book = $state.raw<BookInfo | null>(null);
+  let loading = $state(true);
+  let ready = $state(false);
+  let error = $state("");
+  let positionError = $state("");
+  let invalidated = $state(false);
+  let monitorError = $state("");
+  let notice = $state("");
+  let label = $state("");
+  let toc = $state<BookTocItem[]>([]);
+  let annotations = $state(false);
+  let pdfPages = $state(0);
+  let pdfPage = $state(1);
+  let size = $state(100);
+  let retry = $state(0);
+  let sendCommand: (type: string, data?: Record<string, unknown>) => void = () => {};
+  let openFrame: () => void = () => {};
+  let saveNow: () => Promise<void> = async () => {};
+  let verifySource: () => Promise<boolean> = async () => false;
+  const selection = $derived(book ? selectionForBook($bookSelection, graphPath, book) : null);
+
+  function openNotes() {
+    if (book) window.dispatchEvent(new CustomEvent("book-open-notes", {
+      detail: { graphPath, bookId: book.id, pageId: book.pageId },
+    }));
+  }
+
+  $effect(() => {
+    const graph = graphPath;
+    const pageId = page.id;
+    retry;
+    let disposed = false;
+    let activeBook: BookInfo | null = null;
+    let pending: BookLocation | null = null;
+    let positionTimer: ReturnType<typeof setTimeout> | undefined;
+    let openTimer: ReturnType<typeof setTimeout> | undefined;
+    let writing = Promise.resolve();
+    const token = crypto.randomUUID();
+    loading = true; ready = false; error = ""; positionError = ""; notice = ""; invalidated = false; monitorError = "";
+    url = ""; book = null; toc = []; label = ""; annotations = false; pdfPages = 0; size = 100;
+    let bytes: ArrayBuffer | null = null;
+    let runtime = "";
+    let checking: Promise<boolean> | null = null;
+    let unlisten: (() => void) | undefined;
+    function invalidate(message: string) {
+      if (disposed) return;
+      invalidated = true; ready = false; annotations = false; pending = null;
+      clearTimeout(positionTimer);
+      error = `The original book is no longer verified. ${message}`;
+      notice = "Stale read-only snapshot: position saving and passage annotations are disabled. Reload the book after restoring or reimporting the source.";
+      const selected = get(bookSelection);
+      if (selected?.graphPath === graph && selected.pageId === pageId) bookSelection.set(null);
+    }
+    function validateSource(): Promise<boolean> {
+      if (disposed || !activeBook || invalidated) return Promise.resolve(false);
+      if (checking) return checking;
+      const expected = activeBook;
+      checking = bookOpen(graph, pageId).then(current => {
+        if (disposed) return false;
+        if (current.id !== expected.id || current.sourceSha256 !== expected.sourceSha256
+          || current.format !== expected.format || current.filePath !== expected.filePath) {
+          invalidate("The source was replaced or changed.");
+          return false;
+        }
+        activeBook = current;
+        book = current;
+        return true;
+      }).catch(e => { invalidate(String(e)); return false; }).finally(() => { checking = null; });
+      return checking;
+    }
+    verifySource = validateSource;
+    const revalidate = () => { if (!document.hidden) void validateSource(); };
+    sendCommand = (type, data = {}) => {
+      if (!disposed) frame?.contentWindow?.postMessage({ channel: "grafium-book", token, type, ...data }, "*");
+    };
+    const flush = () => {
+      clearTimeout(positionTimer);
+      if (!pending || !activeBook) return writing;
+      const location = pending;
+      const source = activeBook;
+      pending = null;
+      writing = writing.then(async () => {
+        try {
+          await bookSavePosition(graph, source.id, source.sourceSha256, location);
+          if (!disposed) positionError = "";
+        } catch (e) {
+          if (disposed) showToast(`Book position was not saved: ${String(e)}`);
+          else {
+            pending ??= location; positionError = `Position not saved. ${String(e)}`;
+            await validateSource();
+          }
+        }
+      });
+      return writing;
+    };
+    saveNow = flush;
+    const receive = (event: MessageEvent) => {
+      const message = readReaderMessage(event, frame?.contentWindow ?? null, token);
+      if (!message || disposed || !activeBook) return;
+      if (message.type === "help") {
+        frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+      } else if (message.type === "ready" && !invalidated) {
+        clearTimeout(openTimer); loading = false; ready = true;
+        toc = message.toc; notice = message.notice; annotations = message.annotations; pdfPages = message.pages ?? 0;
+      } else if (message.type === "error") {
+        clearTimeout(openTimer); loading = false; error = message.message;
+      } else if (message.type === "location" && !invalidated && compatibleBookLocation(activeBook, message.location)) {
+        pending = message.location; label = message.label;
+        if (message.location.kind === "pdf") pdfPage = message.location.page;
+        clearTimeout(positionTimer);
+        positionTimer = setTimeout(() => { void flush(); }, 600);
+      } else if (message.type === "selection" && !invalidated && annotations && compatibleBookLocation(activeBook, message.location)) {
+        bookSelection.set({ graphPath: graph, bookId: activeBook.id, pageId, sourceSha256: activeBook.sourceSha256,
+          quote: message.quote, locator: message.location });
+      } else if (message.type === "open-notes") openNotes();
+    };
+    window.addEventListener("message", receive);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
+    void listen<{ graphPath: string }>("book-source-changed", event => {
+      if (event.payload?.graphPath === graph) void validateSource();
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(e => {
+      if (!disposed) monitorError = `Live source notifications unavailable; source checks still run when returning to the window or after a failed save. ${String(e)}`;
+    });
+    openFrame = () => {
+      if (disposed || !bytes || !activeBook) return;
+      sendCommand("bootstrap", { runtime });
+      frame?.contentWindow?.postMessage({
+        channel: "grafium-book", token, type: "open", bytes, format: activeBook.format, location: activeBook.readingLocation,
+      }, "*", [bytes]);
+      bytes = null;
+    };
+    void (async () => {
+      try {
+        const info = await bookOpen(graph, pageId);
+        if (disposed) return;
+        if (info.pageId !== pageId) throw new Error("Book source does not match the requested page.");
+        activeBook = info; book = info;
+        const [data, response] = await Promise.all([
+          bookReadBytes(graph, info.id), fetch("/book-reader/runtime.js"),
+        ]);
+        if (!response.ok) throw new Error("Offline reader runtime is missing. Run npm run build:reader before starting Grafium.");
+        runtime = await response.text();
+        if (disposed) return;
+        if (!(data instanceof ArrayBuffer)) throw new Error("The backend did not return binary book bytes.");
+        bytes = data; url = readerFrameURL(token);
+        openTimer = setTimeout(() => {
+          if (!disposed) { loading = false; error = "The isolated reader did not initialize. This WebView may not support the required offline frame/worker APIs."; }
+        }, 45000);
+      } catch (e) {
+        if (!disposed) { error = `Could not open this original book. ${String(e)}`; loading = false; }
+      }
+    })();
+    return () => {
+      disposed = true; void flush(); clearTimeout(openTimer);
+      window.removeEventListener("message", receive);
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
+      unlisten?.();
+      const selected = get(bookSelection);
+      if (selected?.graphPath === graph && selected.pageId === pageId) bookSelection.set(null);
+    };
+  });
+
+  $effect(() => {
+    $bookNoteChanges;
+    if (!ready || !book) return;
+    const source = book;
+    const graph = graphPath;
+    let cancelled = false;
+    void bookNotesList(graph, source.id).then(notes => {
+      if (!cancelled) sendCommand("notes", { locations: notes.filter(n =>
+        n.status === "attached" && n.sourceSha256 === source.sourceSha256 && n.locator
+        && compatibleBookLocation(source, n.locator)).map(n => n.locator) });
+    }).catch(e => {
+      if (!cancelled) {
+        error = `Could not refresh highlights. ${String(e)}`;
+        void verifySource();
+      }
+    });
+    return () => { cancelled = true; };
+  });
+  $effect(() => {
+    const jump = $bookJump;
+    if (ready && book && jump?.graphPath === graphPath && jump.bookId === book.id
+      && jump.sourceSha256 === book.sourceSha256 && compatibleBookLocation(book, jump.locator)) {
+      sendCommand("goto", { location: jump.locator });
+      bookJump.set(null);
+    }
+  });
+</script>
+
+<section class="book-reader" aria-label="Original book reader" data-help-context="books" data-book-page-id={page.id}>
+  <header>
+    <h1>{book?.title || page.title}</h1>
+    <div class="reader-toolbar">
+      <button type="button" disabled={!ready} onclick={() => sendCommand("prev")}>Previous</button>
+      <button type="button" disabled={!ready} onclick={() => sendCommand("next")}>Next</button>
+      {#if toc.length}
+        <select aria-label="Book contents" disabled={!ready} value="" onchange={e => {
+          const item = toc[Number(e.currentTarget.value)];
+          if (item) sendCommand("toc", { target: item.target });
+          e.currentTarget.value = "";
+        }}>
+          <option value="" disabled>Contents…</option>
+          {#each toc as item, i}<option value={i}>{"　".repeat(item.depth)}{item.label}</option>{/each}
+        </select>
+      {/if}
+      {#if pdfPages}
+        <label>Page <input aria-label="PDF page" type="number" min="1" max={pdfPages} value={pdfPage}
+          onchange={e => {
+            const page = Number(e.currentTarget.value);
+            if (Number.isSafeInteger(page) && page >= 1 && page <= pdfPages) sendCommand("goto", { location: { kind: "pdf", page } });
+          }} /> / {pdfPages}</label>
+      {/if}
+      <label>{pdfPages ? "Zoom" : "Text size"}
+        <select aria-label={pdfPages ? "PDF zoom" : "Book text size"} bind:value={size} disabled={!ready || (!pdfPages && !annotations)}
+          onchange={() => sendCommand("size", { value: Number(size) })}>
+          {#each [75, 90, 100, 115, 130, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}
+        </select>
+      </label>
+      <button type="button" disabled={!book} onclick={openNotes}>{selection ? "Note selection" : "Book notes"}</button>
+    </div>
+    {#if label}<p class="position" aria-live="polite">{label}</p>{/if}
+    {#if notice}<p class="notice">{notice}</p>{/if}
+    {#if monitorError}<p class="notice" role="status">{monitorError}</p>{/if}
+    {#if book?.indexingWarning}<p class="notice">Text indexing: {book.indexingWarning}</p>{/if}
+    {#if positionError}<div role="alert">{positionError} <button onclick={() => { void saveNow(); }}>Retry position save</button></div>{/if}
+    {#if error}<div role="alert">{error} <button onclick={() => retry++}>Reload book</button></div>{/if}
+  </header>
+  {#if loading}<p role="status" class="loading">Opening local original book…</p>{/if}
+  {#if url}
+    <iframe bind:this={frame} src={url} sandbox={BOOK_FRAME_SANDBOX} title="Isolated original book"
+      referrerpolicy="no-referrer" onload={() => openFrame()}></iframe>
+  {/if}
+</section>
+
+<style>
+  .book-reader { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; height:100%; color:var(--text-primary); background:var(--bg-primary); }
+  header { padding:12px 18px 8px; flex-shrink:0; border-bottom:1px solid var(--border); }
+  h1 { font-size:19px; margin:0 0 10px; }
+  .reader-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
+  label { display:flex; align-items:center; gap:5px; font-size:12px; }
+  button,select,input { font:inherit; font-size:12px; color:var(--text-primary); background:var(--bg-tertiary); border:1px solid var(--border); border-radius:5px; padding:6px 8px; min-height:32px; }
+  select { max-width:260px; }
+  input { width:64px; }
+  button { cursor:pointer; } button:disabled { opacity:.5; cursor:default; }
+  button:focus-visible,select:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  iframe { flex:1; min-height:280px; width:100%; border:0; background:white; }
+  .notice,.position { color:var(--text-secondary); font-size:12px; margin:6px 0 0; }
+  [role="alert"] { font-size:12px; padding:6px 0; color:var(--danger,var(--text-primary)); }
+  .loading { padding:10px 18px; }
+</style>

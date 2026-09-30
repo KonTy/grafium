@@ -9,6 +9,7 @@ export type HelpContext =
   | "settings"
   | "ai"
   | "sync"
+  | "books"
   | "search";
 
 const HELP_PAGES: Record<HelpContext, string> = {
@@ -22,6 +23,7 @@ const HELP_PAGES: Record<HelpContext, string> = {
   settings: "Help - Settings",
   ai: "AI Setup And Privacy",
   sync: "Help - Sync",
+  books: "Help - Books",
   search: "Help - Search",
 };
 

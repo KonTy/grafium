@@ -1,0 +1,36 @@
+Grafium original-book reader
+
+Foliate.js, MIT, Copyright John Factotum and contributors.
+Vendored verbatim source: ui/vendor/foliate-js
+Upstream https://github.com/johnfactotum/foliate-js
+Pinned revision 78914aef4466eb960965702401634c2cb348e9b1.
+Build-time local adaptation changes paginator/fixed-layout blob navigation to
+srcdoc navigation within an opaque-origin data frame; it guards initial blank
+frame loads and stale layout/font callbacks during navigation. No upstream files edited.
+Sanitized DOM locator version: foliate-78914aef4466eb960965702401634c2cb348e9b1-grafium-1.
+Upstream API is unstable; updating requires locator and isolation regression tests.
+
+PDF.js 5.5.207, Apache-2.0, Mozilla Foundation.
+DOMPurify, Apache-2.0 OR MPL-2.0, Cure53 and contributors.
+zip.js 2.7.57, BSD-3-Clause, Gildas Lormeau.
+fflate 0.8.2, MIT, Arjun Barrett.
+noble-hashes 1.8.0, MIT, Paul Miller (offline IDPF font deobfuscation).
+Build copies dependency licenses and bundled PDF font/CMap/WASM license notices
+alongside runtime.js. No CDN, remote rendering, or user-content uploads.
+
+The runtime runs in a data: document with a unique opaque origin, not privileged
+app-origin srcdoc. Its bridge checks source window and per-mount random token.
+The small trusted bootstrap accepts the bundled runtime once from the parent
+frame using a source-window and nonce-checked postMessage transfer.
+Book markup is sanitized before being assigned to a nested srcdoc, with a
+script-src 'none'/network-denying CSP. Outer CSP allows only embedded runtime,
+local blob resources, bundled classic data workers, and inline layout styles. Frame sandbox excludes
+top navigation, popups, forms, downloads, and storage access.
+
+Reflowable EPUB/FB2/MOBI/AZW3 use versioned CFIs; protected/DRM books are unsupported.
+Fixed-layout EPUB can render but passage annotations are explicitly unavailable.
+PDF.js is used directly with canvas/text layers, page/rectangle annotations and
+local fonts/CMaps/WASM. PDF document JavaScript, actions, forms, and embedded links
+are not executed or rendered. Image-only PDFs have no selectable text unless an
+embedded text layer exists. Platform WebView behavior must be validated separately
+from Chromium tests, especially older WebKit and opaque-origin worker support.

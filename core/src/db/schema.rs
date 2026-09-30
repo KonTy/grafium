@@ -425,7 +425,8 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         -- so pending edits still get reindexed on next launch.
         CREATE TABLE IF NOT EXISTS pending_reindex (
             page_id TEXT PRIMARY KEY,
-            marked_at INTEGER NOT NULL
+            marked_at INTEGER NOT NULL,
+            vectors_invalidated INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_pending_reindex_marked ON pending_reindex(marked_at);
@@ -477,6 +478,17 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_order
             ON chat_messages(thread_id, position);
     ")?;
+    let has_invalidation_column = conn
+        .prepare("PRAGMA table_info(pending_reindex)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "vectors_invalidated");
+    if !has_invalidation_column {
+        conn.execute_batch(
+            "ALTER TABLE pending_reindex ADD COLUMN vectors_invalidated INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     migrate_link_proposals(conn)?;
     create_entity_index(conn)?;
     Ok(())

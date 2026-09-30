@@ -218,7 +218,7 @@ pub trait Embedder: Send + Sync {
 
 /// Vector store trait — abstracts over LanceDB, Qdrant, SQLite-vec, etc.
 pub trait VectorStore: Send + Sync {
-    /// Insert or update embeddings. Upsert semantics (same chunk_id = overwrite).
+    /// Insert or update embeddings. Identity is (graph_id, chunk_id).
     fn upsert<'a>(&'a self, chunks: &'a [ChunkEmbedding]) -> BoxFuture<'a, Result<()>>;
 
     /// Find the top-k most similar chunks to the query embedding.
@@ -252,6 +252,15 @@ pub trait VectorStore: Send + Sync {
 
     /// Number of stored vectors belonging to a specific graph.
     fn count_for_graph<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<usize>>;
+
+    fn list_page_ids<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        let _ = graph_id;
+        Box::pin(async {
+            Err(crate::error::CoreError::Other(
+                "Vector store does not support source reconciliation".into(),
+            ))
+        })
+    }
 
     /// List `(chunk_id, content_hash)` for every stored chunk in a graph, so a
     /// fresh process can rebuild its in-memory hash cache from vectors that

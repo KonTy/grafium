@@ -15,6 +15,16 @@ particular model can be authorized for one GPU attempt after an unconfirmed exit
 See [[AI Setup And Privacy]] for worker shutdown, eviction, crash recovery, and
 device-specific GPU-memory detection.
 
+Deleted or changed source content is removed from the vector index by background
+maintenance even when AI is disabled or no embedding model is configured.
+Generating replacement vectors waits for an embedding model. Rebuilding the
+graph index also queues removal of old vector identities; an in-flight embedding
+cannot publish a source snapshot that changed or was deleted.
+
+Original books use extracted, read-only source text for page/book context.
+Write your own annotations in **Notes**, not into the original.
+See [[Help - Books]] for extraction limits and source-preserving import.
+
 While an answer is being produced, Chat stacks what it is doing in the
 transcript itself, above the answer: `Searching your notes`, `Thinking`,
 `Generating`, and for web research `Planning searches`, `Reading sources`,

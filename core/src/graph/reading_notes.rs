@@ -744,6 +744,7 @@ impl Graph {
                     }
                 };
                 let path = entry.path();
+                if !crate::fsutil::is_authoritative_source(Path::new(&entry.file_name())) { continue; }
                 let kind = entry.file_type()?;
                 if kind.is_dir() {
                     walk(graph, &path, out, warnings)?;
@@ -1152,6 +1153,7 @@ impl Graph {
         expected_revision: &str,
         body: &str,
     ) -> Result<ReadingNote> {
+        let _operation = self.source_operations.lock();
         self.change_reading_note(note_id, expected_revision, Some(body), None)
     }
 
@@ -1162,6 +1164,7 @@ impl Graph {
         source_page_id: &str,
         selection: Option<&ReadingSelection>,
     ) -> Result<ReadingNote> {
+        let _operation = self.source_operations.lock();
         self.change_reading_note(
             note_id,
             expected_revision,
@@ -1340,7 +1343,7 @@ impl Graph {
             )?;
             self.db
                 .sync_page_properties_in_connection(&tx, &page.id, &parsed.properties)?;
-            self.apply_parsed_blocks_in_connection(&tx, &page.id, &parsed.blocks)?;
+            self.apply_parsed_blocks_in_connection(&tx, &page.id, &parsed.blocks, false)?;
             if fs::read_to_string(path)? != content {
                 return Err(error("concurrent external edit preserved; reload"));
             }

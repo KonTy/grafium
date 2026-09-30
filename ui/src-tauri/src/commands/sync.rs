@@ -1,6 +1,6 @@
 use crate::AppState;
 use grafium_core::sync::{
-    engine::SyncResult,
+    engine::{ConflictSide, ConflictState, SyncResult},
     filesystem::FilesystemBackend,
     state::{BackendConfig, BackendType, SyncConfig, SyncConfigs},
     webdav::WebDavBackend,
@@ -158,9 +158,13 @@ pub fn sync_check_status(
     state: State<'_, AppState>,
     target_id: String,
 ) -> Result<SyncStatus, String> {
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph
+    let root_dir = state
+        .graph
+        .lock()
+        .map_err(|e| e.to_string())?
         .root_dir
+        .clone();
+    let config_path = root_dir
         .join(metadata_dir_name(&app))
         .join("sync-config.json");
     let configs = SyncConfigs::load(&config_path);
@@ -175,7 +179,7 @@ pub fn sync_check_status(
     let available = backend.is_available();
 
     let engine = SyncEngine::new_with_metadata_dir_and_target(
-        graph.root_dir.clone(),
+        root_dir,
         &metadata_dir_name(&app),
         &target.id,
     );
@@ -225,6 +229,136 @@ pub fn sync_list_conflicts(
     Ok(conflicts)
 }
 
+#[tauri::command]
+pub fn sync_get_conflict_state(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target_id: String,
+    rel_path: String,
+) -> Result<ConflictState, String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let configs = SyncConfigs::load(
+        &snapshot
+            .root_dir
+            .join(&snapshot.metadata_dir_name)
+            .join("sync-config.json"),
+    );
+    let target = configs
+        .targets
+        .iter()
+        .find(|t| t.id == target_id)
+        .ok_or("Sync target not found")?;
+    let backend = create_backend(target)?;
+    SyncEngine::new_with_metadata_dir_and_target(
+        snapshot.root_dir,
+        &snapshot.metadata_dir_name,
+        &target.id,
+    )
+    .conflict_state(backend.as_ref(), &rel_path)
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sync_resolve_conflict(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    graph_path: String,
+    target_id: String,
+    rel_path: String,
+    expected_local_hash: Option<String>,
+    expected_remote_hash: Option<String>,
+    chosen: ConflictSide,
+) -> Result<SyncResult, String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    if snapshot.root_dir != std::path::Path::new(&graph_path) {
+        return Err("The graph changed. Reopen the conflict in the current graph.".into());
+    }
+    let configs = SyncConfigs::load(
+        &snapshot
+            .root_dir
+            .join(&snapshot.metadata_dir_name)
+            .join("sync-config.json"),
+    );
+    let target = configs
+        .targets
+        .iter()
+        .find(|t| t.id == target_id)
+        .ok_or("Sync target not found")?;
+    let backend = create_backend(target)?;
+    let engine = SyncEngine::new_with_metadata_dir_and_target(
+        snapshot.root_dir.clone(),
+        &snapshot.metadata_dir_name,
+        &target.id,
+    );
+    let result = reconcile_sync_outcome(
+        &app,
+        &snapshot,
+        engine.resolve_conflict(
+            backend.as_ref(),
+            &rel_path,
+            expected_local_hash.as_deref(),
+            expected_remote_hash.as_deref(),
+            chosen,
+        ),
+    )?;
+    let _ = app.emit("sync-completed", completion_payload(&target.name, &result));
+    Ok(result)
+}
+
+fn changes_local_sources(result: &SyncResult) -> bool {
+    !result.pulled.is_empty() || !result.deleted_local.is_empty() || !result.merged.is_empty()
+}
+
+fn reconcile_after_sync(graph: &grafium_core::graph::Graph) -> Result<(), String> {
+    graph
+        .reconcile_files_from_disk()
+        .map_err(|e| format!("Reconcile after sync failed: {e}"))
+}
+
+pub(crate) fn reconcile_sync_outcome(
+    app: &AppHandle,
+    snapshot: &crate::GraphRuntimeSnapshot,
+    outcome: grafium_core::error::Result<SyncResult>,
+) -> Result<SyncResult, String> {
+    let mut outcome = outcome.map_err(|e| e.to_string());
+    // An error may follow a successful publication (e.g. saving sync state
+    // failed). Reconcile conservatively without hiding the original error.
+    let reconcile = outcome.as_ref().map_or(true, |result| {
+        changes_local_sources(result) || !result.errors.is_empty()
+    });
+    if reconcile {
+        if let Err(error) =
+            crate::open_graph_snapshot(snapshot).and_then(|graph| reconcile_after_sync(&graph))
+        {
+            let _ = app.emit(
+                "graph-index-error",
+                serde_json::json!({ "graphPath": snapshot.root_dir, "message": error }),
+            );
+            match &mut outcome {
+                Ok(result) => result.errors.push(error),
+                Err(original) => *original = format!("{original}; {error}"),
+            }
+        }
+        let _ = app.emit(
+            "book-source-changed",
+            serde_json::json!({ "graphPath": snapshot.root_dir }),
+        );
+        let _ = app.emit(
+            "graph-sources-changed",
+            serde_json::json!({ "graphPath": snapshot.root_dir }),
+        );
+    }
+    outcome
+}
+
+pub(crate) fn completion_payload(target_name: &str, result: &SyncResult) -> serde_json::Value {
+    serde_json::json!({
+        "target_name": target_name, "pushed": result.pushed.len(), "pulled": result.pulled.len(),
+        "conflicts": result.conflicts.len(), "deleted_local": result.deleted_local.len(),
+        "deleted_remote": result.deleted_remote.len(), "errors": result.errors.len(),
+    })
+}
+
 /// Run sync against a specific target. Returns a summary of what happened.
 #[tauri::command]
 pub fn sync_run(
@@ -252,32 +386,9 @@ pub fn sync_run(
         &target.id,
     );
 
-    let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
+    let result = reconcile_sync_outcome(&app, &snapshot, engine.sync(backend.as_ref()))?;
 
-    // Incrementally reconcile pulled/conflict/deleted files. Unlike reindex_all
-    // this keeps page/block ids (and so stored vectors) stable; rescanned pages
-    // are queued for embedding and unchanged chunks are skipped by hash.
-    if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty()
-    {
-        match crate::open_graph_snapshot(&snapshot) {
-            Ok(detached_graph) => {
-                if let Err(e) = detached_graph.reconcile_files_from_disk() {
-                    eprintln!("Reindex after sync failed: {}", e);
-                }
-            }
-            Err(e) => eprintln!("Reindex after sync setup failed: {}", e),
-        }
-    }
-
-    let _ = app.emit(
-        "sync-completed",
-        serde_json::json!({
-            "target_name": target.name,
-            "pushed": result.pushed.len(),
-            "pulled": result.pulled.len(),
-            "conflicts": result.conflicts.len(),
-        }),
-    );
+    let _ = app.emit("sync-completed", completion_payload(&target.name, &result));
 
     Ok(result)
 }
@@ -293,7 +404,7 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
     let configs = SyncConfigs::load(&config_path);
 
     let mut results = Vec::new();
-    let mut needs_reindex = false;
+    let mut needs_reconcile = false;
 
     for target in &configs.targets {
         if !target.auto_sync {
@@ -301,7 +412,10 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         }
         let backend = match create_backend(target) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                results.push(SyncResult::failed(format!("{}: {e}", target.name)));
+                continue;
+            }
         };
         if !backend.is_available() {
             continue;
@@ -313,30 +427,35 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         );
         match engine.sync(backend.as_ref()) {
             Ok(result) => {
-                if !result.pulled.is_empty()
-                    || !result.conflicts.is_empty()
-                    || !result.deleted_local.is_empty()
-                {
-                    needs_reindex = true;
-                }
+                needs_reconcile |= changes_local_sources(&result) || !result.errors.is_empty();
                 results.push(result);
             }
             Err(e) => {
+                needs_reconcile = true;
                 eprintln!("Sync target '{}' failed: {}", target.name, e);
                 results.push(SyncResult::failed(format!("{}: {}", target.name, e)));
             }
         }
     }
 
-    if needs_reindex {
-        match crate::open_graph_snapshot(&snapshot) {
-            Ok(detached_graph) => {
-                if let Err(e) = detached_graph.reconcile_files_from_disk() {
-                    eprintln!("Reindex after sync failed: {}", e);
-                }
-            }
-            Err(e) => eprintln!("Reindex after sync setup failed: {}", e),
+    if needs_reconcile {
+        if let Err(error) =
+            crate::open_graph_snapshot(&snapshot).and_then(|graph| reconcile_after_sync(&graph))
+        {
+            let _ = app.emit(
+                "graph-index-error",
+                serde_json::json!({ "graphPath": snapshot.root_dir, "message": error }),
+            );
+            results.push(SyncResult::failed(error));
         }
+        let _ = app.emit(
+            "book-source-changed",
+            serde_json::json!({ "graphPath": snapshot.root_dir }),
+        );
+        let _ = app.emit(
+            "graph-sources-changed",
+            serde_json::json!({ "graphPath": snapshot.root_dir }),
+        );
     }
 
     let conflicts = results
@@ -358,6 +477,9 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
             "pushed": pushed,
             "pulled": pulled,
             "conflicts": conflicts,
+            "deleted_local": results.iter().map(|r| r.deleted_local.len()).sum::<usize>(),
+            "deleted_remote": results.iter().map(|r| r.deleted_remote.len()).sum::<usize>(),
+            "errors": results.iter().map(|r| r.errors.len()).sum::<usize>(),
         }),
     );
 
@@ -385,3 +507,7 @@ fn create_backend(config: &SyncConfig) -> Result<Box<dyn SyncBackend>, String> {
         .map_err(|e| e.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "sync_tests.rs"]
+mod tests;

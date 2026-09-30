@@ -187,7 +187,7 @@ async function openWriting(browser, options = {}) {
   await focusTarget(page, options.journal ? "day-0-b0" : "b0", options);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("toggle-reference-panel")));
   await page.locator(".reference-panel summary").filter({ hasText: "Page / selection tools" }).click();
-  await page.locator(".reference-panel summary").filter({ hasText: /^Writing assistance$/ }).click();
+  await page.locator(".reference-panel summary").filter({ hasText: /^AI writing assistance$/ }).click();
   await page.locator(PANEL).waitFor();
   await page.waitForFunction(() => !document.querySelector(".writing-panel")?.textContent.includes("Checking AI connection"));
   return fixture;
@@ -884,7 +884,7 @@ for (const theme of ["github", "github-dark"]) cases.push([
     await page.mouse.move(895, bounds.y + 180);
     await page.mouse.up();
     const tabs = page.locator(".reference-panel .panel-tabs");
-    for (const name of ["Chat", "Notes"]) {
+    for (const name of ["Chat (AI)", "Notes"]) {
       const tab = tabs.getByRole("tab", { name, exact: true });
       assert.equal(await tab.isVisible(), true);
       assert.equal(await tab.evaluate((node) => {
@@ -957,7 +957,8 @@ if (require.main === module) (async () => {
   let failures = 0;
   let passes = 0;
   try {
-    for (const [name, options, run] of cases) {
+    const { applicationEditorCases } = require("./appEditorCases.cjs");
+    for (const [name, options, run] of applicationEditorCases(cases)) {
       if (process.env.UI_TEST_CASE && !process.env.UI_TEST_CASE.split("|").some((filter) => name.includes(filter))) continue;
       let fixture;
       try {

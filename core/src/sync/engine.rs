@@ -1,10 +1,32 @@
-use super::backend::{compute_hash, FileMetadata, SyncBackend};
+use super::backend::{compute_hash, revision_changed, FileMetadata, FileSnapshot, SyncBackend};
 use super::state::{SyncState, UnresolvedConflict};
 use crate::error::Result;
+use crate::fsutil::SourceMutationFence;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+// Serialize state-file transactions, not graph editing. Never use this mutex
+// in Graph mutators; network I/O must not hold the source-publication lock.
+static SYNC_OPERATIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConflictState {
+    pub graph_path: String,
+    pub rel_path: String,
+    pub local_hash: Option<String>,
+    pub remote_hash: Option<String>,
+    pub local_size: Option<u64>,
+    pub remote_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSide {
+    Local,
+    Remote,
+}
 
 /// Result of a sync operation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -125,7 +147,7 @@ impl SyncEngine {
         }
     }
 
-    /// Return conflicts still waiting for the user to edit the primary file.
+    /// Return conflicts still waiting for an explicit side selection.
     pub fn unresolved_conflicts(&self) -> Vec<UnresolvedConflict> {
         SyncState::load(&self.state_path)
             .list_unresolved_conflicts()
@@ -161,7 +183,8 @@ impl SyncEngine {
     /// Graph directories that participate in sync. `knowledge/` carries
     /// portable AI/rule/prompt knowledge, and `assets/` carries the media that
     /// notes reference, so omitting either leaves the other machine incomplete.
-    const SYNCED_DIRS: [&'static str; 4] = ["pages/", "journals/", "knowledge/", "assets/"];
+    const SYNCED_DIRS: [&'static str; 5] =
+        ["pages/", "journals/", "knowledge/", "assets/", "books/"];
 
     /// Only files under the graph's note directories participate in sync. This
     /// also keeps the marker file out of the synced set.
@@ -170,7 +193,7 @@ impl SyncEngine {
     /// propose anything here. Reject traversal and absolute components: without
     /// this, an href resolving to `pages/../../../etc/passwd` would be joined
     /// onto the graph root and written outside it.
-    fn is_syncable_path(rel_path: &str) -> bool {
+    pub(super) fn is_syncable_path(rel_path: &str) -> bool {
         if rel_path.contains(".conflict_") {
             return false;
         }
@@ -181,6 +204,9 @@ impl SyncEngine {
             return false;
         }
         if Path::new(rel_path).is_absolute() {
+            return false;
+        }
+        if rel_path.starts_with("books/") && !crate::graph::books::is_portable_book_file(rel_path) {
             return false;
         }
         if rel_path.starts_with("pages/")
@@ -197,13 +223,18 @@ impl SyncEngine {
             .all(|component| !component.is_empty() && component != "." && component != "..")
     }
 
-    fn read_remote_marker(backend: &dyn SyncBackend) -> Option<String> {
-        let bytes = backend.read_file(Self::REMOTE_MARKER_PATH).ok()?;
-        let id = String::from_utf8(bytes).ok()?.trim().to_string();
+    fn read_remote_marker(backend: &dyn SyncBackend) -> Result<Option<String>> {
+        let Some(bytes) = backend.read_snapshot(Self::REMOTE_MARKER_PATH)?.content else {
+            return Ok(None);
+        };
+        let id = String::from_utf8(bytes)
+            .map_err(|e| crate::error::CoreError::Other(format!("Invalid sync marker: {e}")))?
+            .trim()
+            .to_string();
         if id.is_empty() {
-            None
+            Err(crate::error::CoreError::Other("Empty sync marker".into()))
         } else {
-            Some(id)
+            Ok(Some(id))
         }
     }
 
@@ -220,7 +251,7 @@ impl SyncEngine {
         state: &mut SyncState,
         remote_count: usize,
     ) -> Result<()> {
-        let marker = Self::read_remote_marker(backend);
+        let marker = Self::read_remote_marker(backend)?;
         let never_synced = state.files.is_empty() && state.remote_id.is_none();
 
         match (marker, never_synced) {
@@ -231,7 +262,15 @@ impl SyncEngine {
             // First sync against a fresh remote: claim it.
             (None, true) => {
                 let id = uuid::Uuid::new_v4().to_string();
-                backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                backend.publish_if_unchanged(
+                    Self::REMOTE_MARKER_PATH,
+                    &FileSnapshot {
+                        content: None,
+                        etag: None,
+                        mutation_fence: None,
+                    },
+                    Some(id.as_bytes()),
+                )?;
                 state.remote_id = Some(id);
             }
             (Some(id), false) => match &state.remote_id {
@@ -254,7 +293,15 @@ impl SyncEngine {
                     // State predates the marker and the remote still holds
                     // files: adopt it and write the marker for next time.
                     let id = uuid::Uuid::new_v4().to_string();
-                    backend.write_file(Self::REMOTE_MARKER_PATH, id.as_bytes())?;
+                    backend.publish_if_unchanged(
+                        Self::REMOTE_MARKER_PATH,
+                        &FileSnapshot {
+                            content: None,
+                            etag: None,
+                            mutation_fence: None,
+                        },
+                        Some(id.as_bytes()),
+                    )?;
                     state.remote_id = Some(id);
                 } else {
                     return Err(crate::error::CoreError::Other(format!(
@@ -273,6 +320,12 @@ impl SyncEngine {
 
     /// Run a full bidirectional sync against the given backend.
     pub fn sync(&self, backend: &dyn SyncBackend) -> Result<SyncResult> {
+        let _sync = SYNC_OPERATIONS
+            .lock()
+            .map_err(|e| crate::error::CoreError::Other(e.to_string()))?;
+        // Pin generations before any remote request; files discovered during
+        // that request still belong to this initial local snapshot.
+        let epoch = crate::fsutil::graph_mutation_epoch(&self.local_root)?;
         if !backend.is_available() {
             return Err(crate::error::CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
@@ -318,10 +371,21 @@ impl SyncEngine {
             .keys()
             .chain(remote_files.keys())
             .chain(state.files.keys())
+            .chain(state.unresolved_conflicts.keys())
             .cloned()
             .collect();
 
         for rel_path in all_paths {
+            if !Self::is_syncable_path(&rel_path) {
+                continue;
+            }
+            let fence = epoch.for_path(Path::new(&rel_path))?;
+            if let Err(e) = super::filesystem::safe_sync_path(&self.local_root, &rel_path) {
+                result
+                    .errors
+                    .push(format!("Unsafe sync path {rel_path}: {e}"));
+                continue;
+            }
             // A removable drive can be pulled out part way through. Once a
             // file operation has failed, confirm the target is still there
             // before working through the rest of the graph against it.
@@ -360,6 +424,7 @@ impl SyncEngine {
                     self.sync_both_exist(
                         backend,
                         &rel_path,
+                        &fence,
                         &mut local_files,
                         &mut remote_files,
                         &mut state,
@@ -379,22 +444,21 @@ impl SyncEngine {
                 }
                 // Only local exists, was previously synced — remote was deleted
                 (true, false, true) => {
-                    // Remote deletion: delete locally
-                    let local_path = self.local_root.join(&rel_path);
-                    if let Err(e) = fs::remove_file(&local_path) {
-                        result
-                            .errors
-                            .push(format!("Delete local {}: {}", rel_path, e));
-                    } else {
-                        state.remove_record(&rel_path);
-                        result.deleted_local.push(rel_path);
-                    }
+                    self.propagate_deletion(
+                        backend,
+                        &rel_path,
+                        &fence,
+                        ConflictSide::Remote,
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Only local exists, never synced — new local file, push
                 (true, false, false) => {
                     self.push_to_remote(
                         backend,
                         &rel_path,
+                        &fence,
                         &mut local_files,
                         &mut state,
                         &mut result,
@@ -402,21 +466,21 @@ impl SyncEngine {
                 }
                 // Only remote exists, was previously synced — local was deleted
                 (false, true, true) => {
-                    // Local deletion: delete on remote
-                    if let Err(e) = backend.delete_file(&rel_path) {
-                        result
-                            .errors
-                            .push(format!("Delete remote {}: {}", rel_path, e));
-                    } else {
-                        state.remove_record(&rel_path);
-                        result.deleted_remote.push(rel_path);
-                    }
+                    self.propagate_deletion(
+                        backend,
+                        &rel_path,
+                        &fence,
+                        ConflictSide::Local,
+                        &mut state,
+                        &mut result,
+                    );
                 }
                 // Only remote exists, never synced — new remote file, pull
                 (false, true, false) => {
                     self.pull_from_remote(
                         backend,
                         &rel_path,
+                        &fence,
                         remote_files.get(&rel_path).cloned(),
                         &mut state,
                         &mut result,
@@ -443,6 +507,7 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        fence: &SourceMutationFence,
         local_files: &mut HashMap<String, FileMetadata>,
         remote_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
@@ -503,10 +568,17 @@ impl SyncEngine {
                 }
             }
             (true, false) => {
-                self.push_to_remote(backend, rel_path, local_files, state, result);
+                self.push_to_remote(backend, rel_path, fence, local_files, state, result);
             }
             (false, true) => {
-                self.pull_from_remote(backend, rel_path, Some(remote_meta.clone()), state, result);
+                self.pull_from_remote(
+                    backend,
+                    rel_path,
+                    fence,
+                    Some(remote_meta.clone()),
+                    state,
+                    result,
+                );
             }
             (true, true) => {
                 if local_hash == remote_hash {
@@ -530,47 +602,35 @@ impl SyncEngine {
         }
     }
 
-    /// Leave an unresolved conflict alone until the user edits the primary
-    /// file. A resolved local file is then the explicit source of truth.
+    /// Editing a file is not consent to overwrite a different remote version.
+    /// Conflicts, including deletions and binary files, require an explicit
+    /// revision-checked choice.
     fn handle_pending_resolution(
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
-        local_files: &mut HashMap<String, FileMetadata>,
+        _local_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) -> bool {
         let Some(conflict) = state.unresolved_conflict(rel_path).cloned() else {
             return false;
         };
-        let local_path = self.local_root.join(rel_path);
-        let Ok(content) = fs::read(&local_path) else {
-            return true;
-        };
-        let hash = compute_hash(&content);
-        let text = String::from_utf8_lossy(&content);
-        let has_markers =
-            text.contains("<<<<<<<") || text.contains("=======") || text.contains(">>>>>>>");
-        if !state.is_conflict_resolved(rel_path, &hash, has_markers) {
-            return true;
-        }
-        if let Err(e) = backend.write_file(rel_path, &content) {
+        let refresh = (|| -> Result<()> {
+            let remote = backend.read_snapshot(rel_path)?;
+            let source_lock = crate::fsutil::graph_operation_lock(&self.local_root)?;
+            let _source = source_lock.lock();
+            let local = self.local_snapshot(rel_path)?;
+            if local.hash() != conflict.local_hash || remote.hash() != conflict.remote_hash {
+                self.record_conflict(rel_path, &local, &remote, state, result)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = refresh {
             result
                 .errors
-                .push(format!("Push resolved {}: {}", rel_path, e));
-            return true;
+                .push(format!("Refresh conflict {rel_path}: {e}"));
         }
-        let _ = fs::remove_file(self.local_root.join(&conflict.backup_path));
-        let _ = backend.delete_file(&conflict.backup_path);
-        let local_meta = self.current_local_metadata(rel_path).ok();
-        let remote_meta = backend.stat_file(rel_path).ok();
-        state.resolve_unresolved_conflict(rel_path);
-        state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
-        self.save_base(rel_path, &content);
-        if let Some(meta) = local_files.get_mut(rel_path) {
-            meta.hash = Some(hash);
-        }
-        result.pushed.push(rel_path.to_string());
         true
     }
 
@@ -629,33 +689,71 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        fence: &SourceMutationFence,
         local_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        let local_path = self.local_root.join(rel_path);
-        let content = match fs::read(&local_path) {
-            Ok(c) => c,
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Read local {}: {}", rel_path, e));
-                return;
+        let operation = (|| -> Result<()> {
+            let local = {
+                let _source = fence.lock();
+                self.local_snapshot(rel_path)?
+            };
+            let Some(content) = local.content.as_deref() else {
+                return Err(revision_changed(rel_path));
+            };
+            let remote = backend.read_snapshot(rel_path)?;
+            let baseline = state.files.get(rel_path).map(|r| r.hash_at_sync.clone());
+            if remote.hash() != baseline && remote.hash() != local.hash() {
+                let source_lock = crate::fsutil::graph_operation_lock(&self.local_root)?;
+                let _source = source_lock.lock();
+                return self.record_conflict(
+                    rel_path,
+                    &self.local_snapshot(rel_path)?,
+                    &remote,
+                    state,
+                    result,
+                );
             }
-        };
-        let hash = compute_hash(&content);
-        if let Some(meta) = local_files.get_mut(rel_path) {
-            meta.hash = Some(hash.clone());
-        }
-
-        if let Err(e) = backend.write_file(rel_path, &content) {
-            result.errors.push(format!("Push {}: {}", rel_path, e));
-        } else {
-            self.save_base(rel_path, &content);
-            let local_meta = local_files.get(rel_path).cloned();
-            let remote_meta = backend.stat_file(rel_path).ok();
-            state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
+            {
+                let _source = fence.lock();
+                if !fence.is_current() || self.local_snapshot(rel_path)?.hash() != local.hash() {
+                    self.record_conflict(
+                        rel_path,
+                        &self.local_snapshot(rel_path)?,
+                        &remote,
+                        state,
+                        result,
+                    )?;
+                    return Err(revision_changed(rel_path));
+                }
+                self.preserve_copy(rel_path, &remote)?;
+            }
+            if let Err(e) = backend.publish_if_unchanged(rel_path, &remote, Some(content)) {
+                self.reopen_after_remote_change(backend, rel_path, &remote, state, result)?;
+                return Err(e);
+            }
             result.pushed.push(rel_path.to_string());
+            let _source = fence.lock();
+            if !fence.is_current() || self.local_snapshot(rel_path)?.hash() != local.hash() {
+                self.record_conflict(
+                    rel_path,
+                    &self.local_snapshot(rel_path)?,
+                    &local,
+                    state,
+                    result,
+                )?;
+                return Err(revision_changed(rel_path));
+            }
+            self.save_base(rel_path, content);
+            // Metadata is from the captured local revision, never from a newer
+            // edit that arrived while uploading.
+            let local_meta = local_files.get(rel_path).cloned();
+            state.record_sync(rel_path, &compute_hash(content), local_meta.as_ref(), None);
+            Ok(())
+        })();
+        if let Err(e) = operation {
+            result.errors.push(format!("Push {rel_path}: {e}"));
         }
     }
 
@@ -664,33 +762,40 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
-        remote_meta: Option<FileMetadata>,
+        fence: &SourceMutationFence,
+        _remote_meta: Option<FileMetadata>,
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        let content = match backend.read_file(rel_path) {
-            Ok(c) => c,
-            Err(e) => {
-                result.errors.push(format!("Pull {}: {}", rel_path, e));
-                return;
+        let operation = (|| -> Result<()> {
+            let before = {
+                let _source = fence.lock();
+                self.local_snapshot(rel_path)?
+            };
+            let baseline = state.files.get(rel_path).map(|r| r.hash_at_sync.clone());
+            let remote = backend.read_snapshot(rel_path)?;
+            let _source = fence.lock();
+            let current = self.local_snapshot(rel_path)?;
+            if !fence.is_current()
+                || before.hash() != baseline
+                || current.hash() != before.hash()
+                || remote.content.is_none()
+            {
+                self.record_conflict(rel_path, &current, &remote, state, result)?;
+                return Ok(());
             }
-        };
-        let hash = compute_hash(&content);
-
-        let local_path = self.local_root.join(rel_path);
-        if let Some(parent) = local_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        if let Err(e) = fs::write(&local_path, &content) {
-            result
-                .errors
-                .push(format!("Write local {}: {}", rel_path, e));
-        } else {
-            self.save_base(rel_path, &content);
-            let local_meta = self.current_local_metadata(rel_path).ok();
-            state.record_sync(rel_path, &hash, local_meta.as_ref(), remote_meta.as_ref());
+            self.preserve_copy(rel_path, &current)?;
+            let content = remote.content.as_deref().unwrap();
+            let local_path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
+            crate::fsutil::atomic_write(&local_path, content)?;
+            self.save_base(rel_path, content);
+            let local_meta = self.current_local_metadata(rel_path)?;
+            state.record_sync(rel_path, &compute_hash(content), Some(&local_meta), None);
             result.pulled.push(rel_path.to_string());
+            Ok(())
+        })();
+        if let Err(e) = operation {
+            result.errors.push(format!("Pull {rel_path}: {e}"));
         }
     }
 
@@ -702,48 +807,316 @@ impl SyncEngine {
         state: &mut SyncState,
         result: &mut SyncResult,
     ) {
-        // Read both versions
-        let local_path = self.local_root.join(rel_path);
-        let local_content = match fs::read(&local_path) {
-            Ok(c) => c,
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Read local for conflict {}: {}", rel_path, e));
-                return;
-            }
-        };
-        let remote_content = match backend.read_file(rel_path) {
-            Ok(c) => c,
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Read remote for conflict {}: {}", rel_path, e));
-                return;
-            }
-        };
-
-        let local_hash = compute_hash(&local_content);
-        let remote_hash = compute_hash(&remote_content);
-        let conflict_path = make_conflict_path(rel_path, &remote_hash);
-        let local_conflict_path = self.local_root.join(&conflict_path);
-        if let Some(parent) = local_conflict_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(e) = crate::fsutil::atomic_write(&local_conflict_path, &remote_content) {
+        let operation = (|| -> Result<()> {
+            let remote = backend.read_snapshot(rel_path)?;
+            let source_lock = crate::fsutil::graph_operation_lock(&self.local_root)?;
+            let _source = source_lock.lock();
+            self.record_conflict(
+                rel_path,
+                &self.local_snapshot(rel_path)?,
+                &remote,
+                state,
+                result,
+            )
+        })();
+        if let Err(e) = operation {
             result
                 .errors
-                .push(format!("Write conflict backup {}: {}", conflict_path, e));
+                .push(format!("Preserve conflict {rel_path}: {e}"));
         }
-        // Push conflict backup to remote too so both devices see it
-        if let Err(e) = backend.write_file(&conflict_path, &remote_content) {
+    }
+
+    /// Caller holds the graph source lock while reading/publishing locally.
+    fn local_snapshot(&self, rel_path: &str) -> Result<FileSnapshot> {
+        let path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
+        match fs::read(path) {
+            Ok(content) => Ok(FileSnapshot {
+                content: Some(content),
+                etag: None,
+                mutation_fence: None,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileSnapshot {
+                content: None,
+                etag: None,
+                mutation_fence: None,
+            }),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn preserve_copy(&self, rel_path: &str, snapshot: &FileSnapshot) -> Result<Option<String>> {
+        let Some(content) = snapshot.content.as_deref() else {
+            return Ok(None);
+        };
+        // Recovery is deliberately outside pages/assets/books. A reader or
+        // index rebuild must never mistake a preserved version for a source.
+        let recovery = self
+            .state_path
+            .parent()
+            .unwrap()
+            .join("sync-recovery")
+            .join(make_conflict_path(rel_path, &compute_hash(content)));
+        let backup = recovery
+            .strip_prefix(&self.local_root)
+            .map_err(|e| crate::error::CoreError::Other(e.to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let path = super::filesystem::safe_sync_path(&self.local_root, &backup)?;
+        if path.exists() {
+            if fs::read(&path)? != content {
+                return Err(crate::error::CoreError::Other(format!(
+                    "Recovery copy changed: {backup}"
+                )));
+            }
+        } else {
+            crate::fsutil::atomic_write(&path, content)?;
+        }
+        Ok(Some(backup))
+    }
+
+    fn record_conflict(
+        &self,
+        rel_path: &str,
+        local: &FileSnapshot,
+        remote: &FileSnapshot,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) -> Result<()> {
+        let local_backup = self.preserve_copy(rel_path, local)?;
+        let remote_backup = self.preserve_copy(rel_path, remote)?;
+        state.record_unresolved_conflict(
+            rel_path,
+            local.hash(),
+            remote.hash(),
+            &remote_backup.or(local_backup).unwrap_or_default(),
+        );
+        if !result.conflicts.iter().any(|path| path == rel_path) {
+            result.conflicts.push(rel_path.into());
+        }
+        Ok(())
+    }
+
+    fn reopen_after_remote_change(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        original: &FileSnapshot,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) -> Result<()> {
+        let remote = backend.read_snapshot(rel_path)?;
+        let source_lock = crate::fsutil::graph_operation_lock(&self.local_root)?;
+        let _source = source_lock.lock();
+        self.preserve_copy(rel_path, original)?;
+        self.record_conflict(
+            rel_path,
+            &self.local_snapshot(rel_path)?,
+            &remote,
+            state,
+            result,
+        )
+    }
+
+    fn propagate_deletion(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        fence: &SourceMutationFence,
+        deleted_side: ConflictSide,
+        state: &mut SyncState,
+        result: &mut SyncResult,
+    ) {
+        let operation = (|| -> Result<()> {
+            let baseline = state.files.get(rel_path).map(|r| r.hash_at_sync.clone());
+            let remote = backend.read_snapshot(rel_path)?;
+            {
+                let _source = fence.lock();
+                let local = self.local_snapshot(rel_path)?;
+                let unchanged = match deleted_side {
+                    ConflictSide::Local => local.content.is_none() && remote.hash() == baseline,
+                    ConflictSide::Remote => remote.content.is_none() && local.hash() == baseline,
+                };
+                if !fence.is_current() || !unchanged {
+                    return self.record_conflict(rel_path, &local, &remote, state, result);
+                }
+                self.preserve_copy(rel_path, &local)?;
+                self.preserve_copy(rel_path, &remote)?;
+                if matches!(deleted_side, ConflictSide::Remote) {
+                    let path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
+                    crate::fsutil::record_source_mutation(&self.local_root, Path::new(rel_path))?;
+                    fs::remove_file(path)?;
+                    state.remove_record(rel_path);
+                    result.deleted_local.push(rel_path.into());
+                    return Ok(());
+                }
+            }
+            if let Err(e) = backend.publish_if_unchanged(rel_path, &remote, None) {
+                self.reopen_after_remote_change(backend, rel_path, &remote, state, result)?;
+                return Err(e);
+            }
+            result.deleted_remote.push(rel_path.into());
+            let _source = fence.lock();
+            let local = self.local_snapshot(rel_path)?;
+            if !fence.is_current() || local.content.is_some() {
+                self.record_conflict(rel_path, &local, &FileSnapshot::missing(), state, result)?;
+                return Err(revision_changed(rel_path));
+            }
+            state.remove_record(rel_path);
+            Ok(())
+        })();
+        if let Err(e) = operation {
             result
                 .errors
-                .push(format!("Push conflict backup {}: {}", conflict_path, e));
+                .push(format!("Propagate deletion {rel_path}: {e}"));
         }
+    }
 
-        state.record_unresolved_conflict(rel_path, &local_hash, &remote_hash, &conflict_path);
-        result.conflicts.push(rel_path.to_string());
+    /// Refresh the explicit choice dialog without changing either primary file.
+    pub fn conflict_state(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+    ) -> Result<ConflictState> {
+        let _sync = SYNC_OPERATIONS
+            .lock()
+            .map_err(|e| crate::error::CoreError::Other(e.to_string()))?;
+        let mut state = SyncState::load(&self.state_path);
+        self.validate_conflict_path(rel_path, &state)?;
+        self.verify_remote_identity(backend, &mut state, 0)?;
+        let remote = backend.read_snapshot(rel_path)?;
+        let source_lock = crate::fsutil::graph_operation_lock(&self.local_root)?;
+        let _source = source_lock.lock();
+        let local = self.local_snapshot(rel_path)?;
+        self.record_conflict(
+            rel_path,
+            &local,
+            &remote,
+            &mut state,
+            &mut SyncResult::new(),
+        )?;
+        state.save(&self.state_path)?;
+        Ok(ConflictState {
+            graph_path: self.local_root.to_string_lossy().into_owned(),
+            rel_path: rel_path.into(),
+            local_hash: local.hash(),
+            remote_hash: remote.hash(),
+            local_size: local.content.as_ref().map(|c| c.len() as u64),
+            remote_size: remote.content.as_ref().map(|c| c.len() as u64),
+        })
+    }
+
+    fn validate_conflict_path(&self, rel_path: &str, state: &SyncState) -> Result<()> {
+        if !Self::is_syncable_path(rel_path) || state.unresolved_conflict(rel_path).is_none() {
+            return Err(crate::error::CoreError::Other(
+                "Unresolved sync conflict not found".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve exactly the versions presented to the user. None selects a
+    /// deletion; bytes are never decoded, merged, or inspected for markers.
+    pub fn resolve_conflict(
+        &self,
+        backend: &dyn SyncBackend,
+        rel_path: &str,
+        expected_local_hash: Option<&str>,
+        expected_remote_hash: Option<&str>,
+        chosen: ConflictSide,
+    ) -> Result<SyncResult> {
+        let _sync = SYNC_OPERATIONS
+            .lock()
+            .map_err(|e| crate::error::CoreError::Other(e.to_string()))?;
+        let epoch = crate::fsutil::graph_mutation_epoch(&self.local_root)?;
+        let fence = epoch.for_path(Path::new(rel_path))?;
+        let mut state = SyncState::load(&self.state_path);
+        self.validate_conflict_path(rel_path, &state)?;
+        let mut result = SyncResult::new();
+        let operation = (|| -> Result<()> {
+            // Do not allow a dialog opened against a different remote identity.
+            self.verify_remote_identity(backend, &mut state, 0)?;
+            let remote = backend.read_snapshot(rel_path)?;
+            let local = {
+                let _source = fence.lock();
+                let local = self.local_snapshot(rel_path)?;
+                let recorded = state.unresolved_conflict(rel_path).unwrap();
+                if !fence.is_current()
+                    || local.hash().as_deref() != expected_local_hash
+                    || remote.hash().as_deref() != expected_remote_hash
+                    || recorded.local_hash.as_deref() != expected_local_hash
+                    || recorded.remote_hash.as_deref() != expected_remote_hash
+                {
+                    self.record_conflict(rel_path, &local, &remote, &mut state, &mut result)?;
+                    return Err(revision_changed(rel_path));
+                }
+                self.preserve_copy(rel_path, &local)?;
+                self.preserve_copy(rel_path, &remote)?;
+                local
+            };
+            let chosen_content = match chosen {
+                ConflictSide::Local => local.content.as_deref(),
+                ConflictSide::Remote => remote.content.as_deref(),
+            };
+            if matches!(chosen, ConflictSide::Local) {
+                if let Err(e) = backend.publish_if_unchanged(rel_path, &remote, chosen_content) {
+                    self.reopen_after_remote_change(
+                        backend,
+                        rel_path,
+                        &remote,
+                        &mut state,
+                        &mut result,
+                    )?;
+                    return Err(e);
+                }
+            }
+            let _source = fence.lock();
+            let current = self.local_snapshot(rel_path)?;
+            if !fence.is_current() || current.hash() != local.hash() {
+                // In keep-local, the remote is now the captured local snapshot.
+                let opposite = if matches!(chosen, ConflictSide::Local) {
+                    &local
+                } else {
+                    &remote
+                };
+                self.record_conflict(rel_path, &current, opposite, &mut state, &mut result)?;
+                return Err(revision_changed(rel_path));
+            }
+            if matches!(chosen, ConflictSide::Remote) {
+                let path = super::filesystem::safe_sync_path(&self.local_root, rel_path)?;
+                match chosen_content {
+                    Some(content) => {
+                        crate::fsutil::atomic_write(&path, content)?;
+                        result.pulled.push(rel_path.into());
+                    }
+                    None if local.content.is_some() => {
+                        crate::fsutil::record_source_mutation(
+                            &self.local_root,
+                            Path::new(rel_path),
+                        )?;
+                        fs::remove_file(path)?;
+                        result.deleted_local.push(rel_path.into());
+                    }
+                    None => {}
+                }
+            } else if chosen_content.is_some() {
+                result.pushed.push(rel_path.into());
+            } else if remote.content.is_some() {
+                result.deleted_remote.push(rel_path.into());
+            }
+            if let Some(content) = chosen_content {
+                let meta = self.current_local_metadata(rel_path)?;
+                state.record_sync(rel_path, &compute_hash(content), Some(&meta), None);
+                self.save_base(rel_path, content);
+            } else {
+                state.remove_record(rel_path);
+            }
+            state.resolve_unresolved_conflict(rel_path);
+            Ok(())
+        })();
+        // A failed revision check still persists the reopened conflict.
+        state.save(&self.state_path)?;
+        operation?;
+        Ok(result)
     }
 
     /// Collect all local graph files with metadata.
@@ -754,6 +1127,7 @@ impl SyncEngine {
         self.collect_dir_metadata(&root.join("journals"), &root, true, &mut files)?;
         self.collect_dir_metadata(&root.join("knowledge"), &root, false, &mut files)?;
         self.collect_dir_metadata(&root.join("assets"), &root, false, &mut files)?;
+        self.collect_dir_metadata(&root.join("books"), &root, false, &mut files)?;
         Ok(files)
     }
 
@@ -764,12 +1138,20 @@ impl SyncEngine {
         markdown_only: bool,
         out: &mut HashMap<String, FileMetadata>,
     ) -> Result<()> {
-        if !dir.exists() {
-            return Ok(());
+        match fs::symlink_metadata(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+            Ok(meta) if meta.file_type().is_symlink() => return Ok(()),
+            Ok(_) => {}
         }
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+            if entry.file_type()?.is_symlink()
+                || entry.file_name().to_string_lossy().starts_with('.')
+            {
+                continue;
+            }
             if path.is_dir() {
                 self.collect_dir_metadata(&path, base, markdown_only, out)?;
             } else if Self::is_collectable(&path, base, markdown_only) {
@@ -787,7 +1169,14 @@ impl SyncEngine {
         if path.to_string_lossy().contains(".conflict_") {
             return false;
         }
-        let rel = path.strip_prefix(base).unwrap_or(path).to_string_lossy();
+        let rel = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.starts_with("books/") {
+            return crate::graph::books::is_portable_book_file(&rel.replace('\\', "/"));
+        }
         if rel.starts_with("pages/") && rel.contains("/assets/") {
             return true;
         }
@@ -810,7 +1199,7 @@ impl SyncEngine {
             .unwrap_or(0);
         let rel_path = path
             .strip_prefix(base)
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
 
         Ok(FileMetadata {
@@ -868,7 +1257,7 @@ impl SyncEngine {
 /// both machines produce the same filename and converge instead of each
 /// creating its own timestamped duplicate.
 fn make_content_conflict_path(rel_path: &str, hash: &str) -> String {
-    let short = &hash[..hash.len().min(8)];
+    let short = hash;
     match rel_path.rfind('.') {
         Some(dot) => format!(
             "{}.conflict_{}{}",
@@ -970,13 +1359,12 @@ mod tests {
             if rel_path != SyncEngine::REMOTE_MARKER_PATH {
                 self.read_file_calls.fetch_add(1, Ordering::SeqCst);
             }
-            Ok(self
-                .files
+            self.files
                 .lock()
                 .unwrap()
                 .get(rel_path)
                 .cloned()
-                .unwrap_or_default())
+                .ok_or_else(|| crate::error::CoreError::NotFound(rel_path.into()))
         }
 
         fn write_file(&self, rel_path: &str, content: &[u8]) -> Result<()> {
@@ -1021,6 +1409,54 @@ mod tests {
             backend.file_bytes(rel_path),
             b"- prompt:: cite everything\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_pushes_and_pulls_originals_but_never_extraction_caches() -> Result<()> {
+        let local = tempfile::tempdir_in(".")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let original = format!("books/{id}/original.epub");
+        let metadata = format!("books/{id}/book.json");
+        write_local_markdown(local.path(), &original, "original bytes")?;
+        write_local_markdown(local.path(), &metadata, "{}")?;
+        write_local_markdown(
+            local.path(),
+            &format!("books/{id}/.extract-cache/converted.epub"),
+            "cache",
+        )?;
+        write_local_markdown(local.path(), &format!("books/{id}/cached.txt"), "cache")?;
+        let backend = MockBackend::default();
+        let result = SyncEngine::new(local.path().to_path_buf()).sync(&backend)?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pushed.len(), 2);
+        assert_eq!(backend.file_bytes(&original), b"original bytes");
+        let other = tempfile::tempdir_in(".")?;
+        let result = SyncEngine::new(other.path().to_path_buf()).sync(&backend)?;
+        assert_eq!(result.pulled.len(), 2);
+        assert_eq!(fs::read(other.path().join(&original))?, b"original bytes");
+        assert!(!SyncEngine::is_syncable_path(&format!(
+            "books/{id}/../escape"
+        )));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_does_not_follow_original_book_symlinks() -> Result<()> {
+        let local = tempfile::tempdir_in(".")?;
+        let outside = tempfile::tempdir_in(".")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        fs::create_dir_all(local.path().join("books"))?;
+        std::os::unix::fs::symlink(
+            outside.path().canonicalize()?,
+            local.path().join("books").join(&id),
+        )?;
+        let path = format!("books/{id}/original.pdf");
+        let backend = MockBackend::with_files(vec![(&path, b"remote original", 42)]);
+        let result = SyncEngine::new(local.path().to_path_buf()).sync(&backend)?;
+        assert!(!result.errors.is_empty());
+        assert!(!outside.path().join("original.pdf").exists());
         Ok(())
     }
 
@@ -1101,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_detects_real_local_change_and_pushes_without_remote_hash() -> Result<()> {
+    fn sync_revalidates_remote_content_before_pushing_local_change() -> Result<()> {
         let temp = tempdir()?;
         let rel_path = "pages/foo.md";
         write_local_markdown(temp.path(), rel_path, "base content")?;
@@ -1119,13 +1555,13 @@ mod tests {
 
         assert_eq!(second.pushed, vec![rel_path.to_string()]);
         assert_eq!(backend.file_hash_calls(), 0);
-        assert_eq!(backend.read_file_calls(), 0);
+        assert_eq!(backend.read_file_calls(), 2);
         assert_eq!(backend.file_bytes(rel_path), b"base content updated");
 
         backend.reset_counters();
         let third = engine.sync(&backend)?;
         assert!(third.is_clean());
-        assert_eq!(backend.file_hash_calls(), 0);
+        assert_eq!(backend.file_hash_calls(), 1);
         assert_eq!(backend.read_file_calls(), 0);
         Ok(())
     }

@@ -16,6 +16,48 @@ pub struct FileMetadata {
     pub hash: Option<String>,
 }
 
+/// Bytes and the server's revision token captured by the same read.
+/// A missing file is distinct from an empty file and from a failed request.
+#[derive(Clone, Default)]
+pub struct FileSnapshot {
+    pub content: Option<Vec<u8>>,
+    pub etag: Option<String>,
+    /// Filesystem revisions also retain the cooperating writer generation,
+    /// so an absent or byte-identical ABA cannot satisfy a stale snapshot.
+    pub mutation_fence: Option<crate::fsutil::SourceMutationFence>,
+}
+
+impl std::fmt::Debug for FileSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FileSnapshot")
+            .field("hash", &self.hash())
+            .field("etag", &self.etag)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FileSnapshot {
+    pub fn missing() -> Self {
+        Self::default()
+    }
+
+    pub fn hash(&self) -> Option<String> {
+        self.content.as_deref().map(compute_hash)
+    }
+}
+
+pub fn is_not_found(error: &CoreError) -> bool {
+    matches!(error, CoreError::NotFound(_))
+        || matches!(error, CoreError::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+pub fn revision_changed(rel_path: &str) -> CoreError {
+    CoreError::Other(format!(
+        "Sync revision changed for {rel_path}; review the conflict again"
+    ))
+}
+
 /// Trait for sync backends. Each backend represents a remote storage location
 /// (USB filesystem, WebDAV server, network share, etc.)
 pub trait SyncBackend: Send + Sync {
@@ -44,6 +86,40 @@ pub trait SyncBackend: Send + Sync {
 
     /// Delete a file on the remote.
     fn delete_file(&self, rel_path: &str) -> Result<()>;
+
+    fn read_snapshot(&self, rel_path: &str) -> Result<FileSnapshot> {
+        match self.read_file(rel_path) {
+            Ok(content) => Ok(FileSnapshot {
+                content: Some(content),
+                etag: None,
+                mutation_fence: None,
+            }),
+            Err(e) if is_not_found(&e) => Ok(FileSnapshot {
+                content: None,
+                etag: None,
+                mutation_fence: None,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Compare before publishing. Backends with native preconditions must
+    /// override this; the fallback cannot protect against uncooperative writers
+    /// racing between the check and write.
+    fn publish_if_unchanged(
+        &self,
+        rel_path: &str,
+        expected: &FileSnapshot,
+        content: Option<&[u8]>,
+    ) -> Result<()> {
+        if self.read_snapshot(rel_path)?.hash() != expected.hash() {
+            return Err(revision_changed(rel_path));
+        }
+        match content {
+            Some(content) => self.write_file(rel_path, content),
+            None => self.delete_file(rel_path),
+        }
+    }
 
     /// Compute content hash for a remote file.
     fn file_hash(&self, rel_path: &str) -> Result<String> {
