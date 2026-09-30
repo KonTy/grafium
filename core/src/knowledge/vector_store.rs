@@ -106,9 +106,10 @@ impl SqliteVectorStore {
     /// bytes, justify a one-off full VACUUM to convert a store created before
     /// incremental auto-vacuum.
     const VACUUM_FREE_FRACTION: i64 = 4;
-    const VACUUM_MIN_FREE_BYTES: i64 = 16 * 1024 * 1024;
+    const VACUUM_MIN_FREE_BYTES: i64 = 4 * 1024 * 1024;
 
     fn compact_conn(conn: &Connection) -> Result<()> {
+        Self::quantize_legacy_rows(conn)?;
         let pragma = |name: &str| -> Result<i64> {
             Ok(conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))?)
         };
@@ -173,7 +174,82 @@ impl SqliteVectorStore {
         dot / denom
     }
 
-    /// Serialize f32 vector to bytes (native endian for zero-copy on same arch).
+    /// Store a vector as a little-endian f32 scale followed by one signed byte
+    /// per dimension: a quarter of the f32 size. Cosine similarity ignores the
+    /// scale, and symmetric 8-bit rounding moves scores by well under 0.01, far
+    /// below the gap between relevant and unrelated passages.
+    fn quantize(v: &[f32]) -> Vec<u8> {
+        let peak = v.iter().fold(0.0f32, |peak, x| peak.max(x.abs()));
+        let scale = if peak.is_finite() && peak > 0.0 {
+            peak / 127.0
+        } else {
+            0.0
+        };
+        let mut bytes = Vec::with_capacity(v.len() + 4);
+        bytes.extend_from_slice(&scale.to_le_bytes());
+        for &x in v {
+            let q = if scale > 0.0 {
+                (x / scale).round().clamp(-127.0, 127.0)
+            } else {
+                0.0
+            };
+            bytes.push(q as i8 as u8);
+        }
+        bytes
+    }
+
+    /// Decode either format. Stores written before quantization hold four
+    /// bytes per dimension; `compact` converts them in the background.
+    fn decode(bytes: &[u8], dimension: Option<usize>) -> Vec<f32> {
+        match dimension {
+            Some(d) if bytes.len() == d + 4 && bytes.len() != d * 4 => {
+                let scale = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                bytes[4..].iter().map(|&q| q as i8 as f32 * scale).collect()
+            }
+            _ => Self::bytes_to_vec(bytes),
+        }
+    }
+
+    const QUANTIZE_BATCH: usize = 2000;
+
+    /// Rewrite full-precision rows in the compact format. Returns rows converted.
+    fn quantize_legacy_rows(conn: &Connection) -> Result<usize> {
+        let Some(dimension) = Self::stored_dimension(conn)? else {
+            return Ok(0);
+        };
+        if dimension * 4 == dimension + 4 {
+            return Ok(0);
+        }
+        let legacy_len = (dimension * 4) as i64;
+        let mut converted = 0;
+        loop {
+            let tx = conn.unchecked_transaction()?;
+            let rows = {
+                let mut select = tx.prepare(
+                    "SELECT rowid, embedding FROM vectors WHERE length(embedding) = ?1 LIMIT ?2",
+                )?;
+                let rows = select
+                    .query_map(params![legacy_len, Self::QUANTIZE_BATCH as i64], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let mut update =
+                    tx.prepare("UPDATE vectors SET embedding = ?1 WHERE rowid = ?2")?;
+                for (rowid, blob) in &rows {
+                    update.execute(params![Self::quantize(&Self::bytes_to_vec(blob)), rowid])?;
+                }
+                rows.len()
+            };
+            tx.commit()?;
+            converted += rows;
+            if rows < Self::QUANTIZE_BATCH {
+                return Ok(converted);
+            }
+        }
+    }
+
+    /// Serialize f32 vector to bytes (the pre-quantization format).
+    #[cfg(test)]
     fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(v.len() * 4);
         for &f in v {
@@ -379,7 +455,7 @@ impl SqliteVectorStore {
         row: VectorRow,
         top_k: usize,
     ) -> Result<()> {
-        let embedding = Self::bytes_to_vec(&row.embedding);
+        let embedding = Self::decode(&row.embedding, expected_dimension);
         if let Some(expected_dimension) = expected_dimension {
             if embedding.len() != expected_dimension {
                 return Err(CoreError::Other(format!(
@@ -435,7 +511,7 @@ impl VectorStore for SqliteVectorStore {
                 )?;
 
                 for chunk in chunks {
-                    let embedding_bytes = Self::vec_to_bytes(&chunk.embedding);
+                    let embedding_bytes = Self::quantize(&chunk.embedding);
                     let metadata_str = serde_json::to_string(&chunk.metadata).unwrap_or_default();
 
                     stmt.execute(params![
@@ -733,7 +809,7 @@ mod tests {
         legacy_store(&path);
         let store = SqliteVectorStore::open(&path)?;
         store.upsert(&fill("kept", 200)).await?;
-        store.upsert(&fill("gone", 4000)).await?;
+        store.upsert(&fill("gone", 8000)).await?;
         store.compact().await?;
         let full = file_bytes(&path);
 
@@ -753,6 +829,92 @@ mod tests {
         store.delete_by_graph("again").await?;
         store.compact().await?;
         assert!(file_bytes(&path) <= compacted + 64 * 1024);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quantized_vectors_are_a_quarter_size_and_rank_like_full_precision() -> Result<()> {
+        let dimension = 1024;
+        let seeded = |seed: u32| -> Vec<f32> {
+            let mut state = seed.wrapping_mul(2_654_435_761).max(1);
+            (0..dimension)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (state as f32 / u32::MAX as f32) - 0.5
+                })
+                .collect()
+        };
+        let query = seeded(7);
+        let store = SqliteVectorStore::in_memory()?;
+        let chunks: Vec<_> = (0..200)
+            .map(|i| vector_chunk(&format!("c{i}"), "g", seeded(100 + i)))
+            .collect();
+        store.upsert(&chunks).await?;
+
+        let mut exact: Vec<(f32, &str)> = chunks
+            .iter()
+            .map(|c| {
+                (
+                    SqliteVectorStore::cosine_similarity(&query, &c.embedding),
+                    c.chunk_id.as_str(),
+                )
+            })
+            .collect();
+        exact.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let results = store.search(&query, 10, Some("g")).await?;
+        let overlap = results
+            .iter()
+            .filter(|r| exact[..10].iter().any(|(_, id)| *id == r.chunk_id))
+            .count();
+        assert!(overlap >= 9, "top-10 overlap {overlap}");
+        for result in &results {
+            let (score, _) = exact.iter().find(|(_, id)| *id == result.chunk_id).unwrap();
+            assert!((result.score - score).abs() < 5e-3);
+        }
+
+        let blob_len: i64 = store.conn.lock().unwrap().query_row(
+            "SELECT length(embedding) FROM vectors LIMIT 1",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(blob_len as usize, dimension + 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compaction_converts_full_precision_rows_and_search_reads_both() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("vectors.db");
+        let store = SqliteVectorStore::open(&path)?;
+        store
+            .upsert(&[vector_chunk("new", "g", vec![0.6, 0.8, 0.0])])
+            .await?;
+        store.conn.lock().unwrap().execute(
+            "INSERT INTO vectors (chunk_id, graph_id, page_id, page_title, content, embedding)
+             VALUES ('old', 'g', 'p', 'Old', 'legacy', ?1)",
+            [SqliteVectorStore::vec_to_bytes(&[1.0, 0.0, 0.0])],
+        )?;
+
+        let before = store.search(&[1.0, 0.0, 0.0], 2, Some("g")).await?;
+        assert_eq!(before[0].chunk_id, "old");
+        assert!((before[0].score - 1.0).abs() < 1e-6);
+
+        store.compact().await?;
+        let lengths: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut statement = conn.prepare("SELECT length(embedding) FROM vectors")?;
+            let lengths = statement
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            lengths
+        };
+        assert_eq!(lengths, [7, 7]);
+        let after = store.search(&[1.0, 0.0, 0.0], 2, Some("g")).await?;
+        assert_eq!(after[0].chunk_id, "old");
+        assert!((after[0].score - 1.0).abs() < 5e-3);
+        assert!((after[1].score - 0.6).abs() < 5e-3);
         Ok(())
     }
 
@@ -886,9 +1048,10 @@ mod tests {
         );
         assert!(results[0].score > results[1].score);
         assert!(results[1].score > results[2].score);
-        assert!((results[0].score - 1.0).abs() < 1e-6);
-        assert!((results[1].score - 0.8).abs() < 1e-6);
-        assert!((results[2].score - 0.6).abs() < 1e-6);
+        // Stored vectors are 8-bit quantized.
+        assert!((results[0].score - 1.0).abs() < 5e-3);
+        assert!((results[1].score - 0.8).abs() < 5e-3);
+        assert!((results[2].score - 0.6).abs() < 5e-3);
 
         Ok(())
     }
