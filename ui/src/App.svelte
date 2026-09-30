@@ -229,6 +229,7 @@
   const DEFAULT_SIDEBAR_WIDTH = 260;
   const SIDEBAR_MIN_WIDTH = 180;
   const SIDEBAR_MAX_WIDTH = 520;
+  const SIDEBAR_RAIL_WIDTH = 52;
   const MAIN_CONTENT_MIN_WIDTH = 360;
   const DEFAULT_REFERENCE_PANEL_WIDTH = 380;
   const REFERENCE_PANEL_MIN_WIDTH = 280;
@@ -885,12 +886,10 @@
       });
   }
 
-  // Ctrl+B "seamless" focus/close for the left sidebar:
-  // - hidden -> show it (also leaving zen mode) and focus its search box
+  // Ctrl+B "seamless" focus/collapse for the left sidebar:
+  // - collapsed -> expand it (also leaving zen mode) and focus its search box
   // - visible but not focused -> just focus its search box
-  // - visible and already focused -> close it
-  // This mirrors the request that Ctrl+B behave like a real toggle+focus
-  // combo instead of only ever opening/focusing and never closing.
+  // - visible and already focused -> collapse it to the navigation icon rail
   async function focusLeftSidebar() {
     if (!sidebarVisible || zenMode) {
       if (zenMode) zenMode = false;
@@ -1835,6 +1834,30 @@
     importMediaError = "";
   }
 
+  async function browseImportMedia() {
+    if (importMediaBusy) return;
+    importMediaError = "";
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Choose Video or Audio File",
+        filters: [{
+          name: "Video and audio",
+          extensions: [
+            "webm", "mp4", "mkv", "mov", "avi", "m4v",
+            "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus",
+          ],
+        }],
+      });
+      if (typeof selected === "string") {
+        importMediaUrl = selected;
+      }
+    } catch (e) {
+      importMediaError = `Could not open the media picker: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
   async function submitImportMedia() {
     const url = importMediaUrl.trim();
     if (!url || importMediaBusy) return;
@@ -2050,6 +2073,7 @@
   {#if !zenMode}
     <TitleBar
       {sidebarVisible}
+      {sidebarWidth}
       {uiZoom}
       canGoBack={navIndex > 0}
       canGoForward={navIndex < navHistory.length - 1}
@@ -2069,25 +2093,35 @@
     />
   {/if}
   <div class="app-layout" bind:this={appLayoutEl}>
-    {#if sidebarVisible && !zenMode}
-      <div class="sidebar-container" style={`width: ${sidebarWidth}px;`}>
+    {#if !zenMode}
+      <div
+        class="sidebar-container"
+        class:collapsed={!sidebarVisible}
+        style={`width: ${sidebarVisible ? sidebarWidth : SIDEBAR_RAIL_WIDTH}px;`}
+      >
         <Sidebar
           bind:this={sidebarRef}
           {currentPage}
+          {currentView}
           {sidebarWidth}
+          collapsed={!sidebarVisible}
+          onExpand={() => setLayoutPreferences({ sidebarVisible: true })}
+          onCollapse={() => setLayoutPreferences({ sidebarVisible: false })}
           onNavigate={handleNavigate}
           onGraphChanged={handleGraphChanged}
         />
       </div>
-      <div
-        class="sidebar-resizer"
-        class:resizing={isResizingSidebar}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
-        onpointerdown={startSidebarResize}
-        ondblclick={resetSidebarWidth}
-      ></div>
+      {#if sidebarVisible}
+        <div
+          class="sidebar-resizer"
+          class:resizing={isResizingSidebar}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          onpointerdown={startSidebarResize}
+          ondblclick={resetSidebarWidth}
+        ></div>
+      {/if}
     {/if}
 
     <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode}>
@@ -2496,7 +2530,7 @@
 
 {#if showImportMediaDialog}
   <div class="dialog-backdrop" role="presentation" use:dismissOnBackdrop={cancelImportMedia}>
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="import-media-title" tabindex="-1" onkeydown={dialogKeydown(cancelImportMedia)}>
+    <div class="dialog import-media-dialog" role="dialog" aria-modal="true" aria-labelledby="import-media-title" tabindex="-1" onkeydown={dialogKeydown(cancelImportMedia)}>
       <h3 class="dialog-title" id="import-media-title">Import from Video/Audio</h3>
       <p class="dialog-description">
         Paste a YouTube (or other yt-dlp-supported) URL, or a local file path. Captions are used
@@ -2508,15 +2542,32 @@
         <option value="new_page">New page</option>
         <option value="journal">Add to today's journal</option>
       </select>
-      <input
-        type="text"
-        class="dialog-input"
-        placeholder="https://youtube.com/watch?v=... or /path/to/video.mp4"
-        bind:value={importMediaUrl}
-        onkeydown={handleImportMediaKeydown}
-        disabled={importMediaBusy}
-        use:autofocus
-      />
+      <label class="dialog-label" for="import-media-source">URL or local file</label>
+      <div class="dialog-input-with-action">
+        <input
+          id="import-media-source"
+          type="text"
+          class="dialog-input"
+          placeholder="https://youtube.com/watch?v=... or /path/to/video.webm"
+          bind:value={importMediaUrl}
+          onkeydown={handleImportMediaKeydown}
+          disabled={importMediaBusy}
+          use:autofocus
+        />
+        <button
+          class="dialog-file-picker"
+          type="button"
+          onclick={browseImportMedia}
+          disabled={importMediaBusy}
+          aria-label="Choose local media file"
+          title="Choose local media file"
+        >
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+            <path d="M1.75 3.75h4l1.25 1.5h7.25v7.5H1.75z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
+            <path d="M5.25 9h5.5M8 6.25v5.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
       {#if importMediaBusy && importMediaProgress}
         <pre class="dialog-progress">{importMediaProgress}</pre>
       {/if}
@@ -2581,6 +2632,10 @@
     flex: 0 0 auto;
     min-width: 0;
     overflow: hidden;
+  }
+
+  .sidebar-container.collapsed {
+    flex-basis: 52px;
   }
 
   .sidebar-container :global(.sidebar) {
@@ -2693,6 +2748,10 @@
 
   .app-shell.zen {
     background: var(--bg-primary);
+  }
+
+  .app-shell.zen .bottom-nav {
+    display: none;
   }
 
   .main-content.zen-content {
@@ -2828,6 +2887,10 @@
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
   }
 
+  .dialog.import-media-dialog {
+    width: min(560px, calc(100vw - 32px));
+  }
+
   .dialog-title {
     font-size: 16px;
     font-weight: 600;
@@ -2891,6 +2954,47 @@
 
   .dialog-input:focus {
     border-color: var(--accent);
+  }
+
+  .dialog-input-with-action {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+
+  .dialog-input-with-action .dialog-input {
+    min-width: 0;
+    margin-bottom: 0;
+  }
+
+  .dialog-file-picker {
+    width: 42px;
+    min-width: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--btn-bg);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  .dialog-file-picker:hover {
+    background: var(--btn-bg-hover);
+    border-color: var(--accent);
+  }
+
+  .dialog-file-picker:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .dialog-file-picker:disabled {
+    cursor: default;
+    opacity: 0.55;
   }
 
   .dialog-actions {

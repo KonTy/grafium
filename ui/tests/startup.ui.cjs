@@ -80,7 +80,7 @@ async function newPage(browser, cache = JSON.stringify({
               background: args.background,
               appMounted: !!document.querySelector(".app-shell"),
               cssBackground: getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim(),
-              sidebarVisible: !!document.querySelector(".sidebar-container"),
+              sidebarVisible: !document.querySelector(".sidebar")?.classList.contains("collapsed"),
               wideMode: document.querySelector(".app-shell")?.classList.contains("wide-mode") ?? false,
             });
             return;
@@ -174,7 +174,7 @@ const navigate = (page, title) => page.evaluate((title) => {
       await first.page.locator(".sidebar input").first().waitFor({ state: "visible" });
       await first.page.keyboard.press("Control+b");
       await first.page.waitForFunction(() => window.__sidebarWrites.at(-1) === false);
-      await first.page.locator(".sidebar-container").waitFor({ state: "detached" });
+      await first.page.locator(".sidebar.collapsed").waitFor({ state: "visible" });
       await first.page.close();
       assert.equal(sidebar.visible, false);
       assert.equal(sidebar.wideMode, false);
@@ -188,6 +188,7 @@ const navigate = (page, title) => page.evaluate((title) => {
       assert.equal(await second.page.evaluate(() => window.__startupReveals[0].wideMode), false);
       await second.page.setViewportSize({ width: 1200, height: 900 });
       assert.equal(await second.page.locator(".app-shell.wide-mode").count(), 0);
+      await second.page.locator(".sidebar.collapsed").waitFor({ state: "visible" });
       assert.deepEqual(await second.page.evaluate(() => window.__sidebarWrites), []);
       await second.page.keyboard.press("Control+b");
       await second.page.waitForFunction(() => window.__sidebarWrites.at(-1) === true);

@@ -6,7 +6,7 @@ Fresh desktop installs start with **GitHub Light**; Android starts with **OLED**
 
 By default, narrow page layout leaves 15% padding on each side; you can adjust that padding, or use wide layout for the full page width. Try both on [[Writing/Formatting]].
 
-Bullet threading makes nested relationships easier to follow while editing. Use it with [[Writing/Outline]] to see how a branch holds together.
+Bullet threading draws one connected path through the nested branch you are editing, without unrelated guide fragments. Parent headings stay compact and aligned with headings that have no children. Use it with [[Writing/Outline]] to see how a branch holds together.
 
 The top-bar **B** button toggles **Bionic Speedreader**: bold word beginnings in rendered notes, without rewriting the Markdown. It leaves code, math, and icons alone. Try it as a reading preference, not a promise that you must read faster.
 

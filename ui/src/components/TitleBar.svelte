@@ -5,6 +5,7 @@
 
   interface Props {
     sidebarVisible?: boolean;
+    sidebarWidth?: number;
     uiZoom?: number;
     canGoBack?: boolean;
     canGoForward?: boolean;
@@ -25,6 +26,7 @@
 
   let {
     sidebarVisible = true,
+    sidebarWidth = 260,
     uiZoom = 1,
     canGoBack = false,
     canGoForward = false,
@@ -66,10 +68,12 @@
 </script>
 
 <div class="titlebar" data-tauri-drag-region>
-  {#if sidebarVisible}
-    <div class="titlebar-left" data-tauri-drag-region>
-    </div>
-  {/if}
+  <div
+    class="titlebar-left"
+    class:collapsed={!sidebarVisible}
+    style={`width: ${sidebarVisible ? sidebarWidth : 52}px;`}
+    data-tauri-drag-region
+  ></div>
 
   <div class="titlebar-right" data-tauri-drag-region>
     <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} onOpenSettings={onOpenSettings} />
@@ -172,11 +176,14 @@
   }
 
   .titlebar-left {
-    width: 260px;
     height: 100%;
     background: var(--bg-sidebar);
     border-right: 1px solid var(--border);
     flex-shrink: 0;
+  }
+
+  .titlebar-left.collapsed {
+    background: var(--bg-sidebar);
   }
 
   .titlebar-right {

@@ -17,16 +17,24 @@
 
   interface Props {
     currentPage?: Page | null;
+    currentView?: string;
     onNavigate: (pageTitle: string) => void;
     onGraphChanged?: () => void;
     sidebarWidth?: number;
+    collapsed?: boolean;
+    onExpand?: () => void;
+    onCollapse?: () => void;
   }
 
   let {
     currentPage = null,
+    currentView = "",
     onNavigate,
     onGraphChanged = () => {},
     sidebarWidth = 260,
+    collapsed = false,
+    onExpand = () => {},
+    onCollapse = () => {},
   }: Props = $props();
 
   const COMPACT_SIDEBAR_WIDTH = 220;
@@ -231,13 +239,17 @@
     return !!rootEl && !!document.activeElement && rootEl.contains(document.activeElement);
   }
 
-  function toggleSearch() {
+  async function toggleSearch() {
+    if (collapsed) {
+      onExpand();
+      await tick();
+    }
     if (showSearch) {
       showSearch = false;
       clearSearch(true);
       return;
     }
-    void openSearch();
+    await openSearch();
   }
 
   function resetSearchState() {
@@ -312,18 +324,37 @@
 
 </script>
 
-<aside class="sidebar" bind:this={rootEl}>
-  <div class="sidebar-header">
-    <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
-    <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="11" cy="11" r="8"></circle>
-        <path d="m21 21-4.35-4.35"></path>
-      </svg>
-    </button>
+<aside class="sidebar" class:collapsed bind:this={rootEl}>
+  <div class="sidebar-header" class:collapsed>
+    {#if collapsed}
+      <button class="sidebar-toggle" onclick={onExpand} title="Expand sidebar (Ctrl+B)" aria-label="Expand sidebar">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16M13 9l3 3-3 3" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+    {:else}
+      <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
+    {/if}
+    <div class="sidebar-header-actions">
+      <button class="search-toggle" onclick={toggleSearch} title="Search (Ctrl+K)" aria-label="Search pages and blocks">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.35-4.35"></path>
+        </svg>
+      </button>
+      {#if !collapsed}
+        <button class="sidebar-toggle" onclick={onCollapse} title="Collapse sidebar (Ctrl+B)" aria-label="Collapse sidebar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M9 4v16M16 9l-3 3 3 3" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      {/if}
+    </div>
   </div>
 
-  {#if showSearch}
+  {#if showSearch && !collapsed}
     <div class="search-container">
       <input
         type="text"
@@ -355,7 +386,7 @@
   {/if}
 
   <nav class="nav-items">
-    <button class="nav-item" onclick={navigateToJournal}>
+    <button class="nav-item" class:active={currentView === "journal"} onclick={navigateToJournal} title="Journal" aria-label="Journal">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
         <line x1="16" y1="2" x2="16" y2="6"></line>
@@ -364,7 +395,7 @@
       </svg>
       <span>Journal</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__statistics__")}>
+    <button class="nav-item" class:active={currentView === "statistics"} onclick={() => onNavigate("__statistics__")} title="Tasks" aria-label="Tasks">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M18 20V10"></path>
         <path d="M12 20V4"></path>
@@ -372,14 +403,14 @@
       </svg>
       <span>Tasks</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__all_pages__")}>
+    <button class="nav-item" class:active={currentView === "all-pages"} onclick={() => onNavigate("__all_pages__")} title="All Pages" aria-label="All Pages">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
         <polyline points="14 2 14 8 20 8"></polyline>
       </svg>
       <span>All Pages</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__graph__")}>
+    <button class="nav-item" class:active={currentView === "graph"} onclick={() => onNavigate("__graph__")} title="Graph View" aria-label="Graph View">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="5" cy="6" r="2"></circle>
         <circle cx="19" cy="6" r="2"></circle>
@@ -390,7 +421,7 @@
       </svg>
       <span>Graph View</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__flashcards__")}>
+    <button class="nav-item" class:active={currentView === "flashcards"} onclick={() => onNavigate("__flashcards__")} title="Flashcards" aria-label="Flashcards">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"></rect>
         <path d="M12 8v8"></path>
@@ -398,20 +429,20 @@
       </svg>
       <span>Flashcards</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__chat__")}>
+    <button class="nav-item" class:active={currentView === "chat"} onclick={() => onNavigate("__chat__")} title="Chat" aria-label="Chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
       </svg>
       <span>Chat</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__jobs__")}>
+    <button class="nav-item" class:active={currentView === "jobs"} onclick={() => onNavigate("__jobs__")} title="Jobs" aria-label="Jobs">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path>
         <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
       </svg>
       <span>Jobs</span>
     </button>
-    <button class="nav-item" onclick={() => onNavigate("__settings__")}>
+    <button class="nav-item" class:active={currentView === "settings"} onclick={() => onNavigate("__settings__")} title="Settings" aria-label="Settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"></circle>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -420,7 +451,7 @@
     </button>
   </nav>
 
-  {#if favorites.length > 0}
+  {#if favorites.length > 0 && !collapsed}
     <div class="sidebar-section">
       <h3 class="section-title">Favorites</h3>
       {#each favorites as fav}
@@ -439,7 +470,7 @@
     </div>
   {/if}
 
-  {#if recentPages.length > 0}
+  {#if recentPages.length > 0 && !collapsed}
     <div class="sidebar-section">
       <h3 class="section-title">Recent</h3>
       {#each recentPages as recent}
@@ -455,31 +486,31 @@
     </div>
   {/if}
 
-  <div class="sidebar-footer" class:compact={compactSidebar}>
-    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__new_page__") } title="Create new page">
+  <div class="sidebar-footer" class:compact={compactSidebar || collapsed}>
+    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__new_page__") } title="Create new page" aria-label="Create new page">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19"></line>
         <line x1="5" y1="12" x2="19" y2="12"></line>
       </svg>
-      {#if !compactSidebar}
+      {#if !compactSidebar && !collapsed}
         <span>Create</span>
       {/if}
     </button>
-    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__import_media__") } title="Import from video/audio (URL or file)">
+    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_media__") } title="Import from video/audio (URL or file)" aria-label="Import media">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polygon points="23 7 16 12 23 17 23 7"></polygon>
         <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
       </svg>
-      {#if !compactSidebar}
+      {#if !compactSidebar && !collapsed}
         <span>Import Media</span>
       {/if}
     </button>
-    <button class="create-btn" class:compact={compactSidebar} onclick={() => onNavigate("__import_books__") } title="Import PDF/ebook files from a folder you choose">
+    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_books__") } title="Import PDF or ebook folder" aria-label="Import books">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
         <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"></path>
       </svg>
-      {#if !compactSidebar}
+      {#if !compactSidebar && !collapsed}
         <span>Import Books</span>
       {/if}
     </button>
@@ -549,6 +580,11 @@
     flex-shrink: 0;
   }
 
+  .sidebar.collapsed {
+    padding: 10px 7px;
+    overflow-x: hidden;
+  }
+
   .sidebar-header {
     display: flex;
     align-items: center;
@@ -556,16 +592,39 @@
     margin-bottom: 16px;
   }
 
-  .search-toggle {
+  .sidebar-header.collapsed {
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .sidebar-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .sidebar-header.collapsed .sidebar-header-actions {
+    flex-direction: column;
+  }
+
+  .search-toggle,
+  .sidebar-toggle {
     background: none;
     border: none;
     color: var(--text-secondary);
     cursor: pointer;
     padding: 6px;
     border-radius: 4px;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
-  .search-toggle:hover {
+  .search-toggle:hover,
+  .sidebar-toggle:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
@@ -676,6 +735,22 @@
     color: var(--text-primary);
   }
 
+  .sidebar.collapsed .nav-items {
+    align-items: center;
+    gap: 4px;
+  }
+
+  .sidebar.collapsed .nav-item {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .sidebar.collapsed .nav-item span {
+    display: none;
+  }
+
   .sidebar-section {
     margin-bottom: 16px;
   }
@@ -710,6 +785,12 @@
     flex-direction: row;
     justify-content: center;
     gap: 6px;
+  }
+
+  .sidebar.collapsed .sidebar-footer.compact {
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
   }
 
   .create-btn {
