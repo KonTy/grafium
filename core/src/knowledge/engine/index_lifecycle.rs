@@ -205,6 +205,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checked_indexing_reports_chunk_progress_per_batch() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (graph, engine, store, _) = setup(root.path())?;
+        let body: String = (0..70)
+            .map(|i| format!("- Chapter paragraph number {i} about orbital mechanics.\n"))
+            .collect();
+        let page = graph.create_page_with_content("Long book", false, &body)?;
+        let batch = engine.config.embedding.batch_size.max(1);
+
+        let mut reports = Vec::new();
+        let count = engine
+            .index_page_from_database_with_progress(
+                &graph.db,
+                &page.id,
+                "graph",
+                &mut |done, total| reports.push((done, total)),
+            )
+            .await?;
+
+        let total = count;
+        assert!(total > batch, "fixture must span several batches");
+        let mut expected = vec![(0, total)];
+        expected.extend((1..=total.div_ceil(batch)).map(|n| ((n * batch).min(total), total)));
+        assert_eq!(reports, expected);
+        assert_eq!(store.count().await?, total);
+
+        reports.clear();
+        engine
+            .index_page_from_database_with_progress(
+                &graph.db,
+                &page.id,
+                "graph",
+                &mut |done, total| reports.push((done, total)),
+            )
+            .await?;
+        assert!(reports.is_empty(), "an up-to-date page reports nothing");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reconciliation_removes_legacy_orphans_without_a_pending_row() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (graph, mut engine, store, _) = setup(root.path())?;
@@ -311,9 +351,24 @@ impl KnowledgeEngine {
         page_id: &str,
         graph_id: &str,
     ) -> Result<usize> {
+        self.index_page_from_database_with_progress(db, page_id, graph_id, &mut |_, _| {})
+            .await
+    }
+
+    /// [`Self::index_page_from_database`], reporting `(embedded, total)` chunk
+    /// counts: once with `(0, total)` before embedding starts, then after every
+    /// batch. Never called when the page is already up to date. Counts are
+    /// prepared vectors; publication is still verified against the source.
+    pub async fn index_page_from_database_with_progress(
+        &self,
+        db: &Database,
+        page_id: &str,
+        graph_id: &str,
+        on_progress: &mut (dyn FnMut(usize, usize) + Send),
+    ) -> Result<usize> {
         match db.page_index_snapshot(page_id)? {
             Some((page, blocks)) => {
-                self.index_snapshot(&page, &blocks, graph_id, Some(db))
+                self.index_snapshot(&page, &blocks, graph_id, Some(db), on_progress)
                     .await
             }
             None => {
@@ -329,6 +384,7 @@ impl KnowledgeEngine {
         blocks: &[Block],
         graph_id: &str,
         db: Option<&Database>,
+        on_progress: &mut (dyn FnMut(usize, usize) + Send),
     ) -> Result<usize> {
         let mut state = self.index_state.lock().await;
         let store = self
@@ -364,10 +420,17 @@ impl KnowledgeEngine {
                 .embedder
                 .as_ref()
                 .ok_or_else(|| CoreError::Other("Embedder not initialized".into()))?;
+            let total = plan.dirty_chunks.len();
+            on_progress(0, total);
             self.pipeline
                 .read()
                 .await
-                .embed_chunks(&plan.dirty_chunks, graph_id, embedder.as_ref())
+                .embed_chunks_with_progress(
+                    &plan.dirty_chunks,
+                    graph_id,
+                    embedder.as_ref(),
+                    &mut |done| on_progress(done, total),
+                )
                 .await?
         };
         if !current()? {

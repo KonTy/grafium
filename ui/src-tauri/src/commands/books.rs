@@ -5,7 +5,7 @@ use grafium_core::import::books::{
 };
 use grafium_core::CoreError;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::jobs::{JobHandle, JobLink, JobsState};
 use grafium_core::graph::books::{scan_original_sources, BookInfo, BookLocation, BookNote};
@@ -16,6 +16,7 @@ pub async fn books_import_originals(
     source_paths: Vec<String>,
 ) -> Result<String, String> {
     let snapshot = current_graph_snapshot(&app, &state.graph)?;
+    let ai_indexing = ai_indexes_imports(&app).await;
     let handle = jobs.registry.start(app, "book_import", "Import original books", true)?;
     let id = handle.id().to_string();
     tauri::async_runtime::spawn_blocking(move || {
@@ -51,7 +52,8 @@ pub async fn books_import_originals(
             Ok((0, total, _, details)) => handle.failed_with_details(
                 if total == 0 { "No supported original books found" } else { "No original books imported" }, Some(details)),
             Ok((imported, total, link, details)) => handle.succeeded_with_details(
-                format!("Imported {imported} of {total} original books"), link, Some(details)),
+                with_indexing_note(format!("Imported {imported} of {total} original books"), imported, ai_indexing),
+                link, Some(details)),
             Err(e) if e == "cancelled" => handle.cancelled(),
             Err(e) => handle.failed(e),
         }
@@ -148,6 +150,7 @@ pub async fn books_import_directory(
         return Ok(job_id);
     }
 
+    let ai_indexing = ai_indexes_imports(&app).await;
     tauri::async_runtime::spawn_blocking(move || {
         handle.progress(0, 0, "Scanning books...");
 
@@ -175,7 +178,8 @@ pub async fn books_import_directory(
 
         match result {
             Ok(report) => {
-                let message = describe_report(&report);
+                let message =
+                    with_indexing_note(describe_report(&report), report.imported, ai_indexing);
                 let link = first_imported_link(&report);
                 let details = describe_report_details(&report, &source_path);
                 if report.failed > 0 {
@@ -418,6 +422,24 @@ fn describe_report(report: &BookImportReport) -> String {
     format!("Book import finished: {}", parts.join(", "))
 }
 
+/// Imported books are embedded by the background drainer after the import job
+/// ends, so the job says so rather than implying Chat can already cite them.
+fn with_indexing_note(message: String, imported: usize, ai_indexing: bool) -> String {
+    if imported > 0 && ai_indexing {
+        format!("{message} · AI search index is building in the background")
+    } else {
+        message
+    }
+}
+
+async fn ai_indexes_imports(app: &AppHandle) -> bool {
+    let Some(knowledge) = app.try_state::<super::knowledge::KnowledgeState>() else {
+        return false;
+    };
+    let guard = knowledge.engine.read().await;
+    guard.as_ref().is_some_and(|engine| engine.can_index())
+}
+
 fn first_imported_link(report: &BookImportReport) -> Option<JobLink> {
     report
         .items
@@ -443,5 +465,21 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
         singular
     } else {
         plural
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_indexing_note;
+
+    #[test]
+    fn completion_mentions_background_indexing_only_when_it_will_happen() {
+        let done = || "Book import finished: imported 2 books".to_string();
+        assert_eq!(
+            with_indexing_note(done(), 2, true),
+            "Book import finished: imported 2 books · AI search index is building in the background"
+        );
+        assert_eq!(with_indexing_note(done(), 2, false), done());
+        assert_eq!(with_indexing_note(done(), 0, true), done());
     }
 }

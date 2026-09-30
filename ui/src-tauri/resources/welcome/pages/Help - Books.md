@@ -59,6 +59,16 @@ recognition data; originals and annotation files are not rewritten.
 Vector refresh is queued for the configured embedding model. Reindexing does
 not enable a model or recreate a removed book from its external source.
 
+AI search indexing runs in the background after a book import finishes, so the
+import job says **AI search index is building in the background** when an
+embedding model is ready. Large batches — a book, a sync pull, a rebuild —
+appear in the activity list as **Building AI search index**, showing the book
+being embedded and how many passages are done. It closes with **AI search index
+is up to date** once the queue is empty. Until then Chat can already use the
+extracted text, but semantic matches from that book may be incomplete. Small
+edits index quietly. If the embedding model becomes unavailable the job pauses
+and indexing resumes automatically later.
+
 Extraction can be incomplete or unavailable, even when the book can be read.
 MOBI/AZW3 indexing may need Calibre's `ebook-convert`. Original PDF indexing uses
 embedded text, not OCR. Image-only scans can still be displayed; use the separate
