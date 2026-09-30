@@ -482,7 +482,16 @@ fn start_reindex_drainer(
             let Some(e) = guard.as_ref() else { continue; };
             if reconciled_graph.as_deref() != Some(graph_id.as_str()) {
                 match e.reconcile_deleted_vector_pages(&db, &graph_id).await {
-                    Ok(_) => reconciled_graph = Some(graph_id.clone()),
+                    Ok(_) => {
+                        reconciled_graph = Some(graph_id.clone());
+                        // Graph IDs are absolute graph roots. Legacy relative
+                        // IDs can never be searched again. A missing folder is
+                        // kept: it may be an unplugged drive that returns.
+                        let is_live = |id: &str| std::path::Path::new(id).is_absolute();
+                        if let Err(error) = e.prune_and_compact_vectors(&is_live).await {
+                            eprintln!("reindex drainer: vector compaction failed: {error}");
+                        }
+                    }
                     Err(error) => {
                         eprintln!("reindex drainer: orphan cleanup failed: {error}");
                         continue;

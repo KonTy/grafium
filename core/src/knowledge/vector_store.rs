@@ -36,9 +36,13 @@ impl SqliteVectorStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
 
-        // Optimize for our workload.
+        // Optimize for our workload. auto_vacuum only takes effect on a new,
+        // empty file; existing stores are converted by `compact`. The journal
+        // limit stops a burst of indexing leaving a WAL as large as the store.
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_size_limit = 33554432;
+             PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA mmap_size = 268435456;
              PRAGMA cache_size = -65536;",
@@ -96,6 +100,34 @@ impl SqliteVectorStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Free pages at or above this share of the file, and at least this many
+    /// bytes, justify a one-off full VACUUM to convert a store created before
+    /// incremental auto-vacuum.
+    const VACUUM_FREE_FRACTION: i64 = 4;
+    const VACUUM_MIN_FREE_BYTES: i64 = 16 * 1024 * 1024;
+
+    fn compact_conn(conn: &Connection) -> Result<()> {
+        let pragma = |name: &str| -> Result<i64> {
+            Ok(conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))?)
+        };
+        let free = pragma("freelist_count")?;
+        if free > 0 {
+            if pragma("auto_vacuum")? == 2 {
+                // Each step frees one page, so drain every row.
+                let mut statement = conn.prepare("PRAGMA incremental_vacuum")?;
+                let mut rows = statement.query([])?;
+                while rows.next()?.is_some() {}
+            } else if free * Self::VACUUM_FREE_FRACTION >= pragma("page_count")?
+                && free * pragma("page_size")? >= Self::VACUUM_MIN_FREE_BYTES
+            {
+                conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")?;
+            }
+        }
+        // Readers can keep a checkpoint from finishing; the next pass retries.
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
     }
 
     /// Open an in-memory vector store (for testing).
@@ -572,6 +604,34 @@ impl VectorStore for SqliteVectorStore {
             Ok(pages)
         })
     }
+
+    fn list_graph_ids<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {e}")))?;
+            let mut statement = conn.prepare("SELECT DISTINCT graph_id FROM vectors")?;
+            let graphs = statement
+                .query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(graphs)
+        })
+    }
+
+    fn compact<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let conn = conn
+                    .lock()
+                    .map_err(|e| CoreError::Other(format!("Lock error: {e}")))?;
+                Self::compact_conn(&conn)
+            })
+            .await
+            .map_err(|e| CoreError::Other(format!("Vector compaction task panicked: {e}")))?
+        })
+    }
 }
 
 /// Internal row representation.
@@ -645,6 +705,66 @@ mod tests {
             embedding: vec![0.5; dimension],
             metadata: json!({}),
         }
+    }
+
+    fn file_bytes(path: &Path) -> u64 {
+        let wal = path.with_extension("db-wal");
+        std::fs::metadata(path).unwrap().len()
+            + std::fs::metadata(wal).map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn fill(graph_id: &str, count: usize) -> Vec<ChunkEmbedding> {
+        (0..count)
+            .map(|i| vector_chunk(&format!("{graph_id}-{i}"), graph_id, vec![0.25; 1024]))
+            .collect()
+    }
+
+    fn legacy_store(path: &Path) {
+        // Stores created before incremental auto-vacuum have mode 0.
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("PRAGMA auto_vacuum = NONE; PRAGMA journal_mode = WAL;")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compaction_returns_deleted_space_and_converts_legacy_stores() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("vectors.db");
+        legacy_store(&path);
+        let store = SqliteVectorStore::open(&path)?;
+        store.upsert(&fill("kept", 200)).await?;
+        store.upsert(&fill("gone", 4000)).await?;
+        store.compact().await?;
+        let full = file_bytes(&path);
+
+        store.delete_by_graph("gone").await?;
+        store.compact().await?;
+        let compacted = file_bytes(&path);
+        assert!(compacted * 4 < full, "{compacted} bytes left of {full}");
+        assert_eq!(store.count().await?, 200);
+        let mode: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        assert_eq!(mode, 2, "legacy store should switch to incremental vacuum");
+
+        store.upsert(&fill("again", 2000)).await?;
+        store.delete_by_graph("again").await?;
+        store.compact().await?;
+        assert!(file_bytes(&path) <= compacted + 64 * 1024);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lists_every_graph_with_vectors() -> Result<()> {
+        let store = SqliteVectorStore::in_memory()?;
+        store.upsert(&fill("a", 2)).await?;
+        store.upsert(&fill("b", 1)).await?;
+        let mut graphs = store.list_graph_ids().await?;
+        graphs.sort();
+        assert_eq!(graphs, ["a", "b"]);
+        Ok(())
     }
 
     fn vector_chunk(chunk_id: &str, graph_id: &str, embedding: Vec<f32>) -> ChunkEmbedding {
