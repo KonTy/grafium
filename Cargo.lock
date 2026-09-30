@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "grafium"
-version = "0.0.134"
+version = "0.0.135"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "grafium-core"
-version = "0.0.134"
+version = "0.0.135"
 dependencies = [
  "chrono",
  "encoding_rs",
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "grafium-tui"
-version = "0.0.134"
+version = "0.0.135"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "model-runtime"
-version = "0.0.134"
+version = "0.0.135"
 dependencies = [
  "fs2",
  "libc",

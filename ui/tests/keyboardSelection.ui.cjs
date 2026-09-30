@@ -30,7 +30,8 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       id, page_id: pageId, parent_id: parent, order_index: order, content,
       block_type: "Text", properties: {}, created_at: 0, updated_at: 0,
     });
-    const standalone = options.blockCount ? Array.from({ length: options.blockCount }, (_, i) =>
+    const standalone = options.blockContents ? options.blockContents.map((content, i) =>
+      block(note.id, `b${i}`, i, content)) : options.blockCount ? Array.from({ length: options.blockCount }, (_, i) =>
       block(note.id, `large-${i}`, i, `Virtual block ${String(i).padStart(4, "0")}`)) : [
       block(note.id, "b0", 0, "First visual line"),
       block(note.id, "b1", 1, "Second block"),
@@ -101,7 +102,10 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
               section: null, book: isBook ? { pageId: source.id, title: source.title } : null,
             };
           }
-          case "get_app_theme": return "github";
+          case "get_app_theme": return state.theme ?? "github";
+          case "set_app_theme": state.theme = args.themeId; return;
+          case "get_smplos_theme": return null;
+          case "research_get_config": throw new Error("unknown command research_get_config");
           case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
           case "get_page": {
             const found = state.pages.find((note) => note.id === args.id || note.title === args.title);

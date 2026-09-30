@@ -1635,7 +1635,7 @@
             ".cm-content": {
               padding: "0",
               caretColor: "var(--text-primary)",
-              color: "var(--text-primary)",
+              color: "inherit",
               minHeight: "auto",
               fontFamily: "inherit",
               fontSize: "inherit",
@@ -3097,21 +3097,21 @@
   }
 
   .editor-wrapper.h1 :global(.cm-editor) {
-    color: var(--accent-yellow);
+    color: var(--heading-1);
     font-size: 1.75em;
     line-height: 1.08;
     font-weight: 800;
   }
 
   .editor-wrapper.h2 :global(.cm-editor) {
-    color: var(--accent);
+    color: var(--heading-2);
     font-size: 1.45em;
     line-height: 1.14;
     font-weight: 750;
   }
 
   .editor-wrapper.h3 :global(.cm-editor) {
-    color: var(--accent-secondary);
+    color: var(--heading-3);
     font-size: 1.25em;
     line-height: 1.25;
     font-weight: 700;
@@ -3120,11 +3120,14 @@
   .editor-wrapper.h4 :global(.cm-editor),
   .editor-wrapper.h5 :global(.cm-editor),
   .editor-wrapper.h6 :global(.cm-editor) {
-    color: var(--accent-cyan);
     font-size: 1.08em;
     line-height: 1.25;
     font-weight: 700;
   }
+
+  .editor-wrapper.h4 :global(.cm-editor) { color: var(--heading-4); }
+  .editor-wrapper.h5 :global(.cm-editor) { color: var(--heading-5); }
+  .editor-wrapper.h6 :global(.cm-editor) { color: var(--heading-6); }
 
   .rendered-content {
     position: relative;
@@ -3312,8 +3315,6 @@
   }
 
   .rendered-content :global(h1) {
-    --heading-accent: var(--accent-yellow);
-    color: var(--heading-accent);
     font-size: 1.75em;
     font-weight: 800;
     line-height: 1.08;
@@ -3332,8 +3333,6 @@
   }
 
   .rendered-content :global(h2) {
-    --heading-accent: var(--accent);
-    color: var(--heading-accent);
     font-size: 1.45em;
     font-weight: 750;
     line-height: 1.14;
@@ -3352,8 +3351,6 @@
   }
 
   .rendered-content :global(h3) {
-    --heading-accent: var(--accent-secondary);
-    color: var(--heading-accent);
     font-size: 1.25em;
     font-weight: 700;
     line-height: 1.25;
@@ -3371,8 +3368,6 @@
   .rendered-content :global(h4),
   .rendered-content :global(h5),
   .rendered-content :global(h6) {
-    --heading-accent: var(--accent-cyan);
-    color: var(--heading-accent);
     font-size: 1.08em;
     font-weight: 700;
     line-height: 1.25;

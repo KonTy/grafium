@@ -63,6 +63,7 @@
     type SourceBlock,
   } from "../lib/pageSourceMap";
   import { isFencedCodeBlock } from "../lib/codeFence";
+  import { getHeadingLevel } from "../lib/blockLayout";
 
   interface Props {
     page: Page;
@@ -347,6 +348,18 @@
 
     for (const block of sourceMap.blocks) {
       if (activeEditing && block === activeBlock && block.readingNote?.storage !== "inline") {
+        const headingLevel = getHeadingLevel(block.content);
+        if (headingLevel > 0) {
+          // A line decoration at the boundary is swallowed by the previous block's replacement.
+          ranges.push({
+            from: block.contentFrom,
+            to: state.doc.lineAt(block.contentFrom).to,
+            decoration: Decoration.mark({
+              class: "cm-heading-source",
+              attributes: { style: `color:var(--heading-${headingLevel})` },
+            }),
+          });
+        }
         continue;
       }
       ranges.push({
@@ -767,8 +780,6 @@
             margin: "0",
           },
           ".unified-rendered-content h1": {
-            "--heading-accent": "var(--accent-yellow)",
-            color: "var(--heading-accent)",
             fontSize: "1.75em",
             fontWeight: "800",
             lineHeight: "1.08",
@@ -777,8 +788,6 @@
             borderBottom: "2px solid color-mix(in srgb, var(--heading-accent) 62%, transparent)",
           },
           ".unified-rendered-content h2": {
-            "--heading-accent": "var(--accent)",
-            color: "var(--heading-accent)",
             fontSize: "1.45em",
             fontWeight: "750",
             lineHeight: "1.14",
@@ -787,8 +796,6 @@
             borderBottom: "1px solid color-mix(in srgb, var(--heading-accent) 52%, transparent)",
           },
           ".unified-rendered-content h3": {
-            "--heading-accent": "var(--accent-secondary)",
-            color: "var(--heading-accent)",
             fontSize: "1.25em",
             fontWeight: "700",
             lineHeight: "1.25",
@@ -796,8 +803,6 @@
             borderLeft: "3px solid color-mix(in srgb, var(--heading-accent) 72%, transparent)",
           },
           ".unified-rendered-content h4, .unified-rendered-content h5, .unified-rendered-content h6": {
-            "--heading-accent": "var(--accent-cyan)",
-            color: "var(--heading-accent)",
             fontSize: "1.08em",
             fontWeight: "700",
             lineHeight: "1.25",

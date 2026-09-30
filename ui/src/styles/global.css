@@ -47,10 +47,17 @@
   --accent-magenta: #f5c2e7;
   --accent-green: #a6e3a1;
   --accent-yellow: #f9e2af;
-  --accent-blue: #92bafa;
+  --accent-blue: #8fbdff;
   --accent-cyan: #94e2d5;
   --accent-purple: #cda9f7;
-  --accent-red: #f5a0b8;
+  --accent-red: #ff9f95;
+
+  --heading-1: var(--accent-red);
+  --heading-2: var(--accent-blue);
+  --heading-3: var(--accent-purple);
+  --heading-4: var(--accent-cyan);
+  --heading-5: var(--accent-orange);
+  --heading-6: var(--accent-magenta);
 
   --danger: #f38ba8;
   --danger-bg: #f38ba822;
@@ -119,6 +126,11 @@
 body {
   background: var(--bg-primary);
   overflow: hidden;
+}
+
+/* Inline code must not put accent-colored heading text on a chrome surface. */
+:is(h1, h2, h3, h4, h5, h6) {
+  --bg-code: var(--bg-primary);
 }
 
 .assistant-disclosure {
@@ -533,6 +545,12 @@ body {
    accent color used for the 4-px left border and a subtle tinted background. */
 .callout {
   --callout-accent: var(--accent);
+  --heading-1: color-mix(in srgb, var(--accent-red) 70%, var(--text-primary));
+  --heading-2: color-mix(in srgb, var(--accent-blue) 70%, var(--text-primary));
+  --heading-3: color-mix(in srgb, var(--accent-purple) 70%, var(--text-primary));
+  --heading-4: color-mix(in srgb, var(--accent-cyan) 70%, var(--text-primary));
+  --heading-5: color-mix(in srgb, var(--accent-orange) 70%, var(--text-primary));
+  --heading-6: color-mix(in srgb, var(--accent-magenta) 70%, var(--text-primary));
   border-left: 4px solid var(--callout-accent);
   /* Tint the *page* background (the extreme surface each accent is tuned to
      stay AA against), not bg-secondary: a 10% tint of bg-secondary drifts the

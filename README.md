@@ -259,7 +259,7 @@ access.
 | Filesystem and WebDAV sync | Configure USB drives, mounted network folders, or a WebDAV server such as Nextcloud; run **Sync Now** from Settings. |
 | Target availability | Configured auto-sync targets synchronize when the native monitor detects that they have become available. |
 | Sync reporting | See pushed/pulled files, deletions, conflicts, and errors. File sync is not simultaneous collaborative editing; review conflicts and keep backups. |
-| Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark. |
+| Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark, with vivid, contrast-tuned reds, blues, and complementary accents for headings, tags, and callouts. Matrix keeps its green-on-black character with more colorful highlights. |
 | Reading width | Adjust narrow-view padding as a percentage on each side; the default is **15% per side**. |
 | Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. |
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
