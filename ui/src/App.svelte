@@ -179,7 +179,7 @@
   let isResizingReferencePanel = $state(false);
   let appLayoutEl: HTMLDivElement | null = null;
   let sidebarRef: {
-    focusSearch: () => void;
+    focusNavigation: () => void;
     hasFocus: () => boolean;
     refresh: () => Promise<void>;
   } | null = $state(null);
@@ -887,22 +887,22 @@
   }
 
   // Ctrl+B "seamless" focus/collapse for the left sidebar:
-  // - collapsed -> expand it (also leaving zen mode) and focus its search box
-  // - visible but not focused -> just focus its search box
+  // - collapsed -> expand it (also leaving zen mode) and focus navigation
+  // - visible but not focused -> just focus navigation
   // - visible and already focused -> collapse it to the navigation icon rail
   async function focusLeftSidebar() {
     if (!sidebarVisible || zenMode) {
       if (zenMode) zenMode = false;
       setLayoutPreferences({ sidebarVisible: true });
       await tick();
-      sidebarRef?.focusSearch();
+      sidebarRef?.focusNavigation();
       return;
     }
     if (sidebarRef?.hasFocus()) {
       setLayoutPreferences({ sidebarVisible: false });
       return;
     }
-    sidebarRef?.focusSearch();
+    sidebarRef?.focusNavigation();
   }
 
   // Register hotkeys
@@ -1045,9 +1045,6 @@
     },
     search: () => {
       openGlobalSearch();
-    },
-    searchInPage: () => {
-      window.dispatchEvent(new CustomEvent("toggle-search"));
     },
     focusLocalSearch: () => {
       focusLocalSearch();

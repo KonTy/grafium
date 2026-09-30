@@ -156,8 +156,8 @@ guessed into a different block.
 | Favorites and recent pages | Keep frequently used material close at hand and return to recent work. |
 | Full-text search | Search indexed note content with SQLite FTS5 and ranked results. |
 | Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the journal calendar, to browse all pages with an immediately focused fuzzy search. Arrows browse; Enter opens; Escape cancels. |
-| Global search | Search pages and note content with **Ctrl/Cmd+K**, independently of the right panel. Exact search works without AI; semantic search uses the configured embedding index. |
-| In-page search and history | Find text in the current page and move backward or forward through navigation history. |
+| Global search | Search pages and note content in one **Ctrl/Cmd+K** dialog, also opened by the title-bar Search button. The left panel stays focused on navigation, favorites, and recent pages. Exact search works without AI; semantic search uses the configured embedding index. |
+| View filters and history | Focus an available All Pages, Graph, or Settings filter with **Ctrl/Cmd+F**, and move backward or forward through navigation history. |
 | 2D and 3D graphs | Explore global or local connections, search, pan, zoom, inspect, and drag nodes. |
 | Community layouts | Distinguish dense groups from the bridges between them, using shared clustering in both views. |
 | 3D flyovers | Take a **Space flight** through topics, or use manual camera navigation. |
@@ -279,7 +279,7 @@ Sync sends graph files to the destinations you configure; use destinations you t
 | Action | Shortcut |
 | --- | --- |
 | Global search | `Ctrl/Cmd+K` |
-| Search within the page | `Ctrl/Cmd+Shift+K` |
+| Focus the current view's filter (where available) | `Ctrl/Cmd+F` |
 | Command palette | `Ctrl/Cmd+Shift+P` |
 | Today's journal, ready to edit | `Ctrl/Cmd+Shift+J` |
 | Go to date calendar | `Ctrl/Cmd+G` |

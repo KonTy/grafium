@@ -3,13 +3,23 @@ import { helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./
 import { vi } from "vitest";
 import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw";
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
+import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
 import appSource from "../App.svelte?raw";
 import recoverySource from "../components/RuntimeRecovery.svelte?raw";
+import searchSource from "../components/GlobalSearchDialog.svelte?raw";
 
 const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes the single graph-search dialog to its current F1 guidance", () => {
+    expect(searchSource).toContain('data-help-context="search"');
+    expect(helpPageTitle("search")).toBe("Help - Search");
+    expect(searchHelp).toContain("**Search your graph**");
+    expect(searchHelp).toContain("same dialog");
+    expect(searchHelp).not.toContain("Use sidebar search");
+  });
+
   it("routes F1 in recovery controls to current bundled AI guidance", async () => {
     expect(helpPageTitle("ai")).toBe("AI Setup And Privacy");
     expect(isHelpContext("ai")).toBe(true);

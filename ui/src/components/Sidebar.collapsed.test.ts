@@ -27,4 +27,15 @@ describe("collapsed sidebar icon rail", () => {
     expect(titleBar).toContain("sidebarVisible ? sidebarWidth : 52");
     expect(titleBar).toContain("class:collapsed={!sidebarVisible}");
   });
+
+  it("focuses navigation without retaining the duplicate search UI", () => {
+    expect(sidebar).toContain("export function focusNavigation()");
+    expect(sidebar).toContain('".nav-item.active"');
+    expect(sidebar).not.toContain("search-input");
+    expect(sidebar).not.toContain("search-toggle");
+    expect(sidebar).not.toContain("sidebarSearch");
+    expect(app).toContain("sidebarRef?.focusNavigation()");
+    expect(app).not.toContain("toggle-search");
+    expect(app).not.toContain("focusSearch");
+  });
 });
