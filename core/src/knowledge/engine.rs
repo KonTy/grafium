@@ -22,6 +22,7 @@ use crate::parser::TagTerm;
 
 #[path = "ask_budget.rs"]
 mod ask_budget;
+mod index_lifecycle;
 #[path = "reading_research.rs"]
 mod reading_research;
 #[path = "reading_scope.rs"]
@@ -36,6 +37,7 @@ pub struct KnowledgeEngine {
     embedder: Option<Box<dyn Embedder>>,
     vector_store: Option<Arc<dyn VectorStore>>,
     pipeline: RwLock<EmbeddingPipeline>,
+    index_state: tokio::sync::Mutex<index_lifecycle::IndexState>,
     reference_engine: ReferenceEngine,
     /// Why the embedded chat model last failed to load, cleared once one
     /// loads. The reason was already known and logged, but only to the
@@ -86,6 +88,7 @@ impl KnowledgeEngine {
             embedder: None,
             vector_store: None,
             pipeline: RwLock::new(pipeline),
+            index_state: Default::default(),
             reference_engine,
             registry: RwLock::new(registry),
             data_dir: data_dir.to_path_buf(),
@@ -200,6 +203,7 @@ impl KnowledgeEngine {
         self.llm_load_error = replacement.llm_load_error;
         self.vector_store = replacement.vector_store;
         self.pipeline = replacement.pipeline;
+        *self.index_state.get_mut() = Default::default();
         self.reference_engine = replacement.reference_engine;
         Ok(())
     }
@@ -363,69 +367,12 @@ impl KnowledgeEngine {
     /// vector store. Best-effort — a failure just means some content may be
     /// needlessly re-embedded, never a wrong result.
     pub async fn restore_hash_cache(&self, graph_id: &str) -> Result<()> {
-        let store = match self.vector_store.as_ref() {
-            Some(s) => s,
-            None => return Ok(()),
-        };
-        if !self.pipeline.read().await.hash_cache_is_empty() {
-            return Ok(());
-        }
-        let pairs = store.list_content_hashes(graph_id).await?;
-        if pairs.is_empty() {
-            return Ok(());
-        }
-        let mut pipeline = self.pipeline.write().await;
-        pipeline.preload_hashes(pairs);
-        Ok(())
+        self.restore_index_hashes(graph_id).await
     }
 
     /// Index a single page — embed its blocks and store vectors.
     pub async fn index_page(&self, page: &Page, blocks: &[Block], graph_id: &str) -> Result<usize> {
-        let embedder = self
-            .embedder
-            .as_ref()
-            .ok_or_else(|| CoreError::Other("Embedder not initialized".to_string()))?;
-        let store = self
-            .vector_store
-            .as_ref()
-            .ok_or_else(|| CoreError::Other("Vector store not initialized".to_string()))?;
-
-        let update_plan = {
-            let pipeline = self.pipeline.read().await;
-            let source = crate::knowledge::source_projection::project_source_blocks(blocks);
-            let chunks = pipeline.chunk_page(page, &source);
-            pipeline.diff_page_chunks(&page.id, chunks)
-        };
-
-        if update_plan.dirty_chunks.is_empty() && update_plan.removed_chunk_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let count = if update_plan.dirty_chunks.is_empty() {
-            0
-        } else {
-            let pipeline = self.pipeline.read().await;
-            pipeline
-                .embed_and_store(
-                    &update_plan.dirty_chunks,
-                    graph_id,
-                    embedder.as_ref(),
-                    store.as_ref(),
-                )
-                .await?
-        };
-
-        if !update_plan.removed_chunk_ids.is_empty() {
-            store
-                .delete_chunks(graph_id, &update_plan.removed_chunk_ids)
-                .await?;
-        }
-
-        let mut pipeline = self.pipeline.write().await;
-        pipeline.mark_chunks_clean(&update_plan.dirty_chunks);
-        pipeline.remove_chunks(&update_plan.removed_chunk_ids);
-
-        Ok(count)
+        self.index_snapshot(page, blocks, graph_id, None).await
     }
 
     /// Remove a page's vectors from the index — used when a page is deleted so
@@ -434,11 +381,7 @@ impl KnowledgeEngine {
     /// long as a vector store is present; a missing store is a silent no-op.
     /// Also drops the page's chunk hashes so a later re-create re-embeds it.
     pub async fn remove_page(&self, graph_id: &str, page_id: &str) -> Result<()> {
-        if let Some(store) = &self.vector_store {
-            store.delete_by_page(graph_id, page_id).await?;
-        }
-        self.pipeline.write().await.invalidate_page(page_id);
-        Ok(())
+        self.remove_indexed_page(graph_id, page_id).await
     }
 
     /// Semantic search across all (or specific) graphs.
@@ -2508,6 +2451,7 @@ mod tests {
             embedder: Some(embedder),
             vector_store: Some(vector_store),
             pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
+            index_state: Default::default(),
             reference_engine: ReferenceEngine::new(config.references.clone()),
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
@@ -2567,6 +2511,7 @@ mod tests {
             embedder: None,
             vector_store: None,
             pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
+            index_state: Default::default(),
             reference_engine: ReferenceEngine::new(config.references.clone()),
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
@@ -3988,6 +3933,7 @@ mod tests {
             embedder: None,
             vector_store: None,
             pipeline: RwLock::new(EmbeddingPipeline::new(config.embedding.clone())),
+            index_state: Default::default(),
             reference_engine: ReferenceEngine::new(config.references.clone()),
             registry: RwLock::new(GraphRegistry::load(&registry_path)?),
             data_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),

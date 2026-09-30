@@ -43,6 +43,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         "search",
         include_str!("../../resources/welcome/pages/Help - Search.md"),
     ),
+    (
+        "books",
+        include_str!("../../resources/welcome/pages/Help - Books.md"),
+    ),
 ];
 
 #[tauri::command(rename_all = "camelCase")]
@@ -56,6 +60,15 @@ pub fn help_get_page(context: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn books_help_distinguishes_originals_from_conversion() {
+        let page = super::help_get_page("books".into()).unwrap();
+        assert!(page.contains("Original book"));
+        assert!(page.contains("Editable Markdown"));
+        assert!(page.contains("unchanged"));
+        assert!(page.contains("index"));
+    }
+
     #[test]
     fn ai_help_includes_runtime_recovery_controls() {
         let page = super::help_get_page("ai".into()).unwrap();

@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 /// Which pages the All Pages listing should include.
 ///
 /// Grafium creates a page row the moment something links to a title, so a
-/// graph contains two kinds of page: ones with a markdown file behind them,
+/// graph contains two kinds of page: ones backed by a Markdown or original book file,
 /// and placeholders that exist only because a link or tag points at them.
 /// Both are useful — the placeholders are how you find "things I've referred
 /// to but never written" — but a list mixing them makes it hard to answer
@@ -18,7 +18,7 @@ pub enum PageKindFilter {
     /// Everything, as All Pages has always shown it.
     #[default]
     All,
-    /// Only pages with a markdown file on disk.
+    /// Only pages backed by a source file (Markdown or an original book).
     Filed,
     /// Only placeholders created by a link or tag.
     Virtual,
@@ -251,7 +251,7 @@ impl Database {
     pub fn find_page_by_file_path(&self, file_path: &str) -> Result<Option<Page>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE file_path = ?1",
+            "SELECT id, title, file_path, created_at, updated_at, is_journal, properties FROM pages WHERE file_path = ?1 AND file_path != ''",
         )?;
         let mut rows = stmt.query_map(params![file_path], |row| {
             Ok(Page {
@@ -370,6 +370,18 @@ impl Database {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let page = self.get_or_create_page_in_connection(&tx, title, is_journal)?;
         tx.commit()?;
+        Ok(page)
+    }
+
+    pub(crate) fn get_or_create_generated_page_in_connection(
+        &self, conn: &Connection, title: &str, kind: &str,
+    ) -> Result<Page> {
+        if let Some(page) = find_page_by_name_on_conn(conn, title)? { return Ok(page); }
+        let page = create_page_on_conn(conn, title, false)?;
+        conn.execute(
+            "INSERT INTO generated_page_origins(page_id,kind) VALUES(?1,?2)",
+            params![page.id,kind],
+        )?;
         Ok(page)
     }
 
@@ -679,8 +691,11 @@ impl Database {
     }
 
     pub fn delete_page(&self, id: &str) -> Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM pages WHERE id = ?1", params![id])?;
+        let mut conn = self.conn()?;
+        let tx=conn.transaction()?;
+        self.retire_source_in_connection(&tx,id)?;
+        self.collect_generated_pages_in_connection(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -688,11 +703,17 @@ impl Database {
     /// page-scoped rows so `source_id` can be deleted without CASCADE
     /// wiping the moved content or colliding unique keys.
     pub fn rehome_page_into(&self, source_id: &str, dest_id: &str) -> Result<()> {
+        let mut conn=self.conn()?;
+        let tx=conn.transaction()?;
+        self.rehome_page_into_in_connection(&tx,source_id,dest_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn rehome_page_into_in_connection(&self, tx:&Connection, source_id:&str,dest_id:&str)->Result<()> {
         if source_id == dest_id {
             return Ok(());
         }
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
         let now = Utc::now().timestamp_millis();
         let offset: i32 = tx.query_row(
             "SELECT COALESCE(MAX(order_index), -1) + 1 FROM blocks WHERE page_id = ?1 AND parent_id IS NULL",
@@ -767,8 +788,6 @@ impl Database {
             "UPDATE pending_reindex SET page_id = ?1 WHERE page_id = ?2",
             params![dest_id, source_id],
         )?;
-
-        tx.commit()?;
         Ok(())
     }
 

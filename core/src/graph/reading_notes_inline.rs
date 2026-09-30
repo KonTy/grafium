@@ -165,6 +165,7 @@ impl Graph {
         content: &str,
         before_replace: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
+        let _operation = self.source_operations.lock();
         let mut conn = self.db.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.persist_reading_note_with_hook(tx, path, Some(original), content, before_replace)
@@ -187,6 +188,7 @@ impl Graph {
             };
             for entry in entries {
                 let entry = entry?;
+                if !crate::fsutil::is_authoritative_source(Path::new(&entry.file_name())) { continue; }
                 let kind = entry.file_type()?;
                 if kind.is_symlink() {
                     warnings.push(format!("Skipped symlink {}", entry.path().display()));
@@ -226,6 +228,9 @@ impl Graph {
         path: &Path,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<Document>> {
+        if !crate::fsutil::is_authoritative_source(path.strip_prefix(&self.root_dir).unwrap_or(path)) {
+            return Ok(Vec::new());
+        }
         let relative = path
             .strip_prefix(&self.root_dir)
             .map_err(|_| error("note outside graph"))?
@@ -351,6 +356,7 @@ impl Graph {
         selection: Option<&ReadingSelection>,
         body: &str,
     ) -> Result<ReadingNote> {
+        let _operation = self.source_operations.lock();
         uuid(note_id)?;
         let request =
             Self::content_hash(&serde_json::to_string(&(source_page_id, selection, body))?);

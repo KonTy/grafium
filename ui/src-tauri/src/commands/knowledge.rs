@@ -1296,26 +1296,18 @@ pub async fn ai_index_page(
         .as_ref()
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
-    if !engine.is_ready() {
+    if !engine.can_index() {
         return Err(semantic_search_unavailable_error(engine));
     }
 
-    let (page, blocks, graph_id) = {
+    let (db, graph_id) = {
         let graph = app_state.graph.lock().map_err(|e| e.to_string())?;
-        let page = graph
-            .db
-            .get_page_by_id(&page_id)
-            .map_err(|e| e.to_string())?;
-        let blocks = graph
-            .db
-            .list_blocks_for_page(&page_id)
-            .map_err(|e| e.to_string())?;
         let graph_id = graph.root_dir.to_string_lossy().to_string();
-        (page, blocks, graph_id)
+        (graph.db.clone(), graph_id)
     };
 
     engine
-        .index_page(&page, &blocks, &graph_id)
+        .index_page_from_database(&db, &page_id, &graph_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1341,13 +1333,14 @@ pub async fn ai_index_all_pages(
         .as_ref()
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
 
-    if !engine.is_ready() {
+    if !engine.can_index() {
         return Err(semantic_search_unavailable_error(engine));
     }
 
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
     let graph_id = snapshot.root_dir.to_string_lossy().to_string();
     let graph = crate::open_graph_snapshot(&snapshot)?;
+    engine.reconcile_deleted_vector_pages(&graph.db, &graph_id).await.map_err(|e| e.to_string())?;
 
     // Recover the hash cache from already-stored vectors so a restart doesn't
     // needlessly re-embed unchanged content.
@@ -1366,17 +1359,8 @@ pub async fn ai_index_all_pages(
             .list_pages_window(limit, offset, false, PageKindFilter::All)
             .map_err(|e| e.to_string())
     })? {
-        let mut pages_and_blocks = Vec::with_capacity(pages.len());
         for page in pages {
-            let blocks = graph
-                .db
-                .list_blocks_for_page(&page.id)
-                .map_err(|e| e.to_string())?;
-            pages_and_blocks.push((page, blocks));
-        }
-
-        for (page, blocks) in &pages_and_blocks {
-            match engine.index_page(page, blocks, &graph_id).await {
+            match engine.index_page_from_database(&graph.db, &page.id, &graph_id).await {
                 Ok(count) => {
                     indexed_chunks += count;
                     pages_processed += 1;

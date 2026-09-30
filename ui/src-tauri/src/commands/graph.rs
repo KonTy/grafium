@@ -1,11 +1,13 @@
 use crate::AppState;
 use grafium_core::graph::GraphValidationReport;
 use grafium_core::Graph;
+use grafium_core::source_events::open_preserving_graph;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use tauri::AppHandle;
+use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
@@ -232,8 +234,7 @@ pub fn open_graph(
         ));
     }
 
-    // The Welcome graph can be opened after startup (for example from F1
-    // contextual help), so apply additive tutorial migrations here too.
+    // Existing Welcome graphs remain a permanent seeding opt-out.
     let is_tutorial_graph = app
         .path()
         .app_data_dir()
@@ -247,30 +248,7 @@ pub fn open_graph(
 
     let db_path = platform_db_path(&app, &graph_path)?;
 
-    // Open the graph. If DB is corrupted, recover by rotating index.db and recreating it.
-    let new_graph =
-        match Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir) {
-            Ok(g) => g,
-            Err(first_err) => {
-                if try_recover_corrupt_index_db(&db_path).is_ok() {
-                    Graph::open_with_db_path_and_metadata_dir(&graph_path, &db_path, &metadata_dir)
-                        .map_err(|second_err| {
-                            format!(
-                        "Failed to open graph after DB recovery. First error: {}. Second error: {}",
-                        first_err,
-                        second_err
-                    )
-                        })?
-                } else {
-                    return Err(first_err.to_string());
-                }
-            }
-        };
-
-    // Keep graph open instantaneous, but rebuild in the background when the
-    // on-disk Markdown set changed while Grafium was closed or a different
-    // graph was active.
-    let needs_background_reindex = new_graph.needs_startup_reindex().unwrap_or(true);
+    let new_graph = open_preserving_graph(&graph_path, &db_path, &metadata_dir)?;
 
     // Derive name from folder name
     let name = graph_path
@@ -291,11 +269,9 @@ pub fn open_graph(
     *graph = new_graph;
     drop(graph);
 
-    state.restart_graph_watcher()?;
+    state.restart_graph_watcher(&app)?;
 
-    if needs_background_reindex {
-        schedule_background_reindex(graph_path.clone(), db_path.clone(), metadata_dir.clone());
-    }
+    schedule_background_reconcile(app.clone(), graph_path.clone(), db_path.clone(), metadata_dir.clone());
 
     // Notify Android companion app by writing to shared preference file
     // This allows VoiceCommandReceiver to know which graph is currently active in Tauri
@@ -304,58 +280,31 @@ pub fn open_graph(
     Ok(GraphInfo { name, path })
 }
 
-fn schedule_background_reindex(graph_root: PathBuf, db_path: PathBuf, metadata_dir_name: String) {
+pub(crate) fn schedule_background_reconcile(
+    app: AppHandle, graph_root: PathBuf, db_path: PathBuf, metadata_dir_name: String,
+) {
     thread::spawn(move || {
-        let graph = match Graph::open_with_db_path_and_metadata_dir(
-            &graph_root,
-            &db_path,
-            &metadata_dir_name,
-        ) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!(
-                    "Background reindex skipped: failed to open graph '{}': {}",
-                    graph_root.display(),
-                    e
-                );
-                return;
+        let result = open_preserving_graph(&graph_root, &db_path, &metadata_dir_name)
+            .and_then(|graph| graph.reconcile_files_from_disk().map_err(|e| e.to_string()));
+        if let Err(error) = result {
+            eprintln!("Background source reconciliation failed for '{}': {error}", graph_root.display());
+            if let Err(emit_error) = app.emit("graph-index-error", serde_json::json!({
+                "graphPath": graph_root, "message": error,
+            })) {
+                eprintln!("Could not notify graph reconciliation failure: {emit_error}");
             }
-        };
-
-        if let Err(e) = graph.reindex_all() {
-            eprintln!(
-                "Background reindex failed for '{}': {}",
-                graph_root.display(),
-                e
-            );
+        }
+        if let Err(error) = app.emit("book-source-changed", serde_json::json!({
+            "graphPath": graph_root,
+        })) {
+            eprintln!("Could not notify source reconciliation: {error}");
+        }
+        if let Err(error) = app.emit("graph-sources-changed", serde_json::json!({
+            "graphPath": graph_root,
+        })) {
+            eprintln!("Could not refresh graph sources: {error}");
         }
     });
-}
-
-fn try_recover_corrupt_index_db(db_path: &Path) -> Result<(), String> {
-    let metadata_dir = db_path
-        .parent()
-        .ok_or_else(|| "Invalid DB path: missing parent directory".to_string())?;
-
-    if !db_path.exists() {
-        return Ok(());
-    }
-
-    // Delete the corrupted DB file entirely to force clean rebuild instead of
-    // just rotating. This ensures we get a completely fresh database with no
-    // lingering corruption patterns.
-    fs::remove_file(db_path).map_err(|e| e.to_string())?;
-
-    let wal = metadata_dir.join("index.db-wal");
-    if wal.exists() {
-        let _ = fs::remove_file(&wal);
-    }
-    let shm = metadata_dir.join("index.db-shm");
-    if shm.exists() {
-        let _ = fs::remove_file(&shm);
-    }
-
-    Ok(())
 }
 
 #[cfg(target_os = "android")]
@@ -455,7 +404,7 @@ pub fn create_graph(
     *graph = new_graph;
     drop(graph);
 
-    state.restart_graph_watcher()?;
+    state.restart_graph_watcher(&app)?;
 
     // Notify Android companion app that a new graph has been created and opened
     notify_android_graph_changed(&path, &name);
@@ -464,10 +413,20 @@ pub fn create_graph(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn reindex_current(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+pub async fn reindex_current(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
-    let detached_graph = crate::open_graph_snapshot(&snapshot)?;
-    detached_graph.reindex_all().map_err(|e| e.to_string())
+    let graph_path = snapshot.root_dir.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let detached_graph = crate::open_graph_snapshot(&snapshot)?;
+        detached_graph.reindex_all().map_err(|e| e.to_string())
+    }).await.map_err(|error| format!("Re-index worker failed: {error}"))
+        .and_then(|result| result);
+    for event in ["book-source-changed", "graph-sources-changed"] {
+        if let Err(error) = app.emit(event, serde_json::json!({ "graphPath": graph_path })) {
+            tracing::warn!("Could not notify readers after reindex: {error}");
+        }
+    }
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]

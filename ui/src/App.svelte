@@ -21,7 +21,10 @@
   import Toaster from "./components/Toaster.svelte";
   import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, bookImportDirectory, type GraphInfo } from "./lib/api";
+  import BookImportDialog from "./components/BookImportDialog.svelte";
+  import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
+  import { isOriginalBookPage } from "./lib/books";
+  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
@@ -61,6 +64,7 @@
   const loadJobsView = lazyComponent(() => import("./components/JobsView.svelte"));
   const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
   const loadGlobalSearchDialog = lazyComponent(() => import("./components/GlobalSearchDialog.svelte"));
+  const loadOriginalBookPage = lazyComponent(() => import("./components/OriginalBookPage.svelte"));
 
   let shuttingDown = $state(false);
 
@@ -812,6 +816,10 @@
       cancelImportMedia();
       return;
     }
+    if (showImportBooksDialog) {
+      showImportBooksDialog = false;
+      return;
+    }
     if (showCreateGraphDialog) {
       showCreateGraphDialog = false;
       return;
@@ -1097,7 +1105,7 @@
         context ||
         ((
           {
-            page: "editor",
+            page: currentPage && isOriginalBookPage(currentPage) ? "books" : "editor",
             journal: "journal",
             "all-pages": "search",
             graph: "graph",
@@ -1179,7 +1187,7 @@
       return;
     }
 
-    if (showNewPageDialog || showImportMediaDialog) return;
+    if (showNewPageDialog || showImportMediaDialog || showImportBooksDialog) return;
 
     if (keymap_manager.handleKeydown(e)) return;
 
@@ -1233,6 +1241,43 @@
 
   $effect(() => {
     let disposed = false;
+    const stops: (() => void)[] = [];
+    const subscribe = async () => {
+      const subscriptions = [
+        listen<{ graphPath: string; message: string }>("graph-index-error", async ({ payload }) => {
+          try {
+            if (!disposed && (await getGraphInfo()).path === payload.graphPath) {
+              showToast(`Source indexing needs attention: ${payload.message}`, "error");
+            }
+          } catch (cause) {
+            console.error("Could not inspect the graph after an index error:", cause);
+          }
+        }),
+        listen<{ graphPath: string }>("graph-sources-changed", async ({ payload }) => {
+          try {
+            if (disposed || (await getGraphInfo()).path !== payload.graphPath) return;
+            void sidebarRef?.refresh();
+            window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+            window.dispatchEvent(new CustomEvent("graph-sources-changed", { detail: payload }));
+          } catch (cause) {
+            showToast(`Could not refresh changed graph sources: ${String(cause)}`, "error");
+          }
+        }),
+      ];
+      const results = await Promise.allSettled(subscriptions);
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          if (disposed) result.value();
+          else stops.push(result.value);
+        } else if (!disposed) showToast(`Could not watch source-index status: ${String(result.reason)}`, "error");
+      }
+    };
+    void subscribe();
+    return () => { disposed = true; stops.forEach(stop => stop()); };
+  });
+
+  $effect(() => {
+    let disposed = false;
     let unlisten: (() => void) | null = null;
     listen("app-shutdown-started", () => {
       shuttingDown = true;
@@ -1253,6 +1298,7 @@
     let unlisten: (() => void) | null = null;
     initJobs((job) => {
       void sidebarRef?.refresh();
+      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
       notifyJobFinished(job, (pageId) => {
         void navigateToPage({ id: pageId });
       });
@@ -1878,25 +1924,23 @@
     if (e.key === "Enter") submitImportMedia();
   }
 
-  let importBooksBusy = $state(false);
+  let showImportBooksDialog = $state(false);
 
-  async function openImportBooksDirectory() {
-    if (importBooksBusy) return;
-    importBooksBusy = true;
-    try {
-      const defaultPath = await defaultExternalBookImportFolder();
-      const dir = await pickFolder(
-        "Select Folder Containing Book Files",
-        defaultPath
-      );
-      if (!dir) return;
-      await bookImportDirectory(dir);
-      showToast("Book import job added", "info");
-    } catch (e) {
-      showToast(`Could not start book import: ${e instanceof Error ? e.message : String(e)}`, "error");
-    } finally {
-      importBooksBusy = false;
-    }
+  function openImportBooksDirectory() {
+    showImportBooksDialog = true;
+  }
+
+  async function chooseBookFile(mode: BookImportMode): Promise<string | null> {
+    const selected = await open({
+      title: "Choose Book File", directory: false, multiple: false,
+      defaultPath: await defaultExternalBookImportFolder(),
+      filters: [{ name: "Books and documents", extensions: mode === "original" ? ORIGINAL_BOOK_EXTENSIONS : CONVERTIBLE_BOOK_EXTENSIONS }],
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+
+  async function chooseBookFolder(): Promise<string | null> {
+    return pickFolder("Select Folder Containing Book Files", await defaultExternalBookImportFolder());
   }
 
   function toggleMoreMenu() {
@@ -1988,6 +2032,8 @@
   function handleGraphChanged() {
     goToLinkOpen = false;
     globalSearchOpen = false;
+    showImportBooksDialog = false;
+    referencePanelVisible = false;
     expandedConversationId = null;
     void import("./lib/assistantConversations")
       .then(({ stopAllAssistantConversations }) => stopAllAssistantConversations())
@@ -2045,13 +2091,21 @@
     openReferencePanelTab("notes");
   }
 
+  function handleBookOpenNotes() {
+    if (currentView === "page" && currentPage && isOriginalBookPage(currentPage)) {
+      openReferencePanelTab("notes");
+    }
+  }
+
   $effect(() => {
     window.addEventListener("navigate-page", handlePageNav);
     window.addEventListener("open-reading-note", handleReadingNoteNav);
+    window.addEventListener("book-open-notes", handleBookOpenNotes);
     window.addEventListener(ANDROID_BACK_EVENT, handleAndroidBack);
     return () => {
       window.removeEventListener("navigate-page", handlePageNav);
       window.removeEventListener("open-reading-note", handleReadingNoteNav);
+      window.removeEventListener("book-open-notes", handleBookOpenNotes);
       window.removeEventListener(ANDROID_BACK_EVENT, handleAndroidBack);
     };
   });
@@ -2209,6 +2263,14 @@
       />
     {:else if currentView === "page" && currentPage}
       {#key currentPage.id}
+        {#if isOriginalBookPage(currentPage)}
+          {@const bookPage = currentPage}
+          <LazyView load={loadOriginalBookPage} name="book reader">
+            {#snippet children(OriginalBookPage)}
+              <OriginalBookPage page={bookPage} />
+            {/snippet}
+          </LazyView>
+        {:else}
         <PageContent
           page={currentPage}
           highlight={pendingHighlight}
@@ -2237,6 +2299,7 @@
             }
           }}
         />
+        {/if}
       {/key}
     {/if}
     {#if chatVisited}
@@ -2271,6 +2334,7 @@
             visible={true}
             pageId={assistantSourcePage?.id ?? ""}
             pageTitle={assistantSourcePage?.title ?? ""}
+            originalBook={assistantSourcePage ? isOriginalBookPage(assistantSourcePage) : false}
             initialTab={referencePanelTab}
             conversationId={currentView === "chat" ? expandedConversationId : null}
             focusTrigger={referencePanelFocusTrigger}
@@ -2523,6 +2587,18 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if showImportBooksDialog}
+  <BookImportDialog
+    onChooseFile={chooseBookFile}
+    onChooseFolder={chooseBookFolder}
+    onClose={() => (showImportBooksDialog = false)}
+    onQueued={() => {
+      showImportBooksDialog = false;
+      showToast("Book import job added", "info");
+    }}
+  />
 {/if}
 
 {#if showImportMediaDialog}

@@ -57,17 +57,23 @@ const button = (page, name) => page.locator(".reference-panel").getByRole("butto
 const cases = [
   ["Chat tools expose exact link discovery without an AI model", { enabled: false }, async (page) => {
     assert.equal(await button(page, "Exact page links").isEnabled(), true);
-    assert.equal(await button(page, "Summarize this Page").isEnabled(), false);
+    assert.equal(await button(page, "AI: Summarize this page").isEnabled(), false);
     await button(page, "Exact page links").click();
     await page.waitForFunction(() => window.__selectionState.calls.some((c) => c.cmd === "discover_link_candidates"));
     assert.equal(await page.evaluate(() => window.__selectionState.calls.some((c) => c.cmd === "ai_create_concept_edges")), false);
   }],
   ["Chat tools pin a delayed summary to its source page", {}, async (page) => {
-    await page.evaluate(() => { window.__researchFixture.hold = true; });
-    await button(page, "Summarize this Page").click();
+    await page.evaluate(() => {
+      window.__researchFixture.hold = true;
+      window.__capturedPageTools = document.querySelector(".page-tools");
+    });
+    await button(page, "AI: Summarize this page").click();
     await page.waitForFunction(() => window.__researchFixture.pending.length === 1);
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("navigate-page", { detail: "Second research source" })));
     await row(page, "second-block").waitFor();
+    await page.waitForFunction(() => document.querySelector(".page-tools .tool-source")?.textContent.includes("Second research source"));
+    assert.equal(await page.evaluate(() => document.querySelector(".page-tools") === window.__capturedPageTools), true,
+      "checking a new mutable source must not destroy the previous source-bound tool operation");
     await page.evaluate(() => window.__researchFixture.pending.splice(0).forEach((resolve) => resolve()));
     await page.getByRole("region", { name: "Page summary", exact: true }).waitFor();
     assert.match(await page.getByRole("region", { name: "Page summary", exact: true }).getByRole("heading").first().innerText(), /Keyboard selection/i);
@@ -79,7 +85,7 @@ const cases = [
     await page.evaluate(() => { window.__selectionState.holdUpdate = true; });
     await page.keyboard.press("End");
     await page.keyboard.type(" fresh research draft");
-    await button(page, "Summarize this Page").click();
+    await button(page, "AI: Summarize this page").click();
     await page.waitForFunction(() => window.__selectionState.updateWaiters.length > 0);
     assert.equal(await page.evaluate(() => window.__researchFixture.calls.some((c) => c.cmd === "ai_generate_references")), false);
     await page.evaluate(() => {

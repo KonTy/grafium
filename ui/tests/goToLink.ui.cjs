@@ -101,7 +101,9 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.locator(".main-content .page-title").filter({ hasText: "ZZZ Final target" }).waitFor();
     console.log("PASS keyboard navigation crosses virtual rows and fuzzy search reaches the last page");
 
-    for (const continuous of [false, true]) {
+    // The shipped app supports the classic editor. The retained continuous
+    // component's selection and undo run separately in UnifiedEditorHarness.
+    for (const continuous of [false]) {
       if (continuous) await page.getByRole("button", { name: "Experimental continuous editor", exact: true }).click();
       await page.locator(continuous ? ".unified-rendered-block" : ".block-content").first().click();
       const editor = page.locator(".cm-content").first();
@@ -143,7 +145,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       await page.keyboard.press("Alt+z");
     }
     assert.deepEqual(await page.evaluate(() => window.__linkFixture.writes), []);
-    console.log("PASS both editors preserve source, selection and focus; modal traps Tab and preserves Zen");
+    console.log("PASS supported editor preserves source, selection and focus; modal traps Tab and preserves Zen");
 
     await page.keyboard.press("Control+l");
     await input.fill("__graph__");

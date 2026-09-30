@@ -3,6 +3,10 @@ Grafium keeps notes as local Markdown and indexes them in SQLite for search, lin
 - `pages/` holds ordinary pages; slash namespaces map to nested folders.
 - `journals/` holds daily pages.
 - `assets/` holds shared media, including this graph's original orbit SVG.
+- `books/` holds original-format books and their portable book metadata. Their
+  extracted text is indexed without rewriting the original.
+- `pages/Reading Notes/Books/` holds companion Markdown annotations for originals.
+  Back up these notes along with the books.
 - Graph metadata holds the index and state that does not live in plain note text.
 
 ## Pages that are not files
@@ -14,14 +18,50 @@ This is why a page can appear in **All Pages** and in the namespace tree, yet be
 **All Pages** has a filter for exactly this question:
 
 - **All** — everything, placeholders included. The default.
-- **Files** — only pages with a `.md` file on disk. Use this when you want the list to match what a file manager or `git status` shows.
+- **Files** — only pages with a source file on disk: Markdown or an original book.
+  Use this when you want the list to match what a file manager shows.
 - **Placeholders** — only pages that a link or tag named and nobody has written. A useful to-do list: each one is somewhere you meant to say something.
 
 The filter applies to list and tree view alike, and is remembered per graph. Note that **Placeholders** empties the namespace tree of most of its structure, and **Files** empties the tag tree almost entirely — tag pages are usually the placeholders.
 
 The namespace tree keeps Grafium's **Books**, **ImportedMedia**, and **Reading Notes** folders at the top in a fixed order. Their distinct book, media, and note icons make those app-managed locations recognizable. This does not affect the tag tree or same-named folders nested elsewhere.
 
-The file watcher notices external Markdown changes and updates the index. Avoid editing the same page simultaneously in two editors. Watching local edits and synchronizing a graph are separate features.
+The file watcher notices external source changes, removals, and folder moves.
+Opening a graph reconciles changes made while it was closed, even when the
+number of files stayed the same. Avoid editing the same page simultaneously in
+two editors. Watching local edits and synchronizing a graph are separate features.
+
+## What deleting a source removes
+
+Deleting an indexed source removes its indexed text, outgoing links and tags,
+and source-owned task, card, property, and handwriting-search entries.
+Vector cleanup does not require AI to be enabled or an embedding model to be
+loaded. It runs in the background; a replacement embedding is only generated
+when a model is configured.
+
+A title can remain as an empty **placeholder** when another document still
+links to it. That preserves the other document's reference, not the deleted
+source's words. Shared tags, authored pages, favorites, and other owned state
+are not garbage-collected merely because a source stopped mentioning them.
+
+Original-book deletion removes the graph's copy, not the external file it was
+imported from. Companion Markdown notes remain and can become orphaned.
+Likewise, deleting a source is not secure erasure of quotations you saved in
+other notes, previous Chat answers, or preserved sync-conflict copies.
+Those are separate records and require separate, explicit decisions.
+Files named as `.conflict_...` copies and hidden recovery/staging files are
+recovery artifacts, not additional authoritative pages. They are kept out of
+normal indexing and sync so they cannot duplicate a note's identity.
+
+Re-indexing and routine sync reconcile source content rather than discarding
+unrelated favorites or flashcard review progress. An error opening a graph is
+not permission to delete its database; Grafium preserves it and reports the
+failure instead.
+
+Manual **Re-index** includes all originals in `books/`, not just `.md` files.
+It retries text extraction, rebuilds search tables, and queues vector refresh
+without depending on the external files originally imported. A missing graph
+copy is removed from the index, never silently restored from elsewhere.
 
 ## Sync to another location
 

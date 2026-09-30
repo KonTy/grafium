@@ -46,7 +46,7 @@ impl SqliteVectorStore {
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS vectors (
-                chunk_id TEXT PRIMARY KEY,
+                chunk_id TEXT NOT NULL,
                 graph_id TEXT NOT NULL,
                 page_id TEXT NOT NULL,
                 block_id TEXT,
@@ -54,7 +54,8 @@ impl SqliteVectorStore {
                 content TEXT NOT NULL,
                 embedding BLOB NOT NULL,
                 metadata TEXT DEFAULT '{}',
-                created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+                created_at INTEGER DEFAULT (strftime('%s','now') * 1000),
+                PRIMARY KEY (graph_id, chunk_id)
             );
             CREATE TABLE IF NOT EXISTS vector_store_meta (
                 key TEXT PRIMARY KEY,
@@ -63,6 +64,34 @@ impl SqliteVectorStore {
             CREATE INDEX IF NOT EXISTS idx_vectors_graph ON vectors(graph_id);
             CREATE INDEX IF NOT EXISTS idx_vectors_page ON vectors(graph_id, page_id);",
         )?;
+
+        let graph_in_primary_key: bool = conn
+            .prepare("PRAGMA table_info(vectors)")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|(name, position)| name == "graph_id" && *position > 0);
+        if !graph_in_primary_key {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE vectors_scoped (
+                    chunk_id TEXT NOT NULL, graph_id TEXT NOT NULL, page_id TEXT NOT NULL,
+                    block_id TEXT, page_title TEXT NOT NULL, content TEXT NOT NULL,
+                    embedding BLOB NOT NULL, metadata TEXT DEFAULT '{}',
+                    created_at INTEGER DEFAULT (strftime('%s','now') * 1000),
+                    PRIMARY KEY (graph_id, chunk_id)
+                 );
+                 INSERT INTO vectors_scoped SELECT chunk_id, graph_id, page_id, block_id,
+                    page_title, content, embedding, metadata, created_at FROM vectors;
+                 DROP TABLE vectors;
+                 ALTER TABLE vectors_scoped RENAME TO vectors;
+                 CREATE INDEX idx_vectors_graph ON vectors(graph_id);
+                 CREATE INDEX idx_vectors_page ON vectors(graph_id, page_id);",
+            )?;
+            tx.commit()?;
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -523,11 +552,24 @@ impl VectorStore for SqliteVectorStore {
             let mut out = Vec::new();
             for row in rows {
                 let (chunk_id, hash) = row?;
-                if let Some(hash) = hash {
-                    out.push((chunk_id, hash));
-                }
+                out.push((chunk_id, hash.unwrap_or_default()));
             }
             Ok(out)
+        })
+    }
+
+    fn list_page_ids<'a>(&'a self, graph_id: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| CoreError::Other(format!("Lock error: {e}")))?;
+            let mut statement =
+                conn.prepare("SELECT DISTINCT page_id FROM vectors WHERE graph_id = ?1")?;
+            let pages = statement
+                .query_map([graph_id], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(pages)
         })
     }
 }
@@ -640,6 +682,38 @@ mod tests {
                 ("chunk-b".to_string(), "hash-b".to_string()),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_primary_key_migration_preserves_vectors_and_allows_graph_scoping() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("vectors.db");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE vectors (
+                chunk_id TEXT PRIMARY KEY, graph_id TEXT NOT NULL, page_id TEXT NOT NULL,
+                block_id TEXT, page_title TEXT NOT NULL, content TEXT NOT NULL,
+                embedding BLOB NOT NULL, metadata TEXT DEFAULT '{}', created_at INTEGER
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO vectors VALUES('shared','graph-1','page-1','block-1','Title','Retain this text',?1,'{}',42)",
+            [SqliteVectorStore::vec_to_bytes(&[0.5, 0.5, 0.5])],
+        )?;
+        drop(conn);
+        let store = SqliteVectorStore::open(&path)?;
+        let mut second = test_chunk("shared", 3);
+        second.graph_id = "graph-2".into();
+        store.upsert(&[second]).await?;
+        assert_eq!(store.count().await?, 2);
+        store.delete_by_page("graph-2", "page-1").await?;
+        let original = store.search(&[0.5, 0.5, 0.5], 5, Some("graph-1")).await?;
+        assert_eq!(original.len(), 1);
+        assert_eq!(original[0].content, "Retain this text");
+        drop(store);
+        assert_eq!(SqliteVectorStore::open(&path)?.count().await?, 1);
         Ok(())
     }
 

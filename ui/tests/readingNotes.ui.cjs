@@ -13,8 +13,9 @@ const cards = (page) => panel(page).locator(".reading-note-card");
 async function openNativeNotes(browser, options) {
   const initialBlockId = options.unifiedPage ? nativeFixture.notes[0].noteBlockId : nativeFixture.blocks[0].id;
   return openEditor(browser, {
-    ...options, initialBlockId,
+    ...options, initialBlockId, componentHarness: !!options.unifiedPage,
     beforeNavigate: (page) => page.addInitScript(({ fixture, unifiedPage }) => {
+      if (window !== window.top) return;
       localStorage.setItem("grafium.session.lastLocation", JSON.stringify({ kind: "page", title: fixture.page.title }));
       if (unifiedPage) localStorage.setItem(`grafium.experimental.unifiedPageEditor:${fixture.page.id}`, "1");
       function install(internals) {
@@ -105,6 +106,7 @@ async function openNotes(browser, options = {}) {
       return structuredClone(note);
     });
     await page.addInitScript(() => {
+      if (window !== window.top) return;
       function install(internals) {
         const state = window.__selectionState;
         const original = internals.invoke;
@@ -152,7 +154,7 @@ async function openNotes(browser, options = {}) {
       });
     });
   };
-  const fixture = await openEditor(browser, { ...options, beforeNavigate });
+  const fixture = await openEditor(browser, { ...options, componentHarness: !!options.unifiedPage, beforeNavigate });
   const page = fixture.page;
   if (options.journal) {
     await row(page, "day-1-b0").scrollIntoViewIfNeeded();
@@ -387,12 +389,14 @@ if (require.main === module) (async () => {
   let failed = 0;
   try {
     for (const [name, options, run] of cases) {
+      if (process.env.UI_TEST_CASE && !process.env.UI_TEST_CASE.split("|").some((part) => name.includes(part))) continue;
       let fixture;
       try {
         fixture = await openNotes(browser, options);
         await run(fixture);
         assert.deepEqual(fixture.errors, []);
-        console.log(`PASS ${name}`);
+        assert.deepEqual(await fixture.page.evaluate(() => window.__selectionState.unhandledIpc), []);
+        console.log(`PASS ${options.unifiedPage ? "[isolated component] " : ""}${name}`);
       } catch (error) {
         failed++;
         console.error(`FAIL ${name}\n${error.stack ?? error}`);

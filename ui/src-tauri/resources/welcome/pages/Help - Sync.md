@@ -25,9 +25,27 @@ also comes back on its own, with a count, whenever conflicts are still
 unresolved, including after a restart. Once everything is resolved the tab goes
 away again, so it does not take up space on a graph that has never conflicted.
 
-To resolve one: open the **Conflicts** tab, click the note, edit the normal note
-into the version you want, and save.
-Sync carries your notes: `pages/`, `journals/`, `knowledge/` and `assets/`.
+To resolve one, open the **Conflicts** tab and compare the versions. You may edit
+the normal Markdown note first, but editing or opening a file does not by itself
+resolve a conflict. Click **Resolve**, choose **Local** or **Remote**, then
+**Confirm choice**. A missing file is shown as **deleted**, not as an empty file:
+choosing that side confirms deletion on the other side.
+
+The choice applies only if both versions still match the ones you reviewed.
+If either changed, reload the versions and choose again. This works for original
+books, images, and other binary files without modifying their selected bytes.
+Both available versions are retained under `sync-recovery/` in this graph's
+metadata folder. Recovery files are not indexed as notes or propagated by sync.
+
+Failed, malformed, or incomplete remote inventories stop sync instead of being
+treated as deletions. WebDAV replacement/deletion requires a strong server ETag
+and a conditional request. Filesystem targets recheck revisions and retain
+recovery copies, but cannot exclude an uncooperative external application
+writing at exactly the same instant. Avoid simultaneous editing and keep backups.
+
+Sync carries your notes: `pages/`, `journals/`, `knowledge/`, `assets/`, and the
+managed originals, metadata, and reading positions in `books/`.
+Companion book notes sync as Markdown. Derived reader caches do not sync.
 It deliberately leaves everything else behind, including the search index and
 your **Chat** conversations. Chats stay on the machine they happened on — a
 transcript can quote notes the other end has no business receiving, and a

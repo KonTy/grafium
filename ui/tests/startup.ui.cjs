@@ -171,7 +171,9 @@ const navigate = (page, title) => page.evaluate((title) => {
       await first.page.keyboard.press("Alt+w");
       await first.page.waitForFunction(() => window.__layoutWrites.some((patch) => patch.wideMode === false));
       await first.page.keyboard.press("Control+b");
-      await first.page.locator(".sidebar input").first().waitFor({ state: "visible" });
+      await first.page.waitForFunction(() => document.activeElement?.closest(".sidebar") != null);
+      assert.equal(await first.page.locator(".sidebar:not(.collapsed)").isVisible(), true,
+        "the first shortcut focuses an already-open navigation rail");
       await first.page.keyboard.press("Control+b");
       await first.page.waitForFunction(() => window.__sidebarWrites.at(-1) === false);
       await first.page.locator(".sidebar.collapsed").waitFor({ state: "visible" });

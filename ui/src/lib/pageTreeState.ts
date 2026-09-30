@@ -83,8 +83,8 @@ export function getSpecialFolder(id: string): SpecialFolder | undefined {
 }
 
 /**
- * Which kinds of page All Pages is showing. "filed" means a markdown file
- * exists on disk; "virtual" means the page is only a placeholder, conjured by
+ * Which kinds of page All Pages is showing. "filed" means a source file
+ * exists on disk (Markdown or an original book); "virtual" means a placeholder, conjured by
  * a [[link]] or a #tag that nothing has written yet. Mirrors `PageKindFilter`
  * in core/src/db/pages.rs, whose serde casing is lowercase.
  */

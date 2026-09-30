@@ -295,16 +295,21 @@ fn test_conflict_preserves_local_and_records_backup() {
     );
 
     // A .conflict backup file should exist
-    let conflict_files: Vec<_> = fs::read_dir(local.path().join("pages"))
+    let conflict_files: Vec<_> = fs::read_dir(local.path().join(".grafium/sync-recovery/pages"))
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().contains(".conflict"))
         .collect();
-    assert_eq!(conflict_files.len(), 1, "Expected one conflict backup file");
+    assert_eq!(
+        conflict_files.len(),
+        2,
+        "Both original versions must remain recoverable"
+    );
 
     // The backup should contain the remote version
-    let backup = fs::read_to_string(conflict_files[0].path()).unwrap();
-    assert_eq!(backup, "line1\nremote edit\nline3\n");
+    assert!(conflict_files
+        .iter()
+        .any(|file| fs::read_to_string(file.path()).unwrap() == "line1\nremote edit\nline3\n"));
 
     assert_eq!(
         backend.get_file("pages/doc.md").unwrap(),
@@ -320,19 +325,28 @@ fn test_conflict_preserves_local_and_records_backup() {
         "pages/doc.md",
         "line1\nchosen locally\nline3\n",
     );
-    let resolved = engine.sync(&backend).unwrap();
+    let view = engine.conflict_state(&backend, "pages/doc.md").unwrap();
+    let resolved = engine
+        .resolve_conflict(
+            &backend,
+            "pages/doc.md",
+            view.local_hash.as_deref(),
+            view.remote_hash.as_deref(),
+            grafium_core::sync::engine::ConflictSide::Local,
+        )
+        .unwrap();
     assert_eq!(resolved.pushed, vec!["pages/doc.md"]);
     assert_eq!(
         backend.get_file("pages/doc.md").unwrap(),
         b"line1\nchosen locally\nline3\n"
     );
     assert_eq!(
-        fs::read_dir(local.path().join("pages"))
+        fs::read_dir(local.path().join(".grafium/sync-recovery/pages"))
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_name().to_string_lossy().contains(".conflict_"))
             .count(),
-        0
+        3
     );
 }
 
@@ -928,7 +942,7 @@ fn conflicting_binary_assets_are_never_merged_and_both_survive() {
     );
 
     // And the other version must still exist somewhere.
-    let assets: Vec<Vec<u8>> = fs::read_dir(local.path().join("assets"))
+    let assets: Vec<Vec<u8>> = fs::read_dir(local.path().join(".grafium/sync-recovery/assets"))
         .unwrap()
         .map(|e| fs::read(e.unwrap().path()).unwrap())
         .collect();

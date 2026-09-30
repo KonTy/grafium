@@ -9,7 +9,8 @@
   import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { autofocus } from "../lib/autofocus";
   import GraphMenu from "./GraphMenu.svelte";
-  import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo } from "../lib/api";
+  import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo, getPage } from "../lib/api";
+  import { isOriginalBookPage } from "../lib/books";
   import type { Page } from "../lib/api";
 
   interface Props {
@@ -49,7 +50,7 @@
     y: number;
     page: Pick<Page, "id" | "title">;
     isFav: boolean;
-    collectionStatus: "page" | "collection" | "loading" | "unavailable" | "error";
+    collectionStatus: "page" | "collection" | "original" | "loading" | "unavailable" | "error";
   }
   let contextMenu: ContextMenu | null = $state(null);
 
@@ -109,6 +110,12 @@
 
   async function loadContextCollectionStatus(pageId: string) {
     try {
+      const page = await getPage({ id: pageId });
+      if (contextMenu?.page.id !== pageId) return;
+      if (isOriginalBookPage(page)) {
+        contextMenu.collectionStatus = "original";
+        return;
+      }
       const result = await withMissingCommandFallback(
         () => pagesListCollections(),
         [],
@@ -130,6 +137,7 @@
     const { page, collectionStatus } = contextMenu;
     if (
       collectionStatus === "loading"
+      || collectionStatus === "original"
       || collectionStatus === "unavailable"
       || collectionStatus === "error"
     ) return;
@@ -394,14 +402,16 @@
       <button
         class="context-menu-item"
         role="menuitem"
-        disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
+        disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "original" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
         onclick={handleToggleCollection}
       >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M2.25 3.25h4l1.25 1.5h6.25v8H2.25z" stroke-linejoin="round" />
           <path d="M5 8h6M5 10.5h4" stroke-linecap="round" />
         </svg>
-        {#if contextMenu.collectionStatus === "collection"}
+        {#if contextMenu.collectionStatus === "original"}
+          Original book (read-only)
+        {:else if contextMenu.collectionStatus === "collection"}
           Convert to Regular Page
         {:else if contextMenu.collectionStatus === "loading"}
           Loading Collection Status…

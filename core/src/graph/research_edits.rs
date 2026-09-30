@@ -289,10 +289,7 @@ mod tests {
             &targets,
         )?;
         graph.undo_research_summary(&receipt)?;
-        graph.db.conn()?.execute(
-            "UPDATE pages SET title = 'Renamed again' WHERE id = ?1",
-            [&canonical.id],
-        )?;
+        graph.rename_page(&canonical.id,"Renamed again")?;
         let replacement =
             graph.create_page_with_content("Canonical", false, "- Replacement target\n")?;
         assert_ne!(replacement.id, canonical.id);
@@ -807,6 +804,8 @@ impl Graph {
         expected_blocks: Option<&[Block]>,
         links: &SummaryLinkPlan,
     ) -> Result<AiInsertSummaryResult> {
+        let _operation = self.source_operations.lock();
+        self.ensure_page_id_writable(page_id)?;
         let before = self.validate_summary_source(page_id, graph_path, expected_blocks)?;
         if topics.is_empty() && title_answer.is_none_or(|text| text.trim().is_empty()) {
             return Err(CoreError::Other("Cannot insert an empty summary".into()));
@@ -984,6 +983,7 @@ impl Graph {
         expected: Option<&[Block]>,
         write: impl FnOnce(&Path, &str) -> Result<()>,
     ) -> Result<SummaryUndoResult> {
+        let _operation = self.source_operations.lock();
         if self.root_dir.to_string_lossy() != receipt.graph_path {
             return Err(stale("the active graph changed"));
         }
@@ -1135,6 +1135,7 @@ impl Graph {
         let page = self
             .db
             .get_page_by_id_in_connection(&tx, &receipt.page_id)?;
+        self.ensure_page_writable(&page)?;
         let blocks = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
         let count: usize = tx.query_row(
             "SELECT COUNT(*) FROM blocks WHERE page_id = ?1",

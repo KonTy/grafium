@@ -14,6 +14,7 @@ async function openFixture(browser, continuous = false, width = 1400) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
+    if (window !== window.top) return;
     localStorage.setItem("grafium.session.lastLocation", JSON.stringify({
       kind: "page", title: "Emoji reader regression",
     }));
@@ -52,6 +53,7 @@ async function openFixture(browser, continuous = false, width = 1400) {
         return [`- ${first}`, ...rest.map((line) => `  ${line}`), `  id:: ${block.id}`].join("\n");
       }).join("\n\n") + "\n";
     window.__emojiReader = { blocks, source: "", writes: [], calls: [] };
+    window.__selectionState = { pages, blocks };
     window.__emojiReader.source = serialize();
     let sequence = 0;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
@@ -122,14 +124,13 @@ async function openFixture(browser, continuous = false, width = 1400) {
       },
     };
   });
-  await page.goto(BASE_URL, { waitUntil: "networkidle" });
-  await page.locator('[data-block-id="draft"]').first().waitFor();
+  await page.goto(continuous ? new URL("tests/fixtures/unified-editor.html", BASE_URL).href : BASE_URL,
+    { waitUntil: "networkidle" });
   if (continuous) {
-    await page.getByRole("button", { name: "Experimental continuous editor", exact: true }).click();
     await page.locator('.unified-rendered-block[data-source-block-id="draft"]').waitFor();
     assert.equal(await page.locator(".prototype-error").count(), 0);
     assert.ok(await page.evaluate(() => window.__emojiReader.calls.some((call) => call.cmd === "get_page_source")));
-  }
+  } else await page.locator('[data-block-id="draft"]').first().waitFor();
   return { page, continuous, errors };
 }
 
@@ -211,7 +212,7 @@ async function finish(fixture, message) {
 }
 
 async function completionCases(browser, continuous) {
-  const mode = continuous ? "continuous" : "classic";
+  const mode = continuous ? "isolated continuous component" : "classic";
   {
     const fixture = await openFixture(browser, continuous);
     const { page } = fixture;
@@ -251,7 +252,7 @@ async function completionCases(browser, continuous) {
 async function readerCase(browser, continuous) {
   const fixture = await openFixture(browser, continuous);
   const { page } = fixture;
-  const mode = continuous ? "continuous" : "classic";
+  const mode = continuous ? "isolated continuous component" : "classic";
   const toggle = page.getByTitle("Bionic Speedreader", { exact: true });
   const root = continuous ? ".unified-page-editor" : ".page-content";
   await rendered(fixture, "rich").locator('.grafium-icon[aria-label="star"]').waitFor();
@@ -347,7 +348,8 @@ async function headingLayoutCase(browser, phone) {
     assert.ok(element.x >= bounds.heading.x - 1 && element.right <= bounds.heading.right + 1,
       `heading controls must wrap within the content: ${JSON.stringify(bounds)}`);
   }
-  assert.equal(await page.getByRole("button", { name: "Experimental continuous editor", exact: true }).isVisible(), true);
+  assert.equal(await page.getByRole("button", { name: "Experimental continuous editor", exact: true }).count(), 0,
+    "the disabled prototype must not be advertised in the shipped UI");
   await finish(fixture, `heading stays readable and controls stay bounded at ${phone ? "420px phone viewport" : "550px content width"}`);
 }
 

@@ -4,6 +4,12 @@ import { vi } from "vitest";
 import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw";
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
 import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
+import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
+import settingsHelp from "../../src-tauri/resources/welcome/pages/Help - Settings.md?raw";
+import syncHelp from "../../src-tauri/resources/welcome/pages/Help - Sync.md?raw";
+import syncResolution from "../components/SyncConflictResolution.svelte?raw";
+import helpIndex from "../../src-tauri/resources/welcome/pages/Grafium Help.md?raw";
+import importDialog from "../components/BookImportDialog.svelte?raw";
 import appSource from "../App.svelte?raw";
 import recoverySource from "../components/RuntimeRecovery.svelte?raw";
 import searchSource from "../components/GlobalSearchDialog.svelte?raw";
@@ -12,6 +18,34 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("explains that explicit reindex rebuilds copied books without wiping user state", () => {
+    expect(booksHelp).toContain("extracts book text again");
+    expect(booksHelp).toContain("external file you originally imported is no longer required");
+    expect(booksHelp).toContain("flashcard review progress");
+    expect(settingsHelp).toContain("all imported originals");
+    expect(settingsHelp).toContain("Removed sources are cleaned from the index, not recreated.");
+  });
+  it("explains explicit revision-checked sync choices, including deletion and binary files", () => {
+    expect(syncResolution).toContain('data-help-context="sync"');
+    expect(syncHelp).toContain("**Confirm choice**");
+    expect(syncHelp).toContain("**deleted**");
+    expect(syncHelp).toContain("sync-recovery/");
+    expect(syncHelp).toContain("strong server ETag");
+    expect(syncHelp).not.toContain("into the version you want, and save.");
+  });
+  it("routes original books and the import chooser to source-preservation guidance", async () => {
+    expect(isHelpContext("books")).toBe(true);
+    expect(helpPageTitle("books")).toBe("Help - Books");
+    expect(appSource).toContain('isOriginalBookPage(currentPage) ? "books" : "editor"');
+    expect(importDialog).toContain('data-help-context="books"');
+    expect(helpIndex).toContain("[[Help - Books]]");
+    expect(booksHelp).toContain("Original book");
+    expect(booksHelp).toContain("Editable Markdown");
+    expect(booksHelp).toContain("source stays unchanged");
+    expect(booksHelp).toContain("rebuildable index");
+    await loadHelpPage("books");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "books" });
+  });
   it("routes the single graph-search dialog to its current F1 guidance", () => {
     expect(searchSource).toContain('data-help-context="search"');
     expect(helpPageTitle("search")).toBe("Help - Search");
@@ -50,6 +84,7 @@ describe("contextual help", () => {
       "ai",
       "sync",
       "search",
+      "books",
     ];
 
     for (const context of contexts) {

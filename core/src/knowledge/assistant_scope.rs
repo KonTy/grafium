@@ -173,6 +173,9 @@ fn resolve_book(db: &Database, root: &Path, page: &Page) -> Result<Option<Book>>
     if page.is_journal {
         return Ok(None);
     }
+    if crate::graph::books::is_original_book(page) {
+        return Ok(Some(Book { root: page.clone(), pages: vec![page.id.clone()] }));
+    }
     if is_book_collection(page) {
         let mut pages = vec![page.id.clone()];
         pages.extend(collection_members(db, &page.id)?);

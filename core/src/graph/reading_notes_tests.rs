@@ -66,15 +66,15 @@ fn reading_notes_survive_reopen_reindex_and_fresh_database_without_source_ids() 
     graph.reindex_all()?;
     let rebuilt = only(&graph);
     assert_eq!(rebuilt.id, note.id);
-    assert_ne!(rebuilt.note_page_id, note.note_page_id);
-    assert_eq!(rebuilt.status, ReadingNoteStatus::Recovered);
+    assert_eq!(rebuilt.note_page_id, note.note_page_id);
+    assert_eq!(rebuilt.status, ReadingNoteStatus::Attached);
     let id = rebuilt.source.page_id.as_deref().unwrap();
     let source = graph.reading_source(&*graph.db.conn()?, id)?;
     assert_eq!(
         rebuilt.target_block_id.as_deref(),
         Some(source.blocks[2].id.as_str())
     );
-    assert_ne!(rebuilt.target_block_id, note.target_block_id);
+    assert_eq!(rebuilt.target_block_id, note.target_block_id);
     assert_eq!(fs::read_to_string(&source_path)?, raw);
     // A copied ordinary file tree and a brand-new DB, not just in-memory state.
     let fresh = tempfile::tempdir_in(".")?;
@@ -264,7 +264,7 @@ fn reading_notes_unicode_context_windows_use_utf16_not_bytes() -> Result<()> {
 
     graph.reindex_all()?;
     let recovered = only(&graph);
-    assert_eq!(recovered.status, ReadingNoteStatus::Recovered);
+    assert_eq!(recovered.status, ReadingNoteStatus::Attached);
     assert_eq!(recovered.quote, "😀選択");
     assert_eq!(recovered.body, "Unicode note 😀");
     assert_eq!(

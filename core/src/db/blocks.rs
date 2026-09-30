@@ -500,8 +500,12 @@ impl Database {
     }
 
     pub fn delete_block(&self, id: &str) -> Result<()> {
-        let conn = self.conn()?;
-        self.delete_block_in_connection(&conn, id)
+        let mut conn = self.conn()?;
+        let tx=conn.transaction()?;
+        self.delete_block_in_connection(&tx,id)?;
+        self.collect_generated_pages_in_connection(&tx)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn reorder_blocks(&self, page_id: &str, block_ids: &[String]) -> Result<()> {

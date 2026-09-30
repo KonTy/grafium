@@ -8,6 +8,108 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 
 use super::jobs::{JobHandle, JobLink, JobsState};
+use grafium_core::graph::books::{scan_original_sources, BookInfo, BookLocation, BookNote};
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn books_import_originals(
+    app: AppHandle, state: State<'_, AppState>, jobs: State<'_, JobsState>,
+    source_paths: Vec<String>,
+) -> Result<String, String> {
+    let snapshot = current_graph_snapshot(&app, &state.graph)?;
+    let handle = jobs.registry.start(app, "book_import", "Import original books", true)?;
+    let id = handle.id().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths: Vec<PathBuf> = source_paths.into_iter().map(PathBuf::from).collect();
+        if paths.iter().any(|p| source_inside_graph(p, &snapshot.root_dir)) {
+            handle.failed("Choose original books outside the active graph");
+            return;
+        }
+        let result = (|| -> Result<_, String> {
+            let files = scan_original_sources(&paths).map_err(|e| e.to_string())?;
+            let graph = open_graph_snapshot(&snapshot)?;
+            let mut details = Vec::new();
+            let mut link = None;
+            let mut imported = 0usize;
+            for (i, path) in files.iter().enumerate() {
+                if handle.is_cancelled() { return Err("cancelled".into()); }
+                handle.progress(i, files.len(), format!("Copying and indexing {}", path.display()));
+                match graph.import_original_book(path) {
+                    Ok(book) => {
+                        imported += 1;
+                        details.push(format!("{}: copied. {}", path.display(),
+                            book.indexing_warning.as_deref().unwrap_or("Text indexed.")));
+                        link.get_or_insert(JobLink {
+                            page_id: book.page_id, page_title: Some(book.title.clone()), label: book.title,
+                        });
+                    }
+                    Err(e) => details.push(format!("{}: failed: {e}", path.display())),
+                }
+            }
+            Ok((imported, files.len(), link, details.join("\n")))
+        })();
+        match result {
+            Ok((0, total, _, details)) => handle.failed_with_details(
+                if total == 0 { "No supported original books found" } else { "No original books imported" }, Some(details)),
+            Ok((imported, total, link, details)) => handle.succeeded_with_details(
+                format!("Imported {imported} of {total} original books"), link, Some(details)),
+            Err(e) if e == "cancelled" => handle.cancelled(),
+            Err(e) => handle.failed(e),
+        }
+    });
+    Ok(id)
+}
+
+async fn with_book_graph<T: Send + 'static>(
+    app: &AppHandle, state: &AppState, graph_path: &str,
+    run: impl FnOnce(grafium_core::Graph) -> Result<T, CoreError> + Send + 'static,
+) -> Result<T, String> {
+    let snapshot = current_graph_snapshot(app, &state.graph)?;
+    if graph_path.is_empty()
+        || Path::new(graph_path).canonicalize().map_err(|e| e.to_string())?
+            != snapshot.root_dir.canonicalize().map_err(|e| e.to_string())?
+    {
+        return Err("The active graph changed; book operation was not applied".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        run(open_graph_snapshot(&snapshot)?).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_open(app: AppHandle, state: State<'_, AppState>, graph_path: String, page_id: String) -> Result<BookInfo, String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_open(&page_id)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_read_bytes(app: AppHandle, state: State<'_, AppState>, graph_path: String, book_id: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = with_book_graph(&app, &state, &graph_path, move |g| g.book_read_bytes(&book_id)).await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_save_position(app: AppHandle, state: State<'_, AppState>, graph_path: String,
+    book_id: String, source_sha256: String, location: BookLocation) -> Result<(), String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_save_position(&book_id, &source_sha256, location)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_notes_list(app: AppHandle, state: State<'_, AppState>, graph_path: String, book_id: String) -> Result<Vec<BookNote>, String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_notes_list(&book_id)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_note_save(app: AppHandle, state: State<'_, AppState>, graph_path: String,
+    book_id: String, note_id: String, expected_revision: Option<String>, body: String,
+    quote: String, locator: Option<BookLocation>, source_sha256: String) -> Result<BookNote, String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_note_save(
+        &book_id, &note_id, expected_revision.as_deref(), &body, &quote, locator, &source_sha256)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn book_note_delete(app: AppHandle, state: State<'_, AppState>, graph_path: String,
+    book_id: String, note_id: String, expected_revision: String) -> Result<(), String> {
+    with_book_graph(&app, &state, &graph_path, move |g| g.book_note_delete(&book_id, &note_id, &expected_revision)).await
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn books_import_directory(

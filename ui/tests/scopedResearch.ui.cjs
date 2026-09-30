@@ -11,7 +11,7 @@ const togglePanel = (page) => page.evaluate(() => window.dispatchEvent(new Custo
 const cases = [
   ["Chat is the only assistant tab beside manual Notes", {}, async (page) => {
     assert.deepEqual(await page.getByRole("tablist", { name: "Reading panel tabs" })
-      .getByRole("tab").allTextContents(), ["Chat", "Notes"]);
+      .getByRole("tab").allTextContents(), ["Chat (AI)", "Notes"]);
     assert.equal(await panel(page).getByRole("checkbox", { name: /Internet|Research/ }).count(), 0);
     assert.equal(await panel(page).getByRole("combobox", { name: "Mode", exact: true }).count(), 1);
     assert.deepEqual(await context(page).locator("option").evaluateAll((options) => options.map(({ value }) => value).sort()),
@@ -20,7 +20,7 @@ const cases = [
     assert.equal(await mode(page).inputValue(), "answer");
     await input(page).fill("Keep this Chat draft while taking manual notes");
     await page.getByRole("tab", { name: "Notes", exact: true }).click();
-    await page.getByRole("tab", { name: "Chat", exact: true }).click();
+    await page.getByRole("tab", { name: "Chat (AI)", exact: true }).click();
     assert.equal(await input(page).inputValue(), "Keep this Chat draft while taking manual notes");
   }],
   ["Chat defaults to the current book and keeps long source text out of IPC", { book: true }, async (page) => {
@@ -132,9 +132,12 @@ const cases = [
     assert.equal(await page.evaluate(() => window.__assistantFixture.requests.length), 1);
     assert.deepEqual(await page.evaluate(() => window.__assistantFixture.cancellations), []);
     await page.keyboard.press("Alt+c");
+    await frames(page);
+    assert.equal(await context(page).inputValue(), "section", "reopening Chat preserves the selected conversation");
+    await page.locator("#chat-switcher").getByRole("button", { name: "New chat", exact: true }).click();
     await page.waitForFunction(() =>
       document.querySelector('.chat-view select[aria-label="Context"]')?.value === "none");
-    assert.equal(await context(page).inputValue(), "none", "ordinary Chat navigation opens the global conversation");
+    assert.equal(await context(page).inputValue(), "none", "an explicit new chat starts without source context");
     assert.equal(await mode(page).inputValue(), "answer");
     assert.equal(await panel(page).locator(".msg").count(), 0, "source turns do not leak into global Chat");
     assert.equal(await input(page).isEnabled(), true, "the independent global composer is not locked by the source request");
