@@ -868,6 +868,7 @@ where
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    commands::startup::mark("process started");
     // Without this, every `tracing::info!`/`tracing::warn!` call throughout
     // the codebase (including grafium-core) silently went nowhere -- a real
     // observability gap that hampered debugging the OOM-crash investigation.
@@ -928,6 +929,7 @@ pub fn run() {
                     "Native AI supervision could not start; native inference is unavailable: {error}"
                 ));
             }
+            commands::startup::mark("native AI supervision configured");
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -968,6 +970,7 @@ pub fn run() {
                 graph_dir.display(),
             )))?;
 
+            commands::startup::mark("graph opened");
             let should_seed_tutorial = graph_dir == default_graph_dir;
             if should_seed_tutorial {
                 match seed_tutorial_graph(&graph_dir, &metadata_dir) {
@@ -1037,6 +1040,7 @@ pub fn run() {
                 watcher: Mutex::new(None),
             };
             state.restart_graph_watcher(app.handle()).expect("Failed to start graph watcher");
+            commands::startup::mark("graph watcher started");
 
             // Start sync monitor (checks for USB/mount availability)
             let sync_graph = state.graph.clone();
@@ -1076,6 +1080,7 @@ pub fn run() {
                     cancels: Default::default(),
                 }
             };
+            commands::startup::mark("knowledge engine configured");
             // Keep the vector index fresh automatically as the graph changes.
             start_reindex_drainer(
                 app.handle().clone(),
@@ -1220,6 +1225,7 @@ pub fn run() {
                 }
             }
 
+            commands::startup::mark("setup finished");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
