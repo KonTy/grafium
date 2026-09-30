@@ -1,5 +1,15 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
+
+/** Shared runtime schema, filtered to the capabilities of this application. */
+export function aiModelSettingsSchema(): Promise<Record<string, unknown>> {
+  return invoke("ai_model_settings_schema");
+}
+
+/** Uses secret references, never the legacy settings dialog's credential values. */
+export function aiRuntimeSettings(): Promise<Record<string, unknown>> {
+  return invoke("ai_runtime_settings");
+}
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ChatScope } from "./chatScope";
 

@@ -54,6 +54,7 @@ pub struct NetworkConfig {
     client: Client,
     policy: Arc<dyn NetworkPolicy>,
     limits: ResponseLimits,
+    download_safe_client: bool,
 }
 
 impl NetworkConfig {
@@ -68,6 +69,7 @@ impl NetworkConfig {
             client,
             policy: Arc::new(|_: &Url| Ok(())),
             limits: ResponseLimits::default(),
+            download_safe_client: true,
         })
     }
 
@@ -78,6 +80,7 @@ impl NetworkConfig {
             client,
             policy,
             limits: ResponseLimits::default(),
+            download_safe_client: false,
         }
     }
 
@@ -94,6 +97,20 @@ impl NetworkConfig {
         }
         self.limits = limits;
         Ok(self)
+    }
+
+    /// Arbitrary URLs must not inherit unknown default credentials or follow
+    /// redirects before policy has authorized the target. Reqwest cannot inspect
+    /// or override an existing client's redirect/default-header configuration.
+    pub(crate) fn model_download_client(&self, url: &Url) -> Result<&Client> {
+        validate_url(url)?;
+        if !self.download_safe_client {
+            return Err(RuntimeError::Other(
+                "Model downloads require NetworkConfig::new with a host policy; custom clients have an unverifiable redirect/credential policy".into(),
+            ));
+        }
+        self.policy.authorize(url)?;
+        Ok(&self.client)
     }
 }
 

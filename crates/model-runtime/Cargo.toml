@@ -1,6 +1,6 @@
 [package]
 name = "model-runtime"
-description = "Model transports, resource admission and supervised native worker lifecycle."
+description = "Shared model settings, file management, transports and supervised native inference."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,6 +18,20 @@ url = "2"
 fs2 = "0.4"
 sha2 = "0.10"
 uuid = { workspace = true }
+schemars = "0.8"
+whisper-rs = { version = "0.16", optional = true, features = ["tracing_backend"] }
+hound = { version = "3", optional = true }
+llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler", "common"], optional = true }
+llama-cpp-sys-2 = { version = "0.1.156", default-features = false, optional = true }
+encoding_rs = { version = "0.8", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+default = []
+llm-local = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2", "dep:encoding_rs", "dep:tracing-subscriber", "llama-cpp-2/dynamic-link"]
+llm-local-vulkan = ["llm-local", "llama-cpp-2/vulkan"]
+media = ["dep:whisper-rs", "dep:hound", "dep:tracing-subscriber"]
+media-vulkan = ["media", "whisper-rs/vulkan"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

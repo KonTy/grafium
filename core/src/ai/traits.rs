@@ -147,8 +147,7 @@ pub trait LlmProvider: Send + Sync {
     /// Radeon RX 7900 XTX) in 8.4s.", or a "⚠ falling back to CPU"
     /// warning). Optional — cloud providers have no meaningful backend
     /// to report, so their default is `None` and callers just skip
-    /// showing the message. `LocalLlmProcess` overrides this with the
-    /// backend info its worker reported at load time.
+    /// showing the message. Native adapters report confirmed worker state.
     fn backend_summary(&self) -> Option<String> {
         None
     }
@@ -156,12 +155,9 @@ pub trait LlmProvider: Send + Sync {
     /// Best-effort abort of any in-flight completion request. Default is
     /// a no-op: for cloud providers, dropping the completion future is
     /// sufficient — the HTTP client closes the socket and the request
-    /// terminates on the wire. [`LocalLlmProcess`] overrides this to
-    /// hard-kill the worker child, which is the *only* way to interrupt
-    /// a llama.cpp generation in progress (it runs unmanaged C++ and
-    /// checks nothing between tokens). Safe to call even when there's
-    /// no in-flight request; a fresh worker will be spawned on the next
-    /// request either way.
+    /// terminates on the wire. Native requests also carry cooperative flags
+    /// watched by the shared worker supervisor, which can terminate a child
+    /// when native code does not return. Providers may override this shortcut.
     fn abort_in_flight(&self) {}
 }
 

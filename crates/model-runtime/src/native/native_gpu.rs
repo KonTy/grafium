@@ -6,19 +6,20 @@ use std::path::Path;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use crate::resources::GpuMemory;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::model::params::{FitError, LlamaModelParams, LlamaSplitMode};
 use llama_cpp_2::{list_llama_ggml_backend_devices, LlamaBackendDeviceType};
-use model_runtime::resources::GpuMemory;
 
-use crate::ai::resources;
-use crate::error::{CoreError, Result};
+use crate::error::{Result, RuntimeError};
+use crate::native::policy as resources;
 
-pub(crate) const FORCE_CPU_ENV: &str = "GRAFIUM_NATIVE_FORCE_CPU";
+pub(crate) const FORCE_CPU_ENV: &str = "MODEL_RUNTIME_NATIVE_FORCE_CPU";
 
 #[derive(Debug, Clone)]
 pub(crate) struct Device {
     pub index: usize,
+    #[cfg(feature = "media")]
     pub whisper_index: i32,
     pub name: String,
     pub description: String,
@@ -30,8 +31,8 @@ pub(crate) struct Device {
 
 pub(crate) fn cpu_forced() -> bool {
     std::env::var_os(FORCE_CPU_ENV).is_some()
-        || std::env::var_os("GRAFIUM_DISABLE_GPU_OFFLOAD").is_some()
-        || std::env::var("GRAFIUM_GPU_LEASE_ACTIVE").as_deref() != Ok("1")
+        || std::env::var_os("MODEL_RUNTIME_DISABLE_GPU_OFFLOAD").is_some()
+        || std::env::var("MODEL_RUNTIME_GPU_LEASE_ACTIVE").as_deref() != Ok("1")
 }
 
 fn pci_id(index: usize) -> Option<String> {
@@ -56,6 +57,7 @@ fn pci_id(index: usize) -> Option<String> {
 }
 
 pub(crate) fn devices() -> Vec<Device> {
+    #[cfg(feature = "media")]
     let mut ordinal = 0;
     let mut result = Vec::new();
     for native in list_llama_ggml_backend_devices() {
@@ -65,22 +67,27 @@ pub(crate) fn devices() -> Vec<Device> {
         ) {
             continue;
         }
-        let whisper_index = ordinal;
-        ordinal += 1;
+        #[cfg(feature = "media")]
+        let whisper_index = {
+            let index = ordinal;
+            ordinal += 1;
+            index
+        };
         // Unified-memory GPU admission needs a shared RAM budget model rather
         // than treating system RAM as independently available VRAM.
         if !matches!(native.device_type, LlamaBackendDeviceType::Gpu) {
             continue;
         }
         let pci = pci_id(native.index);
-        let memory = model_runtime::gpu::measured_budget(
+        let memory = crate::gpu::measured_budget(
             native.memory_total as u64,
             native.memory_free as u64,
-            pci.as_deref().and_then(model_runtime::gpu::pci_memory),
+            pci.as_deref().and_then(crate::gpu::pci_memory),
         );
         if let Some(memory) = memory {
             result.push(Device {
                 index: native.index,
+                #[cfg(feature = "media")]
                 whisper_index,
                 name: native.name,
                 description: native.description,
@@ -105,22 +112,20 @@ impl Device {
         let native = list_llama_ggml_backend_devices()
             .into_iter()
             .find(|d| d.index == self.index && d.name == self.name && d.backend == self.backend)
-            .ok_or_else(|| CoreError::Other("The selected GPU is no longer available".into()))?;
-        model_runtime::gpu::measured_budget(
+            .ok_or_else(|| RuntimeError::Other("The selected GPU is no longer available".into()))?;
+        crate::gpu::measured_budget(
             native.memory_total as u64,
             native.memory_free as u64,
-            self.pci_id
-                .as_deref()
-                .and_then(model_runtime::gpu::pci_memory),
+            self.pci_id.as_deref().and_then(crate::gpu::pci_memory),
         )
         .ok_or_else(|| {
-            CoreError::Other("The selected GPU no longer reports a usable memory budget".into())
+            RuntimeError::Other("The selected GPU no longer reports a usable memory budget".into())
         })
     }
 
     pub fn check_pressure(&self) -> Result<()> {
-        if model_runtime::gpu::critical_pressure(self.current_memory()?) {
-            return Err(CoreError::Other(format!(
+        if crate::gpu::critical_pressure(self.current_memory()?) {
+            return Err(RuntimeError::Other(format!(
                 "{} memory fell below emergency desktop headroom; inference stopped.",
                 self.description,
             )));
@@ -132,9 +137,9 @@ impl Device {
         let now = self.current_memory()?;
         self.context_floor = Some(
             now.available
-                .saturating_sub(model_runtime::gpu::reserve_bytes(now) / 2),
+                .saturating_sub(crate::gpu::reserve_bytes(now) / 2),
         );
-        crate::ai::worker::emit_gpu_info(crate::gpu_info::GpuInfo {
+        crate::native::worker::emit_gpu_info(crate::gpu_info::GpuInfo {
             name: Some(format!("{} ({})", self.description, self.name)),
             total_vram_bytes: Some(now.total),
             available_vram_bytes: Some(now.available),
@@ -149,7 +154,7 @@ impl Device {
             .context_floor
             .is_some_and(|floor| now.available < floor)
         {
-            return Err(CoreError::Other(
+            return Err(RuntimeError::Other(
                 "GPU headroom changed since model fitting; stopped before context allocation. The next request will use recovery policy.".into(),
             ));
         }
@@ -185,13 +190,13 @@ pub(crate) fn fitted_params(
             .with_devices(&[])
     };
     if requested_layers == 0 || cpu_forced() {
-        return Ok((cpu().map_err(|e| CoreError::Other(e.to_string()))?, None));
+        return Ok((cpu().map_err(|e| RuntimeError::Other(e.to_string()))?, None));
     }
     let Some(device) = devices().into_iter().next() else {
-        crate::ai::worker::emit_runtime_warning(
+        crate::native::worker::emit_runtime_warning(
             "No dedicated GPU has a measured backend memory budget; using CPU.",
         );
-        return Ok((cpu().map_err(|e| CoreError::Other(e.to_string()))?, None));
+        return Ok((cpu().map_err(|e| RuntimeError::Other(e.to_string()))?, None));
     };
     let mut parameters = Box::pin(
         LlamaModelParams::default()
@@ -199,16 +204,16 @@ pub(crate) fn fitted_params(
             .with_main_gpu(0)
             .with_use_mmap(false)
             .with_devices(&[device.index])
-            .map_err(|e| CoreError::Other(e.to_string()))?,
+            .map_err(|e| RuntimeError::Other(e.to_string()))?,
     );
     let mut context_params = context_params(context, embeddings);
     let model_path = CString::new(
         path.to_str()
-            .ok_or_else(|| CoreError::Other("Model path is not UTF-8".into()))?,
+            .ok_or_else(|| RuntimeError::Other("Model path is not UTF-8".into()))?,
     )
-    .map_err(|_| CoreError::Other("Model path contains a NUL byte".into()))?;
+    .map_err(|_| RuntimeError::Other("Model path contains a NUL byte".into()))?;
     let mut margins =
-        vec![model_runtime::gpu::reserve_bytes(device.memory) as usize; llama_cpp_2::max_devices()];
+        vec![crate::gpu::reserve_bytes(device.memory) as usize; llama_cpp_2::max_devices()];
     match parameters.as_mut().fit_params(
         &model_path,
         &mut context_params,
@@ -218,11 +223,11 @@ pub(crate) fn fitted_params(
     ) {
         Ok(fit) if fit.n_ctx == context.get() && parameters.n_gpu_layers() > 0 => {}
         Ok(_) | Err(FitError::Failure) => {
-            crate::ai::worker::emit_runtime_warning("The model's tensors, KV cache and compute buffers do not fit GPU headroom at the requested context; using CPU without shortening context.");
-            return Ok((cpu().map_err(|e| CoreError::Other(e.to_string()))?, None));
+            crate::native::worker::emit_runtime_warning("The model's tensors, KV cache and compute buffers do not fit GPU headroom at the requested context; using CPU without shortening context.");
+            return Ok((cpu().map_err(|e| RuntimeError::Other(e.to_string()))?, None));
         }
         Err(FitError::Error) => {
-            return Err(CoreError::Other(
+            return Err(RuntimeError::Other(
                 "Native model memory fitting failed; inspect the model file and runtime log".into(),
             ))
         }
@@ -230,7 +235,7 @@ pub(crate) fn fitted_params(
     device.check_pressure()?;
     let parameters = *Pin::into_inner(parameters);
     let layers = (parameters.n_gpu_layers() as u32).min(requested_layers);
-    crate::ai::worker::emit_runtime_warning(&format!(
+    crate::native::worker::emit_runtime_warning(&format!(
         "Using {} ({}) with {} GPU layers; context remains {} tokens. GPU budgets are estimates, not a driver-failure guarantee.",
         device.description, device.name, layers, context.get(),
     ));
@@ -241,7 +246,7 @@ pub(crate) fn fitted_params(
             .with_progress_callback(move |_| match pressure.check() {
                 Ok(()) => true,
                 Err(error) => {
-                    crate::ai::worker::emit_runtime_warning(&error.to_string());
+                    crate::native::worker::emit_runtime_warning(&error.to_string());
                     false
                 }
             }),
@@ -257,20 +262,20 @@ pub(crate) fn speech_device(path: &Path) -> Result<Option<Device>> {
     let _backend = super::llama_shared::shared_backend()?;
     let model_size = std::fs::metadata(path)?.len();
     for device in devices() {
-        if model_runtime::resources::gpu_admission(
+        if crate::resources::gpu_admission(
             model_size,
-            model_runtime::resources::ModelWorkload::Whisper,
+            crate::resources::ModelWorkload::Whisper,
             Some(device.memory),
-        ) == model_runtime::resources::GpuAdmission::Gpu
+        ) == crate::resources::GpuAdmission::Gpu
         {
-            crate::ai::worker::emit_runtime_warning(&format!(
+            crate::native::worker::emit_runtime_warning(&format!(
                 "Whisper GPU admission selected {} ({}).",
                 device.description, device.name,
             ));
             return Ok(Some(device));
         }
     }
-    crate::ai::worker::emit_runtime_warning(
+    crate::native::worker::emit_runtime_warning(
         "No measured GPU budget can hold this Whisper model with desktop headroom; using CPU.",
     );
     Ok(None)
@@ -293,8 +298,8 @@ impl PressureWatch {
             return Ok(());
         }
         self.checked_at = Instant::now();
-        if let Some(reason) = model_runtime::resources::critical_memory_pressure() {
-            return Err(CoreError::Other(reason));
+        if let Some(reason) = crate::resources::critical_memory_pressure() {
+            return Err(RuntimeError::Other(reason));
         }
         if let Some(device) = &self.device {
             device.check_pressure()?;

@@ -25,3 +25,4 @@ pub use error::CoreError;
 pub use graph::{Graph, GraphValidationReport};
 pub use ink::{InkPage, InkSvgParser, InkSvgSerializer};
 pub use knowledge::KnowledgeEngine;
+pub use model_runtime;

@@ -1425,6 +1425,8 @@ pub fn run() {
             commands::assets::find_orphaned_assets,
             commands::assets::delete_assets,
             commands::knowledge::ai_get_config,
+            commands::knowledge::ai_model_settings_schema,
+            commands::knowledge::ai_runtime_settings,
             commands::knowledge::ai_default_concept_edge_prompt,
             commands::knowledge::ai_set_config,
             commands::knowledge::ai_health_check,

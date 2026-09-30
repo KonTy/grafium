@@ -21,6 +21,18 @@ search, imports, and sync work without an AI provider.
    Chat can work with keyword retrieval before embeddings are ready.
 5. Index only graph content you intend to make available to AI.
 
+Model settings are validated by Grafium's shared model manager. The current
+settings dialog stays the same; existing model paths and provider choices are
+retained. A valid configuration can still be unavailable (for example, a model
+file is missing or a server is offline); Grafium reports that rather than
+silently selecting a different provider. If preparing or saving new settings
+fails, your previous configuration stays active.
+
+The shared library also supplies a settings schema for other frontends. Apps
+choose their own storage, credentials and permitted providers; a common schema
+does not mean their privacy policies are interchangeable. Managed model-file
+removal is explicit and reversible; borrowed external model files are not deleted.
+
 Local model setup may require substantial disk space, RAM, and GPU support.
 Vulkan acceleration is optional but can make local inference much faster.
 Grafium runs embedded models in a supervised worker. Closing the app stops

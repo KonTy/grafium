@@ -135,6 +135,8 @@ fn looks_like_english_question(question: &str) -> bool {
 }
 
 pub mod config;
+mod managed;
+pub(crate) mod runtime_config;
 pub mod embeddings;
 pub mod gpu_fit;
 pub(crate) mod language;

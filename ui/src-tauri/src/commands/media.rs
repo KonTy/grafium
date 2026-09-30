@@ -79,43 +79,13 @@ pub async fn media_set_config(
 
 // ─── Transcription ───────────────────────────────────────────────────────────
 
-/// Loads (and caches, process-wide) a `WhisperTranscriber` for the resolved
-/// model path + language pair. Loading a whisper.cpp model is expensive
-/// (reads a multi-hundred-MB file, allocates the context), so this avoids
-/// re-loading it on every single video import — the cache key is the
-/// *resolved* model path plus language, so it naturally reloads if either
-/// changes (e.g. the user picks a different model in Settings) without
-/// Resolves which whisper model to use, without loading it.
-///
-/// Loading happens in the worker child and the model stays resident there
-/// between imports, so this side needs nothing but the path and language.
+/// The shared manager owns model resolution, lazy loading and resident reuse.
 #[cfg(not(target_os = "android"))]
 fn worker_transcriber(
     config: &MediaConfig,
     data_dir: &std::path::Path,
-) -> Result<grafium_core::media::WorkerTranscriber, String> {
-    use grafium_core::model_library::{self, ModelKind};
-
-    let models_dir = config
-        .models_dir
-        .clone()
-        .unwrap_or_else(|| model_library::default_models_dir(data_dir));
-    let resolved_path = config
-        .whisper
-        .model_ref
-        .resolve(&models_dir, ModelKind::Whisper)
-        .map_err(|e| e.to_string())?;
-    tracing::info!(
-        models_dir = %models_dir.display(),
-        configured_model = ?config.whisper.model_ref.model,
-        language = ?config.whisper.language,
-        resolved = %resolved_path.display(),
-        "resolved whisper model"
-    );
-    Ok(grafium_core::media::WorkerTranscriber::new(
-        &resolved_path,
-        config.whisper.language.as_deref(),
-    ))
+) -> Result<grafium_core::media::ManagedTranscriber, String> {
+    grafium_core::media::managed_transcriber(config, data_dir).map_err(|error| error.to_string())
 }
 
 /// Fetches a transcript for `url`: captions first (cheap, no transcription

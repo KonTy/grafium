@@ -60,6 +60,56 @@ impl TransformerShape {
 struct Metadata {
     architecture: String,
     numbers: HashMap<String, u32>,
+    descriptions: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelMetadata {
+    pub architecture: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogMetadata {
+    pub architecture: Option<String>,
+    pub description: Option<String>,
+}
+
+pub fn read_catalog_metadata(path: &Path) -> Result<CatalogMetadata> {
+    let metadata = inspect_metadata(path)?;
+    Ok(CatalogMetadata {
+        architecture: Some(metadata.architecture),
+        description: metadata.description,
+    })
+}
+
+const DESCRIPTION_KEYS: &[&str] = &[
+    "general.name",
+    "general.basename",
+    "general.size_label",
+    "general.finetune",
+    "general.base_model.0.name",
+];
+
+/// Inspect catalog metadata without loading native code or tensor weights.
+pub fn inspect_metadata(path: &Path) -> Result<ModelMetadata> {
+    let metadata = parse_metadata(std::fs::File::open(path)?.take(MAX_METADATA_BYTES))?;
+    let mut values = Vec::new();
+    for key in DESCRIPTION_KEYS {
+        if let Some(value) = metadata
+            .descriptions
+            .get(*key)
+            .filter(|v| !v.trim().is_empty())
+        {
+            if !values.contains(&value.as_str()) {
+                values.push(value.as_str());
+            }
+        }
+    }
+    Ok(ModelMetadata {
+        architecture: metadata.architecture,
+        description: (!values.is_empty()).then(|| values.join(" · ")),
+    })
 }
 
 pub fn read_transformer_shape(path: &Path) -> Result<Option<TransformerShape>> {
@@ -191,6 +241,7 @@ fn parse_metadata(mut reader: impl Read) -> Result<Metadata> {
     }
     let mut architecture = None;
     let mut dimensions = HashMap::new();
+    let mut descriptions = HashMap::new();
     for _ in 0..count {
         let key = string(&mut reader)?;
         let kind = u32_value(&mut reader)?;
@@ -199,6 +250,10 @@ fn parse_metadata(mut reader: impl Read) -> Result<Metadata> {
                 return Err(invalid("general.architecture must be a unique string"));
             }
             architecture = Some(string(&mut reader)?);
+        } else if DESCRIPTION_KEYS.contains(&key.as_str()) && kind == 8 {
+            if descriptions.insert(key, string(&mut reader)?).is_some() {
+                return Err(invalid("duplicate descriptive model metadata"));
+            }
         } else if key.ends_with(".embedding_length") || key.ends_with(".context_length") {
             if kind != 4 || dimensions.insert(key, u32_value(&mut reader)?).is_some() {
                 return Err(invalid("embedding dimensions must be unique uint32 values"));
@@ -227,12 +282,40 @@ fn parse_metadata(mut reader: impl Read) -> Result<Metadata> {
     Ok(Metadata {
         architecture,
         numbers: dimensions,
+        descriptions,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_metadata_is_bounded_rust_inspection_without_tensor_loading() {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend(3u64.to_le_bytes());
+        for (key, value) in [
+            ("general.architecture", "llama"),
+            ("general.name", "Example model"),
+            ("general.size_label", "7B"),
+        ] {
+            bytes.extend((key.len() as u64).to_le_bytes());
+            bytes.extend(key.as_bytes());
+            bytes.extend(8u32.to_le_bytes());
+            bytes.extend((value.len() as u64).to_le_bytes());
+            bytes.extend(value.as_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("example.gguf");
+        std::fs::write(&file, bytes).unwrap();
+        let metadata = read_catalog_metadata(&file).unwrap();
+        assert_eq!(metadata.architecture.as_deref(), Some("llama"));
+        let description = metadata.description.unwrap();
+        assert!(description.contains("Example model"));
+        assert!(description.contains("7B"));
+    }
 
     #[test]
     fn reads_dimensions_without_tensors_and_skips_tokenizer_arrays() {

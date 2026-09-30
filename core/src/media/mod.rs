@@ -32,6 +32,38 @@ mod tooling;
 pub mod transcribe;
 pub mod types;
 
+#[cfg(feature = "media")]
+pub type ManagedTranscriber =
+    std::sync::Arc<dyn model_runtime::transcription::Transcriber + Send + Sync>;
+
+#[cfg(feature = "media")]
+pub fn managed_transcriber(
+    config: &MediaConfig,
+    data_dir: &std::path::Path,
+) -> crate::error::Result<ManagedTranscriber> {
+    use model_runtime::{
+        manager::{MemoryCredentials, ModelManager},
+        providers::NetworkConfig,
+        settings::{BackendSettings, RuntimeSettings, SettingsPolicy},
+    };
+    let manager = ModelManager::new(
+        crate::model_library::default_models_dir(data_dir),
+        SettingsPolicy::default(),
+        NetworkConfig::new(std::time::Duration::from_secs(120))?,
+        std::sync::Arc::new(MemoryCredentials::default()),
+    );
+    manager.configure(RuntimeSettings {
+        enabled: config.enabled,
+        transcription: Some(BackendSettings::Whisper {
+            model: config.whisper.model_ref.model.clone(),
+            models_dir: config.models_dir.clone(),
+            language: config.whisper.language.clone(),
+        }),
+        ..Default::default()
+    })?;
+    Ok(manager.transcription()?)
+}
+
 pub use captions::{fetch_captions, fetch_captions_with_progress, fetch_metadata, VideoMetadata};
 pub use config::{MediaConfig, WhisperSettings};
 pub use ingest::{fetch_audio, fetch_audio_with_progress, MediaSource};

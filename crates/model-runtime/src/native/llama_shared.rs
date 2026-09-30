@@ -1,5 +1,5 @@
 //! Process-wide llama.cpp backend, shared between every in-process llama.cpp
-//! consumer (`local_llm::LocalLlm` for chat, `local_embedder::LocalEmbedder`
+//! consumer (`llm::LocalLlm` for chat, `embedder::LocalEmbedder`
 //! for embeddings). llama.cpp's backend is meant to be initialized exactly
 //! once per process — sharing one `OnceLock` here (rather than each module
 //! keeping its own) is what makes it safe for both to be in use at the same
@@ -22,13 +22,9 @@ static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
 /// Returns the shared process-wide llama.cpp backend handle, initializing
 /// it on first use. llama.cpp/GGML's own logs (buffer allocations, memory
 /// type selection, Vulkan driver errors, etc.) are routed through `tracing`
-/// rather than suppressed — the `tui` binary that also links this crate
-/// never installs a `tracing` subscriber, so these events are silently
-/// dropped there regardless; only the desktop app's subscriber (see
-/// `ui/src-tauri/src/lib.rs`) actually prints them, to `grafium.log`. This
-/// visibility is what lets us see e.g. `ggml_vulkan: ... memory allocation
-/// ... failed` lines that were previously invisible — critical for
-/// debugging the VRAM/driver crashes this local-LLM path is prone to.
+/// rather than suppressed. The supervised child installs its subscriber and
+/// diagnostic tap before loading any model. Direct offline callers supply
+/// their own subscriber.
 pub(crate) fn shared_backend() -> crate::error::Result<Arc<LlamaBackend>> {
     INSTALL_LOGGING.call_once(|| {
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
@@ -41,5 +37,7 @@ pub(crate) fn shared_backend() -> crate::error::Result<Arc<LlamaBackend>> {
         })
         .as_ref()
         .map(Arc::clone)
-        .map_err(|e| crate::CoreError::Other(format!("Failed to initialize native backend: {e}")))
+        .map_err(|e| {
+            crate::error::RuntimeError::Other(format!("Failed to initialize native backend: {e}"))
+        })
 }

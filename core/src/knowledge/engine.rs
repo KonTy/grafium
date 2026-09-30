@@ -9,10 +9,6 @@ use tokio::sync::RwLock;
 
 use crate::ai::config::{AiConfig, AiMode, ProviderType};
 use crate::ai::embeddings::EmbeddingPipeline;
-use crate::ai::providers::anthropic::AnthropicLlm;
-use crate::ai::providers::ollama::{OllamaEmbedder, OllamaLlm};
-use crate::ai::providers::openai::{OpenAiEmbedder, OpenAiLlm};
-use crate::ai::providers::openai_compatible::{OpenAiCompatibleEmbedder, OpenAiCompatibleLlm};
 use crate::ai::references::{PageReferencesMeta, PageSummary, ReferenceEngine};
 use crate::ai::traits::{Embedder, LlmProvider, SearchResult, VectorStore};
 use crate::error::{CoreError, Result};
@@ -35,6 +31,7 @@ pub use reading_research::ResearchWebMode;
 /// The Knowledge Engine — main orchestrator for all AI/knowledge operations.
 pub struct KnowledgeEngine {
     config: AiConfig,
+    runtime_manager: Option<Arc<model_runtime::manager::ModelManager>>,
     llm: Option<Box<dyn LlmProvider>>,
     embedder: Option<Box<dyn Embedder>>,
     vector_store: Option<Arc<dyn VectorStore>>,
@@ -84,6 +81,7 @@ impl KnowledgeEngine {
         let mut engine = Self {
             llm_load_error: None,
             config: config.clone(),
+            runtime_manager: None,
             llm: None,
             embedder: None,
             vector_store: None,
@@ -110,228 +108,35 @@ impl KnowledgeEngine {
 
     /// Initialize AI providers based on config.
     fn initialize_providers(&mut self) -> Result<()> {
-        match &self.config.mode {
-            AiMode::Local => {
-                if let Some(local) = &self.config.local {
-                    match local.provider {
-                        ProviderType::Ollama => {
-                            self.llm =
-                                Some(Box::new(OllamaLlm::new(&local.base_url, &local.llm_model)?));
-                            self.embedder = Some(Box::new(OllamaEmbedder::new(
-                                &local.base_url,
-                                &local.embedding_model,
-                                768,
-                            )?));
-                        }
-                        ProviderType::OpenAiCompatible => {
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
-                                &local.base_url,
-                                &local.llm_model,
-                                local.api_key.clone(),
-                            )?));
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
-                                &local.base_url,
-                                &local.embedding_model,
-                                1024,
-                                local.api_key.clone(),
-                            )?));
-                        }
-                        ProviderType::HuggingFace => {
-                            #[cfg(feature = "llm-local")]
-                            {
-                                // Best-effort, like the embedder below: a
-                                // local GGUF chat model can fail to load
-                                // for reasons entirely orthogonal to
-                                // whether the *config itself* is valid —
-                                // out-of-VRAM being the most common (see
-                                // `LocalLlm::load`'s own CPU-fallback
-                                // retry, which already covers the typical
-                                // case, but e.g. a corrupt/incompatible
-                                // GGUF file could still fail even that).
-                                // Previously this used `?`, which made
-                                // `initialize_providers` — and therefore
-                                // `KnowledgeEngine::new`/`reconfigure` —
-                                // fail outright, leaving the whole engine
-                                // as `None` (app startup) or the config
-                                // change rejected (Settings save) even
-                                // though the user's config was fine; the
-                                // UI then misleadingly reported "AI is not
-                                // configured" instead of "model failed to
-                                // load". Keeping the engine alive lets
-                                // health checks/logs surface the real
-                                // error and lets the user retry (e.g. after
-                                // freeing VRAM or picking a smaller model)
-                                // without restarting the app.
-                                match crate::ai::providers::local_llm::LocalLlm::from_config(
-                                    &self.config,
-                                    &self.models_root,
-                                ) {
-                                    Ok(llm) => self.llm = Some(Box::new(llm)),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Embedded local chat model failed to load (chat / \
-                                             \"Ask\" will be unavailable until this is \
-                                             resolved — check the model file, available VRAM, \
-                                             and the \"GPU layers\" setting): {e}"
-                                        );
-                                        self.llm_load_error = Some(e.to_string());
-                                    }
-                                }
-                                // Best-effort: an embedding model is a
-                                // separate download from the chat LLM, so a
-                                // user who's only set up the latter should
-                                // still get a working "Embedded" chat
-                                // provider — just without semantic search /
-                                // "Research this page" until they also point
-                                // Settings at a GGUF embedding model. Mirrors
-                                // the cloud branches' "only set what's
-                                // configured" partial-init pattern below.
-                                match crate::ai::providers::local_embedder::LocalEmbedder::from_config(
-                                    &self.config,
-                                    &self.models_root,
-                                ) {
-                                    Ok(embedder) => self.embedder = Some(Box::new(embedder)),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Embedded local embedding model not available yet \
-                                             (semantic search / \"Research this page\" will be \
-                                             disabled until one is configured): {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            #[cfg(not(feature = "llm-local"))]
-                            {
-                                return Err(CoreError::Other(
-                                    "Embedded Hugging Face local runtime requires building \
-                                     grafium-core with the `llm-local` (or `llm-local-vulkan`) \
-                                     Cargo feature enabled."
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        _ => {
-                            return Err(CoreError::Other("Unsupported local provider".to_string()));
-                        }
-                    }
-                }
-            }
-            AiMode::Cloud => {
-                if let Some(cloud) = &self.config.cloud {
-                    match cloud.llm_provider {
-                        ProviderType::OpenAi => {
-                            let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
-                                CoreError::Other("Missing OpenAI API key".to_string())
-                            })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)?));
-                        }
-                        ProviderType::Anthropic => {
-                            let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
-                                CoreError::Other("Missing Anthropic API key".to_string())
-                            })?;
-                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)?));
-                        }
-                        ProviderType::OpenAiCompatible => {
-                            let base_url = cloud
-                                .llm_base_url
-                                .clone()
-                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
-                                &base_url,
-                                &cloud.llm_model,
-                                cloud.llm_api_key.clone(),
-                            )?));
-                        }
-                        _ => {}
-                    }
-
-                    let embed_key = cloud
-                        .embedding_api_key
-                        .clone()
-                        .or_else(|| cloud.llm_api_key.clone());
-
-                    match cloud.embedding_provider {
-                        ProviderType::OpenAi => {
-                            let key = embed_key.as_deref().ok_or_else(|| {
-                                CoreError::Other("Missing OpenAI embedding API key".to_string())
-                            })?;
-                            self.embedder = Some(Box::new(OpenAiEmbedder::new(
-                                key,
-                                &cloud.embedding_model,
-                                1536,
-                            )?));
-                        }
-                        ProviderType::OpenAiCompatible => {
-                            let base_url = cloud
-                                .embedding_base_url
-                                .clone()
-                                .or_else(|| cloud.llm_base_url.clone())
-                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
-                                &base_url,
-                                &cloud.embedding_model,
-                                1024,
-                                embed_key,
-                            )?));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            AiMode::Hybrid => {
-                // Embeddings from local provider.
-                if let Some(local) = &self.config.local {
-                    match local.provider {
-                        ProviderType::Ollama => {
-                            self.embedder = Some(Box::new(OllamaEmbedder::new(
-                                &local.base_url,
-                                &local.embedding_model,
-                                768,
-                            )?));
-                        }
-                        ProviderType::OpenAiCompatible => {
-                            self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
-                                &local.base_url,
-                                &local.embedding_model,
-                                1024,
-                                local.api_key.clone(),
-                            )?));
-                        }
-                        _ => {}
-                    }
-                }
-
-                // LLM from cloud provider.
-                if let Some(cloud) = &self.config.cloud {
-                    match cloud.llm_provider {
-                        ProviderType::OpenAi => {
-                            let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
-                                CoreError::Other("Missing OpenAI API key".to_string())
-                            })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)?));
-                        }
-                        ProviderType::Anthropic => {
-                            let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
-                                CoreError::Other("Missing Anthropic API key".to_string())
-                            })?;
-                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)?));
-                        }
-                        ProviderType::OpenAiCompatible => {
-                            let base_url = cloud
-                                .llm_base_url
-                                .clone()
-                                .unwrap_or_else(|| "http://localhost:8000/v1".to_string());
-                            self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
-                                &base_url,
-                                &cloud.llm_model,
-                                cloud.llm_api_key.clone(),
-                            )?));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        use model_runtime::{
+            manager::ModelManager,
+            providers::NetworkConfig,
+            settings::{ModelRole, SettingsPolicy},
+        };
+        let (settings, credentials) = crate::ai::runtime_config::configuration(&self.config)?;
+        let manager = Arc::new(ModelManager::new(
+            crate::model_library::default_models_dir(&self.models_root),
+            SettingsPolicy::default(),
+            NetworkConfig::new(std::time::Duration::from_secs(120))?,
+            Arc::new(credentials),
+        ));
+        let status = manager.configure(settings)?;
+        self.llm = if status.prepared.contains(&ModelRole::Chat) {
+            Some(Box::new(manager.chat()?) as Box<dyn LlmProvider>)
+        } else {
+            None
+        };
+        self.embedder = if status.prepared.contains(&ModelRole::Embeddings) {
+            Some(Box::new(manager.embeddings()?) as Box<dyn Embedder>)
+        } else {
+            None
+        };
+        self.llm_load_error = status
+            .issues
+            .iter()
+            .find(|issue| issue.role == ModelRole::Chat)
+            .map(|issue| issue.message.clone());
+        self.runtime_manager = Some(manager);
 
         // Initialize vector store.
         let vs_path = self
@@ -357,21 +162,57 @@ impl KnowledgeEngine {
 
     /// Reconfigure the engine with new settings.
     pub fn reconfigure(&mut self, config: AiConfig) -> Result<()> {
-        #[cfg(any(feature = "llm-local", feature = "media"))]
-        crate::ai::resources::accept_deferred_eviction(crate::ai::worker::evict_idle())?;
-        self.config = config.clone();
-        self.llm = None;
-        self.llm_load_error = None;
-        self.embedder = None;
-        self.vector_store = None;
-        self.pipeline = RwLock::new(EmbeddingPipeline::new(config.embedding.clone()));
-        self.reference_engine = ReferenceEngine::new(config.references.clone());
+        self.reconfigure_persisted(config, |_| Ok(()))
+    }
 
-        if config.enabled {
-            self.initialize_providers()?;
+    /// Prepare a replacement before the host saves settings atomically. Failed
+    /// preparation or persistence leaves the current bindings and registry intact.
+    pub fn reconfigure_persisted(
+        &mut self,
+        config: AiConfig,
+        persist: impl FnOnce(&AiConfig) -> Result<()>,
+    ) -> Result<()> {
+        config.validate()?;
+        let replacement =
+            Self::new_with_models_root(&self.data_dir, config.clone(), &self.models_root)?;
+        if let Some(manager) = &self.runtime_manager {
+            let next = replacement
+                .runtime_manager
+                .as_ref()
+                .map(|m| m.status())
+                .transpose()?
+                .map(|status| status.settings)
+                .unwrap_or_default();
+            if manager.status()?.settings != next {
+                match manager.unload_idle() {
+                    Err(model_runtime::RuntimeError::WorkerBusy) => {
+                        tracing::info!("Native unload deferred until the active model job finishes");
+                    }
+                    result => result?,
+                }
+            }
         }
-
+        persist(&config)?;
+        self.config = replacement.config;
+        self.runtime_manager = replacement.runtime_manager;
+        self.llm = replacement.llm;
+        self.embedder = replacement.embedder;
+        self.llm_load_error = replacement.llm_load_error;
+        self.vector_store = replacement.vector_store;
+        self.pipeline = replacement.pipeline;
+        self.reference_engine = replacement.reference_engine;
         Ok(())
+    }
+
+    pub fn model_manager(&self) -> Option<Arc<model_runtime::manager::ModelManager>> {
+        self.runtime_manager.clone()
+    }
+
+    pub fn runtime_settings(&self) -> Result<model_runtime::settings::RuntimeSettings> {
+        match &self.runtime_manager {
+            Some(manager) => Ok(manager.status()?.settings),
+            None => Ok(crate::ai::runtime_config::configuration(&self.config)?.0),
+        }
     }
 
     /// Request GPU offload without bypassing fitting, admission or crash
@@ -391,16 +232,11 @@ impl KnowledgeEngine {
                     "Retry on GPU only applies to the embedded local chat model.".to_string(),
                 ));
             }
-            let llm = crate::ai::providers::local_llm::LocalLlm::from_config_forcing_gpu(
-                &self.config,
-                &self.models_root,
-            )?;
-            let path = llm.native_model_path().expect("native model provider");
-            let key = crate::ai::worker::gpu_risk_key("chat", path)?;
-            if crate::ai::worker::recovery_status().iter().any(|record| record.key == key) {
-                crate::ai::worker::allow_gpu_retry(&key)?;
-            }
-            self.llm = Some(Box::new(llm));
+            let manager = self.runtime_manager.as_ref().ok_or_else(|| {
+                CoreError::Other("Shared model manager is not initialized".into())
+            })?;
+            manager.retry_gpu(model_runtime::settings::ModelRole::Chat)?;
+            self.llm = Some(Box::new(manager.chat()?));
             Ok(())
         }
         #[cfg(not(feature = "llm-local"))]
@@ -2667,6 +2503,7 @@ mod tests {
         Ok(KnowledgeEngine {
             llm_load_error: None,
             config: config.clone(),
+            runtime_manager: None,
             llm: None,
             embedder: Some(embedder),
             vector_store: Some(vector_store),
@@ -2725,6 +2562,7 @@ mod tests {
         Ok(KnowledgeEngine {
             llm_load_error: None,
             config: config.clone(),
+            runtime_manager: None,
             llm: None,
             embedder: None,
             vector_store: None,
@@ -2900,6 +2738,77 @@ mod tests {
             "This block content is long enough to be indexed.",
         )];
         assert!(engine.index_page(&page, &blocks, "graph-1").await.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reconfigure_persistence_failure_retains_live_providers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config = AiConfig { enabled: true, ..Default::default() };
+        let mut engine = KnowledgeEngine::new(dir.path(), config.clone())?;
+        let original = engine.model_manager().unwrap();
+        let original_settings = original.status()?.settings;
+        let mut next = config;
+        next.local.as_mut().unwrap().llm_model = "replacement".into();
+
+        let result = engine.reconfigure_persisted(next, |_| {
+            Err(CoreError::Other("synthetic storage failure".into()))
+        });
+
+        assert!(result.unwrap_err().to_string().contains("synthetic storage failure"));
+        assert!(Arc::ptr_eq(&engine.model_manager().unwrap(), &original));
+        assert_eq!(engine.runtime_settings()?, original_settings);
+        assert!(engine.llm.is_some());
+        assert!(engine.embedder.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn reconfigure_preparation_failure_never_persists() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut engine = KnowledgeEngine::new(dir.path(), AiConfig::default())?;
+        let mut next = AiConfig { enabled: true, ..Default::default() };
+        next.embedding.vector_store_path = Some(dir.path().to_path_buf());
+        let result = engine.reconfigure_persisted(next, |_| {
+            panic!("A configuration that cannot be prepared must not be saved")
+        });
+        assert!(result.is_err());
+        assert!(!engine.config.enabled);
+        assert!(engine.runtime_manager.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconfigure_preserves_live_registry_and_saves_before_replacing() -> Result<()> {
+        use crate::knowledge::registry::{GraphType, RegisteredGraph};
+        let dir = tempfile::tempdir()?;
+        let mut engine = KnowledgeEngine::new(dir.path(), AiConfig::default())?;
+        {
+            let mut registry = engine.registry_mut().await;
+            registry.register(RegisteredGraph {
+                id: "fixture".into(),
+                name: "Saved name".into(),
+                path: dir.path().to_path_buf(),
+                graph_type: GraphType::Primary,
+                last_indexed: None,
+                page_count: None,
+                vector_count: None,
+                cross_searchable: true,
+                description: None,
+            })?;
+            registry.get_mut("fixture").unwrap().name = "Live name".into();
+        }
+        let mut next = AiConfig::default();
+        next.embedding.chunk_max_tokens = 256;
+        let mut saved = false;
+        engine.reconfigure_persisted(next, |settings| {
+            assert_eq!(settings.embedding.chunk_max_tokens, 256);
+            saved = true;
+            Ok(())
+        })?;
+        assert!(saved);
+        assert_eq!(engine.config.embedding.chunk_max_tokens, 256);
+        assert_eq!(engine.registry().await.get("fixture").unwrap().name, "Live name");
         Ok(())
     }
 
@@ -4074,6 +3983,7 @@ mod tests {
         Ok(KnowledgeEngine {
             llm_load_error: None,
             config: config.clone(),
+            runtime_manager: None,
             llm: Some(llm),
             embedder: None,
             vector_store: None,

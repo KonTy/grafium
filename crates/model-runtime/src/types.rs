@@ -98,6 +98,11 @@ pub trait LlmProvider: Send + Sync {
 
     fn name(&self) -> &str;
 
+    /// Prepared local file identity; not a claim that its weights are resident.
+    fn native_model_path(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
 
     fn context_window(&self) -> Option<usize> {

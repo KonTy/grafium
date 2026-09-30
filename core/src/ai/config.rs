@@ -85,6 +85,11 @@ impl AiConfig {
                 crate::ai::resources::safe_gpu_layers(local.local_llm.gpu_layers)?;
             }
         }
+        if self.enabled {
+            let (settings, _) = super::runtime_config::configuration(self)?;
+            settings.validate(&model_runtime::settings::SettingsPolicy::default())
+                .map_err(model_runtime::error::RuntimeError::from)?;
+        }
         Ok(())
     }
 }
@@ -196,25 +201,9 @@ pub struct LocalLlmSettings {
     /// admission; unknown/insufficient headroom falls back to CPU. Set
     /// `GRAFIUM_DISABLE_GPU_OFFLOAD=1` to force CPU on an unstable driver.
     pub gpu_layers: Option<u32>,
-    /// Whether llama.cpp is allowed to memory-map the model file
-    /// (`llama_model_params.use_mmap`).
-    ///
-    /// `None`: pick automatically — mmap OFF for CPU-only loads (so the
-    ///   RAM budget check up front is meaningful), mmap ON for GPU loads
-    ///   (avoids duplicating tensor bytes into RAM before they get copied
-    ///   to VRAM). Matches the historical behavior.
-    /// `Some(false)`: force mmap OFF regardless. Safer on unreliable
-    ///   storage (removable drives, network mounts, systems under heavy
-    ///   disk pressure) — an mmap page-fault that fails to fault in a
-    ///   page raises SIGBUS mid-generation and crashes the worker;
-    ///   disabling mmap makes the whole model resident up front so no
-    ///   later fault can fail. Slower initial load, higher peak RAM.
-    /// `Some(true)`: force mmap ON regardless. Fastest load; only pick
-    ///   this if you know your storage is reliable.
-    ///
-    /// The process wrapper (`LocalLlmProcess`) may also flip this to
-    /// `Some(false)` at runtime after a SIGBUS-flavored worker crash,
-    /// so a follow-up request auto-heals — see `handle_worker_crash`.
+    /// Legacy serialized preference. Retained so existing settings round-trip;
+    /// the shared native runtime disables mmap to avoid delayed faults from
+    /// removable model files. New schema-driven settings do not expose it.
     pub use_mmap: Option<bool>,
 }
 

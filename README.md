@@ -460,10 +460,10 @@ including startup, journals, selection, tables, and graph rendering.
 | Rendering | Markdown, KaTeX, 2D canvas, and Three.js-powered 3D graphs |
 | Local inference | Optional llama.cpp and Whisper integrations |
 
-Model transports, conservative resource admission, and native-worker supervision
+Model settings/schema, managed model files, native backends, conservative resource admission, and worker supervision
 live in the internal [`model-runtime`](crates/model-runtime) Rust workspace crate.
-Grafium supplies native inference handlers, model discovery, graph access,
-credentials, and UI. The crate has no graph/database or Tauri dependency and is
+Grafium supplies graph access, credential/settings storage adapters, and UI.
+The crate has no graph/database or Tauri dependency and is
 not independently released. See [AI setup and runtime safety](ui/src-tauri/resources/welcome/pages/AI%20Setup%20And%20Privacy.md)
 for CPU fallback and the limits of process isolation.
 

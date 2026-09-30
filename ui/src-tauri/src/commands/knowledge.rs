@@ -1029,8 +1029,38 @@ pub async fn ai_get_config(state: State<'_, KnowledgeState>) -> Result<serde_jso
 }
 
 #[tauri::command]
+pub fn ai_model_settings_schema() -> Result<serde_json::Value, String> {
+    serde_json::to_value(grafium_core::model_runtime::settings::SettingsPolicy::default().schema())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn ai_runtime_settings(state: State<'_, KnowledgeState>) -> Result<serde_json::Value, String> {
+    let guard = state.engine.read().await;
+    let settings = match guard.as_ref() {
+        Some(engine) => engine.runtime_settings().map_err(|error| error.to_string())?,
+        None => grafium_core::model_runtime::settings::RuntimeSettings::default(),
+    };
+    serde_json::to_value(settings).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn ai_default_concept_edge_prompt() -> String {
     grafium_core::ai::references::DEFAULT_CONCEPT_EDGE_PROMPT.to_string()
+}
+
+#[cfg(test)]
+mod shared_schema_tests {
+    #[test]
+    fn schema_is_shared_and_contains_no_plaintext_credential_fields() {
+        let schema = super::ai_model_settings_schema().unwrap();
+        for role in ["chat", "embeddings", "transcription"] {
+            assert!(schema["properties"].get(role).is_some());
+        }
+        let serialized = serde_json::to_string(&schema).unwrap();
+        assert!(serialized.contains("credential_ref"));
+        assert!(!serialized.contains("\"api_key\""));
+    }
 }
 
 #[tauri::command]
@@ -1140,8 +1170,8 @@ pub async fn ai_set_config(
         references,
         ..AiConfig::default()
     };
+    config.validate().map_err(|error| error.to_string())?;
 
-    // Save config to disk.
     let config_dir = app
         .path()
         .app_data_dir()
@@ -1150,16 +1180,19 @@ pub async fn ai_set_config(
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("ai_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, json).map_err(|e| e.to_string())?;
 
-    // Reconfigure the engine.
     let mut guard = state.engine.write().await;
     if let Some(engine) = guard.as_mut() {
-        engine.reconfigure(config).map_err(|e| e.to_string())?;
+        engine
+            .reconfigure_persisted(config, |_| {
+                grafium_core::fsutil::atomic_write(&config_path, json.as_bytes())
+            })
+            .map_err(|e| e.to_string())?;
     } else {
         let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         let engine = KnowledgeEngine::new_with_models_root(&config_dir, config, &app_data_dir)
             .map_err(|e| e.to_string())?;
+        grafium_core::fsutil::atomic_write(&config_path, json.as_bytes()).map_err(|e| e.to_string())?;
         *guard = Some(engine);
     }
 
