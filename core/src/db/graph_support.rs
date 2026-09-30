@@ -233,6 +233,28 @@ impl Database {
         Ok(())
     }
 
+    /// Batch form of [`Self::mark_page_pending_reindex`] for bulk rebuilds, in
+    /// a single transaction so thousands of pages don't pay per-row commits.
+    pub fn mark_pages_pending_reindex(&self, page_ids: &[String]) -> Result<()> {
+        if page_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let now = Utc::now().timestamp_millis();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO pending_reindex (page_id, marked_at) VALUES (?1, ?2)
+                 ON CONFLICT(page_id) DO UPDATE SET marked_at = ?2",
+            )?;
+            for page_id in page_ids {
+                stmt.execute(params![page_id, now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Pages that have been quiescent for at least `debounce_ms` (i.e. not
     /// edited again since), oldest first, each with its `marked_at` so the
     /// caller can clear the row only if it hasn't been re-marked by a newer

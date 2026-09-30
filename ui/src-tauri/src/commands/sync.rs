@@ -254,12 +254,14 @@ pub fn sync_run(
 
     let result = engine.sync(backend.as_ref()).map_err(|e| e.to_string())?;
 
-    // Reindex after sync to pick up pulled/conflict files
+    // Incrementally reconcile pulled/conflict/deleted files. Unlike reindex_all
+    // this keeps page/block ids (and so stored vectors) stable; rescanned pages
+    // are queued for embedding and unchanged chunks are skipped by hash.
     if !result.pulled.is_empty() || !result.conflicts.is_empty() || !result.deleted_local.is_empty()
     {
         match crate::open_graph_snapshot(&snapshot) {
             Ok(detached_graph) => {
-                if let Err(e) = detached_graph.reindex_all() {
+                if let Err(e) = detached_graph.reconcile_files_from_disk() {
                     eprintln!("Reindex after sync failed: {}", e);
                 }
             }
@@ -329,7 +331,7 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
     if needs_reindex {
         match crate::open_graph_snapshot(&snapshot) {
             Ok(detached_graph) => {
-                if let Err(e) = detached_graph.reindex_all() {
+                if let Err(e) = detached_graph.reconcile_files_from_disk() {
                     eprintln!("Reindex after sync failed: {}", e);
                 }
             }

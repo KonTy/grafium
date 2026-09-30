@@ -406,7 +406,7 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                                     || !result.deleted_local.is_empty()
                                 {
                                     if let Ok(detached_graph) = open_graph_snapshot(&snapshot) {
-                                        let _ = detached_graph.reindex_all();
+                                        let _ = detached_graph.reconcile_files_from_disk();
                                     }
                                     // Notify frontend to refresh
                                     let _ = app_handle.emit(

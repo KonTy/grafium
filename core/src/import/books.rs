@@ -5890,6 +5890,31 @@ mod tests {
     }
 
     #[test]
+    fn imported_book_is_queued_for_vector_indexing() {
+        let graph_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        write_minimal_epub(&source_dir.path().join("sample.epub"));
+        let graph = graph_in(graph_dir.path());
+
+        let report = import_books_directory(&graph, source_dir.path(), |_| {}, || false).unwrap();
+        let page_id = report.items[0]
+            .index_page_id
+            .clone()
+            .expect("imported page");
+
+        let due = graph.db.list_pending_reindex_due(0, 100).unwrap();
+        assert!(
+            due.iter().any(|(id, _)| id == &page_id),
+            "imported book page must be queued for the embedding drainer"
+        );
+        let blocks = graph.db.list_blocks_for_page(&page_id).unwrap();
+        assert!(
+            !blocks.is_empty(),
+            "book text must be indexed as blocks for FTS/embedding"
+        );
+    }
+
+    #[test]
     fn skips_unchanged_book_using_manifest() {
         let graph_dir = tempdir().unwrap();
         let source_dir = tempdir().unwrap();

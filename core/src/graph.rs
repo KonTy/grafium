@@ -829,9 +829,18 @@ impl Graph {
     }
 
     /// Full re-index: scan all .md files and rebuild the SQLite index.
+    ///
+    /// The rebuild assigns fresh page and block ids, so every stored vector
+    /// (keyed by `page_id:block_id`) is orphaned by it. The previous ids are
+    /// queued so the drainer purges their vectors, and every rebuilt page is
+    /// queued so it gets re-embedded. Otherwise a manual "Reindex" would silently
+    /// drop semantic search — and any freshly imported book still waiting for
+    /// its first embed — until someone ran "Index all" by hand.
     pub fn reindex_all(&self) -> Result<()> {
         // Migrate legacy %2F-encoded files to folder hierarchy
         let _ = self.migrate_percent_encoded_to_folders();
+
+        let previous_page_ids = self.all_page_ids()?;
 
         // Clear existing index
         self.db.clear_all()?;
@@ -851,7 +860,25 @@ impl Graph {
         self.index_directory(&self.knowledge_dir)?;
         self.seed_page_edit_history_from_file_mtimes()?;
 
+        let mut pending = self.all_page_ids()?;
+        let rebuilt: HashSet<&String> = pending.iter().collect();
+        let stale: Vec<String> = previous_page_ids
+            .into_iter()
+            .filter(|id| !rebuilt.contains(id))
+            .collect();
+        pending.extend(stale);
+        self.db.mark_pages_pending_reindex(&pending)?;
+
         Ok(())
+    }
+
+    fn all_page_ids(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM pages")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     /// Non-destructively reconcile on-disk Markdown with the existing index.
@@ -876,17 +903,25 @@ impl Graph {
             })
             .collect();
 
+        let mut touched = Vec::new();
         for path in files {
-            self.index_file_impl(&path)?;
+            if let Some(page_id) = self.index_file_impl(&path)? {
+                touched.push(page_id);
+            }
         }
 
-        for (_page_id, rel_path) in self.db.list_file_backed_page_paths()? {
-            if !file_set.contains(&rel_path) {
-                self.deindex_file(&self.root_dir.join(&rel_path))?;
+        for (page_id, rel_path) in self.db.list_file_backed_page_paths()? {
+            if !file_set.contains(&rel_path) && self.deindex_file(&self.root_dir.join(&rel_path))? {
+                touched.push(page_id);
             }
         }
 
         self.seed_page_edit_history_from_file_mtimes()?;
+        // Queue vector refresh for anything that arrived, changed or vanished
+        // while Grafium wasn't watching (books copied in, sync pulls). Page and
+        // block ids are stable on this path, so pages whose content is really
+        // unchanged cost only a re-chunk: the embedder's hash cache skips them.
+        self.db.mark_pages_pending_reindex(&touched)?;
         Ok(())
     }
 
@@ -974,9 +1009,8 @@ impl Graph {
                 }
                 self.index_directory_recursive(&path)?;
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                // Bulk rebuild: index without marking pending — a full
-                // reindex_all regenerates the whole DB, so flagging every page
-                // as "stale" here would be noise, not a real vector change.
+                // Bulk rebuild: index without marking per file; reindex_all
+                // queues the whole rebuilt set in one batch afterwards.
                 self.index_file_impl(&path)?;
             }
         }
@@ -988,10 +1022,9 @@ impl Graph {
     /// This is the choke point for content arriving *from disk* — the file
     /// watcher (external editors / USB sync), imports, and page creation all
     /// funnel through here — so it also marks the affected page for a vector
-    /// reindex. The bulk `reindex_all` path deliberately calls
-    /// [`Self::index_file_impl`] directly instead, so rebuilding the whole
-    /// graph DB doesn't flood the pending set (and mislabel every page as
-    /// "stale") when the vectors themselves haven't changed.
+    /// reindex. The bulk `reindex_all` / `reconcile_files_from_disk` paths call
+    /// [`Self::index_file_impl`] directly and queue their pages in one batch,
+    /// without recording a per-file "edit" for every page they rescan.
     pub fn index_file(&self, path: &Path) -> Result<()> {
         if let Some(page_id) = self.index_file_impl(path)? {
             self.mark_page_dirty(&page_id);
@@ -4537,23 +4570,70 @@ mod tests {
     }
 
     #[test]
-    fn reindex_all_does_not_flood_the_pending_set() -> Result<()> {
+    fn reindex_all_queues_vector_refresh_for_regenerated_ids() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
-        let file_path = graph.pages_dir.join("bulk.md");
-        fs::write(
-            &file_path,
-            "- one long enough bullet\n- two long enough bullet\n",
+        let before = graph.create_page_with_content(
+            "Books/Imported",
+            false,
+            "- a freshly imported chapter paragraph\n",
         )?;
+        assert_eq!(pending_page_ids(&graph)?, vec![before.id.clone()]);
 
-        // The individual (external-edit) index_file path DOES mark pending.
-        graph.index_file(&file_path)?;
-        assert!(!pending_page_ids(&graph)?.is_empty());
-
-        // A full rebuild must not flag every page as stale — it regenerates the
-        // whole DB and resets the dirty set.
+        // A full rebuild regenerates ids, orphaning stored vectors. It must not
+        // drop the book's pending embed: the new id is queued for embedding and
+        // the old id for a vector purge.
         graph.reindex_all()?;
-        assert_eq!(graph.db.count_pending_reindex()?, 0);
+        let after = graph.db.get_page_by_title("Books/Imported")?;
+        assert_ne!(after.id, before.id);
+        let pending = pending_page_ids(&graph)?;
+        assert!(
+            pending.contains(&after.id),
+            "rebuilt page must be re-embedded"
+        );
+        assert!(
+            pending.contains(&before.id),
+            "orphaned vectors must be purged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_queues_books_added_changed_or_removed_while_closed() -> Result<()> {
+        let temp = tempdir()?;
+        let kept_id;
+        let removed_id;
+        {
+            let graph = Graph::open(temp.path())?;
+            kept_id = graph
+                .create_page_with_content("Books/Kept", false, "- kept chapter text here\n")?
+                .id;
+            removed_id = graph
+                .create_page_with_content("Books/Removed", false, "- removed chapter text\n")?
+                .id;
+            graph
+                .db
+                .conn()?
+                .execute("DELETE FROM pending_reindex", [])?;
+        }
+
+        // Simulate a book copied in (e.g. sync pull) and one deleted while the
+        // app wasn't watching.
+        let books = temp.path().join("pages/Books");
+        fs::write(books.join("Added.md"), "- a new book arrived via sync\n")?;
+        fs::remove_file(books.join("Removed.md"))?;
+
+        let graph = Graph::open(temp.path())?;
+        graph.reconcile_files_from_disk()?;
+
+        let added = graph.db.get_page_by_title("Books/Added")?;
+        assert_eq!(graph.db.get_page_by_title("Books/Kept")?.id, kept_id);
+        let pending = pending_page_ids(&graph)?;
+        assert!(pending.contains(&added.id), "new book must be embedded");
+        assert!(
+            pending.contains(&removed_id),
+            "removed book vectors must be purged"
+        );
         Ok(())
     }
 
