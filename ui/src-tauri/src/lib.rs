@@ -1,5 +1,7 @@
 pub mod build_info;
 mod commands;
+#[cfg(not(target_os = "android"))]
+mod shutdown;
 mod welcome;
 
 // Android-only JNI bridge: exposes grafium_core::assistant::handle_command as
@@ -14,8 +16,6 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -954,7 +954,7 @@ pub fn run() {
     // is active. Disable them before the webview initializes so the app launches
     // reliably from any entry point (start menu, terminal, packaged binary)
     // without depending on an external wrapper script to set these.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     {
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
@@ -976,6 +976,14 @@ pub fn run() {
             #[cfg(desktop)]
             commands::startup::install_fallback(app.handle());
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            #[cfg(not(target_os = "android"))]
+            if let Err(error) = grafium_core::ai::worker::configure_current_executable_with_state(
+                &app_dir.join("native-runtime-recovery"),
+            ) {
+                grafium_core::ai::worker::emit_runtime_warning(&format!(
+                    "Native AI supervision could not start; native inference is unavailable: {error}"
+                ));
+            }
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -1424,6 +1432,7 @@ pub fn run() {
             commands::knowledge::ai_index_all_pages,
             commands::knowledge::ai_index_status,
             commands::knowledge::ai_retry_llm_on_gpu,
+            commands::knowledge::ai_allow_gpu_retry,
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_cancel_operation,
@@ -1483,19 +1492,29 @@ pub fn run() {
         // exit handlers after an otherwise clean Grafium shutdown. Returning
         // from the loop lets Tauri finish first; the isolated AI worker is then
         // stopped before `_exit` releases all remaining OS resources.
-        let shutdown_started = Arc::new(AtomicBool::new(false));
-        let shutdown_guard = shutdown_started.clone();
+        let shutdown_guard = Arc::new(shutdown::ShutdownGate::default());
         let exit_code = app.run_return(move |app_handle, event| {
-            if let tauri::RunEvent::WindowEvent {
-                event: tauri::WindowEvent::CloseRequested { api, .. },
-                ..
-            } = event
-            {
-                api.prevent_close();
-                if !shutdown_guard.swap(true, Ordering::AcqRel) {
-                    let _ = app_handle.emit("app-shutdown-started", ());
-                    let app_handle = app_handle.clone();
-                    thread::spawn(move || {
+            let requested_code = match event {
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { api, .. }, ..
+                } => {
+                    api.prevent_close();
+                    Some(0)
+                }
+                tauri::RunEvent::ExitRequested { api, code, .. } if !shutdown_guard.is_complete() => {
+                    api.prevent_exit();
+                    Some(code.unwrap_or(0))
+                }
+                _ => None,
+            };
+            if let Some(code) = requested_code {
+                if shutdown_guard.begin() {
+                    if let Err(error) = app_handle.emit("app-shutdown-started", ()) {
+                        tracing::warn!("Could not display shutdown status: {error}");
+                    }
+                    let handle = app_handle.clone();
+                    let gate = shutdown_guard.clone();
+                    let spawned = thread::Builder::new().name("grafium-shutdown".into()).spawn(move || {
                         let started_at = Instant::now();
                         grafium_core::ai::worker::shutdown_pool();
 
@@ -1505,15 +1524,25 @@ pub fn run() {
                         if let Some(remaining) = minimum_notice.checked_sub(started_at.elapsed()) {
                             thread::sleep(remaining);
                         }
-                        app_handle.exit(0);
+                        gate.complete();
+                        handle.exit(code);
                     });
+                    if let Err(error) = spawned {
+                        tracing::error!("Could not start shutdown thread: {error}");
+                        grafium_core::ai::worker::shutdown_pool();
+                        shutdown_guard.complete();
+                        app_handle.exit(code);
+                    }
                 }
             }
         });
         grafium_core::ai::worker::shutdown_pool();
+        #[cfg(target_os = "linux")]
         grafium_core::ai::worker::exit_without_native_cleanup(exit_code);
+        #[cfg(not(target_os = "linux"))]
+        let _ = exit_code;
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "android")]
     app.run(|_, _| {});
 }

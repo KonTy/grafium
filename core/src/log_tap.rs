@@ -63,6 +63,31 @@ pub enum TapLevel {
 /// dozen lines at load time, plus a handful per generation.
 const MAX_EVENTS: usize = 2048;
 
+#[cfg(any(feature = "llm-local", feature = "media"))]
+pub(crate) struct NativeLogLayer;
+
+#[cfg(any(feature = "llm-local", feature = "media"))]
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for NativeLogLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" { self.0 = format!("{value:?}"); }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        let level = match *event.metadata().level() {
+            tracing::Level::ERROR => TapLevel::Error,
+            tracing::Level::WARN => TapLevel::Warn,
+            tracing::Level::INFO => TapLevel::Info,
+            tracing::Level::DEBUG => TapLevel::Debug,
+            tracing::Level::TRACE => TapLevel::Trace,
+        };
+        record(level, event.metadata().target(), &message.0);
+    }
+}
+
 fn buffer() -> &'static Mutex<VecDeque<TapEvent>> {
     static BUFFER: OnceLock<Mutex<VecDeque<TapEvent>>> = OnceLock::new();
     BUFFER.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS)))

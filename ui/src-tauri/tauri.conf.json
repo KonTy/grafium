@@ -1,6 +1,6 @@
 {
   "productName": "Grafium",
-  "version": "0.0.131",
+  "version": "0.0.134",
   "identifier": "com.grafium.app",
   "build": {
     "frontendDist": "../dist",
@@ -37,6 +37,8 @@
     "longDescription": "Grafium is a local-first, privacy-respecting knowledge graph and note-taking workspace with bidirectional links, ink/handwriting support, and offline-first sync.",
     "icon": [
       "icons/32x32.png",
+      "icons/48x48.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",

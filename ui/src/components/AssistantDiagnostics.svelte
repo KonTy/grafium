@@ -15,9 +15,11 @@
   }
   $effect(() => {
     if (!active) return;
-    void refresh();
     const subscription = listen("ai-index-updated", () => { void refresh(); });
     return () => { void subscription.then((unlisten) => unlisten()).catch(() => {}); };
+  });
+  $effect(() => {
+    if (active && !running) void refresh();
   });
   async function buildIndex() {
     if (indexing) return;
@@ -38,6 +40,16 @@
   }
 </script>
 
+{#each index?.runtime_warnings ?? [] as warning}
+  <p class="runtime-warning" role="status">{warning}</p>
+{/each}
+{#if index?.runtime_recovery?.length}
+  <p class="runtime-warning" role="status">
+    A native model needs recovery approval before using GPU again.
+    <button onclick={onOpenSettings}>Review recovery in Settings</button>
+  </p>
+{/if}
+
 <details class="diagnostics assistant-disclosure">
   <summary>Model &amp; index status{index?.accelerator?.gpu_supported && !index.accelerator.on_gpu ? " · Running on CPU" : ""}</summary>
   <div class="diagnostic-content assistant-disclosure-body">
@@ -47,7 +59,7 @@
       {#if !index.embedder_ready}<p>Configure an embedding model to index notes and use semantic search.</p>{/if}
       <button disabled={indexing || !index.embedder_ready} onclick={buildIndex}>{indexing ? "Indexing…" : "Index now"}</button>
       {#if index.accelerator?.gpu_supported && !index.accelerator.on_gpu}
-        <p>Running on CPU despite GPU support. Retrying reloads the same model; it does not select another one.</p>
+        <p>Running on CPU despite GPU support. Retrying checks memory again; it cannot bypass the safety checks.</p>
         <button disabled={retrying || running} onclick={retryGpu}>{retrying ? "Retrying…" : "Retry on GPU"}</button>
       {/if}
     {/if}
@@ -58,6 +70,7 @@
 </details>
 
 <style>
+  .runtime-warning { color: var(--text-secondary); font-size: 12px; margin: 6px 0; }
   .diagnostics { font-size: 12px; color: var(--text-secondary); }
   .diagnostic-content { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   p { flex-basis: 100%; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }

@@ -16,7 +16,7 @@ use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 /// sentinel). A no-op unless built with a GPU feature (`llm-local-vulkan`).
 pub(crate) const OFFLOAD_ALL_LAYERS: u32 = 1_000_000;
 
-static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
+static BACKEND: OnceLock<std::result::Result<Arc<LlamaBackend>, String>> = OnceLock::new();
 static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
 
 /// Returns the shared process-wide llama.cpp backend handle, initializing
@@ -29,13 +29,17 @@ static INSTALL_LOGGING: std::sync::Once = std::sync::Once::new();
 /// visibility is what lets us see e.g. `ggml_vulkan: ... memory allocation
 /// ... failed` lines that were previously invisible — critical for
 /// debugging the VRAM/driver crashes this local-LLM path is prone to.
-pub(crate) fn shared_backend() -> Arc<LlamaBackend> {
+pub(crate) fn shared_backend() -> crate::error::Result<Arc<LlamaBackend>> {
     INSTALL_LOGGING.call_once(|| {
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
     });
     BACKEND
         .get_or_init(|| {
-            Arc::new(LlamaBackend::init().expect("failed to initialize the llama.cpp backend"))
+            LlamaBackend::init()
+                .map(Arc::new)
+                .map_err(|e| e.to_string())
         })
-        .clone()
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|e| crate::CoreError::Other(format!("Failed to initialize native backend: {e}")))
 }

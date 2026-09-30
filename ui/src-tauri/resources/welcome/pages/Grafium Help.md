@@ -15,6 +15,7 @@ separate graph.
 - [[Help - Tasks]]
 - [[Help - Chat]]
 - [[Help - Settings]]
+- [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery
 - [[Help - Sync]]
 - [[Help - Search]]
 - [[Help - Grafium Guide]]

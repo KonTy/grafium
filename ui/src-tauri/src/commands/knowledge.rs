@@ -1184,6 +1184,8 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
             // No engine at all is a different situation from an engine whose
             // model failed to load, and must not be reported as the latter.
             llm_load_error: None,
+            runtime_warnings: grafium_core::ai::resources::runtime_warnings(),
+            runtime_recovery: grafium_core::ai::resources::runtime_recovery(),
         })
     }
 }
@@ -1211,10 +1213,8 @@ pub async fn ai_index_status(
         .map_err(|e| e.to_string())
 }
 
-/// Reload the local chat model forcing full GPU offload. Backs Chat's "Retry
-/// on GPU" action for the case where the free-VRAM heuristic landed on CPU
-/// because VRAM was transiently busy at startup. Returns the refreshed
-/// accelerator status so the UI can update its banner immediately.
+/// Request GPU offload for Chat without bypassing fitting or recovery.
+/// A quarantined model receives one explicit retry authorization.
 #[tauri::command]
 pub async fn ai_retry_llm_on_gpu(
     state: State<'_, KnowledgeState>,
@@ -1225,6 +1225,31 @@ pub async fn ai_retry_llm_on_gpu(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
     engine.retry_llm_on_gpu().map_err(|e| e.to_string())?;
     Ok(engine.llm_accelerator_status())
+}
+
+#[tauri::command]
+pub async fn ai_allow_gpu_retry(
+    state: State<'_, KnowledgeState>,
+    key: String,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut guard = state.engine.write().await;
+        if let Some(engine) = guard.as_mut() {
+            let chat_key = engine.llm_provider().and_then(|provider| provider.native_model_path())
+                .map(|path| grafium_core::ai::worker::gpu_risk_key("chat", path))
+                .transpose().map_err(|e| e.to_string())?;
+            if chat_key.as_deref() == Some(&key) {
+                return engine.retry_llm_on_gpu().map_err(|e| e.to_string());
+            }
+        }
+        grafium_core::ai::worker::allow_gpu_retry(&key).map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (state, key);
+        Err("Embedded GPU inference is unavailable on Android".into())
+    }
 }
 
 #[tauri::command]

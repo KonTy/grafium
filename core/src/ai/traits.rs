@@ -6,54 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// Options for LLM completion requests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionOptions {
-    /// Maximum tokens to generate.
-    pub max_tokens: Option<u32>,
-    /// Sampling temperature (0.0 = deterministic, 1.0 = creative).
-    pub temperature: Option<f32>,
-    /// System prompt / context.
-    pub system_prompt: Option<String>,
-    /// Stop sequences.
-    pub stop: Option<Vec<String>>,
-    /// Cooperative cancellation flag. When set to `true` mid-generation, a
-    /// provider that supports it (currently the local llama.cpp provider)
-    /// stops the token loop and returns what it has so far, so a slow local
-    /// generation can be aborted from the UI. Skipped for (de)serialization —
-    /// it's a live in-process handle, never part of persisted config — and
-    /// ignored by remote providers, which return in one shot anyway. Native
-    /// prompt counting also checks this flag while waiting for its worker.
-    #[serde(skip)]
-    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-}
-
-impl Default for CompletionOptions {
-    fn default() -> Self {
-        Self {
-            max_tokens: Some(2048),
-            temperature: Some(0.3),
-            system_prompt: None,
-            stop: None,
-            cancel: None,
-        }
-    }
-}
-
-/// A single message in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: MessageRole,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-}
+pub use model_runtime::types::{
+    AcceleratorStatus, BoxFuture, ChatMessage, CompletionOptions, Concurrency, MessageRole,
+};
 
 /// Result from a vector similarity search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,74 +44,6 @@ pub struct ChunkEmbedding {
     pub metadata: serde_json::Value,
 }
 
-// Type alias for async trait returns (avoids the `async_trait` macro overhead).
-// Defined once in `async_util` and re-exported here so every AI provider
-// (and, elsewhere, `scraping::browser::BrowserDriver`) shares the exact same
-// type instead of each module declaring its own `Pin<Box<dyn Future<...>>>`.
-pub use crate::async_util::BoxFuture;
-
-/// Describes whether local inference is actually using the GPU, so the UI can
-/// warn the user when a model silently fell back to CPU (a 5–10× slowdown that
-/// otherwise presents as a hang). Only the embedded local provider reports
-/// this; remote providers return `None`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceleratorStatus {
-    /// Whether this build can offload to a GPU at all (compiled with a GPU
-    /// backend, e.g. `llm-local-vulkan`). When `false`, running on CPU is
-    /// expected and the UI should not warn about it.
-    pub gpu_supported: bool,
-    /// Whether inference is actually running with GPU-offloaded layers
-    /// (`gpu_supported` and a non-zero effective `gpu_layers`).
-    pub on_gpu: bool,
-    /// Effective layers requested for GPU offload. The sentinel value for
-    /// "all layers" is large (see `OFFLOAD_ALL_LAYERS`); `0` means CPU-only.
-    pub gpu_layers: u32,
-    /// Free VRAM observed at load time, in MiB — the figure that drove the
-    /// CPU/GPU decision. `None` if it couldn't be queried (no `nvidia-smi`).
-    pub free_vram_mib_at_load: Option<u64>,
-    /// The model file's on-disk size in MiB, for the "needs ~X MiB" message.
-    pub model_mib: Option<u64>,
-    /// Whether `gpu_layers` was pinned explicitly in config (so the free-VRAM
-    /// heuristic was bypassed). An explicit setting always wins.
-    pub explicit: bool,
-}
-
-/// How many requests a provider can genuinely serve at the same time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Concurrency {
-    /// Requests may overlap freely. The provider (or the server behind it)
-    /// batches them.
-    Parallel,
-    /// Only `slots` requests can run at once; the rest must wait their turn.
-    /// `slots` is always at least 1.
-    #[serde(rename_all = "camelCase")]
-    Serialized { slots: usize },
-}
-
-impl Concurrency {
-    /// A serialized provider with a sane floor — zero slots would mean "never
-    /// answer", which is never what a caller means.
-    pub fn serialized(slots: usize) -> Self {
-        Self::Serialized {
-            slots: slots.max(1),
-        }
-    }
-
-    /// Whether a second request has to wait for the first to finish.
-    pub fn queues(&self) -> bool {
-        matches!(self, Self::Serialized { .. })
-    }
-
-    /// How many requests can be in flight, or `None` when unbounded.
-    pub fn slots(&self) -> Option<usize> {
-        match self {
-            Self::Parallel => None,
-            Self::Serialized { slots } => Some(*slots),
-        }
-    }
-}
-
 /// LLM provider trait — abstracts over Ollama, OpenAI, Anthropic, etc.
 pub trait LlmProvider: Send + Sync {
     /// Generate a completion from a prompt.
@@ -168,6 +55,11 @@ pub trait LlmProvider: Send + Sync {
 
     /// Provider name for logging/config.
     fn name(&self) -> &str;
+
+    /// Host identity for explicit native recovery; never included in prompts.
+    fn native_model_path(&self) -> Option<&std::path::Path> {
+        None
+    }
 
     /// Check if the provider is available (connection test).
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>>;
@@ -227,9 +119,10 @@ pub trait LlmProvider: Send + Sync {
     /// Providers that can't stream (e.g. a plain non-SSE HTTP JSON API) can
     /// rely on this default: wait for the full response, then invoke
     /// `on_token` once with it — callers should treat "one big chunk" and
-    /// "many small chunks" as equally valid. `LocalLlm` overrides this with
-    /// genuine token-by-token streaming, since that's the provider slow
-    /// enough (CPU-bound local inference) for live feedback to matter.
+    /// "many small chunks" as equally valid. HTTP transports and `LocalLlm`
+    /// override this with incremental streaming. Deltas remain provisional
+    /// until the future succeeds; transport errors and cancellation are errors,
+    /// not successful partial answers.
     fn complete_stream<'a>(
         &'a self,
         messages: &'a [ChatMessage],

@@ -116,25 +116,25 @@ impl KnowledgeEngine {
                     match local.provider {
                         ProviderType::Ollama => {
                             self.llm =
-                                Some(Box::new(OllamaLlm::new(&local.base_url, &local.llm_model)));
+                                Some(Box::new(OllamaLlm::new(&local.base_url, &local.llm_model)?));
                             self.embedder = Some(Box::new(OllamaEmbedder::new(
                                 &local.base_url,
                                 &local.embedding_model,
                                 768,
-                            )));
+                            )?));
                         }
                         ProviderType::OpenAiCompatible => {
                             self.llm = Some(Box::new(OpenAiCompatibleLlm::new(
                                 &local.base_url,
                                 &local.llm_model,
                                 local.api_key.clone(),
-                            )));
+                            )?));
                             self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
                                 &local.base_url,
                                 &local.embedding_model,
                                 1024,
                                 local.api_key.clone(),
-                            )));
+                            )?));
                         }
                         ProviderType::HuggingFace => {
                             #[cfg(feature = "llm-local")]
@@ -223,13 +223,13 @@ impl KnowledgeEngine {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing OpenAI API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)?));
                         }
                         ProviderType::Anthropic => {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing Anthropic API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)?));
                         }
                         ProviderType::OpenAiCompatible => {
                             let base_url = cloud
@@ -240,7 +240,7 @@ impl KnowledgeEngine {
                                 &base_url,
                                 &cloud.llm_model,
                                 cloud.llm_api_key.clone(),
-                            )));
+                            )?));
                         }
                         _ => {}
                     }
@@ -259,7 +259,7 @@ impl KnowledgeEngine {
                                 key,
                                 &cloud.embedding_model,
                                 1536,
-                            )));
+                            )?));
                         }
                         ProviderType::OpenAiCompatible => {
                             let base_url = cloud
@@ -272,7 +272,7 @@ impl KnowledgeEngine {
                                 &cloud.embedding_model,
                                 1024,
                                 embed_key,
-                            )));
+                            )?));
                         }
                         _ => {}
                     }
@@ -287,7 +287,7 @@ impl KnowledgeEngine {
                                 &local.base_url,
                                 &local.embedding_model,
                                 768,
-                            )));
+                            )?));
                         }
                         ProviderType::OpenAiCompatible => {
                             self.embedder = Some(Box::new(OpenAiCompatibleEmbedder::new(
@@ -295,7 +295,7 @@ impl KnowledgeEngine {
                                 &local.embedding_model,
                                 1024,
                                 local.api_key.clone(),
-                            )));
+                            )?));
                         }
                         _ => {}
                     }
@@ -308,13 +308,13 @@ impl KnowledgeEngine {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing OpenAI API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(OpenAiLlm::new(key, &cloud.llm_model)?));
                         }
                         ProviderType::Anthropic => {
                             let key = cloud.llm_api_key.as_deref().ok_or_else(|| {
                                 CoreError::Other("Missing Anthropic API key".to_string())
                             })?;
-                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)));
+                            self.llm = Some(Box::new(AnthropicLlm::new(key, &cloud.llm_model)?));
                         }
                         ProviderType::OpenAiCompatible => {
                             let base_url = cloud
@@ -325,7 +325,7 @@ impl KnowledgeEngine {
                                 &base_url,
                                 &cloud.llm_model,
                                 cloud.llm_api_key.clone(),
-                            )));
+                            )?));
                         }
                         _ => {}
                     }
@@ -357,6 +357,8 @@ impl KnowledgeEngine {
 
     /// Reconfigure the engine with new settings.
     pub fn reconfigure(&mut self, config: AiConfig) -> Result<()> {
+        #[cfg(any(feature = "llm-local", feature = "media"))]
+        crate::ai::resources::accept_deferred_eviction(crate::ai::worker::evict_idle())?;
         self.config = config.clone();
         self.llm = None;
         self.llm_load_error = None;
@@ -372,15 +374,9 @@ impl KnowledgeEngine {
         Ok(())
     }
 
-    /// Reload the local chat model forcing full GPU offload, bypassing the
-    /// free-VRAM heuristic. Backs Chat's "Retry on GPU" action: the heuristic
-    /// may have landed on CPU because VRAM was *transiently* busy at startup
-    /// (the embedder mid-index, a previous instance shutting down); once that
-    /// clears, this moves inference onto the GPU without a restart or a
-    /// Settings edit. Only meaningful for the embedded local provider; other
-    /// provider modes return an error the UI can surface. On failure the
-    /// previous provider is left untouched (a fresh instance is only swapped
-    /// in on success), so a failed retry can't leave chat unavailable.
+    /// Request GPU offload without bypassing fitting, admission or crash
+    /// recovery. Explicit retries can authorize a quarantined model once.
+    /// The previous provider stays installed if preparation fails.
     pub fn retry_llm_on_gpu(&mut self) -> Result<()> {
         #[cfg(feature = "llm-local")]
         {
@@ -399,6 +395,11 @@ impl KnowledgeEngine {
                 &self.config,
                 &self.models_root,
             )?;
+            let path = llm.native_model_path().expect("native model provider");
+            let key = crate::ai::worker::gpu_risk_key("chat", path)?;
+            if crate::ai::worker::recovery_status().iter().any(|record| record.key == key) {
+                crate::ai::worker::allow_gpu_retry(&key)?;
+            }
             self.llm = Some(Box::new(llm));
             Ok(())
         }
@@ -481,6 +482,8 @@ impl KnowledgeEngine {
 
         Ok(HealthStatus {
             llm_load_error: self.llm_load_error.clone(),
+            runtime_warnings: crate::ai::resources::runtime_warnings(),
+            runtime_recovery: crate::ai::resources::runtime_recovery(),
             enabled: self.config.enabled,
             llm_available: llm_ok,
             embedder_available: self.embedder.is_some(),
@@ -513,6 +516,8 @@ impl KnowledgeEngine {
             embedder_ready: self.embedder.is_some() && self.vector_store.is_some(),
             llm_ready: self.is_llm_ready(),
             accelerator: self.llm.as_ref().and_then(|l| l.accelerator_status()),
+            runtime_warnings: crate::ai::resources::runtime_warnings(),
+            runtime_recovery: crate::ai::resources::runtime_recovery(),
         })
     }
 
@@ -1703,6 +1708,10 @@ pub struct HealthStatus {
     /// which gives the reader nothing to act on.
     #[serde(default)]
     pub llm_load_error: Option<String>,
+    #[serde(default)]
+    pub runtime_warnings: Vec<String>,
+    #[serde(default)]
+    pub runtime_recovery: Vec<model_runtime::recovery::BlockedModel>,
 }
 
 /// Indexing coverage for a graph, for the Chat empty-index banner and
@@ -1727,6 +1736,11 @@ pub struct IndexStatus {
     /// fell back to CPU — a 5–10× slowdown that otherwise looks like a hang.
     /// `None` for remote providers or when no LLM is loaded.
     pub accelerator: Option<crate::ai::traits::AcceleratorStatus>,
+    /// Recent native admission/worker warnings, without prompts or note content.
+    #[serde(default)]
+    pub runtime_warnings: Vec<String>,
+    #[serde(default)]
+    pub runtime_recovery: Vec<model_runtime::recovery::BlockedModel>,
 }
 
 /// How many hits `ask` retrieves before context assembly.

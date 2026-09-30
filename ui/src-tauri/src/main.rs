@@ -15,10 +15,26 @@ fn main() {
     if grafium_core::ai::worker::is_worker_invocation() {
         grafium_core::ai::worker::run_from_stdio();
     }
-    #[cfg(not(target_os = "android"))]
-    if let Err(error) = grafium_core::ai::worker::configure_current_executable() {
-        eprintln!("Failed to configure native AI isolation: {error}");
-        std::process::exit(1);
-    }
+    configure_gui_identity();
     grafium_lib::run();
+}
+
+fn configure_gui_identity() {
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland identifies standalone GTK windows by the program name.
+        // Keep it stable when installers rename the executable to grafium-bin.
+        gtk::glib::set_prgname(Some(env!("CARGO_PKG_NAME")));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn desktop_identity_is_set_without_initializing_gtk() {
+        assert!(!gtk::is_initialized());
+        super::configure_gui_identity();
+        assert_eq!(gtk::glib::prgname().as_deref(), Some("grafium"));
+        assert!(!gtk::is_initialized());
+    }
 }

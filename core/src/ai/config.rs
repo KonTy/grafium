@@ -192,10 +192,9 @@ pub struct LocalLlmSettings {
     pub context_size: Option<u32>,
     /// Number of transformer layers to offload to the GPU when built with
     /// a GPU feature (`llm-local-vulkan`); ignored on CPU-only builds.
-    /// `None` stays CPU-only. Offload is permitted by default now that the
-    /// model runs in a supervised child process; set
-    /// `GRAFIUM_DISABLE_GPU_OFFLOAD=1` to force CPU on a machine whose driver
-    /// is unstable.
+    /// `None` stays CPU-only. Requested offload also requires runtime GPU
+    /// admission; unknown/insufficient headroom falls back to CPU. Set
+    /// `GRAFIUM_DISABLE_GPU_OFFLOAD=1` to force CPU on an unstable driver.
     pub gpu_layers: Option<u32>,
     /// Whether llama.cpp is allowed to memory-map the model file
     /// (`llama_model_params.use_mmap`).

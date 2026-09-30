@@ -1,10 +1,13 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import RuntimeRecovery from "./RuntimeRecovery.svelte";
   import {
     aiGetConfig,
     aiSetConfig,
     aiDefaultConceptEdgePrompt,
     aiHealthCheck,
+    aiAllowGpuRetry,
+    aiRetryLlmOnGpu,
     aiIndexAllPages,
     aiCreateDefaultSchemas,
     type AiConfig,
@@ -18,6 +21,7 @@
   let isLoading = $state(false);
   let isSaving = $state(false);
   let isIndexing = $state(false);
+  let retryingGpu = $state(false);
   let indexCount = $state<number | null>(null);
   let message = $state("");
   let messageType = $state<"success" | "error">("success");
@@ -44,6 +48,12 @@
   let conceptEdgePrompt = $state("");
   let defaultConceptEdgePrompt = $state("");
   let promptAdvancedOpen = $state(false);
+  const savedChatModel = $derived(
+    config?.enabled === enabled && config?.mode === mode
+    && normalizeProvider(config?.local?.provider) === localProvider
+    && (config?.local?.local_llm?.model ?? "") === localModelPath
+    && (config?.local?.models_dir ?? "") === localModelsDir
+  );
 
   // Whisper transcription (video/audio import fallback) — independent of
   // the chat/search config above, since it's used by "Import Video" rather
@@ -244,6 +254,7 @@
             : undefined,
       };
       await aiSetConfig(payload);
+      config = await aiGetConfig();
       window.dispatchEvent(new CustomEvent("ai-configuration-changed"));
       health = await aiHealthCheck();
       showMessage("Configuration saved!", "success");
@@ -251,6 +262,23 @@
       showMessage("Failed to save: " + e, "error");
     } finally {
       isSaving = false;
+    }
+
+  }
+
+  async function retryGpu(key?: string) {
+    if (retryingGpu) return;
+    retryingGpu = true;
+    try {
+      if (key) await aiAllowGpuRetry(key);
+      else await aiRetryLlmOnGpu();
+      health = await aiHealthCheck();
+      showMessage("GPU retry requested. Memory checks still apply; active workers must finish before recovery can be changed.", "success");
+      window.dispatchEvent(new CustomEvent("ai-configuration-changed"));
+    } catch (error) {
+      showMessage(`GPU retry was not enabled: ${String(error)}`, "error");
+    } finally {
+      retryingGpu = false;
     }
   }
 
@@ -331,11 +359,11 @@
   const LOCAL_PROVIDER_DESCRIPTIONS: Record<string, string> = {
     openai_compatible: "Connects to a server you run yourself that speaks the OpenAI API (vLLM, llama-server, LM Studio, etc.).",
     ollama: "Connects to a running Ollama server on this machine or your local network.",
-    huggingface: "Runs llama.cpp in-process, built into Grafium itself — no server to start or keep running.",
+    huggingface: "Runs llama.cpp in a supervised worker built into Grafium — no server to manage. Unknown or insufficient GPU headroom uses CPU with a warning.",
   };
 </script>
 
-<div class="ai-settings">
+<div class="ai-settings" data-help-context="ai">
   <h3>AI / Knowledge Engine</h3>
 
   {#if isLoading}
@@ -369,6 +397,14 @@
           <span class="status-vectors">{health.vector_count} vectors</span>
         {/if}
       </div>
+      {#each health.runtime_warnings ?? [] as warning}
+        <p class="warning" role="status">{warning}</p>
+      {/each}
+      <RuntimeRecovery records={health.runtime_recovery ?? []} busy={retryingGpu} onRetry={retryGpu} />
+      {#if enabled && mode === "local" && localProvider === "huggingface"}
+        <button disabled={retryingGpu || isSaving || !savedChatModel} onclick={() => retryGpu()}>Request GPU for Chat</button>
+        {#if !savedChatModel}<p>Save the selected model settings before requesting GPU.</p>{/if}
+      {/if}
     {/if}
 
     <!-- Enable toggle -->

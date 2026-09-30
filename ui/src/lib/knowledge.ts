@@ -150,6 +150,8 @@ export interface HealthStatus {
   vector_count: number;
   mode: string;
   llm_load_error?: string | null;
+  runtime_warnings?: string[];
+  runtime_recovery?: RuntimeRecovery[];
 }
 
 export interface SemanticSearchResult {
@@ -316,6 +318,19 @@ export interface IndexStatus {
   llm_ready: boolean;
   /** Local LLM GPU/CPU status, or null for remote providers / no LLM loaded. */
   accelerator: AcceleratorStatus | null;
+  /** Recent native admission/worker warnings, without prompts or note content. */
+  runtime_warnings?: string[];
+  runtime_recovery?: RuntimeRecovery[];
+}
+
+export interface RuntimeRecovery {
+  key: string;
+  label: string;
+  reason: string;
+}
+
+export function aiAllowGpuRetry(key: string): Promise<void> {
+  return invoke("ai_allow_gpu_retry", { key });
 }
 
 export function aiIndexStatus(): Promise<IndexStatus> {
@@ -323,8 +338,8 @@ export function aiIndexStatus(): Promise<IndexStatus> {
 }
 
 /**
- * Reload the local chat model forcing full GPU offload — Chat's "Retry on
- * GPU" action. Returns the refreshed accelerator status (or null).
+ * Request GPU offload again, subject to runtime memory admission — Chat's
+ * "Retry on GPU" action. Returns refreshed accelerator status (or null).
  */
 export function aiRetryLlmOnGpu(): Promise<AcceleratorStatus | null> {
   return invoke("ai_retry_llm_on_gpu");

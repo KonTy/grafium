@@ -1094,7 +1094,7 @@
       const eventTarget = e.target;
       const section =
         eventTarget instanceof Element
-          ? eventTarget.closest("details[data-help-context]")?.getAttribute("data-help-context") ?? null
+          ? eventTarget.closest("[data-help-context]")?.getAttribute("data-help-context") ?? null
           : null;
       const context = isHelpContext(section) ? section : null;
       const currentContext: HelpContext =

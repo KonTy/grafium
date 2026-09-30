@@ -725,11 +725,9 @@ async fn assistant_remote_api_web_and_deep_receive_host_fetched_plain_messages()
             },
         )
         .unwrap();
-        engine.llm = Some(Box::new(OpenAiCompatibleLlm::new(
-            &endpoint,
-            "dgx-synthetic",
-            None,
-        )));
+        engine.llm = Some(Box::new(
+            OpenAiCompatibleLlm::new(&endpoint, "dgx-synthetic", None).unwrap(),
+        ));
         let browser = FakeBrowser::default();
         let mut text = String::new();
         let result = tokio::time::timeout(

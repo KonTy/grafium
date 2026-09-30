@@ -7,6 +7,7 @@ export type HelpContext =
   | "tasks"
   | "chat"
   | "settings"
+  | "ai"
   | "sync"
   | "search";
 
@@ -19,12 +20,13 @@ const HELP_PAGES: Record<HelpContext, string> = {
   tasks: "Help - Tasks",
   chat: "Help - Chat",
   settings: "Help - Settings",
+  ai: "AI Setup And Privacy",
   sync: "Help - Sync",
   search: "Help - Search",
 };
 
 export function isHelpContext(value: string | null): value is HelpContext {
-  return value !== null && value in HELP_PAGES;
+  return value !== null && Object.prototype.hasOwnProperty.call(HELP_PAGES, value);
 }
 
 export function helpPageTitle(context: HelpContext): string {

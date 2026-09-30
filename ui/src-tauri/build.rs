@@ -27,6 +27,8 @@ fn main() {
     // succeeds, the app runs, and it is simply the old interface.
     println!("cargo:rerun-if-changed=../dist");
     println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=src/main.rs");
+    println!("cargo:rerun-if-changed=icons");
 
     tauri_build::build();
 }
@@ -190,7 +192,9 @@ fn bundle_native_libs() {
         // used by the dynamic loader as a process-wide fallback search path
         // for *all* dependency resolution, transitively — exactly what's
         // needed here. Verified against an actual built `.deb` with `ldd`.
-        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib/Grafium");
+        // Immutable local builds keep their exact library generation beside
+        // the executable; packaged .deb/AppImage layouts use the second path.
+        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN:$ORIGIN/../lib/Grafium");
     }
 }
 

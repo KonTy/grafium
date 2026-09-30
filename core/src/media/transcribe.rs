@@ -116,8 +116,8 @@ impl WhisperSlot {
 
 /// Transcribe in the child. Runs only in the worker process.
 ///
-/// A fault inside whisper.cpp — an allocation failure, a driver reset — ends
-/// the worker instead of the application.
+/// Native faults are isolated from the application. A GPU driver/kernel failure
+/// can still affect the whole system, so GPU admission happens before loading.
 pub(crate) fn transcribe_in_process(
     slot: &mut Option<WhisperSlot>,
     model_path: &Path,
@@ -152,6 +152,10 @@ pub struct WhisperTranscriber {
     /// "fell back to CPU" up-front instead of leaving the user
     /// guessing why transcription is slow.
     backend: WhisperBackend,
+    #[cfg(not(feature = "llm-local"))]
+    gpu_context_budget: u64,
+    #[cfg(feature = "llm-local")]
+    device: Option<crate::ai::providers::native_gpu::Device>,
 }
 
 impl WhisperTranscriber {
@@ -185,12 +189,22 @@ impl WhisperTranscriber {
         }
 
         let mut params = WhisperContextParameters::default();
-        // Explicitly opt into GPU offload — the `whisper-rs/vulkan`
-        // Cargo feature already sets `use_gpu = true` in the default,
-        // but stating it here means "GPU on" doesn't silently regress
-        // if that default ever changes upstream, and makes the intent
-        // grep-able from a debug log ("why isn't my GPU being used?").
-        params.use_gpu(true);
+        crate::ai::resources::validate_model_load(
+            model_path, crate::ai::resources::ModelWorkload::Whisper,
+        )?;
+        #[cfg(feature = "llm-local")]
+        let mut device = crate::ai::providers::native_gpu::speech_device(model_path)?;
+        #[cfg(feature = "llm-local")]
+        let gpu_layers = u32::from(device.is_some());
+        #[cfg(feature = "llm-local")]
+        if let Some(device) = &device { params.gpu_device(device.whisper_index); }
+        #[cfg(not(feature = "llm-local"))]
+        let gpu_layers = crate::ai::resources::admitted_gpu_layers(
+            model_path,
+            crate::ai::resources::ModelWorkload::Whisper,
+            u32::from(cfg!(feature = "media-vulkan")),
+        )?;
+        params.use_gpu(gpu_layers > 0);
         // flash-attn shrinks whisper's KV cache activations and gives a
         // measurable speedup with negligible accuracy loss on Vulkan/CUDA
         // (this is the same knob whisper.cpp's own examples default to
@@ -229,15 +243,27 @@ impl WhisperTranscriber {
             },
         )?;
 
-        let backend = detect_backend_from_log(&crate::log_tap::snapshot_since_targets(
-            load_start,
-            &["whisper", "ggml"],
-        ));
+        let backend = if gpu_layers == 0 {
+            WhisperBackend::Cpu {
+                reason: "CPU selected by the runtime's GPU admission policy or build configuration.".into(),
+            }
+        } else {
+            detect_backend_from_log(&crate::log_tap::snapshot_since_targets(
+                load_start,
+                &["whisper", "ggml"],
+            ))
+        };
+        #[cfg(feature = "llm-local")]
+        if let Some(device) = &mut device { device.reserve_context()?; }
 
         Ok(Self {
             ctx,
             language: language.map(str::to_string),
             backend,
+            #[cfg(not(feature = "llm-local"))]
+            gpu_context_budget: std::fs::metadata(model_path)?.len(),
+            #[cfg(feature = "llm-local")]
+            device,
         })
     }
 
@@ -285,6 +311,13 @@ impl Transcriber for WhisperTranscriber {
         wav_path: &Path,
         on_progress: &mut dyn FnMut(TranscribeProgress),
     ) -> Result<Transcript> {
+        crate::ai::resources::validate_audio_buffer(wav_path)?;
+        #[cfg(feature = "llm-local")]
+        if let Some(device) = &self.device { device.check_context()?; }
+        #[cfg(not(feature = "llm-local"))]
+        if matches!(self.backend, WhisperBackend::Vulkan { .. }) {
+            crate::ai::resources::validate_gpu_context_headroom(self.gpu_context_budget)?;
+        }
         let samples = read_wav_as_f32_mono(wav_path)?;
         // 16kHz mono samples → seconds. Reported up front so the UI
         // can show "3:24 of audio" rather than a completely opaque
@@ -322,6 +355,26 @@ impl Transcriber for WhisperTranscriber {
             .map_err(|e| CoreError::Other(format!("failed to create whisper state: {e}")))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        #[cfg(feature = "llm-local")]
+        let mut pressure = crate::ai::providers::native_gpu::PressureWatch::new(self.device.clone());
+        let stopped = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let stop_reason = stopped.clone();
+        let mut last_check = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        params.set_abort_callback_safe(move || {
+            if last_check.elapsed() < std::time::Duration::from_millis(500) { return false; }
+            last_check = std::time::Instant::now();
+            #[cfg(feature = "llm-local")]
+            let error = pressure.check().err().map(|e| e.to_string());
+            #[cfg(not(feature = "llm-local"))]
+            let error = model_runtime::resources::critical_memory_pressure();
+            if let Some(error) = error {
+                crate::ai::worker::emit_runtime_warning(&error);
+                *stop_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                return true;
+            }
+            false
+        });
+        params.set_n_threads(crate::ai::resources::inference_thread_count());
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -367,6 +420,9 @@ impl Transcriber for WhisperTranscriber {
 
         let run_start = std::time::Instant::now();
         state.full(params, &samples).map_err(|e| {
+            if let Some(reason) = stopped.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+                return CoreError::Other(reason);
+            }
             // Include any whisper/GGML log lines from *this* run so the
             // surface error carries the actual cause verbatim (e.g. a
             // GPU device-lost/hang message, or a KV-cache OOM), instead

@@ -17,14 +17,12 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::gguf::GgufContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 
 use super::llama_shared::{shared_backend, OFFLOAD_ALL_LAYERS};
+use super::native_gpu;
 use crate::ai::config::LocalEmbeddingSettings;
 use crate::ai::traits::{BoxFuture, Embedder};
 use crate::error::{CoreError, Result};
@@ -60,40 +58,8 @@ fn context_size(trained: u32) -> NonZeroU32 {
 }
 
 fn read_metadata(model_path: &Path) -> Result<(NonZeroU32, usize)> {
-    // GGUF type tags are part of the file format. Check them before calling
-    // the typed accessors, which assert in native code on a type mismatch.
-    const GGUF_TYPE_UINT32: u32 = 4;
-    const GGUF_TYPE_STRING: u32 = 8;
-    let invalid = |detail: &str| {
-        CoreError::Other(format!(
-            "Invalid embedding model metadata in {}: {detail}",
-            model_path.display()
-        ))
-    };
-    let metadata =
-        GgufContext::from_file(model_path).ok_or_else(|| invalid("could not read GGUF header"))?;
-    let architecture_key = metadata.find_key("general.architecture");
-    if architecture_key < 0 || metadata.kv_type(architecture_key) != GGUF_TYPE_STRING {
-        return Err(invalid("general.architecture must be a string"));
-    }
-    let architecture = metadata
-        .val_str(architecture_key)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| invalid("general.architecture is empty or invalid"))?;
-    let read_u32 = |suffix: &str| -> Result<u32> {
-        let key = format!("{architecture}.{suffix}");
-        let index = metadata.find_key(&key);
-        if index < 0 || metadata.kv_type(index) != GGUF_TYPE_UINT32 {
-            return Err(invalid(&format!("{key} must be a uint32")));
-        }
-        Ok(metadata.val_u32(index))
-    };
-    let dimension = read_u32("embedding_length")?;
-    if dimension == 0 || dimension > i32::MAX as u32 {
-        return Err(invalid("embedding_length must be a positive int32"));
-    }
-    let context = context_size(read_u32("context_length")?);
-    Ok((context, dimension as usize))
+    let metadata = model_runtime::gguf::read_embedding_metadata(model_path)?;
+    Ok((context_size(metadata.context_length), metadata.embedding_length as usize))
 }
 
 /// A loaded embedding model, resident in the worker child between requests.
@@ -106,6 +72,7 @@ pub(crate) struct EmbedderSlot {
     model: Arc<LlamaModel>,
     ctx_size: NonZeroU32,
     dimension: usize,
+    device: Option<native_gpu::Device>,
 }
 
 impl EmbedderSlot {
@@ -125,18 +92,26 @@ fn ensure_slot(slot: &mut Option<EmbedderSlot>, model_path: &Path) -> Result<()>
     // the actual reason — an allocation refused, no Vulkan device — went
     // nowhere at all.
     crate::ai::providers::local_llm::install_llm_logging();
-    let backend = shared_backend();
-    let model_params = LlamaModelParams::default().with_n_gpu_layers(OFFLOAD_ALL_LAYERS);
+    let (context, _) = read_metadata(model_path)?;
+    crate::ai::resources::validate_model_load(
+        model_path, crate::ai::resources::ModelWorkload::Llm { context_tokens: context.get() },
+    )?;
+    let backend = shared_backend()?;
+    let (model_params, mut device) = native_gpu::fitted_params(
+        model_path, context, if cfg!(feature = "llm-local-vulkan") { OFFLOAD_ALL_LAYERS } else { 0 }, true,
+    )?;
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
         .map_err(|e| CoreError::Other(format!("failed to load embedding model: {e}")))?;
     let ctx_size = context_size(model.n_ctx_train());
     let dimension = model.n_embd() as usize;
+    if let Some(device) = &mut device { device.reserve_context()?; }
     *slot = Some(EmbedderSlot {
         model_path: model_path.to_path_buf(),
         backend,
         model: Arc::new(model),
         ctx_size,
         dimension,
+        device,
     });
     Ok(())
 }
@@ -161,7 +136,10 @@ pub(crate) fn embed_in_process(
     ensure_slot(slot, model_path)?;
     let slot = slot.as_ref().expect("slot populated by ensure_slot");
     let ctx_size = NonZeroU32::new(context_size).unwrap_or(slot.ctx_size);
-    embed_all(&slot.model, &slot.backend, ctx_size, texts)
+    let additional = model_runtime::resources::estimate_context_for_model(model_path, ctx_size.get())?;
+    crate::ai::resources::validate_inference_headroom("embedding context", additional)?;
+    if let Some(device) = &slot.device { device.check_context()?; }
+    embed_all(&slot.model, &slot.backend, ctx_size, texts, slot.device.clone())
 }
 
 impl LocalEmbedder {
@@ -358,20 +336,11 @@ fn embed_all(
     backend: &LlamaBackend,
     ctx_size: NonZeroU32,
     texts: &[String],
+    device: Option<native_gpu::Device>,
 ) -> Result<Vec<Vec<f32>>> {
-    let n_threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(ctx_size))
-        // See the matching comment in `local_llm::generate` — without this,
-        // a text longer than n_batch's default (2048) crashes the whole
-        // process instead of returning an error.
-        .with_n_batch(ctx_size.get())
-        .with_n_ubatch(ctx_size.get())
-        .with_n_threads(n_threads)
-        .with_n_threads_batch(n_threads)
-        .with_embeddings(true);
+    let ctx_params = native_gpu::context_params(ctx_size, true);
+    let mut pressure = native_gpu::PressureWatch::new(device);
+    pressure.check()?;
 
     let mut ctx = model.new_context(backend, ctx_params).map_err(|e| {
         // Longest text about to be sent through this context — the batch
@@ -398,6 +367,7 @@ fn embed_all(
     let mut embeddings = Vec::with_capacity(texts.len());
 
     for text in texts {
+        pressure.check()?;
         let tokens = model
             .str_to_token(text, AddBos::Always)
             .map_err(|e| CoreError::Other(format!("failed to tokenize text for embedding: {e}")))?;

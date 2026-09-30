@@ -5,7 +5,7 @@
 //!     requiring an exact path (`from_settings`/`from_config` mean the same
 //!     thing in both modules — see `media::transcribe` for the sibling this
 //!     one is deliberately shaped to match),
-//!   * execute native code in disposable resource-limited subprocesses,
+//!   * execute native code in disposable supervised subprocesses,
 //!   * and expose themselves through this crate's existing trait
 //!     abstractions (`Transcriber` there, `LlmProvider` here) rather than a
 //!     bespoke call site — so summarization code depends on "an
@@ -17,10 +17,9 @@
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -36,20 +35,16 @@ use crate::ai::traits::{
 };
 use crate::error::{CoreError, Result};
 use crate::model_library::{self, ModelKind};
+use super::{llama_shared::shared_backend, native_gpu};
 
 /// Resolves and validates a GGUF model, then runs each completion in a
-/// disposable resource-limited Grafium worker process.
+/// disposable Grafium worker process.
 pub struct LocalLlm {
     model_path: PathBuf,
     context_size: u32,
     gpu_layers: u32,
     name: String,
 }
-
-/// The process-wide llama.cpp backend. llama.cpp only wants to be
-/// initialized once; every `LocalLlm` instance shares the same handle
-/// rather than each `load()` call re-initializing it.
-static BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
 impl LocalLlm {
     /// Loads a GGUF model from `model_path`.
@@ -105,10 +100,7 @@ impl LocalLlm {
     /// pre-extracted fields — the shape a caller loading settings straight
     /// from disk (e.g. the Tauri command layer, mirroring
     /// `ai_get_config`/`ai_set_config`) will actually have on hand.
-    /// Load the configured chat model with every layer forced onto the GPU.
-    ///
-    /// Used where a slow CPU fallback is worse than a clear failure: the
-    /// analysis passes would otherwise look like they had hung.
+    /// Request all GPU layers; runtime admission still applies before loading.
     pub fn from_config_forcing_gpu(
         config: &crate::ai::config::AiConfig,
         data_dir: &Path,
@@ -125,7 +117,11 @@ impl LocalLlm {
             .local_llm
             .model_ref
             .resolve(&models_dir, crate::model_library::ModelKind::Llm)?;
-        Self::load(&model_path, local.local_llm.context_size, Some(u32::MAX))
+        Self::load(
+            &model_path,
+            local.local_llm.context_size,
+            Some(super::llama_shared::OFFLOAD_ALL_LAYERS),
+        )
     }
 
     pub fn from_config(config: &crate::ai::config::AiConfig, data_dir: &Path) -> Result<Self> {
@@ -150,7 +146,7 @@ impl LocalLlm {
     /// template is what made an abliterated Qwen3 build get classified as a
     /// non-reasoning model and emit raw chain-of-thought as its answer.
     pub fn chat_template_for_debug(&self) -> Option<String> {
-        let (_backend, model) = load_native_model(&self.model_path, self.gpu_layers).ok()?;
+        let (_backend, model) = load_native_model(&self.model_path, 0).ok()?;
         model
             .chat_template(None)
             .ok()
@@ -201,6 +197,10 @@ impl LlmProvider for LocalLlm {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn native_model_path(&self) -> Option<&Path> {
+        Some(&self.model_path)
     }
 
     fn context_window(&self) -> Option<usize> {
@@ -296,9 +296,9 @@ pub(crate) struct LlmSlot {
     model_path: PathBuf,
     context_size: u32,
     gpu_layers: u32,
+    device: Option<native_gpu::Device>,
     backend: Arc<LlamaBackend>,
     model: LlamaModel,
-    model_size: u64,
 }
 
 impl LlmSlot {
@@ -332,17 +332,23 @@ fn ensure_slot(
     // before a potentially larger replacement is loaded.
     *slot = None;
     install_llm_logging();
-    let (backend, model) = load_native_model(model_path, gpu_layers)?;
-    let model_size = std::fs::metadata(model_path)
-        .map_err(|e| CoreError::Other(format!("Cannot inspect LLM model: {e}")))?
-        .len();
+    resources::validate_model_load(model_path, ModelWorkload::Llm { context_tokens: context_size })?;
+    let backend = shared_backend()?;
+    let context = NonZeroU32::new(context_size)
+        .ok_or_else(|| CoreError::Other("Local context cannot be zero".into()))?;
+    let (parameters, mut device) = native_gpu::fitted_params(
+        model_path, context, if cfg!(feature = "llm-local-vulkan") { gpu_layers } else { 0 }, false,
+    )?;
+    let model = LlamaModel::load_from_file(&backend, model_path, &parameters)
+        .map_err(|e| CoreError::Other(format!("Failed to load fitted model: {e}")))?;
+    if let Some(device) = &mut device { device.reserve_context()?; }
     *slot = Some(LlmSlot {
         model_path: model_path.to_path_buf(),
         context_size,
         gpu_layers,
+        device,
         backend,
         model,
-        model_size,
     });
     Ok(())
 }
@@ -361,12 +367,10 @@ pub(crate) fn validate_in_process(
         .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
     resources::validate_inference_headroom(
         "local LLM validation",
-        resources::estimate_llm_context_bytes(slot.model_size, ctx_size.get()),
+        model_runtime::resources::estimate_context_for_model(&slot.model_path, ctx_size.get())?,
     )?;
-    let params = LlamaContextParams::default()
-        .with_n_ctx(Some(ctx_size))
-        .with_n_threads(1)
-        .with_n_threads_batch(1);
+    if let Some(device) = &slot.device { device.check_context()?; }
+    let params = native_gpu::context_params(ctx_size, false);
     slot.model
         .new_context(&slot.backend, params)
         .map_err(|e| CoreError::Other(format!("failed to validate llama context: {e}")))?;
@@ -388,13 +392,15 @@ pub(crate) fn complete_in_process(
     let ctx_size = NonZeroU32::new(context_size)
         .ok_or_else(|| CoreError::Other("local LLM context cannot be zero".to_string()))?;
     let tokens = prepare_prompt_tokens(&slot.model, messages, options)?;
+    if let Some(device) = &slot.device { device.check_context()?; }
     generate(
         &slot.model,
         &slot.backend,
         ctx_size,
-        slot.model_size,
+        model_runtime::resources::estimate_context_for_model(&slot.model_path, ctx_size.get())?,
         &tokens,
         options,
+        slot.device.clone(),
     )
 }
 
@@ -441,20 +447,12 @@ fn load_native_model(
     model_path: &Path,
     gpu_layers: u32,
 ) -> Result<(Arc<LlamaBackend>, LlamaModel)> {
-    let backend = if let Some(backend) = BACKEND.get() {
-        Arc::clone(backend)
-    } else {
-        let initialized = Arc::new(LlamaBackend::init().map_err(|e| {
-            CoreError::Other(format!("failed to initialize the llama.cpp backend: {e}"))
-        })?);
-        let _ = BACKEND.set(Arc::clone(&initialized));
-        BACKEND.get().map(Arc::clone).unwrap_or(initialized)
-    };
-    // Disable mmap so the worker's virtual-memory ceiling tracks real model
-    // allocations instead of large file mappings.
+    let backend = shared_backend()?;
+    // Fully resident weights avoid SIGBUS on later faults from removable files.
     let model_params = LlamaModelParams::default()
         .with_n_gpu_layers(gpu_layers)
-        .with_use_mmap(false);
+        .with_use_mmap(false)
+        .with_devices(&[]).map_err(|e| CoreError::Other(e.to_string()))?;
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
         .map_err(|e| CoreError::Other(format!("failed to load LLM model: {e}")))?;
     Ok((backend, model))
@@ -548,25 +546,18 @@ fn generate(
     model: &LlamaModel,
     backend: &LlamaBackend,
     ctx_size: NonZeroU32,
-    model_size: u64,
+    context_bytes: u64,
     tokens: &[LlamaToken],
     options: &CompletionOptions,
+    device: Option<native_gpu::Device>,
 ) -> Result<String> {
     resources::validate_inference_headroom(
         "local LLM inference",
-        resources::estimate_llm_context_bytes(model_size, ctx_size.get()),
+        context_bytes,
     )?;
-    let n_threads = resources::inference_thread_count();
-    let ctx_params = LlamaContextParams::default()
-        // n_batch is deliberately left at llama.cpp's default. Raising it to
-        // n_ctx looks like the obvious way to fit a long prompt in one decode,
-        // but llama.cpp derives n_outputs_max from n_batch and sizes the logits
-        // buffer as n_outputs_max * n_vocab * 4 bytes — on a 151936-token vocab
-        // that is ~20 GB at n_batch=32768, and context creation just returns
-        // null. The prompt is chunked to n_batch below instead.
-        .with_n_ctx(Some(ctx_size))
-        .with_n_threads(n_threads)
-        .with_n_threads_batch(n_threads);
+    let ctx_params = native_gpu::context_params(ctx_size, false);
+    let mut pressure = native_gpu::PressureWatch::new(device);
+    pressure.check()?;
 
     let mut ctx = model
         .new_context(backend, ctx_params)
@@ -592,6 +583,7 @@ fn generate(
     let last_index = tokens.len() as i32 - 1;
     let mut batch = LlamaBatch::new(n_batch.min(tokens.len()).max(1), 1);
     for chunk_start in (0..tokens.len()).step_by(n_batch) {
+        pressure.check()?;
         let chunk_end = (chunk_start + n_batch).min(tokens.len());
         batch.clear();
         for (offset, token) in tokens[chunk_start..chunk_end].iter().enumerate() {
@@ -613,6 +605,7 @@ fn generate(
     let stop_at_token = n_cur + max_new_tokens;
 
     while n_cur < stop_at_token && n_cur < n_ctx {
+        pressure.check()?;
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 

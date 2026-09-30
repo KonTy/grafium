@@ -8,6 +8,13 @@ For current outside information, use the research controls and review sources.
 
 ## Watching it work
 
+Native model safety warnings appear beside **Model & index status**. Insufficient
+or unknown GPU headroom selects CPU when RAM permits; retrying GPU does not
+override the admission checks. Recovery notices link to Settings, where a
+particular model can be authorized for one GPU attempt after an unconfirmed exit.
+See [[AI Setup And Privacy]] for worker shutdown, eviction, crash recovery, and
+device-specific GPU-memory detection.
+
 While an answer is being produced, Chat stacks what it is doing in the
 transcript itself, above the answer: `Searching your notes`, `Thinking`,
 `Generating`, and for web research `Planning searches`, `Reading sources`,

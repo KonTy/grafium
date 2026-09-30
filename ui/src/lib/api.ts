@@ -744,15 +744,13 @@ export function listLocalModels(modelsDir?: string): Promise<LocalModelInfo[]> {
   return invoke("list_local_models", { modelsDir });
 }
 
-// Best-effort report of the primary discrete GPU (name + total/free VRAM
-// + which command surfaced it). Empty/all-null on machines where nothing
-// worked — the UI treats that as "no annotations, don't lie about the
-// hardware".
+// Last worker device sample or safe host counters. Opening a picker does not
+// initialize a graphics driver; actual admission always uses a fresh budget.
 export interface GpuInfo {
   name: string | null;
   total_vram_bytes: number | null;
   available_vram_bytes: number | null;
-  source: "none" | "nvidia-smi" | "rocm-smi" | "vulkaninfo" | "sysfs";
+  source: "none" | "native-backend" | "nvidia-smi" | "rocm-smi" | "vulkaninfo" | "sysfs";
 }
 
 export function detectGpuInfo(): Promise<GpuInfo> {

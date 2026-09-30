@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+model-runtime = { path = "../crates/model-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -32,7 +33,8 @@ serde_yaml = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 whisper-rs = { version = "0.16", optional = true, features = ["tracing_backend"] }
 hound = { version = "3", optional = true }
-llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler"], optional = true }
+llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler", "common"], optional = true }
+llama-cpp-sys-2 = { version = "0.1.156", default-features = false, optional = true }
 encoding_rs = { version = "0.8", optional = true }
 scraper = "0.27"
 pdf-extract = "0.12"
@@ -71,7 +73,7 @@ media-vulkan = ["media", "whisper-rs/vulkan"]
 # transcribe with Whisper, then summarize with a local LLM). Dynamic
 # linking keeps each engine's GGML copy in its own shared object so they
 # don't collide.
-llm-local = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:tracing-subscriber", "llama-cpp-2/dynamic-link"]
+llm-local = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2", "dep:encoding_rs", "dep:tracing-subscriber", "llama-cpp-2/dynamic-link"]
 # Same as `llm-local`, but offloads inference to the GPU via Vulkan (no
 # CUDA toolkit required — same rationale as `media-vulkan`).
 llm-local-vulkan = ["llm-local", "llama-cpp-2/vulkan"]

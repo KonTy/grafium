@@ -395,6 +395,19 @@ These checks exist because every one of these failures is invisible: the build
 succeeds, the app starts, and it simply is not the code you expected, which
 reads as "my change did nothing" and sends you hunting a bug that is not there.
 
+Local deployment now stages the executable and dereferenced native libraries in
+one immutable build directory. It verifies the staged loader dependencies and
+build identity, saves and verifies the previous entry points, and then switches
+launchers atomically. It does not overwrite libraries mapped by a running app,
+delete old builds, stop Grafium, or change graphs/settings. Restart Grafium after
+deployment to use the new build.
+The deployment also refreshes the Linux desktop entry and all installed icon
+sizes. The window's `grafium` application ID matches its launcher, so Wayland
+panels can resolve the application icon independently of the executable name.
+Local launcher entries use a distinct raster icon name to avoid stale system
+icons in custom menus that search system directories first. When smplOS's
+`rebuild-app-cache` is available, deployment refreshes its application index too.
+
 <details>
 <summary>Optional import tools and other interfaces</summary>
 
@@ -446,6 +459,13 @@ including startup, journals, selection, tables, and graph rendering.
 | Native shell | Tauri 2 and the platform webview |
 | Rendering | Markdown, KaTeX, 2D canvas, and Three.js-powered 3D graphs |
 | Local inference | Optional llama.cpp and Whisper integrations |
+
+Model transports, conservative resource admission, and native-worker supervision
+live in the internal [`model-runtime`](crates/model-runtime) Rust workspace crate.
+Grafium supplies native inference handlers, model discovery, graph access,
+credentials, and UI. The crate has no graph/database or Tauri dependency and is
+not independently released. See [AI setup and runtime safety](ui/src-tauri/resources/welcome/pages/AI%20Setup%20And%20Privacy.md)
+for CPU fallback and the limits of process isolation.
 
 ## Contributing and license
 

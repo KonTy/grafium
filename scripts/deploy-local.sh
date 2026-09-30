@@ -6,7 +6,7 @@
 # against were left behind from an older build. Same soname, different code —
 # so it still *links* and starts, and the breakage only shows up later as
 # subtly wrong inference behaviour. Copying both together, from one build
-# directory, is the whole point of this script.
+# directory into an immutable application bundle is the point of this script.
 #
 # Usage:  scripts/deploy-local.sh [build-dir]
 #   build-dir defaults to the repo's own target/release.
@@ -16,6 +16,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${1:-$repo_root/target/release}"
 bin_dir="$HOME/.local/bin"
 lib_dir="$HOME/.local/lib"
+app_lib_dir="$lib_dir/grafium"
 
 binary="$build_dir/grafium"
 if [[ ! -x "$binary" ]]; then
@@ -42,7 +43,7 @@ if [[ -d "$dist_dir" ]]; then
   fi
 fi
 
-mkdir -p "$bin_dir" "$lib_dir"
+mkdir -p "$bin_dir" "$app_lib_dir"
 
 # Refuse to install a binary compiled from a different revision than the
 # checkout it is being deployed from.
@@ -94,49 +95,88 @@ if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
-# The launcher sets LD_LIBRARY_PATH rather than relying on the binary's
-# RPATH, so the libraries can live in a plain ~/.local/lib alongside
-# everything else instead of a Grafium-specific directory.
-cat >"$bin_dir/grafium" <<EOF
-#!/bin/bash
-export LD_LIBRARY_PATH="$lib_dir:\$LD_LIBRARY_PATH"
-exec $bin_dir/grafium-bin "\$@"
-EOF
-chmod +x "$bin_dir/grafium"
-
-# Install to a temp name then rename: replacing a running executable in
-# place gets ETXTBSY, and a partial copy would leave an unstartable app.
-cp "$binary" "$bin_dir/grafium-bin.new"
-chmod +x "$bin_dir/grafium-bin.new"
-mv -f "$bin_dir/grafium-bin.new" "$bin_dir/grafium-bin"
-echo "installed: $bin_dir/grafium-bin"
-
+# Each build is immutable. Never overwrite mapped native libraries beneath a
+# running process, or pair its old executable with a new library generation.
+stage="$(mktemp -d "$app_lib_dir/build.XXXXXXXX")"
+cp "$binary" "$stage/grafium-bin"
+chmod +x "$stage/grafium-bin"
 shopt -s nullglob
 copied=0
 for so in "$build_dir"/lib{ggml,ggml-base,ggml-cpu,ggml-vulkan,ggml-cuda,llama,llama-common}.so*; do
-  cp -P "$so" "$lib_dir/"
+  # Dereference build-cache links: an installed build must survive removal of
+  # the source worktree or its target directory.
+  cp -L "$so" "$stage/"
   copied=$((copied + 1))
 done
 shopt -u nullglob
-echo "installed: $copied shared objects -> $lib_dir"
-
 if [[ $copied -eq 0 ]]; then
-  echo "warning: no ggml/llama shared objects found in $build_dir." >&2
-  echo "         A local-LLM build should produce them; the app will fail to start" >&2
-  echo "         if it was built with a dynamically-linked llama.cpp." >&2
+  echo "error: no native libraries found; existing installation is unchanged" >&2
+  exit 1
 fi
 
-# Fail loudly on the exact drift this script exists to prevent, rather than
-# letting a missing/oversized library surface as a runtime crash.
 if command -v ldd >/dev/null 2>&1; then
-  if missing=$(LD_LIBRARY_PATH="$lib_dir" ldd "$bin_dir/grafium-bin" 2>/dev/null | grep "not found"); then
-    echo "error: unresolved shared libraries after install:" >&2
+  dependencies="$(LD_LIBRARY_PATH="$stage" ldd "$stage/grafium-bin")"
+  if missing="$(grep "not found" <<<"$dependencies")"; then
+    echo "error: unresolved staged libraries; existing installation is unchanged:" >&2
     echo "$missing" >&2
     exit 1
   fi
+  while IFS= read -r dependency; do
+    if [[ "$dependency" =~ ^[[:space:]]*lib(ggml|llama)[^[:space:]]*[[:space:]] ]]; then
+      if [[ "$dependency" != *"=> $stage/"* ]]; then
+        echo "error: native library resolved outside the staged build: $dependency" >&2
+        exit 1
+      fi
+    fi
+  done <<<"$dependencies"
 fi
 
-echo "ok: run 'grafium' (or use the desktop entry)"
+staged_version="$(timeout 20s env LD_LIBRARY_PATH="$stage" "$stage/grafium-bin" --version </dev/null)"
+if [[ -n "$version_line" && "$staged_version" != "$version_line" ]]; then
+  echo "error: staged binary identity differs; existing installation is unchanged" >&2
+  exit 1
+fi
+
+# Preserve and verify the old launchers/binary before switching either entry
+# point. Legacy flat libraries remain untouched, as do all previous build dirs.
+backup="$(mktemp -d "$app_lib_dir/backup.XXXXXXXX")"
+for name in grafium grafium-bin; do
+  if [[ -e "$bin_dir/$name" || -L "$bin_dir/$name" ]]; then
+    cp -L "$bin_dir/$name" "$backup/$name"
+    cmp -s "$bin_dir/$name" "$backup/$name"
+  fi
+done
+(
+  cd "$backup"
+  shopt -s nullglob
+  previous=(*)
+  if [[ ${#previous[@]} -gt 0 ]]; then
+    sha256sum "${previous[@]}" > SHA256SUMS
+    sha256sum --check --quiet SHA256SUMS
+  fi
+)
+
+bash "$repo_root/scripts/install-desktop.sh" "$backup/desktop"
+
+launcher="$(mktemp "$bin_dir/.grafium-launcher.XXXXXXXX")"
+{
+  echo '#!/bin/bash'
+  printf 'export LD_LIBRARY_PATH=%q\n' "$stage"
+  printf 'exec %q "$@"\n' "$stage/grafium-bin"
+} >"$launcher"
+chmod +x "$launcher"
+compat_launcher="$(mktemp "$bin_dir/.grafium-bin-launcher.XXXXXXXX")"
+cp "$launcher" "$compat_launcher"
+chmod +x "$compat_launcher"
+sync -f "$stage"
+sync -f "$backup"
+mv -fT "$compat_launcher" "$bin_dir/grafium-bin"
+mv -fT "$launcher" "$bin_dir/grafium"
+sync -f "$bin_dir"
+
+echo "installed: $stage ($copied native libraries)"
+echo "verified previous entry points: $backup"
+echo "ok: run 'grafium' (or use the desktop entry); running instances were not interrupted"
 
 # Always end by stating exactly what is now installed, so the answer to
 # "which build am I testing?" is visible at deploy time instead of needing to

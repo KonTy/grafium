@@ -32,6 +32,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         include_str!("../../resources/welcome/pages/Help - Settings.md"),
     ),
     (
+        "ai",
+        include_str!("../../resources/welcome/pages/AI Setup And Privacy.md"),
+    ),
+    (
         "sync",
         include_str!("../../resources/welcome/pages/Help - Sync.md"),
     ),
@@ -48,4 +52,14 @@ pub fn help_get_page(context: String) -> Result<String, String> {
         .find(|(name, _)| *name == context)
         .map(|(_, content)| (*content).to_string())
         .ok_or_else(|| format!("Unknown help context: {context}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ai_help_includes_runtime_recovery_controls() {
+        let page = super::help_get_page("ai".into()).unwrap();
+        assert!(page.contains("Allow one GPU attempt"));
+        assert!(page.contains("cgroup"));
+    }
 }

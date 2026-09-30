@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CoreError {
+    #[error(transparent)]
+    ModelRuntime(#[from] model_runtime::error::RuntimeError),
+
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 

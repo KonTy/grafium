@@ -1,37 +1,15 @@
 //! Whether a given GGUF model can realistically run on the GPU, and what to
 //! tell the user when it can't.
 //!
-//! This lives outside the `llm-local` feature gate on purpose. The exact same
-//! question gets asked in two very different places:
-//!
-//! 1. At **load time**, by [`crate::ai::providers::local_llm`], to decide how
-//!    many layers to offload.
-//! 2. At **pick time**, by Settings' model dropdown, to warn *before* the user
-//!    commits to a model that will silently crawl.
-//!
-//! Those two answers must agree. When they don't, the UI cheerfully offers a
-//! model that the loader then quietly demotes to CPU — which is precisely the
-//! failure this module exists to prevent: a 13.6 GB model selected on a 16 GB
-//! card measured **1.5 tok/s**, versus 60–74 tok/s for a 2.4 GB model on the
-//! same machine. Nothing in the UI distinguished them; both were just a file
-//! name and a size. Keeping the arithmetic in one ungated place means the
-//! advice and the decision cannot drift apart.
+//! Picker guidance lives outside `llm-local` so Settings can compare models
+//! without loading native code. It uses the runtime's device-memory probe, but
+//! is not permission to load: runtime admission also includes the requested
+//! context and desktop headroom, and can select CPU at execution time.
 
 /// Lower/upper bounds for the VRAM safety margin (see
 /// [`vram_safety_margin_bytes`]).
 pub const VRAM_SAFETY_MARGIN_MIN_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 pub const VRAM_SAFETY_MARGIN_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
-
-/// Number of times [`detect_free_vram_bytes_best`] samples free VRAM before
-/// giving up, and the pause between samples. A *single* reading at load time
-/// used to permanently pin the whole session to CPU whenever VRAM happened to
-/// be transiently busy (the embedding model mid-index, a previous instance
-/// still shutting down, a browser/game) — a silent 5–10× slowdown cached for
-/// the model's entire life. Sampling a few times and taking the *best* (max)
-/// free reading absorbs a brief dip so a transient consumer can't strand
-/// inference on the CPU.
-const VRAM_PROBE_ATTEMPTS: u32 = 3;
-const VRAM_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Headroom to subtract from detected free VRAM before deciding whether a
 /// model fits, scaled with model size instead of a fixed constant.
@@ -70,11 +48,11 @@ pub fn estimated_vram_needed_bytes(model_size_bytes: u64) -> u64 {
     model_size_bytes.saturating_add(vram_safety_margin_bytes(model_size_bytes))
 }
 
-/// Pure decision: given the model's on-disk size and the best observed free
+/// Picker estimate: given the model's on-disk size and currently observed free
 /// VRAM, does full offload fit? Returns `true` when every layer can be
 /// offloaded. Split out from I/O so it can be unit-tested.
 pub fn fits_in_vram(model_size_bytes: u64, free_vram_bytes: u64) -> bool {
-    model_size_bytes + vram_safety_margin_bytes(model_size_bytes) <= free_vram_bytes
+    model_size_bytes.saturating_add(vram_safety_margin_bytes(model_size_bytes)) <= free_vram_bytes
 }
 
 /// How a model is expected to perform on this machine, for display in the
@@ -96,9 +74,8 @@ pub enum GpuFit {
     /// practice means single-digit tokens/second for a multi-billion
     /// parameter model.
     CpuOnly,
-    /// No NVIDIA GPU detected, or `nvidia-smi` unavailable/unparsable. We
-    /// deliberately don't guess: an unknown verdict is shown as unknown
-    /// rather than as false reassurance.
+    /// No unambiguous dedicated GPU budget is available. Native admission
+    /// selects CPU rather than assuming that unknown VRAM is free.
     Unknown,
 }
 
@@ -136,7 +113,7 @@ pub fn assess_gpu_fit(model_size_bytes: u64, free_vram_bytes: Option<u64>) -> Gp
     if !fits_in_vram(model_size_bytes, free) {
         return GpuFit::CpuOnly;
     }
-    let required = model_size_bytes + vram_safety_margin_bytes(model_size_bytes);
+    let required = model_size_bytes.saturating_add(vram_safety_margin_bytes(model_size_bytes));
     if free.saturating_sub(required) < TIGHT_FIT_HEADROOM_BYTES {
         GpuFit::Tight
     } else {
@@ -153,13 +130,13 @@ pub fn fit_detail(fit: GpuFit, model_size_bytes: u64, free_vram_bytes: Option<u6
     let mib = |b: u64| b / (1024 * 1024);
     match fit {
         GpuFit::Fits => format!(
-            "Runs on the GPU (~{} MiB model, ~{} MiB VRAM free) — fast.",
+            "Estimated GPU fit (~{} MiB model, ~{} MiB VRAM free). The runtime also checks context and desktop headroom before loading.",
             mib(model_size_bytes),
             free_vram_bytes.map(mib).unwrap_or(0)
         ),
         GpuFit::Tight => format!(
-            "Only just fits (~{} MiB model vs ~{} MiB free). It'll be fast when the GPU is \
-             otherwise idle, but may drop to CPU speed if anything else uses VRAM.",
+            "Tight estimated fit (~{} MiB model vs ~{} MiB free). Runtime admission may \
+             select CPU to preserve context and desktop headroom.",
             mib(model_size_bytes),
             free_vram_bytes.map(mib).unwrap_or(0)
         ),
@@ -176,40 +153,15 @@ pub fn fit_detail(fit: GpuFit, model_size_bytes: u64, free_vram_bytes: Option<u6
     }
 }
 
-/// Free VRAM in bytes on the first NVIDIA GPU reported by `nvidia-smi`, or
-/// `None` if the tool isn't installed / no GPU is reported / its output
-/// can't be parsed.
+/// Free VRAM from the same unambiguous-device probe used at model load.
 pub fn detect_free_vram_bytes() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let first_line = text.lines().next()?.trim();
-    let free_mib: u64 = first_line.parse().ok()?;
-    Some(free_mib * 1024 * 1024)
+    crate::gpu_info::detect_primary_gpu().available_vram_bytes
 }
 
-/// Samples [`detect_free_vram_bytes`] up to [`VRAM_PROBE_ATTEMPTS`] times and
-/// returns the *maximum* free reading seen, so a transient VRAM dip at the
-/// instant of load can't pin the session to CPU. Returns `None` only if no
-/// probe ever succeeded (no `nvidia-smi` / unparsable). The probe is cheap
-/// and bounded, so it always samples the full budget rather than stopping
-/// early on the first good reading.
+/// Compatibility entry point. Never use an earlier optimistic reading for
+/// admission: another application may have allocated GPU memory since then.
 pub fn detect_free_vram_bytes_best() -> Option<u64> {
-    let mut best: Option<u64> = None;
-    for attempt in 0..VRAM_PROBE_ATTEMPTS {
-        if let Some(free) = detect_free_vram_bytes() {
-            best = Some(best.map_or(free, |b| b.max(free)));
-        }
-        if attempt + 1 < VRAM_PROBE_ATTEMPTS {
-            std::thread::sleep(VRAM_PROBE_INTERVAL);
-        }
-    }
-    best
+    detect_free_vram_bytes()
 }
 
 #[cfg(test)]
@@ -271,7 +223,7 @@ mod tests {
             13_670 * 1024 * 1024,
             Some(15_900 * 1024 * 1024),
         );
-        assert!(detail.contains("Only just fits"));
+        assert!(detail.contains("Tight estimated fit"));
         assert!(detail.contains("CPU"));
     }
 

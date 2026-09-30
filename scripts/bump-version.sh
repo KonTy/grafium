@@ -44,7 +44,7 @@ sed -i -E "0,/\"version\": \"[0-9]+\\.[0-9]+\\.[0-9]+\"/s//\"version\": \"$next\
   "$repo_root/ui/src-tauri/tauri.conf.json"
 
 npm --prefix "$repo_root/ui" version "$next" --no-git-tag-version --allow-same-version >/dev/null
-sed -i -E "/^name = \"(grafium|grafium-core|grafium-tui)\"$/ {
+sed -i -E "/^name = \"(grafium|grafium-core|grafium-tui|model-runtime)\"$/ {
   n
   s/^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"/version = \"$next\"/
 }" "$repo_root/Cargo.lock"
