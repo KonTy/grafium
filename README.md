@@ -298,6 +298,7 @@ access.
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
 | Findable settings | Filter labels and help text with literal search terms, and open categorized keyboard-shortcut help. |
 | Maintenance tools | Manually re-index Markdown and every original book copied into the graph, retrying extraction while preserving identities, annotations, favorites, review progress, and handwriting recognition. Rebuild search data and queue vector refresh; inspect asset-cleanup candidates or preview task-completion backfills separately. |
+| Recoverable asset cleanup | In Settings, scan unreferenced attachments including ZIP archives, review full graph-relative paths and sizes, and confirm moving one, selected, or all candidates to graph-local trash. Changed or newly referenced files are refused with visible errors. |
 | Responsive workspace | Use the desktop layout or Android's adapted editor controls. |
 | Theme-aware startup | Apply the saved theme before showing the desktop window; defer optional screens and local embedding-model loading. |
 
@@ -306,6 +307,24 @@ application state. Preserve graph folders, assets, and application data when
 backing up or moving installations, including review scheduling and other database
 history. Keep credentials and private data out of public repositories.
 Sync sends graph files to the destinations you configure; use destinations you trust.
+
+**Asset Cleanup:** Save pending edits before scanning or confirming a move.
+The scan checks indexed references and saved graph text, including Markdown,
+JSON-LD notes, and configuration; unsaved drafts are not covered. Conservative
+filename matching can retain duplicates. The preview is bound to its graph, and
+references and file contents are checked again before moving. Only confirmed
+moves leave the preview; errors remain visible.
+References inside binary archives or books are not inspected, so this is not an
+exhaustive check of every possible reference.
+
+Moved attachments retain their relative paths under a unique
+`.grafium/asset-trash/` directory. Results show the absolute recovery directory.
+To recover, fully close Grafium and manually move files back to their original
+graph-relative paths. **Never overwrite an existing original**: failed or partial
+attempts may leave recovery copies even when the original was not moved.
+There is no restore UI or automatic purge, and **no disk
+space is freed** until you independently remove the trash. Trash is never synced,
+but removal of the original attachments will sync.
 
 ### Useful shortcuts
 

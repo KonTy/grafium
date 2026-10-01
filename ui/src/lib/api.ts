@@ -663,15 +663,27 @@ export interface OrphanedAsset {
    *  so a bare name would not say which file is meant. */
   filename: string;
   size: number;
+  sha256: string;
 }
 
-export function findOrphanedAssets(): Promise<OrphanedAsset[]> {
+export interface AssetCleanupScan {
+  graph_path: string;
+  assets: OrphanedAsset[];
+}
+
+export interface AssetCleanupResult {
+  moved: string[];
+  trash_path: string | null;
+  errors: string[];
+}
+
+export function findOrphanedAssets(): Promise<AssetCleanupScan> {
   return invoke("find_orphaned_assets", {});
 }
 
-/** Delete media by graph-relative path, as reported by `findOrphanedAssets`. */
-export function deleteAssets(filenames: string[]): Promise<number> {
-  return invoke("delete_assets", { filenames });
+/** Move reviewed, unchanged assets to graph-local trash after rechecking references. */
+export function trashAssets(graphPath: string, assets: OrphanedAsset[]): Promise<AssetCleanupResult> {
+  return invoke("trash_assets", { graphPath, assets });
 }
 
 // Media import (video/audio transcript -> background job)

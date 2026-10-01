@@ -277,92 +277,28 @@ pub async fn list_assets(state: State<'_, AppState>) -> Result<Vec<String>, Stri
         .map_err(|error| error.to_string())
 }
 
-#[derive(serde::Serialize)]
-pub struct OrphanedAsset {
-    pub filename: String,
-    pub size: u64,
+/// Scan saved graph sources and indexed references without changing files.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn find_orphaned_assets(
+    state: State<'_, AppState>,
+) -> Result<grafium_core::graph::asset_cleanup::AssetCleanupScan, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || graph.scan_unused_assets().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-/// Find media that no block refers to any more.
+/// Move only reviewed, still-unreferenced assets into recoverable local trash.
 #[tauri::command(rename_all = "camelCase")]
-pub fn find_orphaned_assets(state: State<AppState>) -> Result<Vec<OrphanedAsset>, String> {
-    let (root, all_content) = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let refs = graph
-            .db
-            .get_all_media_references()
-            .map_err(|e| e.to_string())?;
-        (graph.root_dir.clone(), refs)
-    };
-
-    // Walked with the lock released — this is unbounded disk IO and every
-    // other command queues behind that mutex.
-    let assets = grafium_core::graph::collect_asset_files(&root);
-    if assets.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut orphans = Vec::new();
-    for rel in &assets {
-        // Matched on the bare file name rather than the whole path: the same
-        // file is referred to as `assets/x.png` from its own page and
-        // `../assets/x.png` from elsewhere, and a path-shaped match would call
-        // a referenced file an orphan — which the settings screen offers to
-        // delete.
-        let name = rel.rsplit('/').next().unwrap_or(rel);
-        if all_content.iter().any(|content| content.contains(name)) {
-            continue;
-        }
-        let size = fs::metadata(root.join(rel)).map(|m| m.len()).unwrap_or(0);
-        orphans.push(OrphanedAsset {
-            filename: rel.clone(),
-            size,
-        });
-    }
-
-    Ok(orphans)
-}
-
-/// Delete media by graph-relative path, as reported by `find_orphaned_assets`.
-///
-/// Paths are relative because media no longer lives in one folder — a bare file
-/// name cannot say whether it means the shared copy or a book's own. Each path
-/// must resolve to a real file inside the graph's media folders, so a crafted
-/// path cannot reach a note, a database or anything outside the graph.
-#[tauri::command(rename_all = "camelCase")]
-pub fn delete_assets(state: State<AppState>, filenames: Vec<String>) -> Result<u32, String> {
-    let root = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        graph.root_dir.clone()
-    };
-    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
-
-    let mut deleted = 0u32;
-    for rel in &filenames {
-        let rel = rel.trim_start_matches('/');
-        if rel.is_empty() || rel.split('/').any(|c| c == "..") {
-            continue;
-        }
-        let Ok(path) = root.join(rel).canonicalize() else {
-            continue;
-        };
-        // Only ever delete a real file that sits inside an `assets/` folder
-        // within the graph. Without the folder check a path like `pages/x.md`
-        // would delete a note.
-        //
-        // Any ancestor counts, not just the immediate parent: Anki imports nest
-        // media as `assets/anki/<deck>/x.mp3`, and checking only the parent
-        // silently refused to delete every one of them while still listing them
-        // as orphans — a cleanup button that reported success and freed nothing.
-        let inside_assets = path
-            .strip_prefix(&canon_root)
-            .map(|rel| rel.components().any(|c| c.as_os_str() == "assets"))
-            .unwrap_or(false);
-        if inside_assets && path.is_file() && fs::remove_file(&path).is_ok() {
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+pub async fn trash_assets(
+    state: State<'_, AppState>,
+    graph_path: String,
+    assets: Vec<grafium_core::graph::asset_cleanup::OrphanedAsset>,
+) -> Result<grafium_core::graph::asset_cleanup::AssetCleanupResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        graph.trash_unused_assets(&graph_path, &assets).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
 fn extension_from_content_type(ct: &str) -> Option<&'static str> {
