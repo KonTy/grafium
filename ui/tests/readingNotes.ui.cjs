@@ -197,7 +197,61 @@ async function save(page, body) {
   await button(page, "Save note").click();
   await cards(page).filter({ hasText: body }).waitFor();
 }
+async function deleteAll(page) {
+  const actions = panel(page).locator(".more-actions");
+  if (await actions.getAttribute("open") === null) await actions.locator("summary").click();
+  await button(page, "Delete all notes on this page…").click();
+}
 const cases = [
+  ["Deletion uses a focused modal without jumping the notes list", {}, async ({ page, backend }) => {
+    await page.setViewportSize({ width: 1000, height: 600 });
+    await beginNote(page, "First reflection.");
+    await save(page, "First reflection.");
+    const base = backend.notes.find(({ body }) => body === "First reflection.");
+    for (let index = 1; index <= 8; index++) backend.notes.push({
+      ...structuredClone(base), id: `modal-note-${index}`, footnoteLabel: `grafium-note-${index + 1}`,
+      body: `Specific reflection ${index} to review before deleting.`,
+    });
+    await button(page, "Refresh").click();
+    const card = cards(page).filter({ hasText: "Specific reflection 8" });
+    const trigger = card.getByRole("button", { name: "Delete note…", exact: true });
+    await trigger.scrollIntoViewIfNeeded();
+    const scrollBefore = await panel(page).evaluate((element) => element.scrollTop);
+    assert.ok(scrollBefore > 100, "fixture is scrolled down to a saved note");
+    await trigger.click();
+    const confirmation = panel(page).getByRole("alertdialog", { name: "Confirm note deletion" });
+    await confirmation.waitFor();
+    assert.equal(await confirmation.evaluate((element) => element.matches(":modal")), true);
+    assert.ok(Math.abs(await panel(page).evaluate((element) => element.scrollTop) - scrollBefore) <= 1);
+    assert.match(await confirmation.innerText(), /Specific reflection 8/);
+    assert.equal(await confirmation.getByRole("button").count(), 2);
+    const cancel = confirmation.getByRole("button", { name: "Cancel", exact: true });
+    assert.equal(await cancel.evaluate((element) => element === document.activeElement), true);
+    const bounds = await confirmation.boundingBox();
+    assert.ok(Math.abs(bounds.x + bounds.width / 2 - 500) < 2, "confirmation is centered horizontally");
+    assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 600, "confirmation fits a compact viewport");
+    if (process.env.UI_TEST_SCREENSHOT) await page.screenshot({ path: process.env.UI_TEST_SCREENSHOT });
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await confirmation.getByRole("button", { name: "Delete saved note", exact: true })
+      .evaluate((element) => element === document.activeElement), true);
+    await page.keyboard.press("Tab");
+    assert.equal(await cancel.evaluate((element) => element === document.activeElement), true);
+    await page.keyboard.press("Enter");
+    await confirmation.waitFor({ state: "detached" });
+    assert.equal(await trigger.evaluate((element) => element === document.activeElement), true);
+    assert.ok(Math.abs(await panel(page).evaluate((element) => element.scrollTop) - scrollBefore) <= 1);
+    assert.equal(backend.calls.some(({ cmd }) => cmd === "reading_note_delete"), false);
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await confirmation.waitFor({ state: "detached" });
+    assert.equal(await trigger.evaluate((element) => element === document.activeElement), true);
+    await trigger.click();
+    await confirmation.getByRole("button", { name: "Delete saved note", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
+    await card.waitFor({ state: "detached" });
+    assert.ok(await panel(page).evaluate((element) => element.scrollTop) > 100, "deletion does not return to the top");
+    assert.equal(backend.calls.filter(({ cmd }) => cmd === "reading_note_delete").length, 1);
+  }],
   ["Partial bulk deletion reports all failures and keeps the notes that were not deleted", {}, async ({ page, backend }) => {
     await beginNote(page, "First partial note.");
     await save(page, "First partial note.");
@@ -205,7 +259,7 @@ const cases = [
     await beginNote(page, "Second partial note.");
     await save(page, "Second partial note.");
     backend.partialDelete = true;
-    await button(page, "Delete all notes on this page…").click();
+    await deleteAll(page);
     await panel(page).getByRole("button", { name: "Delete all saved notes", exact: true }).click();
     await panel(page).getByRole("alert").filter({
       hasText: "1 of 2 saved notes deleted, but the operation needs attention: Index reload failed after deletion. The second note file changed.",
@@ -266,12 +320,12 @@ const cases = [
     await save(page, "Second page note.");
     await panel(page).getByRole("combobox", { name: "Notes scope", exact: true }).selectOption("all");
     await cards(page).filter({ hasText: "Keep this orphaned reflection." }).waitFor();
-    await button(page, "Delete all notes on this page…").click();
+    await deleteAll(page);
     const confirmation = panel(page).getByRole("alertdialog", { name: "Confirm note deletion" });
-    assert.match(await confirmation.innerText(), /all 2 saved notes/);
+    assert.match(await confirmation.innerText(), /All 2 saved notes/);
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     assert.equal(backend.calls.some(({ cmd }) => cmd === "reading_notes_delete_for_page"), false);
-    await button(page, "Delete all notes on this page…").click();
+    await deleteAll(page);
     await confirmation.getByRole("button", { name: "Delete all saved notes", exact: true }).click();
     await cards(page).filter({ hasText: "Second page note." }).waitFor({ state: "detached" });
     assert.equal(backend.notes.length, 1);

@@ -26,6 +26,9 @@ describe("contextual help", () => {
     expect(editorHelp).toContain("blank composer automatically attaches");
     expect(editorHelp).toContain("**Delete note…**");
     expect(editorHelp).toContain("**Delete all notes on this page…**");
+    expect(editorHelp).toContain("**More actions**");
+    expect(editorHelp).toContain("centered confirmation dialog");
+    expect(editorHelp).toContain("**Cancel** is focused first");
     expect(editorHelp).toContain("even when **Notes scope** is **All notes**");
     await loadHelpPage("editor");
     expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "editor" });

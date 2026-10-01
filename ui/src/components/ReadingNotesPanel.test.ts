@@ -5,6 +5,17 @@ import pageContent from "./PageContent.svelte?raw";
 import tools from "./PageAssistantTools.svelte?raw";
 
 describe("Notes panel integration", () => {
+  it("uses a native modal for deletion and keeps optional details collapsed", () => {
+    expect(panel).toContain("deleteDialog?.showModal()");
+    expect(panel).toContain('aria-modal="true"');
+    expect(panel).toContain("dialogKeydown(closeDelete)");
+    expect(panel).toContain("cancelDeleteButton?.focus({ preventScroll: true })");
+    expect(panel).not.toContain("deleteDialog?.scrollIntoView");
+    expect(panel).toContain("<summary>About reading notes</summary>");
+    expect(panel).toContain("<summary>More actions</summary>");
+    expect(panel).toContain("<summary>Details</summary>");
+    expect(panel).toContain('.delete-confirm::backdrop');
+  });
   it("mounts outside the AI configuration gate and follows the existing journal-day source", () => {
     const notesBranch = referencePanel.indexOf('{#if activeTab === "notes"}');
     expect(notesBranch).toBeGreaterThan(0);

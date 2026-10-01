@@ -114,8 +114,8 @@ behind the normal graph. It is decorative, not an astronomical map.
 New blank Markdown-note drafts automatically attach selected words or whole
 blocks; check the quote preview before saving. **Use selection** changes the
 attachment explicitly after writing begins; **Make page-level note** removes it.
-**Delete note…** removes one saved annotation after confirmation.
-**Delete all notes on this page…** removes only the current source's annotations,
+**Delete note…** opens a focused confirmation with a preview, without scrolling
+the notes list. **More actions > Delete all notes on this page…** removes only the current source's annotations,
 even in the All notes view. Source prose is preserved and unsaved note edits are
 kept as new drafts.
 

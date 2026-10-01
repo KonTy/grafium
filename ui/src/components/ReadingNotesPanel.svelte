@@ -5,6 +5,8 @@
   import { hydrateAssetMedia } from "../lib/markdown";
   import type { PageNavigationTarget } from "../lib/navigation";
   import { readingSelection } from "../lib/readingSelection";
+  import { dialogKeydown } from "../lib/modal";
+  import { showToast } from "../lib/toast.svelte";
   import {
     readingNoteSelection, readingNotePassageTarget, readingNoteLocationTarget, renderReadingNoteBody, type ReadingNote,
   } from "../lib/readingNotes";
@@ -28,10 +30,17 @@
   let sourceError = $state("");
   let refreshTrigger = $state(0);
   let textarea = $state<HTMLTextAreaElement | undefined>();
-  let pendingDelete = $state.raw<{ source: ReadingNotesSource; notes: ReadingNote[]; wholePage: boolean } | null>(null);
+  let panel = $state<HTMLElement>();
+  let pendingDelete = $state.raw<{
+    source: ReadingNotesSource; notes: ReadingNote[]; wholePage: boolean;
+    trigger: HTMLElement | null; scrollTop: number;
+  } | null>(null);
   let deleteError = $state("");
-  let deleteNotice = $state("");
-  let deleteDialog = $state<HTMLDivElement>();
+  let deleteBusy = $state(false);
+  let deleteDialog = $state<HTMLDialogElement>();
+  let cancelDeleteButton = $state<HTMLButtonElement>();
+  const componentId = $props.id();
+  const deleteDescriptionId = `${componentId}-delete-description`;
   const view = $derived.by(() => {
     $readingNoteChanges;
     if (!source) return null;
@@ -76,9 +85,9 @@
     let disposed = false;
     source = null;
     sourceError = "";
+    untrack(() => deleteDialog?.close());
     pendingDelete = null;
     deleteError = "";
-    deleteNotice = "";
     void (async () => {
       try {
         const graph = await getGraphInfo();
@@ -226,36 +235,59 @@
   }
 
   function requestDelete(notes: ReadingNote[], wholePage = false) {
-    if (!source) return;
-    const request = { source, notes: structuredClone(notes), wholePage };
+    if (!source || deleteBusy) return;
+    const request = {
+      source, notes: structuredClone(notes), wholePage,
+      trigger: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      scrollTop: panel?.scrollTop ?? 0,
+    };
     pendingDelete = request;
     deleteError = "";
-    deleteNotice = "";
     void tick().then(() => {
       if (pendingDelete !== request) return;
-      deleteDialog?.focus();
-      deleteDialog?.scrollIntoView({ block: "nearest" });
+      deleteDialog?.showModal();
+      cancelDeleteButton?.focus({ preventScroll: true });
+      if (panel) panel.scrollTop = request.scrollTop;
+    });
+  }
+
+  function closeDelete() {
+    if (deleteBusy) return;
+    const request = pendingDelete;
+    deleteDialog?.close();
+    pendingDelete = null;
+    deleteError = "";
+    void tick().then(() => {
+      if (!request || source !== request.source || pendingDelete) return;
+      if (panel) panel.scrollTop = request.scrollTop;
+      const target = request.trigger?.isConnected ? request.trigger : panel;
+      target?.focus({ preventScroll: true });
     });
   }
 
   async function confirmDelete() {
     const request = pendingDelete;
-    if (!request) return;
+    if (!request || deleteBusy || deleteError) return;
+    deleteBusy = true;
     deleteError = "";
     try {
       const receipt = await deleteReadingNotes(request.source, request.notes, request.wholePage);
-      if (source === request.source) {
-        pendingDelete = null;
-        deleteNotice = receipt.deletedCount === 1 ? "Saved note deleted." : `${receipt.deletedCount} saved notes deleted.`;
-        if (receipt.backups.length) deleteNotice += " Recovery copies are kept beside the affected source files.";
-      }
       await loadReadingNotes(request.source);
+      if (source === request.source) {
+        deleteBusy = false;
+        closeDelete();
+      }
+      showToast(receipt.deletedCount === 1 ? "Note deleted" : `${receipt.deletedCount} notes deleted`, "success");
     } catch (error) {
       if (source === request.source) {
-        pendingDelete = null;
         deleteError = `${String(error)} Refresh and review saved notes before trying again.`;
-      }
+      } else showToast(`Could not finish deleting notes: ${String(error)}`);
       await loadReadingNotes(request.source);
+    } finally {
+      deleteBusy = false;
+      if (pendingDelete === request && deleteError) {
+        void tick().then(() => cancelDeleteButton?.focus({ preventScroll: true }));
+      }
     }
   }
 
@@ -268,11 +300,14 @@
   }
 </script>
 
-<section class="reading-notes-panel" aria-label="Reading notes" data-help-context="editor">
+<section class="reading-notes-panel" bind:this={panel} tabindex="-1" aria-label="Reading notes" data-help-context="editor">
   <header class="notes-header">
     <h2>{view?.pageTitle || pageTitle || "Reading notes"}</h2>
-    <p class="storage-notice">New notes are footnotes in the source Markdown file. Save notes before closing the app.</p>
-    <p class="note-help">Only note markers and footnotes are added; book words stay unchanged. Existing separate note files remain supported.</p>
+    <details class="note-help">
+      <summary>About reading notes</summary>
+      <p>New notes are footnotes in the source Markdown file. Save notes before closing the app.</p>
+      <p>Only note markers and footnotes are added; book words stay unchanged. Existing separate note files remain supported.</p>
+    </details>
   </header>
 
   {#if sourceError}
@@ -296,25 +331,37 @@
         New note
       </button>
       <button type="button" onclick={() => source && loadReadingNotes(source)} disabled={view.loading}>Refresh</button>
-      <button type="button" class="delete-note" onclick={() => requestDelete(pageNotes, true)}
-        disabled={!pageNotes.length || view.loading || view.deleting || !!view.listError}>
-        Delete all notes on this page…
-      </button>
+      <details class="more-actions">
+        <summary>More actions</summary>
+        <button type="button" class="delete-note" onclick={() => requestDelete(pageNotes, true)}
+          disabled={!pageNotes.length || view.loading || view.deleting || !!view.listError}>
+          Delete all notes on this page…
+        </button>
+      </details>
     </div>
 
     {#if pendingDelete}
-      <div class="delete-confirm" bind:this={deleteDialog} role="alertdialog" aria-label="Confirm note deletion" aria-modal="false" tabindex="-1">
-        <p>{pendingDelete.wholePage
-          ? `Delete all ${pendingDelete.notes.length} saved notes on "${pendingDelete.source.pageTitle}"?`
-          : "Delete this saved note?"} Source text is kept; note markers and footnotes are removed. Unsaved note edits remain as new drafts.</p>
-        <button type="button" class="delete-note" disabled={view.deleting} onclick={confirmDelete}>
-          {view.deleting ? "Deleting…" : pendingDelete.wholePage ? "Delete all saved notes" : "Delete saved note"}
-        </button>
-        <button type="button" disabled={view.deleting} onclick={() => pendingDelete = null}>Cancel</button>
-      </div>
+      <dialog class="delete-confirm" bind:this={deleteDialog} role="alertdialog" aria-label="Confirm note deletion"
+        aria-modal="true" aria-describedby={deleteDescriptionId}
+        onkeydown={dialogKeydown(closeDelete)} oncancel={(event) => { event.preventDefault(); closeDelete(); }}>
+        <h2>{pendingDelete.wholePage ? `Delete ${pendingDelete.notes.length} notes?` : "Delete this note?"}</h2>
+        {#if pendingDelete.wholePage}
+          <p class="delete-preview">All {pendingDelete.notes.length} saved notes on "{pendingDelete.source.pageTitle}"</p>
+        {:else}
+          <blockquote class="delete-preview">{pendingDelete.notes[0].body.slice(0, 200)}{pendingDelete.notes[0].body.length > 200 ? "…" : ""}</blockquote>
+        {/if}
+        <p id={deleteDescriptionId}>The page text stays. Unsaved note edits are kept.</p>
+        {#if deleteError}<div class="notes-error" role="alert">{deleteError}</div>{/if}
+        <div class="delete-actions">
+          <button type="button" bind:this={cancelDeleteButton} disabled={deleteBusy} onclick={closeDelete}>{deleteError ? "Close" : "Cancel"}</button>
+          {#if !deleteError}
+            <button type="button" class="confirm-delete" disabled={deleteBusy} onclick={confirmDelete}>
+              {deleteBusy ? "Deleting…" : pendingDelete.wholePage ? "Delete all saved notes" : "Delete saved note"}
+            </button>
+          {/if}
+        </div>
+      </dialog>
     {/if}
-    {#if deleteError}<div class="notes-error" role="alert">{deleteError}</div>{/if}
-    {#if deleteNotice}<p class="note-help" role="status">{deleteNotice}</p>{/if}
 
     {#if view.drafts.length > 1}
       <label class="draft-picker">
@@ -333,7 +380,7 @@
       <div class="note-composer">
         <div class="composer-heading">
           <h3>{view.draft.note ? "Edit note" : "New reading note"}</h3>
-          {#if view.draft.note}<span class="note-status">{view.draft.note.status}</span>{/if}
+          {#if view.draft.note && view.draft.note.status !== "attached"}<span class="note-status">{view.draft.note.status}</span>{/if}
         </div>
         {#if view.draft.note}
           <p class="note-source">Source: {view.draft.note.source.pageTitle || "Unavailable source"}</p>
@@ -407,7 +454,10 @@
           </details>
         {/if}
         {#if view.draft.note}
-          <p class="note-file">{view.draft.note.storage === "inline" ? "Source file" : "Legacy note file"}: <code>{view.draft.note.filePath}</code></p>
+          <details class="note-help">
+            <summary>Storage details</summary>
+            <p class="note-file">{view.draft.note.storage === "inline" ? "Source file" : "Legacy note file"}: <code>{view.draft.note.filePath}</code></p>
+          </details>
         {/if}
       </div>
     {:else}
@@ -433,27 +483,32 @@
       {#each view.notes as note (note.id)}
         <article class="reading-note-card" aria-label={`Note on ${note.source.pageTitle || "unavailable source"}`}>
           <div class="card-heading">
-            <h4>{note.source.pageTitle || "Unavailable source"}</h4>
-            <span class="note-status" class:needs-attention={note.status === "orphaned" || note.status === "ambiguous"}>
-              {note.status}
-            </span>
+            <h4>{view.scope === "all" ? note.source.pageTitle || "Unavailable source" : note.footnoteLabel ? `Note ${note.footnoteLabel.replace("grafium-note-", "")}` : "Note"}</h4>
+            {#if note.status !== "attached"}
+              <span class="note-status" class:needs-attention={note.status === "orphaned" || note.status === "ambiguous"}>
+                {note.status}
+              </span>
+            {/if}
           </div>
-          {#if note.statusMessage}<p class="note-help">{note.statusMessage}</p>{/if}
+          {#if note.status !== "attached" && note.statusMessage}<p class="note-help">{note.statusMessage}</p>{/if}
           {#if note.quote}<blockquote class="source-quote">{note.quote}</blockquote>
           {:else}<p class="note-help">Page-level note</p>{/if}
           <div class="note-body rendered-content" use:previewMedia={note.body}>{@html renderReadingNoteBody(note, view.graphPath)}</div>
-          <p class="note-file">{note.storage === "inline" ? `Footnote ${note.footnoteLabel?.replace("grafium-note-", "") ?? ""} · source file` : "Legacy note file"}: <code>{note.filePath}</code></p>
           <div class="card-actions">
             <button type="button" onclick={() => editNote(note)}>Edit note</button>
             <button type="button" class="delete-note" disabled={view.deleting} onclick={() => requestDelete([note])}>Delete note…</button>
-            <button type="button" onclick={() => openNote(note)}>Open note</button>
-            <button type="button" disabled={!note.source.pageId} onclick={() => note.source.pageId && onNavigate({ id: note.source.pageId })}>
-              Open source
-            </button>
             {#if readingNotePassageTarget(note)}
               <button type="button" onclick={() => openPassage(note)}>Go to passage</button>
             {/if}
           </div>
+          <details class="note-details note-help">
+            <summary>Details</summary>
+            <p class="note-file">{note.storage === "inline" ? "Source file" : "Legacy note file"}: <code>{note.filePath}</code></p>
+            <div class="card-actions">
+              <button type="button" onclick={() => openNote(note)}>Open note</button>
+              <button type="button" disabled={!note.source.pageId} onclick={() => note.source.pageId && onNavigate({ id: note.source.pageId })}>Open source</button>
+            </div>
+          </details>
         </article>
       {/each}
     </div>
@@ -466,8 +521,12 @@
   h2, h3, h4, p { margin: 0; }
   h2 { font-size: 15px; overflow-wrap: anywhere; }
   h3, h4 { font-size: 13px; font-weight: 600; }
-  .storage-notice, .note-help, .note-file, .note-source { color: var(--text-secondary); font-size: 12px; }
-  .storage-notice { margin-top: 4px; }
+  .note-help, .note-file, .note-source { color: var(--text-secondary); font-size: 12px; }
+  summary { cursor: pointer; }
+  .notes-header details, .note-details { margin-top: 8px; }
+  details[open] > p { margin-top: 8px; }
+  .more-actions { width: 100%; color: var(--text-secondary); font-size: 12px; }
+  .more-actions button { margin-top: 8px; }
   .notes-toolbar, .selection-actions, .save-actions, .card-actions, .composer-heading, .card-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .notes-toolbar { align-items: flex-end; }
   .notes-toolbar label { flex: 1; min-width: 125px; }
@@ -508,6 +567,12 @@
   .revision-review summary { cursor: pointer; font-weight: 600; }
   .revision-review[open] > :not(summary) { margin-top: 9px; }
   .delete-note { color: var(--danger, var(--text-primary)); }
-  .delete-confirm { border: 1px solid var(--border); border-radius: 5px; padding: 9px; }
-  .delete-confirm button { margin-top: 8px; }
+  .delete-confirm { box-sizing: border-box; margin: auto; width: min(420px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; padding: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 16px 64px rgb(0 0 0 / .4); }
+  .delete-confirm::backdrop { background: rgb(0 0 0 / .65); }
+  .delete-confirm h2 { font-size: 18px; }
+  .delete-confirm > :not(:first-child) { margin-top: 16px; }
+  .delete-preview { max-height: 100px; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--text-secondary); }
+  .delete-actions { display: flex; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+  .delete-actions button { padding: 9px 14px; }
+  .confirm-delete, .confirm-delete:hover:not(:disabled) { background: var(--danger); color: var(--bg-primary); border-color: var(--danger); }
 </style>

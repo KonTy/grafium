@@ -49,12 +49,18 @@ footnotes inside its Markdown file, not just database records. Original-format
 ebooks use adjacent JSON-LD instead; see [[Help - Books]].
 
 **Delete note…** is available on each saved note card and in its editor.
-**Delete all notes on this page…** is in the Notes toolbar. Both ask for
-confirmation; Cancel changes nothing. Bulk deletion targets only the current
+**Delete all notes on this page…** is under **More actions** in the Notes
+toolbar. Both open a centered confirmation dialog without scrolling the notes
+list. A single-note confirmation previews the note being deleted; bulk deletion
+shows the note count and page. **Cancel** is focused first; Cancel or **Escape**
+returns to the same place without changing anything. Bulk deletion targets only the current
 page or journal day, even when **Notes scope** is **All notes**, and includes
 legacy separate-file annotations on that source. It does not delete the page,
 source prose, ordinary footnotes, or other pages' notes. Unsaved note edits are
 kept as new drafts rather than silently discarded. Save them before closing.
+Storage guidance and file paths are available under **About reading notes**,
+**Storage details**, or a saved note's **Details**, rather than repeated beside
+every action. Attachment warnings remain visible.
 
 Deletion checks the reviewed revisions. If a note changed since confirmation,
 refresh and review it before retrying instead of overwriting someone else's
