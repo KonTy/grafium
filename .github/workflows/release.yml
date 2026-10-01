@@ -21,18 +21,26 @@ jobs:
 
       - name: Compute CI version
         id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
 
           CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAG="${{ github.ref_name }}"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            TAG="$REF_NAME"
+            if [[ "$TAG" != "v$CURRENT" ]]; then
+              echo "::error::Release tag $TAG must match committed version v$CURRENT"
+              exit 1
+            fi
             SEMVER="${TAG#v}"
             echo "is_tag_build=true" >> "$GITHUB_OUTPUT"
           else
             IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-            PATCH=$((PATCH + ${{ github.run_number }}))
+            PATCH=$((PATCH + RUN_NUMBER))
             SEMVER="$MAJOR.$MINOR.$PATCH"
             TAG="v$SEMVER"
             echo "is_tag_build=false" >> "$GITHUB_OUTPUT"
@@ -65,6 +73,7 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libappindicator3-dev \
+            libfuse2 \
             patchelf \
             libvulkan-dev \
             mesa-vulkan-drivers
@@ -94,11 +103,42 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+      - name: Build Debian package
+        working-directory: ui
+        run: npx tauri build --bundles deb --verbose
+
+      - name: Smoke-check Debian package without launching Grafium
+        id: deb-smoke
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare-version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          DEB="target/release/bundle/deb/Grafium_${VERSION}_amd64.deb"
+          test "$(dpkg-deb --field "$DEB" Version)" = "$VERSION"
+          test "$(dpkg-deb --field "$DEB" Architecture)" = amd64
+          ROOT="$PWD/target/deb-smoke"
+          dpkg-deb --extract "$DEB" "$ROOT"
+          test -x "$ROOT/usr/bin/grafium"
+          test -f "$ROOT/usr/share/applications/Grafium.desktop"
+          test -f "$ROOT/usr/lib/Grafium/libllama.so.0"
+          for LIB in target/release/bundled-libs/*.so*; do
+            cmp "$LIB" "$ROOT/usr/lib/Grafium/${LIB##*/}"
+          done
+          # Do not let the build's library directory hide missing packaged libraries.
+          env -u LD_LIBRARY_PATH ldd "$ROOT/usr/bin/grafium" | tee target/deb-ldd.log
+          if grep -q 'not found' target/deb-ldd.log; then
+            echo "::error::Debian package has unresolved runtime libraries"
+            exit 1
+          fi
+          mkdir -p target/linux-artifacts
+          cp "$DEB" target/linux-artifacts/
+
+      - name: Bundle AppImage
+        working-directory: ui
+        env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          # Avoid the old linuxdeploy strip binary rejecting newer ELF sections.
+          NO_STRIP: "1"
           # `build.rs` copies the shared libraries the `llm-local` feature
           # needs (libllama/libggml*) into target/release/bundled-libs so
           # tauri.conf.json can bundle them. linuxdeploy (used for the
@@ -107,17 +147,73 @@ jobs:
           # binary itself (that rpath only helps at final app runtime), so
           # it needs this set to find libggml* while scanning libllama.so.
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release/bundled-libs
-        with:
-          projectPath: ui
-          tauriScript: npx tauri
+        run: |
+          set -euo pipefail
+          # Without --verbose, Tauri discards linuxdeploy's stderr on failure.
+          npx tauri bundle --bundles appimage --verbose 2>&1 | tee ../target/appimage-bundle.log
+
+      - name: Smoke-check AppImage without launching Grafium
+        env:
+          VERSION: ${{ needs.prepare-version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          APPIMAGE="$PWD/target/release/bundle/appimage/Grafium_${VERSION}_amd64.AppImage"
+          test -s "$APPIMAGE"
+          mkdir -p target/appimage-smoke
+          (
+            cd target/appimage-smoke
+            "$APPIMAGE" --appimage-extract >/dev/null
+            test -x squashfs-root/AppRun
+            test -x squashfs-root/usr/bin/grafium
+            test -f squashfs-root/usr/lib/Grafium/libllama.so.0
+          )
+          cp "$APPIMAGE" target/linux-artifacts/
+
+      - name: Record Linux checksums and build provenance
+        if: ${{ !cancelled() && steps.deb-smoke.outcome == 'success' }}
+        env:
+          VERSION: ${{ needs.prepare-version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          provenance = {
+              "version": os.environ["VERSION"],
+              "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "ref": os.environ["GITHUB_REF"],
+              "run": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path("target/linux-artifacts/linux-build-provenance.json").write_text(
+              json.dumps(provenance, indent=2) + "\n"
+          )
+          PY
+          cd target/linux-artifacts
+          sha256sum ./*.deb ./*.json > SHA256SUMS-linux.txt
+          if compgen -G '*.AppImage' >/dev/null; then
+            sha256sum ./*.AppImage >> SHA256SUMS-linux.txt
+          fi
+          sha256sum --check SHA256SUMS-linux.txt
 
       - name: Upload Linux artifacts
+        # Preserve the verified DEB if AppImage bundling fails; the job still fails
+        # and the all-platform release gate below remains unchanged.
+        if: ${{ !cancelled() && steps.deb-smoke.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: linux-artifacts
+          path: target/linux-artifacts/
+          if-no-files-found: error
+
+      - name: Upload Linux packaging diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packaging-diagnostics
           path: |
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
+            target/deb-ldd.log
+            target/appimage-bundle.log
+          if-no-files-found: ignore
 
   build-windows:
     needs: [prepare-version]
@@ -153,6 +249,36 @@ jobs:
         with:
           version: 1.3.296.0
           cache: true
+
+      - name: Fetch matching SPIRV-Headers CMake package
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/SPIRV-Headers
+          # vulkan-sdk-1.3.296.0; keep this aligned with the SDK above.
+          ref: 2a9b6f951c7d6b04b6c21fe1bf3f475b68b84801
+          path: target/spirv-headers
+          persist-credentials: false
+
+      - name: Install and verify SPIRV-Headers CMake package
+        shell: pwsh
+        run: |
+          # This Windows SDK has the headers but lacks their CMake package.
+          # Install the matching upstream package, not a fabricated find module.
+          cmake -S target/spirv-headers -B target/spirv-headers-build `
+            "-DCMAKE_INSTALL_PREFIX=$env:VULKAN_SDK" `
+            -DSPIRV_HEADERS_ENABLE_TESTS=OFF -DSPIRV_HEADERS_ENABLE_INSTALL=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --install target/spirv-headers-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force target/vulkan-check | Out-Null
+          @'
+          cmake_minimum_required(VERSION 3.19)
+          project(vulkan_check LANGUAGES CXX)
+          find_package(Vulkan REQUIRED COMPONENTS glslc)
+          find_package(SPIRV-Headers CONFIG REQUIRED)
+          '@ | Set-Content target/vulkan-check/CMakeLists.txt
+          cmake -S target/vulkan-check -B target/vulkan-check-build "-DCMAKE_PREFIX_PATH=$env:VULKAN_SDK"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
