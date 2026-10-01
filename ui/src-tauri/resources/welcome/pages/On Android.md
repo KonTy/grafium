@@ -4,6 +4,10 @@ Choose a graph location the app can access and keep a verified backup before mov
 
 Use the controls available in your installed Android build. Optional desktop import, OCR, transcription, and model workflows can have different availability or requirements.
 
+In Journal, the calendar and link icons are in the top toolbar immediately
+before Search, leaving more vertical space for notes. In Zen mode they remain
+available above the journal while the top toolbar is hidden.
+
 Swipe inward from either screen edge to go back through pages you opened in
 Grafium. An open dialog or menu closes first. At the beginning of Grafium's
 navigation history, the gesture leaves the current page open instead of exiting

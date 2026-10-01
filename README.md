@@ -164,7 +164,7 @@ guessed into a different block.
 | Files or placeholders | Filter All Pages, in list and tree view, to every page, only pages with a source file on disk (Markdown or an original book), or only the placeholders a `[[link]]` or `#tag` created but nobody has written. Remembered per graph. |
 | Favorites and recent pages | Keep frequently used material close at hand and return to recent work. |
 | Full-text search | Search indexed note content with SQLite FTS5 and ranked results. |
-| Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the journal calendar, to browse all pages with an immediately focused fuzzy search. Arrows browse; Enter opens; Escape cancels. |
+| Go to link | Press **Ctrl/Cmd+L**, or use the link icon beside the calendar in Journal's top toolbar, to browse all pages with an immediately focused fuzzy search. Desktop and Android keep both icons beside Search rather than in an extra row above the notes. Arrows browse; Enter opens; Escape cancels. |
 | Global search | Search pages and note content in one **Ctrl/Cmd+K** dialog, also opened by the title-bar Search button. The left panel stays focused on navigation, favorites, and recent pages. Exact search works without AI; semantic search uses the configured embedding index. |
 | View filters and history | Focus an available All Pages, Graph, or Settings filter with **Ctrl/Cmd+F**, and move backward or forward through navigation history. |
 | 2D and 3D graphs | Explore global or local connections, search, pan, zoom, inspect, and drag nodes. |

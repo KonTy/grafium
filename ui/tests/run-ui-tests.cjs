@@ -59,7 +59,7 @@ const run = (cmd, args, opts) =>
   try {
     await waitForServer();
     const failed = [];
-    for (const testFile of ["startup.ui.cjs", "emojiReader.ui.cjs", "themeColors.ui.cjs", "goToLink.ui.cjs", "globalSearch.ui.cjs", "settingsSearch.ui.cjs", "mainPanePaging.ui.cjs", "journalLoading.ui.cjs", "keyboardSelection.ui.cjs", "allPages.ui.cjs", "chat.ui.cjs", "askContext.ui.cjs", "researchPanel.ui.cjs", "researchLinks.ui.cjs", "scopedResearch.ui.cjs", "readingNotes.ui.cjs", "bookImport.ui.cjs", "booksApp.ui.cjs", "syncResolution.ui.cjs", "writing.ui.cjs", "graphCommunities2D.ui.cjs", "graphCommunities3D.ui.cjs", "graphFlight.ui.cjs", "paste.ui.cjs", "bulletThreading.ui.cjs"]) {
+    for (const testFile of ["startup.ui.cjs", "emojiReader.ui.cjs", "themeColors.ui.cjs", "goToLink.ui.cjs", "globalSearch.ui.cjs", "settingsSearch.ui.cjs", "mainPanePaging.ui.cjs", "journalLoading.ui.cjs", "keyboardSelection.ui.cjs", "allPages.ui.cjs", "chat.ui.cjs", "askContext.ui.cjs", "researchPanel.ui.cjs", "researchLinks.ui.cjs", "scopedResearch.ui.cjs", "readingNotes.ui.cjs", "bookImport.ui.cjs", "booksApp.ui.cjs", "syncResolution.ui.cjs", "writing.ui.cjs", "graphCommunities2D.ui.cjs", "graphCommunities3D.ui.cjs", "graphFlight.ui.cjs", "paste.ui.cjs", "bulletThreading.ui.cjs", "bulletRendering.ui.cjs"]) {
       const code = await run("node", [path.join(__dirname, testFile)], {
         cwd: uiDir,
         env: { ...process.env, UI_TEST_URL: URL },

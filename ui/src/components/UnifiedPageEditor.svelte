@@ -45,6 +45,7 @@
     clearMarkdownImageWidth,
     hydrateAssetMedia,
     renderBlock,
+    outlineListMarker,
     setMarkdownImageWidth,
   } from "../lib/markdown";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
@@ -181,9 +182,10 @@
         row.style.gridTemplateColumns = "minmax(0, 1fr)";
         row.append(content);
       } else {
+        content.classList.add("outline-rendered-content");
         const bullet = document.createElement("span");
         bullet.className = "unified-rendered-bullet";
-        bullet.textContent = "•";
+        bullet.textContent = outlineListMarker(content.innerHTML).symbol;
         row.append(bullet, content);
       }
       row.addEventListener("click", (event) => {

@@ -7,7 +7,10 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     ? await webkit.launch()
     : await chromium.launch({ args: ["--no-sandbox"] });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      ...(process.env.UI_TEST_ANDROID ? { userAgent: "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36" } : {}),
+    });
     page.setDefaultTimeout(10_000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -68,6 +71,8 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     });
     await page.goto(BASE_URL, { waitUntil: "networkidle" });
     await page.locator(".block-item").first().waitFor();
+    assert.equal(await page.locator(".titlebar [data-journal-date-action]").count(), 0,
+      "journal actions are not shown on ordinary pages");
     assert.equal(await page.evaluate(() => window.__linkFixture.calls), 0, "no full title-list query at startup");
     await page.evaluate(() => { window.__linkFixture.hold = true; });
     await page.keyboard.press("Control+l");
@@ -158,6 +163,9 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await calendar.waitFor();
     await page.keyboard.press("Escape");
     const dateButton = page.getByRole("button", { name: "Go to date", exact: true });
+    assert.equal(await page.locator(".journal-toolbar").count(), 0, "no separate row takes space above the journal");
+    assert.equal(await page.locator(".titlebar").getByRole("button", { name: "Go to date", exact: true }).count(), 1);
+    assert.equal(await page.locator(".titlebar").getByRole("button", { name: "Go to link", exact: true }).count(), 1);
     assert.equal((await dateButton.textContent()).trim(), "");
     assert.equal(await dateButton.locator("svg").count(), 1);
     await page.getByRole("button", { name: "Go to link", exact: true }).click();
@@ -167,6 +175,38 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.keyboard.press("Escape");
     console.log("PASS adjacent icon controls, unchanged calendar keys, journal links, and ID-based navigation");
 
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 700 });
+      const dateRect = await dateButton.boundingBox();
+      const linkButton = page.getByRole("button", { name: "Go to link", exact: true });
+      const linkRect = await linkButton.boundingBox();
+      const searchRect = await page.locator('.titlebar button[title="Search (Ctrl+K)"]').boundingBox();
+      assert.ok(dateRect.x >= 0 && dateRect.x + dateRect.width <= linkRect.x
+        && linkRect.x + linkRect.width <= searchRect.x && searchRect.x + searchRect.width <= width,
+        "calendar and link fit immediately before Search on narrow screens");
+      assert.equal(dateRect.y, searchRect.y);
+      assert.ok(dateRect.width >= 24 && linkRect.width >= 24, "navigation keeps usable tap targets");
+      await dateButton.click();
+      await calendar.waitFor();
+      const calendarBox = await calendar.boundingBox();
+      assert.ok(calendarBox.x >= 0 && calendarBox.x + calendarBox.width <= width,
+        "calendar stays inside the narrow viewport");
+      await page.keyboard.press("Escape");
+      await linkButton.click();
+      await input.waitFor();
+      await page.keyboard.press("Escape");
+      assert.equal(await page.locator(".journal-toolbar").count(), 0);
+    }
+    await page.keyboard.press("Alt+z");
+    assert.equal(await page.locator(".titlebar").count(), 0);
+    await page.locator(".journal-toolbar").getByRole("button", { name: "Go to date", exact: true }).click();
+    await calendar.waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator(".journal-toolbar").getByRole("button", { name: "Go to link", exact: true }).click();
+    await input.waitFor();
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Alt+z");
+    assert.equal(await page.locator(".journal-toolbar").count(), 0, "Zen fallback disappears with the restored title bar");
     await page.setViewportSize({ width: 390, height: 700 });
     await page.keyboard.press("Control+l");
     await dialog.getByRole("option").first().waitFor();

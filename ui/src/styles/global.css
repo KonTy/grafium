@@ -253,6 +253,23 @@ body {
   vertical-align: -0.08em;
 }
 
+ul.grafium-list-diamond > li {
+  list-style-type: "\25c6  ";
+}
+
+ul.grafium-list-square > li {
+  list-style-type: square;
+}
+
+ul.grafium-list-dot > li {
+  list-style-type: disc;
+}
+
+/* The outline gutter already supplies the first unordered list item's bullet. */
+.outline-rendered-content > ul:first-child > li:first-child {
+  list-style-type: none;
+}
+
 .bionic-reader-enabled .rendered-content,
 .bionic-reader-enabled .backlink-content,
 .bionic-reader-enabled .unified-rendered-content {

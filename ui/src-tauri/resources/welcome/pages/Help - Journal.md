@@ -33,13 +33,17 @@ can create it when you follow the link. Links turn journal capture into a
 connected graph: open **Graph** from the sidebar, or press **F1** there for
 graph-specific guidance.
 
-Use `Ctrl+L` / `Cmd+L` to inspect links for the current page. Backlinks and
-related pages show how an idea connects without requiring folders.
+Use the top toolbar's link icon or `Ctrl+L` / `Cmd+L` to find and open any page
+by name. Backlinks and related pages show how an idea connects without requiring
+folders.
 
 ## Dates, times, and tasks
 
-- Journal pages are dated automatically. Use the calendar or **Go to time** to
-  jump to another day.
+- Journal pages are dated automatically. Use **Go to date** (the calendar icon
+  in the top toolbar, beside the link icon and Search) or **Ctrl/Cmd+G** to
+  jump to another day. Desktop and Android share this compact placement,
+  without an extra button row above your notes. In Zen mode, which hides the
+  top toolbar, these two buttons remain available above the journal.
 - To delete a day, hover its date label and click the trash button (always
   visible on touch screens), or right-click the date and choose **Delete page**.
   This removes that day's `.md` file after you confirm.
@@ -55,7 +59,7 @@ related pages show how an idea connects without requiring folders.
 
 - **Ctrl+K / Cmd+K**: global search.
 - **Ctrl+Shift+B / Cmd+Shift+B**: toggle the right reference panel.
-- **Ctrl+L / Cmd+L**: list links for the current page.
+- **Ctrl+L / Cmd+L**: find and open a page by name.
 - **Ctrl+Shift+P / Cmd+Shift+P**: command palette.
 - **F1**: contextual help.
 - Use the back and forward buttons to return to earlier pages and journal days.

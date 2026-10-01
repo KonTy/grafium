@@ -2135,7 +2135,7 @@
       onGoBack={goBack}
       onGoForward={goForward}
       onToggleReferencePanel={() => (referencePanelVisible = !referencePanelVisible)}
-      showJournalActions={isAndroid && currentView === "journal"}
+      showJournalActions={currentView === "journal"}
       onGoToDate={openJournalCalendar}
       onGoToLink={openGoToLink}
       onOpenSearch={openGlobalSearch}
@@ -2254,7 +2254,7 @@
     {:else if currentView === "journal"}
       <JournalView
         onGoToLink={openGoToLink}
-        showNavigationToolbar={!isAndroid}
+        showNavigationToolbar={zenMode}
         openCalendar={journalCalendarRequested}
         onCalendarOpened={() => (journalCalendarRequested = false)}
         restorePageTitle={pendingJournalRestore?.sourcePageTitle}

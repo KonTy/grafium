@@ -4,6 +4,16 @@ Press **F1** while editing for quick editor help.
 
 - **Enter** creates a block; **Shift+Enter** adds a line inside it.
 - **Tab** indents; **Shift+Tab** outdents.
+- Click the compact triangle beside a heading to collapse or expand its
+  children. The full gutter area remains clickable.
+- Blocks already have an outline bullet. A block starting with a Markdown list
+  (`- text`, `* text`, or `+ text`) uses that bullet for its first item instead
+  of showing two. Further items and nested lists keep their own markers.
+  Source text is unchanged; `_ text` is literal text, not a Markdown list.
+- Markdown list markers have distinct shapes: `* text` shows a dot,
+  `- text` a diamond, and `+ text` a square. This always applies to rendered
+  lists, including nested lists and books; ordinary blocks keep their dot.
+  Other Markdown editors may display all three as the same bullet.
 - Type `/` for commands.
 - Link pages with `[[Page Title]]` and add tags such as `#project`.
 - Headings from `#` through `######` use theme-aware red, blue, purple, cyan,
@@ -21,8 +31,10 @@ Press **F1** while editing for quick editor help.
 - On Android, tap **Time** in the editor bar to insert the current local time.
   Hold **Time** to request the current location and insert both. Grafium asks
   for Android location permission only when you use the hold action. In the
-  Journal, **Go to date** and **Go to link** sit in the title bar immediately
-  before Search so the journal itself keeps more room for notes.
+  Journal on both desktop and Android, **Go to date** and **Go to link** sit
+  in the top toolbar immediately before Search, without a separate row above
+  your notes. Zen mode keeps the two buttons above the journal while the
+  top toolbar is hidden.
 
 Clicking a block's text opens it for editing. Controls inside a rendered block
 act on themselves instead: ticking a task checkbox, sorting a table column, or

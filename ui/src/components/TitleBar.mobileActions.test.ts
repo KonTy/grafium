@@ -7,10 +7,10 @@ const titleBar = readFileSync(join(process.cwd(), "src/components/TitleBar.svelt
 const journal = readFileSync(join(process.cwd(), "src/components/JournalView.svelte"), "utf8");
 const jobs = readFileSync(join(process.cwd(), "src/components/JobActivity.svelte"), "utf8");
 
-describe("compact Android title bar actions", () => {
-  it("moves journal navigation immediately before Search on Android", () => {
-    expect(app).toContain('showJournalActions={isAndroid && currentView === "journal"}');
-    expect(app).toContain("showNavigationToolbar={!isAndroid}");
+describe("compact title bar actions", () => {
+  it("places journal navigation before Search on every platform, with a Zen fallback", () => {
+    expect(app).toContain('showJournalActions={currentView === "journal"}');
+    expect(app).toContain("showNavigationToolbar={zenMode}");
 
     const actions = titleBar.indexOf("{#if showJournalActions}");
     const search = titleBar.indexOf('title="Search (Ctrl+K)"');

@@ -97,6 +97,7 @@
         onclick={onGoToDate}
         title="Go to date (Ctrl/Cmd+G)"
         aria-label="Go to date"
+        aria-haspopup="dialog"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect x="3" y="5" width="18" height="16" rx="2" />
@@ -109,6 +110,7 @@
         onclick={onGoToLink}
         title="Go to link (Ctrl/Cmd+L)"
         aria-label="Go to link"
+        aria-haspopup="dialog"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M10 13a5 5 0 0 0 7 .2l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7-.2l-3 3a5 5 0 0 0 7 7l1.7-1.7" />

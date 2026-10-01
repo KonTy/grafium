@@ -6,11 +6,30 @@ import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
 
-// Custom renderer for code blocks with line numbers.
-// Each line number is emitted as a CSS counter (::before) on its own
-// .code-line, so the number always shares the same line box as its code and
-// can never drift out of alignment (regardless of theme borders/fonts).
 const renderer = new marked.Renderer();
+const LIST_MARKERS = {
+  "-": { shape: "diamond", symbol: "\u25c6" },
+  "+": { shape: "square", symbol: "\u25a0" },
+  "*": { shape: "dot", symbol: "\u2022" },
+} as const;
+
+renderer.list = function (token) {
+  const html = marked.Renderer.prototype.list.call(this, token);
+  if (token.ordered) return html;
+  const marker = token.raw.trimStart()[0];
+  const shape = marker === "-" || marker === "+" || marker === "*"
+    ? LIST_MARKERS[marker].shape : "dot";
+  return html.replace(/^<ul>/, `<ul class="grafium-list-${shape}">`);
+};
+
+/** Use the parsed leading list, not source punctuation that could be code or emphasis. */
+export function outlineListMarker(html: string) {
+  if (html.startsWith('<ul class="grafium-list-diamond">')) return LIST_MARKERS["-"];
+  if (html.startsWith('<ul class="grafium-list-square">')) return LIST_MARKERS["+"];
+  return LIST_MARKERS["*"];
+}
+
+// Line numbers use a CSS counter on each .code-line to keep them aligned.
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   const lines = text.split("\n");
   const codeHtml = lines

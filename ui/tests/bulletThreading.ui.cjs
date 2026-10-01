@@ -180,6 +180,25 @@ function assertConnected(rows, startId, endId) {
       (element) => element.getBoundingClientRect().height / 1.25,
     );
     assert.ok(headingHeight <= 36, `heading parent should stay compact, got ${headingHeight}px`);
+    for (let level = 1; level <= 6; level++) {
+      await focusBlock(page, "heading");
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.insertText(`${"#".repeat(level)} A heading`);
+      await focusBlock(page, "heading-child");
+      const heading = page.locator('.block-item[data-block-id="heading"]');
+      const gutter = heading.locator(".bullet-container");
+      const arrow = heading.locator(".collapse-arrow");
+      for (const collapsed of [false, true]) {
+        assert.equal(await arrow.evaluate((element) => getComputedStyle(element).fontSize), "10px",
+          `H${level} ${collapsed ? "collapsed" : "expanded"} arrow stays compact`);
+        assert.equal(await gutter.evaluate((element) => element.getBoundingClientRect().width / 1.25), 20,
+          "the click target does not shrink with the triangle");
+        await gutter.click();
+        await page.locator('.block-item[data-block-id="heading-child"]').waitFor({
+          state: collapsed ? "visible" : "detached",
+        });
+      }
+    }
     await focusBlock(page, "root");
     assert.equal((await readPath(page)).flatMap((row) => row.segments).length, 0);
     assert.deepEqual(errors, []);

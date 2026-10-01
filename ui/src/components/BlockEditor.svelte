@@ -15,6 +15,7 @@
   import {
     clearMarkdownImageWidth,
     renderBlock,
+    outlineListMarker,
     hydrateAssetMedia,
     assetBaseDirFor,
     markdownHeadingSlug,
@@ -177,6 +178,7 @@
   let renderedHtml = $derived(readingNoteLabel
     ? renderReadingNoteFooter(block.content, readingNoteLabel, assetBaseDir) : renderBlock(block.content, assetBaseDir));
   let isTableBlock = $derived(renderedHtml.includes("<table"));
+  const listMarker = $derived(outlineListMarker(renderedHtml));
 
   /**
    * Base directory for one query result row.
@@ -2571,11 +2573,11 @@
       {#if hasChildren}
         <span class="collapse-arrow" class:collapsed>
           {#if collapsed || suppressBullet}{collapsed ? "▶" : "▼"}{:else}
-            <span class="arrow-hover">▼</span><span class="bullet-default">•</span>
+            <span class="arrow-hover">▼</span><span class="bullet-default">{listMarker.symbol}</span>
           {/if}
         </span>
       {:else if !suppressBullet}
-        <span class="bullet">•</span>
+        <span class="bullet" data-list-marker={listMarker.shape}>{listMarker.symbol}</span>
       {/if}
     </div>
   {/if}
@@ -2662,6 +2664,7 @@
     {:else}
       <div
         class="rendered-content"
+        class:outline-rendered-content={showBlockMarker && !suppressBullet}
         use:bionicReader={block.content}
         data-reading-note-footer={readingNoteLabel ? "" : undefined}
         bind:this={renderedEl}
@@ -2909,6 +2912,15 @@
     font-weight: 700;
   }
 
+  .bullet[data-list-marker="square"],
+  .bullet[data-list-marker="diamond"] {
+    border-radius: 0;
+  }
+
+  .bullet[data-list-marker="diamond"] {
+    transform: rotate(45deg);
+  }
+
   .bullet-container.has-children .collapse-arrow {
     color: var(--accent);
     text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
@@ -2972,6 +2984,10 @@
   .collapse-arrow.collapsed {
     font-size: 1em;
     color: var(--text-secondary);
+  }
+
+  .block-item:is(.h1, .h2, .h3, .h4, .h5, .h6) .collapse-arrow {
+    font-size: 10px;
   }
 
   .block-content {
