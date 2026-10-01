@@ -24,6 +24,8 @@ pub mod study_player;
 pub mod sync;
 pub mod tasks;
 pub mod theme;
+#[cfg(all(test, target_os = "linux"))]
+mod theme_native_tests;
 pub mod trees;
 pub mod writing;
 pub mod writing_edits;

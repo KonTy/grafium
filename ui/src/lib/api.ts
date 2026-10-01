@@ -607,6 +607,7 @@ export interface SystemAppearance {
   themeName: string | null;
   backgroundOpacity: number;
   nativeTransparency: boolean;
+  transparencyUnavailableReason?: string | null;
 }
 
 export function getSystemAppearance(): Promise<SystemAppearance> {

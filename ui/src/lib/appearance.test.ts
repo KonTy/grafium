@@ -110,6 +110,24 @@ describe("background appearance", () => {
     controller.stop();
   });
 
+  it("explains an opaque renderer override only when Auto requests transparency", async () => {
+    const reason = "WEBKIT_DISABLE_DMABUF_RENDERER requires opaque rendering.";
+    const { controller, deps } = setup("auto", {
+      ...glass(), nativeTransparency: false, transparencyUnavailableReason: reason,
+    });
+    await controller.start();
+    expect(get(controller).error).toBe(reason);
+    expect(document.documentElement.hasAttribute("data-window-transparency")).toBe(false);
+    await controller.select("github");
+    expect(get(controller).error).toBe("");
+    await controller.select("auto");
+    deps.readSystem.mockResolvedValue(glass());
+    await controller.refresh();
+    expect(get(controller).error).toBe("");
+    expect(document.documentElement.hasAttribute("data-window-transparency")).toBe(true);
+    controller.stop();
+  });
+
   it("does not let slow startup preferences overwrite a user click", async () => {
     const { controller, deps } = setup();
     let finish!: (id: string) => void;

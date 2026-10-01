@@ -333,8 +333,13 @@ to `popup_opacity`, then `1.0`; invalid explicit values log an error and use opa
 Palette edits and replacements update live. Unknown system names use the default
 opaque palette, not a custom palette import. Native alpha needs a rebuilt Grafium
 and one normal quit/reopen; the compositor must keep whole-window opacity at
-`1.0`. Linux needs an RGBA visual and, on X11, an active compositor. Transparency
-does not require changing Grafium's existing WebKit renderer safety settings.
+`1.0`. Linux needs an RGBA visual and, on X11, an active compositor. On WebKitGTK
+2.44 or newer, Grafium defaults to shared-memory rendering: this preserves native
+background alpha without the GPU-DMABUF transport that can trigger Wayland
+protocol errors. Older engines keep the safe opaque renderer. Explicit
+`WEBKIT_DISABLE_DMABUF_RENDERER` or `WEBKIT_DISABLE_COMPOSITING_MODE` environment
+overrides are respected; Settings explains when they prevent transparency.
+Remove such an override and quit/reopen to use the default shared-memory path.
 
 ### Useful shortcuts
 
@@ -516,8 +521,20 @@ Background-transparency coverage is included in `test:ui`. On Linux,
 backing-store alpha using synthetic content and an isolated Xvfb display
 (requires PyGObject, Cairo, GTK3 and WebKitGTK 4.1). It verifies opaque text/icon
 interiors at clear, translucent and opaque background values with Grafium's
-renderer safeguards enabled. This is not a real Wayland/X11 compositor capture;
-desktop composition still needs release validation after the app is rebuilt.
+legacy renderer safeguards enabled. Snapshots alone do not prove on-screen alpha:
+WebKit's legacy software renderer can return transparent snapshots while painting
+an opaque native widget. After `npm --prefix ui run build`, run
+`cargo test --release -p grafium --lib native_window_appearance -- --ignored --nocapture --test-threads=1`
+alone on a composited Linux display, with each of `GTK_THEME=Adwaita` and
+`GTK_THEME=Adwaita:dark`. The test isolates HOME/config/data, uses the compiled Tauri
+configuration and real Svelte Settings, and measures the complete GTK toplevel
+drawing at 0, 0.5, 0.9 and 1 with opaque glyph interiors, resizing and remapping.
+It also compares native frames before and after repeated scrolling in a long
+synthetic document, both while reading and editing. Explicit renderer overrides
+must be unset for this default-path test; set `GRAFIUM_TEST_LEGACY_RENDERER=1`
+alongside an override to check its opaque fallback and Settings explanation.
+It never opens personal graphs. This is native drawing coverage, not a desktop
+screenshot; the compositor must still preserve the application's alpha.
 
 The isolated book reader has synthetic EPUB, FB2, MOBI, and PDF fixtures:
 `npm --prefix ui run test:books:ui` runs them in Chromium. On Linux,

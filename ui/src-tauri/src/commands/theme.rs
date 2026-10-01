@@ -159,17 +159,46 @@ fn background_opacity(content: &str) -> Result<f64, String> {
 pub struct SystemAppearance {
     theme_name: Option<String>,
     background_opacity: f64,
-    native_transparency: bool,
+    pub(super) native_transparency: bool,
+    transparency_unavailable_reason: Option<String>,
 }
 
 /// GTK objects must never cross threads. Commands await the main-loop result,
 /// rather than blocking the loop on a synchronous channel receive.
 pub(crate) async fn native_transparency(window: &tauri::WebviewWindow) -> bool {
+    native_transparency_status(window).await.is_ok()
+}
+
+async fn native_transparency_status(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let result = check_native_transparency(window).await;
+    static LAST_STATUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let message = result
+        .as_ref()
+        .err()
+        .map(String::as_str)
+        .unwrap_or("Native background transparency is supported");
+    if let Ok(mut previous) = LAST_STATUS.lock() {
+        if previous.as_deref() != Some(message) {
+            if result.is_err() {
+                tracing::warn!("{message}");
+            } else {
+                tracing::info!("{message}");
+            }
+            *previous = Some(message.to_owned());
+        }
+    }
+    result
+}
+
+async fn check_native_transparency(window: &tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use gtk::prelude::*;
         use tauri::Manager;
 
+        if let Some(reason) = crate::webkit_renderer::transparency_unavailable_reason() {
+            return Err(reason);
+        }
         let configured = window
             .app_handle()
             .config()
@@ -178,15 +207,14 @@ pub(crate) async fn native_transparency(window: &tauri::WebviewWindow) -> bool {
             .iter()
             .any(|config| config.label == window.label() && config.transparent);
         if !configured {
-            return false;
+            return Err("This build has no transparent native window; rebuild with the Linux Tauri configuration and quit/reopen.".into());
         }
         let window_on_main = window.clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         if let Err(error) = window.run_on_main_thread(move || {
-            let supported = window_on_main.gtk_window().ok().is_some_and(|native| {
-                let Some(screen) = WidgetExt::screen(&native) else {
-                    return false;
-                };
+            let supported = (|| -> Result<(), String> {
+                let native = window_on_main.gtk_window().map_err(|error| error.to_string())?;
+                let screen = WidgetExt::screen(&native).ok_or("No GTK screen is available")?;
                 let rgba = screen.rgba_visual();
                 let display_type = screen.display().type_().name();
                 let backend_supported = match display_type {
@@ -194,22 +222,26 @@ pub(crate) async fn native_transparency(window: &tauri::WebviewWindow) -> bool {
                     "GdkX11Display" => screen.is_composited(),
                     _ => false,
                 };
-                native.is_app_paintable()
-                    && rgba.is_some()
-                    && native.visual() == rgba
-                    && backend_supported
-            });
+                if !native.is_app_paintable() || rgba.is_none() || native.visual() != rgba {
+                    return Err("This GTK window has no transparent RGBA drawing surface; using an opaque background.".into());
+                }
+                if !backend_supported {
+                    return Err("Background transparency needs Wayland or an active X11 compositor; using an opaque background.".into());
+                }
+                Ok(())
+            })();
             let _ = send.send(supported);
         }) {
-            tracing::warn!("Could not check native transparency: {error}");
-            return false;
+            return Err(format!("Could not check native transparency: {error}"));
         }
-        receive.await.unwrap_or(false)
+        receive
+            .await
+            .map_err(|error| format!("Native transparency check did not finish: {error}"))?
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = window;
-        false
+        Err("Native background transparency is currently supported only on Linux.".into())
     }
 }
 
@@ -219,12 +251,14 @@ pub async fn get_system_appearance(window: tauri::WebviewWindow) -> SystemAppear
     if let Some(snapshot) = &snapshot {
         snapshot.log_diagnostics();
     }
+    let transparency = native_transparency_status(&window).await;
     SystemAppearance {
         theme_name: snapshot.as_ref().and_then(ThemeSnapshot::theme_name),
         background_opacity: snapshot
             .as_ref()
             .map_or(1.0, |snapshot| snapshot.opacity().unwrap_or(1.0)),
-        native_transparency: native_transparency(&window).await,
+        native_transparency: transparency.is_ok(),
+        transparency_unavailable_reason: transparency.err(),
     }
 }
 
@@ -502,12 +536,14 @@ mod tests {
             theme_name: None,
             background_opacity: 0.75,
             native_transparency: false,
+            transparency_unavailable_reason: Some("Renderer override".into()),
         })
         .unwrap();
         assert_eq!(
             value,
             serde_json::json!({
                 "themeName": null, "backgroundOpacity": 0.75, "nativeTransparency": false,
+                "transparencyUnavailableReason": "Renderer override",
             })
         );
     }

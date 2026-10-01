@@ -35,8 +35,11 @@ export function createAppearanceController(deps: AppearanceDependencies, fallbac
     if (!known) console.warn(`[theme] Unknown theme "${requested}"; using opaque ${fallbackId}.`);
     const opacity = preference === "auto" && system.themeName && known && system.nativeTransparency
       ? system.backgroundOpacity : 1;
+    const transparencyError = preference === "auto" && system.themeName && known
+      && system.backgroundOpacity < 1 && !system.nativeTransparency
+      ? system.transparencyUnavailableReason : "";
     applyTheme(theme.colors, opacity);
-    state.set({ preference, system, error: [watchError, preferenceError, error].filter(Boolean).join(" ") });
+    state.set({ preference, system, error: [watchError, preferenceError, error, transparencyError].filter(Boolean).join(" ") });
   }
 
   async function refresh() {

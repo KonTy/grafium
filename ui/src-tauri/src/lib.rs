@@ -4,6 +4,8 @@ mod index_activity;
 #[cfg(not(target_os = "android"))]
 mod shutdown;
 mod welcome;
+#[cfg(target_os = "linux")]
+mod webkit_renderer;
 
 // Android-only JNI bridge: exposes grafium_core::assistant::handle_command as
 // `Java_com_grafium_app_AssistantReceiver_nativeHandleCommand` so the Kotlin
@@ -904,12 +906,9 @@ pub fn run() {
         .with(LogTapLayer)
         .init();
 
-    // WebKitGTK on Wayland aborts with "Error 71 (Protocol error)" on some
-    // GPU/compositor setups when the DMABUF renderer / accelerated compositing
-    // is active. Disable them before the webview initializes so the app launches
-    // reliably from any entry point (start menu, terminal, packaged binary)
-    // without depending on an external wrapper script to set these.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "linux")]
+    webkit_renderer::configure();
+    #[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
     {
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");

@@ -184,6 +184,7 @@ GLib.timeout_add_seconds(30, lambda: fail("Native transparency snapshot timed ou
 window.show_all()
 view.load_html(f"""<!doctype html>
 <html data-window-transparency style="
+  color-scheme:light;
   --bg-primary:#ffffff; --bg-sidebar:#f6f8fa;
   --window-bg-primary:rgba(255,255,255,.65);
   --window-bg-sidebar:rgba(246,248,250,.65)">

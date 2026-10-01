@@ -47,6 +47,14 @@ the 2D graph background, and window chrome can show the desktop. Contrast depend
 on what is behind a transparent window; use an explicit palette for opaque reading.
 The compositor must leave Grafium's whole-window opacity at `1.0`.
 
+On Linux with WebKitGTK 2.44 or newer, Grafium uses shared-memory rendering to
+preserve background alpha without unstable GPU-DMABUF transport. Older engines
+remain opaque. Settings explains when an explicit `WEBKIT_DISABLE_DMABUF_RENDERER`
+or `WEBKIT_DISABLE_COMPOSITING_MODE` environment override prevents transparency.
+Grafium does not erase these overrides: remove them and quit/reopen to use its
+default renderer. Whole-window compositor fading is not a substitute because it
+also fades text and icons.
+
 Enabling native transparency requires a rebuilt Grafium and one normal quit and
 reopen. Later theme opacity changes are live. This does not migrate or refresh
 existing tutorial graphs, and installing a build does not restart a running app.
