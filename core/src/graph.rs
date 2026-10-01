@@ -22,6 +22,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 mod reading_note_replace;
+pub mod asset_cleanup;
 pub mod books;
 pub mod reading_notes;
 mod research_edits;

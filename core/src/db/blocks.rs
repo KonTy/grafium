@@ -695,6 +695,11 @@ impl Database {
         let mut out = Vec::new();
         for sql in [
             "SELECT content FROM blocks WHERE content != ''",
+            "SELECT properties FROM blocks WHERE properties != '{}'",
+            "SELECT file_path FROM pages WHERE file_path IS NOT NULL",
+            "SELECT content FROM chat_messages WHERE content != ''",
+            "SELECT sources_json FROM chat_messages WHERE sources_json IS NOT NULL",
+            "SELECT context_json FROM chat_threads WHERE context_json != '{}'",
             "SELECT audio_path FROM audio_notes",
             "SELECT file_path FROM ink_pages",
             "SELECT value FROM block_properties WHERE value != ''",

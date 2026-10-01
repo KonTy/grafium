@@ -1,8 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, findOrphanedAssets, deleteAssets, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
-  import type { OrphanedAsset } from "../lib/api";
+  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
+  import AssetCleanup from "./AssetCleanup.svelte";
   import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
@@ -90,11 +90,6 @@
     }
   }
 
-  // Asset cleanup state
-  let orphanedAssets = $state<OrphanedAsset[]>([]);
-  let assetScanDone = $state(false);
-  let assetDeleting = $state(false);
-
   let backfillPreview = $state<import("../lib/api").BackfillReport | null>(null);
   let backfillResult = $state<import("../lib/api").BackfillReport | null>(null);
   let backfillBusy = $state(false);
@@ -124,46 +119,6 @@
     } finally {
       backfillBusy = false;
     }
-  }
-
-  async function scanOrphanedAssets() {
-    try {
-      orphanedAssets = await findOrphanedAssets();
-      assetScanDone = true;
-    } catch (e) {
-      console.error("Failed to scan assets:", e);
-    }
-  }
-
-  async function deleteAllOrphans() {
-    if (orphanedAssets.length === 0) return;
-    assetDeleting = true;
-    try {
-      await deleteAssets(orphanedAssets.map((a) => a.filename));
-      orphanedAssets = [];
-    } catch (e) {
-      console.error("Failed to delete assets:", e);
-    } finally {
-      assetDeleting = false;
-    }
-  }
-
-  async function deleteSingleOrphan(filename: string) {
-    assetDeleting = true;
-    try {
-      await deleteAssets([filename]);
-      orphanedAssets = orphanedAssets.filter((a) => a.filename !== filename);
-    } catch (e) {
-      console.error("Failed to delete asset:", e);
-    } finally {
-      assetDeleting = false;
-    }
-  }
-
-  function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   // Sync state
@@ -619,7 +574,7 @@
   </details>
 
   <!-- Asset Cleanup Section -->
-  <details class="settings-section">
+  <details class="settings-section" data-help-context="settings">
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="9 18 15 12 9 6"></polyline>
@@ -674,34 +629,7 @@
 
       <hr class="setting-divider" />
 
-      <p class="setting-desc">Find and remove images in assets/ that are no longer referenced by any block.</p>
-      <button class="sync-btn" onclick={scanOrphanedAssets}>
-        {assetScanDone ? "Re-scan" : "Scan for orphaned assets"}
-      </button>
-
-      {#if assetScanDone}
-        {#if orphanedAssets.length === 0}
-          <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">No orphaned assets found.</p>
-        {:else}
-          <p class="setting-desc" style="margin-top: 8px;">Found {orphanedAssets.length} orphaned file{orphanedAssets.length > 1 ? "s" : ""} ({formatBytes(orphanedAssets.reduce((s, a) => s + a.size, 0))} total)</p>
-          <button class="sync-btn sync-btn-remove" onclick={deleteAllOrphans} disabled={assetDeleting}>
-            {assetDeleting ? "Deleting..." : `Delete all ${orphanedAssets.length} orphans`}
-          </button>
-          <div class="orphan-list">
-            {#each orphanedAssets as asset}
-              <div class="orphan-item">
-                <span class="orphan-name" title={asset.filename}>
-                  {#if asset.filename.includes("/")}
-                    <span class="orphan-dir">{asset.filename.slice(0, asset.filename.lastIndexOf("/") + 1)}</span>
-                  {/if}<span class="orphan-file">{asset.filename.slice(asset.filename.lastIndexOf("/") + 1)}</span>
-                </span>
-                <span class="orphan-size">{formatBytes(asset.size)}</span>
-                <button class="orphan-delete" onclick={() => deleteSingleOrphan(asset.filename)} disabled={assetDeleting}>✕</button>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      {/if}
+      <AssetCleanup />
     </div>
   </details>
 
@@ -1350,88 +1278,10 @@
     color: var(--text-primary);
   }
 
-  /* Asset Cleanup */
-  .orphan-list {
-    margin-top: 8px;
-    max-height: 200px;
-    overflow-y: auto;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-  }
-
-  .orphan-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
-  }
-
-  .orphan-item:last-child {
-    border-bottom: none;
-  }
-
-  /* Media can now live beside its page, so these are paths rather than bare
-     names. Truncating the end would cut off the file name — the part that
-     actually identifies the asset — so the folder shrinks and the name does
-     not. */
-  .orphan-name {
-    flex: 1;
-    display: flex;
-    min-width: 0;
-    white-space: nowrap;
-    color: var(--text-primary);
-  }
-
-  .orphan-dir {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--text-tertiary, var(--text-secondary));
-  }
-
-  /* Holds its ground against a long directory, but still gives way rather than
-     pushing the size and delete button out of the row when the file name
-     itself is enormous. */
-  .orphan-file {
-    flex-shrink: 0;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .orphan-size {
-    color: var(--text-muted);
-    font-size: 11px;
-    white-space: nowrap;
-  }
-
   .setting-divider {
     border: none;
     border-top: 1px solid var(--border-color);
     margin: 18px 0;
-  }
-
-  .orphan-delete {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 2px 6px;
-    min-width: 32px;
-    min-height: 32px;
-    border-radius: 4px;
-    font-size: 14px;
-  }
-
-  .orphan-delete:focus-visible {
-    outline: 2px solid var(--danger, var(--accent));
-    outline-offset: 1px;
-  }
-
-  .orphan-delete:hover {
-    background: rgba(255, 80, 80, 0.2);
-    color: #ff5050;
   }
 
   /* Settings is the most control-dense screen in the app and had no narrow

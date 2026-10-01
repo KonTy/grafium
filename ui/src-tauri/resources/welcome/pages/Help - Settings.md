@@ -56,6 +56,41 @@ preserved. Removed sources are cleaned from the index, not recreated.
 An invalid source is reported without erasing unrelated books or notes.
 See [[Help - Books]] for format and extraction limits.
 
+## Asset Cleanup
+
+Open **Asset Cleanup** to find unreferenced attachments, including ZIP archives
+and other non-image files. **Save pending edits first**: unsaved editor drafts
+cannot be checked. The scan checks indexed references and saved graph text,
+including Markdown, JSON-LD reading notes, and configuration. Filename matching
+is deliberately conservative: a reference to a name can retain multiple files
+with that name even in different folders.
+References inside binary archives or books are not inspected; this is a
+conservative scan of supported sources, not an exhaustive check of every
+possible reference. Symlinks or unreadable text sources can prevent a safe scan
+and are reported rather than silently ignored.
+
+Choose **Scan for orphaned assets**, then review the full graph-relative paths
+and sizes. Tick individual files or **Select all**, then choose **Move selected
+to trash…**. You can also move one file or all preview candidates. Every move
+requires an explicit confirmation. Grafium binds the preview to its graph,
+checks references again, and refuses files whose contents changed or which have
+become referenced. Scan failures and per-file move errors are shown; only files
+confirmed moved disappear from the preview. Re-scan after resolving errors.
+
+This is recoverable removal, not permanent deletion. Files move into a unique
+directory under `.grafium/asset-trash/`, retaining their original relative folder
+structure. The result lists the files moved and the absolute recovery directory.
+To restore, fully close Grafium, then manually move the files back from that
+directory to their original relative paths in the graph. **Never overwrite an
+existing original**: failed or partial attempts can leave recovery copies even
+when the original file was not moved. There is no restore
+button or automatic purge. **Moving to trash does not free disk space**; space
+is freed only if you independently remove the trash.
+
+The `.grafium` trash stays local and is never synced, but removal of each
+original attachment will sync to your configured destinations. Keep backups and
+review the preview carefully. Press **F1** inside Asset Cleanup for this help.
+
 ## Sync
 
 Add filesystem or WebDAV targets here. USB drives and file-server folders are

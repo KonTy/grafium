@@ -1380,7 +1380,7 @@ pub fn run() {
             commands::assets::resolve_asset_file_path,
             commands::assets::save_image_to_path,
             commands::assets::find_orphaned_assets,
-            commands::assets::delete_assets,
+            commands::assets::trash_assets,
             commands::knowledge::ai_get_config,
             commands::knowledge::ai_model_settings_schema,
             commands::knowledge::ai_runtime_settings,
