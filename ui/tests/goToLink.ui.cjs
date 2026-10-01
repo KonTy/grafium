@@ -13,7 +13,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     });
     page.setDefaultTimeout(10_000);
     const errors = [];
-    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
     await page.addInitScript(() => {
       const row = (id, title, is_journal = false) => ({
         id, title, is_journal, file_path: null, properties: {}, created_at: 0, updated_at: 0,
@@ -215,6 +215,17 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     assert.equal(await input.evaluate((el) => el === document.activeElement), true);
     await page.keyboard.press("Escape");
     await page.setViewportSize({ width: 1280, height: 900 });
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await page.keyboard.press("Control+l");
+      await dialog.getByRole("option").first().waitFor();
+      await dialog.evaluate((element) => {
+        element.querySelector(".results").scrollTop = 1000;
+        element.querySelector('button[aria-label="Close Go to link"]').click();
+      });
+      await dialog.waitFor({ state: "detached" });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    }
 
     await page.evaluate(() => { window.__linkFixture.fail = true; });
     await page.keyboard.press("Control+l");

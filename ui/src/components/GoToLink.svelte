@@ -194,7 +194,7 @@
     role="listbox"
     aria-label="Pages"
     aria-busy={loading}
-    onscroll={() => { scrollTop = list.scrollTop; }}
+    onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; }}
   >
     <div class="rows" role="presentation" style:height={`${ranked.length * rowHeight}px`}>
       {#each ranked.slice(start, end) as page, index (page.id)}
