@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing version tag to build with the current release pipeline"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,44 +21,48 @@ jobs:
       semver: ${{ steps.version.outputs.semver }}
       tag: ${{ steps.version.outputs.tag }}
       is_tag_build: ${{ steps.version.outputs.is_tag_build }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Compute CI version
         id: version
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          RUN_NUMBER: ${{ github.run_number }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
 
           CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            TAG="$REF_NAME"
+          if [[ -n "$RELEASE_TAG" || "$REF_TYPE" == "tag" ]]; then
+            TAG="${RELEASE_TAG:-$REF_NAME}"
             if [[ "$TAG" != "v$CURRENT" ]]; then
               echo "::error::Release tag $TAG must match committed version v$CURRENT"
               exit 1
             fi
+            test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$(git rev-parse HEAD)"
             SEMVER="${TAG#v}"
             echo "is_tag_build=true" >> "$GITHUB_OUTPUT"
           else
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-            PATCH=$((PATCH + RUN_NUMBER))
-            SEMVER="$MAJOR.$MINOR.$PATCH"
-            TAG="v$SEMVER"
-            echo "is_tag_build=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Manual release builds require an existing version tag"
+            exit 1
           fi
 
           echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build-linux:
     needs: [prepare-version]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.source_sha }}
 
       - name: Apply CI version
         run: |
@@ -91,6 +100,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ui/src-tauri
+          cache-on-failure: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -103,6 +113,12 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      - name: Build native app before collecting runtime libraries
+        working-directory: ui
+        # On a cold build, build.rs can run before llama.cpp's normal dependency
+        # finishes. A second Cargo pass refreshes the watched bundled-libs directory.
+        run: npx tauri build --no-bundle --verbose
+
       - name: Build Debian package
         working-directory: ui
         run: npx tauri build --bundles deb --verbose
@@ -112,7 +128,7 @@ jobs:
         env:
           VERSION: ${{ needs.prepare-version.outputs.semver }}
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           DEB="target/release/bundle/deb/Grafium_${VERSION}_amd64.deb"
           test "$(dpkg-deb --field "$DEB" Version)" = "$VERSION"
           test "$(dpkg-deb --field "$DEB" Architecture)" = amd64
@@ -120,6 +136,7 @@ jobs:
           dpkg-deb --extract "$DEB" "$ROOT"
           test -x "$ROOT/usr/bin/grafium"
           test -f "$ROOT/usr/share/applications/Grafium.desktop"
+          find "$ROOT/usr" -type f -o -type l | tee target/deb-inventory.log
           test -f "$ROOT/usr/lib/Grafium/libllama.so.0"
           for LIB in target/release/bundled-libs/*.so*; do
             cmp "$LIB" "$ROOT/usr/lib/Grafium/${LIB##*/}"
@@ -212,6 +229,8 @@ jobs:
           name: linux-packaging-diagnostics
           path: |
             target/deb-ldd.log
+            target/deb-inventory.log
+            target/release/bundle/deb/*.deb
             target/appimage-bundle.log
           if-no-files-found: ignore
 
@@ -220,8 +239,14 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TARGET_DIR: C:/t
+      # MSBuild races the Vulkan shader generator's configure/install steps.
+      # cmake-rs passes Cargo's NUM_JOBS explicitly; nested CMake reads its env.
+      CARGO_BUILD_JOBS: "1"
+      CMAKE_BUILD_PARALLEL_LEVEL: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.source_sha }}
 
       - name: Apply CI version
         shell: pwsh
@@ -299,6 +324,18 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      - name: Align Windows native resource paths
+        shell: pwsh
+        run: |
+          # Keep the short Cargo path while satisfying tauri.windows.conf.json.
+          New-Item -ItemType Directory -Force "$env:CARGO_TARGET_DIR/release/bundled-libs", "target/release" | Out-Null
+          New-Item -ItemType Junction -Path target/release/bundled-libs `
+            -Target "$env:CARGO_TARGET_DIR/release/bundled-libs" | Out-Null
+
+      - name: Compile Windows native dependencies before packaging
+        working-directory: ui
+        run: npx tauri build --no-bundle --verbose
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -306,6 +343,16 @@ jobs:
         with:
           projectPath: ui
           tauriScript: npx tauri
+
+      - name: Verify Windows native resources
+        shell: pwsh
+        run: |
+          foreach ($dll in @("llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll")) {
+            $path = "target/release/bundled-libs/$dll"
+            if (-not (Test-Path $path -PathType Leaf) -or (Get-Item $path).Length -eq 0) {
+              throw "Missing packaged native resource: $path"
+            }
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -325,6 +372,8 @@ jobs:
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.source_sha }}
 
       - name: Apply CI version
         run: |
@@ -409,6 +458,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.source_sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
