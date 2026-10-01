@@ -3,6 +3,7 @@ import { get } from "svelte/store";
 import { createAppearanceController } from "./appearance";
 import { applyTheme, getThemeById, readableSupportingText } from "./themes";
 import type { SystemAppearance } from "./api";
+import stockPalettes from "../../tests/fixtures/smplos-theme-contract.json";
 
 const glass = (): SystemAppearance => ({
   themeName: "tokyo-night", backgroundOpacity: 0.8, nativeTransparency: true,
@@ -33,6 +34,64 @@ afterEach(() => {
 });
 
 describe("background appearance", () => {
+  it.each(stockPalettes)("Auto consumes the actual $id semantic palette", async ({ id, palette, opacity }) => {
+    const { controller } = setup("auto", {
+      themeName: id, palette, backgroundOpacity: opacity, nativeTransparency: true,
+    });
+    await controller.start();
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue("--bg-primary")).toBe(palette.background);
+    expect(style.getPropertyValue("--bg-secondary")).toBe(palette.bg_light);
+    expect(style.getPropertyValue("--text-primary")).toBe(palette.foreground);
+    expect(style.getPropertyValue("--accent")).toBe(palette.accent);
+    expect(style.colorScheme).toBe(["catppuccin-latte", "flexoki-light", "rose-pine"].includes(id) ? "light" : "dark");
+    expect(get(controller).autoColors.bgPrimary).toBe(palette.background);
+    expect(get(controller).error).toBe("");
+    await controller.select("github");
+    expect(style.getPropertyValue("--bg-primary")).toBe("#ffffff");
+    expect(document.documentElement.hasAttribute("data-window-transparency")).toBe(false);
+    controller.stop();
+  });
+
+  it("updates custom palette content without renaming and preserves manual selection", async () => {
+    const palette = stockPalettes.find(theme => theme.id === "grafium")!.palette;
+    const initial = { ...glass(), themeName: "custom-graphite", palette };
+    const { controller, deps } = setup("auto", initial);
+    await controller.start();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#000000");
+    const changed = { ...initial, palette: { ...palette, background: "#101010", foreground: "#eeeeee" } };
+    deps.readSystem.mockResolvedValue(changed);
+    await controller.refresh();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#101010");
+    expect(document.documentElement.style.getPropertyValue("--text-primary")).toBe("#eeeeee");
+    expect(get(controller).error).toBe("");
+    await controller.select("github");
+    deps.readSystem.mockResolvedValue(initial);
+    await controller.refresh();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#ffffff");
+    expect(get(controller).autoColors.bgPrimary).toBe("#000000");
+    controller.stop();
+  });
+
+  it("diagnoses missing and invalid system palettes without a white Grafium fallback", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { controller, deps } = setup("auto", {
+      ...glass(), themeName: "grafium", palette: null, paletteError: "System palette is missing.",
+    });
+    await controller.start();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#000000");
+    expect(document.documentElement.hasAttribute("data-window-transparency")).toBe(false);
+    expect(get(controller).error).toContain("missing");
+    deps.readSystem.mockResolvedValue({ ...glass(), themeName: "grafium",
+      palette: { ...stockPalettes[0].palette, background: "white" } });
+    await controller.refresh();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#000000");
+    expect(get(controller).error).toContain("invalid");
+    await controller.select("github");
+    expect(get(controller).error).toBe("");
+    controller.stop();
+  });
   it.each(["catppuccin", "catppuccin-latte"])("keeps helper text strong on %s glass and restores opaque colors", (id) => {
     const colors = getThemeById(id)!.colors;
     const root = document.documentElement;

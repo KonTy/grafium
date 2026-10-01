@@ -608,6 +608,8 @@ export interface SystemAppearance {
   backgroundOpacity: number;
   nativeTransparency: boolean;
   transparencyUnavailableReason?: string | null;
+  palette?: import("./themes").SystemThemePalette | null;
+  paletteError?: string | null;
 }
 
 export function getSystemAppearance(): Promise<SystemAppearance> {

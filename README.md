@@ -347,6 +347,12 @@ rather than faint grey. Foreground images and text remain opaque. Since wallpape
 is outside Grafium's control, use an explicit opaque palette for predictable
 reading contrast.
 
+Auto consumes the current smplOS semantic palette, not only its name. This includes
+the OLED-black Grafium theme and valid custom palettes; same-name color edits and
+the Settings preview update together. Missing or invalid palettes are diagnosed
+with an opaque built-in fallback. Explicit Grafium palette selections are not
+overwritten by system changes.
+
 ### Useful shortcuts
 
 | Action | Shortcut |

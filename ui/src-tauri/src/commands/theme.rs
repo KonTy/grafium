@@ -67,6 +67,45 @@ impl ThemeSnapshot {
         }
     }
 
+    fn palette(&self) -> Result<HashMap<String, String>, String> {
+        let ThemeFile::Content(content) = &self.colors else {
+            return Err(match &self.colors {
+                ThemeFile::Failed(error) => error.clone(),
+                _ => "smplOS colors.toml is missing".into(),
+            });
+        };
+        let values = flat_values(content);
+        [
+            "background",
+            "bg_light",
+            "bg_lighter",
+            "foreground",
+            "fg_dim",
+            "muted",
+            "accent",
+            "accent_alt",
+            "danger",
+            "success",
+            "warning",
+        ]
+        .into_iter()
+        .map(|key| {
+            let value = values
+                .get(key)
+                .ok_or_else(|| format!("Missing palette color: {key}"))?
+                .as_ref()
+                .map_err(|error| format!("{key}: {error}"))?;
+            if value.len() != 7
+                || !value.starts_with('#')
+                || !value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            {
+                return Err(format!("{key} must be a six-digit hex color"));
+            }
+            Ok((key.to_owned(), value.clone()))
+        })
+        .collect()
+    }
+
     pub(crate) fn log_diagnostics(&self) {
         if let ThemeFile::Failed(error) = &self.name {
             tracing::warn!("Could not read smplOS theme name: {error}");
@@ -161,6 +200,8 @@ pub struct SystemAppearance {
     background_opacity: f64,
     pub(super) native_transparency: bool,
     transparency_unavailable_reason: Option<String>,
+    palette: Option<HashMap<String, String>>,
+    palette_error: Option<String>,
 }
 
 /// GTK objects must never cross threads. Commands await the main-loop result,
@@ -252,6 +293,18 @@ pub async fn get_system_appearance(window: tauri::WebviewWindow) -> SystemAppear
         snapshot.log_diagnostics();
     }
     let transparency = native_transparency_status(&window).await;
+    let palette = snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.theme_name().is_some())
+        .map(ThemeSnapshot::palette)
+        .transpose();
+    let (palette, palette_error) = match palette {
+        Ok(palette) => (palette, None),
+        Err(error) => {
+            tracing::warn!("Could not read smplOS palette: {error}");
+            (None, Some(format!("Could not read the system palette ({error}); using an opaque built-in palette.")))
+        }
+    };
     SystemAppearance {
         theme_name: snapshot.as_ref().and_then(ThemeSnapshot::theme_name),
         background_opacity: snapshot
@@ -259,6 +312,8 @@ pub async fn get_system_appearance(window: tauri::WebviewWindow) -> SystemAppear
             .map_or(1.0, |snapshot| snapshot.opacity().unwrap_or(1.0)),
         native_transparency: transparency.is_ok(),
         transparency_unavailable_reason: transparency.err(),
+        palette,
+        palette_error,
     }
 }
 
@@ -537,6 +592,8 @@ mod tests {
             background_opacity: 0.75,
             native_transparency: false,
             transparency_unavailable_reason: Some("Renderer override".into()),
+            palette: None,
+            palette_error: Some("Palette missing".into()),
         })
         .unwrap();
         assert_eq!(
@@ -544,8 +601,58 @@ mod tests {
             serde_json::json!({
                 "themeName": null, "backgroundOpacity": 0.75, "nativeTransparency": false,
                 "transparencyUnavailableReason": "Renderer override",
+                "palette": null, "paletteError": "Palette missing",
             })
         );
+    }
+
+    #[test]
+    fn stock_semantic_palettes_survive_native_parsing() {
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/smplos-theme-contract.json"
+        ))
+        .unwrap();
+        assert_eq!(fixtures.len(), 17);
+        for fixture in fixtures {
+            let palette = fixture["palette"].as_object().unwrap();
+            let content = palette
+                .iter()
+                .map(|(key, value)| format!("{key} = {value}\n"))
+                .collect::<String>();
+            let snapshot = ThemeSnapshot {
+                name: ThemeFile::Content(fixture["id"].as_str().unwrap().into()),
+                colors: ThemeFile::Content(format!(
+                    "{content}app_background_opacity = {}\n",
+                    fixture["opacity"]
+                )),
+            };
+            assert_eq!(
+                serde_json::to_value(snapshot.palette().unwrap()).unwrap(),
+                fixture["palette"]
+            );
+            assert_eq!(
+                snapshot.opacity().unwrap(),
+                fixture["opacity"].as_f64().unwrap()
+            );
+            for invalid in [
+                content.replace("background = ", "missing_background = "),
+                format!("{content}background = \"#000000\"\n"),
+                content.replace("background = \"#000000\"", "background = \"#00000080\""),
+            ] {
+                if invalid != content {
+                    let invalid = ThemeSnapshot {
+                        name: snapshot.name.clone(),
+                        colors: ThemeFile::Content(invalid),
+                    };
+                    assert!(invalid.palette().is_err());
+                }
+            }
+        }
+        let missing = ThemeSnapshot {
+            name: ThemeFile::Missing,
+            colors: ThemeFile::Missing,
+        };
+        assert!(missing.palette().is_err());
     }
 
     #[test]

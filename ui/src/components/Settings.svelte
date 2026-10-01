@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { themes, getThemeById } from "../lib/themes";
+  import { themes } from "../lib/themes";
   import { appearance } from "../lib/appearance";
   import { getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import AssetCleanup from "./AssetCleanup.svelte";
@@ -141,11 +141,8 @@
   });
 
   function autoSwatches(): { accent: string; bg: string; fg: string } {
-    if (smplosThemeName) {
-      const t = getThemeById(smplosThemeName);
-      if (t) return { accent: t.colors.accent, bg: t.colors.bgPrimary, fg: t.colors.textPrimary };
-    }
-    return { accent: "#0969da", bg: "#ffffff", fg: "#1f2328" };
+    const colors = $appearance.autoColors;
+    return { accent: colors.accent, bg: colors.bgPrimary, fg: colors.textPrimary };
   }
 
   async function selectTheme(themeId: string) {

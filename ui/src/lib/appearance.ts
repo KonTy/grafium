@@ -1,7 +1,7 @@
 import { writable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { getAppTheme, getSystemAppearance, setAppTheme, type SystemAppearance } from "./api";
-import { applyTheme, getThemeById } from "./themes";
+import { applyTheme, getThemeById, systemThemeColors } from "./themes";
 
 interface AppearanceDependencies {
   readPreference: () => Promise<string>;
@@ -16,6 +16,21 @@ const opaqueSystem: SystemAppearance = {
   nativeTransparency: false,
 };
 
+function resolveAutoTheme(system: SystemAppearance, fallbackId: string) {
+  let error = system.paletteError ?? "";
+  if (system.palette) {
+    try {
+      return { colors: systemThemeColors(system.palette, system.themeName), known: true, error };
+    } catch (cause) {
+      console.error("[theme] Invalid system palette:", cause);
+      error = "The system palette is invalid; using an opaque built-in palette.";
+    }
+  }
+  const known = getThemeById(system.themeName ?? fallbackId);
+  if (!known && !error) error = `Unknown system theme "${system.themeName}" has no usable palette; using opaque ${fallbackId}.`;
+  return { colors: (known ?? getThemeById(fallbackId)!).colors, known: !!known, error };
+}
+
 export function createAppearanceController(deps: AppearanceDependencies, fallbackId = "github") {
   let preference = fallbackId;
   let system = opaqueSystem;
@@ -26,20 +41,23 @@ export function createAppearanceController(deps: AppearanceDependencies, fallbac
   let saves: Promise<void> = Promise.resolve();
   let watchError = "";
   let preferenceError = "";
-  const state = writable({ preference, system, error: "" });
+  const state = writable({ preference, system, autoColors: getThemeById(fallbackId)!.colors, error: "" });
 
   function apply(error = "") {
-    const requested = preference === "auto" ? system.themeName ?? fallbackId : preference;
-    const known = getThemeById(requested);
-    const theme = known ?? getThemeById(fallbackId)!;
-    if (!known) console.warn(`[theme] Unknown theme "${requested}"; using opaque ${fallbackId}.`);
-    const opacity = preference === "auto" && system.themeName && known && system.nativeTransparency
+    const auto = resolveAutoTheme(system, fallbackId);
+    const manual = getThemeById(preference);
+    const paletteError = preference === "auto" ? auto.error
+      : !manual ? `Unknown theme "${preference}"; using opaque ${fallbackId}.` : "";
+    if (paletteError) console.warn(`[theme] ${paletteError}`);
+    const colors = preference === "auto" ? auto.colors : (manual ?? getThemeById(fallbackId)!).colors;
+    const opacity = preference === "auto" && system.themeName && auto.known && !auto.error && system.nativeTransparency
       ? system.backgroundOpacity : 1;
-    const transparencyError = preference === "auto" && system.themeName && known
+    const transparencyError = preference === "auto" && system.themeName && auto.known
       && system.backgroundOpacity < 1 && !system.nativeTransparency
       ? system.transparencyUnavailableReason : "";
-    applyTheme(theme.colors, opacity);
-    state.set({ preference, system, error: [watchError, preferenceError, error, transparencyError].filter(Boolean).join(" ") });
+    applyTheme(colors, opacity);
+    state.set({ preference, system, autoColors: auto.colors,
+      error: [watchError, preferenceError, error, paletteError, transparencyError].filter(Boolean).join(" ") });
   }
 
   async function refresh() {

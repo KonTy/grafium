@@ -1,6 +1,6 @@
 [package]
 name = "grafium"
-version = "0.0.148"
+version = "0.0.149"
 license = "AGPL-3.0-only"
 edition = "2021"
 

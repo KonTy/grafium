@@ -5,6 +5,21 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 use webkit2gtk::WebViewExt;
 
+fn palette_content(id: &str, opacity: f64) -> String {
+    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/smplos-theme-contract.json"
+    ))
+    .unwrap();
+    let fixture = fixtures.iter().find(|fixture| fixture["id"] == id).unwrap();
+    let colors = fixture["palette"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(key, value)| format!("{key} = {value}\n"))
+        .collect::<String>();
+    format!("{colors}app_background_opacity = {opacity}\n")
+}
+
 #[allow(deprecated)]
 async fn javascript(window: &WebviewWindow, script: &str) -> Result<String, String> {
     let script = script.to_owned();
@@ -191,7 +206,7 @@ async fn exercise(window: WebviewWindow, colors: std::path::PathBuf) -> Result<(
     )
     .await?;
     for (index, opacity) in [0.9, 0.0, 0.5, 1.0, 0.5, 0.9].into_iter().enumerate() {
-        std::fs::write(&colors, format!("app_background_opacity = {opacity}\n"))
+        std::fs::write(&colors, palette_content("catppuccin-latte", opacity))
             .map_err(|error| error.to_string())?;
         window
             .emit("smplos-theme-changed", ())
@@ -250,6 +265,44 @@ async fn exercise(window: WebviewWindow, colors: std::path::PathBuf) -> Result<(
     if !legacy {
         scrolling(&window).await?;
     }
+    std::fs::write(
+        colors
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("theme.name"),
+        "grafium",
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::write(&colors, palette_content("grafium", 1.0)).map_err(|error| error.to_string())?;
+    window
+        .emit("smplos-theme-changed", ())
+        .map_err(|error| error.to_string())?;
+    javascript(
+        &window,
+        "window.dispatchEvent(new CustomEvent('navigate-page', {detail:'__settings__'})); 'ok'",
+    )
+    .await?;
+    let mut measured = (0, 0);
+    for _ in 0..100 {
+        if javascript(&window, "document.documentElement.style.getPropertyValue('--window-bg-primary') === 'rgba(0, 0, 0, 1)' && document.documentElement.style.colorScheme === 'dark'").await? == "true" {
+            let frame = native_frame(&window).await?;
+            measured = frame.chunks_exact(4).map(|pixel| u32::from_ne_bytes(pixel.try_into().unwrap()))
+                .fold((0, 0), |(black, text), argb| (black + usize::from(argb == 0xff000000), text + usize::from(argb == 0xffc8ccd2)));
+            if measured.0 > 10_000 && measured.1 > 20 { break; }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if measured.0 <= 10_000 || measured.1 <= 20 {
+        return Err(format!(
+            "Grafium dark Settings native pixels incorrect: {measured:?}"
+        ));
+    }
+    println!(
+        "PASS production Grafium dark Settings: {} black pixels, {} opaque silver glyph pixels",
+        measured.0, measured.1
+    );
     Ok(())
 }
 
@@ -273,7 +326,7 @@ fn native_window_appearance() {
     std::fs::create_dir_all(current.join("theme")).unwrap();
     std::fs::write(current.join("theme.name"), "catppuccin-latte").unwrap();
     let colors = current.join("theme/colors.toml");
-    std::fs::write(&colors, "popup_opacity = 0.9").unwrap();
+    std::fs::write(&colors, palette_content("catppuccin-latte", 0.9)).unwrap();
     let graph = grafium_core::Graph::open(&home.path().join("graph")).unwrap();
     let document = (0..50).map(|index| format!(
         "- ## Heading {index}\n- A synthetic paragraph {index} for native scroll repaint coverage, with **bold text** and an ordinary nested outline.\n"

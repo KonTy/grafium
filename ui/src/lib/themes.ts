@@ -76,6 +76,20 @@ export interface Theme {
   colors: ThemeColors;
 }
 
+export interface SystemThemePalette {
+  background: string;
+  bg_light: string;
+  bg_lighter: string;
+  foreground: string;
+  fg_dim: string;
+  muted: string;
+  accent: string;
+  accent_alt: string;
+  danger: string;
+  success: string;
+  warning: string;
+}
+
 /**
  * A tuned, in-family accent palette for one theme. Every entry must clear
  * WCAG AA against the theme's background (enforced by tests). Passed as the
@@ -205,6 +219,13 @@ function light(bg: string, bgLight: string, bgLighter: string, fg: string, fgDim
 // from silently shipping unreadable tags/links. Light-theme hues are darker
 // variants of the same hue (not dropped or diluted) so they stay legible.
 export const themes: Theme[] = [
+  {
+    id: "grafium",
+    name: "Grafium",
+    colors: dark("#000000", "#141519", "#232529", "#C8CCD2", "#E4E7EC", "#787D85",
+      "#AEB9C4", "#7E97A8", "#CE8181", "#9FB79A", "#CBB98C",
+      { orange: "#efac6e", magenta: "#f286c4", green: "#63ee91", yellow: "#f0d775", blue: "#54aeff", cyan: "#5eead4", purple: "#c9a5f5", red: "#ff626b" }),
+  },
   {
     // Primer-inspired GitHub Light — the Logseq "GitHub" look: white canvas,
     // gray chrome, blue links. Default for new desktop installs.
@@ -370,6 +391,28 @@ export const themes: Theme[] = [
 export function getThemeById(id: string): Theme | undefined {
   const normalized = normalizeThemeId(id);
   return themes.find((t) => t.id === normalized || normalizeThemeId(t.name) === normalized);
+}
+
+export function systemThemeColors(palette: SystemThemePalette, name: string | null): ThemeColors {
+  for (const key of [
+    "background", "bg_light", "bg_lighter", "foreground", "fg_dim", "muted",
+    "accent", "accent_alt", "danger", "success", "warning",
+  ] as const) {
+    if (!/^#[0-9a-f]{6}$/i.test(palette[key])) throw new Error(`Invalid system palette color: ${key}`);
+  }
+  const isLight = readableTextOn(palette.background) === "#000000";
+  const base = getThemeById(name ?? "")?.colors ?? getThemeById(isLight ? "github" : "oled")!.colors;
+  const colors = (isLight ? light : dark)(
+    palette.background, palette.bg_light, palette.bg_lighter, palette.foreground,
+    palette.fg_dim, palette.muted, palette.accent, palette.accent_alt,
+    palette.danger, palette.success, palette.warning,
+    {
+      orange: base.accentOrange, magenta: base.accentMagenta, green: base.accentGreen,
+      yellow: base.accentYellow, blue: base.accentBlue, cyan: base.accentCyan,
+      purple: base.accentPurple, red: base.accentRed,
+    },
+  );
+  return { ...colors, fx: base.fx };
 }
 
 export function readableSupportingText(theme: ThemeColors, transparent = false): {

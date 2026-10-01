@@ -32,8 +32,15 @@ background. Selecting another theme updates these colors immediately.
 supported Linux desktops. The desktop can show through the window background;
 text and icons are not faded, and switching focus does not change the opacity.
 Explicitly selecting a Grafium palette keeps it opaque, even when smplOS changes.
-Without smplOS or native transparency support, Auto stays opaque. Unknown system
-theme names use the default opaque palette rather than importing custom colors.
+Auto reads the actual background, foreground, and semantic colors from the current
+smplOS palette, including custom theme names and changes without renaming a theme.
+The Grafium system theme is OLED black with silver-grey text. Its Auto preview
+shows the same colors as the app. Explicit palette selections remain independent
+of system changes.
+
+Without smplOS or native transparency support, Auto stays opaque. Missing or
+malformed system palettes show a diagnostic and use an opaque built-in palette
+matching the name when available, otherwise the platform default.
 
 smplOS themes set `app_background_opacity` in `current/theme/colors.toml` to a
 decimal from `0.0` (clear background) to `1.0` (opaque). When absent, Grafium uses
