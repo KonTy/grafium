@@ -15,6 +15,7 @@ mod raw_query;
 mod retrieval;
 mod schema;
 mod source_lifecycle;
+pub mod studies;
 pub mod tasks;
 
 use crate::error::Result;
@@ -185,6 +186,7 @@ impl Database {
         )?;
         schema::create_tables(&conn)?;
         source_lifecycle::initialize(&conn)?;
+        studies::initialize(&conn)?;
 
         // Migration: recreate task_events without CASCADE to preserve history across reindexes
         let has_fk: bool = conn

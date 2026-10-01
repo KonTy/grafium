@@ -13,6 +13,7 @@ separate graph.
 - [[Help - Graph]]
 - [[Help - Flashcards]]
 - [[Help - Tasks]]
+- [[Help - Studies]] - your study list, topic filters, resume positions, and active time
 - [[Help - Chat]]
 - [[Help - Settings]]
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery

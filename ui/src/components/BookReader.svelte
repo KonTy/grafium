@@ -9,8 +9,11 @@
   } from "../lib/books";
   import { BOOK_FRAME_SANDBOX, readerFrameURL, readReaderMessage, type BookTocItem } from "../lib/bookReaderSecurity";
   import { showToast } from "../lib/toast.svelte";
+  import type { StudyProgress } from "../lib/studies";
 
-  let { page, graphPath }: { page: Page; graphPath: string } = $props();
+  let { page, graphPath, onStudyProgress }: {
+    page: Page; graphPath: string; onStudyProgress?: (progress: StudyProgress) => void;
+  } = $props();
   let frame = $state<HTMLIFrameElement>();
   let url = $state("");
   let book = $state.raw<BookInfo | null>(null);
@@ -122,6 +125,11 @@
       } else if (message.type === "location" && !invalidated && compatibleBookLocation(activeBook, message.location)) {
         pending = message.location; label = message.label;
         if (message.location.kind === "pdf") pdfPage = message.location.page;
+        onStudyProgress?.({
+          position: message.location.kind === "pdf" ? message.location.page : (message.fraction ?? 0) * 100,
+          total: message.location.kind === "pdf" ? pdfPages : message.fraction === undefined ? 0 : 100,
+          anchor: "", label: message.label,
+        });
         clearTimeout(positionTimer);
         positionTimer = setTimeout(() => { void flush(); }, 600);
       } else if (message.type === "selection" && !invalidated && annotations && compatibleBookLocation(activeBook, message.location)) {

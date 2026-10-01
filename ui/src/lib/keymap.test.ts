@@ -49,6 +49,18 @@ afterEach(() => {
 });
 
 describe("keymap dual-mode matching", () => {
+  it("opens Studies with its navigation chord but not while editing", () => {
+    const goStudies = vi.fn();
+    registerDefaultShortcuts({ ...stubActions(), goStudies });
+    keymap_manager.handleKeydown(keyEvent({ key: "g" }));
+    keymap_manager.handleKeydown(keyEvent({ key: "s" }));
+    expect(goStudies).toHaveBeenCalledOnce();
+    expect(keymap_manager.getShortcuts().some(({ id }) => id === "go-studies")).toBe(true);
+    keymap_manager.isEditing = true;
+    keymap_manager.handleKeydown(keyEvent({ key: "g" }));
+    keymap_manager.handleKeydown(keyEvent({ key: "s" }));
+    expect(goStudies).toHaveBeenCalledOnce();
+  });
   it("opens Go to link while editing and leaves modified variants alone", () => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);

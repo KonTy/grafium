@@ -131,6 +131,7 @@ async function openReflowable({ bytes, format, location }) {
   view.addEventListener("relocate", event => {
     const { cfi, tocItem, fraction } = event.detail;
     if (cfi) send("location", { location: locator(cfi),
+      fraction: Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : undefined,
       label: `${tocItem?.label ?? ""}${Number.isFinite(fraction) ? ` · ${Math.round(fraction * 100)}%` : ""}` });
   });
   view.addEventListener("load", event => {

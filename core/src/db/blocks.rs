@@ -686,7 +686,8 @@ impl Database {
     ///
     /// Block markdown is the obvious source but not the only one: a recorded
     /// audio note keeps its path in `audio_notes`, a handwriting page keeps
-    /// its SVG in `ink_pages`, and properties can hold a cover or icon. This
+    /// its SVG in `ink_pages`, studies can own local audio/video references,
+    /// and properties can hold a cover or icon. This
     /// backs "which media is unreferenced?", and a source missing from here
     /// means real, irreplaceable media gets offered to the user for deletion —
     /// so err towards including a table rather than leaving it out.
@@ -700,6 +701,8 @@ impl Database {
             "SELECT value FROM block_properties WHERE value != ''",
             "SELECT value FROM page_properties WHERE value != ''",
             "SELECT properties FROM pages WHERE properties != '{}'",
+            r#"SELECT source FROM study_items WHERE kind IN ('"audio"', '"video"')
+               AND source NOT LIKE 'http://%' AND source NOT LIKE 'https://%'"#,
         ] {
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt

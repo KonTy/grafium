@@ -49,7 +49,7 @@ export function sanitizeBookDocument(source: string): string {
 export interface BookTocItem { label: string; target: string | number; depth: number }
 export type ReaderMessage =
   | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number }
-  | { type: "location"; location: BookLocation; label: string }
+  | { type: "location"; location: BookLocation; label: string; fraction?: number }
   | { type: "selection"; quote: string; location: BookLocation }
   | { type: "clear-selection" }
   | { type: "error"; message: string }
@@ -69,7 +69,9 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
         && Number.isInteger(t.depth) && t.depth >= 0 && t.depth < 100)
         && typeof m.annotations === "boolean" && typeof m.notice === "string"
         && (m.pages === undefined || Number.isSafeInteger(m.pages) && m.pages > 0) ? m : null;
-    case "location": return isBookLocation(m.location) && typeof m.label === "string" ? m : null;
+    case "location": return isBookLocation(m.location) && typeof m.label === "string"
+      && (m.fraction === undefined || typeof m.fraction === "number" && Number.isFinite(m.fraction)
+        && m.fraction >= 0 && m.fraction <= 1) ? m : null;
     case "selection": return isBookLocation(m.location) && typeof m.quote === "string"
       && m.quote.trim().length > 0 && m.quote.length <= 200000 ? m : null;
     case "clear-selection": case "open-notes": case "help": return m;

@@ -1,20 +1,25 @@
 use crate::AppState;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::State;
 
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 50 * 1024 * 1024;
 
 fn graph_asset_path(state: &State<AppState>, path: &str) -> Result<PathBuf, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph_asset_path_in(&graph.root_dir, path)
+}
+
+fn graph_asset_path_in(root: &Path, path: &str) -> Result<PathBuf, String> {
     let rel = path.trim_start_matches('/');
     if rel.is_empty() || rel.split('/').any(|c| c == "..") {
         return Err("invalid asset path".into());
     }
 
-    let root = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        graph.root_dir.clone()
-    };
-    grafium_core::graph::resolve_asset_path(&root, rel).ok_or_else(|| "asset not found".into())
+    grafium_core::graph::resolve_asset_path(root, rel).ok_or_else(|| "asset not found".into())
 }
 
 fn new_asset_location(
@@ -61,13 +66,38 @@ fn new_asset_location(
 /// custom `grafium-asset://` scheme, so media is hydrated in-memory via this
 /// command instead. The path is graph-relative (e.g. `assets/anki/gre/x.mp3`);
 /// traversal outside the active graph root is rejected.
+/// Supplying graphPath also rejects stale requests after a graph switch.
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_asset_data_url(state: State<AppState>, path: String) -> Result<String, String> {
+pub fn read_asset_data_url(
+    state: State<AppState>,
+    path: String,
+    graph_path: Option<String>,
+) -> Result<String, String> {
+    read_asset_data_url_in(&state.graph, &path, graph_path.as_deref())
+}
+
+fn read_asset_data_url_in(
+    graph: &Mutex<grafium_core::Graph>,
+    path: &str,
+    graph_path: Option<&str>,
+) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    let canon_target = graph_asset_path(&state, &path)?;
-    let bytes = fs::read(&canon_target).map_err(|e| e.to_string())?;
-    let mime = crate::mime_for_path(&canon_target);
+    let (bytes, mime) = {
+        let graph = graph.lock().map_err(|e| e.to_string())?;
+        if let Some(expected) = graph_path {
+            let mismatch = || "The active graph changed; asset was not read".to_string();
+            if expected.trim().is_empty()
+                || graph.root_dir.canonicalize().map_err(|_| mismatch())?
+                    != Path::new(expected).canonicalize().map_err(|_| mismatch())?
+            {
+                return Err(mismatch());
+            }
+        }
+        let canon_target = graph_asset_path_in(&graph.root_dir, path)?;
+        let bytes = fs::read(&canon_target).map_err(|e| e.to_string())?;
+        (bytes, crate::mime_for_path(&canon_target))
+    };
     Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&bytes)))
 }
 
@@ -235,14 +265,16 @@ pub fn save_system_clipboard_image(
 /// Covers both the shared `assets/` folder and the `assets/` folder beside each
 /// page, so media stored with a book is not invisible to maintenance.
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_assets(state: State<AppState>) -> Result<Vec<String>, String> {
+pub async fn list_assets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     // The lock is released before walking the graph: every other command waits
     // on this mutex, and the walk is unbounded disk IO.
     let root = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         graph.root_dir.clone()
     };
-    Ok(grafium_core::graph::collect_asset_files(&root))
+    tauri::async_runtime::spawn_blocking(move || grafium_core::graph::collect_asset_files(&root))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -380,6 +412,54 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     use super::clipboard_rgba_png;
     use super::extension_from_content_type;
+
+    #[test]
+    fn asset_reads_preserve_legacy_calls_and_reject_stale_graphs() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("study-asset-fixture-{}", uuid::Uuid::new_v4()));
+        let a = root.join("a");
+        let b = root.join("b");
+        for directory in [&a, &b] {
+            std::fs::create_dir_all(directory.join("assets")).unwrap();
+        }
+        std::fs::write(a.join("assets/clip.mp3"), b"first").unwrap();
+        std::fs::write(b.join("assets/clip.mp3"), b"second").unwrap();
+        {
+            let graph = std::sync::Mutex::new(grafium_core::Graph::open(&a).unwrap());
+            let first =
+                super::read_asset_data_url_in(&graph, "assets/clip.mp3", Some(a.to_str().unwrap()))
+                    .unwrap();
+            assert!(first.ends_with("Zmlyc3Q="));
+            assert_eq!(
+                super::read_asset_data_url_in(&graph, "assets/clip.mp3", None).unwrap(),
+                first
+            );
+            *graph.lock().unwrap() = grafium_core::Graph::open(&b).unwrap();
+            for stale in [a.to_str().unwrap(), "", "/nonexistent-study-graph"] {
+                let error = super::read_asset_data_url_in(&graph, "assets/clip.mp3", Some(stale))
+                    .unwrap_err();
+                assert!(error.contains("active graph changed"), "{error}");
+            }
+            let second =
+                super::read_asset_data_url_in(&graph, "assets/clip.mp3", Some(b.to_str().unwrap()))
+                    .unwrap();
+            assert!(second.ends_with("c2Vjb25k"));
+            assert_eq!(
+                super::read_asset_data_url_in(&graph, "assets/clip.mp3", None).unwrap(),
+                second
+            );
+            assert!(super::read_asset_data_url_in(&graph, "../a/assets/clip.mp3", None).is_err());
+            assert!(super::read_asset_data_url_in(
+                &graph,
+                "assets/missing.mp3",
+                Some(b.to_str().unwrap())
+            )
+            .is_err());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn clipboard_image_types_map_to_safe_extensions() {

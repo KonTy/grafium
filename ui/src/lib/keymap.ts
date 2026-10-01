@@ -208,6 +208,7 @@ export function registerDefaultShortcuts(actions: {
   goFlashcards: () => void;
   goTomorrow: () => void;
   goTasks: () => void;
+  goStudies?: () => void;
   goChat: () => void;
   goNextJournal: () => void;
   goPrevJournal: () => void;
@@ -283,6 +284,9 @@ export function registerDefaultShortcuts(actions: {
     ...pair("go-tasks", "Go to tasks", "navigation", actions.goTasks, [
       { binding: "mod+shift+t", navOnly: false },
     ]),
+    ...(actions.goStudies ? pair("go-studies", "Go to Studies", "navigation", actions.goStudies, [
+      { binding: "g s" },
+    ]) : []),
     ...pair("go-next-journal", "Go to next journal", "navigation", actions.goNextJournal, [
       { binding: "g n" },
       { binding: "mod+shift+.", navOnly: false },

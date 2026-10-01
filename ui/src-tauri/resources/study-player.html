@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Grafium study player</title>
+  <style nonce="__SCRIPT_NONCE__">
+    html,body,iframe{margin:0;border:0;width:100%;height:100%;overflow:hidden;background:#000}
+  </style>
+</head>
+<body>
+<script nonce="__SCRIPT_NONCE__">
+  const params = new URLSearchParams(location.hash.slice(1));
+  const video = params.get("video") ?? "";
+  const start = Number(params.get("start") ?? 0);
+  const youtubeOrigin = "https://www.youtube-nocookie.com";
+  let parentOrigin = null;
+  if (/^[A-Za-z0-9_-]{11}$/.test(video) && Number.isFinite(start) && start >= 0 && start <= 1e12) {
+    const player = document.createElement("iframe");
+    player.title = "YouTube video";
+    player.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    player.setAttribute("allow", "autoplay; encrypted-media; fullscreen; picture-in-picture");
+    player.allowFullscreen = true;
+    player.referrerPolicy = "strict-origin-when-cross-origin";
+    player.src = `${youtubeOrigin}/embed/${video}?${new URLSearchParams({
+      enablejsapi: "1", playsinline: "1", autoplay: "0",
+      start: String(Math.floor(start)), origin: location.origin,
+      widget_referrer: "https://com.grafium.app/",
+    })}`;
+    document.body.append(player);
+    addEventListener("message", event => {
+      if (typeof event.data !== "string" || event.data.length > 100000) return;
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+      if (!data || typeof data !== "object") return;
+      if (event.source === parent) {
+        if (data.event !== "listening" && !(data.event === "command"
+          && ["addEventListener", "seekTo", "playVideo", "pauseVideo"].includes(data.func))) return;
+        parentOrigin = event.origin;
+        player.contentWindow.postMessage(event.data, youtubeOrigin);
+      } else if (event.source === player.contentWindow && event.origin === youtubeOrigin && parentOrigin) {
+        if (!["onReady", "onError", "onStateChange", "infoDelivery"].includes(data.event)) return;
+        let info = data.info;
+        if (data.event === "infoDelivery") {
+          if (!info || typeof info !== "object") return;
+          info = { currentTime: info.currentTime, duration: info.duration, playerState: info.playerState };
+        }
+        parent.postMessage(JSON.stringify({ event: data.event, info }), parentOrigin === "null" ? "*" : parentOrigin);
+      }
+    });
+  } else {
+    document.body.textContent = "Invalid study video.";
+  }
+</script>
+</body>
+</html>

@@ -19,6 +19,7 @@ export interface PageSummary {
   id: string;
   title: string;
   is_journal: boolean;
+  is_book?: boolean;
 }
 
 export interface DeleteBookFolderResult {

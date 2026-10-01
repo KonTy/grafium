@@ -5,6 +5,8 @@ import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
 import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
 import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
+import studiesHelp from "../../src-tauri/resources/welcome/pages/Help - Studies.md?raw";
+import sidebarSource from "../components/Sidebar.svelte?raw";
 import editorHelp from "../../src-tauri/resources/welcome/pages/Help - Editor.md?raw";
 import readingNotesPanel from "../components/ReadingNotesPanel.svelte?raw";
 import settingsHelp from "../../src-tauri/resources/welcome/pages/Help - Settings.md?raw";
@@ -20,6 +22,28 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes Studies navigation and F1 to current resume and timing guidance", async () => {
+    expect(helpPageTitle("studies")).toBe("Help - Studies");
+    expect(isHelpContext("studies")).toBe(true);
+    expect(appSource).toContain('studies: "studies"');
+    expect(appSource).toContain('target === "__studies__"');
+    expect(appSource).toContain('saved.kind === "studies"');
+    expect(sidebarSource).toContain('onNavigate("__studies__")');
+    expect(helpIndex).toContain("[[Help - Studies]]");
+    expect(studiesHelp).toContain("90 seconds");
+    expect(studiesHelp).toContain("manual checkpoint");
+    expect(studiesHelp).toContain("embedding restrictions");
+    expect(studiesHelp).toContain("**Search or paste a link**");
+    expect(studiesHelp).toContain("Selecting a result does not save anything");
+    expect(studiesHelp).toContain("**Edit details**");
+    expect(studiesHelp).toContain("current topic filter");
+    expect(studiesHelp).toContain("never replace a title");
+    expect(studiesHelp).toContain("**+ Add a new topic...**");
+    expect(studiesHelp).toContain("Pasting a link contacts YouTube");
+    expect(studiesHelp).toContain("private/local network addresses");
+    await loadHelpPage("studies");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "studies" });
+  });
   it("routes reading-note controls to current selection and deletion guidance", async () => {
     expect(readingNotesPanel).toContain('data-help-context="editor"');
     expect(appSource).toContain('closest("[data-help-context]")');
@@ -100,6 +124,7 @@ describe("contextual help", () => {
       "graph",
       "flashcards",
       "tasks",
+      "studies",
       "chat",
       "settings",
       "ai",
