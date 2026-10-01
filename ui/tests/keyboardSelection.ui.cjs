@@ -105,12 +105,13 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "list_graphs": return [{ name: "Keyboard selection fixture", path: "/synthetic/keyboard-selection" }];
           case "list_favorites": case "list_recent_pages": case "jobs_list": case "get_backlinks":
           case "get_child_pages": case "pages_list_collections": case "sync_list_conflicts":
+          case "sync_list_targets": case "list_flashcards_due": case "list_flashcard_topics":
           case "discover_link_candidates": case "list_link_candidates":
             return [];
           case "ui_log": case "record_page_open": case "reveal_startup_window":
             return;
           case "plugin:event|unlisten": listeners.delete(args.eventId); return;
-          case "ai_get_config": return { enabled: false, mode: "local" };
+          case "ai_get_config": return options.aiConfig ?? { enabled: false, mode: "local" };
           case "ai_health_check": return {
             enabled: false, llm_available: false, embedder_available: false,
             vector_store_available: false, vector_count: 0, mode: "local",

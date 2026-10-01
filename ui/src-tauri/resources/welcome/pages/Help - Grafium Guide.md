@@ -71,6 +71,13 @@ manual conflicts. Sync copies files to the selected destination; it is not a
 backup or live collaboration. Read [[Sync And Privacy]] before syncing a real
 graph.
 
+## Background jobs
+
+The **Jobs** page shows imports, indexing, progress, errors, and completed jobs
+from this app session. Its **Running** label shimmers only while at least one
+job is running, and stops when the last job finishes, fails, or is cancelled.
+With reduced motion enabled, the count updates without animation.
+
 ## The Grafium model
 
 Grafium is a local-first graph of Markdown pages and journals. Blocks are

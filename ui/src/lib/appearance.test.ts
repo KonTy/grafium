@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 import { createAppearanceController } from "./appearance";
-import { applyTheme, getThemeById } from "./themes";
+import { applyTheme, getThemeById, readableSupportingText } from "./themes";
 import type { SystemAppearance } from "./api";
 
 const glass = (): SystemAppearance => ({
@@ -33,7 +33,19 @@ afterEach(() => {
 });
 
 describe("background appearance", () => {
-  it("changes only window paint, not solid foreground or readability tokens", () => {
+  it.each(["catppuccin", "catppuccin-latte"])("keeps helper text strong on %s glass and restores opaque colors", (id) => {
+    const colors = getThemeById(id)!.colors;
+    const root = document.documentElement;
+    for (const opacity of [0.5, 1, 0, 0.9]) {
+      applyTheme(colors, opacity);
+      const expected = readableSupportingText(colors, opacity < 1);
+      expect(root.style.getPropertyValue("--text-muted")).toBe(expected.muted);
+      expect(root.style.getPropertyValue("--text-secondary")).toBe(expected.secondary);
+      expect(root.style.getPropertyValue("--text-primary")).toBe(colors.textPrimary);
+      expect(root.style.opacity).toBe("");
+    }
+  });
+  it("changes window paint without fading body text or solid surfaces", () => {
     const theme = getThemeById("github")!;
     applyTheme(theme.colors, 0.65);
     const root = document.documentElement;

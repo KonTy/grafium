@@ -106,7 +106,9 @@ describe("busy labels shimmer", () => {
 
   it("uses the endless variant for job labels, which have real progress events", () => {
     expect(read("components/JobActivity.svelte")).toContain('class="shimmer shimmer-endless"');
-    expect(read("components/JobsView.svelte")).toContain("shimmer shimmer-endless");
+    const jobs = read("components/JobsView.svelte");
+    expect(jobs).toContain("class:shimmer={running.length > 0}");
+    expect(jobs).toContain("class:shimmer-endless={running.length > 0}");
   });
 
   it("keeps the chat trail endless, since it withholds shimmer on its own evidence", () => {

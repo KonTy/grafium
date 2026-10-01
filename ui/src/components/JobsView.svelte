@@ -67,7 +67,11 @@
     </div>
     <div class="summary-card">
       <span class="summary-count">{running.length}</span>
-      <span class="summary-label shimmer shimmer-endless">Running</span>
+      <span
+        class="summary-label"
+        class:shimmer={running.length > 0}
+        class:shimmer-endless={running.length > 0}
+      >Running</span>
     </div>
     <div class="summary-card" class:has-failures={failed.length > 0}>
       <span class="summary-count">{failed.length}</span>

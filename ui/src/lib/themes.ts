@@ -1,4 +1,4 @@
-import { contrastRatio, parseHex } from "./contrast";
+import { contrastRatio, mixSrgb, parseHex, WCAG_AA_NORMAL } from "./contrast";
 
 // Theme definitions derived from smplOS colors.toml files.
 // Each theme maps smplos color tokens to Grafium CSS variable values.
@@ -372,6 +372,30 @@ export function getThemeById(id: string): Theme | undefined {
   return themes.find((t) => t.id === normalized || normalizeThemeId(t.name) === normalized);
 }
 
+export function readableSupportingText(theme: ThemeColors, transparent = false): {
+  secondary: string;
+  muted: string;
+} {
+  const surfaces = [
+    theme.bgPrimary, theme.bgSecondary, theme.bgSidebar, theme.bgInput,
+    theme.bgCode, theme.bgHover, theme.bgActive, theme.surfaceRaised, theme.surfaceOverlay,
+  ];
+  const target = theme.isLight ? "#000000" : "#ffffff";
+  const readable = (color: string) => {
+    for (let amount = 0; amount <= 100; amount++) {
+      const candidate = mixSrgb(target, color, amount);
+      if (surfaces.every(surface => contrastRatio(candidate, surface) >= WCAG_AA_NORMAL)) return candidate;
+    }
+    throw new Error("Theme surfaces cannot support readable supporting text");
+  };
+  // Wallpaper is unknown. On glass, retain the body text's strength rather
+  // than using decorative greys for instructions, labels and inline code.
+  return {
+    secondary: readable(transparent ? theme.textPrimary : theme.textSecondary),
+    muted: readable(transparent ? theme.textPrimary : theme.textMuted),
+  };
+}
+
 export function applyTheme(theme: ThemeColors, backgroundOpacity = 1): void {
   const root = document.documentElement;
   if (!Number.isFinite(backgroundOpacity) || backgroundOpacity < 0 || backgroundOpacity > 1) {
@@ -395,8 +419,9 @@ export function applyTheme(theme: ThemeColors, backgroundOpacity = 1): void {
   root.style.setProperty("--bg-input", theme.bgInput);
   root.style.setProperty("--bg-code", theme.bgCode);
   root.style.setProperty("--text-primary", theme.textPrimary);
-  root.style.setProperty("--text-secondary", theme.textSecondary);
-  root.style.setProperty("--text-muted", theme.textMuted);
+  const supportingText = readableSupportingText(theme, backgroundOpacity < 1);
+  root.style.setProperty("--text-secondary", supportingText.secondary);
+  root.style.setProperty("--text-muted", supportingText.muted);
   root.style.setProperty("--border", theme.border);
   root.style.setProperty("--accent", theme.accent);
   root.style.setProperty("--text-link", theme.textLink);

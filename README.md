@@ -341,6 +341,12 @@ protocol errors. Older engines keep the safe opaque renderer. Explicit
 overrides are respected; Settings explains when they prevent transparency.
 Remove such an override and quit/reopen to use the default shared-memory path.
 
+Supporting text (including flashcard hints and settings descriptions) keeps
+readable contrast on solid UI surfaces; on glass it uses body-strength colors
+rather than faint grey. Foreground images and text remain opaque. Since wallpaper
+is outside Grafium's control, use an explicit opaque palette for predictable
+reading contrast.
+
 ### Useful shortcuts
 
 | Action | Shortcut |

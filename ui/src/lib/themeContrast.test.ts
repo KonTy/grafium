@@ -7,7 +7,7 @@ import {
   mixSrgb,
   WCAG_AA_NORMAL,
 } from "./contrast";
-import { themes, type ThemeColors } from "./themes";
+import { readableSupportingText, themes, type ThemeColors } from "./themes";
 
 // ── WCAG helper unit tests ────────────────────────────────────────────────
 describe("contrast helper (WCAG relative luminance / ratio)", () => {
@@ -89,6 +89,30 @@ describe("theme metadata", () => {
     const oled = themes.find((t) => t.id === "oled");
     expect(oled).toBeDefined();
     expect(oled!.colors.bgPrimary.toLowerCase()).toBe("#000000");
+  });
+
+  describe("supporting text remains readable on solid UI surfaces", () => {
+    for (const theme of themes) {
+      for (const transparent of [false, true]) {
+        it(`${theme.id}: secondary and muted text meet AA (glass=${transparent})`, () => {
+          const c = theme.colors;
+          const surfaces = [c.bgPrimary, c.bgSecondary, c.bgSidebar, c.bgInput,
+            c.bgCode, c.bgHover, c.bgActive, c.surfaceRaised, c.surfaceOverlay];
+          for (const color of Object.values(readableSupportingText(c, transparent))) {
+            for (const surface of surfaces) {
+              expect(contrastRatio(color, surface)).toBeGreaterThanOrEqual(4.5);
+            }
+          }
+          if (transparent) {
+            const { secondary, muted } = readableSupportingText(c, true);
+            expect(muted).toBe(secondary);
+            expect(contrastRatio(muted, c.bgPrimary)).toBeGreaterThanOrEqual(
+              contrastRatio(c.textPrimary, c.bgPrimary),
+            );
+          }
+        });
+      }
+    }
   });
 
   describe("vivid red and blue accents", () => {

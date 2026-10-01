@@ -47,6 +47,12 @@ the 2D graph background, and window chrome can show the desktop. Contrast depend
 on what is behind a transparent window; use an explicit palette for opaque reading.
 The compositor must leave Grafium's whole-window opacity at `1.0`.
 
+Helper text, settings labels, and inline-code text use readable solid colors.
+On transparent backgrounds, supporting text uses the strength of normal body
+text instead of faint grey. This does not fade images or change background
+opacity. Wallpaper can still affect contrast; choose an explicit opaque palette
+when you need predictable reading contrast.
+
 On Linux with WebKitGTK 2.44 or newer, Grafium uses shared-memory rendering to
 preserve background alpha without unstable GPU-DMABUF transport. Older engines
 remain opaque. Settings explains when an explicit `WEBKIT_DISABLE_DMABUF_RENDERER`
