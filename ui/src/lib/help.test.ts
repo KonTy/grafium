@@ -33,7 +33,10 @@ describe("contextual help", () => {
     expect(studiesHelp).toContain("90 seconds");
     expect(studiesHelp).toContain("manual checkpoint");
     expect(studiesHelp).toContain("embedding restrictions");
-    expect(studiesHelp).toContain("**Paste a web link**");
+    expect(studiesHelp).toContain("**Search or paste a link**");
+    expect(studiesHelp).toContain("Selecting a result does not save anything");
+    expect(studiesHelp).toContain("**Edit details**");
+    expect(studiesHelp).toContain("current topic filter");
     expect(studiesHelp).toContain("never replace a title");
     expect(studiesHelp).toContain("**+ Add a new topic...**");
     expect(studiesHelp).toContain("Pasting a link contacts YouTube");

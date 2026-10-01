@@ -8,22 +8,34 @@ The command palette includes **Go to Studies**; in navigation mode, press `g s`.
 ## Add and organize
 
 Use **Add to Studies** on a page or original book, or add an item from Studies.
-Choose a graph page (including a link-created placeholder), original book,
-flashcard topic, audio/video source, YouTube video, or website.
-For a graph link such as `[[Supplements]]`, choose its page in the picker.
+Use the single **Search or paste a link** field. Start typing to search graph
+pages (including link-created placeholders), original books, flashcard topics,
+and existing audio/video assets together. Results show their type and, for
+flashcards, card/due counts. Search names, filenames, or types such as MP3.
+For a graph link such as `[[Supplements]]`, paste the link and choose its page.
+Original books are recognized automatically; converted Markdown books remain pages.
 
-For an online source, use **Paste a web link** without selecting its type first.
+Click a result, or use **Arrow keys** and **Enter** to select it. **Escape**
+hides suggestions. The title and source type fill themselves in; neither needs
+manual entry. **Show more results** reveals additional matches.
+Already-added sources are marked and cannot be added again.
+Selecting a result does not save anything: choose a Topic if needed, then press
+the single **Add study** button to confirm.
+
+For an online source, paste its HTTP(S) URL into the same field.
 Grafium detects YouTube videos and websites, then fetches the title automatically.
 Direct audio/video links with recognized filename extensions use their filename
-as a title without fetching the media. For extensionless streaming URLs, choose
-Audio or Video manually and enter the media URL.
-You can edit any suggested title; later lookup results never replace a title
-you edited. If a site blocks lookup or has no readable title, use **Retry title
-lookup** or enter a title yourself. Lookup does not require AI or a YouTube login.
+as a title without fetching the media. **Edit details** stays collapsed for the
+usual flow. Open it to rename a source or set Audio/Video for an unusual,
+extensionless streaming URL. Later lookup results never replace a title
+you edited. If a site blocks lookup or has no readable title, the title field
+opens for manual entry; **Retry title lookup** tries again.
+Lookup does not require AI or a YouTube login.
 It only supports public HTTP(S) hosts, not private/local network addresses.
 
 Choose a **Topic** such as Health, General, or Chinese from the dropdown, or
 choose **+ Add a new topic...** and enter any new name.
+New studies default to the current topic filter, or General when showing all topics.
 Previously saved topics are remembered within this graph, even if their last
 study is retagged or removed. A new topic is saved when you save the study.
 This is an organizational label, separate from the tag that selects flashcards.

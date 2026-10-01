@@ -265,14 +265,16 @@ pub fn save_system_clipboard_image(
 /// Covers both the shared `assets/` folder and the `assets/` folder beside each
 /// page, so media stored with a book is not invisible to maintenance.
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_assets(state: State<AppState>) -> Result<Vec<String>, String> {
+pub async fn list_assets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     // The lock is released before walking the graph: every other command waits
     // on this mutex, and the walk is unbounded disk IO.
     let root = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
         graph.root_dir.clone()
     };
-    Ok(grafium_core::graph::collect_asset_files(&root))
+    tauri::async_runtime::spawn_blocking(move || grafium_core::graph::collect_asset_files(&root))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(serde::Serialize)]

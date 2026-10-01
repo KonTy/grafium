@@ -30,9 +30,11 @@ beforeEach(() => {
   api.fetchStudyLinkTitle.mockResolvedValue("A helpful lesson");
 });
 function button(text: string) {
-  return [...document.querySelectorAll<HTMLButtonElement>("button")].find(element => element.textContent?.trim() === text)!;
+  return [...document.querySelectorAll<HTMLButtonElement>("button")].find(element => element.textContent?.trim() === text
+    || element.querySelector(".result-text strong")?.textContent === text)!;
 }
 function input(label: string, value: string) {
+  if (label === "Paste a web link") label = "Search or paste a link";
   const field = [...document.querySelectorAll("label")].find(element => element.textContent?.startsWith(label) && element.querySelector("input"))!.querySelector("input")!;
   field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); flushSync();
 }
@@ -49,7 +51,7 @@ async function openAdd() {
   button("+ Add study").click(); flushSync();
 }
 function titleValue() {
-  return document.querySelector<HTMLInputElement>(".form-grid input")!.value;
+  return document.querySelector<HTMLInputElement>("details input")?.value ?? "";
 }
 
 describe("Studies library", () => {
@@ -80,10 +82,9 @@ describe("Studies library", () => {
     const page = { id: "book-page", title: "Original book", properties: { "book-id": "original" } };
     api.listStudies.mockResolvedValue({ items: [fixture({ kind: "book", source: page.id })], days: [] });
     component = mount(Studies, { target: document.body, props: { graphPath: "/graph", onOpen: vi.fn(), addPage: page as never } });
-    await vi.waitFor(() => expect(button("Add study")?.disabled).toBe(false));
-    expect(document.querySelector<HTMLSelectElement>(".form-grid select")?.value).toBe("book");
-    button("Add study").click();
+    await vi.waitFor(() => expect(document.querySelector(".selected-source .badge")?.textContent).toBe("Book"));
     await vi.waitFor(() => expect(document.body.textContent).toContain("already in Studies"));
+    expect(button("Add study").disabled).toBe(true);
     expect(api.saveStudy).not.toHaveBeenCalled();
   });
   it("chooses a page using its persisted ID and does not silently ignore a save failure", async () => {
@@ -93,7 +94,7 @@ describe("Studies library", () => {
     button("+ Add study").click(); flushSync();
     await vi.waitFor(() => expect(button("Physics")).toBeTruthy());
     button("Physics").click();
-    await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('.form-grid input')?.value).toBe("Physics"));
+    await vi.waitFor(() => expect(titleValue()).toBe("Physics"));
     newTopic("Natural sciences");
     button("Add study").click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Disk full"));
@@ -142,16 +143,14 @@ describe("Studies library", () => {
     filter.value = "topic:General"; filter.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
     expect(document.querySelectorAll(".study-row")).toHaveLength(2);
   });
-  it("suggests existing graph assets while allowing a directly entered media source", async () => {
+  it("selects existing graph assets without choosing their type or typing a title", async () => {
     component = mount(Studies, { target: document.body, props: { graphPath: "/graph", onOpen: vi.fn() } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("A little learning"));
     button("+ Add study").click(); flushSync();
-    const kind = document.querySelector<HTMLSelectElement>(".form-grid select")!;
-    kind.value = "audio"; kind.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
-    await vi.waitFor(() => expect(document.querySelectorAll("datalist option")).toHaveLength(2));
-    const source = [...document.querySelectorAll("label")].find(element => element.textContent?.startsWith("Media URL"))!.querySelector("input")!;
-    expect(source.list).toBe(document.querySelector("datalist"));
-    input("Title", "Listening lesson"); input("Media URL", "assets/lesson.mp3");
+    await vi.waitFor(() => expect(button("lesson")).toBeTruthy());
+    input("Search or paste a link", "lesson");
+    button("lesson").click(); flushSync();
+    expect(titleValue()).toBe("lesson");
     button("Add study").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
       source: "assets/lesson.mp3", kind: "audio", topic: "General",
@@ -160,7 +159,7 @@ describe("Studies library", () => {
   it("pastes YouTube links without first choosing a source type and saves the fetched title", async () => {
     await openAdd();
     input("Paste a web link", "https://youtu.be/dQw4w9WgXcQ?t=10");
-    expect(document.querySelector<HTMLSelectElement>(".form-grid select")!.value).toBe("youtube");
+    expect(document.querySelector(".selected-source .badge")?.textContent).toBe("YouTube");
     await vi.waitFor(() => expect(titleValue()).toBe("A helpful lesson"));
     expect(api.fetchStudyLinkTitle).toHaveBeenCalledWith("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     button("Add study").click();
@@ -244,7 +243,7 @@ describe("Studies library", () => {
     await openAdd();
     input("Paste a web link", "https://example.com/Chinese-lesson.mp3");
     expect(titleValue()).toBe("Chinese lesson");
-    expect(document.querySelector<HTMLSelectElement>(".form-grid select")!.value).toBe("audio");
+    expect(document.querySelector(".selected-source .badge")?.textContent).toBe("Audio");
     await vi.waitFor(() => expect(button("Add study").disabled).toBe(false));
     button("Add study").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
@@ -258,9 +257,9 @@ describe("Studies library", () => {
     await openAdd();
     input("Paste a web link", "https://example.com/old");
     await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
-    const kind = document.querySelector<HTMLSelectElement>(".form-grid select")!;
+    input("Paste a web link", "https://example.com/stream?id=42");
+    const kind = document.querySelector<HTMLSelectElement>("details select")!;
     kind.value = "audio"; kind.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
-    input("Media URL", "https://example.com/stream?id=42");
     input("Title", "Streaming lesson");
     finish("Wrong title"); await Promise.resolve(); flushSync();
     expect(titleValue()).toBe("Streaming lesson");
@@ -310,5 +309,83 @@ describe("Studies library", () => {
     newTopic("   "); button("Add study").click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Give the topic a name"));
     expect(api.saveStudy).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["#physics", "flashcards", "physics", "#physics"],
+    ["Untagged cards", "flashcards", "", "Untagged cards"],
+    ["lesson", "audio", "assets/lesson.mp3", "lesson"],
+    ["movie", "video", "assets/movie.mp4", "movie"],
+    ["Original book", "book", "book", "Original book"],
+  ])("adds %s with automatically selected type/title and one confirmation", async (query, kind, source, title) => {
+    api.listPageSummaries.mockResolvedValue([{ id: "book", title: "Original book", is_journal: false, is_book: true }]);
+    api.getPage.mockResolvedValue({ id: "book", title: "Original book", properties: { "book-id": "original" } });
+    api.listFlashcardTopics.mockResolvedValue([{ topic: "physics", total: 10, due: 2 }, { topic: "", total: 3, due: 1 }]);
+    await openAdd();
+    await vi.waitFor(() => expect(button("Original book")).toBeTruthy());
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(5);
+    expect(document.querySelector("details")).toBeNull();
+    input("Search or paste a link", query);
+    const field = document.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); flushSync();
+    expect(field.getAttribute("aria-activedescendant")).toBeTruthy();
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(titleValue()).toBe(title));
+    expect(api.saveStudy).not.toHaveBeenCalled();
+    expect(document.querySelector("details")?.open).toBe(false);
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ kind, source, title, topic: "General" })));
+  });
+  it("clears a previous selection when searching again and ignores its late page response", async () => {
+    let finish!: (value: unknown) => void;
+    api.getPage.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    await openAdd();
+    await vi.waitFor(() => expect(button("Physics")).toBeTruthy());
+    button("Physics").click(); flushSync();
+    input("Search or paste a link", "lesson");
+    button("lesson").click(); flushSync();
+    finish({ id: "old", title: "Old page", properties: {} });
+    await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("lesson");
+    input("Search or paste a link", "unmatched source");
+    expect(button("Add study").disabled).toBe(true);
+    expect(document.body.textContent).toContain("No matching sources");
+    expect(api.fetchStudyLinkTitle).not.toHaveBeenCalled();
+  });
+  it("reports partial catalog failures while keeping available sources and links usable", async () => {
+    api.listAssets.mockRejectedValueOnce(new Error("Asset directory unavailable"));
+    await openAdd();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Could not load media assets"));
+    expect(button("Physics")).toBeTruthy();
+    expect(button("#physics")).toBeTruthy();
+    button("Retry sources").click();
+    await vi.waitFor(() => expect(button("lesson")).toBeTruthy());
+    expect(document.body.textContent).not.toContain("Asset directory unavailable");
+  });
+  it("shows pages before slow asset discovery finishes and discards late results after closing", async () => {
+    let finish!: (value: string[]) => void;
+    api.listAssets.mockReturnValueOnce(new Promise<string[]>(resolve => { finish = resolve; }));
+    await openAdd();
+    await vi.waitFor(() => expect(button("Physics")).toBeTruthy());
+    expect(document.body.textContent).toContain("Loading sources...");
+    button("Cancel").click(); flushSync();
+    button("+ Add study").click(); flushSync();
+    await vi.waitFor(() => expect(button("lesson")).toBeTruthy());
+    finish(["assets/Old-graph-recording.mp3"]); await Promise.resolve(); flushSync();
+    expect(button("Old graph recording")).toBeUndefined();
+    expect(button("Physics")).toBeTruthy();
+  });
+  it("marks existing sources without adding duplicates and defaults to the active topic filter", async () => {
+    api.listStudies.mockResolvedValue({ items: [fixture({ source: "assets/lesson.mp3", topic: "Health" })], days: [] });
+    component = mount(Studies, { target: document.body, props: { graphPath: "/graph", onOpen: vi.fn() } });
+    await vi.waitFor(() => expect(button("French lesson")).toBeTruthy());
+    const filter = document.querySelector<HTMLSelectElement>(".library-heading select")!;
+    filter.value = "topic:Health"; filter.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
+    button("+ Add study").click(); flushSync();
+    await vi.waitFor(() => expect(button("lesson")).toBeTruthy());
+    expect(button("lesson").disabled).toBe(true);
+    expect(button("lesson").textContent).toContain("Already added");
+    expect(document.querySelector<HTMLSelectElement>(".topic-picker select")!.value).toBe("topic:Health");
+    button("movie").click(); flushSync(); button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ kind: "video", topic: "Health" })));
   });
 });

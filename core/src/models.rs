@@ -16,14 +16,18 @@ pub struct PageSummary {
     pub id: String,
     pub title: String,
     pub is_journal: bool,
+    #[serde(default)]
+    pub is_book: bool,
 }
 
 impl From<Page> for PageSummary {
     fn from(page: Page) -> Self {
+        let is_book = crate::graph::books::is_original_book(&page);
         Self {
             id: page.id,
             title: page.title,
             is_journal: page.is_journal,
+            is_book,
         }
     }
 }

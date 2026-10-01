@@ -60,11 +60,15 @@ export function studySourceFromLink(source: string): {
   if (["youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"].includes(url.hostname.toLowerCase()))
     return { kind: "youtube", source: normalizeStudySource("youtube", url.href) };
   const filename = url.pathname.split("/").at(-1) ?? "";
-  const extension = filename.split(".").at(-1)?.toLowerCase() ?? "";
-  const kind = ["mp3", "wav", "ogg", "m4a", "aac", "flac", "opus"].includes(extension) ? "audio"
-    : ["mp4", "webm", "mov", "m4v", "ogv"].includes(extension) ? "video" : "website";
+  const kind = studyMediaKind(filename) ?? "website";
   return { kind, source: url.href,
     ...(kind !== "website" ? { filenameTitle: decodeURIComponent(filename).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ") } : {}) };
+}
+
+export function studyMediaKind(path: string): "audio" | "video" | null {
+  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+  return ["mp3", "wav", "ogg", "m4a", "aac", "flac", "opus", "oga", "weba"].includes(extension) ? "audio"
+    : ["mp4", "webm", "mov", "m4v", "ogv", "mkv", "avi"].includes(extension) ? "video" : null;
 }
 
 export function finiteStudyProgress(position: number, total: number, label = "", anchor = ""): StudyProgress {

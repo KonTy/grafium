@@ -287,7 +287,10 @@ impl Database {
     pub fn list_page_summaries(&self) -> Result<Vec<PageSummary>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, is_journal FROM pages
+            "SELECT id, title, is_journal,
+                    COALESCE(json_type(properties, '$.\"book-id\"') = 'text', 0)
+                    OR COALESCE(file_path GLOB 'books/*', 0)
+             FROM pages
              ORDER BY title COLLATE NOCASE, title, id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -295,6 +298,7 @@ impl Database {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 is_journal: row.get(2)?,
+                is_book: row.get(3)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1020,6 +1024,35 @@ mod tests {
         assert_eq!(rows[1].id, target.id);
         assert!(!rows[1].is_journal);
         assert_eq!(rows.last().unwrap().title, "Topic 104");
+        Ok(())
+    }
+
+    #[test]
+    fn page_summaries_identify_original_books_without_loading_each_page() -> Result<()> {
+        let db = Database::in_memory()?;
+        let ordinary = db.create_page("Ordinary", false)?;
+        let original = db.create_page("Original", false)?;
+        let relocated = db.create_page("Relocated", false)?;
+        db.conn()?.execute(
+            "UPDATE pages SET file_path = 'books/original.pdf' WHERE id = ?1",
+            [&original.id],
+        )?;
+        db.conn()?.execute(
+            "UPDATE pages SET properties = '{\"book-id\":\"saved-book\"}' WHERE id = ?1",
+            [&relocated.id],
+        )?;
+        for summary in db.list_page_summaries()? {
+            let page = db.get_page_by_id(&summary.id)?;
+            assert_eq!(
+                summary.is_book,
+                crate::graph::books::is_original_book(&page)
+            );
+            assert_eq!(
+                crate::models::PageSummary::from(page).is_book,
+                summary.is_book
+            );
+            assert_eq!(summary.is_book, summary.id != ordinary.id);
+        }
         Ok(())
     }
 
