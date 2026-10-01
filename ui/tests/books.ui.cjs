@@ -9,8 +9,12 @@ const http = require("node:http");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
+const UNICODE_PASSAGE = `Unicode ${"x".repeat(311)}\u{1F600} end.`;
+
 function epub(fixed = false) {
-  const repeated = Array.from({ length: 45 }, (_, n) => `<p>Offline paragraph ${n}. A book can remember its place across window and font size changes.</p>`).join("");
+  const repeated = Array.from({ length: 145 }, (_, n) => `<p>Offline paragraph ${n}. A book can remember its place across window and font size changes.</p>`).join("")
+    + `<p>${UNICODE_PASSAGE}</p>`
+    + `<p id="long-chunks">${"CanonicalLongChunk ".repeat(80)}</p>`;
   const font = new Uint8Array(readFileSync(path.join(__dirname, "../node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf")));
   const key = createHash("sha1").update("synthetic").digest();
   for (let i = 0; i < 1040; i++) font[i] ^= key[i % key.length];
@@ -148,6 +152,48 @@ async function main() {
     assert.equal(await chapter.evaluate(() => {
       try { return !!top.__TAURI_INTERNALS__; } catch { return false; }
     }), false, "book cannot reach privileged parent");
+    const narration = [];
+    for (let section = 0; section < 2; section++) {
+      let offset = 0;
+      do {
+        const requestId = `narration-${section}-${offset}`;
+        await page.evaluate(({ requestId, section, offset }) => {
+          send("read-aloud-segments", { requestId, section, offset });
+        }, { requestId, section, offset });
+        await page.waitForFunction(id => messages.some(m =>
+          m.type === "read-aloud-segments" && m.requestId === id), requestId);
+        const batch = await page.evaluate(id => messages.find(m =>
+          m.type === "read-aloud-segments" && m.requestId === id), requestId);
+        assert.equal(batch.sectionCount, 2);
+        assert(batch.segments.length > 0 && batch.segments.length <= 128);
+        if (batch.nextOffset !== null) assert(batch.nextOffset > offset, "narration pagination advances");
+        narration.push(...batch.segments);
+        offset = batch.nextOffset;
+      } while (offset !== null);
+    }
+    assert(narration.length > 145, "narration includes every paragraph across pagination");
+    assert(narration.some(segment => segment.text.includes("Offline paragraph 144.")));
+    assert(narration.map(segment => segment.text).join("").includes(UNICODE_PASSAGE),
+      "narration chunk boundaries preserve complete Unicode code points");
+    assert(narration.every(segment => Buffer.from(segment.text, "utf8").toString("utf8") === segment.text),
+      "no segment contains an unpaired surrogate");
+    assert(!narration.some(segment => segment.text.includes("top.pwned") || segment.text.includes("@font-face")));
+    for (const segment of narration) {
+      assert(Buffer.byteLength(segment.text, "utf8") <= 1500);
+      assert.equal(segment.locator.kind, "epub");
+      assert.match(segment.locator.cfi, /^epubcfi\(/);
+      assert.equal(segment.locator.rendererVersion, selection.location.rendererVersion);
+    }
+    const chunks = narration.filter(segment => segment.text.includes("CanonicalLongChunk"));
+    assert(chunks.length >= 3, "a long text node is split into bounded narration chunks");
+    assert.equal(new Set(chunks.map(segment => segment.locator.cfi)).size, chunks.length,
+      "each chunk of the same paragraph has a distinct actual-renderer CFI");
+    const secondChapter = narration.find(segment => segment.text.includes("Return to the first passage."));
+    assert(secondChapter, "narration includes the second chapter before it has been displayed");
+    await page.evaluate(location => send("goto", { location }), secondChapter.locator);
+    await page.waitForFunction(() => messages.findLast(m => m.type === "location")?.label.includes("Second chapter"));
+    assert.equal(requests.length, 0, "full-spine narration extraction must remain offline");
+    console.log("EPUB narration: bounded pagination, full spine, canonical jumpable CFI, and no script/network access passed.");
     await page.evaluate(location => { send("notes", { locations: [location] }); send("toc", { target: "two.xhtml" }); }, selection.location);
     await page.waitForFunction(() => messages.some(m => m.type === "location" && m.label.includes("Second chapter")));
     await page.setViewportSize({ width: 780, height: 700 });

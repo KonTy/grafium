@@ -1,0 +1,29 @@
+Grafium Android private reader runtime provenance
+
+sherpa-onnx 1.13.8 (Apache-2.0)
+Source and license: https://github.com/k2-fsa/sherpa-onnx/tree/v1.13.8
+Pinned AAR: sherpa-onnx-1.13.8.aar
+SHA-256: 633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96
+
+The upstream native speech build includes:
+- ONNX Runtime 1.28.2 (MIT)
+  https://github.com/microsoft/onnxruntime/tree/v1.28.2
+- eSpeak NG (GPL-3.0-or-later), commit ed530aa113046142eb5115cf2fc9157854d0ffe1
+  https://github.com/csukuangfj/espeak-ng/tree/ed530aa113046142eb5115cf2fc9157854d0ffe1
+- Piper phonemize (MIT), commit f3ff95afc03640bc1399e113e83361192a2fafb4
+  https://github.com/csukuangfj/piper-phonemize/tree/f3ff95afc03640bc1399e113e83361192a2fafb4
+
+Grafium is AGPL-3.0. Before distributing the native AAR in a release, retain the
+upstream and transitive license texts/notices and provide corresponding source
+under the applicable licenses; this provenance inventory is not a substitute
+for those distribution obligations. No voice model is bundled or downloaded
+automatically. Each voice package must carry license metadata and a checksummed
+license artifact; its own license, not the runtime's license, governs the model.
+
+Android voice packages use sherpa-vits-v1 with converted Piper/VITS ONNX metadata
+and hash-verified espeak-ng-data files; raw Piper ONNX is not compatible. The
+shared Rust package/ONNX validator runs before an installation is published,
+before selecting a voice, and before constructing the native speech engine.
+Missing validation support or rejected metadata is an explicit error, never a
+fallback to an unchecked model or system/cloud TTS. This validation-only JNI
+adapter does not prepare or modify the canonical EPUB narration queue.

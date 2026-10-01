@@ -5,6 +5,12 @@ separate from Tasks: adding an item does not create a task, duplicate your notes
 or change a source file.
 The command palette includes **Go to Studies**; in navigation mode, press `g s`.
 
+The **Private library** is a separate, app-level reader for external audiobook
+folders and EPUBs configured with **Library location** in Settings. Its files,
+progress, and automatic bookmarks do not become graph studies or AI sources.
+Its global player continues while you navigate, rather than using the focused
+study clock described below. See [[Help - Private Reader]].
+
 ## Add and organize
 
 Use **Add to Studies** on a page or original book, or add an item from Studies.

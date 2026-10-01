@@ -1,6 +1,10 @@
 pub mod build_info;
 mod commands;
 mod index_activity;
+mod private_reader;
+mod private_voice;
+#[cfg(any(test, target_os = "android"))]
+mod private_voice_validation;
 #[cfg(not(target_os = "android"))]
 mod shutdown;
 mod welcome;
@@ -921,6 +925,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_geolocation::init())
         .manage(commands::startup::StartupWindow::default())
+        .manage(private_voice::VoiceState::default())
+        .manage(private_reader::ReaderState::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("grafium-asset", |ctx, request| {
@@ -1238,6 +1244,28 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::private_reader::reader_snapshot,
+            commands::private_reader::reader_set_library,
+            commands::private_reader::reader_rescan,
+            commands::private_reader::reader_media_url,
+            commands::private_reader::reader_read_epub,
+            commands::private_reader::reader_save_position,
+            commands::private_reader::reader_add_bookmark,
+            commands::private_reader::reader_update_bookmark,
+            commands::private_reader::reader_delete_bookmark,
+            commands::private_reader::reader_reorder,
+            commands::private_reader::reader_relink,
+            commands::private_reader::reader_export,
+            commands::private_reader::reader_restore,
+            commands::private_voice::private_voice_status,
+            commands::private_voice::private_voice_configure_runtime,
+            commands::private_voice::private_voice_installed,
+            commands::private_voice::private_voice_import,
+            commands::private_voice::private_voice_download,
+            commands::private_voice::private_voice_select,
+            commands::private_voice::private_voice_synthesize,
+            commands::private_voice::private_voice_cancel,
+            commands::private_voice::private_voice_audio,
             commands::startup::reveal_startup_window,
             commands::layout::get_sidebar_visibility,
             commands::layout::set_sidebar_visibility,

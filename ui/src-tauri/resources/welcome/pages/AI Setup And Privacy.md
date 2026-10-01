@@ -3,6 +3,13 @@
 AI is optional. Grafium's editor, journal, links, graph, tasks, flashcards,
 search, imports, and sync work without an AI provider.
 
+The **private reader** uses external books without adding their text or automatic
+bookmarks to graph search, AI indexing, or Chat. Its offline speech path must not
+fall back to cloud or system-default speech. Explicit voice downloads are separate
+from synthesis and do not require book text. Manually writing a quotation or
+`[[Book title]]` note in a journal does put that text into the normal graph and
+its configured sync/AI scope. See [[Help - Private Reader]].
+
 ## Set up AI
 
 1. Open **Settings → AI / Knowledge Engine**.

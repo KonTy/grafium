@@ -1,0 +1,87 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { androidPrivateCommand, androidReaderRequest, normalizeAndroidReaderPosition } from "./privateReaderAndroid";
+import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, playPrivateAudio, privatePlayback, stopPrivatePlayback } from "./privateReaderPlayback";
+import { privateLibrary, type ReaderBook } from "./privateReader";
+import { get } from "svelte/store";
+import { BOOK_RENDERER_VERSION } from "./bookLocations";
+import sharedPosition from "../../tests/fixtures/private-reader-position.json";
+
+const book: ReaderBook = { id: "native", title: "SAF book", available: true, kind: "audio", tracks: [
+  { id: "doc-1", title: "1.mp3", relativePath: "Disc 1/1.mp3" },
+], position: { trackId: "doc-1", offsetMs: 3500 }, bookmarks: [] };
+let requests: { id: string; command: string; args: Record<string, unknown> }[] = [];
+beforeEach(() => {
+  requests = [];
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
+  privateLibrary.set({ libraryPath: "Local documents", books: [book] });
+  window.PrivateReaderBridge = { request(json) {
+    const request = JSON.parse(json);
+    requests.push(request);
+    const result = request.command === "library" ? { configured: true, locationLabel: "Local documents", books: [book] }
+      : request.command === "stop" ? { bookId: null, trackId: null, offsetMs: 3500, playing: false, buffering: false, error: null }
+      : { bookId: book.id, trackId: "doc-1", offsetMs: 3500, playing: true, buffering: false, error: null };
+    queueMicrotask(() => window.dispatchEvent(new CustomEvent("private-reader-response", { detail: { id: request.id, ok: true, result } })));
+  } };
+});
+afterEach(async () => {
+  await stopPrivatePlayback();
+  delete window.PrivateReaderBridge;
+  vi.restoreAllMocks();
+});
+describe("Android private reader bridge", () => {
+  it("controls native playback and captures bookmarks in the service, not at a stale UI offset", async () => {
+    await playPrivateAudio(book);
+    expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500 });
+    expect(get(privatePlayback).status).toBe("playing");
+    await bookmarkPrivatePlayback();
+    expect(requests.find(request => request.command === "bookmark")?.args).toEqual({ bookId: book.id });
+    expect(requests.some(request => request.command === "media_url")).toBe(false);
+  });
+  it("normalizes SAF library without coercing provider IDs into filesystem paths", async () => {
+    const result = await androidPrivateCommand("snapshot");
+    expect(result).toEqual({ libraryPath: "Local documents", books: [book] });
+  });
+  it("rejects native write failures instead of showing a saved bookmark", async () => {
+    window.PrivateReaderBridge = { request(json) {
+      const { id } = JSON.parse(json);
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent("private-reader-response", { detail: { id, ok: false, error: "PRIVATE_STATE_WRITE_FAILED" } })));
+    } };
+    await expect(androidReaderRequest("bookmark")).rejects.toThrow("PRIVATE_STATE_WRITE_FAILED");
+    privatePlayback.update(state => ({ ...state, bookId: null }));
+  });
+  it("does not silently use browser playback when the native bridge is unavailable", async () => {
+    delete window.PrivateReaderBridge;
+    await expect(androidReaderRequest("play")).rejects.toThrow("native Android private reader bridge is unavailable");
+    privatePlayback.update(state => ({ ...state, bookId: null }));
+  });
+  it("keeps service-owned narration distinct from audio and captures native EPUB bookmarks", async () => {
+    const cfi = "epubcfi(/6/2!/4/2)";
+    applyAndroidState({ bookId: book.id, trackId: null, offsetMs: 1275, durationMs: 20000,
+      playing: true, buffering: false, error: null, mode: "tts", ttsLoading: false,
+      ordinal: 4, segmentCount: 10, locator: { kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION } });
+    expect(get(privatePlayback)).toMatchObject({
+      mode: "tts", status: "playing", position: { offsetMs: 1275, locator: { kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION } },
+    });
+    await checkpointPrivatePlayback();
+    expect(requests).toEqual([]);
+    await bookmarkPrivatePlayback();
+    expect(requests.find(request => request.command === "bookmark")?.args).toEqual({ bookId: book.id });
+    expect(requests.some(request => request.command === "position")).toBe(false);
+  });
+  it("normalizes native narration history without silently replacing an existing renderer version", () => {
+    const cfi = "epubcfi(/6/2!/4/2)";
+    expect(normalizeAndroidReaderPosition({ offsetMs: 700, locator: JSON.stringify({ kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION }) }))
+      .toEqual({ offsetMs: 700, locator: { kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION } });
+    expect(normalizeAndroidReaderPosition({ offsetMs: 700, locator: { kind: "epub", cfi, rendererVersion: "older-renderer" } })?.locator)
+      .toMatchObject({ rendererVersion: "older-renderer" });
+    expect(() => normalizeAndroidReaderPosition({ offsetMs: 0, locator: '{"broken"' })).toThrow("invalid");
+    expect(() => normalizeAndroidReaderPosition({ offsetMs: 0, locator: { cfi, source_hash: "native-source" } })).toThrow("Unsupported");
+    expect(() => normalizeAndroidReaderPosition({ offsetMs: 0, locator: cfi })).toThrow("Unsupported");
+  });
+  it("sends complete canonical locator objects for visual-reading persistence", async () => {
+    await androidPrivateCommand("save_position", { bookId: book.id, position: sharedPosition });
+    expect(requests.find(request => request.command === "position")?.args).toEqual({
+      bookId: book.id, locator: sharedPosition.locator, offsetMs: 2370,
+    });
+  });
+});

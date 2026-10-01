@@ -47,13 +47,16 @@ export function sanitizeBookDocument(source: string): string {
 }
 
 export interface BookTocItem { label: string; target: string | number; depth: number }
+export interface ReaderTextSegment { text: string; locator: Extract<BookLocation, { kind: "epub" }> }
 export type ReaderMessage =
-  | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number }
+  | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number; language?: string }
   | { type: "location"; location: BookLocation; label: string; fraction?: number }
   | { type: "selection"; quote: string; location: BookLocation }
   | { type: "clear-selection" }
   | { type: "error"; message: string }
+  | { type: "read-aloud-segments"; requestId: string; section: number; sectionCount: number; nextOffset: number | null; segments: ReaderTextSegment[] }
   | { type: "help" }
+  | { type: "navigation" }
   | { type: "open-notes" };
 
 /** An opaque frame has origin "null"; source identity plus a per-mount secret is mandatory. */
@@ -62,19 +65,31 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
     || event.data.channel !== "grafium-book" || event.data.token !== token) return null;
   const m = event.data;
   switch (m.type) {
+    case "read-aloud-segments":
+      return typeof m.requestId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(m.requestId)
+        && Number.isSafeInteger(m.section) && m.section >= 0
+        && Number.isSafeInteger(m.sectionCount) && m.sectionCount > m.section && m.sectionCount <= 10000
+        && (m.nextOffset === null || Number.isSafeInteger(m.nextOffset) && m.nextOffset >= 0)
+        && Array.isArray(m.segments) && m.segments.length <= 128
+        && m.segments.every((segment: ReaderTextSegment) => segment && typeof segment.text === "string"
+          && segment.text.trim().length > 0 && segment.text.length <= 2048
+          && isBookLocation(segment.locator) && segment.locator.kind === "epub")
+        && m.segments.reduce((sum: number, segment: ReaderTextSegment) => sum + segment.text.length, 0) <= 131072 ? m : null;
     case "ready":
       return Array.isArray(m.toc) && m.toc.length <= 10000 && m.toc.every((t: BookTocItem) =>
         t && typeof t.label === "string" && t.label.length < 8192
         && ((typeof t.target === "string" && t.target.length < 16384) || Number.isSafeInteger(t.target))
         && Number.isInteger(t.depth) && t.depth >= 0 && t.depth < 100)
         && typeof m.annotations === "boolean" && typeof m.notice === "string"
+        && (m.language === undefined || typeof m.language === "string" && m.language.length <= 63
+          && /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/.test(m.language))
         && (m.pages === undefined || Number.isSafeInteger(m.pages) && m.pages > 0) ? m : null;
     case "location": return isBookLocation(m.location) && typeof m.label === "string"
       && (m.fraction === undefined || typeof m.fraction === "number" && Number.isFinite(m.fraction)
         && m.fraction >= 0 && m.fraction <= 1) ? m : null;
     case "selection": return isBookLocation(m.location) && typeof m.quote === "string"
       && m.quote.trim().length > 0 && m.quote.length <= 200000 ? m : null;
-    case "clear-selection": case "open-notes": case "help": return m;
+    case "clear-selection": case "open-notes": case "help": case "navigation": return m;
     case "error": return typeof m.message === "string" && m.message.length < 20000 ? m : null;
     default: return null;
   }

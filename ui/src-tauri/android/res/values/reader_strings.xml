@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="reader_volume_label">Grafium private reader volume bookmark</string>
+    <string name="reader_volume_description">Optional physical volume-key bookmarking for private books. Only filters keys; cannot read screen content or perform gestures. Enable in Grafium Library settings as well. Hold the configured key 700 ms while a book plays to save a bookmark. A short press adjusts media volume on release. Disabled or idle playback leaves keys untouched. Locked-screen and screen-off delivery is UNVERIFIED and may be blocked by your phone. No root or system changes.</string>
+</resources>

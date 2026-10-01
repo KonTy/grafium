@@ -6,9 +6,11 @@
   import { isStudySourceAdded, type StudySourceChoice } from "../lib/studyCatalog";
   import StudyTopicPicker from "./StudyTopicPicker.svelte";
   import StudySourcePicker from "./StudySourcePicker.svelte";
+  import PrivateReaderLibrary from "./PrivateReaderLibrary.svelte";
 
-  let { graphPath, onOpen, addPage = null }: {
+  let { graphPath, onOpen, addPage = null, onOpenPrivateBook, onLibrarySettings }: {
     graphPath: string; onOpen: (item: StudyItem) => void; addPage?: Page | null;
+    onOpenPrivateBook?: (bookId: string) => void; onLibrarySettings?: () => void;
   } = $props();
   let items = $state<StudyItem[]>([]);
   let days = $state<StudyDay[]>([]);
@@ -119,6 +121,9 @@
 
 <section class="studies" data-help-context="studies">
   <header><div><p class="eyebrow">YOUR LEARNING LIBRARY</p><h1>Studies</h1><p class="subtitle">Choose a source. Keep your place. Make time to learn.</p></div><button class="primary" disabled={saving || formOpen} onclick={startAdd}>+ Add study</button></header>
+  {#if onOpenPrivateBook && onLibrarySettings}
+    <PrivateReaderLibrary onOpen={onOpenPrivateBook} onSettings={onLibrarySettings} />
+  {/if}
   <div class="stats" aria-label="Study statistics">
     <div><span>Total study time</span><strong>{studyTime(totalTime)}</strong><small>{libraryQuery.trim() ? "Filtered studies" : topicFilter ? "Selected topic" : "All studies"}</small></div>
     <div><span>Today</span><strong>{studyTime(todayTime)}</strong><small>Active study time</small></div>

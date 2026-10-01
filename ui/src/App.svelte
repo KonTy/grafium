@@ -19,6 +19,10 @@
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import TitleBar from "./components/TitleBar.svelte";
   import Toaster from "./components/Toaster.svelte";
+  import PrivateReaderToolbar from "./components/PrivateReaderToolbar.svelte";
+  import PrivateReaderBook from "./components/PrivateReaderBook.svelte";
+  import { refreshPrivateLibrary } from "./lib/privateReader";
+  import { attachPrivatePlayback } from "./lib/privateReaderPlayback";
   import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import BookImportDialog from "./components/BookImportDialog.svelte";
@@ -74,6 +78,19 @@
   const loadBookAnnotationPage = lazyComponent(() => import("./components/BookAnnotationPage.svelte"));
 
   let shuttingDown = $state(false);
+  let privateBookId = $state<string | null>(null);
+  onMount(attachPrivatePlayback);
+
+  async function openPrivateBook(bookId: string) {
+    await navigateToPage("__studies__");
+    await refreshPrivateLibrary().catch(() => {});
+    privateBookId = bookId;
+  }
+
+  function openPrivateLibrarySettings() {
+    privateBookId = null;
+    void navigateToPage("__settings__").then(() => { settingsOpenSection = "library"; });
+  }
 
   function isAndroidClient(): boolean {
     return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
@@ -1211,6 +1228,7 @@
       const context = isHelpContext(section) ? section : null;
       const currentContext: HelpContext =
         context ||
+        (currentView === "studies" && privateBookId ? "reader" : null) ||
         ((
           {
             page: currentPage && (isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)) ? "books" : "editor",
@@ -1680,6 +1698,7 @@
     sourceBlockId?: string,
     sourcePageTitle?: string
   ) {
+    privateBookId = null;
     ++studyNavigation;
     await finishStudy();
     if (!skipHistory) {
@@ -2144,6 +2163,7 @@
   }
 
   function handleGraphChanged() {
+    privateBookId = null;
     ++studyNavigation;
     void finishStudy();
     studyGraphPath = "";
@@ -2261,6 +2281,7 @@
       onZoomReset={resetUiZoom}
     />
   {/if}
+  <PrivateReaderToolbar onOpen={bookId => { void openPrivateBook(bookId); }} />
   <div class="app-layout" bind:this={appLayoutEl}>
     {#if !zenMode}
       <div
@@ -2365,7 +2386,9 @@
         {/snippet}
       </LazyView>
     {:else if currentView === "studies"}
-      {#if activeStudy}
+      {#if privateBookId}
+        <PrivateReaderBook bookId={privateBookId} onBack={() => privateBookId = null} onVoiceSettings={openPrivateLibrarySettings} />
+      {:else if activeStudy}
         {#key activeStudy.id}
           {@const selectedStudy = activeStudy}
           {#if activeStudy.kind === "flashcards"}
@@ -2392,7 +2415,8 @@
       {:else}
         <LazyView load={loadStudies} name="studies">
           {#snippet children(Studies)}
-            <Studies graphPath={studyGraphPath} addPage={studyAddPage} onOpen={(item) => { void openStudy(item); }} />
+            <Studies graphPath={studyGraphPath} addPage={studyAddPage} onOpen={(item) => { void openStudy(item); }}
+              onOpenPrivateBook={bookId => { privateBookId = bookId; }} onLibrarySettings={openPrivateLibrarySettings} />
           {/snippet}
         </LazyView>
       {/if}

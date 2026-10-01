@@ -8,6 +8,7 @@
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
+  import PrivateReaderSettings from "./PrivateReaderSettings.svelte";
   import { beginSyncRun, endSyncRun } from "../lib/syncActivity.svelte";
   import { runSyncTarget, summarizeSyncResult } from "../lib/sync";
   import {
@@ -40,6 +41,7 @@
     openSection = "",
   }: Props = $props();
   let themeSectionEl: HTMLDetailsElement | null = $state(null);
+  let librarySectionEl: HTMLDetailsElement | null = $state(null);
   let settingsRoot: HTMLDivElement | null = $state(null);
   let settingsQuery = $state("");
   let settingsMatchCount = $state(0);
@@ -52,6 +54,10 @@
   }
 
   $effect(() => {
+    if (openSection === "library" && librarySectionEl && !settingsQuery.trim()) {
+      librarySectionEl.open = true;
+      librarySectionEl.scrollIntoView({ block: "start" });
+    }
     if (openSection === "theme" && themeSectionEl && !settingsQuery.trim()) {
       themeSectionEl.open = true;
       themeSectionEl.scrollIntoView({ block: "start" });
@@ -304,6 +310,11 @@
         </select>
       </div>
     </div>
+  </details>
+
+  <details class="settings-section" data-help-context="reader" data-settings-section="library" bind:this={librarySectionEl}>
+    <summary class="section-header"><span class="section-title">Private reader · Library location</span></summary>
+    <div class="section-content"><PrivateReaderSettings /></div>
   </details>
 
   <!-- Sync Section -->

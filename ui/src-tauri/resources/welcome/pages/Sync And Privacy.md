@@ -83,6 +83,12 @@ race with another application writing at exactly the same instant.
 
 ## Privacy
 
+The app-level **private library** is not part of graph sync: linked external
+audio/EPUB sources, private progress, and automatic bookmarks are not graph
+assets or imported Books. Back up those sources and private application state
+separately. Notes you intentionally write into journals, including `[[Book title]]`
+links and quotations, still follow normal graph sharing. See [[Help - Private Reader]].
+
 Filesystem sync sends files to the selected location. WebDAV sends them to the
 configured server and its operators. Sync can include Markdown, assets, book
 files, and other graph files; it does not make cloud AI private.

@@ -51,6 +51,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         "books",
         include_str!("../../resources/welcome/pages/Help - Books.md"),
     ),
+    (
+        "reader",
+        include_str!("../../resources/welcome/pages/Help - Private Reader.md"),
+    ),
 ];
 
 #[tauri::command(rename_all = "camelCase")]
@@ -64,6 +68,15 @@ pub fn help_get_page(context: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_reader_help_explains_privacy_and_device_limits() {
+        let page = super::help_get_page("reader".into()).unwrap();
+        assert!(page.contains("not copied into your graph"));
+        assert!(page.contains("[[Book title]]"));
+        assert!(page.contains("unverified"));
+        assert!(page.contains("screen-content"));
+    }
+
     #[test]
     fn books_help_distinguishes_originals_from_conversion() {
         let page = super::help_get_page("books".into()).unwrap().to_lowercase();

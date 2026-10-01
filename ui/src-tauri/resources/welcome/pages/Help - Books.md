@@ -1,5 +1,11 @@
 # Books: originals and editable copies
 
+For linked external EPUBs and audiobook folders without graph copies, use
+**Settings > Library location** and the private library in Studies instead.
+That app-private reader does not index books for graph AI or sync them.
+See [[Help - Private Reader]]. The import workflow below intentionally makes
+graph copies and retains its existing graph search, annotation, and sync behavior.
+
 Use **Import books** (`Alt+B`) to choose a file or a folder. Folder imports scan
 subfolders. Set **Convert to editable Markdown** before importing:
 

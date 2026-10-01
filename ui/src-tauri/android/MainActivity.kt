@@ -18,9 +18,33 @@ import androidx.core.view.WindowInsetsCompat
 class MainActivity : TauriActivity() {
   private lateinit var folderPickerLauncher: ActivityResultLauncher<Uri?>
   private var webViewRef: WebView? = null
+  private lateinit var readerLocationLauncher: ActivityResultLauncher<Intent>
+  private lateinit var readerExportLauncher: ActivityResultLauncher<Intent>
+  private lateinit var readerRestoreLauncher: ActivityResultLauncher<Intent>
+  private var readerLocationRequest: String? = null
+  private var readerExportRequest: String? = null
+  private var readerRestoreRequest: String? = null
+  private var readerBridge: PrivateReaderBridge? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+
+    readerLocationLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val id = readerLocationRequest
+      readerLocationRequest = null
+      if (id != null) readerBridge?.selectedLocation(id,
+        if (result.resultCode == RESULT_OK) result.data?.data else null)
+    }
+    readerExportLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val id = readerExportRequest
+      readerExportRequest = null
+      if (id != null) readerBridge?.selectedExport(id, if (result.resultCode == RESULT_OK) result.data?.data else null)
+    }
+    readerRestoreLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val id = readerRestoreRequest
+      readerRestoreRequest = null
+      if (id != null) readerBridge?.selectedRestore(id, if (result.resultCode == RESULT_OK) result.data?.data else null)
+    }
 
     ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { view, windowInsets ->
       val insets = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
@@ -66,6 +90,39 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     webViewRef = webView
     webView.addJavascriptInterface(FolderPickerBridge(), "FolderPickerBridge")
+    readerBridge = PrivateReaderBridge(this, webView, { id ->
+      check(readerLocationRequest == null) { "PICKER_ALREADY_OPEN" }
+      readerLocationRequest = id
+      readerLocationLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+      })
+    }, { id ->
+      check(readerExportRequest == null) { "EXPORT_ALREADY_OPEN" }
+      readerExportRequest = id
+      readerExportLauncher.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "application/json"
+        putExtra(Intent.EXTRA_TITLE, "grafium-private-reader.json")
+        putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+      })
+    }, { id ->
+      check(readerRestoreRequest == null) { "RESTORE_ALREADY_OPEN" }
+      readerRestoreRequest = id
+      readerRestoreLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "application/json"
+        putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      })
+    })
+  }
+
+  override fun onDestroy() {
+    readerBridge?.destroy()
+    readerBridge = null
+    webViewRef = null
+    super.onDestroy()
   }
 
   @Suppress("DEPRECATION")

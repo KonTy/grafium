@@ -46,6 +46,11 @@ window.addEventListener("message", event => {
         await adapter.size(m.value);
       else if (m.type === "notes" && Array.isArray(m.locations) && m.locations.length <= 10000)
         await adapter.notes(m.locations.filter(isBookLocation));
+      else if (m.type === "read-aloud-segments" && typeof m.requestId === "string"
+        && /^[a-zA-Z0-9-]{1,80}$/.test(m.requestId)
+        && Number.isSafeInteger(m.section) && m.section >= 0
+        && Number.isSafeInteger(m.offset) && m.offset >= 0)
+        await adapter.segments?.(m);
     }
   }).catch(error);
 });
@@ -127,6 +132,7 @@ async function openReflowable({ bytes, format, location }) {
   view.addEventListener("external-link", event => event.preventDefault());
   view.addEventListener("link", event => {
     if (typeof event.detail.href !== "string" || !localBookLink(event.detail.href)) event.preventDefault();
+    else send("navigation");
   });
   view.addEventListener("relocate", event => {
     const { cfi, tocItem, fraction } = event.detail;
@@ -155,6 +161,7 @@ async function openReflowable({ bytes, format, location }) {
         && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
         if (doc.defaultView.getSelection()?.toString()) return;
         event.preventDefault();
+        send("navigation");
         void (event.key === "ArrowRight" ? view.goRight() : view.goLeft()).catch(error);
       }
     });
@@ -172,7 +179,10 @@ async function openReflowable({ bytes, format, location }) {
   };
   const toc = tocItems(book.toc);
   if (!toc.length) book.sections.forEach((_, index) => toc.push({ label: `Section ${index + 1}`, target: index, depth: 0 }));
-  send("ready", { toc, annotations: !fixed, notice: fixed
+  const metadataLanguage = Array.isArray(book.metadata?.language) ? book.metadata.language[0] : book.metadata?.language;
+  const language = typeof metadataLanguage === "string" && metadataLanguage.length <= 63
+    && /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/.test(metadataLanguage) ? metadataLanguage : undefined;
+  send("ready", { toc, annotations: !fixed, language, notice: fixed
     ? "Fixed-layout book: passage selection and highlighting are unavailable. Whole-book notes remain available."
     : "Local book · text selections can be saved as passage notes. Book scripts and external resources are blocked." });
   if (location && location.kind === "epub" && location.rendererVersion === BOOK_RENDERER_VERSION) await goTo(location);
@@ -182,6 +192,41 @@ async function openReflowable({ bytes, format, location }) {
   }
   return {
     next: () => view.next(), prev: () => view.prev(), goTo,
+    segments: async ({ requestId, section, offset }) => {
+      if (format !== "epub" || fixed) throw new Error("Read aloud requires a reflowable EPUB.");
+      if (book.sections.length > 10000 || section >= book.sections.length)
+        throw new Error("Invalid read-aloud section.");
+      const url = await book.sections[section].load();
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Could not read the local EPUB section.");
+      const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      const segments = [];
+      let skipped = 0;
+      let total = 0;
+      let more = false;
+      let node;
+      outer: while ((node = walker.nextNode())) {
+        if (node.parentElement?.closest("script,style,noscript,[hidden],[aria-hidden=true]")) continue;
+        // 320 UTF-16 units remain below the native offline engine's 1,500-byte input cap.
+        for (let start = 0, end = 0; start < node.textContent.length; start = end) {
+          end = Math.min(start + 320, node.textContent.length);
+          const before = node.textContent.charCodeAt(end - 1);
+          const after = node.textContent.charCodeAt(end);
+          if (before >= 0xD800 && before <= 0xDBFF && after >= 0xDC00 && after <= 0xDFFF) end--;
+          const text = node.textContent.slice(start, end);
+          if (!text.trim()) continue;
+          if (skipped++ < offset) continue;
+          if (segments.length >= 128 || total + text.length > 131072) { more = true; break outer; }
+          const range = doc.createRange();
+          range.setStart(node, start); range.setEnd(node, start + text.length);
+          segments.push({ text, locator: locator(view.getCFI(section, range)) });
+          total += text.length;
+        }
+      }
+      send("read-aloud-segments", { requestId, section, sectionCount: book.sections.length,
+        nextOffset: more ? offset + segments.length : null, segments });
+    },
     toc: async target => {
       if (typeof target === "string" && !localBookLink(target)) throw new Error("External navigation is blocked.");
       if (!await view.goTo(target)) throw new Error("The contents entry could not be opened.");

@@ -5,6 +5,7 @@ import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
 import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
 import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
+import readerHelp from "../../src-tauri/resources/welcome/pages/Help - Private Reader.md?raw";
 import studiesHelp from "../../src-tauri/resources/welcome/pages/Help - Studies.md?raw";
 import sidebarSource from "../components/Sidebar.svelte?raw";
 import editorHelp from "../../src-tauri/resources/welcome/pages/Help - Editor.md?raw";
@@ -22,6 +23,19 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes private reading to its privacy and hardware guidance", async () => {
+    expect(helpPageTitle("reader")).toBe("Help - Private Reader");
+    expect(isHelpContext("reader")).toBe(true);
+    expect(helpIndex).toContain("[[Help - Private Reader]]");
+    expect(readerHelp).toContain("not copied into your graph");
+    expect(readerHelp).toContain("[[Book title]]");
+    expect(readerHelp).toContain("unverified");
+    expect(readerHelp).toContain("screen-content");
+    expect(studiesHelp).toContain("[[Help - Private Reader]]");
+    expect(booksHelp).toContain("[[Help - Private Reader]]");
+    await loadHelpPage("reader");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "reader" });
+  });
   it("routes Studies navigation and F1 to current resume and timing guidance", async () => {
     expect(helpPageTitle("studies")).toBe("Help - Studies");
     expect(isHelpContext("studies")).toBe(true);
@@ -131,6 +145,7 @@ describe("contextual help", () => {
       "sync",
       "search",
       "books",
+      "reader",
     ];
 
     for (const context of contexts) {

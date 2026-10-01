@@ -20,6 +20,7 @@ separate graph.
 - [[Help - Sync]]
 - [[Help - Search]]
 - [[Help - Books]] - read original books, annotate, or convert to editable Markdown
+- [[Help - Private Reader]] - external audiobook/EPUB library, listening, and private bookmarks
 - [[Help - Grafium Guide]]
 - [[Help - Journal Guide]]
 

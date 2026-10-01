@@ -11,6 +11,7 @@ export type HelpContext =
   | "ai"
   | "sync"
   | "books"
+  | "reader"
   | "search";
 
 const HELP_PAGES: Record<HelpContext, string> = {
@@ -26,6 +27,7 @@ const HELP_PAGES: Record<HelpContext, string> = {
   ai: "AI Setup And Privacy",
   sync: "Help - Sync",
   books: "Help - Books",
+  reader: "Help - Private Reader",
   search: "Help - Search",
 };
 

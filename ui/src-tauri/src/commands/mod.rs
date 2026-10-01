@@ -14,6 +14,8 @@ pub mod links;
 pub mod media;
 pub mod model_library;
 pub mod pages;
+pub mod private_reader;
+pub mod private_voice;
 pub mod query;
 pub mod reading_notes;
 pub mod research;

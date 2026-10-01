@@ -63,6 +63,51 @@ const { epub, mobi, pdf } = require("./books.ui.cjs");
             }
           }, 200);
         });
+        if (fixture.format === 'epub') {
+          const narration = [];
+          for (let section = 0; section < 2; section++) {
+            let offset = 0;
+            do {
+              const requestId = 'native-narration-' + section + '-' + offset;
+              send('read-aloud-segments', {requestId, section, offset});
+              const batch = await new Promise((resolve, reject) => {
+                let attempts = 0;
+                const timer = setInterval(() => {
+                  const result = messages.find(message =>
+                    message.type === 'read-aloud-segments' && message.requestId === requestId);
+                  const failure = messages.find(message => message.type === 'error');
+                  if (failure || ++attempts > 100) {
+                    clearInterval(timer);
+                    reject(new Error(failure?.message || 'Native narration extraction timed out'));
+                  } else if (result) { clearInterval(timer); resolve(result); }
+                }, 50);
+              });
+              if (!batch.segments.length || batch.sectionCount !== 2 ||
+                  (batch.nextOffset !== null && batch.nextOffset <= offset))
+                throw new Error('Invalid native narration pagination');
+              narration.push(...batch.segments);
+              offset = batch.nextOffset;
+            } while (offset !== null);
+          }
+          if (narration.length <= 145 ||
+              !narration.some(segment => segment.text.includes('Offline paragraph 144.')) ||
+              narration.some(segment => segment.text.includes('top.pwned')))
+            throw new Error('Native narration omitted content or extracted executable text');
+          const target = narration.find(segment => segment.text.includes('Return to the first passage.'));
+          if (!target || target.locator.kind !== 'epub') throw new Error('Missing second-chapter narration');
+          send('goto', {location:target.locator});
+          await new Promise((resolve, reject) => {
+            let attempts = 0;
+            const timer = setInterval(() => {
+              if (messages.some(message => message.type === 'location' && message.label.includes('Second chapter'))) {
+                clearInterval(timer); resolve();
+              } else if (++attempts > 100) {
+                clearInterval(timer); reject(new Error('Native narration CFI did not resolve visually'));
+              }
+            }, 50);
+          });
+          completed.push({format:'epub-narration', segments:narration.length, chapters:2, cfiJump:true});
+        }
         await new Promise(resolve => setTimeout(resolve, 300));
         const lateFailure = messages.find(message => message.type === 'error');
         if (lateFailure) throw new Error(fixture.format + ': ' + lateFailure.message);

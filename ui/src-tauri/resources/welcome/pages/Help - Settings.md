@@ -72,6 +72,16 @@ Enabling native transparency requires a rebuilt Grafium and one normal quit and
 reopen. Later theme opacity changes are live. This does not migrate or refresh
 existing tutorial graphs, and installing a build does not restart a running app.
 
+## Private library
+
+**Library location** selects an external audiobook/EPUB library for the private
+reader in Studies. This is an app-level setting, independent of the active graph.
+Source media is not copied into the graph. Automatic bookmarks and progress stay
+outside graph sync and AI indexing. Deliberately written journal notes such as
+`[[Book title]]` remain ordinary graph content with ordinary sharing settings.
+See [[Help - Private Reader]] for folder layout, local voices, backups, and
+Android's unverified locked-screen volume-key compatibility.
+
 ## AI / Knowledge Engine
 
 Open this section to configure an embedded local model, Ollama, an
