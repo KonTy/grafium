@@ -474,8 +474,8 @@
       ? ` and ${childCount} subpage${childCount === 1 ? "" : "s"}`
       : "";
     const confirmed = await askConfirm(
-      `Delete page '${title}'${extra}? This removes notes, markdown files, `
-      + `and media that nothing else uses. This cannot be undone.`,
+      `Delete page '${title}'${extra}? This removes notes and markdown files; page deletion cannot be undone. `
+      + `Newly unused attachments move to recoverable Asset trash in Settings, not permanent deletion.`,
     );
     if (!confirmed) return;
 
@@ -499,8 +499,8 @@
     const total = childCount + (pageId ? 1 : 0);
     const confirmed = await askConfirm(
       `Delete folder '${title}' and ${total} page${total === 1 ? "" : "s"} under it? `
-      + `This removes source files (including original books), notes in this folder, and media that nothing else uses. `
-      + `This cannot be undone.`,
+      + `This removes source files (including original books) and notes in this folder; source deletion cannot be undone. `
+      + `Newly unused attachments move to recoverable Asset trash in Settings, not permanent deletion.`,
     );
     if (!confirmed) return;
 

@@ -62,7 +62,7 @@ fn text_source(path: &Path) -> bool {
     )
 }
 
-fn protected_source(path: &Path) -> bool {
+pub(super) fn protected_source(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|s| s.to_str())
@@ -200,7 +200,7 @@ fn reference_text(content: &str) -> String {
     normalized(&text)
 }
 
-fn fingerprint(path: &Path) -> Result<(u64, String)> {
+pub(super) fn fingerprint(path: &Path) -> Result<(u64, String)> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut size = 0;
@@ -218,7 +218,7 @@ fn fingerprint(path: &Path) -> Result<(u64, String)> {
 
 /// Check every component, not just the canonical destination: symlinked media
 /// and recovery folders must not make cleanup write outside the graph.
-fn checked_path(root: &Path, relative: &Path) -> Result<PathBuf> {
+pub(super) fn checked_path(root: &Path, relative: &Path) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
@@ -232,7 +232,7 @@ fn checked_path(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn create_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
+pub(super) fn create_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
@@ -260,12 +260,7 @@ fn create_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
 }
 
 impl Graph {
-    pub fn scan_unused_assets(&self) -> Result<AssetCleanupScan> {
-        let _operation = self.source_operations.lock();
-        let root = self.root_dir.canonicalize()?;
-        let mut assets = Vec::new();
-        let mut sources = Vec::new();
-        walk(&root, &root, false, &mut assets, &mut sources)?;
+    fn asset_reference_texts(&self, sources: Vec<PathBuf>) -> Result<Vec<String>> {
         let mut references = self
             .db
             .get_all_media_references()?
@@ -281,8 +276,48 @@ impl Graph {
             })?;
             references.push(reference_text(&text));
         }
+        Ok(references)
+    }
+
+    pub(super) fn asset_is_referenced(&self, path: &Path) -> Result<bool> {
+        let root = self.root_dir.canonicalize()?;
+        let mut sources = Vec::new();
+        walk(&root, &root, false, &mut Vec::new(), &mut sources)?;
+        let name = normalized(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| error("Invalid asset filename"))?,
+        );
+        Ok(self
+            .asset_reference_texts(sources)?
+            .iter()
+            .any(|text| text.contains(&name)))
+    }
+
+    pub fn scan_unused_assets(&self) -> Result<AssetCleanupScan> {
+        self.scan_unused_assets_matching(None)
+    }
+
+    pub(super) fn scan_unused_assets_matching(
+        &self,
+        candidates: Option<&HashSet<String>>,
+    ) -> Result<AssetCleanupScan> {
+        let _operation = self.source_operations.lock();
+        let root = self.root_dir.canonicalize()?;
+        let mut assets = Vec::new();
+        let mut sources = Vec::new();
+        walk(&root, &root, false, &mut assets, &mut sources)?;
+        let references = self.asset_reference_texts(sources)?;
         let mut unused = Vec::new();
         for path in assets {
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|e| error(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if candidates.is_some_and(|candidates| !candidates.contains(&relative)) {
+                continue;
+            }
             let name = normalized(
                 path.file_name()
                     .and_then(|s| s.to_str())
@@ -295,11 +330,7 @@ impl Graph {
             }
             let (size, sha256) = fingerprint(&path)?;
             unused.push(OrphanedAsset {
-                filename: path
-                    .strip_prefix(&root)
-                    .map_err(|e| error(e.to_string()))?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
+                filename: relative,
                 size,
                 sha256,
             });
@@ -325,7 +356,11 @@ impl Graph {
         if requested.is_empty() {
             return Ok(result);
         }
-        let scan = self.scan_unused_assets()?;
+        let candidates = requested
+            .iter()
+            .map(|asset| asset.filename.clone())
+            .collect();
+        let scan = self.scan_unused_assets_matching(Some(&candidates))?;
         let current: HashMap<_, _> = scan
             .assets
             .iter()
@@ -387,7 +422,7 @@ impl Graph {
         }
         // Copying may take time. Re-read disk references and content hashes after
         // backups are durable, still under the app/sync source-operation lock.
-        let fresh = match self.scan_unused_assets() {
+        let fresh = match self.scan_unused_assets_matching(Some(&candidates)) {
             Ok(scan) => scan
                 .assets
                 .into_iter()

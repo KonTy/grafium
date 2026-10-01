@@ -74,6 +74,28 @@ It retries text extraction, rebuilds search tables, and queues vector refresh
 without depending on the external files originally imported. A missing graph
 copy is removed from the index, never silently restored from elsewhere.
 
+## Recoverable attachments
+
+Deleting text, blocks, or a whole page moves newly unused attachments into
+`.grafium/asset-trash/`, with their original graph-relative paths recorded.
+Shared references are kept conservatively. Undo of text or block deletion
+restores references and files while those files remain in trash; it does not
+make whole-page deletion undoable.
+
+In **Settings > Asset Cleanup**, manual cleanup uses the same persistent trash.
+Under **Asset trash**, list or refresh its contents and restore selected or all
+copies without overwriting existing originals. Restore recovers files, not
+deleted notes. Trash still uses disk space and is never automatically purged.
+Explicit **Permanently delete** frees space after confirmation, but **Undo
+cannot recover permanently deleted attachments**. Undo that requires a purged
+attachment fails explicitly; tiny deletion records remain, not the bytes.
+Other restoration failures stop Undo so you can resolve the error and retry.
+Automatic cleanup warnings preserve successful edits and their Undo history.
+Manual partial failures keep unconfirmed files in the preview with visible
+errors. Trash is device-local and is never synced; removal of original
+attachment files does sync, but other devices do not receive the recovery copies.
+See [[Help - Settings]] for previews, errors, and recovery.
+
 ## Sync to another location
 
 Grafium supports **filesystem** and **WebDAV** sync targets. Configure the target in **Settings**, where **Sync Now** lets you request a sync. The sync monitor starts with the app and can automatically sync a configured target when it becomes available. This is not continuous collaborative editing.

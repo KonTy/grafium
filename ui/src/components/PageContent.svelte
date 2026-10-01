@@ -543,7 +543,7 @@
       ? ` and ${childCount} subpage${childCount === 1 ? "" : "s"}`
       : "";
     const ok = window.confirm(
-      `Delete page '${page.title}'${extra}? This removes notes, markdown files, and media that nothing else uses. This cannot be undone.`,
+      `Delete page '${page.title}'${extra}? This removes notes and markdown files; page deletion cannot be undone. Newly unused attachments move to recoverable Asset trash in Settings, not permanent deletion.`,
     );
     if (!ok) return;
     try {
@@ -553,7 +553,7 @@
       const assets = result.deleted_assets;
       showToast(
         `Deleted ${pages} page${pages === 1 ? "" : "s"}`
-          + (assets > 0 ? ` and ${assets} media file${assets === 1 ? "" : "s"}` : "")
+          + (assets > 0 ? `; moved ${assets} media file${assets === 1 ? "" : "s"} to recoverable trash` : "")
           + ".",
         "success",
       );

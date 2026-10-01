@@ -1286,6 +1286,7 @@ impl Graph {
                     .unwrap_or("note.md"),
             ),
         )?;
+        self.restore_changed_content_assets(path, original.unwrap_or(""), content)?;
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent)?;
         self.reading_path(&relative)?;
@@ -1404,6 +1405,7 @@ impl Graph {
             self.mark_page_dirty(&id);
             self.record_page_edit(&id, "file");
         }
+        self.trash_removed_content_assets(path, original.unwrap_or(""), content);
         Ok(())
     }
 

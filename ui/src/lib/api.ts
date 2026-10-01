@@ -559,12 +559,14 @@ export function validateGraph(path: string): Promise<GraphValidationReport> {
   return invoke("validate_graph", { path });
 }
 
-export function openGraph(path: string): Promise<GraphInfo> {
-  return invoke("open_graph", { path });
+export async function openGraph(path: string): Promise<GraphInfo> {
+  const { runGraphChange } = await import("./undoStack");
+  return runGraphChange(() => invoke<GraphInfo>("open_graph", { path }));
 }
 
-export function createGraph(path: string, name: string): Promise<GraphInfo> {
-  return invoke("create_graph", { path, name });
+export async function createGraph(path: string, name: string): Promise<GraphInfo> {
+  const { runGraphChange } = await import("./undoStack");
+  return runGraphChange(() => invoke<GraphInfo>("create_graph", { path, name }));
 }
 
 export function reindexCurrent(): Promise<void> {
@@ -697,6 +699,36 @@ export function findOrphanedAssets(): Promise<AssetCleanupScan> {
 /** Move reviewed, unchanged assets to graph-local trash after rechecking references. */
 export function trashAssets(graphPath: string, assets: OrphanedAsset[]): Promise<AssetCleanupResult> {
   return invoke("trash_assets", { graphPath, assets });
+}
+
+export interface AssetTrashEntry {
+  filename: string;
+  trash_filename: string;
+  size: number;
+  sha256: string;
+}
+
+export interface AssetTrashScan {
+  graph_path: string;
+  assets: AssetTrashEntry[];
+}
+
+export interface AssetTrashResult {
+  restored: string[];
+  purged: string[];
+  errors: string[];
+}
+
+export function listAssetTrash(): Promise<AssetTrashScan> {
+  return invoke("list_asset_trash", {});
+}
+
+export function restoreTrashedAssets(graphPath: string, assets: AssetTrashEntry[]): Promise<AssetTrashResult> {
+  return invoke("restore_trashed_assets", { graphPath, assets });
+}
+
+export function purgeTrashedAssets(graphPath: string, assets: AssetTrashEntry[]): Promise<AssetTrashResult> {
+  return invoke("purge_trashed_assets", { graphPath, assets });
 }
 
 // Media import (video/audio transcript -> background job)

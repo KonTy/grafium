@@ -329,6 +329,7 @@
   let restoreTimer: number | null = null;
   let pendingJournalRestore: HistoryEntry | null = $state(null);
   let journalRestoreRequestId = $state(0);
+  let graphGeneration = $state(0);
   let uiZoom = $state(1);
 
   // Navigation history for back/forward
@@ -1380,6 +1381,17 @@
             console.error("Could not inspect the graph after an index error:", cause);
           }
         }),
+        listen<{ graphPath: string; message: string }>("asset-cleanup-warning", async ({ payload }) => {
+          try {
+            if (disposed) return;
+            const graph = await getGraphInfo();
+            if (!disposed && graph.path === payload.graphPath) {
+              showToast(payload.message, "error");
+            }
+          } catch (cause) {
+            console.error("Could not inspect the graph after an asset cleanup warning:", cause);
+          }
+        }),
         listen<{ graphPath: string }>("graph-sources-changed", async ({ payload }) => {
           try {
             if (disposed || (await getGraphInfo()).path !== payload.graphPath) return;
@@ -1396,7 +1408,7 @@
         if (result.status === "fulfilled") {
           if (disposed) result.value();
           else stops.push(result.value);
-        } else if (!disposed) showToast(`Could not watch source-index status: ${String(result.reason)}`, "error");
+        } else if (!disposed) showToast(`Could not watch graph maintenance status: ${String(result.reason)}`, "error");
       }
     };
     void subscribe();
@@ -2163,6 +2175,7 @@
   }
 
   function handleGraphChanged() {
+    graphGeneration += 1;
     privateBookId = null;
     ++studyNavigation;
     void finishStudy();
@@ -2315,6 +2328,7 @@
     {/if}
 
     <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode}>
+    {#key graphGeneration}
     {#if studySaveError || activeStudy}
     <div class="study-session-controls">
     {#if studySaveError}
@@ -2524,6 +2538,7 @@
         </LazyView>
       </div>
     {/if}
+    {/key}
     </main>
 
     <!-- Chat and reading notes -->

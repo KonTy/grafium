@@ -44,12 +44,15 @@ import {
 } from "./api";
 import {
   APP_UNDO_LIMIT,
+  canRedo,
+  canUndo,
   getUndoStackSize,
   performRedo,
   performUndo,
   pushUndo,
   setUndoCallback,
   removeUndoCallback,
+  runGraphChange,
 } from "./undoStack";
 import { showToast } from "./toast.svelte";
 import { registerEditorFlush } from "./editorPersistence";
@@ -335,6 +338,93 @@ describe("undoStack — insert_summary flow", () => {
       removeUndoCallback("page-1");
     }
   });
+
+    it("surfaces a purged attachment rejection without replacing editor text and keeps Undo retryable", async () => {
+      const action = {
+        type: "update_blocks" as const, pageId: "page-1",
+        changes: [{ blockId: "block-1", beforeContent: "![photo](assets/photo.png)", afterContent: "" }],
+      };
+      const cb = vi.fn();
+      const replaced = vi.fn();
+      setUndoCallback("page-1", cb);
+      window.addEventListener("grafium-block-content-replaced", replaced);
+      pushUndo(action);
+      mockUpdateBlock.mockRejectedValueOnce(new Error("Attachment assets/photo.png was permanently purged"));
+      try {
+        await expect(performUndo()).resolves.toBe(false);
+        expect(getUndoStackSize()).toBe(1);
+        expect(canRedo()).toBe(false);
+        expect(cb).not.toHaveBeenCalled();
+        expect(replaced).not.toHaveBeenCalled();
+        expect(showToast).toHaveBeenCalledWith(expect.stringContaining("permanently purged"), "error");
+        expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Undo again to retry"), "error");
+        mockUpdateBlock.mockResolvedValueOnce(undefined);
+        await expect(performUndo()).resolves.toBe(true);
+        expect(mockUpdateBlock).toHaveBeenLastCalledWith("block-1", action.changes[0].beforeContent);
+        expect(cb).toHaveBeenCalledOnce();
+        expect(replaced).toHaveBeenCalledOnce();
+        expect(canRedo()).toBe(true);
+      } finally {
+        removeUndoCallback("page-1");
+        window.removeEventListener("grafium-block-content-replaced", replaced);
+      }
+    });
+
+    it("clears both histories and old callbacks when switching to a graph with copied IDs", async () => {
+      const action = {
+        type: "update_block" as const, pageId: "page-1", blockId: "block-1",
+        beforeContent: "before", afterContent: "after",
+      };
+      mockUpdateBlock.mockResolvedValue(undefined);
+      pushUndo(action);
+      pushUndo(action);
+      await performUndo();
+      expect(canUndo()).toBe(true);
+      expect(canRedo()).toBe(true);
+      const oldCallback = vi.fn();
+      setUndoCallback("page-1", oldCallback);
+      await runGraphChange(async () => ({ path: "/synthetic/copied-graph" }));
+      mockUpdateBlock.mockClear();
+      expect(canUndo()).toBe(false);
+      expect(canRedo()).toBe(false);
+      await expect(performUndo()).resolves.toBe(false);
+      await expect(performRedo()).resolves.toBe(false);
+      expect(mockUpdateBlock).not.toHaveBeenCalled();
+      pushUndo(action);
+      await performUndo();
+      expect(oldCallback).not.toHaveBeenCalled();
+    });
+
+    it("preserves history when a graph switch fails and blocks Undo during a pending switch", async () => {
+      pushUndo({
+        type: "update_block", pageId: "page-1", blockId: "block-1",
+        beforeContent: "before", afterContent: "after",
+      });
+      let reject!: (error: Error) => void;
+      const changing = runGraphChange(() => new Promise((_, fail) => { reject = fail; }));
+      await expect(performUndo()).resolves.toBe(false);
+      expect(mockUpdateBlock).not.toHaveBeenCalled();
+      reject(new Error("could not open graph"));
+      await expect(changing).rejects.toThrow("could not open graph");
+      expect(canUndo()).toBe(true);
+      mockUpdateBlock.mockResolvedValueOnce(undefined);
+      await expect(performUndo()).resolves.toBe(true);
+    });
+
+    it("refuses graph switching while Undo is in flight", async () => {
+      pushUndo({
+        type: "update_block", pageId: "page-1", blockId: "block-1",
+        beforeContent: "before", afterContent: "after",
+      });
+      let resolve!: () => void;
+      mockUpdateBlock.mockReturnValueOnce(new Promise<void>((done) => { resolve = done; }));
+      const undo = performUndo();
+      const changeGraph = vi.fn();
+      await expect(runGraphChange(changeGraph)).rejects.toThrow("still running");
+      expect(changeGraph).not.toHaveBeenCalled();
+      resolve();
+      await expect(undo).resolves.toBe(true);
+    });
 
   it("undoes and redoes accepted link suggestions through their stored snapshots", async () => {
     mockUndoLinkCandidateAccept.mockResolvedValue({} as any);

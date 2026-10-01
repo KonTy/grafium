@@ -301,6 +301,39 @@ pub async fn trash_assets(
     }).await.map_err(|e| e.to_string())?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_asset_trash(
+    state: State<'_, AppState>,
+) -> Result<grafium_core::graph::asset_trash::AssetTrashScan, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || graph.list_asset_trash().map_err(|e| e.to_string()))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_trashed_assets(
+    state: State<'_, AppState>,
+    graph_path: String,
+    assets: Vec<grafium_core::graph::asset_trash::AssetTrashEntry>,
+) -> Result<grafium_core::graph::asset_trash::AssetTrashResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        graph.restore_trashed_assets(&graph_path, &assets).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn purge_trashed_assets(
+    state: State<'_, AppState>,
+    graph_path: String,
+    assets: Vec<grafium_core::graph::asset_trash::AssetTrashEntry>,
+) -> Result<grafium_core::graph::asset_trash::AssetTrashResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        graph.purge_trashed_assets(&graph_path, &assets).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
 fn extension_from_content_type(ct: &str) -> Option<&'static str> {
     let mime = ct.split(';').next()?.trim().to_ascii_lowercase();
     match mime.as_str() {

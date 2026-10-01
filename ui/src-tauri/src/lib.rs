@@ -471,13 +471,20 @@ fn start_reindex_drainer(
             tokio::time::sleep(REINDEX_CYCLE).await;
             // Keep the database pool with its graph ID. A graph switch cannot
             // redirect source reads or queue acknowledgements into another graph.
-            let (db, graph_id) = {
+            let (db, graph_id, asset_warnings) = {
                 let g = match graph.lock() {
                     Ok(g) => g,
                     Err(_) => continue,
                 };
-                (g.db.clone(), g.root_dir.to_string_lossy().into_owned())
+                (g.db.clone(), g.root_dir.to_string_lossy().into_owned(), g.take_asset_cleanup_warnings())
             };
+            for message in asset_warnings {
+                if let Err(error) = app_handle.emit("asset-cleanup-warning", serde_json::json!({
+                    "graphPath": graph_id, "message": message,
+                })) {
+                    tracing::error!("Could not display attachment cleanup warning: {error}");
+                }
+            }
             let guard = engine.read().await;
             let Some(e) = guard.as_ref() else { continue; };
             if reconciled_graph.as_deref() != Some(graph_id.as_str()) {
@@ -1403,6 +1410,9 @@ pub fn run() {
             commands::assets::save_image_to_path,
             commands::assets::find_orphaned_assets,
             commands::assets::trash_assets,
+            commands::assets::list_asset_trash,
+            commands::assets::restore_trashed_assets,
+            commands::assets::purge_trashed_assets,
             commands::knowledge::ai_get_config,
             commands::knowledge::ai_model_settings_schema,
             commands::knowledge::ai_runtime_settings,

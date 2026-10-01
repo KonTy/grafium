@@ -287,6 +287,18 @@ export async function runUndoOperation<T>(operation: () => Promise<T>): Promise<
   }
 }
 
+export async function runGraphChange<T>(change: () => Promise<T>): Promise<T> {
+  // Graph switches must not race a multi-step Undo or let copied block IDs
+  // reuse the outgoing graph's history.
+  return runUndoOperation(async () => {
+    const result = await change();
+    w.__undoStack = [];
+    w.__redoStack = [];
+    undoCallbacks.clear();
+    return result;
+  });
+}
+
 export function notifyBlockSelectionChanged(action: DeleteBlockSelectionAction): void {
   for (const { pageId } of action.groups) {
     try {
@@ -378,6 +390,7 @@ async function performUndoAction(): Promise<boolean> {
       notifyBlockContentReplaced(action.pageId, action.blockId, action.beforeContent);
     } catch (e) {
       console.error("[undoStack] update_block undo failed:", e);
+      showToast(`Could not undo the text edit. Resolve the error and Undo again to retry: ${describeError(e)}`, "error");
       stack.push(action);
       return false;
     }
@@ -397,6 +410,7 @@ async function performUndoAction(): Promise<boolean> {
       }
     } catch (e) {
       console.error("[undoStack] update_blocks undo failed:", e);
+      showToast(`Could not finish undoing the text edits. Resolve the error and Undo again to retry: ${describeError(e)}`, "error");
       stack.push(action);
       return false;
     }
@@ -538,6 +552,7 @@ async function performRedoAction(): Promise<boolean> {
       notifyBlockContentReplaced(action.pageId, action.blockId, action.afterContent);
     } catch (e) {
       console.error("[undoStack] update_block redo failed:", e);
+      showToast(`Could not redo the text edit. Resolve the error and Redo again to retry: ${describeError(e)}`, "error");
       redoStack.push(action);
       return false;
     }
@@ -557,6 +572,7 @@ async function performRedoAction(): Promise<boolean> {
       }
     } catch (e) {
       console.error("[undoStack] update_blocks redo failed:", e);
+      showToast(`Could not finish redoing the text edits. Resolve the error and Redo again to retry: ${describeError(e)}`, "error");
       redoStack.push(action);
       return false;
     }
