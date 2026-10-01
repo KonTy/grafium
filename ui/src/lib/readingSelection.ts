@@ -42,6 +42,25 @@ export function sourceReadingSelection(pageId: string, blockId: string, text: st
   return { pageId, blockIds: [blockId], text: text.slice(from, to), kind: "source", parts: [part(blockId, text, from, to)] };
 }
 
+export function blockReadingSelection(
+  pageId: string, blocks: readonly { id: string; content: string }[], selectedIds: ReadonlySet<string>,
+): ReadingSelectionCapture {
+  const selected = blocks.filter((block) => selectedIds.has(block.id));
+  if (selected.length !== selectedIds.size) {
+    return { selection: null, error: "Select saved source blocks, not annotation footnotes.", pageIds: [pageId] };
+  }
+  const parts = selected.filter((block) => block.content.trim())
+    .map((block) => part(block.id, block.content, 0, block.content.length));
+  return {
+    selection: parts.length ? {
+      pageId, blockIds: parts.map((part) => part.blockId), text: parts.map((part) => part.text).join("\n"),
+      kind: "source", parts,
+    } : null,
+    error: selectedIds.size && !parts.length ? "Select source blocks containing text first." : null,
+    pageIds: [pageId],
+  };
+}
+
 export function continuousReadingSelection(pageId: string, source: string, from: number, to: number): ReadingSelectionCapture {
   const parts: ReadingSelectionPart[] = [];
   for (const block of parsePageSourceMap(source).blocks) {

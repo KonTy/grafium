@@ -49,6 +49,25 @@ export function readingNoteReattach(
   return invoke("reading_note_reattach", { graphPath, noteId, expectedRevision, sourcePageId, selection });
 }
 
+export interface ReadingNotesDeleteResult {
+  deletedIds: string[];
+  deletedCount: number;
+  failures: { id: string; message: string }[];
+  backups: { filePath: string; backupPath: string }[];
+}
+
+export function readingNoteDelete(
+  graphPath: string, noteId: string, expectedRevision: string,
+): Promise<ReadingNotesDeleteResult> {
+  return invoke("reading_note_delete", { graphPath, noteId, expectedRevision });
+}
+
+export function readingNotesDeleteForPage(
+  graphPath: string, sourcePageId: string, expectedNotes: { id: string; revision: string }[],
+): Promise<ReadingNotesDeleteResult> {
+  return invoke("reading_notes_delete_for_page", { graphPath, sourcePageId, expectedNotes });
+}
+
 export function cloneReadingSelection(selection: ReadingSelection | null): ReadingSelection | null {
   if (!selection) return null;
   return {

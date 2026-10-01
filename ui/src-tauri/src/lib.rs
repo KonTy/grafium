@@ -1403,6 +1403,8 @@ pub fn run() {
             commands::reading_notes::reading_notes_list,
             commands::reading_notes::reading_note_create,
             commands::reading_notes::reading_note_update,
+            commands::reading_notes::reading_note_delete,
+            commands::reading_notes::reading_notes_delete_for_page,
             commands::reading_notes::reading_note_reattach,
             commands::knowledge::ai_create_concept_edges,
             commands::knowledge::ai_research_web,

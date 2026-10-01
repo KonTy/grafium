@@ -29,3 +29,16 @@ keeps the Rust workspace, Tauri application, npm package, and lockfiles in sync.
 
 Bump exactly once per deployable change set. Do not bump for intermediate
 compiles, tests, or rebuilds of the same commit.
+
+## Deploy completed changes for local testing
+
+After completing and validating user-facing changes, deploy them locally by
+default so the user can test without a separate deployment request, unless
+the user explicitly asks not to deploy.
+
+Build the frontend before the native release, then use
+`./scripts/deploy-local.sh` and verify the installed `grafium --version`.
+Preserve the existing installation through the script's verified backups.
+Do not interrupt running instances or modify personal graphs for smoke tests;
+tell the user to fully quit and reopen Grafium. Local deployment does not
+authorize a remote push or release publication.

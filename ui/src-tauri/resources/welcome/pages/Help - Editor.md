@@ -31,4 +31,36 @@ also opening the editor. A plain web link still opens the block for editing
 after it follows the link. Query result rows that carry a block reference are
 reachable with **Tab** and open with **Enter**.
 
+## Reading notes and selected passages
+
+Open the right panel's **Notes** tab to annotate a page, converted book, or
+journal day. Select words or several blocks before writing a new note:
+the blank composer automatically attaches that selection and shows its quote.
+Whole-block selections made with the mouse or **Shift+Up/Down** attach those
+blocks, not the entire page. Only one page or journal day can be annotated at
+once. Unsupported selections show an error instead of silently saving a
+page-level note.
+
+Once you start writing, the attachment is kept. **Use selection** explicitly
+replaces a new draft's quote; **Make page-level note** deliberately removes it.
+Check the quote preview, write your Markdown, then **Save note**. With no
+selection, a new note applies to the whole current source. Saved notes are
+footnotes inside its Markdown file, not just database records. Original-format
+ebooks use adjacent JSON-LD instead; see [[Help - Books]].
+
+**Delete note…** is available on each saved note card and in its editor.
+**Delete all notes on this page…** is in the Notes toolbar. Both ask for
+confirmation; Cancel changes nothing. Bulk deletion targets only the current
+page or journal day, even when **Notes scope** is **All notes**, and includes
+legacy separate-file annotations on that source. It does not delete the page,
+source prose, ordinary footnotes, or other pages' notes. Unsaved note edits are
+kept as new drafts rather than silently discarded. Save them before closing.
+
+Deletion checks the reviewed revisions. If a note changed since confirmation,
+refresh and review it before retrying instead of overwriting someone else's
+edit. Before deleting, Grafium keeps verified recovery copies beside the affected
+source files as `.reading-note-<uuid>.deleted`. These copies are not indexed as
+notes. If only some files can be changed, the error reports what was deleted and
+what still needs attention; it does not claim that everything succeeded.
+
 See [[Writing]] for more examples.

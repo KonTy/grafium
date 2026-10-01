@@ -31,6 +31,11 @@ warning, not a claim that the whole book was indexed.
 
 ## Read and annotate
 
+For converted Markdown books, use the Notes controls described in
+[[Help - Editor]]: selected words or blocks attach to a new blank note,
+**Delete note…** removes one saved annotation, and **Delete all notes on this
+page…** removes only that source's annotations after confirmation.
+
 Open an original from **Books** to use the reader rather than the Markdown
 editor. Use chapter navigation or page controls to move through it. The reader
 remembers your last location.

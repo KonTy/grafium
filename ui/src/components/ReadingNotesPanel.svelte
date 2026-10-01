@@ -11,7 +11,7 @@
   import {
     getReadingNotesSource, newReadingNoteDraft, editReadingNote, applyReadingNoteFocusRequest, readingNoteDirty, loadReadingNotes,
     saveReadingNoteDraft, reattachReadingNoteDraft, readingNoteChanges, updateReadingNotes,
-    useReviewedReadingNoteRevision,
+    useReviewedReadingNoteRevision, deleteReadingNotes,
     type ReadingNotesSource,
   } from "../lib/readingNoteDrafts";
 
@@ -28,6 +28,10 @@
   let sourceError = $state("");
   let refreshTrigger = $state(0);
   let textarea = $state<HTMLTextAreaElement | undefined>();
+  let pendingDelete = $state.raw<{ source: ReadingNotesSource; notes: ReadingNote[]; wholePage: boolean } | null>(null);
+  let deleteError = $state("");
+  let deleteNotice = $state("");
+  let deleteDialog = $state<HTMLDivElement>();
   const view = $derived.by(() => {
     $readingNoteChanges;
     if (!source) return null;
@@ -44,6 +48,22 @@
   const canReattach = $derived(view?.draft?.note?.status === "ambiguous" || view?.draft?.note?.status === "orphaned");
   const changedSavedNote = $derived(view?.notes.find((note) => note.id === view.draft?.id
     && note.revision !== view.draft?.note?.revision));
+  const pageNotes = $derived(view?.notes.filter((note) => note.source.pageId === pageId) ?? []);
+
+  $effect(() => {
+    const selection = currentSelection;
+    const captureError = selectionError;
+    const destination = source;
+    untrack(() => {
+      const draft = destination?.activeDraftId ? destination.drafts.get(destination.activeDraftId) : null;
+      if ((selection || captureError) && draft && !draft.note && !draft.body && !draft.saving && !draft.selectionPinned) {
+        draft.selection = selection;
+        draft.selectionError = captureError;
+        draft.error = captureError;
+        updateReadingNotes();
+      }
+    });
+  });
 
   $effect(() => {
     const id = pageId;
@@ -56,6 +76,9 @@
     let disposed = false;
     source = null;
     sourceError = "";
+    pendingDelete = null;
+    deleteError = "";
+    deleteNotice = "";
     void (async () => {
       try {
         const graph = await getGraphInfo();
@@ -68,6 +91,7 @@
             draft.selection = readingNoteSelection(captured, id);
           } catch (error) {
             draft.error = String(error);
+            draft.selectionError = draft.error;
           }
           updateReadingNotes();
         }
@@ -103,6 +127,7 @@
       draft.selection = readingNoteSelection(get(readingSelection), pageId);
     } catch (error) {
       draft.error = String(error);
+      draft.selectionError = draft.error;
     }
     updateReadingNotes();
     void focusComposer(source);
@@ -129,6 +154,8 @@
       if (!selection) throw new Error("Select words or a passage in the current page first.");
       if (!draft.note && draft.sourcePageId !== pageId) throw new Error("Return to this draft's source page first.");
       draft.selection = selection;
+      draft.selectionPinned = true;
+      draft.selectionError = null;
       draft.error = null;
       draft.notice = "";
     } catch (error) {
@@ -141,6 +168,9 @@
     const draft = activeDraft();
     if (!draft || draft.saving) return;
     draft.selection = null;
+    draft.selectionPinned = true;
+    draft.selectionError = null;
+    draft.error = null;
     draft.notice = "";
     updateReadingNotes();
   }
@@ -149,6 +179,7 @@
     const draft = activeDraft();
     if (!draft) return;
     draft.body = body;
+    draft.selectionPinned = true;
     draft.notice = "";
     updateReadingNotes();
   }
@@ -194,6 +225,40 @@
     else onNavigate({ id: note.notePageId });
   }
 
+  function requestDelete(notes: ReadingNote[], wholePage = false) {
+    if (!source) return;
+    const request = { source, notes: structuredClone(notes), wholePage };
+    pendingDelete = request;
+    deleteError = "";
+    deleteNotice = "";
+    void tick().then(() => {
+      if (pendingDelete !== request) return;
+      deleteDialog?.focus();
+      deleteDialog?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  async function confirmDelete() {
+    const request = pendingDelete;
+    if (!request) return;
+    deleteError = "";
+    try {
+      const receipt = await deleteReadingNotes(request.source, request.notes, request.wholePage);
+      if (source === request.source) {
+        pendingDelete = null;
+        deleteNotice = receipt.deletedCount === 1 ? "Saved note deleted." : `${receipt.deletedCount} saved notes deleted.`;
+        if (receipt.backups.length) deleteNotice += " Recovery copies are kept beside the affected source files.";
+      }
+      await loadReadingNotes(request.source);
+    } catch (error) {
+      if (source === request.source) {
+        pendingDelete = null;
+        deleteError = `${String(error)} Refresh and review saved notes before trying again.`;
+      }
+      await loadReadingNotes(request.source);
+    }
+  }
+
   function previewMedia(node: HTMLElement, _body: string) {
     let cleanup = hydrateAssetMedia(node);
     return {
@@ -203,7 +268,7 @@
   }
 </script>
 
-<section class="reading-notes-panel" aria-label="Reading notes">
+<section class="reading-notes-panel" aria-label="Reading notes" data-help-context="editor">
   <header class="notes-header">
     <h2>{view?.pageTitle || pageTitle || "Reading notes"}</h2>
     <p class="storage-notice">New notes are footnotes in the source Markdown file. Save notes before closing the app.</p>
@@ -231,7 +296,25 @@
         New note
       </button>
       <button type="button" onclick={() => source && loadReadingNotes(source)} disabled={view.loading}>Refresh</button>
+      <button type="button" class="delete-note" onclick={() => requestDelete(pageNotes, true)}
+        disabled={!pageNotes.length || view.loading || view.deleting || !!view.listError}>
+        Delete all notes on this page…
+      </button>
     </div>
+
+    {#if pendingDelete}
+      <div class="delete-confirm" bind:this={deleteDialog} role="alertdialog" aria-label="Confirm note deletion" aria-modal="false" tabindex="-1">
+        <p>{pendingDelete.wholePage
+          ? `Delete all ${pendingDelete.notes.length} saved notes on "${pendingDelete.source.pageTitle}"?`
+          : "Delete this saved note?"} Source text is kept; note markers and footnotes are removed. Unsaved note edits remain as new drafts.</p>
+        <button type="button" class="delete-note" disabled={view.deleting} onclick={confirmDelete}>
+          {view.deleting ? "Deleting…" : pendingDelete.wholePage ? "Delete all saved notes" : "Delete saved note"}
+        </button>
+        <button type="button" disabled={view.deleting} onclick={() => pendingDelete = null}>Cancel</button>
+      </div>
+    {/if}
+    {#if deleteError}<div class="notes-error" role="alert">{deleteError}</div>{/if}
+    {#if deleteNotice}<p class="note-help" role="status">{deleteNotice}</p>{/if}
 
     {#if view.drafts.length > 1}
       <label class="draft-picker">
@@ -272,7 +355,7 @@
         {#if !view.draft.note || canReattach}
           <div class="selection-actions">
             <button type="button" onclick={useSelection} disabled={!currentSelection || view.draft.saving}>Use selection</button>
-            {#if view.draft.selection}
+            {#if view.draft.selection || view.draft.selectionError}
               <button type="button" onclick={clearSelection} disabled={view.draft.saving}>
                 {view.draft.note ? "Cancel reattachment" : "Make page-level note"}
               </button>
@@ -292,9 +375,13 @@
           placeholder="What do you want to remember?" rows="5"></textarea>
 
         <div class="save-actions">
-          <button type="button" class="save-note" onclick={save} disabled={view.draft.saving || !view.draft.body.trim()}>
+          <button type="button" class="save-note" onclick={save} disabled={view.deleting || view.draft.saving || !view.draft.body.trim()}>
             Save note
           </button>
+          {#if view.draft.note}
+            <button type="button" class="delete-note" onclick={() => view?.draft?.note && requestDelete([view.draft.note])}
+              disabled={view.deleting || view.draft.saving}>Delete note…</button>
+          {/if}
           <span class="draft-status" role="status">
             {view.draft.saving ? "Saving…" : view.dirty ? "Unsaved draft" : view.draft.note ? "Saved" : "Not saved yet"}
           </span>
@@ -358,6 +445,7 @@
           <p class="note-file">{note.storage === "inline" ? `Footnote ${note.footnoteLabel?.replace("grafium-note-", "") ?? ""} · source file` : "Legacy note file"}: <code>{note.filePath}</code></p>
           <div class="card-actions">
             <button type="button" onclick={() => editNote(note)}>Edit note</button>
+            <button type="button" class="delete-note" disabled={view.deleting} onclick={() => requestDelete([note])}>Delete note…</button>
             <button type="button" onclick={() => openNote(note)}>Open note</button>
             <button type="button" disabled={!note.source.pageId} onclick={() => note.source.pageId && onNavigate({ id: note.source.pageId })}>
               Open source
@@ -419,4 +507,7 @@
   .revision-review { border: 1px solid var(--border); border-radius: 5px; padding: 9px; }
   .revision-review summary { cursor: pointer; font-weight: 600; }
   .revision-review[open] > :not(summary) { margin-top: 9px; }
+  .delete-note { color: var(--danger, var(--text-primary)); }
+  .delete-confirm { border: 1px solid var(--border); border-radius: 5px; padding: 9px; }
+  .delete-confirm button { margin-top: 8px; }
 </style>

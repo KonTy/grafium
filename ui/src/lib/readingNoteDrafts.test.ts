@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getReadingNotesSource, newReadingNoteDraft, editReadingNote, readingNoteDirty, loadReadingNotes,
-  saveReadingNoteDraft, reattachReadingNoteDraft,
+  saveReadingNoteDraft, reattachReadingNoteDraft, deleteReadingNotes,
   focusReadingNoteLabel, applyReadingNoteFocusRequest, useReviewedReadingNoteRevision,
 } from "./readingNoteDrafts";
 import { sourceReadingSelection } from "./readingSelection";
@@ -28,6 +28,9 @@ function savedNote(overrides: Partial<ReadingNote> = {}): ReadingNote {
   };
 }
 function selection(pageId = "a") { return sourceReadingSelection(pageId, `block-${pageId}`, "Before quote after", 7, 12)!; }
+function deletionReceipt(...deletedIds: string[]) {
+  return { deletedIds, deletedCount: deletedIds.length, failures: [], backups: [] };
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -54,6 +57,125 @@ beforeEach(() => {
 });
 
 describe("session-owned reading note drafts", () => {
+  it("does not silently save a page-level note when its block selection was rejected", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const draft = newReadingNoteDraft(source);
+    draft.body = "About the highlighted blocks";
+    draft.selectionError = "Select text within one page or journal day.";
+    await saveReadingNoteDraft(source, draft);
+    expect(draft.error).toContain("one page");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("deletes with a revision fence inside the source editor lock and retains dirty edits as a new draft", async () => {
+    const order: string[] = [];
+    const note = savedNote({ storage: "inline", notePageId: "a" });
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const all = getReadingNotesSource(graphPath, "", "");
+    source.notes = [note];
+    all.notes = [note];
+    const draft = editReadingNote(source, note);
+    editReadingNote(all, note);
+    draft.body = "Keep my unsaved thought";
+    mocks.lock.mockImplementation(async (id, operation) => {
+      order.push(`lock:${id}`);
+      try { return await operation(); } finally { order.push(`unlock:${id}`); }
+    });
+    mocks.flush.mockImplementation(async (id) => { order.push(`flush:${id}`); });
+    mocks.reload.mockImplementation(async (id) => { order.push(`reload:${id}`); });
+    mocks.invoke.mockImplementation(async () => { order.push("delete"); return deletionReceipt(note.id); });
+    await deleteReadingNotes(source, [note]);
+    expect(mocks.invoke).toHaveBeenCalledWith("reading_note_delete", {
+      graphPath, noteId: note.id, expectedRevision: "r1",
+    });
+    expect(order).toEqual(["lock:a", "flush:a", "delete", "reload:a", "unlock:a"]);
+    expect(source.notes).toEqual([]);
+    expect(all.notes).toEqual([]);
+    expect(source.drafts.has(note.id)).toBe(false);
+    const kept = source.drafts.get(source.activeDraftId!)!;
+    expect(kept.id).not.toBe(note.id);
+    expect(kept.note).toBeNull();
+    expect(kept.body).toBe("Keep my unsaved thought");
+    expect(all.drafts.get(all.activeDraftId!)).toBe(kept);
+    expect(readingNoteDirty(kept)).toBe(true);
+  });
+
+  it("bulk deletion passes exactly the reviewed page notes, never the all-notes scope", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    source.scope = "all";
+    const own = savedNote({ storage: "inline" });
+    const other = savedNote({ id: "other", source: { pageId: "b", pageTitle: "B", filePath: "pages/B.md" } });
+    source.notes = [own, other];
+    mocks.invoke.mockResolvedValue(deletionReceipt(own.id));
+    await expect(deleteReadingNotes(source, [own, other], true)).rejects.toThrow("current page");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    await deleteReadingNotes(source, [own], true);
+    expect(mocks.invoke).toHaveBeenCalledWith("reading_notes_delete_for_page", {
+      graphPath, sourcePageId: "a", expectedNotes: [{ id: own.id, revision: own.revision }],
+    });
+    expect(source.notes).toEqual([other]);
+  });
+
+  it("does not resurrect deleted notes from an older in-flight list response", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const note = savedNote({ storage: "inline" });
+    source.notes = [note];
+    const pending = deferred<{ notes: ReadingNote[]; warnings: string[] }>();
+    mocks.invoke.mockImplementation(async (command) => command === "reading_notes_list" ? pending.promise : deletionReceipt(note.id));
+    const loading = loadReadingNotes(source);
+    await deleteReadingNotes(source, [note]);
+    pending.resolve({ notes: [note], warnings: [] });
+    await loading;
+    expect(source.notes).toEqual([]);
+  });
+
+  it("preserves notes and drafts on a deletion conflict or graph switch", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const note = savedNote({ storage: "inline" });
+    source.notes = [note];
+    const draft = editReadingNote(source, note);
+    mocks.invoke.mockRejectedValue(new Error("Revision conflict"));
+    await expect(deleteReadingNotes(source, [note])).rejects.toThrow("Revision conflict");
+    expect(source.notes).toEqual([note]);
+    expect(source.drafts.get(note.id)).toBe(draft);
+    expect(source.deleting).toBe(false);
+    mocks.invoke.mockClear();
+    mocks.graph.mockResolvedValue({ path: "/different-graph" });
+    await expect(deleteReadingNotes(source, [note])).rejects.toThrow("graph changed");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps the deletion receipt and protects stale editors if reload fails", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const note = savedNote({ storage: "inline" });
+    source.notes = [note];
+    mocks.invoke.mockResolvedValue(deletionReceipt(note.id));
+    mocks.reload.mockRejectedValue(new Error("Reload unavailable"));
+    await expect(deleteReadingNotes(source, [note])).rejects.toThrow("1 of 1 saved notes deleted, but");
+    expect(source.notes).toEqual([]);
+    expect(mocks.stale).toHaveBeenCalledWith("a");
+    expect(source.deleting).toBe(false);
+  });
+
+  it("publishes only confirmed deletions and reports every partial failure, including indexing failures", async () => {
+    const source = getReadingNotesSource(graphPath, "a", "A");
+    const first = savedNote({ storage: "inline" });
+    const second = savedNote({ id: "note-2" });
+    source.notes = [first, second];
+    const draft = editReadingNote(source, second);
+    mocks.invoke.mockResolvedValue({
+      ...deletionReceipt(first.id),
+      failures: [{ id: first.id, message: "Index reload failed after deletion." }, { id: second.id, message: "Legacy file changed." }],
+      backups: [{ filePath: first.filePath, backupPath: "pages/.reading-note-backup.deleted" }],
+    });
+    await expect(deleteReadingNotes(source, [first, second], true))
+      .rejects.toThrow("1 of 2 saved notes deleted, but the operation needs attention: Index reload failed after deletion. Legacy file changed.");
+    expect(source.notes).toEqual([second]);
+    expect(source.drafts.get(second.id)).toBe(draft);
+    expect(mocks.reload).toHaveBeenCalledWith("a");
+    expect(source.deleting).toBe(false);
+  });
+
   it("treats revisions as opaque and requires explicit review of a changed note after Refresh", async () => {
     const source = getReadingNotesSource(graphPath, "a", "A");
     const old = savedNote({ id: "other-note", storage: "inline", revision: "other-note-r1" });

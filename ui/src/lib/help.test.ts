@@ -5,6 +5,8 @@ import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
 import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
 import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
+import editorHelp from "../../src-tauri/resources/welcome/pages/Help - Editor.md?raw";
+import readingNotesPanel from "../components/ReadingNotesPanel.svelte?raw";
 import settingsHelp from "../../src-tauri/resources/welcome/pages/Help - Settings.md?raw";
 import syncHelp from "../../src-tauri/resources/welcome/pages/Help - Sync.md?raw";
 import syncResolution from "../components/SyncConflictResolution.svelte?raw";
@@ -18,6 +20,16 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes reading-note controls to current selection and deletion guidance", async () => {
+    expect(readingNotesPanel).toContain('data-help-context="editor"');
+    expect(appSource).toContain('closest("[data-help-context]")');
+    expect(editorHelp).toContain("blank composer automatically attaches");
+    expect(editorHelp).toContain("**Delete note…**");
+    expect(editorHelp).toContain("**Delete all notes on this page…**");
+    expect(editorHelp).toContain("even when **Notes scope** is **All notes**");
+    await loadHelpPage("editor");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "editor" });
+  });
   it("explains that explicit reindex rebuilds copied books without wiping user state", () => {
     expect(booksHelp).toContain("extracts book text again");
     expect(booksHelp).toContain("external file you originally imported is no longer required");

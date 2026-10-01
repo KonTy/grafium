@@ -4,13 +4,16 @@ import { flushPageEditors, reloadPageEditors, withPageEditorsLocked, markPageEdi
 import type { ReadingSelection } from "./readingSelection";
 import {
   cloneReadingSelection, readingNoteCreate, readingNotesList, readingNoteUpdate, readingNoteReattach,
-  type ReadingNote,
+  readingNoteDelete, readingNotesDeleteForPage,
+  type ReadingNote, type ReadingNotesDeleteResult,
 } from "./readingNotes";
 
 export interface ReadingNoteDraft {
   id: string;
   sourcePageId: string;
   selection: ReadingSelection | null;
+  selectionPinned: boolean;
+  selectionError: string | null;
   body: string;
   savedBody: string;
   note: ReadingNote | null;
@@ -30,6 +33,7 @@ export interface ReadingNotesSource {
   warnings: string[];
   listError: string | null;
   loading: boolean;
+  deleting: boolean;
   loadGeneration: number;
   lastFocusRequest: string | null;
   focusError: string | null;
@@ -38,7 +42,7 @@ export interface ReadingNotesSource {
 // Unsaved work belongs to a graph/source, not a mounted tab. This is session memory, not a backup.
 const sources = new Map<string, ReadingNotesSource>();
 const savedDrafts = new Map<string, ReadingNoteDraft>();
-const recentWrites = new Map<string, Map<string, { generation: number; note: ReadingNote }>>();
+const recentWrites = new Map<string, Map<string, { generation: number; note: ReadingNote | null }>>();
 let writeGeneration = 0;
 export const readingNoteChanges = writable(0);
 export function updateReadingNotes(): void { readingNoteChanges.update((version) => version + 1); }
@@ -49,7 +53,8 @@ export function getReadingNotesSource(graphPath: string, pageId: string, pageTit
   if (!source) {
     source = {
       graphPath, pageId, pageTitle, scope: pageId ? "page" : "all", drafts: new Map(), activeDraftId: null,
-      notes: [], warnings: [], listError: null, loading: false, loadGeneration: 0,
+      notes: [], warnings: [], listError: null, loading: false,
+      deleting: [...sources.values()].some((item) => item.graphPath === graphPath && item.deleting), loadGeneration: 0,
       lastFocusRequest: null, focusError: null,
     };
     sources.set(key, source);
@@ -67,6 +72,7 @@ export function newReadingNoteDraft(source: ReadingNotesSource, selection: Readi
   source.focusError = null;
   const draft: ReadingNoteDraft = {
     id: crypto.randomUUID(), sourcePageId: source.pageId, selection: cloneReadingSelection(selection),
+    selectionPinned: false, selectionError: null,
     body: "", savedBody: "", note: null, saving: false, error: null, notice: "",
   };
   source.drafts.set(draft.id, draft);
@@ -81,7 +87,7 @@ export function editReadingNote(source: ReadingNotesSource, note: ReadingNote): 
   let draft = savedDrafts.get(key) ?? source.drafts.get(note.id);
   if (!draft) {
     draft = {
-      id: note.id, sourcePageId: note.source.pageId ?? "", selection: null,
+      id: note.id, sourcePageId: note.source.pageId ?? "", selection: null, selectionPinned: true, selectionError: null,
       body: note.body, savedBody: note.body, note, saving: false, error: null, notice: "",
     };
     savedDrafts.set(key, draft);
@@ -150,11 +156,12 @@ export async function loadReadingNotes(source: ReadingNotesSource): Promise<void
   try {
     const result = await readingNotesList(source.graphPath, pageId);
     if (generation !== source.loadGeneration) return;
-    const writes = [...recentWrites.get(source.graphPath)?.values() ?? []]
-      .filter((write) => write.generation > writesAtStart);
-    const writtenIds = new Set(writes.map((write) => write.note.id));
+    const writes = [...recentWrites.get(source.graphPath)?.entries() ?? []]
+      .filter(([, write]) => write.generation > writesAtStart);
+    const writtenIds = new Set(writes.map(([id]) => id));
     source.notes = [
-      ...writes.map((write) => write.note).filter((note) => !pageId || note.source.pageId === pageId),
+      ...writes.map(([, write]) => write.note)
+        .filter((note): note is ReadingNote => !!note && (!pageId || note.source.pageId === pageId)),
       ...result.notes.filter((note) => !writtenIds.has(note.id)),
     ];
     source.warnings = result.warnings;
@@ -225,6 +232,11 @@ function publishSavedNote(graphPath: string, draft: ReadingNoteDraft, note: Read
 /** Snapshot every argument before awaiting, and settle back into the original draft even after navigation. */
 export async function saveReadingNoteDraft(source: ReadingNotesSource, draft: ReadingNoteDraft): Promise<void> {
   if (draft.saving) return;
+  if (source.deleting) {
+    draft.error = "Wait for note deletion to finish before saving.";
+    updateReadingNotes();
+    return;
+  }
   const { graphPath } = source;
   const { id, body, sourcePageId } = draft;
   const revision = draft.note?.revision;
@@ -233,6 +245,11 @@ export async function saveReadingNoteDraft(source: ReadingNotesSource, draft: Re
   const selection = cloneReadingSelection(draft.selection);
   draft.error = null;
   draft.notice = "";
+  if (!draft.note && draft.selectionError) {
+    draft.error = draft.selectionError;
+    updateReadingNotes();
+    return;
+  }
   if (!body.trim()) {
     draft.error = "Write a note before saving.";
     updateReadingNotes();
@@ -269,6 +286,11 @@ export async function reattachReadingNoteDraft(
   source: ReadingNotesSource, draft: ReadingNoteDraft, currentPageId: string,
 ): Promise<void> {
   if (draft.saving || !draft.note) return;
+  if (source.deleting) {
+    draft.error = "Wait for note deletion to finish before reattaching.";
+    updateReadingNotes();
+    return;
+  }
   const { graphPath } = source;
   const { id } = draft;
   const revision = draft.note.revision;
@@ -297,6 +319,80 @@ export async function reattachReadingNoteDraft(
     draft.error = `Could not reattach note. Your draft and selected quote are kept. ${errorText(error)}`;
   } finally {
     draft.saving = false;
+    updateReadingNotes();
+  }
+}
+
+function publishDeletedNotes(graphPath: string, notes: ReadingNote[]): void {
+  let writes = recentWrites.get(graphPath);
+  if (!writes) recentWrites.set(graphPath, writes = new Map());
+  for (const note of notes) {
+    writes.set(note.id, { generation: ++writeGeneration, note: null });
+    savedDrafts.delete(JSON.stringify([graphPath, note.id]));
+    const retained = new Map<ReadingNoteDraft, ReadingNoteDraft | null>();
+    for (const source of sources.values()) {
+      if (source.graphPath !== graphPath) continue;
+      source.notes = source.notes.filter((existing) => existing.id !== note.id);
+      const draft = source.drafts.get(note.id);
+      if (!draft) continue;
+      source.drafts.delete(note.id);
+      if (!retained.has(draft)) {
+        retained.set(draft, readingNoteDirty(draft) ? {
+          ...draft, id: crypto.randomUUID(), note: null, savedBody: "", saving: false, error: null,
+          notice: "Saved note deleted. Your unsaved edits remain as a new draft.",
+        } : null);
+      }
+      const kept = retained.get(draft);
+      if (kept) source.drafts.set(kept.id, kept);
+      if (source.activeDraftId === note.id) source.activeDraftId = kept?.id ?? null;
+    }
+  }
+  updateReadingNotes();
+}
+
+/** The confirmation owns this snapshot; never expand it to include newly arriving notes. */
+export async function deleteReadingNotes(
+  source: ReadingNotesSource, notes: ReadingNote[], wholePage = false,
+): Promise<ReadingNotesDeleteResult> {
+  const { graphPath, pageId } = source;
+  const destinations = [...sources.values()].filter((item) => item.graphPath === graphPath);
+  if (destinations.some((item) => item.deleting || [...item.drafts.values()].some((draft) => draft.saving))) {
+    throw new Error("Wait for the current note operation to finish, then try deleting again.");
+  }
+  if (!notes.length) throw new Error("There are no saved notes to delete.");
+  if (wholePage && (!pageId || notes.some((note) => note.source.pageId !== pageId))) {
+    throw new Error("Delete all is limited to notes on the current page.");
+  }
+  if (!wholePage && notes.length !== 1) throw new Error("Choose one saved note to delete.");
+  const snapshot = notes.map((note) => ({ ...note }));
+  const affectedPages = [...new Set(snapshot.map((note) =>
+    note.storage === "inline" ? note.source.pageId ?? "" : note.notePageId).filter(Boolean))];
+  for (const destination of destinations) destination.deleting = true;
+  updateReadingNotes();
+  try {
+    return await withNoteSourceEditors(graphPath, affectedPages, async () => {
+      const receipt = wholePage
+        ? await readingNotesDeleteForPage(graphPath, pageId, snapshot.map((note) => ({ id: note.id, revision: note.revision })))
+        : await readingNoteDelete(graphPath, snapshot[0].id, snapshot[0].revision);
+      const deleted = new Set(receipt.deletedIds);
+      publishDeletedNotes(graphPath, snapshot.filter((note) => deleted.has(note.id)));
+      const failures = receipt.failures.map((failure) => failure.message);
+      try {
+        if ((await getGraphInfo()).path === graphPath) await Promise.all(affectedPages.map((id) => reloadPageEditors(id)));
+      } catch (error) {
+        affectedPages.forEach((id) => markPageEditorsStale(id));
+        failures.push(`The source editor could not refresh. It is protected from stale edits. Reopen the page. ${errorText(error)}`);
+      }
+      if (failures.length) throw new Error(
+        `${receipt.deletedCount} of ${snapshot.length} saved notes deleted, but the operation needs attention: ${failures.join(" ")}`
+        + (receipt.backups.length ? " Recovery copies are kept beside the affected source files." : ""),
+      );
+      return receipt;
+    });
+  } finally {
+    for (const destination of sources.values()) {
+      if (destination.graphPath === graphPath) destination.deleting = false;
+    }
     updateReadingNotes();
   }
 }

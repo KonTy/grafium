@@ -61,6 +61,7 @@
   import { pushUndo, removeUndoActions, setUndoCallback, removeUndoCallback, runUndoOperation } from "../lib/undoStack";
   import { flushPageEditors, withPageEditorsLocked, registerPageEditorReload } from "../lib/editorPersistence";
   import { readingSourceBlocks } from "../lib/readingNoteFormat";
+  import { blockReadingSelection, readingSelection } from "../lib/readingSelection";
   import type { BlockContentChange, UndoAction } from "../lib/undoStack";
   import { contextMenuPositionFromEvent } from "../lib/contextMenu";
   import { jobs, isTerminal } from "../lib/jobs.svelte";
@@ -398,6 +399,11 @@
   let collectionRequest = 0;
   let loadError: string | null = $state(null);
   let selectedBlockIds: Set<string> = $state(new Set());
+  $effect(() => {
+    if (selectedBlockIds.size) {
+      readingSelection.set(blockReadingSelection(page.id, readingSourceBlocks(blocks), selectedBlockIds));
+    }
+  });
   type SelectionMakeLinkAction = {
     blockId: string;
     from: number | null;

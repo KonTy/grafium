@@ -111,6 +111,14 @@ behind the normal graph. It is decorative, not an astronomical map.
 | Reading notes | Open the right panel's **Notes** tab, select a passage and choose **Use selection**, then write and **Save note**. Notes can also apply to the whole current page, book, or journal day. No AI is required. |
 | Markdown-source annotations | Notes on Markdown pages are footnotes inside the source file, with hidden quote-anchor metadata. Copying the book's `.md` carries its annotations too; SQLite is only a rebuildable index. Click a footnote marker to open its note in the pane. Original-format books instead keep one adjacent JSON-LD annotation file. Ambiguous or missing passages remain flagged instead of being guessed. |
 
+New blank Markdown-note drafts automatically attach selected words or whole
+blocks; check the quote preview before saving. **Use selection** changes the
+attachment explicitly after writing begins; **Make page-level note** removes it.
+**Delete note…** removes one saved annotation after confirmation.
+**Delete all notes on this page…** removes only the current source's annotations,
+even in the All notes view. Source prose is preserved and unsaved note edits are
+kept as new drafts.
+
 Reading-note drafts survive navigation during the app session, but **Save note**
 is required before closing the app. For Markdown sources, saving adds reference
 markers and footnote definitions without rewriting the book's words. Original

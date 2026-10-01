@@ -4,7 +4,7 @@ import { get } from "svelte/store";
 import { renderBlock } from "./markdown";
 import { renderedReadingText } from "./renderedReadingText";
 import {
-  captureRenderedReadingSelection, continuousReadingSelection, publishSourceReadingSelection,
+  blockReadingSelection, captureRenderedReadingSelection, continuousReadingSelection, publishSourceReadingSelection,
   readingSelection, readingSelectionCapture, sourceReadingSelection,
 } from "./readingSelection";
 
@@ -31,6 +31,29 @@ beforeEach(() => {
 });
 
 describe("reading selections", () => {
+  it("captures whole selected blocks in document order without requiring a DOM text range", () => {
+    const blocks = [
+      { id: "a", content: "First **passage**" }, { id: "b", content: "Second\nline" },
+      { id: "c", content: "Unselected" },
+    ];
+    const captured = blockReadingSelection("page", blocks, new Set(["b", "a"]));
+    expect(captured.error).toBeNull();
+    expect(captured.selection).toEqual({
+      pageId: "page", blockIds: ["a", "b"], text: "First **passage**\nSecond\nline", kind: "source",
+      parts: [
+        { blockId: "a", text: "First **passage**", from: 0, to: 17, prefix: "", suffix: "" },
+        { blockId: "b", text: "Second\nline", from: 0, to: 11, prefix: "", suffix: "" },
+      ],
+    });
+  });
+
+  it("rejects missing or excluded annotation blocks and all-empty selections", () => {
+    const blocks = [{ id: "a", content: "Text" }, { id: "empty", content: "" }];
+    expect(blockReadingSelection("page", blocks, new Set(["a", "footer"])).error).toMatch(/not annotation footnotes/);
+    expect(blockReadingSelection("page", blocks, new Set(["empty"])).error).toMatch(/containing text/);
+    expect(blockReadingSelection("page", blocks, new Set(["a", "empty"])).selection?.blockIds).toEqual(["a"]);
+  });
+
   it("preserves exact source text, block offsets, and anchoring context", () => {
     const source = "Before **exact** text after";
     const selected = sourceReadingSelection("page", "block", source, 7, 16)!;

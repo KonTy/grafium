@@ -1,7 +1,7 @@
 // Real Notes UI; synthetic persistence survives browser reload independently of component state.
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
-const { openEditor, focus, focusContinuous, row, frames } = require("./keyboardSelection.ui.cjs");
+const { openEditor, focus, focusContinuous, row, frames, shift } = require("./keyboardSelection.ui.cjs");
 const nativeFixture = require("./fixtures/inline-reading-notes-native.json");
 
 const ROOT = "/synthetic/keyboard-selection";
@@ -63,7 +63,7 @@ async function openNotes(browser, options = {}) {
       storage: "file", footnoteLabel: null, noteBlockId: "orphan-note-body",
       targetBlockId: null, createdAt: "2026-09-13T12:00:00Z", updatedAt: "2026-09-13T12:00:00Z",
     }],
-    calls: [], hold: false, pending: [], fail: false,
+    calls: [], hold: false, pending: [], fail: false, partialDelete: false,
   };
   const beforeNavigate = async (page) => {
     await page.exposeFunction("__notesBackend", async (cmd, args, source) => {
@@ -74,6 +74,16 @@ async function openNotes(browser, options = {}) {
       };
       if (backend.hold) await new Promise((resolve) => backend.pending.push(resolve));
       if (backend.fail) throw new Error("Synthetic disk is unavailable. Your draft was not saved.");
+      if (cmd === "reading_notes_delete_for_page") {
+        const notes = backend.notes.filter((note) => note.source.pageId === args.sourcePageId);
+        assert.deepEqual(notes.map(({ id, revision }) => ({ id, revision })).sort((a, b) => a.id.localeCompare(b.id)),
+          [...args.expectedNotes].sort((a, b) => a.id.localeCompare(b.id)));
+        const deletedIds = (backend.partialDelete ? notes.slice(0, 1) : notes).map(({ id }) => id);
+        backend.notes = backend.notes.filter((note) => !deletedIds.includes(note.id));
+        return { deletedIds, deletedCount: deletedIds.length, failures: backend.partialDelete
+          ? [{ id: notes[0].id, message: "Index reload failed after deletion." },
+            { id: notes[1].id, message: "The second note file changed." }] : [], backups: [] };
+      }
       if (cmd === "reading_note_create") {
         if (args.graphPath !== ROOT || !source || source.id !== args.sourcePageId) throw new Error("Wrong source graph or page");
         const existing = backend.notes.find(({ id }) => id === args.noteId);
@@ -94,7 +104,10 @@ async function openNotes(browser, options = {}) {
       const note = backend.notes.find(({ id }) => id === args.noteId);
       if (!note) throw new Error("Missing note");
       if (args.expectedRevision !== note.revision) throw new Error("The note changed on disk. Your draft has been preserved.");
-      if (cmd === "reading_note_update") note.body = args.body;
+      if (cmd === "reading_note_delete") {
+        backend.notes = backend.notes.filter((item) => item.id !== note.id);
+        return { deletedIds: [note.id], deletedCount: 1, failures: [], backups: [] };
+      } else if (cmd === "reading_note_update") note.body = args.body;
       else if (cmd === "reading_note_reattach") {
         note.source = { pageId: source.id, pageTitle: source.title, filePath: source.file_path };
         note.quote = args.selection?.text ?? "";
@@ -123,6 +136,14 @@ async function openNotes(browser, options = {}) {
           if (cmd === "ai_health_check") return { enabled: false, llm_available: false, embedder_available: false, vector_count: 0 };
           if (cmd.startsWith("reading_note")) {
             const result = await window.__notesBackend(cmd, args, state.pages.find(({ id }) => id === args.sourcePageId));
+            if (cmd === "reading_note_delete" || cmd === "reading_notes_delete_for_page") {
+              const saved = await window.__notesBackend("reading_notes_list", { graphPath: args.graphPath });
+              const labels = new Set(saved.notes.map((note) => note.footnoteLabel));
+              for (const block of state.blocks) {
+                block.content = block.content.replace(/\[\^(grafium-note-\d+)\]/g, (marker, label) => labels.has(label) ? marker : "");
+              }
+              return result;
+            }
             for (const note of result.notes ?? [result]) {
               if (note.storage === "inline") {
                 const reference = `[^${note.footnoteLabel}]`;
@@ -177,6 +198,121 @@ async function save(page, body) {
   await cards(page).filter({ hasText: body }).waitFor();
 }
 const cases = [
+  ["Partial bulk deletion reports all failures and keeps the notes that were not deleted", {}, async ({ page, backend }) => {
+    await beginNote(page, "First partial note.");
+    await save(page, "First partial note.");
+    await button(page, "New note").click();
+    await beginNote(page, "Second partial note.");
+    await save(page, "Second partial note.");
+    backend.partialDelete = true;
+    await button(page, "Delete all notes on this page…").click();
+    await panel(page).getByRole("button", { name: "Delete all saved notes", exact: true }).click();
+    await panel(page).getByRole("alert").filter({
+      hasText: "1 of 2 saved notes deleted, but the operation needs attention: Index reload failed after deletion. The second note file changed.",
+    }).waitFor();
+    await cards(page).filter({ hasText: "First partial note." }).waitFor({ state: "detached" });
+    await cards(page).filter({ hasText: "Second partial note." }).waitFor();
+    assert.equal(backend.notes.some(({ body }) => body === "Second partial note."), true);
+  }],
+  ["Mouse-selected blocks remain attached when opening the Notes panel", {}, async ({ page, backend }) => {
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("toggle-reference-panel")));
+    await row(page, "b0").getByRole("button", { name: "Select block", exact: true }).click();
+    await row(page, "b1").getByRole("button", { name: "Select block", exact: true }).click({ modifiers: ["Shift"] });
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("toggle-reference-panel")));
+    await page.locator(".reference-panel .panel-tabs").getByRole("tab", { name: "Notes", exact: true }).click();
+    await panel(page).locator(".quote-preview").waitFor();
+    await beginNote(page, "Mouse-selected passage.");
+    await save(page, "Mouse-selected passage.");
+    assert.deepEqual(backend.calls.find(({ cmd }) => cmd === "reading_note_create").args.selection.blockIds, ["b0", "b1"]);
+  }],
+  ["Continuous cross-block selections attach automatically to new notes", { unifiedPage: true }, async ({ page, backend }) => {
+    await focusContinuous(page, "selection-page", "b0", "start");
+    await page.evaluate(async () => {
+      const view = window.__activeEditorView;
+      const { parsePageSourceMap } = await import("/src/lib/pageSourceMap.ts");
+      const blocks = parsePageSourceMap(view.state.doc.toString()).blocks;
+      view.dispatch({ selection: { anchor: blocks.find(({ id }) => id === "b0").contentFrom,
+        head: blocks.find(({ id }) => id === "b1").contentTo } });
+    });
+    await frames(page);
+    await panel(page).locator(".quote-preview").waitFor();
+    await beginNote(page, "Continuous selected blocks.");
+    await save(page, "Continuous selected blocks.");
+    assert.deepEqual(backend.calls.find(({ cmd }) => cmd === "reading_note_create").args.selection.blockIds, ["b0", "b1"]);
+  }],
+  ["Saved notes have confirmed deletion that keeps unsaved edits", {}, async ({ page, backend }) => {
+    await beginNote(page, "Delete this saved note.");
+    await save(page, "Delete this saved note.");
+    await input(page).fill("Keep this unfinished revision.");
+    const card = cards(page).filter({ hasText: "Delete this saved note." });
+    await card.getByRole("button", { name: "Delete note…", exact: true }).click();
+    const confirmation = panel(page).getByRole("alertdialog", { name: "Confirm note deletion" });
+    await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(backend.calls.some(({ cmd }) => cmd === "reading_note_delete"), false);
+    await card.getByRole("button", { name: "Delete note…", exact: true }).click();
+    await confirmation.getByRole("button", { name: "Delete saved note", exact: true }).click();
+    await card.waitFor({ state: "detached" });
+    assert.equal(await input(page).inputValue(), "Keep this unfinished revision.");
+    await save(page, "Keep this unfinished revision.");
+    const creates = backend.calls.filter(({ cmd }) => cmd === "reading_note_create");
+    assert.equal(creates.length, 2);
+    assert.notEqual(creates[0].args.noteId, creates[1].args.noteId);
+  }],
+  ["Delete all is limited to the current page even while showing All notes", {}, async ({ page, backend }) => {
+    await beginNote(page, "First page note.");
+    await save(page, "First page note.");
+    await button(page, "New note").click();
+    await beginNote(page, "Second page note.");
+    await save(page, "Second page note.");
+    await panel(page).getByRole("combobox", { name: "Notes scope", exact: true }).selectOption("all");
+    await cards(page).filter({ hasText: "Keep this orphaned reflection." }).waitFor();
+    await button(page, "Delete all notes on this page…").click();
+    const confirmation = panel(page).getByRole("alertdialog", { name: "Confirm note deletion" });
+    assert.match(await confirmation.innerText(), /all 2 saved notes/);
+    await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(backend.calls.some(({ cmd }) => cmd === "reading_notes_delete_for_page"), false);
+    await button(page, "Delete all notes on this page…").click();
+    await confirmation.getByRole("button", { name: "Delete all saved notes", exact: true }).click();
+    await cards(page).filter({ hasText: "Second page note." }).waitFor({ state: "detached" });
+    assert.equal(backend.notes.length, 1);
+    assert.equal(backend.notes[0].id, "orphan-note");
+    await cards(page).filter({ hasText: "Keep this orphaned reflection." }).waitFor();
+    assert.equal(await button(page, "Delete all notes on this page…").isDisabled(), true);
+  }],
+  ["Deletion refuses an externally changed note and reloads it for review", {}, async ({ page, backend }) => {
+    await beginNote(page, "Original note.");
+    await save(page, "Original note.");
+    await cards(page).filter({ hasText: "Original note." }).getByRole("button", { name: "Delete note…", exact: true }).click();
+    const note = backend.notes.find(({ body }) => body === "Original note.");
+    note.revision = "changed-after-confirmation";
+    note.body = "New external note body.";
+    await panel(page).getByRole("button", { name: "Delete saved note", exact: true }).click();
+    await panel(page).getByRole("alert").filter({ hasText: "note changed on disk" }).waitFor();
+    await cards(page).filter({ hasText: "New external note body." }).waitFor();
+    assert.equal(backend.notes.some(({ id }) => id === note.id), true);
+  }],
+  ["New notes automatically attach to keyboard-selected blocks instead of the whole page", {}, async ({ page, backend }) => {
+    await focus(page, "b0");
+    await shift(page, "Down", ["b0", "b1"]);
+    await shift(page, "Down", ["b0", "b1", "b2"]);
+    await panel(page).locator(".quote-preview").waitFor();
+    await beginNote(page, "About these three selected blocks.");
+    await save(page, "About these three selected blocks.");
+    const create = backend.calls.find(({ cmd }) => cmd === "reading_note_create");
+    assert.deepEqual(create.args.selection.blockIds, ["b0", "b1", "b2"]);
+    const expected = await page.evaluate(() => window.__selectionState.blocks
+      .filter(({ id }) => ["b0", "b1", "b2"].includes(id)).map(({ content }) => content.replace(/\[\^grafium-note-\d+\]/g, "")));
+    assert.deepEqual(create.args.selection.parts.map(({ text }) => text), expected);
+    assert.equal(create.args.selection.kind, "source");
+  }],
+  ["Explicit page-level choice is retained despite a frozen block selection", {}, async ({ page, backend }) => {
+    await focus(page, "b0");
+    await shift(page, "Down", ["b0", "b1"]);
+    await button(page, "Make page-level note").click();
+    await beginNote(page, "Deliberately about the whole page.");
+    await save(page, "Deliberately about the whole page.");
+    assert.equal(backend.calls.find(({ cmd }) => cmd === "reading_note_create").args.selection, null);
+  }],
   ["Notes works without AI and saved Markdown notes return after reload", { book: true }, async ({ page, backend }) => {
     await beginNote(page, "A durable reading reflection.");
     await save(page, "A durable reading reflection.");

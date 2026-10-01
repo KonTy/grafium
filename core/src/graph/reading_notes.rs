@@ -18,6 +18,42 @@ mod tests;
 #[path = "reading_notes_inline.rs"]
 mod inline;
 
+#[path = "reading_notes_delete.rs"]
+mod delete;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadingNoteRevision {
+    pub id: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingNotesDeleteReceipt {
+    /// Notes confirmed absent from their authoritative files, even if indexing failed.
+    pub deleted_ids: Vec<String>,
+    pub deleted_count: usize,
+    /// May overlap deletedIds when the file changed but indexing/durability failed.
+    pub failures: Vec<ReadingNoteDeleteFailure>,
+    /// Verified pre-deletion copies retained on disk, one per affected source file.
+    pub backups: Vec<ReadingNoteDeletionBackup>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingNoteDeletionBackup {
+    pub file_path: String,
+    pub backup_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingNoteDeleteFailure {
+    pub id: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadingSelection {

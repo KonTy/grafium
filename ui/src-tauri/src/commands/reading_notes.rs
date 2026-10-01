@@ -1,4 +1,6 @@
-use grafium_core::graph::reading_notes::{ReadingNote, ReadingNotesList, ReadingSelection};
+use grafium_core::graph::reading_notes::{
+    ReadingNote, ReadingNoteRevision, ReadingNotesDeleteReceipt, ReadingNotesList, ReadingSelection,
+};
 use grafium_core::Graph;
 use std::path::Path;
 use tauri::State;
@@ -57,6 +59,34 @@ pub fn reading_note_update(
     current_graph(&graph, &graph_path)?;
     graph
         .reading_note_update(&note_id, &expected_revision, &body)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reading_note_delete(
+    state: State<crate::AppState>,
+    graph_path: String,
+    note_id: String,
+    expected_revision: String,
+) -> Result<ReadingNotesDeleteReceipt, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    current_graph(&graph, &graph_path)?;
+    graph
+        .reading_note_delete(&note_id, &expected_revision)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reading_notes_delete_for_page(
+    state: State<crate::AppState>,
+    graph_path: String,
+    source_page_id: String,
+    expected_notes: Vec<ReadingNoteRevision>,
+) -> Result<ReadingNotesDeleteReceipt, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    current_graph(&graph, &graph_path)?;
+    graph
+        .reading_notes_delete_for_page(&source_page_id, &expected_notes)
         .map_err(|e| e.to_string())
 }
 
@@ -129,6 +159,27 @@ mod tests {
             serde_json::to_value(graph.reading_notes_list(None).unwrap()).unwrap()["notes"][0]
                 ["id"],
             note.id
+        );
+        let reviewed: Vec<ReadingNoteRevision> = serde_json::from_value(serde_json::json!([
+            { "id": note.id, "revision": note.revision }
+        ]))
+        .unwrap();
+        let receipt = graph
+            .reading_notes_delete_for_page(&page.id, &reviewed)
+            .unwrap();
+        assert_eq!(receipt.backups.len(), 1);
+        assert_eq!(receipt.backups[0].file_path, note.file_path);
+        assert!(graph
+            .root_dir
+            .join(&receipt.backups[0].backup_path)
+            .is_file());
+        let backup_path = receipt.backups[0].backup_path.clone();
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::json!({
+                "deletedIds": [note.id], "deletedCount": 1, "failures": [],
+                "backups": [{ "filePath": note.file_path, "backupPath": backup_path }]
+            })
         );
     }
 }
