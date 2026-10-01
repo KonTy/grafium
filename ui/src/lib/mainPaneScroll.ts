@@ -1,6 +1,6 @@
 export const MAIN_PANE_SCROLL_INTENT = "grafium-main-pane-scroll";
 
-const PAGED_VIEWS = new Set(["page", "journal", "all-pages", "statistics"]);
+const PAGED_VIEWS = new Set(["page", "journal", "all-pages", "statistics", "studies"]);
 const KEYBOARD_OVERLAYS = [
   "[role='dialog']", "[role='alertdialog']", "[role='menu']", "dialog[open]",
   ".dialog-backdrop", ".page-dialog-backdrop", ".folder-browser-backdrop",

@@ -261,6 +261,10 @@
       </svg>
       <span>Tasks</span>
     </button>
+    <button class="nav-item" class:active={currentView === "studies"} onclick={() => onNavigate("__studies__")} title="Studies" aria-label="Studies">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 4h7l3 3 3-3h7v16h-7l-3 2-3-2H2zM12 7v15" /></svg>
+      <span>Studies</span>
+    </button>
     <button class="nav-item" class:active={currentView === "all-pages"} onclick={() => onNavigate("__all_pages__")} title="All Pages" aria-label="All Pages">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>

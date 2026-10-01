@@ -24,6 +24,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         include_str!("../../resources/welcome/pages/Help - Tasks.md"),
     ),
     (
+        "studies",
+        include_str!("../../resources/welcome/pages/Help - Studies.md"),
+    ),
+    (
         "chat",
         include_str!("../../resources/welcome/pages/Help - Chat.md"),
     ),

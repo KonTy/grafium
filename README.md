@@ -178,6 +178,7 @@ guessed into a different block.
 | Flashcards in your notes | Write `Question :: Answer` to make a reviewable card without maintaining a second copy. |
 | Spaced repetition | Reveal answers and grade recall with **Again**, **Hard**, **Good**, or **Easy**; SM-2 schedules subsequent reviews. |
 | Study topics | Use tags to study one topic or mix cards from across your notes. |
+| Studies workspace | Curate books, graph pages, flashcard topics, audio/video, YouTube videos, and websites in one list. Assign arbitrary topics, filter rows and time cards, and resume saved reading/playback positions. Reading and flashcards pause their clock after 90 seconds of inactivity; media follows active playback while Grafium is focused. Websites open externally with manual checkpoints and no automatic time tracking. |
 | Rich flashcards | Include Markdown, mathematics, images, audio, and video in cards. |
 | Anki import | Bring `.apkg` decks and supported media into Grafium's note-and-card workflow. |
 | Original-book library | Copy EPUB, PDF, FB2, MOBI, or AZW3 into the graph, read the original under Books, and keep notes with Markdown bodies in one adjacent JSON-LD file (`1.epub` → `1.jsonld`). Source files remain unchanged. Extracted text feeds graph search and configured AI indexing; extraction warnings are shown explicitly. |

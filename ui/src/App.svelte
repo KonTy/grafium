@@ -54,7 +54,12 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
   import { helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./lib/help";
+  import { recordStudyActivity, type StudyItem, type StudyProgress } from "./lib/studies";
+  import { StudyTracker, type StudyClockState } from "./lib/studyTracker";
+  import { trackReading } from "./lib/studyReading";
 
+  const loadStudies = lazyComponent(() => import("./components/Studies.svelte"));
+  const loadStudyMedia = lazyComponent(() => import("./components/StudyMedia.svelte"));
   const loadAllPages = lazyComponent(() => import("./components/AllPages.svelte"));
   const loadGraphView = lazyComponent(() => import("./components/GraphView.svelte"));
   const loadGraphView3D = lazyComponent(() => import("./components/GraphView3D.svelte"));
@@ -151,9 +156,107 @@
     return undefined;
   }
 
-  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs";
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "studies" | "chat" | "settings" | "graph" | "jobs";
 
   let currentView: View = $state("page");
+  let studyGraphPath = $state("");
+  let studyAddPage = $state<Page | null>(null);
+  let activeStudy = $state<StudyItem | null>(null);
+  let studyClock: StudyTracker | null = null;
+  let studyClockState = $state<StudyClockState>("idle");
+  let studySessionSeconds = $state(0);
+  let studySaveError = $state("");
+  const failedStudyWrites = new Set<StudyTracker>();
+  let studyNavigation = 0;
+
+  async function saveStudyClock(clock: StudyTracker, stop = false) {
+    try {
+      await (stop ? clock.stop() : clock.flush());
+      failedStudyWrites.delete(clock);
+      if (!failedStudyWrites.size) studySaveError = "";
+    } catch (cause) {
+      failedStudyWrites.add(clock);
+      studySaveError = `Study time or progress was not saved: ${String(cause)}. Keep Grafium open and retry.`;
+    }
+  }
+  async function finishStudy() {
+    const clock = studyClock;
+    studyClock = null;
+    activeStudy = null;
+    if (clock) await saveStudyClock(clock, true);
+  }
+  async function openStudy(item: StudyItem) {
+    const request = ++studyNavigation;
+    const graph = studyGraphPath;
+    await finishStudy();
+    if (request !== studyNavigation || currentView !== "studies") return;
+    for (const clock of failedStudyWrites) {
+      if (clock.item.id === item.id) {
+        await saveStudyClock(clock);
+        if (failedStudyWrites.has(clock)) return;
+      }
+    }
+    if (item.kind === "page" || item.kind === "book") {
+      await navigateToPage({ id: item.source });
+      if (request + 1 !== studyNavigation || error || currentPage?.id !== item.source) return;
+    }
+    if (graph !== studyGraphPath) return;
+    studyAddPage = null;
+    activeStudy = item;
+    if (item.kind !== "page" && item.kind !== "book") {
+      await tick();
+      if (mainContentEl) mainContentEl.scrollTop = 0;
+    }
+  }
+  function updateStudyProgress(progress: StudyProgress) {
+    studyClock?.updateProgress(progress);
+    if (activeStudy?.kind === "website" && studyClock) void saveStudyClock(studyClock);
+  }
+  async function returnToStudies() {
+    await finishStudy();
+    await navigateToPage("__studies__");
+  }
+  function addCurrentPageToStudies() {
+    studyAddPage = currentPage;
+    void navigateToPage("__studies__");
+  }
+  $effect(() => {
+    const item = activeStudy;
+    const graph = studyGraphPath;
+    if (!item || !graph) return;
+    const clock = new StudyTracker(item, (seconds, day, progress, requestId) =>
+      recordStudyActivity(graph, item.id, seconds, day, progress, requestId));
+    studyClock = clock;
+    studySessionSeconds = 0;
+    let count = 0;
+    const visibility = () => {
+      clock.setVisible(!document.hidden && document.hasFocus());
+      studyClockState = clock.state;
+      if (document.hidden) void saveStudyClock(clock);
+    };
+    visibility();
+    const interval = setInterval(() => {
+      visibility();
+      clock.tick();
+      studyClockState = clock.state;
+      studySessionSeconds = clock.seconds;
+      if (++count % 10 === 0) void saveStudyClock(clock);
+    }, 1000);
+    const pagehide = () => { void saveStudyClock(clock); };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("pagehide", pagehide);
+    const cleanupReading = item.kind === "page" && mainContentEl
+      ? trackReading(mainContentEl, item.progress, progress => clock.updateProgress(progress), () => clock.activity())
+      : undefined;
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("pagehide", pagehide);
+      cleanupReading?.();
+      if (studyClock === clock) studyClock = null;
+      void saveStudyClock(clock, true);
+    };
+  });
   let helpVisible = $state(false);
   let helpLoading = $state(false);
   let helpTitle = $state("");
@@ -581,6 +684,9 @@
     if (currentView === "statistics") {
       return { kind: "statistics", scrollTop: currentScrollTop() };
     }
+    if (currentView === "studies") {
+      return { kind: "studies", scrollTop: currentScrollTop() };
+    }
     if (currentView === "settings") {
       return { kind: "settings", scrollTop: currentScrollTop() };
     }
@@ -703,6 +809,12 @@
   }
 
   async function navigateToHistoryEntry(entry: HistoryEntry) {
+    ++studyNavigation;
+    await finishStudy();
+    if (entry.kind === "studies") {
+      await navigateToPage("__studies__", false, true, entry);
+      return;
+    }
     if (entry.kind === "journal") {
       await navigateToJournal(true, entry);
       return;
@@ -1044,6 +1156,7 @@
     goFlashcards: () => navigateToPage("__flashcards__"),
     goTomorrow: () => navigateToPage(shiftIsoDate(formatLocalIsoDate(), 1), true),
     goTasks: () => navigateToPage("__statistics__"),
+    goStudies: () => navigateToPage("__studies__"),
     goChat: () => navigateToPage("__chat__"),
     goNextJournal: () => shiftJournalDay(1),
     goPrevJournal: () => shiftJournalDay(-1),
@@ -1113,6 +1226,7 @@
             graph: "graph",
             flashcards: "flashcards",
             statistics: "tasks",
+            studies: "studies",
             chat: "chat",
             settings: "settings",
             jobs: "general",
@@ -1283,6 +1397,7 @@
     let unlisten: (() => void) | null = null;
     listen("app-shutdown-started", () => {
       shuttingDown = true;
+      void finishStudy();
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -1412,7 +1527,7 @@
   type SavedLocation =
     | { kind: "page"; title: string }
     | { kind: "journal" }
-    | { kind: "all-pages" | "flashcards" | "statistics" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
+    | { kind: "all-pages" | "flashcards" | "statistics" | "studies" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
 
   function saveLastLocation() {
     try {
@@ -1425,6 +1540,7 @@
         currentView === "all-pages" ||
         currentView === "flashcards" ||
         currentView === "statistics" ||
+        currentView === "studies" ||
         currentView === "chat" ||
         currentView === "settings" ||
         currentView === "graph" ||
@@ -1491,6 +1607,10 @@
         }
         if (saved.kind === "statistics") {
           await navigateToPage("__statistics__");
+          return;
+        }
+        if (saved.kind === "studies") {
+          await navigateToPage("__studies__");
           return;
         }
         if (saved.kind === "chat") {
@@ -1562,6 +1682,8 @@
   }
 
   async function navigateToJournal(skipHistory = false, restoreEntry?: HistoryEntry) {
+    ++studyNavigation;
+    await finishStudy();
     if (!skipHistory) {
       saveCurrentHistoryState();
     }
@@ -1590,11 +1712,31 @@
     sourceBlockId?: string,
     sourcePageTitle?: string
   ) {
+    ++studyNavigation;
+    await finishStudy();
     if (!skipHistory) {
       saveCurrentHistoryState(sourceBlockId, sourcePageTitle);
     }
 
     // Handle special routes
+    if (target === "__studies__") {
+      const request = studyNavigation;
+      currentView = "studies";
+      currentPage = null;
+      loading = true;
+      error = null;
+      try {
+        const graph = await getGraphInfo();
+        if (request !== studyNavigation) return;
+        studyGraphPath = graph.path;
+        if (!skipHistory) pushHistoryEntry({ kind: "studies", scrollTop: 0 });
+      } catch (cause) {
+        if (request === studyNavigation) error = `Could not open Studies: ${String(cause)}`;
+      } finally {
+        if (request === studyNavigation) loading = false;
+      }
+      return;
+    }
     if (target === "__all_pages__") {
       currentView = "all-pages";
       currentPage = null;
@@ -2034,6 +2176,10 @@
   }
 
   function handleGraphChanged() {
+    ++studyNavigation;
+    void finishStudy();
+    studyGraphPath = "";
+    studyAddPage = null;
     goToLinkOpen = false;
     globalSearchOpen = false;
     showImportBooksDialog = false;
@@ -2180,6 +2326,29 @@
     {/if}
 
     <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode}>
+    {#if studySaveError || activeStudy}
+    <div class="study-session-controls">
+    {#if studySaveError}
+      <div class="study-session-bar" role="alert">
+        <span>{studySaveError}</span>
+        <button onclick={() => { for (const clock of failedStudyWrites) void saveStudyClock(clock); }}>Retry saving</button>
+      </div>
+    {/if}
+    {#if activeStudy}
+      <div class="study-session-bar" data-help-context="studies">
+        <button onclick={() => { void returnToStudies(); }}>Back to Studies</button>
+        <strong>{activeStudy.title}</strong>
+        {#if activeStudy.kind !== "website"}
+          <span>{Math.floor(studySessionSeconds / 60)}m {Math.floor(studySessionSeconds % 60)}s · {studyClockState}</span>
+          <button onclick={() => {
+            studyClock?.setPaused(studyClockState !== "paused");
+            studyClockState = studyClock?.state ?? "stopped";
+          }}>{studyClockState === "paused" ? "Resume clock" : "Pause clock"}</button>
+        {/if}
+      </div>
+    {/if}
+    </div>
+    {/if}
     {#if error}
       <div class="error-state">
         <p>{error}</p>
@@ -2227,6 +2396,38 @@
           <Statistics onNavigate={handleNavigate} />
         {/snippet}
       </LazyView>
+    {:else if currentView === "studies"}
+      {#if activeStudy}
+        {#key activeStudy.id}
+          {@const selectedStudy = activeStudy}
+          {#if activeStudy.kind === "flashcards"}
+            <LazyView load={loadFlashcardReview} name="study flashcards">
+              {#snippet children(FlashcardReview)}
+                <FlashcardReview initialTopic={selectedStudy.source === "*" ? null : selectedStudy.source}
+                  onNavigate={handleNavigate} onExit={() => { void returnToStudies(); }}
+                  onStudyActivity={() => studyClock?.activity()}
+                  onStudyProgress={updateStudyProgress}
+                  onStudyComplete={() => studyClock?.setPaused(true)} />
+              {/snippet}
+            </LazyView>
+          {:else}
+            <LazyView load={loadStudyMedia} name="study source">
+              {#snippet children(StudyMedia)}
+                <StudyMedia graphPath={studyGraphPath} item={selectedStudy}
+                  onProgress={updateStudyProgress}
+                  onPlayback={(playing) => studyClock?.playback(playing)}
+                  onActivity={() => studyClock?.activity()} />
+              {/snippet}
+            </LazyView>
+          {/if}
+        {/key}
+      {:else}
+        <LazyView load={loadStudies} name="studies">
+          {#snippet children(Studies)}
+            <Studies graphPath={studyGraphPath} addPage={studyAddPage} onOpen={(item) => { void openStudy(item); }} />
+          {/snippet}
+        </LazyView>
+      {/if}
     {:else if currentView === "flashcards"}
       <LazyView load={loadFlashcardReview} name="flashcards">
         {#snippet children(FlashcardReview)}
@@ -2266,6 +2467,9 @@
         onPageDeleted={() => { void sidebarRef?.refresh(); }}
       />
     {:else if currentView === "page" && currentPage}
+      {#if !activeStudy}
+        <div class="study-page-action"><button onclick={addCurrentPageToStudies}>Add to Studies</button></div>
+      {/if}
       {#key currentPage.id}
         {#if isBookAnnotationPage(currentPage)}
           {@const annotationPage = currentPage}
@@ -2278,7 +2482,10 @@
           {@const bookPage = currentPage}
           <LazyView load={loadOriginalBookPage} name="book reader">
             {#snippet children(OriginalBookPage)}
-              <OriginalBookPage page={bookPage} />
+              <OriginalBookPage page={bookPage} onStudyProgress={(progress) => {
+                updateStudyProgress(progress);
+                studyClock?.activity();
+              }} />
             {/snippet}
           </LazyView>
         {:else}
@@ -2366,6 +2573,10 @@
 
     <!-- Bottom nav for narrow screens -->
     <nav class="bottom-nav">
+      <button class="bottom-nav-item" class:active={currentView === "studies"} onclick={() => handleNavigate("__studies__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 4h7l3 3 3-3h7v16h-7l-3 2-3-2H2zM12 7v15" /></svg>
+        <span>Studies</span>
+      </button>
       <button class="bottom-nav-item" class:active={currentView === "journal"} onclick={() => handleNavigate("__journal__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
@@ -2698,6 +2909,28 @@
 {/if}
 
 <style>
+  .study-session-controls { position: sticky; top: 0; z-index: 20; }
+  .study-session-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .study-session-bar strong { color: var(--text-primary); }
+  .study-session-bar button, .study-page-action button {
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .study-page-action { display: flex; justify-content: flex-end; padding: 8px 24px 0; }
   .app-shell {
     display: flex;
     flex-direction: column;

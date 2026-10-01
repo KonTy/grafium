@@ -18,6 +18,8 @@ pub mod query;
 pub mod reading_notes;
 pub mod research;
 pub mod startup;
+pub mod studies;
+pub mod study_player;
 pub mod sync;
 pub mod tasks;
 pub mod theme;

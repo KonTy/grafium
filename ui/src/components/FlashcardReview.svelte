@@ -10,12 +10,18 @@
   import { renderBlock, hydrateAssetMedia, assetBaseDirFor } from "../lib/markdown";
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
+  import type { StudyProgress } from "../lib/studies";
 
   interface Props {
     onNavigate?: (title: string) => void;
+    initialTopic?: string | null;
+    onExit?: () => void;
+    onStudyActivity?: () => void;
+    onStudyProgress?: (progress: StudyProgress) => void;
+    onStudyComplete?: () => void;
   }
 
-  let { onNavigate }: Props = $props();
+  let { onNavigate, initialTopic, onExit, onStudyActivity, onStudyProgress, onStudyComplete }: Props = $props();
 
   // "topics" = deck picker; "review" = an active study session.
   let view = $state<"topics" | "review">("topics");
@@ -30,6 +36,7 @@
   let loading = $state(true);
   let reviewed = $state(0);
   let grading = $state(false);
+  let reviewError = $state("");
 
   // Anki import state.
   let importing = $state(false);
@@ -73,7 +80,8 @@
   ];
 
   $effect(() => {
-    loadTopics();
+    if (initialTopic !== undefined) void study(initialTopic);
+    else void loadTopics();
   });
 
   // Re-hydrate media whenever the visible card face changes.
@@ -112,20 +120,27 @@
     selectedTopic = topic;
     view = "review";
     loading = true;
+    reviewError = "";
     try {
       cards = await listFlashcardsDue(100, topic ?? undefined);
       index = 0;
       showBack = false;
       reviewed = 0;
+      reportStudyProgress();
+      if (cards.length) onStudyActivity?.();
+      else onStudyComplete?.();
     } catch (e) {
       console.error("Failed to load flashcards", e);
       cards = [];
+      reviewError = `Could not load this review: ${String(e)}`;
+      onStudyComplete?.();
     } finally {
       loading = false;
     }
   }
 
   function backToTopics() {
+    if (onExit) { onExit(); return; }
     view = "topics";
     cards = [];
     loadTopics();
@@ -167,6 +182,14 @@
 
   function reveal() {
     showBack = true;
+    onStudyActivity?.();
+  }
+
+  function reportStudyProgress() {
+    onStudyProgress?.({
+      position: reviewed, total: cards.length, anchor: "",
+      label: cards.length ? `${reviewed} / ${cards.length} reviewed last session` : "No cards due",
+    });
   }
 
   async function grade(quality: number) {
@@ -177,8 +200,12 @@
       reviewed += 1;
       index += 1;
       showBack = false;
+      onStudyActivity?.();
+      reportStudyProgress();
+      if (!cards[index]) onStudyComplete?.();
     } catch (e) {
       console.error("Failed to grade flashcard", e);
+      reviewError = `Could not save this grade: ${String(e)}`;
     } finally {
       grading = false;
     }
@@ -207,6 +234,10 @@
 <svelte:window on:keydown={onKeydown} />
 
 <div class="review">
+  {#if reviewError}
+    <p role="alert">{reviewError}</p>
+    <button onclick={() => { void study(selectedTopic); }}>Reload review</button>
+  {/if}
   {#if importing}
     <div class="import-overlay">
       <div class="import-card">
