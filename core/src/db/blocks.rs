@@ -682,15 +682,16 @@ impl Database {
         Ok(rows)
     }
 
-    /// Every stored string that could name a media file.
+    /// Attachment references owned by durable graph data.
     ///
     /// Block markdown is the obvious source but not the only one: a recorded
     /// audio note keeps its path in `audio_notes`, a handwriting page keeps
     /// its SVG in `ink_pages`, studies can own local audio/video references,
     /// and properties can hold a cover or icon. This
     /// backs "which media is unreferenced?", and a source missing from here
-    /// means real, irreplaceable media gets offered to the user for deletion —
-    /// so err towards including a table rather than leaving it out.
+    /// means real, irreplaceable media gets offered to the user for deletion.
+    /// Chat messages, citations and context are historical snapshots, not
+    /// owners: quoting a note must not prolong its attachments' lifetime.
     pub fn get_all_media_references(&self) -> Result<Vec<String>> {
         let conn = self.conn()?;
         let mut out = Vec::new();
@@ -698,9 +699,6 @@ impl Database {
             "SELECT content FROM blocks WHERE content != ''",
             "SELECT properties FROM blocks WHERE properties != '{}'",
             "SELECT file_path FROM pages WHERE file_path IS NOT NULL",
-            "SELECT content FROM chat_messages WHERE content != ''",
-            "SELECT sources_json FROM chat_messages WHERE sources_json IS NOT NULL",
-            "SELECT context_json FROM chat_threads WHERE context_json != '{}'",
             "SELECT audio_path FROM audio_notes",
             "SELECT file_path FROM ink_pages",
             "SELECT value FROM block_properties WHERE value != ''",

@@ -81,6 +81,7 @@ describe("recoverable asset cleanup", () => {
   it("scans explicitly, shows busy state, full ZIP paths and sizes, and uses Settings F1 help", async () => {
     expect(invoke).not.toHaveBeenCalled();
     expect(host.textContent).toContain("Save pending edits first");
+    expect(host.textContent).toContain("AI chat history does not keep pages or attachments alive");
     expect(host.textContent).toContain("No disk space is freed");
     expect(host.textContent).toContain("References inside binary archives or books are not inspected");
     let resolve!: (value: AssetCleanupScan) => void;
@@ -100,6 +101,7 @@ describe("recoverable asset cleanup", () => {
     expect(helpPageTitle("settings")).toBe("Help - Settings");
     expect(settingsSource).toContain('<AssetCleanup />');
     expect(settingsHelp).toContain("## Asset Cleanup");
+    expect(settingsHelp).toContain("AI chat history does not keep pages or attachments alive");
     expect(settingsHelp).toContain(".grafium/asset-trash/");
     expect(settingsHelp).toContain("Never overwrite an");
     expect(settingsHelp).toContain("References inside binary archives or books are not inspected");

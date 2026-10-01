@@ -144,6 +144,29 @@ fn deleted_referenced_source_retains_target_identity_and_reconnects() -> Result<
 }
 
 #[test]
+fn chat_source_and_citations_do_not_retain_a_deleted_page() -> Result<()> {
+    let (_directory, graph) = graph();
+    let page = graph.create_page_with_content("Chat source", false, "- Original note\n")?;
+    graph.db.conn()?.execute(
+        "INSERT INTO chat_threads(id,title,source_page_id,source_page_title,context_json,created_at,updated_at)
+         VALUES('t','Discussion',?1,?2,?3,0,0)",
+        params![page.id, page.title, serde_json::json!({"pageId": page.id}).to_string()],
+    )?;
+    graph.db.conn()?.execute(
+        "INSERT INTO chat_messages(id,thread_id,position,role,content,sources_json,created_at)
+         VALUES('m','t',0,'assistant','See [[Chat source]]',?1,0)",
+        [serde_json::json!([{"pageId": page.id}]).to_string()],
+    )?;
+    graph.delete_page(&page.id)?;
+    assert!(graph.db.get_page_by_id(&page.id).is_err());
+    assert!(!graph.root_dir.join(page.file_path.unwrap()).exists());
+    let conversation = graph.db.load_chat_thread("t")?.unwrap();
+    assert_eq!(conversation.messages[0].content, "See [[Chat source]]");
+    assert_eq!(conversation.thread.source_page_id.as_deref(), Some(page.id.as_str()));
+    Ok(())
+}
+
+#[test]
 fn generated_tag_gc_preserves_shared_authored_and_favorited_pages() -> Result<()> {
     let (_directory, graph) = graph();
     let owned = graph.db.create_page("Authored empty", false)?;

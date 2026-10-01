@@ -328,8 +328,11 @@ without making page deletion itself undoable.
 Automatic cleanup errors appear as graph-bound notifications without
 discarding a successful text edit or its Undo history. Restoration errors
 instead stop Undo so it can be retried after resolving the error.
-The scan checks indexed references and saved graph text, including Markdown,
-JSON-LD notes, and configuration; unsaved drafts are not covered. Conservative
+AI chat messages, citations, and conversation context are not checked for page
+or attachment ownership. Old chat links may stop opening after cleanup; save
+an excerpt as a note if its attachments should be kept.
+The scan checks indexed data references and saved graph text, including
+Markdown, JSON-LD notes, and configuration; unsaved drafts are not covered. Conservative
 filename matching can retain duplicates. The preview is bound to its graph, and
 references and file contents are checked again before moving. Only confirmed
 moves leave the preview; errors remain visible.

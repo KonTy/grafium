@@ -47,7 +47,10 @@ reachable with **Tab** and open with **Enter**.
 
 Deleting text or blocks moves newly unreferenced attachments into persistent
 graph-local trash, rather than destroying them. Shared references are checked
-conservatively. **Undo** restores the deleted references and their files while
+conservatively. AI conversations do not own pages or attachments: their quoted
+links, citations, and context do not prevent cleanup, and old chat links may
+stop opening. Save an excerpt into a note to retain its attachments.
+**Undo** restores the deleted references and their files while
 the attachment copies remain in trash.
 Switching graphs clears Undo/Redo and the editors' local text history, even
 when the graphs contain copied pages with the same IDs. Finish an in-progress

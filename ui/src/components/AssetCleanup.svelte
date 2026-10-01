@@ -88,6 +88,7 @@
 
 <div class="asset-cleanup" data-help-context="settings">
   <p>Deleting text or blocks automatically moves newly unreferenced attachments to persistent graph-local trash. Undo restores their references and files while the attachments remain in trash. Shared references are kept conservatively. Whole-page attachment cleanup uses the same recoverable trash.</p>
+  <p>AI chat history does not keep pages or attachments alive. Quoted links, citations, and conversation context do not prevent cleanup; old chat links may stop opening. Save content as a note if its attachments should be kept.</p>
   <p>Find unreferenced attachments, including ZIP archives, not just images. Review the full graph-relative paths before moving anything.</p>
   <p><strong>Save pending edits first.</strong> Unsaved editor drafts cannot be checked. The scan checks indexed references and saved graph text, including Markdown, JSON-LD notes, and configuration. Conservative filename matches can retain duplicates.</p>
   <p>References inside binary archives or books are not inspected. This is a conservative scan of supported sources, not proof that every possible reference has been found.</p>

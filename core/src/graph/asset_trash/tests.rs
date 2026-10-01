@@ -100,7 +100,7 @@ fn shared_files_survive_until_last_reference_is_deleted() -> Result<()> {
 }
 
 #[test]
-fn page_delete_protects_jsonld_chat_and_unsaved_indexed_references() -> Result<()> {
+fn page_delete_protects_notes_and_indexed_references_but_not_chat() -> Result<()> {
     let (_dir, graph) = setup();
     let page = graph.create_page_with_content("Remove", false,
         "- [note](assets/note.zip) [chat](assets/chat.zip) [indexed](assets/indexed.zip) [unused](assets/unused.zip)\n")?;
@@ -128,14 +128,57 @@ fn page_delete_protects_jsonld_chat_and_unsaved_indexed_references() -> Result<(
     )?;
     conn.execute("INSERT INTO chat_messages(id,thread_id,position,role,content,created_at) VALUES('m','t',0,'user','assets/chat.zip',0)", [])?;
     let deleted = graph.delete_page(&page.id)?;
-    assert_eq!(deleted.deleted_assets, 1);
-    for name in ["note.zip", "chat.zip", "indexed.zip"] {
+    assert_eq!(deleted.deleted_assets, 2);
+    for name in ["note.zip", "indexed.zip"] {
         assert!(graph.root_dir.join("pages/assets").join(name).exists());
     }
     assert_eq!(
-        graph.list_asset_trash()?.assets[0].filename,
-        "pages/assets/unused.zip"
+        graph.list_asset_trash()?.assets.into_iter().map(|asset| asset.filename).collect::<Vec<_>>(),
+        vec!["pages/assets/chat.zip", "pages/assets/unused.zip"]
     );
+    assert!(!graph.root_dir.join("pages/assets/chat.zip").exists());
+    assert!(graph.db.load_chat_thread("t")?.is_some());
+    Ok(())
+}
+
+#[test]
+fn removing_last_note_reference_trashes_chat_quoted_zip_and_undo_restores_it() -> Result<()> {
+    for operation in ["edit", "single", "batch"] {
+        let (_dir, graph) = setup();
+        let page = graph.create_page_with_content(
+            "Notes", false, "- [[Ephemeral]] [archive](../assets/archive.zip)\n",
+        )?;
+        put(&graph, "assets/archive.zip", b"archive bytes");
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+        let target = graph.db.get_page_by_title("Ephemeral")?;
+        graph.db.conn()?.execute(
+            "INSERT INTO chat_threads(id,title,source_page_id,source_page_title,context_json,created_at,updated_at)
+             VALUES('t','Discussion',?1,'Ephemeral',?2,0,0)",
+            rusqlite::params![target.id, serde_json::json!({"pageId": target.id, "excerpt": block.content}).to_string()],
+        )?;
+        graph.db.conn()?.execute(
+            "INSERT INTO chat_messages(id,thread_id,position,role,content,sources_json,created_at)
+             VALUES('m','t',0,'assistant',?1,?2,0)",
+            rusqlite::params![block.content, serde_json::json!([{"pageId": target.id, "path": "../assets/archive.zip"}]).to_string()],
+        )?;
+        match operation {
+            "edit" => graph.update_block(&block.id, "No attachment", None)?,
+            "single" => graph.delete_block(&block.id)?,
+            _ => { graph.delete_blocks(&page.id, &[block.id.clone()])?; }
+        }
+        assert!(!graph.root_dir.join("assets/archive.zip").exists(), "{operation}");
+        assert_eq!(graph.list_asset_trash()?.assets.len(), 1, "{operation}");
+        assert!(graph.db.find_page_by_title("Ephemeral")?.is_none(), "{operation}");
+        assert_eq!(graph.db.load_chat_thread("t")?.unwrap().messages[0].content, block.content);
+        if operation == "edit" {
+            graph.update_block(&block.id, &block.content, None)?;
+        } else {
+            graph.create_blocks(&page.id, vec![spec(&block)])?;
+        }
+        assert_eq!(fs::read(graph.root_dir.join("assets/archive.zip"))?, b"archive bytes");
+        assert!(graph.list_asset_trash()?.assets.is_empty());
+        assert!(graph.db.get_page_by_title("Ephemeral").is_ok());
+    }
     Ok(())
 }
 

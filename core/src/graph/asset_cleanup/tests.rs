@@ -90,9 +90,9 @@ fn conservatively_retains_duplicate_names_and_asset_dependencies() {
 }
 
 #[test]
-fn protects_indexed_content_properties_and_chat() {
+fn protects_indexed_notes_and_properties_but_ignores_chat_snapshots() {
     let (_dir, graph) = setup();
-    for name in ["block.zip", "prop.png", "chat.zip"] {
+    for name in ["block.zip", "prop.png", "chat.zip", "chat-source.zip", "chat-context.zip"] {
         put(&graph, &format!("assets/{name}"), b"data");
     }
     let page = graph.db.create_page("Indexed", false).unwrap();
@@ -109,12 +109,53 @@ fn protects_indexed_content_properties_and_chat() {
         .unwrap();
     let conn = graph.db.conn().unwrap();
     conn.execute(
-        "INSERT INTO chat_threads (id,title,created_at,updated_at) VALUES ('t','Chat',0,0)",
+        "INSERT INTO chat_threads (id,title,context_json,created_at,updated_at)
+         VALUES ('t','Chat','{\"asset\":\"assets/chat-context.zip\"}',0,0)",
         [],
     )
     .unwrap();
-    conn.execute("INSERT INTO chat_messages (id,thread_id,position,role,content,created_at) VALUES ('m','t',0,'user','assets/chat.zip',0)", []).unwrap();
+    conn.execute("INSERT INTO chat_messages (id,thread_id,position,role,content,sources_json,created_at)
+        VALUES ('m','t',0,'user','[archive](../assets/chat.zip)','[{\"path\":\"assets/chat-source.zip\"}]',0)", []).unwrap();
+    conn.execute("INSERT INTO chat_messages (id,thread_id,position,role,content,created_at)
+        VALUES ('reply','t',1,'assistant','Quoted: [archive](../assets/chat.zip)',0)", []).unwrap();
+    assert_eq!(names(&graph), vec!["assets/chat-context.zip", "assets/chat-source.zip", "assets/chat.zip"]);
+    let scan = graph.scan_unused_assets().unwrap();
+    let moved = graph.trash_unused_assets(&scan.graph_path, &scan.assets).unwrap();
+    assert!(moved.errors.is_empty());
+    assert_eq!(moved.moved.len(), 3);
+    let trash = graph.list_asset_trash().unwrap();
+    let purged = graph.purge_trashed_assets(&trash.graph_path, &trash.assets).unwrap();
+    assert!(purged.errors.is_empty());
+    assert_eq!(purged.purged.len(), 3);
+    assert!(graph.db.load_chat_thread("t").unwrap().is_some());
+    assert!(graph.root_dir.join("assets/block.zip").exists());
+    assert!(graph.root_dir.join("assets/prop.png").exists());
+}
+
+#[test]
+fn chat_excerpt_saved_as_a_note_protects_its_attachment() {
+    let (_dir, graph) = setup();
+    put(&graph, "assets/chat.zip", b"archive");
+    put(&graph, "pages/Saved conversation.md", b"- Quoted answer: [archive](../assets/chat.zip)\n");
     assert!(names(&graph).is_empty());
+}
+
+#[test]
+fn asset_lifetime_checks_never_query_chat_storage() {
+    let (_dir, graph) = setup();
+    let page = graph.create_page_with_content("Only note", false, "- [file](../assets/archive.zip)\n").unwrap();
+    put(&graph, "assets/archive.zip", b"archive");
+    let block = graph.db.list_blocks_for_page(&page.id).unwrap().remove(0);
+    // In this isolated fixture, any attempted chat query must fail.
+    graph.db.conn().unwrap().execute_batch("DROP TABLE chat_messages; DROP TABLE chat_threads;").unwrap();
+    assert!(graph.scan_unused_assets().unwrap().assets.is_empty());
+    graph.delete_block(&block.id).unwrap();
+    assert!(!graph.root_dir.join("assets/archive.zip").exists());
+    let trash = graph.list_asset_trash().unwrap();
+    assert_eq!(trash.assets.len(), 1);
+    let purged = graph.purge_trashed_assets(&trash.graph_path, &trash.assets).unwrap();
+    assert!(purged.errors.is_empty());
+    assert_eq!(purged.purged.len(), 1);
 }
 
 #[test]

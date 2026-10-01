@@ -118,6 +118,15 @@ files while those files remain in trash; shared references are kept
 conservatively. Whole-page asset cleanup and manual cleanup below use the same
 trash. Restoring an attachment does not restore a deleted page.
 
+AI chat history does not keep pages or attachments alive. Messages, quoted
+links, citations, and conversation context are historical snapshots, not
+owners. They do not prevent page deletion, unused-placeholder removal, or
+attachment cleanup, so old chat links may stop opening. Save content into a
+note if it and its attachments should be kept. Real note and annotation
+references, properties, and active Studies/audio/handwriting attachments still
+protect shared files. Use **Scan for orphaned assets** to find files previously
+retained only by chat history; no conversation needs to be deleted.
+
 If automatic cleanup fails or moves only some attachments, Grafium shows an
 error notification for that graph and keeps the successful text edit and its
 Undo history. Review the warning, then scan or refresh Asset Cleanup before
