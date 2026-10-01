@@ -179,13 +179,13 @@
 
   .titlebar-left {
     height: 100%;
-    background: var(--bg-sidebar);
+    background: var(--window-bg-sidebar, var(--bg-sidebar));
     border-right: 1px solid var(--border);
     flex-shrink: 0;
   }
 
   .titlebar-left.collapsed {
-    background: var(--bg-sidebar);
+    background: var(--window-bg-sidebar, var(--bg-sidebar));
   }
 
   .titlebar-right {
@@ -196,7 +196,7 @@
     justify-content: flex-end;
     gap: 2px;
     padding-right: 4px;
-    background: var(--bg-primary);
+    background: var(--window-bg-primary, var(--bg-primary));
   }
 
   .nav-controls {

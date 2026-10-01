@@ -21,6 +21,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
             case "get_page": throw new Error("Page not found");
             case "get_app_theme": return "github";
             case "get_smplos_theme": return null;
+            case "get_system_appearance": return { themeName: null, backgroundOpacity: 1, nativeTransparency: false };
             case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "get_graph_info": return { name: "Welcome test graph", path: "/synthetic/welcome-settings" };
             case "get_app_version": return "0.0.123";

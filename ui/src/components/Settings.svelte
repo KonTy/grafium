@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { themes, applyTheme, getThemeById } from "../lib/themes";
-  import { getAppTheme, setAppTheme, getSmplosTheme, getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
+  import { themes, getThemeById } from "../lib/themes";
+  import { appearance } from "../lib/appearance";
+  import { getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import AssetCleanup from "./AssetCleanup.svelte";
   import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
   import { applySettingsSearch } from "../lib/settingsSearch";
@@ -70,8 +71,8 @@
     return () => observer.disconnect();
   });
 
-  let currentThemeId = $state("auto");
-  let smplosThemeName = $state<string | null>(null);
+  let currentThemeId = $derived($appearance.preference);
+  let smplosThemeName = $derived($appearance.system.themeName);
   let appVersion = $state("...");
   let graphPath = $state("...");
   let reindexing = $state(false);
@@ -134,21 +135,10 @@
   let addSyncPassword = $state("");
 
   $effect(() => {
-    loadCurrentTheme();
     loadSyncTargets();
     getAppVersion().then((v) => (appVersion = v)).catch(() => {});
     getGraphInfo().then((info) => (graphPath = info.path)).catch(() => {});
   });
-
-  async function loadCurrentTheme() {
-    try {
-      const [appTheme, smplos] = await Promise.all([getAppTheme(), getSmplosTheme()]);
-      currentThemeId = appTheme;
-      smplosThemeName = smplos;
-    } catch (e) {
-      console.error("Failed to load theme settings:", e);
-    }
-  }
 
   function autoSwatches(): { accent: string; bg: string; fg: string } {
     if (smplosThemeName) {
@@ -158,22 +148,9 @@
     return { accent: "#0969da", bg: "#ffffff", fg: "#1f2328" };
   }
 
-  function resolvedThemeId(): string {
-    if (currentThemeId === "auto") {
-      return smplosThemeName ?? "github";
-    }
-    return currentThemeId;
-  }
-
   async function selectTheme(themeId: string) {
-    currentThemeId = themeId;
-    const resolved = resolvedThemeId();
-    const theme = getThemeById(resolved);
-    if (theme) {
-      applyTheme(theme.colors);
-    }
     try {
-      await setAppTheme(themeId);
+      await appearance.select(themeId);
     } catch (e) {
       console.error("Failed to save theme:", e);
     }
@@ -503,6 +480,14 @@
         vivid on dark backgrounds, deeper on light backgrounds for readability.
       </p>
 
+      <p class="section-desc">
+        Auto follows the smplOS palette and background transparency live on supported Linux
+        desktops. Explicit palettes stay opaque. Text and icons do not fade when focus changes.
+        Menus, book pages, media, and the 3D space scene keep their readability backgrounds.
+      </p>
+      {#if $appearance.error}
+        <p class="section-desc" role="alert">{$appearance.error}</p>
+      {/if}
       <div class="theme-grid">
       <button
         class="theme-card"

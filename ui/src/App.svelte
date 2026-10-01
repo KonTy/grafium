@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, onMount } from "svelte";
+  import { tick, onMount, onDestroy } from "svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
@@ -24,7 +24,7 @@
   import BookImportDialog from "./components/BookImportDialog.svelte";
   import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
   import { isOriginalBookPage, isBookAnnotationPage } from "./lib/books";
-  import { getPage, createPage, recordPageOpen, getAppTheme, getSmplosTheme, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
+  import { getPage, createPage, recordPageOpen, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
   import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
@@ -36,7 +36,7 @@
   import { formatBinding, formatBindingList, groupShortcutRows } from "./lib/shortcuts";
   import type { PageNavigationTarget } from "./lib/navigation";
   import { isPageNotFoundError, resolvePageLookup } from "./lib/navigation";
-  import { applyTheme, getThemeById } from "./lib/themes";
+  import { appearance } from "./lib/appearance";
   import { attachAppUndoRedoListeners } from "./lib/undoEvents";
   import { initJobs, notifyJobFinished } from "./lib/jobs.svelte";
   import { initSyncActivity } from "./lib/syncActivity.svelte";
@@ -1046,13 +1046,6 @@
     }
   }
 
-  function defaultAutoThemeId(): string {
-    // Desktop follows smplOS, then GitHub Light. Phones have no smplOS theme
-    // file, so auto would otherwise land on a light canvas instead of OLED.
-    if (typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)) return "oled";
-    return "github";
-  }
-
   function toggleWideMode() {
     setLayoutPreferences({ wideMode: !wideMode });
   }
@@ -1499,7 +1492,7 @@
         loading = false;
       });
       // Restore the theme and menu before mapping the native window.
-      void Promise.all([initTheme(), restoreLayoutPreferences()]).then(revealStartupWindow).then(() => {
+      void Promise.all([appearance.start(), restoreLayoutPreferences()]).then(revealStartupWindow).then(() => {
         requestAnimationFrame(() => {
           const sidebar = document.querySelector(".sidebar-container");
           uiLog(`[layout] ${JSON.stringify({
@@ -1640,32 +1633,7 @@
     }
   }
 
-  async function initTheme() {
-    // Register listener first — must always succeed regardless of saved theme state
-    listen<{ theme: string }>("smplos-theme-changed", (event) => {
-      const t = getThemeById(event.payload.theme);
-      if (t) {
-        applyTheme(t.colors);
-      }
-    });
-
-    // Apply saved/smplos theme on startup
-    try {
-      const [appTheme, smplosTheme] = await Promise.all([getAppTheme(), getSmplosTheme()]);
-      const themeId = appTheme === "auto" ? (smplosTheme ?? defaultAutoThemeId()) : appTheme;
-      const theme = getThemeById(themeId);
-      if (theme) {
-        applyTheme(theme.colors);
-      }
-    } catch (e) {
-      // If theme commands fail, fall back to smplos or default
-      try {
-        const smplos = await getSmplosTheme();
-        const t = getThemeById(smplos ?? defaultAutoThemeId());
-        if (t) applyTheme(t.colors);
-      } catch (_) {}
-    }
-  }
+  onDestroy(() => appearance.stop());
 
   async function goJournalAndEdit() {
     journalEditTodayRequestId += 1;

@@ -252,45 +252,33 @@ fn start_graph_watcher(
     })
 }
 
-/// Watch ~/.config/smplos/current/theme.name for changes and emit event to frontend
+/// Poll name and palette contents, including absence and symlink replacement.
 fn start_smplos_theme_watcher(app_handle: tauri::AppHandle) {
-    let theme_path = match dirs::config_dir() {
-        Some(d) => d.join("smplos/current/theme.name"),
-        None => return,
+    let Some(current_dir) = commands::theme::smplos_current_dir() else {
+        tracing::warn!("Cannot watch smplOS appearance: configuration directory unavailable");
+        return;
     };
 
-    if !theme_path.exists() {
-        return;
-    }
-
     thread::spawn(move || {
-        use std::fs;
-
-        let mut last_content = fs::read_to_string(&theme_path)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let mut last = commands::theme::ThemeSnapshot::read(&current_dir);
+        last.log_diagnostics();
 
         loop {
             thread::sleep(Duration::from_secs(2));
 
-            let current = match fs::read_to_string(&theme_path) {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => continue,
-            };
-
-            if current != last_content && !current.is_empty() {
-                eprintln!(
-                    "[theme-watcher] smplos theme changed: {} -> {}",
-                    last_content, current
-                );
-                last_content = current.clone();
-                let _ = app_handle.emit(
+            let current = commands::theme::ThemeSnapshot::read(&current_dir);
+            if current != last {
+                current.log_diagnostics();
+                tracing::info!("smplOS appearance changed");
+                if let Err(error) = app_handle.emit(
                     "smplos-theme-changed",
                     serde_json::json!({
-                        "theme": current,
+                        "theme": current.theme_name(),
                     }),
-                );
+                ) {
+                    tracing::warn!("Could not notify appearance change: {error}");
+                }
+                last = current;
             }
         }
     });
@@ -1376,6 +1364,7 @@ pub fn run() {
             commands::sync::sync_run_all,
             commands::theme::get_smplos_theme,
             commands::theme::get_smplos_theme_colors,
+            commands::theme::get_system_appearance,
             commands::theme::get_app_theme,
             commands::theme::set_app_theme,
             commands::assets::download_asset,

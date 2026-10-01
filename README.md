@@ -293,6 +293,7 @@ access.
 | Target availability | Configured auto-sync targets synchronize when the native monitor detects that they have become available. |
 | Sync reporting | See pushed/pulled files, deletions, conflicts, and errors. File sync is not simultaneous collaborative editing; review conflicts and keep backups. |
 | Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark, with vivid, contrast-tuned reds, blues, and complementary accents for headings, tags, and callouts. Matrix keeps its green-on-black character with more colorful highlights. |
+| Background transparency | Auto follows recognized smplOS themes and their background opacity on supported Linux desktops, without fading text/icons or changing opacity on focus. Explicit Grafium palettes and unsupported desktops stay opaque; menus, paper/media, and the 3D space scene retain readability backgrounds. |
 | Reading width | Adjust narrow-view padding as a percentage on each side; the default is **15% per side**. |
 | Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. |
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
@@ -325,6 +326,15 @@ attempts may leave recovery copies even when the original was not moved.
 There is no restore UI or automatic purge, and **no disk
 space is freed** until you independently remove the trash. Trash is never synced,
 but removal of the original attachments will sync.
+
+On smplOS, Auto reads `app_background_opacity` from
+`current/theme/colors.toml` (decimal `0.0` through `1.0`). Older themes fall back
+to `popup_opacity`, then `1.0`; invalid explicit values log an error and use opaque.
+Palette edits and replacements update live. Unknown system names use the default
+opaque palette, not a custom palette import. Native alpha needs a rebuilt Grafium
+and one normal quit/reopen; the compositor must keep whole-window opacity at
+`1.0`. Linux needs an RGBA visual and, on X11, an active compositor. Transparency
+does not require changing Grafium's existing WebKit renderer safety settings.
 
 ### Useful shortcuts
 
@@ -500,6 +510,14 @@ npm run test:ui
 Browser tests start their own dev server and use Tauri IPC fixtures rather than a
 personal graph. They exercise interactions that unit tests alone cannot cover,
 including startup, journals, selection, tables, and graph rendering.
+
+Background-transparency coverage is included in `test:ui`. On Linux,
+`python3 ui/tests/transparency.webkit.py` additionally checks native WebKitGTK
+backing-store alpha using synthetic content and an isolated Xvfb display
+(requires PyGObject, Cairo, GTK3 and WebKitGTK 4.1). It verifies opaque text/icon
+interiors at clear, translucent and opaque background values with Grafium's
+renderer safeguards enabled. This is not a real Wayland/X11 compositor capture;
+desktop composition still needs release validation after the app is rebuilt.
 
 The isolated book reader has synthetic EPUB, FB2, MOBI, and PDF fixtures:
 `npm --prefix ui run test:books:ui` runs them in Chromium. On Linux,

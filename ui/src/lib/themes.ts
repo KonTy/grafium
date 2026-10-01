@@ -1,4 +1,4 @@
-import { contrastRatio } from "./contrast";
+import { contrastRatio, parseHex } from "./contrast";
 
 // Theme definitions derived from smplOS colors.toml files.
 // Each theme maps smplos color tokens to Grafium CSS variable values.
@@ -372,8 +372,21 @@ export function getThemeById(id: string): Theme | undefined {
   return themes.find((t) => t.id === normalized || normalizeThemeId(t.name) === normalized);
 }
 
-export function applyTheme(theme: ThemeColors): void {
+export function applyTheme(theme: ThemeColors, backgroundOpacity = 1): void {
   const root = document.documentElement;
+  if (!Number.isFinite(backgroundOpacity) || backgroundOpacity < 0 || backgroundOpacity > 1) {
+    console.error("[theme] Invalid background opacity; using an opaque background.", backgroundOpacity);
+    backgroundOpacity = 1;
+  }
+  root.toggleAttribute("data-window-transparency", backgroundOpacity < 1);
+  for (const [name, color] of [
+    ["primary", theme.bgPrimary],
+    ["secondary", theme.bgSecondary],
+    ["sidebar", theme.bgSidebar],
+  ]) {
+    const { r, g, b } = parseHex(color);
+    root.style.setProperty(`--window-bg-${name}`, `rgba(${r}, ${g}, ${b}, ${backgroundOpacity})`);
+  }
   root.style.setProperty("--bg-primary", theme.bgPrimary);
   root.style.setProperty("--bg-secondary", theme.bgSecondary);
   root.style.setProperty("--bg-sidebar", theme.bgSidebar);
