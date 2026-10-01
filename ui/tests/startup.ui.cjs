@@ -75,6 +75,7 @@ async function newPage(browser, cache = JSON.stringify({
             }
             return "oled";
           case "get_smplos_theme": return null;
+          case "get_system_appearance": return { themeName: null, backgroundOpacity: 1, nativeTransparency: false };
           case "reveal_startup_window":
             window.__startupReveals.push({
               background: args.background,

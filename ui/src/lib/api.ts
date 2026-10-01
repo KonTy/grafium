@@ -602,6 +602,16 @@ export function getTutorialGraphPath(): Promise<string> {
 }
 
 // Theme
+export interface SystemAppearance {
+  themeName: string | null;
+  backgroundOpacity: number;
+  nativeTransparency: boolean;
+}
+
+export function getSystemAppearance(): Promise<SystemAppearance> {
+  return invoke("get_system_appearance", {});
+}
+
 export function getSmplosTheme(): Promise<string | null> {
   return invoke("get_smplos_theme", {});
 }

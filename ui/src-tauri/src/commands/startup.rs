@@ -2,8 +2,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{State, WebviewWindow};
 use tauri::Manager;
+use tauri::{State, WebviewWindow};
 
 /// Startups slower than this leave a phase report in `startup-slow.log` in the
 /// app data directory, so a stall that can't be reproduced on demand still
@@ -69,7 +69,10 @@ fn report_startup(app_data: Option<&Path>, how: &str) {
         .unwrap_or_default();
     let line = format!("unix={unix} {how}: {report}\n");
     if let Err(error) = file.and_then(|mut f| f.write_all(line.as_bytes())) {
-        tracing::warn!("Could not record slow startup in {}: {error}", path.display());
+        tracing::warn!(
+            "Could not record slow startup in {}: {error}",
+            path.display()
+        );
     }
 }
 
@@ -88,17 +91,25 @@ impl StartupWindow {
 }
 
 #[cfg(desktop)]
-fn show(window: &WebviewWindow, background: [u8; 3]) -> Result<(), String> {
-    let [r, g, b] = background;
-    // Color both the native surface and WebKit's backing surface before mapping.
-    if let Err(error) = window.set_background_color(Some(tauri::window::Color(r, g, b, 255))) {
+fn show(window: &WebviewWindow, background: [u8; 3], transparent: bool) -> Result<(), String> {
+    // WebviewWindow updates both native and WebKit backing surfaces. CSS alone
+    // owns the requested alpha; applying it here too would multiply opacity.
+    if let Err(error) = window.set_background_color(Some(backing_color(background, transparent))) {
         tracing::warn!("Could not set startup window background: {error}");
     }
     window.show().map_err(|e| e.to_string())
 }
 
+fn backing_color([r, g, b]: [u8; 3], transparent: bool) -> tauri::window::Color {
+    if transparent {
+        tauri::window::Color(0, 0, 0, 0)
+    } else {
+        tauri::window::Color(r, g, b, 255)
+    }
+}
+
 #[tauri::command]
-pub fn reveal_startup_window(
+pub async fn reveal_startup_window(
     window: WebviewWindow,
     state: State<'_, StartupWindow>,
     background: [u8; 3],
@@ -106,13 +117,18 @@ pub fn reveal_startup_window(
     if window.label() != "main" {
         return Err("Only the main window can complete startup".into());
     }
+    #[cfg(desktop)]
+    let transparent = super::theme::native_transparency(&window).await;
     state.reveal_once(|| {
         #[cfg(desktop)]
-        show(&window, background)?;
+        show(&window, background, transparent)?;
         #[cfg(mobile)]
         let _ = background;
         tracing::info!("Startup window ready");
-        report_startup(window.app_handle().path().app_data_dir().ok().as_deref(), "ready");
+        report_startup(
+            window.app_handle().path().app_data_dir().ok().as_deref(),
+            "ready",
+        );
         Ok(())
     })
 }
@@ -125,6 +141,7 @@ pub fn install_fallback(app: &tauri::AppHandle) {
         let Some(window) = app.get_webview_window("main") else {
             return;
         };
+        let transparent = super::theme::native_transparency(&window).await;
         let result = app.state::<StartupWindow>().reveal_once(|| {
             tracing::warn!("Startup readiness timed out; showing the recovery window");
             if let Err(error) = window.eval(
@@ -137,7 +154,7 @@ pub fn install_fallback(app: &tauri::AppHandle) {
             ) {
                 tracing::warn!("Could not display startup recovery message: {error}");
             }
-            let shown = show(&window, [30, 30, 46]);
+            let shown = show(&window, [30, 30, 46], transparent);
             report_startup(app.path().app_data_dir().ok().as_deref(), "fallback");
             shown
         });
@@ -149,8 +166,20 @@ pub fn install_fallback(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_phases, StartupWindow};
+    use super::{backing_color, format_phases, StartupWindow};
     use std::time::Duration;
+
+    #[test]
+    fn backing_alpha_is_clear_only_when_native_transparency_is_supported() {
+        assert_eq!(
+            backing_color([30, 40, 50], true),
+            tauri::window::Color(0, 0, 0, 0)
+        );
+        assert_eq!(
+            backing_color([30, 40, 50], false),
+            tauri::window::Color(30, 40, 50, 255)
+        );
+    }
 
     #[test]
     fn phase_report_shows_each_phase_duration() {

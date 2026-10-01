@@ -28,6 +28,29 @@ Matrix keeps its green text, black canvas, and terminal font, with colorful
 headings and highlights rather than an all-green page. OLED keeps its true-black
 background. Selecting another theme updates these colors immediately.
 
+**Auto** follows a recognized smplOS theme, including its background opacity on
+supported Linux desktops. The desktop can show through the window background;
+text and icons are not faded, and switching focus does not change the opacity.
+Explicitly selecting a Grafium palette keeps it opaque, even when smplOS changes.
+Without smplOS or native transparency support, Auto stays opaque. Unknown system
+theme names use the default opaque palette rather than importing custom colors.
+
+smplOS themes set `app_background_opacity` in `current/theme/colors.toml` to a
+decimal from `0.0` (clear background) to `1.0` (opaque). When absent, Grafium uses
+`popup_opacity`, then `1.0`. An invalid explicit value is reported in the log and
+uses `1.0`; it does not fall through to an older value. Changes to the palette,
+including replacement without a theme rename, are picked up while Grafium runs.
+
+Menus, dialog cards, code surfaces, original book/PDF pages, media, and the 3D
+space scene retain their readability backgrounds. Ordinary notes and editors,
+the 2D graph background, and window chrome can show the desktop. Contrast depends
+on what is behind a transparent window; use an explicit palette for opaque reading.
+The compositor must leave Grafium's whole-window opacity at `1.0`.
+
+Enabling native transparency requires a rebuilt Grafium and one normal quit and
+reopen. Later theme opacity changes are live. This does not migrate or refresh
+existing tutorial graphs, and installing a build does not restart a running app.
+
 ## AI / Knowledge Engine
 
 Open this section to configure an embedded local model, Ollama, an

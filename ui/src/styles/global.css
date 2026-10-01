@@ -128,6 +128,30 @@ body {
   overflow: hidden;
 }
 
+/* Each window region paints once. Solid palette tokens remain available for
+   popovers, code, paper and media; making those tokens translucent stacks alpha. */
+html[data-window-transparency],
+html[data-window-transparency] body,
+html[data-window-transparency] .app-shell.zen {
+  background: transparent;
+}
+
+html[data-window-transparency] .main-content {
+  background: var(--window-bg-primary);
+}
+
+html[data-window-transparency] :is(.titlebar-left, .sidebar) {
+  background: var(--window-bg-sidebar);
+}
+
+html[data-window-transparency] :is(.titlebar-right, .sidebar-resizer, .reference-panel-resizer) {
+  background: var(--window-bg-primary);
+}
+
+html[data-window-transparency] :is(.chat-view, .journal-toolbar, .unified-page-editor .cm-editor, .unified-page-editor .cm-gutters) {
+  background: transparent;
+}
+
 /* Inline code must not put accent-colored heading text on a chrome surface. */
 :is(h1, h2, h3, h4, h5, h6) {
   --bg-code: var(--bg-primary);

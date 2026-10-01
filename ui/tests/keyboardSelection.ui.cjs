@@ -53,6 +53,8 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       journal.push(block("day-0", "journal-grandchild", 0, "Hidden journal grandchild", "journal-hidden"));
     }
     let sequence = 0;
+    const callbacks = new Map();
+    const listeners = new Map();
     const state = window.__selectionState = {
       pages: [note, ...days], blocks: [...standalone, ...journal], calls: [], completed: [],
       unhandledIpc: [],
@@ -63,6 +65,11 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       clipboard: [], clipboardRequests: [], clipboardWaiters: [], holdClipboard: false, failClipboard: false,
       fallbackClipboard: null, clipboardFallbacks: [], deleteFocus: [],
       holdDelete: false, deleteWaiters: [], holdReload: false, reloadReads: [],
+      emit(event, payload = {}) {
+        for (const [id, entry] of listeners) {
+          if (entry.event === event) callbacks.get(entry.handler)?.({ event, id, payload });
+        }
+      },
     };
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
       writeText: async (text) => {
@@ -86,7 +93,9 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
-      plugins: {}, transformCallback() { return ++sequence; }, unregisterCallback() {},
+      plugins: {},
+      transformCallback(callback) { const id = ++sequence; callbacks.set(id, callback); return id; },
+      unregisterCallback(id) { callbacks.delete(id); },
       invoke: async (cmd, args = {}) => {
         state.calls.push({ cmd, args: structuredClone(args) });
         switch (cmd) {
@@ -99,8 +108,8 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "discover_link_candidates": case "list_link_candidates":
             return [];
           case "ui_log": case "record_page_open": case "reveal_startup_window":
-          case "plugin:event|unlisten":
             return;
+          case "plugin:event|unlisten": listeners.delete(args.eventId); return;
           case "ai_get_config": return { enabled: false, mode: "local" };
           case "ai_health_check": return {
             enabled: false, llm_available: false, embedder_available: false,
@@ -132,7 +141,10 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
               section: null, book: isBook ? { pageId: source.id, title: source.title } : null,
             };
           }
-          case "get_app_theme": return state.theme ?? "github";
+          case "get_app_theme": return state.theme ?? options.theme ?? "github";
+          case "get_system_appearance": return state.appearance ?? options.appearance ??
+            { themeName: null, backgroundOpacity: 1, nativeTransparency: false };
+          case "get_graph_data": return options.graphData ?? { nodes: [], edges: [] };
           case "set_app_theme": state.theme = args.themeId; return;
           case "get_smplos_theme": return null;
           case "research_get_config": throw new Error("unknown command research_get_config");
@@ -269,7 +281,11 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "plugin:clipboard-manager|write_text":
             state.clipboard.push(args.text);
             return;
-          case "plugin:event|listen": return ++sequence;
+          case "plugin:event|listen": {
+            const id = ++sequence;
+            listeners.set(id, args);
+            return id;
+          }
           default:
             state.unhandledIpc.push(cmd);
             throw new Error(`Unhandled synthetic IPC command: ${cmd}`);

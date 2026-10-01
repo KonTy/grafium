@@ -1,4 +1,19 @@
 {
+  "app": {
+    "windows": [
+      {
+        "title": "Grafium",
+        "visible": false,
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "incognito": true,
+        "transparent": true
+      }
+    ]
+  },
   "bundle": {
     "resources": {
       "../../target/release/bundled-libs/*": ""

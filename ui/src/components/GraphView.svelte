@@ -370,8 +370,10 @@
     const themeColor = (name: string, fallback: string) =>
       theme.getPropertyValue(name).trim() || fallback;
     const backgroundColor = themeColor("--bg-primary", "#16161e");
-    ctx.fillStyle = backgroundColor;
-    ctx.fillRect(0, 0, width, height);
+    if (!document.documentElement.hasAttribute("data-window-transparency")) {
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, width, height);
+    }
 
     const edgeColor = themeColor("--text-muted", "#777");
     const textColor = themeColor("--text-secondary", "#aaa");
