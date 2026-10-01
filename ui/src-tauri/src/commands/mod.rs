@@ -19,6 +19,7 @@ pub mod reading_notes;
 pub mod research;
 pub mod startup;
 pub mod studies;
+pub mod study_link;
 pub mod study_player;
 pub mod sync;
 pub mod tasks;

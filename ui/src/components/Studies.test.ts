@@ -5,10 +5,10 @@ import type { StudyItem } from "../lib/studies";
 import { localStudyDay } from "../lib/studySources";
 
 const api = vi.hoisted(() => ({
-  listStudies: vi.fn(), saveStudy: vi.fn(), removeStudy: vi.fn(),
+  listStudies: vi.fn(), saveStudy: vi.fn(), removeStudy: vi.fn(), fetchStudyLinkTitle: vi.fn(),
   listPageSummaries: vi.fn(), getPage: vi.fn(), listFlashcardTopics: vi.fn(), listAssets: vi.fn(),
 }));
-vi.mock("../lib/studies", () => ({ listStudies: api.listStudies, saveStudy: api.saveStudy, removeStudy: api.removeStudy }));
+vi.mock("../lib/studies", () => ({ listStudies: api.listStudies, saveStudy: api.saveStudy, removeStudy: api.removeStudy, fetchStudyLinkTitle: api.fetchStudyLinkTitle }));
 vi.mock("../lib/api", () => ({ listPageSummaries: api.listPageSummaries, getPage: api.getPage, listFlashcardTopics: api.listFlashcardTopics, listAssets: api.listAssets }));
 vi.mock("../lib/books", () => ({ isOriginalBookPage: (page: { properties: Record<string, unknown> }) => page.properties["book-id"] === "original" }));
 import Studies from "./Studies.svelte";
@@ -27,6 +27,7 @@ beforeEach(() => {
   api.listFlashcardTopics.mockResolvedValue([{ topic: "physics", total: 10, due: 2 }]);
   api.listAssets.mockResolvedValue(["assets/lesson.mp3", "assets/movie.mp4"]);
   api.saveStudy.mockImplementation(async (_graph, item) => item);
+  api.fetchStudyLinkTitle.mockResolvedValue("A helpful lesson");
 });
 function button(text: string) {
   return [...document.querySelectorAll<HTMLButtonElement>("button")].find(element => element.textContent?.trim() === text)!;
@@ -34,6 +35,21 @@ function button(text: string) {
 function input(label: string, value: string) {
   const field = [...document.querySelectorAll("label")].find(element => element.textContent?.startsWith(label) && element.querySelector("input"))!.querySelector("input")!;
   field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); flushSync();
+}
+function selectTopic(value: string) {
+  const select = document.querySelector<HTMLSelectElement>(".topic-picker select")!;
+  select.value = value; select.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
+}
+function newTopic(value: string) {
+  selectTopic("new"); input("New topic", value);
+}
+async function openAdd() {
+  component = mount(Studies, { target: document.body, props: { graphPath: "/graph", onOpen: vi.fn() } });
+  await vi.waitFor(() => expect(document.querySelector('[role="status"]')).toBeNull());
+  button("+ Add study").click(); flushSync();
+}
+function titleValue() {
+  return document.querySelector<HTMLInputElement>(".form-grid input")!.value;
 }
 
 describe("Studies library", () => {
@@ -50,7 +66,7 @@ describe("Studies library", () => {
     expect(document.querySelector(".stats")?.textContent).toContain("1m 30s");
     button("Continue").click(); expect(onOpen).toHaveBeenCalledWith(item);
     document.querySelector<HTMLButtonElement>(".topic")!.click(); flushSync();
-    input("Topic", "French"); button("Save topic").click();
+    newTopic("French"); button("Save topic").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ id: "study", topic: "French" })));
     await vi.waitFor(() => expect(document.querySelector(".topic-edit")).toBeNull());
     filter.value = ""; filter.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
@@ -78,7 +94,7 @@ describe("Studies library", () => {
     await vi.waitFor(() => expect(button("Physics")).toBeTruthy());
     button("Physics").click();
     await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('.form-grid input')?.value).toBe("Physics"));
-    input("Topic", "Natural sciences");
+    newTopic("Natural sciences");
     button("Add study").click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Disk full"));
     expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ source: "page", kind: "page", topic: "Natural sciences" }));
@@ -110,7 +126,7 @@ describe("Studies library", () => {
     search.value = "French"; search.dispatchEvent(new Event("input", { bubbles: true })); flushSync();
     expect(document.querySelectorAll(".study-row")).toHaveLength(1);
     document.querySelector<HTMLButtonElement>(".topic")!.click(); flushSync();
-    input("Topic", "French"); button("Save topic").click();
+    newTopic("French"); button("Save topic").click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Latest progress: 80%"));
     expect(document.querySelector("progress")?.value).toBe(80);
   });
@@ -140,5 +156,159 @@ describe("Studies library", () => {
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
       source: "assets/lesson.mp3", kind: "audio", topic: "General",
     })));
+  });
+  it("pastes YouTube links without first choosing a source type and saves the fetched title", async () => {
+    await openAdd();
+    input("Paste a web link", "https://youtu.be/dQw4w9WgXcQ?t=10");
+    expect(document.querySelector<HTMLSelectElement>(".form-grid select")!.value).toBe("youtube");
+    await vi.waitFor(() => expect(titleValue()).toBe("A helpful lesson"));
+    expect(api.fetchStudyLinkTitle).toHaveBeenCalledWith("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      kind: "youtube", source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", title: "A helpful lesson",
+    })));
+  });
+  it("uses the latest URL and ignores an out-of-order title response", async () => {
+    let finishOld!: (value: string) => void;
+    api.fetchStudyLinkTitle.mockReturnValueOnce(new Promise<string>(resolve => { finishOld = resolve; }));
+    await openAdd();
+    input("Paste a web link", "https://old.example/lesson");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
+    input("Paste a web link", "https://new.example/lesson");
+    await vi.waitFor(() => expect(titleValue()).toBe("A helpful lesson"));
+    finishOld("Old lesson"); await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("A helpful lesson");
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      kind: "website", source: "https://new.example/lesson", title: "A helpful lesson",
+    })));
+  });
+  it("never replaces a user-edited title, including edits made during a lookup", async () => {
+    let finish!: (value: string) => void;
+    api.fetchStudyLinkTitle.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    await openAdd();
+    input("Paste a web link", "https://example.com/lesson");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
+    input("Title", "My personal title");
+    finish("Fetched title"); await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("My personal title");
+    input("Paste a web link", "https://example.com/another");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(2));
+    expect(titleValue()).toBe("My personal title");
+  });
+  it("shows lookup failures, supports retry, and still permits manual titles", async () => {
+    api.fetchStudyLinkTitle.mockRejectedValue(new Error("Site unavailable"));
+    await openAdd();
+    input("Paste a web link", "https://example.com/lesson");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Site unavailable"));
+    button("Retry title lookup").click();
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(2));
+    input("Title", "Manual title"); button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ title: "Manual title" })));
+  });
+  it("cancels a debounced lookup when the form closes and ignores late results after reopening", async () => {
+    await openAdd();
+    input("Paste a web link", "https://example.com/not-requested");
+    button("Cancel").click(); flushSync();
+    await new Promise(resolve => setTimeout(resolve, 500));
+    expect(api.fetchStudyLinkTitle).not.toHaveBeenCalled();
+    button("+ Add study").click(); flushSync();
+    let finish!: (value: string) => void;
+    api.fetchStudyLinkTitle.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    input("Paste a web link", "https://example.com/lesson");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
+    button("Cancel").click(); flushSync(); button("+ Add study").click(); flushSync();
+    finish("Old form title"); await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("");
+  });
+  it("ignores metadata when changing graphs and clears prior topic choices", async () => {
+    let finish!: (value: string) => void;
+    api.fetchStudyLinkTitle.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    api.listStudies.mockResolvedValueOnce({ items: [], days: [], topics: ["Old graph topic"] });
+    const state = new SvelteMap([["graph", "/old"]]);
+    component = mount(Studies, { target: document.body, props: {
+      get graphPath() { return state.get("graph")!; }, onOpen: vi.fn(),
+    } });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("A little learning"));
+    button("+ Add study").click(); flushSync();
+    input("Paste a web link", "https://example.com/lesson");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
+    state.set("graph", "/new"); flushSync();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("A little learning"));
+    button("+ Add study").click(); flushSync();
+    finish("Other graph title"); await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("");
+    expect(document.querySelector(".topic-picker")!.textContent).not.toContain("Old graph topic");
+  });
+  it("infers direct media titles from filenames without fetching their contents", async () => {
+    await openAdd();
+    input("Paste a web link", "https://example.com/Chinese-lesson.mp3");
+    expect(titleValue()).toBe("Chinese lesson");
+    expect(document.querySelector<HTMLSelectElement>(".form-grid select")!.value).toBe("audio");
+    await vi.waitFor(() => expect(button("Add study").disabled).toBe(false));
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      kind: "audio", source: "https://example.com/Chinese-lesson.mp3", title: "Chinese lesson",
+    })));
+    expect(api.fetchStudyLinkTitle).not.toHaveBeenCalled();
+  });
+  it("keeps manually selected media types for extensionless URLs and cancels old title lookups", async () => {
+    let finish!: (value: string) => void;
+    api.fetchStudyLinkTitle.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    await openAdd();
+    input("Paste a web link", "https://example.com/old");
+    await vi.waitFor(() => expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1));
+    const kind = document.querySelector<HTMLSelectElement>(".form-grid select")!;
+    kind.value = "audio"; kind.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
+    input("Media URL", "https://example.com/stream?id=42");
+    input("Title", "Streaming lesson");
+    finish("Wrong title"); await Promise.resolve(); flushSync();
+    expect(titleValue()).toBe("Streaming lesson");
+    expect(kind.value).toBe("audio");
+    await vi.waitFor(() => expect(button("Add study").disabled).toBe(false));
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      kind: "audio", source: "https://example.com/stream?id=42", title: "Streaming lesson",
+    })));
+  });
+  it("debounces rapid URL changes and allows an inline topic to reuse a previous choice", async () => {
+    api.listStudies.mockResolvedValue({ items: [fixture()], days: [], topics: ["Health"] });
+    await openAdd();
+    input("Paste a web link", "https://example.com/first");
+    input("Paste a web link", "https://example.com/second");
+    await vi.waitFor(() => expect(titleValue()).toBe("A helpful lesson"));
+    expect(api.fetchStudyLinkTitle).toHaveBeenCalledTimes(1);
+    expect(api.fetchStudyLinkTitle).toHaveBeenCalledWith("https://example.com/second");
+    button("Cancel").click(); flushSync();
+    document.querySelector<HTMLButtonElement>(".topic")!.click(); flushSync();
+    selectTopic("topic:Health");
+    button("Save topic").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      id: "study", topic: "Health",
+    })));
+  });
+  it("reuses past topics and offers arbitrary new topics without sentinel collisions", async () => {
+    api.listStudies.mockResolvedValue({ items: [], days: [], topics: ["Health", "new", "topic:Language"] });
+    await openAdd();
+    const select = document.querySelector<HTMLSelectElement>(".topic-picker select")!;
+    expect([...select.options].map(option => option.textContent)).toEqual(expect.arrayContaining(["General", "Health", "new", "topic:Language", "+ Add a new topic..."]));
+    selectTopic("topic:Health");
+    expect(document.querySelector(".topic-picker input")).toBeNull();
+    newTopic("New arbitrary topic");
+    expect(document.activeElement?.getAttribute("placeholder")).toBe("Name your topic");
+    selectTopic("topic:new");
+    input("Paste a web link", "https://example.com/lesson");
+    await vi.waitFor(() => expect(titleValue()).toBe("A helpful lesson"));
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({ topic: "new" })));
+  });
+  it("rejects a whitespace-only new topic instead of silently saving it as General", async () => {
+    await openAdd();
+    await vi.waitFor(() => expect(button("Physics")).toBeTruthy());
+    button("Physics").click();
+    await vi.waitFor(() => expect(titleValue()).toBe("Physics"));
+    newTopic("   "); button("Add study").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Give the topic a name"));
+    expect(api.saveStudy).not.toHaveBeenCalled();
   });
 });

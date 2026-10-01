@@ -26,6 +26,7 @@ export interface StudyDay {
 export interface StudySnapshot {
   items: StudyItem[];
   days: StudyDay[];
+  topics?: string[];
 }
 
 export const listStudies = (graphPath: string) =>
@@ -34,6 +35,9 @@ export const saveStudy = (graphPath: string, item: StudyItem) =>
   invoke<StudyItem>("save_study", { graphPath, item });
 export const removeStudy = (graphPath: string, id: string) =>
   invoke<void>("remove_study", { graphPath, id });
+
+export const fetchStudyLinkTitle = (url: string): Promise<string> =>
+  invoke<string>("study_link_title", { url });
 
 export async function recordStudyActivity(
   graphPath: string, id: string, seconds: number, day: string, progress: StudyProgress | null,

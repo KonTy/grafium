@@ -53,6 +53,20 @@ export function normalizeStudySource(kind: StudyItem["kind"], source: string): s
   return decoded;
 }
 
+export function studySourceFromLink(source: string): {
+  kind: StudyItem["kind"]; source: string; filenameTitle?: string;
+} {
+  const url = webStudyUrl(/^www\./i.test(source.trim()) ? `https://${source.trim()}` : source);
+  if (["youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"].includes(url.hostname.toLowerCase()))
+    return { kind: "youtube", source: normalizeStudySource("youtube", url.href) };
+  const filename = url.pathname.split("/").at(-1) ?? "";
+  const extension = filename.split(".").at(-1)?.toLowerCase() ?? "";
+  const kind = ["mp3", "wav", "ogg", "m4a", "aac", "flac", "opus"].includes(extension) ? "audio"
+    : ["mp4", "webm", "mov", "m4v", "ogv"].includes(extension) ? "video" : "website";
+  return { kind, source: url.href,
+    ...(kind !== "website" ? { filenameTitle: decodeURIComponent(filename).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ") } : {}) };
+}
+
 export function finiteStudyProgress(position: number, total: number, label = "", anchor = ""): StudyProgress {
   const duration = Number.isFinite(total) && total > 0 ? total : 0;
   const current = Number.isFinite(position) && position > 0 ? position : 0;

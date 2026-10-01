@@ -18,17 +18,19 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
             items: [
               entry("reading", "Reading practice", "page", "selection-page", "Health"),
               entry("cards", "Chinese cards", "flashcards", "chinese", "Chinese"),
-            ], days: [], writes: [], receipts: new Set(),
+            ], days: [], topics: ["Health", "Chinese", "Past topic"], writes: [], receipts: new Set(),
           };
           const original = internals.invoke;
           internals.invoke = async (command, args = {}) => {
             if (["list_studies", "save_study", "remove_study", "record_study_activity"].includes(command)) {
               assertGraph(args.graphPath);
             }
-            if (command === "list_studies") return structuredClone({ items: fixture.items, days: fixture.days });
+            if (command === "list_studies") return structuredClone({ items: fixture.items, days: fixture.days, topics: fixture.topics });
+            if (command === "study_link_title") return args.url.includes("youtube.com") ? "Video lesson" : "Reading website";
             if (command === "save_study") {
               const item = structuredClone(args.item);
               fixture.items = fixture.items.filter(old => old.id !== item.id).concat(item);
+              fixture.topics = [...new Set([...fixture.topics, item.topic])];
               return item;
             }
             if (command === "remove_study") {
@@ -99,10 +101,10 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
     await page.getByRole("button", { name: "Back to Studies", exact: true }).click();
     await page.getByRole("button", { name: "+ Add study", exact: true }).click();
     const form = page.locator("form.add-form");
-    await form.getByLabel("Source type").selectOption("website");
-    await form.getByLabel("Title", { exact: true }).fill("Reading website");
-    await form.getByLabel("Topic", { exact: true }).fill("Health");
-    await form.getByLabel("URL", { exact: true }).fill("https://example.com/lesson");
+    await form.getByLabel("Paste a web link").fill("https://example.com/lesson");
+    await page.waitForFunction(() => document.querySelector(".form-grid input").value === "Reading website");
+    assert.equal(await form.getByLabel("Source type").inputValue(), "website");
+    await form.getByLabel("Topic", { exact: true }).selectOption("topic:Health");
     await form.getByRole("button", { name: "Add study", exact: true }).click();
     await page.getByRole("button", { name: "Reading website", exact: true }).click();
     await page.getByLabel("Where did you leave off?").fill("Section 4");
@@ -114,11 +116,23 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
     assert.equal(await page.getByRole("button", { name: "Chinese cards", exact: true }).count(), 0);
     await page.getByText("Section 4", { exact: true }).waitFor();
     if (process.env.STUDIES_SCREENSHOT) await page.screenshot({ path: process.env.STUDIES_SCREENSHOT });
+    await page.getByRole("button", { name: "+ Add study", exact: true }).click();
+    await form.getByLabel("Paste a web link").fill("https://youtu.be/dQw4w9WgXcQ");
+    await page.waitForFunction(() => document.querySelector(".form-grid input").value === "Video lesson");
+    assert.equal(await form.getByLabel("Source type").inputValue(), "youtube");
+    await form.getByLabel("Topic", { exact: true }).selectOption("topic:Past topic");
+    await form.getByLabel("Topic", { exact: true }).selectOption("new");
+    await form.getByLabel("New topic", { exact: true }).fill("Learning");
+    if (process.env.STUDIES_FORM_SCREENSHOT) await page.screenshot({ path: process.env.STUDIES_FORM_SCREENSHOT });
+    await form.getByRole("button", { name: "Add study", exact: true }).click();
+    await page.locator(".library-heading select").selectOption("topic:Learning");
+    await page.getByRole("button", { name: "Video lesson", exact: true }).waitFor();
+    assert.ok(await page.evaluate(() => window.__studiesFixture.items.some(item => item.kind === "youtube" && item.topic === "Learning")));
     await page.keyboard.press("F1");
     await page.getByText("90 seconds of inactivity.").waitFor();
     assert.deepEqual(errors, []);
     assert.equal(await page.evaluate(() => window.__selectionState.calls.some(call => call.cmd === "create_page")), false);
-    console.log("PASS Studies: navigation, source resume, clock controls, topic review, manual website checkpoints, filtering, and F1");
+    console.log("PASS Studies: navigation, source resume, clock controls, URL title prefill, topic reuse/creation, manual checkpoints, filtering, and F1");
   } finally {
     await browser.close();
   }

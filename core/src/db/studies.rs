@@ -54,6 +54,7 @@ pub struct StudyDay {
 pub struct StudySnapshot {
     pub items: Vec<StudyItem>,
     pub days: Vec<StudyDay>,
+    pub topics: Vec<String>,
 }
 
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
@@ -82,7 +83,13 @@ pub(super) fn initialize(conn: &Connection) -> Result<()> {
             payload TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_study_receipts_item
-            ON study_activity_receipts(item_id);",
+            ON study_activity_receipts(item_id);
+        CREATE TABLE IF NOT EXISTS study_topics (
+            name TEXT PRIMARY KEY NOT NULL CHECK(name != '')
+        );
+        INSERT OR IGNORE INTO study_topics(name)
+            SELECT topic FROM study_items WHERE topic != ''
+            UNION SELECT topic FROM study_days WHERE topic != '';",
     )?;
     tx.commit()?;
     Ok(())
@@ -214,8 +221,16 @@ impl Database {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let topics = tx
+            .prepare("SELECT name FROM study_topics ORDER BY name")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         tx.commit()?;
-        Ok(StudySnapshot { items, days })
+        Ok(StudySnapshot {
+            items,
+            days,
+            topics,
+        })
     }
 }
 
@@ -553,6 +568,11 @@ mod tests {
                 })?,
                 0
             );
+            drop(conn);
+            drop(graph);
+            let graph = crate::Graph::open(&root)?;
+            assert!(graph.db.list_studies()?.items.is_empty());
+            assert_eq!(graph.db.list_studies()?.topics, vec!["Physics"]);
             Ok(())
         })();
         std::fs::remove_dir_all(&root)?;
@@ -595,6 +615,65 @@ mod tests {
         second.remove_study("study-one")?;
         first.delete_page(&page.id)?;
         assert_eq!(first.list_studies()?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn studies_topic_migration_preserves_history_after_retag_and_removal() -> Result<()> {
+        let db = Database::in_memory()?;
+        let mut study = db.save_study(item())?;
+        db.record_study_activity(&study.id, 10.0, "2026-09-30", None, &request())?;
+        study.topic = "Astronomy".into();
+        study = db.save_study(study)?;
+        let mut empty = item();
+        empty.id = "untagged".into();
+        empty.topic.clear();
+        db.save_study(empty)?;
+        let conn = db.conn()?;
+        // Simulate an existing graph before topic-history storage. Physics
+        // exists only in activity, while Astronomy exists only on the item.
+        conn.execute_batch("DROP TABLE study_topics;")?;
+        initialize(&conn)?;
+        initialize(&conn)?;
+        drop(conn);
+        assert_eq!(db.list_studies()?.topics, vec!["Astronomy", "Physics"]);
+        study.topic = "Chemistry".into();
+        db.save_study(study.clone())?;
+        db.remove_study(&study.id)?;
+        db.remove_study("untagged")?;
+        let snapshot = db.list_studies()?;
+        assert!(snapshot.items.is_empty());
+        assert!(snapshot.days.is_empty());
+        assert_eq!(snapshot.topics, vec!["Astronomy", "Chemistry", "Physics"]);
+        let conn = db.conn()?;
+        initialize(&conn)?;
+        drop(conn);
+        assert_eq!(db.list_studies()?, snapshot);
+        assert_eq!(
+            serde_json::to_value(snapshot)?["topics"],
+            serde_json::json!(["Astronomy", "Chemistry", "Physics"])
+        );
+        assert!(Database::in_memory()?.list_studies()?.topics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn studies_topic_history_and_metadata_are_saved_atomically() -> Result<()> {
+        let db = Database::in_memory()?;
+        let original = db.save_study(item())?;
+        let conn = db.conn()?;
+        conn.execute_batch(
+            "CREATE TRIGGER fail_topic_save BEFORE INSERT ON study_topics
+             BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+        )?;
+        drop(conn);
+        let mut changed = original.clone();
+        changed.topic = "Unsaved topic".into();
+        changed.title = "Unsaved title".into();
+        assert!(db.save_study(changed).is_err());
+        let snapshot = db.list_studies()?;
+        assert_eq!(snapshot.items, vec![original]);
+        assert_eq!(snapshot.topics, vec!["Physics"]);
         Ok(())
     }
 
@@ -677,6 +756,12 @@ impl Database {
             )?;
         }
         item.updated_at = now;
+        if !item.topic.is_empty() {
+            tx.execute(
+                "INSERT OR IGNORE INTO study_topics(name) VALUES(?1)",
+                [&item.topic],
+            )?;
+        }
         tx.commit()?;
         Ok(item)
     }

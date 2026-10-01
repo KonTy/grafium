@@ -12,7 +12,20 @@ Choose a graph page (including a link-created placeholder), original book,
 flashcard topic, audio/video source, YouTube video, or website.
 For a graph link such as `[[Supplements]]`, choose its page in the picker.
 
-Give each row an arbitrary **Topic** such as Health, General, or Chinese.
+For an online source, use **Paste a web link** without selecting its type first.
+Grafium detects YouTube videos and websites, then fetches the title automatically.
+Direct audio/video links with recognized filename extensions use their filename
+as a title without fetching the media. For extensionless streaming URLs, choose
+Audio or Video manually and enter the media URL.
+You can edit any suggested title; later lookup results never replace a title
+you edited. If a site blocks lookup or has no readable title, use **Retry title
+lookup** or enter a title yourself. Lookup does not require AI or a YouTube login.
+It only supports public HTTP(S) hosts, not private/local network addresses.
+
+Choose a **Topic** such as Health, General, or Chinese from the dropdown, or
+choose **+ Add a new topic...** and enter any new name.
+Previously saved topics are remembered within this graph, even if their last
+study is retagged or removed. A new topic is saved when you save the study.
 This is an organizational label, separate from the tag that selects flashcards.
 Use the topic filter to focus the list and its time cards. Editing a topic
 does not retag your graph or move cards between review decks.
@@ -42,9 +55,12 @@ Removing a study entry removes its study history, not its book, page, or media.
   such as a section heading or page number. Grafium does not observe your
   external browser, resume its scroll position, or estimate time spent there.
 
-External content is contacted only when opened, not while browsing the study
-list. Opening a YouTube player contacts YouTube; direct remote media contacts
-its host. No media is downloaded into your graph merely by adding its URL.
+Pasting a link contacts YouTube for a video's title or the website's host for
+its page title, including public redirects. Grafium does not run page scripts
+or send browser cookies for this lookup. Browsing the saved study list does not
+contact external content. Opening a YouTube player contacts YouTube; direct
+remote media contacts its host. No media is downloaded into your graph merely
+by adding its URL.
 YouTube uses an isolated local HTTP wrapper to identify the embedded player.
 That wrapper serves only the player shell: it cannot read your graph or invoke
 Grafium commands, and does not expose source files through its local address.

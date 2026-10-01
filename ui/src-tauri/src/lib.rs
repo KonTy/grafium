@@ -1324,6 +1324,7 @@ pub fn run() {
             commands::studies::save_study,
             commands::studies::remove_study,
             commands::studies::record_study_activity,
+            commands::study_link::study_link_title,
             commands::study_player::study_youtube_embed,
             commands::books::books_import_directory,
             commands::books::books_import_originals,

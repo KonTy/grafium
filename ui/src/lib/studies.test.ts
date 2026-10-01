@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { listStudies, recordStudyActivity, removeStudy, saveStudy, type StudyItem } from "./studies";
+import { fetchStudyLinkTitle, listStudies, recordStudyActivity, removeStudy, saveStudy, type StudyItem } from "./studies";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockedInvoke = vi.mocked(invoke);
@@ -11,6 +11,18 @@ const item: StudyItem = {
 
 describe("Studies command contract", () => {
   beforeEach(() => { vi.resetAllMocks(); });
+  it("looks up link titles without a graph argument or mutation", async () => {
+    mockedInvoke.mockResolvedValueOnce("A decoded title");
+    expect(await fetchStudyLinkTitle("https://example.com/watch?v=1")).toBe("A decoded title");
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke).toHaveBeenCalledWith("study_link_title", { url: "https://example.com/watch?v=1" });
+  });
+  it("surfaces title lookup failures without retrying or inventing a fallback", async () => {
+    mockedInvoke.mockRejectedValueOnce("Study title unavailable: private address");
+    await expect(fetchStudyLinkTitle("http://127.0.0.1/private"))
+      .rejects.toBe("Study title unavailable: private address");
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+  });
   it("scopes every read and metadata operation to the explicit graph", async () => {
     mockedInvoke.mockResolvedValueOnce({ items: [], days: [] });
     expect(await listStudies("/a")).toEqual({ items: [], days: [] });
@@ -20,6 +32,10 @@ describe("Studies command contract", () => {
     expect(mockedInvoke).toHaveBeenLastCalledWith("save_study", { graphPath: "/a", item });
     await removeStudy("/a", "study");
     expect(mockedInvoke).toHaveBeenLastCalledWith("remove_study", { graphPath: "/a", id: "study" });
+  });
+  it("returns durable topic history even when no study rows remain", async () => {
+    mockedInvoke.mockResolvedValueOnce({ items: [], days: [], topics: ["Astronomy", "Physics"] });
+    expect(await listStudies("/a")).toEqual({ items: [], days: [], topics: ["Astronomy", "Physics"] });
   });
   it("retries with exactly the same receipt and captured progress", async () => {
     mockedInvoke.mockRejectedValueOnce("lost response").mockResolvedValueOnce(undefined);

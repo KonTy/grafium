@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { finiteStudyProgress, localStudyDay, normalizeStudySource, studyPercent, studyTime, youtubeVideoId } from "./studySources";
+import { finiteStudyProgress, localStudyDay, normalizeStudySource, studySourceFromLink, studyPercent, studyTime, youtubeVideoId } from "./studySources";
 
 describe("study sources", () => {
+  it.each([
+    ["https://youtu.be/dQw4w9WgXcQ?t=12", "youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    ["www.example.com/article", "website", "https://www.example.com/article"],
+    ["http://example.com/article?q=x#section", "website", "http://example.com/article?q=x#section"],
+    ["https://example.com/movie.MP4?token=x", "video", "https://example.com/movie.MP4?token=x"],
+    ["https://example.com/lesson.mp3", "audio", "https://example.com/lesson.mp3"],
+    ["https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ", "website", "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ"],
+  ])("detects pasted source %s without making network requests", (url, kind, source) => {
+    expect(studySourceFromLink(url)).toMatchObject({ kind, source });
+  });
+  it("prefills direct media filenames and rejects unsafe pasted links", () => {
+    expect(studySourceFromLink("https://example.com/Chinese%20Lesson-1.mp3").filenameTitle).toBe("Chinese Lesson 1");
+    for (const link of ["javascript:alert(1)", "file:///book", "https://user:pass@example.com", "https://youtu.be/short"])
+      expect(() => studySourceFromLink(link)).toThrow();
+  });
   it.each([
     "https://youtu.be/dQw4w9WgXcQ?t=12",
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=playlist",
