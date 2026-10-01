@@ -43,6 +43,31 @@ also opening the editor. A plain web link still opens the block for editing
 after it follows the link. Query result rows that carry a block reference are
 reachable with **Tab** and open with **Enter**.
 
+## Deleted attachments and Undo
+
+Deleting text or blocks moves newly unreferenced attachments into persistent
+graph-local trash, rather than destroying them. Shared references are checked
+conservatively. **Undo** restores the deleted references and their files while
+the attachment copies remain in trash.
+Switching graphs clears Undo/Redo and the editors' local text history, even
+when the graphs contain copied pages with the same IDs. Finish an in-progress
+block operation before switching graphs.
+
+Open **Settings > Asset Cleanup > Asset trash** to list, restore, or explicitly
+permanently delete selected or all trash copies. Restore never overwrites an
+existing original. Trash is not automatically purged and still uses disk space.
+**Undo cannot recover permanently deleted attachment bytes**: an Undo that
+needs a purged attachment fails rather than silently restoring broken
+references. Other restoration errors stop Undo so you can resolve the error
+and retry. Automatic cleanup failures show an error notification without
+discarding the successful edit or its Undo history. Trash is device-local and
+never synced. See [[Help - Settings]] for confirmation, backup, and partial
+failure guidance.
+If Undo reports several attachment versions at the same path, use Asset trash
+to compare their batch paths, sizes, and SHA-256 fingerprints. Restore only the
+intended copy, then retry Undo. Your explicit version choice is recorded;
+the other copies stay in trash rather than being guessed or deleted.
+
 ## Reading notes and selected passages
 
 Open the right panel's **Notes** tab to annotate a page, converted book, or

@@ -299,7 +299,7 @@ access.
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
 | Findable settings | Filter labels and help text with literal search terms, and open categorized keyboard-shortcut help. |
 | Maintenance tools | Manually re-index Markdown and every original book copied into the graph, retrying extraction while preserving identities, annotations, favorites, review progress, and handwriting recognition. Rebuild search data and queue vector refresh; inspect asset-cleanup candidates or preview task-completion backfills separately. |
-| Recoverable asset cleanup | In Settings, scan unreferenced attachments including ZIP archives, review full graph-relative paths and sizes, and confirm moving one, selected, or all candidates to graph-local trash. Changed or newly referenced files are refused with visible errors. |
+| Recoverable asset cleanup | Deleted text/blocks move newly unreferenced attachments to persistent graph-local trash; Undo restores references and files. Settings offers manual cleanup plus selected/all restore or explicitly confirmed permanent deletion. Shared references are kept conservatively. |
 | Responsive workspace | Use the desktop layout or Android's adapted editor controls. |
 | Theme-aware startup | Apply the saved theme before showing the desktop window; defer optional screens and local embedding-model loading. |
 
@@ -310,6 +310,13 @@ history. Keep credentials and private data out of public repositories.
 Sync sends graph files to the destinations you configure; use destinations you trust.
 
 **Asset Cleanup:** Save pending edits before scanning or confirming a move.
+Deleting text or blocks automatically moves newly unreferenced attachments into
+persistent graph-local trash; Undo restores references and files while the
+attachments remain in trash. Whole-page asset cleanup uses the same trash,
+without making page deletion itself undoable.
+Automatic cleanup errors appear as graph-bound notifications without
+discarding a successful text edit or its Undo history. Restoration errors
+instead stop Undo so it can be retried after resolving the error.
 The scan checks indexed references and saved graph text, including Markdown,
 JSON-LD notes, and configuration; unsaved drafts are not covered. Conservative
 filename matching can retain duplicates. The preview is bound to its graph, and
@@ -320,12 +327,24 @@ exhaustive check of every possible reference.
 
 Moved attachments retain their relative paths under a unique
 `.grafium/asset-trash/` directory. Results show the absolute recovery directory.
-To recover, fully close Grafium and manually move files back to their original
-graph-relative paths. **Never overwrite an existing original**: failed or partial
-attempts may leave recovery copies even when the original was not moved.
-There is no restore UI or automatic purge, and **no disk
-space is freed** until you independently remove the trash. Trash is never synced,
-but removal of the original attachments will sync.
+In **Settings > Asset Cleanup > Asset trash**, choose **List trash** or
+**Refresh trash** to see original paths, trash paths, and sizes. Restore selected
+or all copies to their original graph-relative paths. **Never overwrite an
+existing original**: restoration refuses conflicts and keeps the trash copy.
+Restoring files does not recreate deleted notes. Only confirmed changes leave
+the graph-bound preview; failures remain visible.
+When versions share an original path, automatic Undo refuses to guess.
+Compare their batch paths, sizes, and SHA-256 fingerprints, restore the intended
+copy, then retry Undo. The explicit version choice is recorded persistently;
+other copies remain in trash, and purge records prevent silent substitution.
+There is no automatic purge, expiration, or disk-pressure deletion, and **no disk
+space is freed** until you explicitly choose **Permanently delete** for selected
+or all trash copies and confirm. **Undo cannot recover permanently deleted
+attachment bytes**: Undo that needs a purged attachment fails explicitly rather
+than silently restoring broken references. Tiny deletion records remain after
+purge, not the attachment bytes. Keep an independent backup if needed. Trash is
+device-local and never synced; removal of the original attachments will sync,
+but other devices do not receive these recovery copies.
 
 On smplOS, Auto reads `app_background_opacity` from
 `current/theme/colors.toml` (decimal `0.0` through `1.0`). Older themes fall back

@@ -26,6 +26,17 @@ large text field. Try these operations:
 - Shift-select blocks, then copy, cut, delete, or undo the whole selection.
 - Leave a block to see its Markdown rendered; click it again to edit the source.
 
+When deleting text or blocks removes an attachment's last reference, its file
+moves to persistent graph-local trash. Undo restores the references and files
+while they remain in trash; shared references are kept conservatively.
+**Settings > Asset Cleanup > Asset trash** offers restore and explicit permanent
+deletion. There is no automatic purge. **Undo cannot recover permanently deleted
+attachment bytes.** See [[Help - Settings]].
+Undo reports missing purged attachments instead of completing with broken
+references; other restoration failures can be retried after resolving the
+error. Cleanup warnings do not discard a successful edit or its Undo history.
+Trash is device-local and never synced to your other devices.
+
 ## Links and connections
 
 Write `[[Dinner ideas]]` to link to a page. If the page does not exist, Grafium
@@ -46,7 +57,8 @@ folders.
   top toolbar, these two buttons remain available above the journal.
 - To delete a day, hover its date label and click the trash button (always
   visible on touch screens), or right-click the date and choose **Delete page**.
-  This removes that day's `.md` file after you confirm.
+  This removes that day's `.md` file after you confirm. Page deletion itself
+  cannot be undone; newly unused attachments go to recoverable Asset trash.
 - Use **Ctrl+Shift+P** / **Cmd+Shift+P** to open the command palette, then search
   for time, journal, insert, or navigation commands.
 - Use the toolbar timestamp command to insert the current local date and time.

@@ -102,6 +102,21 @@ See [[Help - Books]] for format and extraction limits.
 
 ## Asset Cleanup
 
+Deleting text or blocks automatically moves attachments that become unreferenced
+into persistent graph-local trash. **Undo** restores references and attachment
+files while those files remain in trash; shared references are kept
+conservatively. Whole-page asset cleanup and manual cleanup below use the same
+trash. Restoring an attachment does not restore a deleted page.
+
+If automatic cleanup fails or moves only some attachments, Grafium shows an
+error notification for that graph and keeps the successful text edit and its
+Undo history. Review the warning, then scan or refresh Asset Cleanup before
+retrying. Attachment restoration failures instead stop Undo so it can be
+retried after resolving the error; Grafium does not silently complete an Undo
+with missing attachments.
+Undo/Redo history is cleared when switching graphs; it cannot be used on a
+different graph with copied page or block IDs.
+
 Open **Asset Cleanup** to find unreferenced attachments, including ZIP archives
 and other non-image files. **Save pending edits first**: unsaved editor drafts
 cannot be checked. The scan checks indexed references and saved graph text,
@@ -124,16 +139,38 @@ confirmed moved disappear from the preview. Re-scan after resolving errors.
 This is recoverable removal, not permanent deletion. Files move into a unique
 directory under `.grafium/asset-trash/`, retaining their original relative folder
 structure. The result lists the files moved and the absolute recovery directory.
-To restore, fully close Grafium, then manually move the files back from that
-directory to their original relative paths in the graph. **Never overwrite an
-existing original**: failed or partial attempts can leave recovery copies even
-when the original file was not moved. There is no restore
-button or automatic purge. **Moving to trash does not free disk space**; space
-is freed only if you independently remove the trash.
+Under **Asset trash**, choose **List trash** or **Refresh trash** to review the
+original path, full trash path (including its batch ID), size, and SHA-256
+fingerprint of each file. Select individual copies or
+**Select all trash**, then choose **Restore selected…** or **Restore all…**.
+Restoration returns files to their original paths, not deleted notes.
+**Never overwrite an existing original**: Grafium refuses conflicts and keeps
+the trash copy. Failed or partial attempts can leave recovery copies even when
+the original file was not moved. Each preview and confirmation names its graph.
+Only confirmed restorations or permanent deletions leave the preview; errors
+remain visible and failed entries remain available for review. Refresh after
+resolving an error or after moving more files to trash.
 
-The `.grafium` trash stays local and is never synced, but removal of each
+If several versions share an original path, automatic Undo refuses to guess.
+Compare their batch paths, sizes, and fingerprints; select the intended copy,
+**Restore** it, then retry Undo. Grafium records that explicit version choice
+persistently; other copies stay in trash. Purged-version records also prevent
+a different file from silently substituting for permanently deleted bytes.
+
+**Moving to trash does not free disk space.** To reclaim it, use
+**Permanently delete selected…** or **Permanently delete all…** and review the
+focused confirmation. **Cancel** is focused first; Cancel or **Escape** leaves
+the files untouched. **Permanent deletion destroys the attachment bytes.
+Undo cannot recover permanently deleted attachments**. Undo that needs a
+purged attachment fails explicitly rather than silently restoring broken
+references. Tiny deletion records remain after purge to recognize these cases;
+the attachment bytes are gone. Keep an independent backup if needed. There is no
+automatic purge, expiration, or disk-pressure deletion.
+
+The `.grafium` trash is device-local and is never synced, but removal of each
 original attachment will sync to your configured destinations. Keep backups and
-review the preview carefully. Press **F1** inside Asset Cleanup for this help.
+review the preview carefully. Another device does not receive these recovery
+copies. Press **F1** inside Asset Cleanup for this help.
 
 ## Sync
 

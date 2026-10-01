@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 mod reading_note_replace;
 pub mod asset_cleanup;
+pub mod asset_trash;
 pub mod books;
 pub mod reading_notes;
 mod research_edits;
@@ -55,6 +56,7 @@ pub struct Graph {
     /// each file path. Incremental single-block patching is only attempted when
     /// the current on-disk bytes still match one of these canonical writes.
     canonical_content_hashes: Arc<Mutex<HashMap<PathBuf, String>>>,
+    asset_cleanup_warnings: Arc<parking_lot::Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -773,6 +775,7 @@ impl Graph {
             self_writes: Arc::new(Mutex::new(HashMap::new())),
             indexed_content_hashes: Arc::new(Mutex::new(HashMap::new())),
             canonical_content_hashes: Arc::new(Mutex::new(HashMap::new())),
+            asset_cleanup_warnings: Arc::new(parking_lot::Mutex::new(Vec::new())),
         };
         let _ = graph.seed_page_edit_history_from_file_mtimes();
         drop(operation);
@@ -1762,19 +1765,6 @@ impl Graph {
             .sync_task_from_content_in_connection(conn, block_id, &marker, &fields, closed_at)
     }
 
-    fn cleanup_removed_local_images(
-        &self,
-        _page: &Page,
-        _before: &str,
-        _after: &str,
-    ) -> Result<()> {
-        // Ordinary edits, cut/delete, and undo all mutate Markdown first. Deleting
-        // media here makes those operations irreversible because undo snapshots
-        // only restore text. Leave eventual garbage collection to an explicit,
-        // user-visible cleanup command.
-        Ok(())
-    }
-
     pub fn discover_link_candidates(
         &self,
         page_id: Option<&str>,
@@ -2166,6 +2156,7 @@ impl Graph {
         if let Some(parent) = parent_id {
             self.ensure_page_id_writable(&self.db.get_block_by_id(parent)?.page_id)?;
         }
+        self.restore_changed_block_assets(&self.resolve_page_file_path(&page)?, "", &serde_json::Value::Null, content, &properties)?;
 
         // Generate a block ID
         let block_id = Uuid::new_v4().to_string();
@@ -2204,6 +2195,10 @@ impl Graph {
         }
 
         let page = self.db.get_page_by_id(page_id)?;
+        let source = self.resolve_page_file_path(&page)?;
+        for spec in &specs {
+            self.restore_changed_block_assets(&source, "", &serde_json::Value::Null, &spec.content, &spec.properties)?;
+        }
         let ids: Vec<String> = specs
             .iter()
             .map(|spec| {
@@ -2276,14 +2271,17 @@ impl Graph {
         // Get the page this block belongs to
         let block = self.db.get_block_by_id(block_id)?;
         self.ensure_page_id_writable(&block.page_id)?;
+        let page = self.db.get_page_by_id(&block.page_id)?;
+        self.restore_changed_block_assets(
+            &self.resolve_page_file_path(&page)?, &block.content, &block.properties,
+            content, properties.unwrap_or(&block.properties),
+        )?;
         if parser::is_reading_note_block(&block) {
             return self.update_reading_note_block(&block, content, properties);
         }
         if self.try_update_inline_source_block(&block, content, properties)? {
             return Ok(());
         }
-        let page = self.db.get_page_by_id(&block.page_id)?;
-
         let mut updated=block.clone();
         updated.content=content.to_owned();
         if let Some(properties)=properties { updated.properties=properties.clone(); }
@@ -2297,10 +2295,6 @@ impl Graph {
             let _ = self.write_single_block_update_to_disk(&page, &block)?;
         } else {
             self.write_page_to_disk(&page)?;
-        }
-
-        if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, content) {
-            eprintln!("Warning: could not clean up removed local images: {e}");
         }
 
         Ok(())
@@ -2458,6 +2452,9 @@ impl Graph {
             }
         }
 
+        for (_, change) in &replacements {
+            self.restore_changed_content_assets(&file_path, &change.before_content, &change.after_content)?;
+        }
         for (index, change) in replacements {
             blocks[index].content.clone_from(&change.after_content);
             self.reconcile_edited_block_in_connection(&tx,&mut blocks[index],&change.before_content,false)?;
@@ -2510,6 +2507,7 @@ impl Graph {
         // durable edit into an error (which would prevent the caller's undo).
         self.mark_page_dirty(page_id);
         self.record_page_edit(page_id, "app");
+        self.trash_removed_content_assets(&file_path, &original, &content);
         Ok(())
     }
 
@@ -2746,11 +2744,6 @@ impl Graph {
         // Re-serialize to disk
         self.write_page_to_disk(&page)?;
         self.db.collect_generated_pages()?;
-        for block in &deleted_blocks {
-            if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, "") {
-                eprintln!("Warning: could not clean up removed local images: {e}");
-            }
-        }
 
         Ok(())
     }
@@ -2774,11 +2767,6 @@ impl Graph {
 
         self.write_page_to_disk(&page)?;
         self.db.collect_generated_pages()?;
-        for block in &deleted_blocks {
-            if let Err(e) = self.cleanup_removed_local_images(&page, &block.content, "") {
-                eprintln!("Warning: could not clean up removed local images: {e}");
-            }
-        }
 
         Ok(deleted_blocks)
     }
@@ -2963,21 +2951,22 @@ impl Graph {
         self.db.collect_generated_pages_in_connection(&tx)?;
         tx.commit()?;
 
-        let mut deleted_assets = 0usize;
-        for path in media {
-            if !path.is_file() || !self.is_owned_asset_path(&path) || self.media_still_referenced(&path)? {
-                continue;
+        let root = self.root_dir.canonicalize()?;
+        let candidates = media.into_iter().filter_map(|path| {
+            let path = path.canonicalize().ok()?;
+            path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))
+        }).collect();
+        let deleted_assets = match self.trash_candidate_assets(&candidates) {
+            Ok(count) => count,
+            Err(e) => {
+                self.asset_cleanup_warning(format!("Pages were deleted, but attachment cleanup needs attention: {e}. Review Settings > Asset Cleanup."));
+                0
             }
-            self.note_self_write(&path);
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    deleted_assets += 1;
-                    if let Some(parent) = path.parent() {
-                        self.remove_empty_dirs_up(parent.to_path_buf());
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+        };
+        for relative in &candidates {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                self.remove_empty_dirs_up(parent.to_path_buf());
             }
         }
 
@@ -3056,49 +3045,7 @@ impl Graph {
     }
 
     fn media_still_referenced(&self, path: &Path) -> Result<bool> {
-        let target = path.canonicalize()?;
-        for (id, relative) in self.db.list_file_backed_page_paths()? {
-            let source = self.root_dir.join(&relative);
-            if source.canonicalize().ok().as_ref() == Some(&target) { return Ok(true); }
-            if !crate::fsutil::is_authoritative_markdown(Path::new(&relative)) { continue; }
-            self.ensure_path_inside_graph(&source)?;
-            let content = match fs::read_to_string(&source) {
-                Ok(content) => content,
-                Err(error) if error.kind()==std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let page = self.db.get_page_by_id(&id)?;
-            if extract_media_refs(&content).iter().any(|raw|
-                self.resolve_media_file(&page,raw).as_ref()==Some(&target)) { return Ok(true); }
-            let parsed = parser::parse_page(&content,"page.md");
-            let mut properties = vec![&parsed.properties];
-            let mut blocks=parsed.blocks.iter().collect::<Vec<_>>();
-            while let Some(block)=blocks.pop() {
-                properties.push(&block.properties);
-                blocks.extend(&block.children);
-            }
-            while let Some(value) = properties.pop() {
-                match value {
-                    serde_json::Value::String(raw) if self.resolve_media_file(&page,raw).as_ref()==Some(&target) => return Ok(true),
-                    serde_json::Value::Array(values) => properties.extend(values),
-                    serde_json::Value::Object(values) => properties.extend(values.values()),
-                    _ => {}
-                }
-            }
-        }
-        // Include surviving files not indexed yet (external edits/sync can race
-        // the watcher). Their relative references are equally authoritative.
-        for source in self.markdown_files()? {
-            if source.canonicalize().ok().as_ref()==Some(&target) {return Ok(true);}
-            let relative = self.relative_graph_path(&source);
-            if self.db.find_page_by_file_path(&relative)?.is_some() { continue; }
-            let content = fs::read_to_string(&source)?;
-            let page = Page { id:String::new(),title:String::new(),file_path:Some(relative),
-                created_at:0,updated_at:0,is_journal:false,properties:serde_json::json!({}) };
-            if extract_media_refs(&content).iter().any(|raw|
-                self.resolve_media_file(&page,raw).as_ref()==Some(&target)) { return Ok(true); }
-        }
-        Ok(false)
+        self.asset_is_referenced(path)
     }
 
     fn remove_page_file(&self, page: &Page) -> Result<()> {
@@ -3147,9 +3094,10 @@ impl Graph {
         if !path.is_file()||!self.is_owned_asset_path(path){return Ok(false);}
         self.ensure_path_inside_graph(path)?;
         if self.media_still_referenced(path)? {return Ok(false);}
-        fs::remove_file(path)?;
-        self.note_self_write(path);
-        Ok(true)
+        let root = self.root_dir.canonicalize()?;
+        let path = path.canonicalize()?;
+        let relative = path.strip_prefix(&root).map_err(|e| CoreError::Other(e.to_string()))?;
+        Ok(self.trash_candidate_assets(&HashSet::from([relative.to_string_lossy().replace('\\', "/")]))? > 0)
     }
 
     /// Append `source_id`'s blocks onto `dest_id`, rewrite wiki links from the
@@ -3925,6 +3873,12 @@ impl Graph {
     }
 
     fn persist_page_content(&self, file_path: &Path, content: &str) -> Result<()> {
+        let original = match fs::read_to_string(file_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        self.restore_changed_content_assets(file_path, &original, content)?;
         Self::atomic_write(file_path, content)?;
 
         // Remember this write so the filesystem watcher ignores the resulting
@@ -3934,6 +3888,7 @@ impl Graph {
         let content_hash = Self::content_hash(content);
         self.remember_indexed_content_hash(&file_path, content_hash.clone());
         self.remember_canonical_content_hash(&file_path, content_hash);
+        self.trash_removed_content_assets(file_path, &original, content);
 
         Ok(())
     }
@@ -4051,6 +4006,9 @@ impl Graph {
         let existing = self.db.get_page_by_id(page_id)?;
         self.ensure_page_writable(&existing)?;
         self.validate_book_note_properties(&existing, &properties)?;
+        self.restore_changed_block_assets(
+            &self.resolve_page_file_path(&existing)?, "", &existing.properties, "", &properties,
+        )?;
         self.db.update_page(page_id, None, Some(&properties))?;
         let page = self.db.get_page_by_id(page_id)?;
         self.write_page_to_disk(&page)
@@ -4962,7 +4920,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_last_markdown_image_reference_preserves_asset_file() -> Result<()> {
+    fn removing_last_markdown_image_reference_trashes_asset_file() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let page = graph.create_page_with_content(
@@ -4979,7 +4937,8 @@ mod tests {
 
         graph.update_block(&block.id, "No image here", None)?;
 
-        assert!(asset_path.exists());
+        assert!(!asset_path.exists());
+        assert_eq!(graph.list_asset_trash()?.assets.len(), 1);
         Ok(())
     }
 
@@ -5013,7 +4972,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_pipe_sized_markdown_image_reference_preserves_asset_file() -> Result<()> {
+    fn removing_pipe_sized_markdown_image_reference_trashes_asset_file() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let page = graph.create_page_with_content(
@@ -5030,7 +4989,8 @@ mod tests {
 
         graph.update_block(&block.id, "No image here", None)?;
 
-        assert!(asset_path.exists());
+        assert!(!asset_path.exists());
+        assert_eq!(graph.list_asset_trash()?.assets.len(), 1);
         Ok(())
     }
 
@@ -5055,7 +5015,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_block_with_last_markdown_image_reference_preserves_asset_file() -> Result<()> {
+    fn deleting_block_with_last_markdown_image_reference_trashes_asset_file() -> Result<()> {
         let temp = tempdir()?;
         let graph = Graph::open(temp.path())?;
         let page = graph.create_page_with_content(
@@ -5072,7 +5032,8 @@ mod tests {
 
         graph.delete_block(&blocks[0].id)?;
 
-        assert!(asset_path.exists());
+        assert!(!asset_path.exists());
+        assert_eq!(graph.list_asset_trash()?.assets.len(), 1);
         Ok(())
     }
 

@@ -155,7 +155,7 @@ describe("recoverable asset cleanup", () => {
     expect(checkbox("Select pages/book/assets/image.png").checked).toBe(true);
     expect(host.textContent).toContain("Moved 1 file to trash.");
     expect(host.textContent).toContain("/synthetic/graph/.grafium/asset-trash/batch-id");
-    expect(host.textContent).toContain("fully close Grafium");
+    expect(host.textContent).toContain("List trash or Refresh trash");
     expect(host.textContent).toContain("Never overwrite an existing original");
     expect(host.textContent).toContain("recovery copies even when the original was not moved");
     expect(host.textContent).toContain("pages/book/assets/image.png: file changed");

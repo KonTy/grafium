@@ -3,6 +3,7 @@
   import { findOrphanedAssets, trashAssets } from "../lib/api";
   import type { AssetCleanupResult, AssetCleanupScan, OrphanedAsset } from "../lib/api";
   import { dialogKeydown } from "../lib/modal";
+  import AssetTrash from "./AssetTrash.svelte";
 
   let scan = $state<AssetCleanupScan | null>(null);
   let selected = $state<string[]>([]);
@@ -86,10 +87,11 @@
 </script>
 
 <div class="asset-cleanup" data-help-context="settings">
+  <p>Deleting text or blocks automatically moves newly unreferenced attachments to persistent graph-local trash. Undo restores their references and files while the attachments remain in trash. Shared references are kept conservatively. Whole-page attachment cleanup uses the same recoverable trash.</p>
   <p>Find unreferenced attachments, including ZIP archives, not just images. Review the full graph-relative paths before moving anything.</p>
   <p><strong>Save pending edits first.</strong> Unsaved editor drafts cannot be checked. The scan checks indexed references and saved graph text, including Markdown, JSON-LD notes, and configuration. Conservative filename matches can retain duplicates.</p>
   <p>References inside binary archives or books are not inspected. This is a conservative scan of supported sources, not proof that every possible reference has been found.</p>
-  <p>Files move to recoverable graph-local trash, not permanent deletion. Trash is never synced, but removal of the original files will sync. No disk space is freed until you independently remove the trash.</p>
+  <p>Files move to recoverable graph-local trash, not permanent deletion. Trash is never synced, but removal of the original files will sync. No disk space is freed until you explicitly choose Permanently delete in Asset trash below. Undo cannot recover purged attachments.</p>
   <button bind:this={scanButton} onclick={scanAssets} disabled={busy || !!pending}>
     {scanning ? "Scanning…" : scan ? "Re-scan" : "Scan for orphaned assets"}
   </button>
@@ -142,7 +144,7 @@
       {/if}
       {#if result.trash_path}
         <p>Recovery directory: <code>{result.trash_path}</code></p>
-        <p>To recover: fully close Grafium, then manually move files from this directory back to the same relative paths in the graph. Never overwrite an existing original: failed or partial attempts may leave recovery copies even when the original was not moved. Trash keeps the original folder structure. There is no automatic purge or restore button.</p>
+        <p>To recover, choose List trash or Refresh trash below, then Restore. Never overwrite an existing original: restore refuses conflicts. Failed or partial attempts may leave recovery copies even when the original was not moved. Trash keeps the original folder structure and is never automatically purged.</p>
       {/if}
       {#if result.errors.length}
         <div role="alert" class="error">
@@ -162,14 +164,15 @@
       <ul class="confirmation-list">
         {#each pending.assets as asset}<li><code>{asset.filename}</code> ({formatBytes(asset.size)})</li>{/each}
       </ul>
-      <p id={descriptionId}>Save pending edits before continuing. References and file contents are checked again; changed or referenced files will be refused. Files go to <code>.grafium/asset-trash/</code> with their original paths for manual recovery, not permanent deletion.</p>
-      <p>The original removals will sync; the trash will not. Disk space is not freed. Close Grafium before manually restoring files to their original graph-relative paths, and never overwrite an existing original. Failed or partial attempts may leave recovery copies of files that were not moved. Trash is not automatically purged.</p>
+      <p id={descriptionId}>Save pending edits before continuing. References and file contents are checked again; changed or referenced files will be refused. Files go to <code>.grafium/asset-trash/</code> with their original paths for recovery through Asset trash below, not permanent deletion.</p>
+      <p>The original removals will sync; the trash will not. Disk space is not freed. Restore never overwrites an existing original. Failed or partial attempts may leave recovery copies of files that were not moved. Trash is not automatically purged; permanent deletion requires a separate confirmation and Undo cannot recover those bytes.</p>
       <div class="actions">
         <button bind:this={cancelButton} disabled={moving} onclick={closeConfirmation}>Cancel</button>
         <button disabled={moving} onclick={moveAssets}>{moving ? "Moving…" : "Confirm move to trash"}</button>
       </div>
     </dialog>
   {/if}
+  <AssetTrash />
 </div>
 
 <style>
