@@ -16,6 +16,7 @@ pub enum StudyKind {
     Video,
     Youtube,
     Website,
+    Library,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -127,6 +128,9 @@ fn validate_progress(progress: &StudyProgress) -> Result<()> {
 fn normalize_source(kind: StudyKind, source: &str) -> Result<String> {
     bounded(source, "source", 8192, kind != StudyKind::Flashcards)?;
     match kind {
+        StudyKind::Library => uuid::Uuid::parse_str(source)
+            .map(|id| id.to_string())
+            .map_err(|_| invalid("library sources must be stable item IDs, not paths or URLs")),
         StudyKind::Website => Ok(web_url(source)?.to_string()),
         StudyKind::Youtube => {
             let mut url = web_url(source)?;
@@ -265,6 +269,7 @@ mod tests {
             (StudyKind::Video, "video"),
             (StudyKind::Youtube, "youtube"),
             (StudyKind::Website, "website"),
+            (StudyKind::Library, "library"),
         ] {
             let mut value = item();
             value.kind = kind;
@@ -282,6 +287,35 @@ mod tests {
         })?;
         assert_eq!(json["itemId"], "one");
         assert!(json.get("item_id").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn library_plan_entries_only_store_stable_references() -> Result<()> {
+        let db = Database::in_memory()?;
+        let mut entry = item();
+        entry.kind = StudyKind::Library;
+        entry.source = uuid::Uuid::new_v4().to_string();
+        let saved = db.save_study(entry.clone())?;
+        assert_eq!(saved.source, entry.source);
+        assert_eq!(db.list_studies()?.items[0].kind, StudyKind::Library);
+        let progress = StudyProgress { position: 12.0, ..StudyProgress::default() };
+        let mut with_progress = entry.clone();
+        with_progress.progress = progress.clone();
+        assert!(db.save_study(with_progress).is_err());
+        assert!(db.record_study_activity(&saved.id, 10.0, "2026-09-30", Some(&progress), &request()).is_err());
+        db.record_study_activity(&saved.id, 10.0, "2026-09-30", None, &request())?;
+        let snapshot = db.list_studies()?;
+        assert_eq!(snapshot.items[0].progress, StudyProgress::default());
+        assert_eq!(snapshot.days[0].seconds, 10.0);
+        for invalid in ["/private/book.mp3", "assets/book.mp3", "https://example.com/book", ""] {
+            let mut invalid_entry = entry.clone();
+            invalid_entry.id = uuid::Uuid::new_v4().to_string();
+            invalid_entry.source = invalid.into();
+            assert!(db.save_study(invalid_entry).is_err());
+        }
+        db.remove_study(&saved.id)?;
+        assert!(db.list_studies()?.items.is_empty());
         Ok(())
     }
 
@@ -724,6 +758,9 @@ impl Database {
         validate_progress(&item.progress)?;
         item.title = item.title.trim().to_string();
         item.source = normalize_source(item.kind, &item.source)?;
+        if item.kind == StudyKind::Library && item.progress != StudyProgress::default() {
+            return Err(invalid("Library playback progress belongs to Library, not the study plan"));
+        }
         let conn = self.conn()?;
         let tx = immediate_transaction(&conn)?;
         let now = Utc::now().to_rfc3339();
@@ -820,6 +857,9 @@ impl Database {
             return Ok(());
         }
         let item = find_item(&tx, id)?.ok_or_else(|| CoreError::NotFound(format!("Study {id}")))?;
+        if item.kind == StudyKind::Library && progress.is_some() {
+            return Err(invalid("Library playback progress belongs to Library, not the study plan"));
+        }
         tx.execute(
             "INSERT INTO study_activity_receipts(request_id,item_id,payload) VALUES(?1,?2,?3)",
             params![request_id, id, payload],

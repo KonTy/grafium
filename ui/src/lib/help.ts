@@ -12,6 +12,7 @@ export type HelpContext =
   | "sync"
   | "books"
   | "reader"
+  | "library"
   | "search";
 
 const HELP_PAGES: Record<HelpContext, string> = {
@@ -28,6 +29,7 @@ const HELP_PAGES: Record<HelpContext, string> = {
   sync: "Help - Sync",
   books: "Help - Books",
   reader: "Help - Private Reader",
+  library: "Help - Library",
   search: "Help - Search",
 };
 

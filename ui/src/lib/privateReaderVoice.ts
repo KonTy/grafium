@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { get } from "svelte/store";
 import { BOOK_RENDERER_VERSION, type BookLocation } from "./bookLocations";
-import { privateLibrary, savePrivateBookmark, savePrivatePosition } from "./privateReader";
+import { privateLibrary, savePrivateBookmark } from "./privateReader";
 import { claimPrivateNarration, updatePrivateNarration } from "./privateReaderPlayback";
 import { androidReaderRequest, isAndroidReader } from "./privateReaderAndroid";
 import { canonicalNarrationBatches, collectPrivateSegments, startAndroidPrivateNarration, type CanonicalNarrationSegment } from "./privateReaderSegments";
+import { saveLibraryCheckpoint } from "./library";
 
 export interface PrivateVoiceManifest {
   schema_version: number; id: string; name: string; language: string; runtime: string;
@@ -69,6 +70,8 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
   let objectURL = "";
   let timer: ReturnType<typeof setInterval> | undefined;
   let saving = Promise.resolve();
+  let lastPosition = "";
+  let played = false;
   const pending = new Map<number, Promise<Clip>>();
   const current = () => active ? {
     offsetMs: Math.max(0, Math.round(audio.currentTime * 1000)), locator: active.locator, voiceId,
@@ -76,8 +79,13 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
   const checkpoint = () => {
     if (!active || !audio.src) return saving;
     const position = current()!;
+    const key = JSON.stringify(position);
+    const moved = played && key !== lastPosition;
+    const progress = { position: active.ordinal + (Number.isFinite(audio.duration) && audio.duration > 0 ? Math.min(1, audio.currentTime / audio.duration) : 0),
+      total: queue.length, anchor: active.locator.kind === "epub" ? active.locator.cfi : "", label: `Read aloud · passage ${active.ordinal + 1} of ${queue.length}` };
+    lastPosition = key;
     saving = saving.catch(() => {}).then(async () => {
-      await savePrivatePosition(bookId, position);
+      await saveLibraryCheckpoint(bookId, position, progress, moved);
     });
     return saving;
   };
@@ -129,17 +137,18 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
       throw new Error("The saved voice clip offset is incompatible; restart narration from the beginning.");
     audio.currentTime = Math.min(offsetMs / 1000, audio.duration);
     loading = false;
+    played = false;
     await checkpoint();
     if (stopped || request !== generation) return;
     updatePrivateNarration({ position: current(), status: paused ? "paused" : "playing" });
-    if (!paused) await audio.play();
+    if (!paused) { await audio.play(); played = true; }
     if (ordinal + 1 < queue.length) void fetchClip(ordinal + 1);
   };
   await claimPrivateNarration(book, {
     pause: async () => { paused = true; audio.pause(); await checkpoint(); },
     resume: async () => {
       if (loading || !audio.src) throw new Error("Wait for the native voice to prepare, or restart after an error.");
-      paused = false; await audio.play();
+      paused = false; await audio.play(); played = true;
     },
     stop: async () => {
       stopped = true; audio.pause(); clearInterval(timer);

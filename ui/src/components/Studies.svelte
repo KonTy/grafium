@@ -6,23 +6,27 @@
   import { isStudySourceAdded, type StudySourceChoice } from "../lib/studyCatalog";
   import StudyTopicPicker from "./StudyTopicPicker.svelte";
   import StudySourcePicker from "./StudySourcePicker.svelte";
-  import PrivateReaderLibrary from "./PrivateReaderLibrary.svelte";
+  import { addPrivateLibraryLink, refreshPrivateLibrary, privateLibrary, type ReaderBook } from "../lib/privateReader";
+  import { studyDisplayProgress } from "../lib/studyLibrary";
 
-  let { graphPath, onOpen, addPage = null, onOpenPrivateBook, onLibrarySettings }: {
+  let { graphPath, onOpen, addPage = null, addLibrary = null, onLibraryConsumed }: {
     graphPath: string; onOpen: (item: StudyItem) => void; addPage?: Page | null;
-    onOpenPrivateBook?: (bookId: string) => void; onLibrarySettings?: () => void;
+    addLibrary?: ReaderBook | null;
+    onLibraryConsumed?: () => void;
   } = $props();
   let items = $state<StudyItem[]>([]);
   let days = $state<StudyDay[]>([]);
   let topicHistory = $state<string[]>([]);
   let loading = $state(true);
   let error = $state("");
+  let libraryError = $state("");
   let formError = $state("");
   let topicFilter = $state("");
   let libraryQuery = $state("");
   let formOpen = $state(false);
   let choice = $state<StudySourceChoice | null>(null);
   let sourcePage = $state<Page | null>(null);
+  let sourceLibrary = $state<ReaderBook | null>(null);
   let topic = $state("General");
   let saving = $state(false);
   let editId = $state("");
@@ -44,7 +48,11 @@
     const graph = graphPath;
     const current = ++generation;
     items = []; days = []; topicHistory = []; loading = true; error = ""; formOpen = false;
-    topicFilter = ""; libraryQuery = ""; editId = ""; removeId = ""; pendingId = ""; saving = false; choice = null; sourcePage = null;
+    topicFilter = ""; libraryQuery = ""; editId = ""; removeId = ""; pendingId = ""; saving = false; choice = null; sourcePage = null; sourceLibrary = null;
+    libraryError = "";
+    void refreshPrivateLibrary().catch(cause => {
+      if (current === generation) libraryError = `Could not load Library progress: ${String(cause)}`;
+    });
     void listStudies(graph).then(snapshot => {
       if (current !== generation) return;
       items = snapshot.items; days = snapshot.days; topicHistory = snapshot.topics ?? [];
@@ -56,14 +64,23 @@
 
   $effect(() => {
     graphPath;
+    const book = addLibrary;
+    if (book) untrack(() => {
+      sourceLibrary = book; sourcePage = null; formOpen = true; topic = "General"; formError = "";
+      onLibraryConsumed?.();
+    });
+  });
+
+  $effect(() => {
+    graphPath;
     const page = addPage;
     if (page) untrack(() => {
-      sourcePage = page; formOpen = true; topic = "General"; formError = "";
+      sourcePage = page; sourceLibrary = null; formOpen = true; topic = "General"; formError = "";
     });
   });
 
   function startAdd() {
-    sourcePage = null; choice = null; formOpen = true;
+    sourcePage = null; sourceLibrary = null; choice = null; formOpen = true;
     topic = topicFilter ? topicFilter.slice(6) : "General"; formError = "";
   }
 
@@ -74,12 +91,20 @@
     formError = "";
     try {
       if (!choice) throw new Error("Choose a source for this study.");
-      const { kind, source, title } = choice;
-      const normalized = normalizeStudySource(kind, source);
+      let { kind, source } = choice;
+      const { title } = choice;
+      let normalized = normalizeStudySource(kind, source);
       if (!title.trim()) throw new Error("Give this study a title.");
       if (!topic.trim()) throw new Error("Give the topic a name or choose an existing topic.");
       if (duplicate) throw new Error("This source is already in Studies. Open its existing entry instead.");
       saving = true;
+      if (kind === "youtube" || ((kind === "audio" || kind === "video") && /^https?:/i.test(normalized))) {
+        const book = await addPrivateLibraryLink(title.trim(), kind, normalized);
+        if (current !== generation || graph !== graphPath) return;
+        kind = "library"; source = book.id; normalized = normalizeStudySource(kind, source);
+        if (isStudySourceAdded(items, { kind, source, title }))
+          throw new Error("This Library item is already in Studies. Open its existing entry instead.");
+      }
       const now = new Date().toISOString();
       const saved = await saveStudy(graph, {
         id: crypto.randomUUID(), title: title.trim(), topic: topic.trim() || "General", kind, source: normalized,
@@ -120,20 +145,18 @@
 </script>
 
 <section class="studies" data-help-context="studies">
-  <header><div><p class="eyebrow">YOUR LEARNING LIBRARY</p><h1>Studies</h1><p class="subtitle">Choose a source. Keep your place. Make time to learn.</p></div><button class="primary" disabled={saving || formOpen} onclick={startAdd}>+ Add study</button></header>
-  {#if onOpenPrivateBook && onLibrarySettings}
-    <PrivateReaderLibrary onOpen={onOpenPrivateBook} onSettings={onLibrarySettings} />
-  {/if}
+  <header><div><p class="eyebrow">YOUR LEARNING PLAN</p><h1>Studies</h1><p class="subtitle">Plan learning from Library, graph notes, and flashcards.</p></div><button class="primary" disabled={saving || formOpen} onclick={startAdd}>+ Add study</button></header>
   <div class="stats" aria-label="Study statistics">
     <div><span>Total study time</span><strong>{studyTime(totalTime)}</strong><small>{libraryQuery.trim() ? "Filtered studies" : topicFilter ? "Selected topic" : "All studies"}</small></div>
     <div><span>Today</span><strong>{studyTime(todayTime)}</strong><small>Active study time</small></div>
-    <div><span>In your library</span><strong>{filtered.length}</strong><small>{filtered.length === 1 ? "Study" : "Studies"}</small></div>
+    <div><span>In your plan</span><strong>{filtered.length}</strong><small>{filtered.length === 1 ? "Study" : "Studies"}</small></div>
   </div>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if libraryError}<p class="error" role="alert">{libraryError}</p>{/if}
   {#if formOpen}
     <form class="add-form" onsubmit={addStudy}>
       <h2>Add to Studies</h2>
-      <StudySourcePicker {graphPath} {items} initialPage={sourcePage} bind:choice disabled={saving} />
+      <StudySourcePicker {graphPath} {items} initialPage={sourcePage} initialLibrary={sourceLibrary} bind:choice disabled={saving} />
       <StudyTopicPicker bind:value={topic} topics={topicChoices} disabled={saving} />
       {#if formError}<p class="error" role="alert">{formError}</p>{/if}
       <div class="actions"><button class="primary" type="submit" disabled={saving || loading || !choice?.title.trim() || !!duplicate}>{saving ? "Saving…" : "Add study"}</button><button type="button" disabled={saving} onclick={() => formOpen = false}>Cancel</button></div>
@@ -146,11 +169,12 @@
     <div class="column-headings" aria-hidden="true"><span>Type</span><span>Study / progress</span><span>Topic</span><span class="time-heading">Time</span><span></span></div>
     <ul class="study-list">
       {#each filtered as item (item.id)}
+        {@const progress = studyDisplayProgress(item, $privateLibrary.books)}
         <li class="study-row">
           <div class="kind" aria-label={studyKindLabels[item.kind]}>{studyKindLabels[item.kind]}</div>
           <div class="details">
             <button class="study-title" onclick={() => onOpen(item)}>{item.title}</button>
-            <div class="progress-line"><progress max="100" value={studyPercent(item.progress)} aria-label={`${item.title} progress`}></progress><span>{item.progress.label || (item.progress.total > 0 ? `${studyPercent(item.progress)}%` : item.kind === "website" ? "Manual checkpoint" : "Not started")}</span></div>
+            <div class="progress-line"><progress max="100" value={studyPercent(progress)} aria-label={`${item.title} progress`}></progress><span>{progress.label || (progress.total > 0 ? `${studyPercent(progress)}%` : item.kind === "website" ? "Manual checkpoint" : "Not started")}</span></div>
           </div>
           <div class="topic-cell">
             <span class="topic-label">Topic</span>
@@ -161,7 +185,7 @@
             {/if}
           </div>
           <div class="row-time"><strong>{itemTime(item.id)}</strong><small>studied</small></div>
-          <div class="row-actions"><button class="open" onclick={() => onOpen(item)}>{item.progress.position > 0 || item.progress.label ? "Continue" : "Open"}</button><button class="remove" aria-label={`Remove ${item.title} from Studies`} onclick={() => removeId = item.id}>×</button></div>
+          <div class="row-actions"><button class="open" onclick={() => onOpen(item)}>{progress.position > 0 || progress.label ? "Continue" : "Open"}</button><button class="remove" aria-label={`Remove ${item.title} from Studies`} onclick={() => removeId = item.id}>×</button></div>
           {#if removeId === item.id}<div class="remove-confirm" role="group" aria-label="Confirm removal"><p>Remove “{item.title}” from Studies? Only this study entry and its study history are removed. Your source page, book, cards, or media will not be deleted.</p><button disabled={pendingId === item.id} onclick={() => confirmRemove(item)}>Remove study entry</button><button disabled={pendingId === item.id} onclick={() => removeId = ""}>Keep study</button></div>{/if}
         </li>
       {/each}

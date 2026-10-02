@@ -4,11 +4,12 @@
   import { autofocus } from "../lib/autofocus";
   import { isOriginalBookPage } from "../lib/books";
   import { fetchStudyLinkTitle, type StudyItem } from "../lib/studies";
-  import { isStudyLinkInput, isStudySourceAdded, searchStudyCatalog, studyCatalog, type StudyCandidate, type StudySourceChoice } from "../lib/studyCatalog";
+  import { isStudyLinkInput, isStudySourceAdded, libraryStudyCatalog, searchStudyCatalog, studyCatalog, type StudyCandidate, type StudySourceChoice } from "../lib/studyCatalog";
+  import { privateLibrary, refreshPrivateLibrary, type ReaderBook } from "../lib/privateReader";
   import { normalizeStudySource, studyKindLabels, studySourceFromLink } from "../lib/studySources";
 
-  let { graphPath, items, initialPage = null, choice = $bindable(null), disabled = false }: {
-    graphPath: string; items: StudyItem[]; initialPage?: Page | null;
+  let { graphPath, items, initialPage = null, initialLibrary = null, choice = $bindable(null), disabled = false }: {
+    graphPath: string; items: StudyItem[]; initialPage?: Page | null; initialLibrary?: ReaderBook | null;
     choice?: StudySourceChoice | null; disabled?: boolean;
   } = $props();
   const listId = $props.id();
@@ -43,9 +44,9 @@
     const current = ++generation;
     const graph = graphPath;
     loading = true; loadError = "";
-    const groups: StudyCandidate[][] = [[], [], []];
-    const errors = ["", "", ""];
-    let remaining = 3;
+    const groups: StudyCandidate[][] = [[], [], [], []];
+    const errors = ["", "", "", ""];
+    let remaining = 4;
     const currentGraph = () => current === generation && graph === graphPath;
     async function load<T>(index: number, label: string, request: Promise<T>, convert: (result: T) => StudyCandidate[]) {
       try {
@@ -64,6 +65,7 @@
       load(0, "pages and books", listPageSummaries(), pages => studyCatalog(pages, [], [])),
       load(1, "flashcard topics", listFlashcardTopics(), cards => studyCatalog([], cards, [])),
       load(2, "media assets", listAssets(), assets => studyCatalog([], [], assets)),
+      load(3, "Library", refreshPrivateLibrary(), () => libraryStudyCatalog($privateLibrary.books)),
     ]);
   }
 
@@ -74,6 +76,14 @@
       void loadSources();
     });
     return () => { ++generation; cancelSelection(); };
+  });
+
+  $effect(() => {
+    const book = initialLibrary;
+    if (book) untrack(() => {
+      cancelSelection(); titleEdited = false; query = book.title; expanded = false;
+      choice = { kind: "library", source: book.id, title: book.title };
+    });
   });
 
   $effect(() => {
@@ -170,7 +180,7 @@
       onkeydown={keydown} onfocus={() => { if (!choice) expanded = true; }}
       role="combobox" aria-expanded={showResults} aria-controls={listId} aria-autocomplete="list"
       aria-activedescendant={showResults && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
-      autocomplete="off" placeholder="Pages, books, flashcard topics, videos, MP3s, or a URL"
+      autocomplete="off" placeholder="Library, pages, flashcards, graph media, or a URL"
       {disabled} use:autofocus />
   </label>
   {#if showResults}
@@ -202,6 +212,10 @@
       <div><strong>{choice.title || "Title needed"}</strong><small>{choice.kind === "flashcards" ? `${choice.source ? "#" + choice.source : "Untagged"} flashcards` : choice.source}</small></div>
     </div>
     {#if choice.kind === "website"}<small>Opens in your browser with a manual checkpoint. Browser time is not tracked.</small>{/if}
+    {#if choice.kind === "library"}<small>Links to Library. Media, playback progress, and bookmarks stay there.</small>{/if}
+    {#if choice.kind === "youtube" || ((choice.kind === "audio" || choice.kind === "video") && /^https?:/i.test(choice.source))}
+      <small>Adds the media to Library and links it into this plan.</small>
+    {/if}
     {#if alreadyAdded(choice)}<p role="status">This source is already in Studies. Open its existing entry instead.</p>{/if}
     <details bind:open={detailsOpen}>
       <summary>Edit details</summary>

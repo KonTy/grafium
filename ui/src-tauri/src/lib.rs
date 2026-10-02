@@ -1252,6 +1252,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::private_reader::reader_snapshot,
+            commands::private_reader::reader_set_favorite,
+            commands::private_reader::reader_record_activity,
+            commands::private_reader::reader_add_link,
             commands::private_reader::reader_set_library,
             commands::private_reader::reader_rescan,
             commands::private_reader::reader_media_url,

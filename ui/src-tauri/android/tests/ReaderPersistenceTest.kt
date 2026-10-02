@@ -49,6 +49,79 @@ class ReaderPersistenceTest {
     assertFalse(File(context.filesDir, "private-reader/library.json").exists())
   }
 
+  @Test fun libraryMetadataDefaultsAndExplicitActivitySurviveLegacyWrites() {
+    val library = open()
+    assertFalse(library.book("book-a").getBoolean("favorite"))
+    assertEquals(0, library.book("book-a").getLong("lastUsedAt"))
+    library.setFavorite("book-a", true)
+    assertEquals(0, library.book("book-a").getLong("lastUsedAt"))
+    val progress = JSONObject().put("position", 42).put("total", 100).put("anchor", "").put("label", "0:42")
+    library.recordActivity("book-a", progress)
+    val used = library.book("book-a").getLong("lastUsedAt")
+    assertTrue(used > 0)
+    library.checkpoint("book-a", "chapter-1", 42000)
+    library.bookmark("book-a", "chapter-1", 43000, "Private")
+    val reopened = open().book("book-a")
+    assertTrue(reopened.getBoolean("favorite"))
+    assertEquals(used, reopened.getLong("lastUsedAt"))
+    assertEquals(progress.toString(), reopened.getJSONObject("progress").toString())
+    val before = library.exportState()
+    assertThrows(IllegalArgumentException::class.java) {
+      library.recordActivity("book-a", JSONObject(progress.toString()).put("position", -1))
+    }
+    assertEquals(before, library.exportState())
+  }
+
+  @Test fun externalLinksPersistWithoutSourceGrantsAndRestoreTheirHistory() {
+    val library = open()
+    library.addLink("Talk", "youtube", "https://youtu.be/abcdefghijk?t=5")
+    library.addLink("Duplicate", "youtube", "https://youtube.com/embed/abcdefghijk")
+    assertEquals(3, library.books().length())
+    val link = library.books().getJSONObject(2)
+    val id = link.getString("id")
+    assertEquals("https://www.youtube.com/watch?v=abcdefghijk", link.getString("sourceUrl"))
+    assertFalse(link.has("tree"))
+    assertEquals(0, link.getJSONArray("tracks").length())
+    library.setFavorite(id, true)
+    library.recordActivity(id, JSONObject().put("position", 5).put("total", 50).put("anchor", "").put("label", "0:05"))
+    library.saveExternalPosition(id, JSONObject().put("offsetMs", 5000))
+    library.externalBookmark(id, JSONObject().put("offsetMs", 5000), "At five seconds")
+    assertThrows(IllegalArgumentException::class.java) { library.relink(id, "book-a") }
+    assertThrows(IllegalArgumentException::class.java) { library.resource(id, "anything") }
+    val exportedLink = JSONObject(library.exportState()).getJSONArray("books").getJSONObject(2)
+    val backup = JSONObject().put("books", JSONArray().put(exportedLink)).toString()
+    val originalContext = context
+    context = object : ContextWrapper(originalContext) {
+      override fun getNoBackupFilesDir(): File = File(originalContext.noBackupFilesDir, "external-target").apply { mkdirs() }
+    }
+    open().restore(backup)
+    val restored = open().book(id)
+    assertTrue(restored.getBoolean("favorite") && restored.getBoolean("available"))
+    assertTrue(restored.getLong("lastUsedAt") > 0)
+    assertEquals(5000, restored.getJSONObject("position").getLong("offsetMs"))
+    assertEquals(1, restored.getJSONArray("bookmarks").length())
+    assertFalse(restored.has("tree"))
+  }
+
+  @Test fun invalidExternalLinksAndMetadataNeverChangePrivateState() {
+    val library = open()
+    val before = library.exportState()
+    for (url in listOf("file:///secret", "https://user:pass@example.com/a", "https://@example.com/a",
+      "https://example.com/\nfile", "https://example.com\\@evil.test/a")) {
+      assertThrows(IllegalArgumentException::class.java) { library.addLink("Bad", "video", url) }
+    }
+    for (url in listOf("https://youtube.com.evil.test/watch?v=abcdefghijk", "https://youtu.be/short")) {
+      assertThrows(IllegalArgumentException::class.java) { library.addLink("Bad", "youtube", url) }
+    }
+    assertEquals(before, library.exportState())
+    val file = File(context.noBackupFilesDir, "private-reader/library.json")
+    val invalid = JSONObject(file.readText())
+    invalid.getJSONArray("books").getJSONObject(0).put("favorite", "yes")
+    file.writeText(invalid.toString())
+    assertThrows(Exception::class.java) { open() }
+    assertEquals(invalid.toString(), file.readText())
+  }
+
   @Test fun reorderNeverChangesSavedTrackIdentity() {
     val library = open()
     library.checkpoint("book-a", "chapter-2", 9200)

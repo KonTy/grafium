@@ -52,6 +52,252 @@ fn position(track_id: &str, offset_ms: u64) -> ReaderPosition {
 }
 
 #[test]
+fn library_metadata_and_links_survive_scans_restarts_restore_and_source_changes() {
+    let f = Fixture::new();
+    f.put("local.mp3", b"unchanged");
+    let mut store = f.store();
+    let local = store.snapshot().books.remove(0);
+    let progress = ReaderProgress {
+        position: 12.0,
+        total: 100.0,
+        anchor: "".into(),
+        label: "0:12".into(),
+    };
+    store.set_favorite(&local.id, true).unwrap();
+    assert_eq!(store.snapshot().books[0].last_used_at, 0);
+    store
+        .record_activity(&local.id, Some(progress.clone()))
+        .unwrap();
+    let used = store.snapshot().books[0].last_used_at;
+    store
+        .save_position(&local.id, position(&local.tracks[0].id, 12000))
+        .unwrap();
+    store
+        .add_bookmark(
+            &local.id,
+            position(&local.tracks[0].id, 12000),
+            "saved".into(),
+        )
+        .unwrap();
+    store
+        .add_link(
+            "Talk".into(),
+            ReaderKind::Youtube,
+            "https://youtu.be/abcdefghijk?t=20".into(),
+        )
+        .unwrap();
+    let external = store
+        .snapshot()
+        .books
+        .into_iter()
+        .find(|b| b.source_url.is_some())
+        .unwrap();
+    let offset = ReaderPosition {
+        track_id: None,
+        offset_ms: 5000,
+        locator: None,
+        voice_id: None,
+    };
+    store
+        .add_bookmark(&external.id, offset.clone(), "Network bookmark".into())
+        .unwrap();
+    store.set_favorite(&external.id, true).unwrap();
+    store
+        .record_activity(&external.id, Some(progress.clone()))
+        .unwrap();
+    assert!(store.open_media(&external.id, Some("any")).is_err());
+    assert!(store
+        .relink(&external.id, "local.mp3".into(), true)
+        .is_err());
+    store.rescan().unwrap();
+    let changed = f._directory.path().join("different-library");
+    fs::create_dir(&changed).unwrap();
+    store.set_library(changed.to_str().unwrap().into()).unwrap();
+    let reopened = ReaderStore::load(f.state.clone()).unwrap();
+    let saved = reopened
+        .snapshot()
+        .books
+        .into_iter()
+        .find(|b| b.id == local.id)
+        .unwrap();
+    assert!(saved.favorite);
+    assert_eq!(saved.last_used_at, used);
+    assert_eq!(saved.progress, Some(progress));
+    assert!(!saved.available);
+    let backup = reopened.export().unwrap();
+    let exported: serde_json::Value = serde_json::from_str(&backup).unwrap();
+    let link = exported["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["book"]["id"] == external.id)
+        .unwrap();
+    assert!(link["root"].is_null());
+    assert_eq!(link["files"].as_array().unwrap().len(), 0);
+    let mut restored = ReaderStore::load(f._directory.path().join("restored-library")).unwrap();
+    restored.restore(&backup).unwrap();
+    let recovered = restored
+        .snapshot()
+        .books
+        .into_iter()
+        .find(|b| b.id == external.id)
+        .unwrap();
+    assert!(recovered.available && recovered.favorite && recovered.last_used_at > 0);
+    assert_eq!(recovered.position, Some(offset));
+    assert_eq!(recovered.bookmarks.len(), 1);
+    assert_eq!(fs::read(f.root.join("local.mp3")).unwrap(), b"unchanged");
+}
+
+#[test]
+fn legacy_library_metadata_defaults_and_invalid_new_fields_refuse_changes() {
+    let f = Fixture::new();
+    f.put("book.mp3", b"media");
+    let store = f.store();
+    let mut legacy: serde_json::Value = serde_json::from_str(&store.export().unwrap()).unwrap();
+    legacy["version"] = 1.into();
+    for field in ["favorite", "lastUsedAt", "sourceUrl", "progress"] {
+        legacy["books"][0]["book"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    fs::write(f.state.join("reader.json"), legacy.to_string()).unwrap();
+    let mut reopened = ReaderStore::load(f.state.clone()).unwrap();
+    let book = reopened.snapshot().books.remove(0);
+    assert!(!book.favorite);
+    assert_eq!(book.last_used_at, 0);
+    assert!(book.progress.is_none());
+    assert_eq!(
+        fs::read_to_string(f.state.join("reader.json")).unwrap(),
+        legacy.to_string()
+    );
+    let before = reopened.export().unwrap();
+    for field in ["favorite", "lastUsedAt", "progress"] {
+        let mut bad = legacy.clone();
+        bad["books"][0]["book"][field] = "invalid".into();
+        assert!(reopened.restore(&bad.to_string()).is_err());
+        assert_eq!(reopened.export().unwrap(), before);
+    }
+    let invalid = ReaderProgress {
+        position: f64::NAN,
+        total: 1.0,
+        anchor: "".into(),
+        label: "".into(),
+    };
+    assert!(reopened.record_activity(&book.id, Some(invalid)).is_err());
+    assert_eq!(reopened.export().unwrap(), before);
+    reopened.set_favorite(&book.id, true).unwrap();
+    let persisted: serde_json::Value = serde_json::from_str(&reopened.export().unwrap()).unwrap();
+    assert_eq!(persisted["version"], 2);
+}
+
+#[test]
+fn external_urls_are_validated_deduplicated_and_cannot_grant_local_authority() {
+    let f = Fixture::new();
+    let mut store = ReaderStore::load(f.state.clone()).unwrap();
+    for url in [
+        "file:///secret",
+        "javascript:alert(1)",
+        "https://user:pass@example.com/x",
+        "https://@example.com/x",
+        "https://example.com/\nfoo",
+        "https://example.com\\@evil.test/x",
+    ] {
+        assert!(
+            store
+                .add_link("Bad".into(), ReaderKind::Video, url.into())
+                .is_err(),
+            "{url}"
+        );
+    }
+    for url in [
+        "https://youtube.com.evil.test/watch?v=abcdefghijk",
+        "https://youtu.be/short",
+        "https://youtube.com/playlist?list=abcdefghijk",
+    ] {
+        assert!(
+            store
+                .add_link("Bad".into(), ReaderKind::Youtube, url.into())
+                .is_err(),
+            "{url}"
+        );
+    }
+    for url in [
+        "https://youtu.be/abcdefghijk",
+        "https://www.youtube.com/embed/abcdefghijk",
+        "https://m.youtube.com/shorts/abcdefghijk",
+    ] {
+        store
+            .add_link("Talk".into(), ReaderKind::Youtube, url.into())
+            .unwrap();
+    }
+    assert_eq!(store.snapshot().books.len(), 1);
+    let before = store.export().unwrap();
+    let mut forged: serde_json::Value = serde_json::from_str(&before).unwrap();
+    forged["books"][0]["authorized"] = true.into();
+    assert!(store.restore(&forged.to_string()).is_err());
+    assert_eq!(store.export().unwrap(), before);
+}
+
+#[test]
+fn video_and_extended_audio_use_registered_paths_and_correct_mime() {
+    let f = Fixture::new();
+    for path in [
+        "Album/1.m4a",
+        "Album/2.flac",
+        "loose.opus",
+        "Film/a.mp4",
+        "Film/b.webm",
+    ] {
+        f.put(path, b"0123456789");
+    }
+    let mut store = f.store();
+    let books = store.snapshot().books;
+    assert_eq!(books.len(), 4);
+    assert_eq!(
+        books
+            .iter()
+            .find(|b| b.title == "Album")
+            .unwrap()
+            .tracks
+            .len(),
+        2
+    );
+    let video = books
+        .iter()
+        .find(|b| b.kind == ReaderKind::Video && b.title == "a")
+        .unwrap();
+    assert_eq!(
+        store.media_mime(&video.id, &video.tracks[0].id).unwrap(),
+        "video/mp4"
+    );
+    store
+        .save_position(&video.id, position(&video.tracks[0].id, 1234))
+        .unwrap();
+    assert!(store
+        .save_position(&video.id, position("unknown", 1234))
+        .is_err());
+    store
+        .open_media(&video.id, Some(&video.tracks[0].id))
+        .unwrap();
+    assert_eq!(source::media_mime("chapter.m4b"), "audio/mp4");
+    assert_eq!(source::media_mime("film.webm"), "video/webm");
+    let store = Arc::new(Mutex::new(store));
+    let server = stream::MediaServer::start(store).unwrap();
+    let url = server.url(&video.id, &video.tracks[0].id).unwrap();
+    let response =
+        String::from_utf8(http(&url, "GET", "Range: bytes=2-5\r\n", None, None)).unwrap();
+    assert!(response.starts_with("HTTP/1.1 206"));
+    assert!(response.contains("Content-Type: video/mp4"));
+    assert!(response.ends_with("\r\n\r\n2345"));
+    let head = String::from_utf8(http(&url, "HEAD", "", None, None)).unwrap();
+    assert!(head.contains("Content-Type: video/mp4"));
+    assert!(head.ends_with("\r\n\r\n"));
+    f.put("Film/a.mp4", b"replacement");
+    assert!(http(&url, "GET", "", None, None).starts_with(b"HTTP/1.1 410"));
+}
+
+#[test]
 fn discovery_groups_top_folders_and_naturally_sorts_discs_and_chapters() {
     let f = Fixture::new();
     for path in [

@@ -209,6 +209,7 @@ export function registerDefaultShortcuts(actions: {
   goTomorrow: () => void;
   goTasks: () => void;
   goStudies?: () => void;
+  goLibrary?: () => void;
   goChat: () => void;
   goNextJournal: () => void;
   goPrevJournal: () => void;
@@ -286,6 +287,9 @@ export function registerDefaultShortcuts(actions: {
     ]),
     ...(actions.goStudies ? pair("go-studies", "Go to Studies", "navigation", actions.goStudies, [
       { binding: "g s" },
+    ]) : []),
+    ...(actions.goLibrary ? pair("go-library", "Go to Library", "navigation", actions.goLibrary, [
+      { binding: "g l" },
     ]) : []),
     ...pair("go-next-journal", "Go to next journal", "navigation", actions.goNextJournal, [
       { binding: "g n" },

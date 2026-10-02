@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +59,7 @@ struct RegisteredFile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredBook {
     book: ReaderBook,
-    root: Binding,
+    root: Option<Binding>,
     key: String,
     files: Vec<RegisteredFile>,
     manual_order: bool,
@@ -141,7 +141,8 @@ impl ReaderStore {
         }
     }
 
-    fn commit(&mut self, document: Document) -> ReaderResult<()> {
+    fn commit(&mut self, mut document: Document) -> ReaderResult<()> {
+        document.version = VERSION;
         validate(&document)?;
         let bytes = serde_json::to_vec(&document).map_err(|e| e.to_string())?;
         if bytes.len() as u64 > MAX_STATE_BYTES {
@@ -186,9 +187,12 @@ impl ReaderStore {
             Ok((dir, binding)) => {
                 self.error = None;
                 for book in &mut self.document.books {
-                    let same_root = book.authorized
-                        && book.root.path == binding.path
-                        && book.root.identity == binding.identity;
+                    if book.book.source_url.is_some() {
+                        book.book.available = true;
+                        book.book.error = None;
+                        continue;
+                    }
+                    let same_root = book.authorized && book.root.as_ref() == Some(&binding);
                     let mut all = same_root;
                     for file in &book.files {
                         let available = same_root
@@ -207,6 +211,11 @@ impl ReaderStore {
             Err(error) => {
                 self.error = self.document.library.as_ref().map(|_| error);
                 for book in &mut self.document.books {
+                    if book.book.source_url.is_some() {
+                        book.book.available = true;
+                        book.book.error = None;
+                        continue;
+                    }
                     book.book.available = false;
                     book.book.error = Some("Library unavailable; history is retained".into());
                     for track in &mut book.book.tracks {
@@ -273,14 +282,16 @@ impl ReaderStore {
             .books
             .iter()
             .enumerate()
-            .filter(|(_, book)| book.authorized && book.root.path == root.path)
+            .filter(|(_, book)| {
+                book.authorized && book.root.as_ref().is_some_and(|b| b.path == root.path)
+            })
             .map(|(index, book)| (book.key.clone(), index))
             .collect();
         for discovered in found {
             if let Some(index) = existing_books.get(&discovered.key) {
                 let existing = &mut document.books[*index];
                 // Do not adopt replacement roots/files, even when the path matches.
-                if existing.root.identity != root.identity {
+                if existing.root.as_ref() != Some(&root) {
                     continue;
                 }
                 let existing_paths: HashSet<_> =
@@ -318,11 +329,7 @@ impl ReaderStore {
                 let book = ReaderBook {
                     id: id(),
                     title: discovered.title,
-                    kind: if discovered.epub {
-                        ReaderKind::Epub
-                    } else {
-                        ReaderKind::Audio
-                    },
+                    kind: discovered.kind,
                     available: true,
                     tracks: if discovered.epub {
                         Vec::new()
@@ -331,11 +338,15 @@ impl ReaderStore {
                     },
                     position: None,
                     bookmarks: Vec::new(),
+                    favorite: false,
+                    last_used_at: 0,
+                    source_url: None,
+                    progress: None,
                     error: None,
                 };
                 document.books.push(StoredBook {
                     book,
-                    root: root.clone(),
+                    root: Some(root.clone()),
                     key: discovered.key,
                     files,
                     manual_order: false,
@@ -344,7 +355,10 @@ impl ReaderStore {
             }
         }
         for stored in &mut document.books {
-            let same_root = stored.authorized && stored.root == root;
+            if stored.book.source_url.is_some() {
+                continue;
+            }
+            let same_root = stored.authorized && stored.root.as_ref() == Some(&root);
             let statuses: HashMap<_, _> = stored
                 .files
                 .iter()
@@ -375,14 +389,14 @@ impl ReaderStore {
             .iter()
             .find(|b| b.book.id == book_id)
             .ok_or("Unknown private book")?;
-        if !book.authorized
-            || book.root.path != active.path
-            || book.root.identity != active.identity
+        if !book.authorized || book.book.source_url.is_some() || book.root.as_ref() != Some(active)
         {
             return Err("Book belongs to an unavailable library source".into());
         }
         let file = match (book.book.kind, track_id) {
-            (ReaderKind::Audio, Some(id)) => book.files.iter().find(|f| f.id == id),
+            (ReaderKind::Audio | ReaderKind::Video, Some(id)) => {
+                book.files.iter().find(|f| f.id == id)
+            }
             (ReaderKind::Epub, None) => book.files.first(),
             _ => None,
         }
@@ -392,6 +406,91 @@ impl ReaderStore {
             return Err("Source changed; explicit replacement confirmation is required".into());
         }
         Ok(opened)
+    }
+
+    pub fn media_mime(&self, book_id: &str, track_id: &str) -> ReaderResult<&'static str> {
+        let file = self
+            .document
+            .books
+            .iter()
+            .find(|b| b.book.id == book_id)
+            .and_then(|b| b.files.iter().find(|f| f.id == track_id))
+            .ok_or("Unknown media")?;
+        Ok(source::media_mime(&file.path))
+    }
+
+    pub fn set_favorite(&mut self, book_id: &str, favorite: bool) -> ReaderResult<ReaderSnapshot> {
+        let mut document = self.document.clone();
+        book_mut(&mut document, book_id)?.book.favorite = favorite;
+        self.commit(document)?;
+        Ok(self.snapshot())
+    }
+
+    pub fn record_activity(
+        &mut self,
+        book_id: &str,
+        progress: Option<ReaderProgress>,
+    ) -> ReaderResult<ReaderSnapshot> {
+        if let Some(progress) = &progress {
+            progress.validate()?;
+        }
+        let mut document = self.document.clone();
+        let book = &mut book_mut(&mut document, book_id)?.book;
+        book.last_used_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis() as u64;
+        if let Some(progress) = progress {
+            book.progress = Some(progress);
+        }
+        self.commit(document)?;
+        Ok(self.snapshot())
+    }
+
+    pub fn add_link(
+        &mut self,
+        title: String,
+        kind: ReaderKind,
+        url: String,
+    ) -> ReaderResult<ReaderSnapshot> {
+        let url = normalize_link(kind, &url)?;
+        let title = title.trim().to_string();
+        if title.is_empty() || title.len() > 1024 || title.chars().any(char::is_control) {
+            return Err("Library title must contain 1–1024 characters".into());
+        }
+        if self
+            .document
+            .books
+            .iter()
+            .any(|b| b.book.kind == kind && b.book.source_url.as_ref() == Some(&url))
+        {
+            return Ok(self.snapshot());
+        }
+        let mut document = self.document.clone();
+        let book_id = id();
+        document.books.push(StoredBook {
+            book: ReaderBook {
+                id: book_id.clone(),
+                title,
+                kind,
+                available: true,
+                tracks: vec![],
+                position: None,
+                bookmarks: vec![],
+                favorite: false,
+                last_used_at: 0,
+                source_url: Some(url),
+                progress: None,
+                error: None,
+            },
+            root: None,
+            key: book_id,
+            files: vec![],
+            manual_order: false,
+            authorized: false,
+        });
+        self.commit(document)?;
+        Ok(self.snapshot())
     }
 
     pub fn read_epub(&self, book_id: &str) -> ReaderResult<Vec<u8>> {
@@ -493,6 +592,7 @@ impl ReaderStore {
         let expected: HashSet<_> = book.book.tracks.iter().map(|t| &t.id).collect();
         let actual: HashSet<_> = track_ids.iter().collect();
         if book.book.kind != ReaderKind::Audio
+            || book.book.source_url.is_some()
             || expected != actual
             || actual.len() != track_ids.len()
         {
@@ -548,28 +648,40 @@ impl ReaderStore {
             .find(|b| b.key == relative_path)
             .ok_or("No discovered book at that relative path")?;
         let mut document = self.document.clone();
-        if document
-            .books
-            .iter()
-            .any(|b| b.book.id != book_id && b.root.path == root.path && b.key == candidate.key)
-        {
+        if book_mut(&mut document, book_id)?.book.source_url.is_some() {
+            return Err("External Library links cannot be relinked to local files".into());
+        }
+        if document.books.iter().any(|b| {
+            b.book.id != book_id
+                && b.root.as_ref().is_some_and(|r| r.path == root.path)
+                && b.key == candidate.key
+        }) {
             // A freshly discovered entry may be merged only if it has no user history.
             let duplicate = document
                 .books
                 .iter()
                 .find(|b| {
-                    b.book.id != book_id && b.root.path == root.path && b.key == candidate.key
+                    b.book.id != book_id
+                        && b.root.as_ref().is_some_and(|r| r.path == root.path)
+                        && b.key == candidate.key
                 })
                 .unwrap();
-            if duplicate.book.position.is_some() || !duplicate.book.bookmarks.is_empty() {
+            if duplicate.book.position.is_some()
+                || !duplicate.book.bookmarks.is_empty()
+                || duplicate.book.favorite
+                || duplicate.book.last_used_at != 0
+                || duplicate.book.progress.is_some()
+            {
                 return Err("Relink destination already has reader history".into());
             }
             document.books.retain(|b| {
-                b.book.id == book_id || b.root.path != root.path || b.key != candidate.key
+                b.book.id == book_id
+                    || !b.root.as_ref().is_some_and(|r| r.path == root.path)
+                    || b.key != candidate.key
             });
         }
         let book = book_mut(&mut document, book_id)?;
-        if candidate.epub != (book.book.kind == ReaderKind::Epub) {
+        if candidate.kind != book.book.kind {
             return Err("Relink must keep the book format".into());
         }
         let mut replacements = Vec::new();
@@ -594,7 +706,7 @@ impl ReaderStore {
             if !used.insert(path.clone()) {
                 return Err("Relink track mapping is ambiguous".into());
             }
-            if (&old.fingerprint != fingerprint || book.root.identity != root.identity)
+            if (&old.fingerprint != fingerprint || book.root.as_ref() != Some(&root))
                 && !confirm_replacement
             {
                 return Err(
@@ -616,7 +728,7 @@ impl ReaderStore {
                 });
             }
         }
-        if book.book.kind == ReaderKind::Audio {
+        if matches!(book.book.kind, ReaderKind::Audio | ReaderKind::Video) {
             for old in &mut book.book.tracks {
                 let new = replacements.iter().find(|f| f.id == old.id).unwrap();
                 *old = track(new);
@@ -634,7 +746,7 @@ impl ReaderStore {
         }
         book.key = candidate.key;
         book.files = replacements;
-        book.root = root;
+        book.root = Some(root);
         book.authorized = true;
         book.book.available = true;
         book.book.error = None;
@@ -663,7 +775,10 @@ impl ReaderStore {
                 .find(|b| b.book.id == book.book.id)
             {
                 if existing.key != book.key
-                    || existing.root.path != book.root.path
+                    || existing.root.as_ref().map(|r| &r.path)
+                        != book.root.as_ref().map(|r| &r.path)
+                    || existing.book.kind != book.book.kind
+                    || existing.book.source_url != book.book.source_url
                     || existing
                         .files
                         .iter()
@@ -719,7 +834,7 @@ fn track(file: &RegisteredFile) -> ReaderTrack {
 }
 
 fn validate(document: &Document) -> ReaderResult<()> {
-    if document.version != VERSION {
+    if !(1..=VERSION).contains(&document.version) {
         return Err("Unsupported private reader database version".into());
     }
     let mut ids = HashSet::new();
@@ -733,10 +848,29 @@ fn validate(document: &Document) -> ReaderResult<()> {
             return Err("Invalid or duplicate book ID".into());
         }
         if stored.book.title.len() > 16_384
-            || stored.files.is_empty()
             || stored.files.len() > 100_000
+            || stored.book.last_used_at > 9_007_199_254_740_991
         {
             return Err("Invalid book metadata".into());
+        }
+        if let Some(progress) = &stored.book.progress {
+            progress.validate()?;
+        }
+        if let Some(url) = &stored.book.source_url {
+            if normalize_link(stored.book.kind, url)? != *url
+                || stored.root.is_some()
+                || !stored.files.is_empty()
+                || !stored.book.tracks.is_empty()
+                || stored.authorized
+                || stored.manual_order
+            {
+                return Err("Invalid external Library registration".into());
+            }
+        } else if stored.root.is_none()
+            || stored.files.is_empty()
+            || stored.book.kind == ReaderKind::Youtube
+        {
+            return Err("Missing local Library registration".into());
         }
         let mut files = HashSet::new();
         let mut paths = HashSet::new();
@@ -748,12 +882,7 @@ fn validate(document: &Document) -> ReaderResult<()> {
             {
                 return Err("Invalid or duplicate source ID/path".into());
             }
-            let extension = Path::new(&file.path).extension().unwrap_or_default();
-            if !extension.eq_ignore_ascii_case(if stored.book.kind == ReaderKind::Audio {
-                "mp3"
-            } else {
-                "epub"
-            }) {
+            if source::media_kind(&file.path) != Some(stored.book.kind) {
                 return Err("Source extension does not match book format".into());
             }
         }
@@ -762,7 +891,7 @@ fn validate(document: &Document) -> ReaderResult<()> {
         {
             return Err("Invalid EPUB source registration".into());
         }
-        if stored.book.kind == ReaderKind::Audio {
+        if matches!(stored.book.kind, ReaderKind::Audio | ReaderKind::Video) {
             let tracks: HashSet<_> = stored.book.tracks.iter().map(|t| &t.id).collect();
             if tracks != files || tracks.len() != stored.book.tracks.len() {
                 return Err("Invalid registered track list".into());

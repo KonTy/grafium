@@ -22,7 +22,11 @@ beforeEach(() => {
   invoke.mockReset();
   openDialog.mockReset();
   privateLibrary.set({ libraryPath: "/outside-graph", books: [book] });
-  invoke.mockImplementation(async command => command.endsWith("read_epub") ? new ArrayBuffer(8)
+  invoke.mockImplementation(async (command, args) => command.endsWith("read_epub") ? new ArrayBuffer(8)
+    : command.endsWith("record_activity") ? {
+      ...get(privateLibrary), books: get(privateLibrary).books.map(book => book.id === args.bookId
+        ? { ...book, lastUsedAt: Date.now(), ...(args.progress ? { progress: args.progress } : {}) } : book),
+    }
     : command.endsWith("snapshot") || command.endsWith("rescan") ? { libraryPath: "/outside-graph", books: [book] } : undefined);
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => "/* bundled runtime */" })));
 });
@@ -33,6 +37,60 @@ afterEach(async () => {
   delete window.PrivateReaderBridge;
 });
 describe("private reader components", () => {
+  it("reports manual reading interactions, not mounting or passive layout, and uses renderer progress", async () => {
+    const onActivity = vi.fn(); const onProgress = vi.fn();
+    component = mount(PrivateBookReader, { target: document.body, props: { bookId: book.id, onActivity, onProgress } });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    const frame = document.querySelector("iframe")!;
+    const token = decodeURIComponent(frame.src).match(/const token="([^"]+)"/)![1];
+    const locator = { kind: "epub", cfi: "epubcfi(/6/2!/4/8)", rendererVersion: BOOK_RENDERER_VERSION };
+    const send = (data: Record<string, unknown>, origin = "null") => {
+      window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, origin,
+        data: { channel: "grafium-book", token, ...data } })); flushSync();
+    };
+    send({ type: "ready", toc: [], annotations: true, notice: "" });
+    send({ type: "location", location: locator, label: "Passive initial place", fraction: .25 });
+    expect(onActivity).not.toHaveBeenCalled(); expect(onProgress).not.toHaveBeenCalled();
+    document.querySelector<HTMLSelectElement>("label select")!.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(onActivity).toHaveBeenCalledOnce();
+    send({ type: "selection", location: locator, quote: "Spoofed selection" }, "https://attacker.test");
+    expect(onActivity).toHaveBeenCalledOnce();
+    send({ type: "selection", location: locator, quote: "Read this passage" });
+    expect(onActivity).toHaveBeenCalledTimes(2);
+    expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
+    [...document.querySelectorAll("button")].find(button => button.textContent === "Next")!.click();
+    send({ type: "location", location: locator, label: "Halfway", fraction: .5 });
+    expect(onActivity).toHaveBeenCalledTimes(3);
+    expect(onProgress).toHaveBeenLastCalledWith({ position: .5, total: 1, anchor: locator.cfi, label: "Halfway" });
+    window.dispatchEvent(new Event("pagehide"));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_record_activity", {
+      bookId: book.id, progress: { position: .5, total: 1, anchor: locator.cfi, label: "Halfway" },
+    }));
+  });
+  it("targets an initial EPUB bookmark once after the isolated frame becomes ready", async () => {
+    const locator = { kind: "epub" as const, cfi: "epubcfi(/6/2!/4/8)", rendererVersion: BOOK_RENDERER_VERSION };
+    const target = { ...book, bookmarks: [{ id: "target", bookId: book.id, note: "", createdAt: 1, position: { offsetMs: 0, locator } }] };
+    privateLibrary.set({ libraryPath: "/outside-graph", books: [target] });
+    const onActivity = vi.fn(); const onProgress = vi.fn();
+    component = mount(PrivateReaderBook, { target: document.body, props: {
+      bookId: book.id, initialBookmarkId: "target", onBack: vi.fn(), onActivity, onProgress,
+    } });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    const frame = document.querySelector("iframe")!;
+    const token = decodeURIComponent(frame.src).match(/const token="([^"]+)"/)![1];
+    const post = vi.spyOn(frame.contentWindow!, "postMessage");
+    const send = (data: Record<string, unknown>) => {
+      window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, origin: "null", data: { channel: "grafium-book", token, ...data } }));
+      flushSync();
+    };
+    send({ type: "ready", toc: [], annotations: true, notice: "" });
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: "goto", location: locator }), "*");
+    privateLibrary.set({ libraryPath: "/outside-graph", books: [{ ...target, favorite: true }] }); flushSync();
+    expect(post.mock.calls.filter(([message]) => message.type === "goto")).toHaveLength(1);
+    send({ type: "location", location: locator, label: "Bookmarked passage" });
+    expect(onActivity).toHaveBeenCalledOnce();
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ anchor: locator.cfi, label: "Bookmarked passage" }));
+  });
   it("preserves restored narration timing and voice through passive initial and reflow relocations", async () => {
     const locator = { kind: "epub" as const, cfi: "epubcfi(/6/2!/4/2/1,:320,:640)", rendererVersion: BOOK_RENDERER_VERSION };
     const position = { locator, offsetMs: 2370, voiceId: "saved-voice" };
@@ -143,6 +201,7 @@ describe("private reader components", () => {
     send({ type: "selection", location: locator, quote: "Private passage" });
     window.dispatchEvent(new Event("pagehide"));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_save_position", { bookId: book.id, position: { offsetMs: 0, locator } }));
+    expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
     expect(get(bookSelection)).toBeNull();
     expect(invoke.mock.calls.every(([command]) => command.startsWith("reader_"))).toBe(true);
   });
@@ -151,7 +210,8 @@ describe("private reader components", () => {
     component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen, onSettings: vi.fn() } });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_rescan", undefined));
     expect(document.body.textContent).toContain("no graph pages, AI indexing, or graph sync");
-    expect(document.body.textContent).toContain("[[Book title]]");
+    expect(document.body.textContent).not.toContain("[[Book title]]");
+    expect(document.querySelector("[data-settings-help-text]")?.textContent).toContain("Journal note");
     [...document.querySelectorAll("button")].find(button => button.textContent === book.title)!.click();
     expect(onOpen).toHaveBeenCalledWith(book.id);
   });

@@ -1,21 +1,23 @@
 # Studies
 
-Open **Studies** in the navigation to build your own learning list. Studies is
+Open **Studies** in the navigation to build your own learning plan. Studies is
 separate from Tasks: adding an item does not create a task, duplicate your notes,
 or change a source file.
 The command palette includes **Go to Studies**; in navigation mode, press `g s`.
 
-The **Private library** is a separate, app-level reader for external audiobook
-folders and EPUBs configured with **Library location** in Settings. Its files,
-progress, and automatic bookmarks do not become graph studies or AI sources.
-Its global player continues while you navigate, rather than using the focused
-study clock described below. See [[Help - Private Reader]].
+**Library** has its own top-level destination for private local media and
+supported online media links. Studies references Library items by stable ID;
+it does not duplicate their files, playback progress, or bookmarks. Removing a
+plan entry never removes the Library item. Opening a linked item uses the same
+Library reader while the focused study clock records only study time.
+Casual Library use does not create a study entry or count toward a plan.
+See [[Help - Library]] and [[Help - Private Reader]].
 
 ## Add and organize
 
 Use **Add to Studies** on a page or original book, or add an item from Studies.
 Use the single **Search or paste a link** field. Start typing to search graph
-pages (including link-created placeholders), original books, flashcard topics,
+Library items, graph pages (including link-created placeholders), original books, flashcard topics,
 and existing audio/video assets together. Results show their type and, for
 flashcards, card/due counts. Search names, filenames, or types such as MP3.
 For a graph link such as `[[Supplements]]`, paste the link and choose its page.
@@ -39,6 +41,12 @@ opens for manual entry; **Retry title lookup** tries again.
 Lookup does not require AI or a YouTube login.
 It only supports public HTTP(S) hosts, not private/local network addresses.
 
+When you confirm a new YouTube or direct audio/video link, Grafium saves it in
+Library and places only its Library reference into the plan. Existing direct
+media studies remain usable; they are not silently migrated or removed.
+If saving the plan fails after adding a link, its Library item remains
+available and can be selected again.
+
 Choose a **Topic** such as Health, General, or Chinese from the dropdown, or
 choose **+ Add a new topic...** and enter any new name.
 New studies default to the current topic filter, or General when showing all topics.
@@ -51,6 +59,9 @@ Removing a study entry removes its study history, not its book, page, or media.
 
 ## Resume where you stopped
 
+- **Library items:** use the Library's current position and bookmarks, including
+  progress made outside Studies. A missing Library record on this device is
+  reported, not replaced by a similarly named source.
 - **Pages and converted books:** open the item to restore its saved block and
   offset when available, with proportional scroll position as a fallback.
   The percentage is a scroll-position estimate, not a count of words learned.

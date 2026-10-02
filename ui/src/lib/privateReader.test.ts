@@ -40,7 +40,7 @@ describe("private reader persistence boundary", () => {
     await refreshPrivateLibrary();
     finish({ libraryPath: "/old", books: [] });
     await old;
-    expect(get(privateLibrary)).toEqual({ libraryPath: "/new", books: [unavailable] });
+    expect(get(privateLibrary)).toEqual({ libraryPath: "/new", books: [{ ...unavailable, favorite: false, lastUsedAt: 0 }] });
   });
   it("keeps discovery errors visible without destroying prior records", async () => {
     invoke.mockRejectedValue(new Error("Grant revoked"));

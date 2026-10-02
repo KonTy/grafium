@@ -7,12 +7,26 @@ import { localStudyDay } from "../lib/studySources";
 const api = vi.hoisted(() => ({
   listStudies: vi.fn(), saveStudy: vi.fn(), removeStudy: vi.fn(), fetchStudyLinkTitle: vi.fn(),
   listPageSummaries: vi.fn(), getPage: vi.fn(), listFlashcardTopics: vi.fn(), listAssets: vi.fn(),
+  addPrivateLibraryLink: vi.fn(), refreshPrivateLibrary: vi.fn(),
 }));
 vi.mock("../lib/studies", () => ({ listStudies: api.listStudies, saveStudy: api.saveStudy, removeStudy: api.removeStudy, fetchStudyLinkTitle: api.fetchStudyLinkTitle }));
 vi.mock("../lib/api", () => ({ listPageSummaries: api.listPageSummaries, getPage: api.getPage, listFlashcardTopics: api.listFlashcardTopics, listAssets: api.listAssets }));
 vi.mock("../lib/books", () => ({ isOriginalBookPage: (page: { properties: Record<string, unknown> }) => page.properties["book-id"] === "original" }));
+vi.mock("../lib/privateReader", async () => {
+  const { writable } = await import("svelte/store");
+  return {
+    privateLibrary: writable({ libraryPath: null, books: [] }),
+    refreshPrivateLibrary: api.refreshPrivateLibrary, addPrivateLibraryLink: api.addPrivateLibraryLink,
+    bookmarkLabel: () => "Saved Library position",
+  };
+});
+import { privateLibrary, type ReaderBook } from "../lib/privateReader";
 import Studies from "./Studies.svelte";
 
+const libraryId = "12345678-1234-4234-8234-123456789abc";
+const libraryBook = (extra: Partial<ReaderBook> = {}): ReaderBook => ({
+  id: libraryId, title: "Private lesson", kind: "audio", available: true, tracks: [], position: null, bookmarks: [], ...extra,
+});
 const fixture = (extra: Partial<StudyItem> = {}): StudyItem => ({
   id: "study", title: "French lesson", topic: "Languages", kind: "audio", source: "assets/french.mp3",
   progress: { position: 20, total: 100, anchor: "", label: "20%" }, createdAt: "", updatedAt: "", ...extra,
@@ -21,6 +35,9 @@ let component: ReturnType<typeof mount> | undefined;
 afterEach(async () => { if (component) await unmount(component); component = undefined; document.body.replaceChildren(); });
 beforeEach(() => {
   vi.resetAllMocks();
+  privateLibrary.set({ libraryPath: null, books: [] });
+  api.refreshPrivateLibrary.mockResolvedValue(undefined);
+  api.addPrivateLibraryLink.mockImplementation(async (title, kind, sourceUrl) => libraryBook({ title, kind, sourceUrl }));
   api.listStudies.mockResolvedValue({ items: [], days: [] });
   api.listPageSummaries.mockResolvedValue([{ id: "page", title: "Physics", is_journal: false }]);
   api.getPage.mockResolvedValue({ id: "page", title: "Physics", properties: {} });
@@ -55,6 +72,73 @@ function titleValue() {
 }
 
 describe("Studies library", () => {
+  it("prefills a Library reference without importing media or duplicating its progress", async () => {
+    const book = libraryBook({ progress: { position: 60, total: 100, anchor: "", label: "60%" } });
+    const onLibraryConsumed = vi.fn();
+    privateLibrary.set({ libraryPath: "/private/library", books: [book] });
+    component = mount(Studies, { target: document.body, props: {
+      graphPath: "/graph", onOpen: vi.fn(), addLibrary: book, onLibraryConsumed,
+    } });
+    await vi.waitFor(() => expect(button("Add study")?.disabled).toBe(false));
+    expect(document.querySelector(".selected-source .badge")?.textContent).toBe("Library");
+    expect(api.saveStudy).not.toHaveBeenCalled();
+    expect(onLibraryConsumed).toHaveBeenCalledOnce();
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
+      source: libraryId, kind: "library", title: book.title,
+      progress: { position: 0, total: 0, anchor: "", label: "" },
+    })));
+    expect(api.addPrivateLibraryLink).not.toHaveBeenCalled();
+    expect(document.querySelector(".private-library")).toBeNull();
+  });
+
+  it("reads canonical Library progress and removes only the plan entry", async () => {
+    const book = libraryBook({ progress: { position: 70, total: 100, anchor: "", label: "70% in Library" } });
+    privateLibrary.set({ libraryPath: "/private/library", books: [book] });
+    const item = fixture({ kind: "library", source: libraryId, title: book.title });
+    api.listStudies.mockResolvedValue({ items: [item], days: [] });
+    const onOpen = vi.fn();
+    component = mount(Studies, { target: document.body, props: { graphPath: "/graph", onOpen } });
+    await vi.waitFor(() => expect(document.querySelector("progress")?.value).toBe(70));
+    button("Continue").click();
+    expect(onOpen).toHaveBeenCalledWith(item);
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove Private lesson from Studies"]')!.click();
+    flushSync();
+    button("Remove study entry").click();
+    await vi.waitFor(() => expect(api.removeStudy).toHaveBeenCalledWith("/graph", item.id));
+    let remaining: ReaderBook[] = [];
+    const unsubscribe = privateLibrary.subscribe(value => { remaining = value.books; });
+    unsubscribe();
+    expect(remaining).toEqual([book]);
+  });
+
+  it("keeps the plan unsaved when adding the Library link fails", async () => {
+    api.addPrivateLibraryLink.mockRejectedValue(new Error("Private storage is full"));
+    await openAdd();
+    input("Paste a web link", "https://example.com/lesson.mp3");
+    button("Add study").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Private storage is full"));
+    expect(api.saveStudy).not.toHaveBeenCalled();
+  });
+
+  it("does not write a plan into a different graph after delayed Library registration", async () => {
+    let finish!: (book: ReaderBook) => void;
+    api.addPrivateLibraryLink.mockReturnValueOnce(new Promise<ReaderBook>(resolve => { finish = resolve; }));
+    const state = new SvelteMap([["graph", "/old"]]);
+    component = mount(Studies, { target: document.body, props: {
+      get graphPath() { return state.get("graph")!; }, onOpen: vi.fn(),
+    } });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("A little learning"));
+    button("+ Add study").click(); flushSync();
+    input("Paste a web link", "https://example.com/lesson.mp3");
+    button("Add study").click();
+    await vi.waitFor(() => expect(api.addPrivateLibraryLink).toHaveBeenCalledOnce());
+    state.set("graph", "/new"); flushSync();
+    finish(libraryBook());
+    await Promise.resolve(); flushSync();
+    expect(api.saveStudy).not.toHaveBeenCalled();
+  });
+
   it("filters statistics, opens a study, edits its topic, and confirms source-preserving removal", async () => {
     const item = fixture();
     api.listStudies.mockResolvedValue({ items: [item, fixture({ id: "other", title: "Other", topic: "Science" })],
@@ -164,8 +248,9 @@ describe("Studies library", () => {
     expect(api.fetchStudyLinkTitle).toHaveBeenCalledWith("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     button("Add study").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
-      kind: "youtube", source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", title: "A helpful lesson",
+      kind: "library", source: libraryId, title: "A helpful lesson",
     })));
+    expect(api.addPrivateLibraryLink).toHaveBeenCalledWith("A helpful lesson", "youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   });
   it("uses the latest URL and ignores an out-of-order title response", async () => {
     let finishOld!: (value: string) => void;
@@ -247,8 +332,9 @@ describe("Studies library", () => {
     await vi.waitFor(() => expect(button("Add study").disabled).toBe(false));
     button("Add study").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
-      kind: "audio", source: "https://example.com/Chinese-lesson.mp3", title: "Chinese lesson",
+      kind: "library", source: libraryId, title: "Chinese lesson",
     })));
+    expect(api.addPrivateLibraryLink).toHaveBeenCalledWith("Chinese lesson", "audio", "https://example.com/Chinese-lesson.mp3");
     expect(api.fetchStudyLinkTitle).not.toHaveBeenCalled();
   });
   it("keeps manually selected media types for extensionless URLs and cancels old title lookups", async () => {
@@ -267,8 +353,9 @@ describe("Studies library", () => {
     await vi.waitFor(() => expect(button("Add study").disabled).toBe(false));
     button("Add study").click();
     await vi.waitFor(() => expect(api.saveStudy).toHaveBeenCalledWith("/graph", expect.objectContaining({
-      kind: "audio", source: "https://example.com/stream?id=42", title: "Streaming lesson",
+      kind: "library", source: libraryId, title: "Streaming lesson",
     })));
+    expect(api.addPrivateLibraryLink).toHaveBeenCalledWith("Streaming lesson", "audio", "https://example.com/stream?id=42");
   });
   it("debounces rapid URL changes and allows an inline topic to reuse a previous choice", async () => {
     api.listStudies.mockResolvedValue({ items: [fixture()], days: [], topics: ["Health"] });

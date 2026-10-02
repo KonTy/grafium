@@ -1,18 +1,20 @@
 <script lang="ts">
   import { get } from "svelte/store";
   import { BOOK_FRAME_SANDBOX, readReaderMessage, readerFrameURL, type BookTocItem } from "../lib/bookReaderSecurity";
-  import { privateBookJump, privateLibrary, privateVisualPositions, readerNative, savePrivatePosition, privateLibraryError, refreshPrivateLibrary, privateBookLanguages, privateVoiceLanguageSuggestion } from "../lib/privateReader";
+  import { privateBookJump, privateLibrary, privateVisualPositions, readerNative, privateLibraryError, refreshPrivateLibrary, privateBookLanguages, privateVoiceLanguageSuggestion } from "../lib/privateReader";
   import type { BookLocation } from "../lib/bookLocations";
   import type { ReaderTextSegment, ReaderMessage } from "../lib/bookReaderSecurity";
   import { registerPrivateSegments } from "../lib/privateReaderSegments";
   import { privatePlayback } from "../lib/privateReaderPlayback";
   import { sha256 } from "@noble/hashes/sha256";
-  let { bookId }: { bookId: string } = $props();
+  import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
+  let { bookId, onActivity, onProgress }: { bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void } = $props();
   let frame = $state<HTMLIFrameElement>();
   let url = $state("");
   let ready = $state(false);
   let error = $state("");
   let label = $state("");
+  let fraction = $state<number | undefined>();
   let toc = $state<BookTocItem[]>([]);
   let size = $state(100);
   let retry = $state(0);
@@ -30,12 +32,13 @@
     let runtime = "";
     let sourceHash = "";
     let pending: BookLocation | null = null;
+    let pendingActivity = false;
     let navigationPending = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let openTimer: ReturnType<typeof setTimeout> | undefined;
     let writing = Promise.resolve();
     const requests = new Map<string, { resolve: (message: Extract<ReaderMessage, { type: "read-aloud-segments" }>) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-    ready = false; url = ""; error = ""; label = ""; toc = [];
+    ready = false; url = ""; error = ""; label = ""; fraction = undefined; toc = [];
     function flush() {
       clearTimeout(timer);
       const playback = get(privatePlayback);
@@ -43,10 +46,14 @@
       if (!sourceAvailable) pending = null;
       if (!pending) return writing;
       const locator = pending;
+      const active = pendingActivity;
+      const progress = { position: fraction ?? 0, total: fraction === undefined ? 0 : 1,
+        anchor: locator.kind === "epub" ? locator.cfi : "", label };
       pending = null;
-      writing = writing.then(() => savePrivatePosition(id, { offsetMs: 0, locator })).catch(cause => {
+      pendingActivity = false;
+      writing = writing.then(() => saveLibraryCheckpoint(id, { offsetMs: 0, locator }, progress, active)).catch(cause => {
         // A failed write is never shown as a saved place.
-        if (!disposed) { pending ??= locator; error = `Position not saved: ${String(cause)}`; }
+        if (!disposed) { if (!pending) { pending = locator; pendingActivity = active; } error = `Position not saved: ${String(cause)}`; }
         else privateLibraryError.set(`Private book position was not saved: ${String(cause)}`);
       });
       return writing;
@@ -114,12 +121,14 @@
         requests.clear();
       }
       else if (message.type === "help") frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+      else if (message.type === "selection" && sourceAvailable) onActivity?.();
       else if (message.type === "navigation") navigationPending = true;
       else if (message.type === "location" && message.location.kind === "epub") {
         if (!sourceAvailable) return;
         const explicitNavigation = navigationPending;
         navigationPending = false;
         label = message.label;
+        fraction = message.fraction;
         const playback = get(privatePlayback);
         if (playback.bookId === id && playback.mode === "tts" && playback.status !== "stopped") {
           return;
@@ -128,6 +137,12 @@
         const saved = get(privateLibrary).books.find(item => item.id === id)?.position;
         if (!explicitNavigation && saved?.locator && (saved.voiceId !== undefined || saved.offsetMs > 0)) return;
         pending = message.location;
+        pendingActivity ||= explicitNavigation;
+        if (explicitNavigation) {
+          onActivity?.();
+          onProgress?.({ position: message.fraction ?? 0, total: message.fraction === undefined ? 0 : 1,
+            anchor: message.location.cfi, label: message.label });
+        }
         clearTimeout(timer); timer = setTimeout(() => { void flush(); }, 600);
       }
     };
@@ -186,7 +201,7 @@
       if (item) send("toc", { target: item.target });
       event.currentTarget.value = "";
     }}><option disabled value="">Contents…</option>{#each toc as item, index}<option value={index}>{"—".repeat(item.depth)} {item.label}</option>{/each}</select>
-    <label>Text size<select bind:value={size} disabled={!ready} onchange={() => send("size", { value: size })}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
+    <label>Text size<select bind:value={size} disabled={!ready} onchange={() => { onActivity?.(); send("size", { value: size }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
     <small>{label}</small>
   </div>
   {#if error}<p role="alert">{error} <button onclick={() => retry++}>Reload book</button></p>{/if}

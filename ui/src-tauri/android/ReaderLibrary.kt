@@ -14,6 +14,77 @@ import java.util.UUID
 internal object ReaderPolicy {
   const val LOCAL_AUTHORITY = "com.android.externalstorage.documents"
   val audioExtensions = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav")
+  fun normalizeLink(kind: String, value: String): String {
+    require(kind in setOf("audio", "video", "youtube") && value.length <= 8192 &&
+      value.none { it.isISOControl() || it.isWhitespace() } && !value.contains('\\')) { "INVALID_LIBRARY_LINK" }
+    val url = try { java.net.URI(value) } catch (_: Exception) { throw IllegalArgumentException("INVALID_LIBRARY_URL") }
+    require(url.scheme?.lowercase() in setOf("http", "https") && !url.host.isNullOrEmpty() &&
+      url.rawUserInfo == null && !url.rawAuthority.contains('@')) { "HTTP_LINK_WITHOUT_CREDENTIALS_REQUIRED" }
+    if (kind != "youtube") {
+      val scheme = url.scheme.lowercase()
+      val port = if ((scheme == "https" && url.port == 443) || (scheme == "http" && url.port == 80)) -1 else url.port
+      return java.net.URI(scheme, null, url.host.lowercase(), port, null, null, null).toString() +
+        (url.rawPath.ifEmpty { "/" }) + (url.rawQuery?.let { "?$it" } ?: "") + (url.rawFragment?.let { "#$it" } ?: "")
+    }
+    require(url.port == -1 || url.port == if (url.scheme.lowercase() == "https") 443 else 80) { "INVALID_YOUTUBE_PORT" }
+    val host = url.host.lowercase()
+    val parts = url.path.removePrefix("/").split("/")
+    val id = if (host in setOf("youtu.be", "www.youtu.be") && parts.size == 1) parts[0]
+      else if (host in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+        "youtube-nocookie.com", "www.youtube-nocookie.com")) {
+        if (url.path == "/watch") Uri.parse(value).getQueryParameter("v")
+        else if (parts.size == 2 && parts[0] in setOf("embed", "shorts", "live")) parts[1] else null
+      } else null
+    require(id != null && Regex("[A-Za-z0-9_-]{11}").matches(id)) { "KNOWN_YOUTUBE_VIDEO_REQUIRED" }
+    return "https://www.youtube.com/watch?v=$id"
+  }
+
+  fun progress(value: JSONObject): JSONObject {
+    require(value.keys().asSequence().toSet() == setOf("position", "total", "anchor", "label")) { "INVALID_LIBRARY_PROGRESS" }
+    val position = value.get("position")
+    val total = value.get("total")
+    val anchor = value.get("anchor")
+    val label = value.get("label")
+    require(position is Number && total is Number && anchor is String && label is String) { "INVALID_LIBRARY_PROGRESS" }
+    require(position.toDouble().isFinite() && total.toDouble().isFinite() &&
+      position.toDouble() in 0.0..31_536_000_000.0 && total.toDouble() in 0.0..31_536_000_000.0 &&
+      (total.toDouble() == 0.0 || position.toDouble() <= total.toDouble()) &&
+      anchor.length <= 8192 && label.length <= 1024 && (anchor + label).none { it.isISOControl() }) { "INVALID_LIBRARY_PROGRESS" }
+    return JSONObject(value.toString())
+  }
+
+  fun libraryMetadata(book: JSONObject) {
+    if (!book.has("favorite")) book.put("favorite", false)
+    if (!book.has("lastUsedAt")) book.put("lastUsedAt", 0)
+    require(book.get("favorite") is Boolean) { "INVALID_LIBRARY_FAVORITE" }
+    val used = book.get("lastUsedAt")
+    require(used is Number && used.toDouble() == used.toLong().toDouble() &&
+      used.toLong() in 0..9_007_199_254_740_991L) { "INVALID_LIBRARY_ACTIVITY" }
+    if (book.has("progress")) progress(book.getJSONObject("progress"))
+    if (book.has("sourceUrl")) {
+      require(book.get("sourceUrl") is String && normalizeLink(book.getString("kind"), book.getString("sourceUrl")) ==
+        book.getString("sourceUrl") && book.getJSONArray("tracks").length() == 0 &&
+        listOf("tree", "documentId", "bindingId").none { book.has(it) }) { "INVALID_EXTERNAL_LIBRARY_ITEM" }
+      mediaPosition(book.getJSONObject("position"))
+      val marks = book.getJSONArray("bookmarks")
+      for (i in 0 until marks.length()) mediaPosition(marks.getJSONObject(i).getJSONObject("position"))
+    } else require(book.getString("kind") in setOf("audio", "epub")) { "UNSUPPORTED_LOCAL_LIBRARY_KIND" }
+  }
+
+  fun libraryVersion(document: JSONObject) {
+    if (!document.has("libraryVersion")) return
+    val version = document.get("libraryVersion")
+    require(version is Number && version.toDouble() == version.toInt().toDouble() &&
+      version.toInt() in 1..2) { "UNSUPPORTED_LIBRARY_VERSION" }
+  }
+
+  fun mediaPosition(raw: JSONObject): JSONObject {
+    require(raw.keys().asSequence().toSet() == setOf("offsetMs")) { "EXTERNAL_POSITION_REQUIRED" }
+    val offset = raw.get("offsetMs")
+    require(offset is Number && offset.toDouble() == offset.toLong().toDouble() &&
+      offset.toLong() in 0..31_536_000_000L) { "INVALID_POSITION" }
+    return JSONObject().put("offsetMs", offset.toLong())
+  }
   fun stableId(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
   fun naturalKey(value: String): String =
@@ -53,15 +124,24 @@ internal class ReaderLibrary private constructor(private val context: Context) {
       catch (_: Exception) { throw IllegalStateException("PRIVATE_STATE_UNREADABLE: preserve app data and restore a local backup") }
     } else JSONObject().put("books", JSONArray()).put("volume", JSONObject()
       .put("enabled", false).put("key", "up").put("gesture", "longPress"))
+    ReaderPolicy.libraryVersion(data)
+    val books = data.getJSONArray("books")
+    for (i in 0 until books.length()) ReaderPolicy.libraryMetadata(books.getJSONObject(i))
   }
 
+  private var committed: String = data.toString()
+
   @Synchronized private fun save() {
-    val stream = file.startWrite()
+    var stream: java.io.FileOutputStream? = null
     try {
+      data.put("libraryVersion", 2)
+      stream = file.startWrite()
       stream.write(data.toString().toByteArray())
       file.finishWrite(stream)
+      committed = data.toString()
     } catch (error: Exception) {
-      file.failWrite(stream)
+      if (stream != null) file.failWrite(stream)
+      data = JSONObject(committed)
       throw IllegalStateException("PRIVATE_STATE_WRITE_FAILED", error)
     }
   }
@@ -91,6 +171,55 @@ internal class ReaderLibrary private constructor(private val context: Context) {
   @Synchronized fun library(): JSONObject = JSONObject().put("books", books())
     .put("configured", data.has("tree")).put("locationLabel", data.optString("locationLabel", ""))
     .put("error", data.optString("error", ""))
+
+  @Synchronized fun setFavorite(bookId: String, favorite: Boolean): JSONObject {
+    mutableBook(bookId).put("favorite", favorite)
+    save()
+    return library()
+  }
+
+  @Synchronized fun recordActivity(bookId: String, progress: JSONObject?): JSONObject {
+    val checked = progress?.let { ReaderPolicy.progress(it) }
+    val book = mutableBook(bookId)
+    book.put("lastUsedAt", System.currentTimeMillis())
+    if (checked != null) book.put("progress", checked)
+    save()
+    return library()
+  }
+
+  @Synchronized fun addLink(title: String, kind: String, url: String): JSONObject {
+    val normalized = ReaderPolicy.normalizeLink(kind, url)
+    val trimmed = title.trim()
+    require(trimmed.length in 1..1024 && trimmed.none { it.isISOControl() }) { "INVALID_LIBRARY_TITLE" }
+    val books = data.getJSONArray("books")
+    for (i in 0 until books.length()) {
+      val book = books.getJSONObject(i)
+      if (book.getString("kind") == kind && book.optString("sourceUrl") == normalized) return library()
+    }
+    require(books.length() < 10000) { "LIBRARY_LIMIT" }
+    books.put(JSONObject().put("id", ReaderPolicy.stableId(UUID.randomUUID().toString()))
+      .put("title", trimmed).put("kind", kind).put("sourceUrl", normalized).put("available", true)
+      .put("tracks", JSONArray()).put("bookmarks", JSONArray()).put("position", JSONObject().put("offsetMs", 0))
+      .put("favorite", false).put("lastUsedAt", 0))
+    save()
+    return library()
+  }
+
+  private fun externalPosition(book: JSONObject, raw: JSONObject): JSONObject {
+    require(book.has("sourceUrl")) { "EXTERNAL_POSITION_REQUIRED" }
+    return ReaderPolicy.mediaPosition(raw)
+  }
+
+  @Synchronized fun saveExternalPosition(bookId: String, raw: JSONObject): JSONObject {
+    val book = mutableBook(bookId)
+    val position = externalPosition(book, raw)
+    book.put("position", position)
+    save()
+    return JSONObject(position.toString())
+  }
+
+  @Synchronized fun externalBookmark(bookId: String, raw: JSONObject, note: String): JSONObject =
+    bookmarkAt(bookId, externalPosition(mutableBook(bookId), raw), note)
   @Synchronized fun volume(): JSONObject = JSONObject(data.getJSONObject("volume").toString())
   @Synchronized fun setVolume(args: JSONObject): JSONObject {
     require(args.optString("key", "up") in setOf("up", "down")) { "INVALID_VOLUME_KEY" }
@@ -188,6 +317,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
         val merged = JSONArray()
         for (i in 0 until old.length()) {
           val previous = old.getJSONObject(i)
+          if (previous.has("sourceUrl")) { merged.put(previous); continue }
           val bindingId = previous.optString("bindingId", previous.getString("id"))
           val fresh = found.remove(bindingId)
           if (fresh == null) {
@@ -196,6 +326,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
           } else {
             fresh.put("id", previous.getString("id")).put("bindingId", bindingId)
             fresh.put("position", previous.getJSONObject("position")).put("bookmarks", previous.getJSONArray("bookmarks"))
+            for (field in listOf("favorite", "lastUsedAt", "progress")) if (previous.has(field)) fresh.put(field, previous.get(field))
             if (previous.has("order")) applyOrder(fresh, previous.getJSONArray("order"))
             val trackId = fresh.getJSONObject("position").optString("trackId")
             if (trackId.isNotEmpty() && !hasTrack(fresh, trackId))
@@ -205,7 +336,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
         }
         val excluded = data.optJSONArray("excluded") ?: JSONArray()
         val excludedIds = (0 until excluded.length()).map { excluded.getString(it) }.toSet()
-        found.values.filter { it.getString("id") !in excludedIds }.forEach { merged.put(it) }
+        found.values.filter { it.getString("id") !in excludedIds }.forEach { ReaderPolicy.libraryMetadata(it); merged.put(it) }
         data.put("books", merged).remove("error")
         save()
         return library()
@@ -216,7 +347,10 @@ internal class ReaderLibrary private constructor(private val context: Context) {
         data.put("error", if (Regex("[A-Z_]+").matches(code)) code
           else if (error is SecurityException) "READ_GRANT_MISSING" else "SOURCE_UNAVAILABLE")
         val books = data.getJSONArray("books")
-        for (i in 0 until books.length()) books.getJSONObject(i).put("available", false)
+        for (i in 0 until books.length()) {
+          val book = books.getJSONObject(i)
+          if (!book.has("sourceUrl")) book.put("available", false)
+        }
         save()
       }
       throw error
@@ -230,6 +364,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
 
   @Synchronized fun resource(bookId: String, trackId: String): Uri {
     val book = mutableBook(bookId)
+    require(!book.has("sourceUrl")) { "EXTERNAL_MEDIA_NOT_A_SAF_RESOURCE" }
     require(book.optBoolean("available")) { "SOURCE_MISSING: rescan or relink this book" }
     val tree = Uri.parse(book.getString("tree"))
     ReaderPolicy.validateProvider(context, tree)
@@ -303,6 +438,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
   @Synchronized fun bookmarkAt(bookId: String, position: JSONObject, note: String): JSONObject {
     require(note.length <= 4096) { "NOTE_TOO_LONG" }
     val book = mutableBook(bookId)
+    if (book.has("sourceUrl")) externalPosition(book, position)
     if (position.has("locator")) position.put("locator", ReaderNarrationUploads.canonicalLocator(position.get("locator")))
     val mark = JSONObject().put("id", UUID.randomUUID().toString()).put("bookId", bookId).put("createdAt", System.currentTimeMillis())
       .put("position", position).put("note", note)
@@ -346,6 +482,10 @@ internal class ReaderLibrary private constructor(private val context: Context) {
     require(bookId != replacementId) { "CHOOSE_REPLACEMENT_BOOK" }
     val previous = mutableBook(bookId)
     val fresh = JSONObject(mutableBook(replacementId).toString())
+    require(!previous.has("sourceUrl") && !fresh.has("sourceUrl")) { "EXTERNAL_LINKS_CANNOT_RELINK" }
+    require(!fresh.optBoolean("favorite") && fresh.optLong("lastUsedAt") == 0L && !fresh.has("progress")) {
+      "REPLACEMENT_HAS_LIBRARY_HISTORY: keep this item separate"
+    }
     require(fresh.optBoolean("available") && previous.getString("kind") == fresh.getString("kind")) { "INCOMPATIBLE_REPLACEMENT" }
     // Explicit relink never applies an old numeric position to potentially different media.
     val marks = JSONArray(previous.getJSONArray("bookmarks").toString())
@@ -356,6 +496,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
       .put("id", bookId).put("bookmarks", marks)
       .put("previousPosition", previous.getJSONObject("position"))
       .put("position", JSONObject().put("offsetMs", 0))
+    for (field in listOf("favorite", "lastUsedAt", "progress")) if (previous.has(field)) fresh.put(field, previous.get(field))
     val result = JSONArray()
     val books = data.getJSONArray("books")
     for (i in 0 until books.length()) {
@@ -388,7 +529,9 @@ internal class ReaderLibrary private constructor(private val context: Context) {
   /** Merge recovery never replaces current progress, grants, settings, or edited notes. */
   fun restore(json: String): JSONObject {
     require(json.toByteArray().size <= 16 * 1024 * 1024) { "RESTORE_SIZE_LIMIT" }
-    val imported = JSONObject(json).getJSONArray("books")
+    val source = JSONObject(json)
+    ReaderPolicy.libraryVersion(source)
+    val imported = source.getJSONArray("books")
     require(imported.length() <= 10000) { "RESTORE_BOOK_LIMIT" }
     val safe = ArrayList<JSONObject>()
     val ids = HashSet<String>()
@@ -424,7 +567,8 @@ internal class ReaderLibrary private constructor(private val context: Context) {
       val id = book.getString("id")
       require(Regex("[a-f0-9]{64}").matches(id) && ids.add(id)) { "INVALID_OR_DUPLICATE_RESTORE_BOOK_ID" }
       val kind = book.getString("kind")
-      require(kind in setOf("audio", "epub") && book.getString("title").length in 1..1024) { "INVALID_RESTORE_BOOK" }
+      ReaderPolicy.libraryMetadata(book)
+      require(kind in setOf("audio", "epub", "video", "youtube") && book.getString("title").length in 1..1024) { "INVALID_RESTORE_BOOK" }
       val tracks = JSONArray()
       val trackIds = HashSet<String>()
       val incomingTracks = book.getJSONArray("tracks")
@@ -455,6 +599,12 @@ internal class ReaderLibrary private constructor(private val context: Context) {
         .put("tracks", tracks).put("bookmarks", marks).put("position", position(book.getJSONObject("position")))
         .put("available", false).put("error", "RESTORED_SOURCE_RELINK_REQUIRED: select and rescan the local library")
         .put("order", JSONArray((0 until tracks.length()).map { tracks.getJSONObject(it).getString("id") }))
+      for (field in listOf("favorite", "lastUsedAt", "progress")) if (book.has(field)) restored.put(field, book.get(field))
+      if (book.has("sourceUrl")) {
+        restored.put("sourceUrl", book.getString("sourceUrl")).put("available", true).remove("error")
+        externalPosition(restored, restored.getJSONObject("position"))
+        for (j in 0 until marks.length()) externalPosition(restored, marks.getJSONObject(j).getJSONObject("position"))
+      }
       if (book.has("bindingId")) {
         require(Regex("[a-f0-9]{64}").matches(book.getString("bindingId"))) { "INVALID_RESTORE_BINDING" }
         restored.put("bindingId", book.getString("bindingId"))
@@ -480,6 +630,8 @@ internal class ReaderLibrary private constructor(private val context: Context) {
             require(current.length() < 10000) { "RESTORE_BOOK_LIMIT" }
             current.put(book)
           } else {
+            require(existing.getString("kind") == book.getString("kind") &&
+              existing.optString("sourceUrl") == book.optString("sourceUrl")) { "RESTORE_SOURCE_CONFLICT" }
             val marks = existing.getJSONArray("bookmarks")
             val existingIds = (0 until marks.length()).map { marks.getJSONObject(it).getString("id") }.toMutableSet()
             val additions = book.getJSONArray("bookmarks")

@@ -102,6 +102,7 @@ internal class PrivateReaderBridge(
           }
         }
         "library", "rescan", "remove", "reorder", "position", "relink", "volumeSettings", "readEpub",
+        "set_favorite", "record_activity", "add_link", "external_position", "external_bookmark",
         "voiceStatus", "selectVoice", "downloadVoice", "narrationPrepare", "updateBookmark", "restore",
         "narrationBegin", "narrationAppend", "narrationCommit", "narrationCancel", "narrationAbort" -> {
           if (command in setOf("remove", "relink", "reorder") &&
@@ -112,6 +113,15 @@ internal class PrivateReaderBridge(
             val library = ReaderLibrary.get(activity)
             when (command) {
               "library" -> library.library()
+              "set_favorite" -> {
+                require(args.get("favorite") is Boolean) { "INVALID_LIBRARY_FAVORITE" }
+                library.setFavorite(args.getString("bookId"), args.getBoolean("favorite"))
+              }
+              "record_activity" -> library.recordActivity(args.getString("bookId"),
+                if (args.has("progress")) args.getJSONObject("progress") else null)
+              "add_link" -> library.addLink(args.getString("title"), args.getString("kind"), args.getString("url"))
+              "external_position" -> library.saveExternalPosition(args.getString("bookId"), args.getJSONObject("position"))
+              "external_bookmark" -> library.externalBookmark(args.getString("bookId"), args.getJSONObject("position"), args.optString("note"))
               "rescan" -> library.rescan()
               "remove" -> { library.remove(args.getString("bookId")); library.library() }
               "reorder" -> { library.reorder(args.getString("bookId"), args.getJSONArray("trackIds")); library.library() }

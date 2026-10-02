@@ -55,6 +55,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         "reader",
         include_str!("../../resources/welcome/pages/Help - Private Reader.md"),
     ),
+    (
+        "library",
+        include_str!("../../resources/welcome/pages/Help - Library.md"),
+    ),
 ];
 
 #[tauri::command(rename_all = "camelCase")]
@@ -68,6 +72,14 @@ pub fn help_get_page(context: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_help_explains_separate_ownership_and_reference_plans() {
+        let page = super::help_get_page("library".into()).unwrap();
+        assert!(page.contains("stable Library item and bookmark IDs"));
+        assert!(page.contains("not another copy"));
+        assert!(page.contains("g l"));
+    }
+
     #[test]
     fn private_reader_help_explains_privacy_and_device_limits() {
         let page = super::help_get_page("reader".into()).unwrap();

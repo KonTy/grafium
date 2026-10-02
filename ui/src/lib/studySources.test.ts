@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { finiteStudyProgress, localStudyDay, normalizeStudySource, studySourceFromLink, studyPercent, studyTime, youtubeVideoId } from "./studySources";
 
 describe("study sources", () => {
+  it("accepts only stable Library UUIDs, never paths or URLs", () => {
+    expect(normalizeStudySource("library", "12345678-1234-4234-8234-123456789ABC")).toBe("12345678-1234-4234-8234-123456789abc");
+    for (const source of ["", "../book.epub", "assets/book.mp3", "https://example.com/book", "1234"])
+      expect(() => normalizeStudySource("library", source)).toThrow();
+  });
   it.each([
     ["https://youtu.be/dQw4w9WgXcQ?t=12", "youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
     ["www.example.com/article", "website", "https://www.example.com/article"],

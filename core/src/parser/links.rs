@@ -597,6 +597,12 @@ fn is_word_boundary(content: &str, at: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_bookmark_links_do_not_create_graph_references() {
+        let note = "[My &#91;&#91;book&#93;&#93; - 0:12](#grafium-library/12345678-1234-4234-8234-123456789abc?bookmark=87654321-4321-4321-8321-cba987654321)";
+        assert!(super::extract_links(note).is_empty());
+    }
+
     use super::*;
 
     #[test]

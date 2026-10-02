@@ -16,7 +16,7 @@
 {#if $privatePlayback.bookId && ($privatePlayback.status !== "stopped" || error || $privatePlayback.error)}
   <section class="reader-bar" aria-label="Private reader playback" data-help-context="reader">
     <div class="identity">
-      <span class="privacy">PRIVATE READER · {$privatePlayback.mode === "tts" ? "READ ALOUD" : "AUDIO"}</span>
+      <span class="privacy">LIBRARY · {$privatePlayback.mode === "tts" ? "READ ALOUD" : "AUDIO"}</span>
       <button class="title" onclick={() => onOpen($privatePlayback.bookId!)}>{$privatePlayback.title}</button>
       <small>{$privatePlayback.status} · {readerTime($privatePlayback.position?.offsetMs ?? 0)}</small>
     </div>

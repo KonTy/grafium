@@ -42,6 +42,10 @@ beforeEach(() => {
     if (command === "private_voice_status") return { available: true, selection: { voice_id: "voice", language: "fr-CA" } };
     if (command === "private_voice_synthesize") return { file_name: "clip.wav" };
     if (command === "private_voice_audio") return wave();
+    if (command === "reader_record_activity") return {
+      ...get(privateLibrary), books: get(privateLibrary).books.map(book => book.id === args.bookId
+        ? { ...book, lastUsedAt: Date.now(), ...(args.progress ? { progress: args.progress } : {}) } : book),
+    };
     if (command === "reader_snapshot") return get(privateLibrary);
     if (command === "reader_add_bookmark") return { id: "mark", ...args };
   });
@@ -126,7 +130,7 @@ describe("native private narration", () => {
     await startPrivateReadAloud("book", true);
     elements[0].currentTime = 4.125;
     await vi.advanceTimersByTimeAsync(4000);
-    expect(invoke).toHaveBeenLastCalledWith("reader_save_position", { bookId: "book",
+    expect(invoke).toHaveBeenCalledWith("reader_save_position", { bookId: "book",
       position: { locator: segment(0).locator, offsetMs: 4125, voiceId: "voice" } });
     expect(get(privateLibrary).books[0].position?.offsetMs).toBe(4125);
     expect(get(privatePlayback).position?.locator).toEqual(segment(0).locator);

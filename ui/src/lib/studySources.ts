@@ -2,7 +2,7 @@ import type { StudyItem, StudyProgress } from "./studies";
 
 export const studyKindLabels: Record<StudyItem["kind"], string> = {
   page: "Page", book: "Book", flashcards: "Flashcards", audio: "Audio",
-  video: "Video", youtube: "YouTube", website: "Website",
+  video: "Video", youtube: "YouTube", website: "Website", library: "Library",
 };
 
 export function webStudyUrl(source: string): URL {
@@ -38,6 +38,11 @@ export function normalizeStudySource(kind: StudyItem["kind"], source: string): s
   const value = source.trim();
   if (kind === "flashcards") return value;
   if (!value) throw new Error("Choose a source for this study.");
+  if (kind === "library") {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))
+      throw new Error("Choose a Library item, not a file path or URL.");
+    return value.toLowerCase();
+  }
   if (kind === "page" || kind === "book") return value;
   if (kind === "youtube") return `https://www.youtube.com/watch?v=${youtubeVideoId(value)}`;
   if (kind === "website") return webStudyUrl(value).href;

@@ -37,15 +37,19 @@ impl ReaderPosition {
             return Err("Reader position voice ID is invalid".into());
         }
         match book.kind {
-            ReaderKind::Audio => {
+            ReaderKind::Audio | ReaderKind::Video | ReaderKind::Youtube => {
                 if self.locator.is_some()
                     || self.voice_id.is_some()
-                    || !book
-                        .tracks
-                        .iter()
-                        .any(|t| Some(&t.id) == self.track_id.as_ref())
+                    || if book.source_url.is_some() {
+                        self.track_id.is_some()
+                    } else {
+                        !book
+                            .tracks
+                            .iter()
+                            .any(|t| Some(&t.id) == self.track_id.as_ref())
+                    }
                 {
-                    return Err("Position must name a registered audio track".into());
+                    return Err("Position must name a registered local media track, or an offset-only external item".into());
                 }
             }
             ReaderKind::Epub => {
@@ -76,6 +80,105 @@ impl ReaderPosition {
 pub enum ReaderKind {
     Audio,
     Epub,
+    Video,
+    Youtube,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReaderProgress {
+    pub position: f64,
+    pub total: f64,
+    pub anchor: String,
+    pub label: String,
+}
+
+impl ReaderProgress {
+    pub fn validate(&self) -> ReaderResult<()> {
+        if !self.position.is_finite()
+            || !self.total.is_finite()
+            || self.position < 0.0
+            || self.total < 0.0
+            || self.position > 31_536_000_000.0
+            || self.total > 31_536_000_000.0
+            || (self.total > 0.0 && self.position > self.total)
+            || self.anchor.len() > 8192
+            || self.label.len() > 1024
+            || self.anchor.chars().any(char::is_control)
+            || self.label.chars().any(char::is_control)
+        {
+            return Err("Invalid Library progress".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn normalize_link(kind: ReaderKind, value: &str) -> ReaderResult<String> {
+    if kind == ReaderKind::Epub
+        || !(value.to_ascii_lowercase().starts_with("http://")
+            || value.to_ascii_lowercase().starts_with("https://"))
+        || value.len() > 8192
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+        || value.contains('\\')
+    {
+        return Err("Invalid Library link".into());
+    }
+    let url = reqwest::Url::parse(value).map_err(|_| "Invalid Library URL")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || value
+            .split("://")
+            .nth(1)
+            .unwrap_or("")
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .contains('@')
+    {
+        return Err("Library links require HTTP(S) without credentials".into());
+    }
+    if kind != ReaderKind::Youtube {
+        return Ok(url.to_string());
+    }
+    if url.port().is_some() {
+        return Err("Invalid YouTube URL port".into());
+    }
+    let host = url.host_str().unwrap_or("");
+    let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+    let video = if matches!(host, "youtu.be" | "www.youtu.be") && segments.len() == 1 {
+        Some(segments[0].to_owned())
+    } else if matches!(
+        host,
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "music.youtube.com"
+            | "youtube-nocookie.com"
+            | "www.youtube-nocookie.com"
+    ) {
+        if url.path() == "/watch" {
+            url.query_pairs()
+                .find(|(key, _)| key == "v")
+                .map(|(_, v)| v.into_owned())
+        } else if segments.len() == 2 && matches!(segments[0], "embed" | "shorts" | "live") {
+            Some(segments[1].to_owned())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .ok_or("Use a known YouTube video URL")?;
+    if video.len() != 11
+        || !video
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Invalid YouTube video ID".into());
+    }
+    Ok(format!("https://www.youtube.com/watch?v={video}"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,6 +210,14 @@ pub struct ReaderBook {
     pub tracks: Vec<ReaderTrack>,
     pub position: Option<ReaderPosition>,
     pub bookmarks: Vec<ReaderBookmark>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub last_used_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ReaderProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -161,6 +272,10 @@ mod tests {
             tracks: vec![],
             position: None,
             bookmarks: vec![],
+            favorite: false,
+            last_used_at: 0,
+            source_url: None,
+            progress: None,
             error: None,
         };
         position.validate(&book).unwrap();

@@ -1,4 +1,4 @@
-use super::types::ReaderResult;
+use super::types::{ReaderKind, ReaderResult};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
@@ -258,7 +258,45 @@ pub struct Discovered {
     pub key: String,
     pub title: String,
     pub epub: bool,
+    pub kind: ReaderKind,
     pub files: Vec<(String, Fingerprint)>,
+}
+
+pub fn media_kind(path: &str) -> Option<ReaderKind> {
+    match Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "epub" => Some(ReaderKind::Epub),
+        "mp3" | "m4a" | "m4b" | "aac" | "ogg" | "opus" | "flac" | "wav" => Some(ReaderKind::Audio),
+        "mp4" | "m4v" | "webm" | "ogv" | "mov" | "mkv" => Some(ReaderKind::Video),
+        _ => None,
+    }
+}
+
+pub fn media_mime(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "m4a" | "m4b" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        _ => "application/octet-stream",
+    }
 }
 
 fn title(path: &str) -> String {
@@ -277,15 +315,14 @@ pub fn discover(dir: &Dir) -> ReaderResult<Vec<Discovered>> {
     let mut books = Vec::<Discovered>::new();
     let mut audio_groups = HashMap::<String, usize>::new();
     for (path, fingerprint) in paths {
-        let epub = Path::new(&path)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("epub"));
-        let key = if epub || !path.contains('/') {
+        let kind = media_kind(&path).ok_or("Unsupported discovered media")?;
+        let epub = kind == ReaderKind::Epub;
+        let key = if kind != ReaderKind::Audio || !path.contains('/') {
             path.clone()
         } else {
             path.split('/').next().unwrap().to_owned()
         };
-        if !epub {
+        if kind == ReaderKind::Audio {
             if let Some(index) = audio_groups.get(&key) {
                 books[*index].files.push((path, fingerprint));
                 continue;
@@ -296,6 +333,7 @@ pub fn discover(dir: &Dir) -> ReaderResult<Vec<Discovered>> {
             title: title(&key),
             key,
             epub,
+            kind,
             files: vec![(path, fingerprint)],
         });
     }
@@ -336,11 +374,7 @@ fn walk(
         if kind.is_dir() {
             let child = dir.open_dir_nofollow(&name).map_err(|e| e.to_string())?;
             walk(&child, &path, depth + 1, count, out)?;
-        } else if kind.is_file()
-            && Path::new(&name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("mp3") || e.eq_ignore_ascii_case("epub"))
-        {
+        } else if kind.is_file() && media_kind(&name).is_some() {
             let file = open(dir, &name)?;
             out.push((path, Fingerprint::of(&file)?));
         }

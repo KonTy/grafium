@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type StudyKind = "page" | "book" | "flashcards" | "audio" | "video" | "youtube" | "website";
+export type StudyKind = "page" | "book" | "flashcards" | "audio" | "video" | "youtube" | "website" | "library";
 export interface StudyProgress {
   position: number;
   total: number;

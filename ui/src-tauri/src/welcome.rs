@@ -6,7 +6,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
-const SEED_VERSION: u8 = 55;
+const SEED_VERSION: u8 = 56;
 
 struct Resource {
     path: &'static str,
@@ -63,6 +63,7 @@ const RESOURCES: &[Resource] = &[
     resource!("pages/Help - Flashcards.md"),
     resource!("pages/Help - Tasks.md"),
     resource!("pages/Help - Studies.md"),
+    resource!("pages/Help - Library.md"),
     resource!("pages/Help - Chat.md"),
     resource!("pages/Help - Settings.md"),
     resource!("pages/Help - Sync.md"),
@@ -460,7 +461,7 @@ mod tests {
             .collect();
         // Guards against a page being added to RESOURCES without anyone
         // checking that its links resolve below.
-        assert_eq!(markdown.len(), 53);
+        assert_eq!(markdown.len(), 54);
         let titles: HashSet<String> = markdown
             .iter()
             .map(|resource| {

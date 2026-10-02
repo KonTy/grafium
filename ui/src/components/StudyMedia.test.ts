@@ -23,11 +23,21 @@ afterEach(async () => { if (component) await unmount(component); component = und
 beforeEach(() => {
   vi.resetAllMocks();
   vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
   api.invoke.mockImplementation(async command => command === "study_youtube_embed" ? wrapperUrl : "data:audio/mpeg;base64,AAAA");
   api.open.mockResolvedValue(undefined);
 });
 
 describe("study media", () => {
+  it("accepts the Library reference kind without treating its UUID as playable media", () => {
+    render(fixture({ kind: "library", source: "123e4567-e89b-12d3-a456-426614174000" }));
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Open this reference in Library");
+    expect(document.querySelector("audio, video, iframe")).toBeNull();
+    expect(api.invoke).not.toHaveBeenCalled();
+    expect(progress).not.toHaveBeenCalled();
+    expect(playback).not.toHaveBeenCalledWith(true);
+  });
   it("restores native media before requesting playback and uses actual playback events", async () => {
     render();
     await vi.waitFor(() => expect(document.querySelector("audio")).not.toBeNull());

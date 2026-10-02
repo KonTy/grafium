@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, onMount, onDestroy } from "svelte";
+  import { tick, onMount, onDestroy, untrack } from "svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import PageContent from "./components/PageContent.svelte";
   import JournalView from "./components/JournalView.svelte";
@@ -21,7 +21,10 @@
   import Toaster from "./components/Toaster.svelte";
   import PrivateReaderToolbar from "./components/PrivateReaderToolbar.svelte";
   import PrivateReaderBook from "./components/PrivateReaderBook.svelte";
-  import { refreshPrivateLibrary } from "./lib/privateReader";
+  import PrivateReaderLibrary from "./components/PrivateReaderLibrary.svelte";
+  import { privateLibrary, refreshPrivateLibrary, type ReaderBook, type ReaderBookmark } from "./lib/privateReader";
+  import { libraryBookmarkJournalSnippet, routeLibraryLink } from "./lib/libraryLinks";
+  import { studyClockItem } from "./lib/studyLibrary";
   import { attachPrivatePlayback } from "./lib/privateReaderPlayback";
   import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
@@ -79,16 +82,48 @@
 
   let shuttingDown = $state(false);
   let privateBookId = $state<string | null>(null);
+  let privateBookmarkId = $state<string | undefined>();
   onMount(attachPrivatePlayback);
 
-  async function openPrivateBook(bookId: string) {
+  async function openPrivateBook(bookId: string, bookmarkId?: string) {
+    if (currentView === "library" && privateBookId === bookId && !bookmarkId) return true;
+    const request = studyNavigation + 1;
+    await navigateToPage("__library__");
+    if (request !== studyNavigation) return false;
+    try {
+      await refreshPrivateLibrary();
+      if (request !== studyNavigation || currentView !== "library") return false;
+      if (!$privateLibrary.books.some(book => book.id === bookId))
+        throw new Error("This Library item is unavailable on this device. Restore its private library backup or relink its source.");
+      privateBookId = bookId;
+      privateBookmarkId = bookmarkId;
+      return true;
+    } catch (cause) {
+      if (request === studyNavigation) showToast(`Could not open Library item: ${String(cause)}`, "error");
+      return false;
+    }
+  }
+
+  async function addLibraryToStudies(book: ReaderBook) {
+    studyAddPage = null;
+    studyAddLibrary = book;
     await navigateToPage("__studies__");
-    await refreshPrivateLibrary().catch(() => {});
-    privateBookId = bookId;
+  }
+
+  async function writeLibraryBookmarkToJournal(book: ReaderBook, bookmark: ReaderBookmark) {
+    const generation = graphGeneration;
+    try {
+      const insert = libraryBookmarkJournalSnippet(book, bookmark);
+      const title = todayJournalTitle();
+      await navigateToPage(title, true);
+      if (generation !== graphGeneration || error || currentPage?.title !== title) return;
+      dispatchEditPageEnd({ pageId: currentPage.id, insert });
+    } catch (cause) {
+      showToast(`Could not open a journal note: ${String(cause)}`, "error");
+    }
   }
 
   function openPrivateLibrarySettings() {
-    privateBookId = null;
     void navigateToPage("__settings__").then(() => { settingsOpenSection = "library"; });
   }
 
@@ -173,11 +208,12 @@
     return undefined;
   }
 
-  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "studies" | "chat" | "settings" | "graph" | "jobs";
+  type View = "page" | "journal" | "all-pages" | "flashcards" | "statistics" | "studies" | "library" | "chat" | "settings" | "graph" | "jobs";
 
   let currentView: View = $state("page");
   let studyGraphPath = $state("");
   let studyAddPage = $state<Page | null>(null);
+  let studyAddLibrary = $state<ReaderBook | null>(null);
   let activeStudy = $state<StudyItem | null>(null);
   let studyClock: StudyTracker | null = null;
   let studyClockState = $state<StudyClockState>("idle");
@@ -217,8 +253,12 @@
       await navigateToPage({ id: item.source });
       if (request + 1 !== studyNavigation || error || currentPage?.id !== item.source) return;
     }
+    if (item.kind === "library") {
+      if (!await openPrivateBook(item.source) || request + 1 !== studyNavigation) return;
+    }
     if (graph !== studyGraphPath) return;
     studyAddPage = null;
+    studyAddLibrary = null;
     activeStudy = item;
     if (item.kind !== "page" && item.kind !== "book") {
       await tick();
@@ -234,6 +274,7 @@
     await navigateToPage("__studies__");
   }
   function addCurrentPageToStudies() {
+    studyAddLibrary = null;
     studyAddPage = currentPage;
     void navigateToPage("__studies__");
   }
@@ -241,8 +282,16 @@
     const item = activeStudy;
     const graph = studyGraphPath;
     if (!item || !graph) return;
-    const clock = new StudyTracker(item, (seconds, day, progress, requestId) =>
-      recordStudyActivity(graph, item.id, seconds, day, progress, requestId));
+    let tracked: StudyItem;
+    try {
+      tracked = untrack(() => studyClockItem(item, $privateLibrary.books));
+    } catch (cause) {
+      showToast(`Could not start study timer: ${String(cause)}`, "error");
+      activeStudy = null;
+      return;
+    }
+    const clock = new StudyTracker(tracked, (seconds, day, progress, requestId) =>
+      recordStudyActivity(graph, item.id, seconds, day, item.kind === "library" ? null : progress, requestId));
     studyClock = clock;
     studySessionSeconds = 0;
     let count = 0;
@@ -340,6 +389,7 @@
     sourceBlockId?: string;
     sourcePageTitle?: string;
     conversationId?: string | null;
+    bookId?: string;
   };
 
   type LinkNavigateDetail = {
@@ -705,6 +755,9 @@
     if (currentView === "studies") {
       return { kind: "studies", scrollTop: currentScrollTop() };
     }
+    if (currentView === "library") {
+      return { kind: "library", scrollTop: currentScrollTop(), bookId: privateBookId ?? undefined };
+    }
     if (currentView === "settings") {
       return { kind: "settings", scrollTop: currentScrollTop() };
     }
@@ -831,6 +884,10 @@
     await finishStudy();
     if (entry.kind === "studies") {
       await navigateToPage("__studies__", false, true, entry);
+      return;
+    }
+    if (entry.kind === "library") {
+      await navigateToPage("__library__", false, true, entry);
       return;
     }
     if (entry.kind === "journal") {
@@ -1168,6 +1225,7 @@
     goTomorrow: () => navigateToPage(shiftIsoDate(formatLocalIsoDate(), 1), true),
     goTasks: () => navigateToPage("__statistics__"),
     goStudies: () => navigateToPage("__studies__"),
+    goLibrary: () => navigateToPage("__library__"),
     goChat: () => navigateToPage("__chat__"),
     goNextJournal: () => shiftJournalDay(1),
     goPrevJournal: () => shiftJournalDay(-1),
@@ -1229,7 +1287,7 @@
       const context = isHelpContext(section) ? section : null;
       const currentContext: HelpContext =
         context ||
-        (currentView === "studies" && privateBookId ? "reader" : null) ||
+        (currentView === "library" && privateBookId ? "reader" : null) ||
         ((
           {
             page: currentPage && (isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)) ? "books" : "editor",
@@ -1239,6 +1297,7 @@
             flashcards: "flashcards",
             statistics: "tasks",
             studies: "studies",
+            library: "library",
             chat: "chat",
             settings: "settings",
             jobs: "general",
@@ -1551,7 +1610,7 @@
   type SavedLocation =
     | { kind: "page"; title: string }
     | { kind: "journal" }
-    | { kind: "all-pages" | "flashcards" | "statistics" | "studies" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
+    | { kind: "all-pages" | "flashcards" | "statistics" | "studies" | "library" | "chat" | "settings" | "graph" | "jobs" | "notifications" };
 
   function saveLastLocation() {
     try {
@@ -1565,6 +1624,7 @@
         currentView === "flashcards" ||
         currentView === "statistics" ||
         currentView === "studies" ||
+        currentView === "library" ||
         currentView === "chat" ||
         currentView === "settings" ||
         currentView === "graph" ||
@@ -1637,6 +1697,10 @@
           await navigateToPage("__studies__");
           return;
         }
+        if (saved.kind === "library") {
+          await navigateToPage("__library__");
+          return;
+        }
         if (saved.kind === "chat") {
           await navigateToPage("__chat__");
           return;
@@ -1681,8 +1745,9 @@
   }
 
   async function navigateToJournal(skipHistory = false, restoreEntry?: HistoryEntry) {
-    ++studyNavigation;
+    const request = ++studyNavigation;
     await finishStudy();
+    if (request !== studyNavigation) return;
     if (!skipHistory) {
       saveCurrentHistoryState();
     }
@@ -1711,14 +1776,36 @@
     sourceBlockId?: string,
     sourcePageTitle?: string
   ) {
-    privateBookId = null;
-    ++studyNavigation;
+    const navigationRequest = ++studyNavigation;
     await finishStudy();
+    if (navigationRequest !== studyNavigation) return;
     if (!skipHistory) {
       saveCurrentHistoryState(sourceBlockId, sourcePageTitle);
     }
+    privateBookId = null;
+    privateBookmarkId = undefined;
 
     // Handle special routes
+    if (target === "__library__") {
+      const request = studyNavigation;
+      currentView = "library";
+      currentPage = null;
+      loading = false;
+      error = null;
+      if (!skipHistory) pushHistoryEntry({ kind: "library", scrollTop: 0 });
+      if (restoreEntry?.bookId) {
+        try {
+          await refreshPrivateLibrary();
+          if (request !== studyNavigation) return;
+          privateBookId = restoreEntry.bookId;
+        } catch (cause) {
+          showToast(`Could not restore Library view: ${String(cause)}`, "error");
+        }
+      }
+      await tick();
+      if (restoreEntry) restoreHistoryState(restoreEntry);
+      return;
+    }
     if (target === "__studies__") {
       const request = studyNavigation;
       currentView = "studies";
@@ -2182,6 +2269,8 @@
     void finishStudy();
     studyGraphPath = "";
     studyAddPage = null;
+    studyAddLibrary = null;
+    privateBookmarkId = undefined;
     goToLinkOpen = false;
     globalSearchOpen = false;
     showImportBooksDialog = false;
@@ -2248,6 +2337,17 @@
       openReferencePanelTab("notes");
     }
   }
+
+  function handleLibraryLink(event: MouseEvent) {
+    routeLibraryLink(event,
+      (bookId, bookmarkId) => { void openPrivateBook(bookId, bookmarkId); },
+      () => showToast("This Library link is invalid.", "error"));
+  }
+
+  $effect(() => {
+    window.addEventListener("click", handleLibraryLink, true);
+    return () => window.removeEventListener("click", handleLibraryLink, true);
+  });
 
   $effect(() => {
     window.addEventListener("navigate-page", handlePageNav);
@@ -2400,10 +2500,22 @@
           <Statistics onNavigate={handleNavigate} />
         {/snippet}
       </LazyView>
-    {:else if currentView === "studies"}
+    {:else if currentView === "library"}
       {#if privateBookId}
-        <PrivateReaderBook bookId={privateBookId} onBack={() => privateBookId = null} onVoiceSettings={openPrivateLibrarySettings} />
-      {:else if activeStudy}
+        {#key privateBookId}
+          <PrivateReaderBook bookId={privateBookId} initialBookmarkId={privateBookmarkId}
+            onBack={() => { void navigateToPage("__library__"); }} onVoiceSettings={openPrivateLibrarySettings}
+            onAddToStudies={book => { void addLibraryToStudies(book); }}
+            onJournalNote={(book, bookmark) => { void writeLibraryBookmarkToJournal(book, bookmark); }}
+            onProgress={updateStudyProgress} onPlayback={playing => studyClock?.playback(playing)}
+            onActivity={() => studyClock?.activity()} />
+        {/key}
+      {:else}
+        <PrivateReaderLibrary onOpen={bookId => { void openPrivateBook(bookId); }}
+          onSettings={openPrivateLibrarySettings} onAddToStudies={book => { void addLibraryToStudies(book); }} />
+      {/if}
+    {:else if currentView === "studies"}
+      {#if activeStudy}
         {#key activeStudy.id}
           {@const selectedStudy = activeStudy}
           {#if activeStudy.kind === "flashcards"}
@@ -2430,8 +2542,9 @@
       {:else}
         <LazyView load={loadStudies} name="studies">
           {#snippet children(Studies)}
-            <Studies graphPath={studyGraphPath} addPage={studyAddPage} onOpen={(item) => { void openStudy(item); }}
-              onOpenPrivateBook={bookId => { privateBookId = bookId; }} onLibrarySettings={openPrivateLibrarySettings} />
+            <Studies graphPath={studyGraphPath} addPage={studyAddPage} addLibrary={studyAddLibrary}
+              onLibraryConsumed={() => { studyAddLibrary = null; }}
+              onOpen={(item) => { void openStudy(item); }} />
           {/snippet}
         </LazyView>
       {/if}
@@ -2581,6 +2694,10 @@
 
     <!-- Bottom nav for narrow screens -->
     <nav class="bottom-nav">
+      <button class="bottom-nav-item" class:active={currentView === "library"} onclick={() => handleNavigate("__library__")}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 3h4v18H3zM10 3h4v18h-4zM17 3l4 1v17l-4-1z" /></svg>
+        <span>Library</span>
+      </button>
       <button class="bottom-nav-item" class:active={currentView === "studies"} onclick={() => handleNavigate("__studies__")}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 4h7l3 3 3-3h7v16h-7l-3 2-3-2H2zM12 7v15" /></svg>
         <span>Studies</span>
@@ -3378,12 +3495,14 @@
       padding: 4px 0;
       padding-bottom: env(safe-area-inset-bottom, 4px);
       z-index: 100;
-      justify-content: space-around;
+      justify-content: flex-start;
       align-items: center;
+      overflow-x: auto;
     }
 
     .bottom-nav-item {
       display: flex;
+      flex: 1 0 auto;
       flex-direction: column;
       align-items: center;
       gap: 2px;

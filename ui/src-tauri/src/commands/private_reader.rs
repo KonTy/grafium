@@ -1,5 +1,6 @@
 use crate::private_reader::{
-    ReaderBookmark, ReaderPosition, ReaderResult, ReaderSnapshot, ReaderState,
+    ReaderBookmark, ReaderKind, ReaderPosition, ReaderProgress, ReaderResult, ReaderSnapshot,
+    ReaderState,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
@@ -38,6 +39,46 @@ pub async fn reader_snapshot(
 ) -> ReaderResult<ReaderSnapshot> {
     blocking(app, |state, directory| {
         state.with_store(directory, |store| Ok(store.snapshot()))
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reader_set_favorite(
+    app: AppHandle,
+    _state: State<'_, ReaderState>,
+    book_id: String,
+    favorite: bool,
+) -> ReaderResult<ReaderSnapshot> {
+    blocking(app, move |state, directory| {
+        state.with_store(directory, |store| store.set_favorite(&book_id, favorite))
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reader_record_activity(
+    app: AppHandle,
+    _state: State<'_, ReaderState>,
+    book_id: String,
+    progress: Option<ReaderProgress>,
+) -> ReaderResult<ReaderSnapshot> {
+    blocking(app, move |state, directory| {
+        state.with_store(directory, |store| store.record_activity(&book_id, progress))
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reader_add_link(
+    app: AppHandle,
+    _state: State<'_, ReaderState>,
+    title: String,
+    kind: ReaderKind,
+    url: String,
+) -> ReaderResult<ReaderSnapshot> {
+    blocking(app, move |state, directory| {
+        state.with_store(directory, |store| store.add_link(title, kind, url))
     })
     .await
 }

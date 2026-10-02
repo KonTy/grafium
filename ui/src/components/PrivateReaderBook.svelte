@@ -1,11 +1,21 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import PrivateBookReader from "./PrivateBookReader.svelte";
-  import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, privateBookLanguages, type ReaderBookmark } from "../lib/privateReader";
+  import LibraryMedia from "./LibraryMedia.svelte";
+  import SettingsHelp from "./SettingsHelp.svelte";
+  import { requestLibraryMedia } from "../lib/library";
+  import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
   import { playPrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   import { startPrivateReadAloud } from "../lib/privateReaderVoice";
-  let { bookId, onBack, onVoiceSettings }: { bookId: string; onBack: () => void; onVoiceSettings?: () => void } = $props();
+  let { bookId, onBack, onVoiceSettings, onAddToStudies, onJournalNote, initialBookmarkId, onPlayback, onActivity, onProgress }: {
+    bookId: string; onBack: () => void; onVoiceSettings?: () => void;
+    onAddToStudies?: (book: ReaderBook) => void;
+    onJournalNote?: (book: ReaderBook, bookmark: ReaderBookmark) => void;
+    initialBookmarkId?: string | null; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
+    onProgress?: (progress: ReaderProgress) => void;
+  } = $props();
   const book = $derived($privateLibrary.books.find(item => item.id === bookId));
   let busy = $state(false);
   let error = $state("");
@@ -17,6 +27,44 @@
   let replacementBookId = $state("");
   let replacementPath = $state("");
   let audioRelinkChoice = $state(false);
+  let consumedBookmark = "";
+  let ignoredBookmark = $state<string | null>(null);
+  const missingInitialBookmark = $derived(!!initialBookmarkId && !!book
+    && !book.bookmarks.some(mark => mark.id === initialBookmarkId) && ignoredBookmark !== initialBookmarkId);
+  let reportedPlayback = "";
+  let reportedProgress = "";
+  $effect(() => {
+    const id = initialBookmarkId;
+    const current = book;
+    if (!id || !current || consumedBookmark === `${bookId}:${id}`) return;
+    consumedBookmark = `${bookId}:${id}`;
+    untrack(() => {
+      const mark = current.bookmarks.find(mark => mark.id === id);
+      if (mark && current.available) void run(() => jump(mark));
+    });
+  });
+  $effect(() => {
+    if (!book || book.kind === "video" || book.kind === "youtube" || (book.sourceUrl && android)) return;
+    const state = $privatePlayback;
+    const playing = state.bookId === bookId && state.status === "playing";
+    const position = state.bookId === bookId ? state.position : null;
+    // Observations for the Study clock only; Library owns the durable checkpoint.
+    const progress: ReaderProgress | null = position ? {
+      position: position.offsetMs / 1000, total: 0,
+      anchor: position.locator?.kind === "epub" ? position.locator.cfi : position.trackId ?? "",
+      label: bookmarkLabel(book, position),
+    } : null;
+    const playbackKey = `${bookId}:${playing}`;
+    const progressKey = `${bookId}:${JSON.stringify(progress)}`;
+    untrack(() => {
+      const changedPlayback = playbackKey !== reportedPlayback;
+      const changedProgress = progressKey !== reportedProgress;
+      reportedPlayback = playbackKey; reportedProgress = progressKey;
+      if (changedPlayback) onPlayback?.(playing);
+      if (changedProgress && progress) onProgress?.(progress);
+      if (playing && (changedPlayback || changedProgress)) onActivity?.();
+    });
+  });
   async function run(action: () => Promise<unknown>, success = "") {
     busy = true; error = ""; message = "";
     try { await action(); message = success; }
@@ -28,7 +76,7 @@
     if (android) { await refreshPrivateLibrary(true); relinking = true; return; }
     if (book.kind === "audio" && directory === undefined) { audioRelinkChoice = true; return; }
     const path = await open({ directory: directory === true, multiple: false,
-      title: directory ? "Choose the top-level audiobook folder" : "Choose the replacement EPUB or loose root MP3" });
+      title: directory ? "Choose the top-level audiobook folder" : "Choose the replacement EPUB, video, or loose audio file" });
     if (typeof path !== "string") return;
     const library = $privateLibrary.libraryPath?.replace(/\/+$/, "");
     if (!library || !path.startsWith(`${library}/`)) throw new Error("Choose a replacement inside your current private library folder.");
@@ -46,6 +94,7 @@
   async function jump(bookmark: ReaderBookmark) {
     if (!book) return;
     if (bookmark.position.locator) privateBookJump.set({ bookId, locator: bookmark.position.locator });
+    else if (book.kind === "video" || book.kind === "youtube" || (book.sourceUrl && android)) requestLibraryMedia(bookId, bookmark.position);
     else await playPrivateAudio(book, bookmark.position);
   }
   async function bookmark() {
@@ -59,12 +108,17 @@
 </script>
 
 <section class="private-detail" data-help-context="reader">
-  <button onclick={onBack}>← Private library</button>
+  <button onclick={onBack}>← Library</button>
   {#if book}
-    <header><div><p class="eyebrow">APP-PRIVATE · {book.kind === "audio" ? "AUDIOBOOK" : "EPUB"}</p><h1>{book.title}</h1></div>
-      <div class="actions"><button disabled={busy || !book.available || !book.position} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button><button disabled={busy} onclick={() => run(relink)}>Relink source…</button></div>
+    <header><div><p class="eyebrow">APP-PRIVATE · {book.kind.toUpperCase()}</p><h1>{book.title}</h1></div>
+      <div class="actions">
+        <button disabled={busy} aria-pressed={book.favorite ?? false} onclick={() => run(() => setPrivateFavorite(bookId, !book!.favorite))}>{book.favorite ? "★ Favorite" : "☆ Favorite"}</button>
+        {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
+        <button disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>
+        {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
+        <SettingsHelp title="Private reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
+      </div>
     </header>
-    <p class="privacy">Your books and automatic bookmarks stay out of graph sync and AI. Journal notes you intentionally write with [[Book title]] remain ordinary graph content.</p>
     {#if !book.available}<p class="unavailable">Source unavailable. Progress and bookmarks have been retained. Reconnect the library or relink this book; a different chapter will never be chosen silently.</p>{/if}
     {#if book.error}<p class="error" role="alert">{book.error}</p>{/if}
     {#if audioRelinkChoice}
@@ -90,9 +144,12 @@
     {/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if message}<p role="status">{message}</p>{/if}
-    {#if book.kind === "audio"}
-      <div class="actions"><button class="primary" disabled={busy || !book.available} onclick={() => run(() => playPrivateAudio(book!))}>{book.position ? "Resume audiobook" : "Play audiobook"}</button><span class="hint">Playback continues outside Studies and across graph switches.</span></div>
-      <details class="chapters" open><summary>Chapters · {book.tracks.length}</summary><ol>
+    {#if missingInitialBookmark}
+      <p class="error" role="alert">This bookmark is no longer in the local Library. No replacement position was opened.</p>
+      <button onclick={() => ignoredBookmark = initialBookmarkId ?? null}>Open current saved place</button>
+    {:else if book.kind === "audio" && !(book.sourceUrl && android)}
+      <div class="actions"><button class="primary" disabled={busy || !book.available} onclick={() => run(() => playPrivateAudio(book!))}>{book.position ? "Resume audio" : "Play audio"}</button></div>
+      {#if book.tracks.length}<details class="chapters" open><summary>Chapters · {book.tracks.length}</summary><ol>
         {#each book.tracks as track, index (track.id)}
           <li><button class="chapter" disabled={busy || !book.available || track.available === false} onclick={() => run(() => playPrivateAudio(book!, { trackId: track.id, offsetMs: 0 }))}>{track.title}</button>
             <small>{track.relativePath}{track.available === false ? " · Source unavailable" : ""}</small><span class="order">
@@ -100,8 +157,8 @@
               <button aria-label={`Move ${track.title} later`} disabled={busy || index === book!.tracks.length - 1} onclick={() => run(() => reorder(index, 1))}>↓</button>
             </span></li>
         {/each}
-      </ol></details>
-    {:else if book.available}
+      </ol></details>{/if}
+    {:else if book.kind === "epub" && book.available}
       {#if $privateBookLanguages[bookId]}
         <p class="hint">Book language suggestion: <strong>{$privateBookLanguages[bookId]}</strong>.
           {#if onVoiceSettings}<button class="text-button" onclick={onVoiceSettings}>Choose voice and language…</button>{/if}
@@ -112,7 +169,9 @@
         <button disabled={busy} onclick={() => run(() => startPrivateReadAloud(bookId, true))}>Read aloud from start</button>
         <span class="hint">{android ? "Your complete narration queue and progress are owned by the native offline service after preparation." : "Uses your installed offline voice. Playback continues when you leave this page."}</span>
       </div>
-      <PrivateBookReader {bookId} />
+      <PrivateBookReader {bookId} {onActivity} {onProgress} />
+    {:else if book.available}
+      {#key bookId}<LibraryMedia {book} {onPlayback} {onActivity} {onProgress} />{/key}
     {/if}
     <section class="bookmarks" aria-label="Private bookmarks">
       <h2>Private bookmarks <span>{book.bookmarks.length}</span></h2>
@@ -126,18 +185,19 @@
           {:else}
             {#if mark.note}<p class="note">{mark.note}</p>{/if}
             <button class="text-button" onclick={() => { editing = mark.id; note = mark.note; }}>{mark.note ? "Edit private note" : "Add private note"}</button>
+            {#if onJournalNote}<button class="text-button journal" onclick={() => onJournalNote?.(book!, mark)}>Journal note…</button>{/if}
           {/if}
         </li>
       {/each}</ul>
     </section>
-  {:else}<p role="alert">This private book is not in the local library. Return to Studies and rescan.</p>{/if}
+  {:else}<p role="alert">This source is not in the local library. Return to Library and rescan.</p>{/if}
 </section>
 
 <style>
   .private-detail { max-width: 1100px; margin: auto; padding: 24px clamp(16px, 4vw, 48px); color: var(--text-primary); }
   header, .actions, .bookmark-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; margin-top: 20px; }
   h1 { margin: 5px 0; font-size: 27px; overflow-wrap: anywhere; } h2 { font-size: 18px; } h2 span { color: var(--text-muted); font-weight: 400; }
-  .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .1em; } .privacy, .hint, small, time { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .1em; } .hint, small, time { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
   button, textarea { font: inherit; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
   button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; } button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .primary { color: var(--accent); } .chapters, .bookmarks { margin-top: 24px; } summary { cursor: pointer; font-weight: 600; }
@@ -145,5 +205,6 @@
   .chapter { border: 0; padding: 2px 0; text-align: left; background: none; } ol small { grid-column: 1; overflow-wrap: anywhere; } .order { display: flex; gap: 5px; grid-column: 2; grid-row: 1 / 3; }
   .bookmark-heading { justify-content: space-between; } .note { white-space: pre-wrap; overflow-wrap: anywhere; }
   .text-button { border: 0; padding: 5px 0; color: var(--accent); background: none; } label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; } textarea { resize: vertical; }
+  .journal { margin-left: 16px; }
   .unavailable { padding: 12px; border: 1px solid var(--border); border-radius: 8px; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
 </style>

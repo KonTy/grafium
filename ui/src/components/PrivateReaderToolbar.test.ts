@@ -22,7 +22,11 @@ let component: ReturnType<typeof mount> | undefined;
 const button = (name: string) => [...document.querySelectorAll("button")].find(element => element.textContent?.trim() === name)!;
 beforeEach(() => {
   invoke.mockReset();
-  invoke.mockImplementation(async command => command === "reader_media_url" ? "http://127.0.0.1:1234/capability"
+  invoke.mockImplementation(async (command, args) => command === "reader_media_url" ? "http://127.0.0.1:1234/capability"
+    : command === "reader_record_activity" ? {
+      ...get(privateLibrary), books: get(privateLibrary).books.map(book => book.id === args.bookId
+        ? { ...book, lastUsedAt: Date.now(), ...(args.progress ? { progress: args.progress } : {}) } : book),
+    }
     : command === "reader_snapshot" ? { libraryPath: "/local", books: [book] } : undefined);
   privateLibrary.set({ libraryPath: "/local", books: [book] });
   vi.stubGlobal("Audio", class extends FakeAudio { constructor() { super(); audio = this; } });
@@ -45,6 +49,9 @@ describe("actual global reader controls", () => {
     expect(document.querySelector("h1")?.textContent).toBe("Journal");
     expect(document.querySelector('[aria-label="Private reader playback"]')).toBe(bar);
     expect(audio.currentTime).toBe(42.25);
+    expect(audio.pause).not.toHaveBeenCalled();
+    button(book.title).click(); flushSync();
+    expect(document.querySelector("h1")?.textContent).toBe("Library");
     expect(audio.pause).not.toHaveBeenCalled();
     button("Bookmark").click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Bookmark saved on this device."));

@@ -1,7 +1,9 @@
 import { get, writable } from "svelte/store";
-import { privateLibrary, readerNative, savePrivateBookmark, savePrivatePosition, type ReaderBook, type ReaderPosition } from "./privateReader";
+import { privateLibrary, readerNative, savePrivateBookmark, type ReaderBook, type ReaderPosition } from "./privateReader";
 import { androidReaderRequest, isAndroidReader, normalizeAndroidReaderPosition, type AndroidReaderState } from "./privateReaderAndroid";
 import { refreshPrivateLibrary } from "./privateReader";
+import { saveLibraryCheckpoint, type LibraryProgress } from "./library";
+import { webStudyUrl } from "./studySources";
 
 export interface ReaderPlaybackState {
   bookId: string | null; title: string; mode: "audio" | "tts"; status: "stopped" | "playing" | "paused" | "loading";
@@ -21,6 +23,7 @@ let narration: PrivateNarrationAdapter | null = null;
 let generation = 0;
 let writing = Promise.resolve();
 let activeBook: ReaderBook | null = null;
+let activityPosition: ReaderPosition | null = null;
 let cancelPreparation: (() => void) | null = null;
 
 export function registerPrivatePreparation(cancel: () => void): () => void {
@@ -43,7 +46,18 @@ export function checkpointPrivatePlayback(): Promise<void> {
   if (!state.bookId || !captured || state.mode !== "audio") return writing;
   patch({ position: captured });
   const bookId = state.bookId;
-  const next = writing.catch(() => {}).then(() => savePrivatePosition(bookId, captured));
+  const moved = state.status === "playing" && captured.offsetMs !== activityPosition?.offsetMs;
+  const book = get(privateLibrary).books.find(item => item.id === bookId) ?? activeBook;
+  const track = book?.tracks.find(item => item.id === captured.trackId);
+  const total = audio && Number.isFinite(audio.duration) ? audio.duration : 0;
+  const progress: LibraryProgress = {
+    position: captured.offsetMs / 1000, total: (book?.tracks.length ?? 0) <= 1 ? total : 0,
+    anchor: captured.trackId ?? "", label: `${track?.title ? `${track.title} · ` : ""}${Math.floor(captured.offsetMs / 60000)}:${String(Math.floor(captured.offsetMs / 1000) % 60).padStart(2, "0")}`,
+  };
+  const next = writing.catch(() => {}).then(async () => {
+    await saveLibraryCheckpoint(bookId, captured, progress, moved);
+    if (moved && get(privatePlayback).bookId === bookId) activityPosition = captured;
+  });
   writing = next;
   return next;
 }
@@ -83,13 +97,16 @@ export function validatePrivateMediaURL(value: string): string {
 export async function playPrivateAudio(book: ReaderBook, saved = book.position): Promise<void> {
   if (!book.available) throw new Error("This source is unavailable. Relink it before playing.");
   if (book.kind !== "audio") throw new Error("This book is not an audiobook.");
-  const trackId = saved?.trackId ?? book.tracks[0]?.id;
-  if (!trackId || !book.tracks.some(track => track.id === trackId && track.available !== false))
+  const remote = book.sourceUrl ? webStudyUrl(book.sourceUrl).href : null;
+  if (remote && isAndroidReader()) throw new Error("Open this network audio in Library. Android network media uses the foreground player, not the offline audio service.");
+  const trackId = remote ? undefined : saved?.trackId ?? book.tracks[0]?.id;
+  if (!remote && (!trackId || !book.tracks.some(track => track.id === trackId && track.available !== false)))
     throw new Error("The saved chapter is missing. Choose a chapter explicitly; progress was not guessed.");
   await stopPrivatePlayback();
   const request = ++generation;
   activeBook = book;
   const selected = { trackId, offsetMs: saved?.offsetMs ?? 0 };
+  activityPosition = selected;
   patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "" });
   try {
     if (isAndroidReader()) {
@@ -97,7 +114,7 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
       if (request === generation) applyAndroidState(state);
       return;
     }
-    const url = validatePrivateMediaURL(await readerNative<string>("media_url", { bookId: book.id, trackId }));
+    const url = remote ?? validatePrivateMediaURL(await readerNative<string>("media_url", { bookId: book.id, trackId }));
     if (request !== generation) return;
     const element = player();
     element.src = url;
@@ -123,7 +140,7 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
 export async function pausePrivatePlayback(): Promise<void> {
   if (narration) await narration.pause();
   else if (isAndroidReader()) { applyAndroidState(await androidReaderRequest<AndroidReaderState>("pause")); return; }
-  else { audio?.pause(); patch({ status: "paused" }); await checkpointPrivatePlayback(); }
+  else { audio?.pause(); try { await checkpointPrivatePlayback(); } finally { patch({ status: "paused" }); } }
   patch({ status: "paused" });
 }
 export async function resumePrivatePlayback(): Promise<void> {

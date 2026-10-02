@@ -2,8 +2,12 @@
 
 The private library is separate from your graph's imported Books and study
 history. Choose **Library location** in Settings, then open the private library
-in **Studies**. Audio and EPUB originals are linked from that location and are
+in the top-level **Library**. Audio and EPUB originals are linked from that location and are
 not copied into your graph. Nothing is automatically added to your journal.
+
+Library also organizes supported video and online-media entries. Its active
+pile, favorites, shared progress, journal links, and reference-only Study plans
+are described in [[Help - Library]].
 
 ## Library layout and missing sources
 

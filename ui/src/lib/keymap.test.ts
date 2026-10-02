@@ -49,6 +49,17 @@ afterEach(() => {
 });
 
 describe("keymap dual-mode matching", () => {
+  it("opens Library separately without intercepting text entry", () => {
+    const goLibrary = vi.fn();
+    registerDefaultShortcuts({ ...stubActions(), goLibrary });
+    keymap_manager.handleKeydown(keyEvent({ key: "g" }));
+    keymap_manager.handleKeydown(keyEvent({ key: "l" }));
+    expect(goLibrary).toHaveBeenCalledOnce();
+    keymap_manager.isEditing = true;
+    keymap_manager.handleKeydown(keyEvent({ key: "g" }));
+    keymap_manager.handleKeydown(keyEvent({ key: "l" }));
+    expect(goLibrary).toHaveBeenCalledOnce();
+  });
   it("opens Studies with its navigation chord but not while editing", () => {
     const goStudies = vi.fn();
     registerDefaultShortcuts({ ...stubActions(), goStudies });

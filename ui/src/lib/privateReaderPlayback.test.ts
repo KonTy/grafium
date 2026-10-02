@@ -20,7 +20,11 @@ const book: ReaderBook = {
 };
 beforeEach(() => {
   invoke.mockReset();
-  invoke.mockImplementation(async (command: string) => command.endsWith("media_url") ? "http://127.0.0.1:38721/secret/track"
+  invoke.mockImplementation(async (command: string, args) => command.endsWith("media_url") ? "http://127.0.0.1:38721/secret/track"
+    : command.endsWith("record_activity") ? {
+      ...get(privateLibrary), books: get(privateLibrary).books.map(book => book.id === args.bookId
+        ? { ...book, lastUsedAt: Date.now(), ...(args.progress ? { progress: args.progress } : {}) } : book),
+    }
     : command.endsWith("snapshot") ? { libraryPath: "/local", books: [book] } : undefined);
   vi.stubGlobal("Audio", class extends FakeAudio { constructor() { super(); elements.push(this); } });
   privateLibrary.set({ libraryPath: "/local", books: [book] });
@@ -70,6 +74,30 @@ describe("app-owned private playback", () => {
     invoke.mockRejectedValueOnce(new Error("Read-only storage"));
     await expect(checkpointPrivatePlayback()).rejects.toThrow("Read-only storage");
     await checkpointPrivatePlayback();
+  });
+  it("records recency only after listening moves, never from restoration or a paused seek", async () => {
+    await playPrivateAudio(book);
+    await checkpointPrivatePlayback();
+    expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
+    elements.at(-1)!.currentTime = 11;
+    await checkpointPrivatePlayback();
+    expect(invoke).toHaveBeenCalledWith("reader_record_activity", {
+      bookId: book.id, progress: expect.objectContaining({ position: 11, total: 0, anchor: "stable-2" }),
+    });
+    await pausePrivatePlayback();
+    invoke.mockClear();
+    elements.at(-1)!.currentTime = 50;
+    await checkpointPrivatePlayback();
+    expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
+  });
+  it("plays explicit network audio without a local track or copying graph assets", async () => {
+    const remote: ReaderBook = { ...book, id: "network", tracks: [], sourceUrl: "https://example.test/audio.mp3", position: { offsetMs: 3000 } };
+    privateLibrary.set({ libraryPath: null, books: [remote] });
+    await playPrivateAudio(remote);
+    expect(elements.at(-1)!.src).toBe(remote.sourceUrl);
+    expect(elements.at(-1)!.currentTime).toBe(3);
+    expect(invoke).not.toHaveBeenCalledWith("reader_media_url", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("read_asset_data_url", expect.anything());
   });
   it("saves the old book's captured position before switching without resetting the new book", async () => {
     const second = { ...book, id: "second-book", title: "Second", position: { trackId: "stable-10", offsetMs: 80000 } };

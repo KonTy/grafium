@@ -314,8 +314,13 @@ fn serve(
     let opened = store
         .lock()
         .map_err(|_| "Reader lock failed".to_string())
-        .and_then(|store| store.open_media(&book, Some(&track)));
-    let Ok(mut file) = opened else {
+        .and_then(|store| {
+            Ok((
+                store.open_media(&book, Some(&track))?,
+                store.media_mime(&book, &track)?,
+            ))
+        });
+    let Ok((mut file, mime)) = opened else {
         return response(socket, 410, 0, "", write_timeout);
     };
     let size = file.metadata().map_err(|e| e.to_string())?.len();
@@ -338,8 +343,7 @@ fn serve(
     file.seek(SeekFrom::Start(start))
         .map_err(|e| e.to_string())?;
     let mut headers =
-        "Content-Type: audio/mpeg\r\nAccept-Ranges: bytes\r\nReferrer-Policy: no-referrer\r\n"
-            .to_owned();
+        format!("Content-Type: {mime}\r\nAccept-Ranges: bytes\r\nReferrer-Policy: no-referrer\r\n");
     if let Some(origin) = origin {
         headers.push_str(&format!(
             "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"

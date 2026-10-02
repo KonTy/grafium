@@ -13,7 +13,8 @@ separate graph.
 - [[Help - Graph]]
 - [[Help - Flashcards]]
 - [[Help - Tasks]]
-- [[Help - Studies]] - your study list, topic filters, resume positions, and active time
+- [[Help - Library]] - private media, recent pile, favorites, resume, and bookmarks
+- [[Help - Studies]] - learning plans linking Library, graph notes, and flashcards
 - [[Help - Chat]]
 - [[Help - Settings]]
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery

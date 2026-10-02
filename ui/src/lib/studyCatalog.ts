@@ -1,5 +1,6 @@
 import type { FlashcardTopic, PageSummary } from "./api";
 import type { StudyItem } from "./studies";
+import type { ReaderBook } from "./privateReader";
 import { fuzzyRank } from "./fuzzy";
 import { studyKindLabels, studyMediaKind } from "./studySources";
 
@@ -34,6 +35,13 @@ export function studyCatalog(pages: PageSummary[], topics: FlashcardTopic[], ass
       }] : [];
     }),
   ];
+}
+
+export function libraryStudyCatalog(books: ReaderBook[]): StudyCandidate[] {
+  return books.map(book => ({
+    key: `library:${book.id}`, title: book.title, source: book.id, kind: "library",
+    detail: book.available ? `Library · ${book.kind.toUpperCase()}` : "Library · Source unavailable",
+  }));
 }
 
 export function searchStudyCatalog(candidates: StudyCandidate[], query: string): StudyCandidate[] {

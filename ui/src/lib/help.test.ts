@@ -7,6 +7,7 @@ import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md
 import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
 import readerHelp from "../../src-tauri/resources/welcome/pages/Help - Private Reader.md?raw";
 import studiesHelp from "../../src-tauri/resources/welcome/pages/Help - Studies.md?raw";
+import libraryHelp from "../../src-tauri/resources/welcome/pages/Help - Library.md?raw";
 import sidebarSource from "../components/Sidebar.svelte?raw";
 import editorHelp from "../../src-tauri/resources/welcome/pages/Help - Editor.md?raw";
 import readingNotesPanel from "../components/ReadingNotesPanel.svelte?raw";
@@ -23,6 +24,19 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes Library independently and explains reference-only study plans", async () => {
+    expect(helpPageTitle("library")).toBe("Help - Library");
+    expect(isHelpContext("library")).toBe(true);
+    expect(appSource).toContain('target === "__library__"');
+    expect(appSource).toContain('saved.kind === "library"');
+    expect(appSource).toContain('library: "library"');
+    expect(sidebarSource).toContain('onNavigate("__library__")');
+    expect(helpIndex).toContain("[[Help - Library]]");
+    expect(libraryHelp).toContain("stable Library item and bookmark IDs");
+    expect(libraryHelp).toContain("not another copy");
+    await loadHelpPage("library");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "library" });
+  });
   it("routes private reading to its privacy and hardware guidance", async () => {
     expect(helpPageTitle("reader")).toBe("Help - Private Reader");
     expect(isHelpContext("reader")).toBe(true);
