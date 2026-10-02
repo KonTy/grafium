@@ -2,6 +2,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import AppMenu from "./AppMenu.svelte";
   import JobActivity from "./JobActivity.svelte";
+  import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
 
   interface Props {
     sidebarVisible?: boolean;
@@ -17,8 +18,6 @@
     onGoToLink?: () => void;
     onOpenSearch?: () => void;
     onOpenSettings?: () => void;
-    bionicReaderMode?: boolean;
-    onToggleBionicReader?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
     onZoomReset?: () => void;
@@ -38,8 +37,6 @@
     onGoToLink = () => {},
     onOpenSearch = () => {},
     onOpenSettings = () => {},
-    bionicReaderMode = false,
-    onToggleBionicReader = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
     onZoomReset = () => {},
@@ -78,12 +75,12 @@
   <div class="titlebar-right" data-tauri-drag-region>
     <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} onOpenSettings={onOpenSettings} />
     <div class="nav-controls" data-tauri-drag-region="false">
-      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title="Back" disabled={!canGoBack}>
+      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title={shortcutTitle("Back", "go-backward")} aria-label="Back" aria-keyshortcuts={shortcutAria("go-backward")} disabled={!canGoBack}>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M7.5 2.5L4 6l3.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
-      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoForward} title="Forward" disabled={!canGoForward}>
+      <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoForward} title={shortcutTitle("Forward", "go-forward")} aria-label="Forward" aria-keyshortcuts={shortcutAria("go-forward")} disabled={!canGoForward}>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M4.5 2.5L8 6 4.5 9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
@@ -95,7 +92,8 @@
         data-journal-date-action
         data-tauri-drag-region="false"
         onclick={onGoToDate}
-        title="Go to date (Ctrl/Cmd+G)"
+        title={shortcutTitle("Go to date", "go-journal-date")}
+        aria-keyshortcuts={shortcutAria("go-journal-date")}
         aria-label="Go to date"
         aria-haspopup="dialog"
       >
@@ -108,7 +106,8 @@
         class="titlebar-btn"
         data-tauri-drag-region="false"
         onclick={onGoToLink}
-        title="Go to link (Ctrl/Cmd+L)"
+        title={shortcutTitle("Go to link", "go-link")}
+        aria-keyshortcuts={shortcutAria("go-link")}
         aria-label="Go to link"
         aria-haspopup="dialog"
       >
@@ -117,25 +116,14 @@
         </svg>
       </button>
     {/if}
-    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onOpenSearch} title="Search (Ctrl+K)">
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onOpenSearch} title={shortcutTitle("Search", "search-global")} aria-label="Search" aria-keyshortcuts={shortcutAria("search-global")}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="11" cy="11" r="8"></circle>
         <path d="m21 21-4.35-4.35"></path>
       </svg>
     </button>
     <JobActivity toolbar />
-    <button
-      class="titlebar-btn"
-      class:active={bionicReaderMode}
-      data-tauri-drag-region="false"
-      onclick={onToggleBionicReader}
-      title="Bionic Speedreader"
-      aria-pressed={bionicReaderMode}
-    >
-      <span class="bionic-toggle-icon" aria-hidden="true">B</span>
-    </button>
-
-    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title="Knowledge Panel">
+    <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title={shortcutTitle("Knowledge Panel", "toggle-right-sidebar")} aria-label="Knowledge Panel" aria-keyshortcuts={shortcutAria("toggle-right-sidebar")}>
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
         <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
@@ -229,17 +217,6 @@
   .titlebar-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
-  }
-
-  .titlebar-btn.active {
-    background: color-mix(in srgb, var(--accent-purple) 22%, transparent);
-    color: var(--accent-purple);
-  }
-
-  .bionic-toggle-icon {
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
   }
 
   .titlebar-btn:disabled:hover {

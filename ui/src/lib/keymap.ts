@@ -9,6 +9,8 @@
  * Supports chord sequences (e.g. "g j" = two keypresses in sequence).
  */
 
+import { BIONIC_SHORTCUT, BOOKMARK_SHORTCUT, readerShortcut } from "./readerHotkeys";
+
 export type ActionFn = () => void;
 
 export interface Shortcut {
@@ -82,6 +84,7 @@ function chordToString(parts: string[]): string {
 }
 
 interface ParsedShortcut {
+  id?: string;
   /** Array of chord strings to match in sequence */
   sequence: string[];
   action: ActionFn;
@@ -116,6 +119,7 @@ class KeymapManager {
     this.shortcuts = shortcuts.map((s) => {
       const chords = parseBinding(s.binding);
       return {
+        id: s.id,
         sequence: chords.map((c) => chordToString(c)),
         action: s.action,
         navOnly: s.navOnly !== false,
@@ -128,6 +132,10 @@ class KeymapManager {
   }
 
   handleKeydown(e: KeyboardEvent): boolean {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) {
+      this.pendingChord = [];
+      return false;
+    }
     const target = e.target as HTMLElement | null;
     const inField =
       target?.tagName === "INPUT" ||
@@ -142,11 +150,13 @@ class KeymapManager {
       return false;
     }
 
-    const active = navBlocked
+    const available = navBlocked
       ? this.shortcuts.filter((s) => !s.navOnly)
       : this.shortcuts;
+    const active = available.filter((s) =>
+      (s.id !== "toggle-bionic" && s.id !== "bookmark") || readerShortcut(e) === s.id);
 
-    if (navBlocked) {
+    if (navBlocked || readerShortcut(e)) {
       this.pendingChord = [];
     }
 
@@ -224,6 +234,8 @@ export function registerDefaultShortcuts(actions: {
   toggleSettings: () => void;
   toggleWideMode: () => void;
   toggleZenMode: () => void;
+  toggleBionicReader?: () => void;
+  bookmark?: () => void;
   newPage?: () => void;
   reindex?: () => void;
   undo?: () => void;
@@ -251,6 +263,15 @@ export function registerDefaultShortcuts(actions: {
     }));
 
   const shortcuts: Shortcut[] = [
+    ...(actions.toggleBionicReader ? pair("toggle-bionic", "Toggle Bionic reading", "toggle", actions.toggleBionicReader, [
+      { binding: BIONIC_SHORTCUT, navOnly: false },
+    ]) : []),
+    ...(actions.bookmark ? pair("bookmark", "Bookmark Library reading or playback", "basics", actions.bookmark, [
+      { binding: BOOKMARK_SHORTCUT, navOnly: false },
+    ]) : []),
+    ...(actions.toggleHelp ? pair("help", "Contextual help", "basics", actions.toggleHelp, [
+      { binding: "F1", navOnly: false },
+    ]) : []),
     ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournal, [
       { binding: "g j" },
     ]),

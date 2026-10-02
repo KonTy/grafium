@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import app from "./App.svelte?raw";
 
 describe("Library app integration", () => {
+  it("routes local filter focus to the mounted Library shelf without stealing modal focus", () => {
+    const focus = app.slice(app.indexOf("function focusLocalSearch()"), app.indexOf("function journalCursorTitle()"));
+    expect(focus).toContain("if (hasKeyboardOverlay(document)) return false;");
+    expect(focus).toContain('if (currentView === "library") return privateLibraryRef?.focusSearch() ?? false;');
+    expect(app).toContain("<PrivateReaderLibrary bind:this={privateLibraryRef}");
+  });
+
   it("opens the private shelf without querying the active graph", () => {
     const route = app.slice(app.indexOf('if (target === "__library__")'), app.indexOf('if (target === "__studies__")'));
     expect(route).toContain('currentView = "library"');

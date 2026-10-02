@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AppMenu from "./AppMenu.svelte";
 import GraphMenu from "./GraphMenu.svelte";
+import { keymap_manager } from "../lib/keymap";
 
 /**
  * The seeded help promises `↑`/`↓` move through the menus opened from a button.
@@ -38,6 +39,25 @@ afterEach(() => {
   component = null;
   host.remove();
   vi.restoreAllMocks();
+  keymap_manager.register([]);
+});
+
+it("shows platform-correct zoom and registered settings hints without claiming About has a shortcut", () => {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  keymap_manager.register([
+    { id: "toggle-settings", binding: "t s", action: () => {} },
+    { id: "toggle-settings", binding: "alt+s", action: () => {}, navOnly: false },
+  ]);
+  component = mount(AppMenu, { target: host });
+  flushSync();
+  const menu = openMenu(host.querySelector<HTMLElement>(".menu-trigger")!);
+  const zoom = menu.querySelector('[aria-label="Zoom in"]');
+  expect(zoom?.getAttribute("title")).toBe("Zoom in (Cmd-=)");
+  expect(zoom?.getAttribute("aria-keyshortcuts")).toBe("Meta+=");
+  const settings = menu.querySelector('[title="Settings (t s | Alt-S)"]');
+  expect(settings?.getAttribute("aria-keyshortcuts")).toBe("Alt+s");
+  const about = [...menu.querySelectorAll("button")].find(button => button.textContent?.includes("About"));
+  expect(about?.getAttribute("aria-keyshortcuts")).toBeNull();
 });
 
 function openMenu(trigger: HTMLElement): HTMLElement {

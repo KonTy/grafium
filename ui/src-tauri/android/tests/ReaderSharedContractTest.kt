@@ -30,6 +30,9 @@ class ReaderSharedContractTest {
   private fun useLibrary(library: ReaderLibrary?) {
     ReaderLibrary::class.java.getDeclaredField("instance").apply { isAccessible = true }.set(null, library)
   }
+  private fun useService(service: PrivateReaderService?) {
+    PrivateReaderService::class.java.getDeclaredField("instance").apply { isAccessible = true }.set(null, service)
+  }
   private fun seed(context: Context): ReaderLibrary {
     val book = JSONObject().put("id", bookId).put("title", "Shared fixture EPUB").put("kind", "epub")
       .put("available", true).put("tracks", JSONArray()).put("bookmarks", JSONArray())
@@ -112,6 +115,48 @@ class ReaderSharedContractTest {
       val bookmarked = command("bookmark", JSONObject().put("bookId", bookId).put("note", "Through actual bridge"))
       assertTrue(bookmarked.toString(), bookmarked.getBoolean("ok"))
       assertPosition(expected, bookmarked.getJSONObject("result").getJSONObject("position"))
+      val narration = JSONObject(expected.toString()).put("voiceId", "fixture-voice").put("ttsOrdinal", 4)
+        .put("sourceHash", ReaderPolicy.stableId("source")).put("sourceTrackId", ReaderPolicy.stableId("source-track"))
+      source.narrationCheckpoint(bookId, narration)
+      val visualPosition = JSONObject().put("offsetMs", 0).put("locator",
+        JSONObject(expected.getJSONObject("locator").toString()).put("cfi", "epubcfi(/6/4!/4/2,/1:4,/1:19)"))
+      val visualArgs = JSONObject().put("bookId", bookId).put("position", visualPosition).put("note", "Selected words")
+      assertNull(PrivateReaderService.instance)
+      val visual = command("bookmarkVisual", visualArgs)
+      assertTrue(visual.toString(), visual.getBoolean("ok"))
+      assertPosition(visualPosition, visual.getJSONObject("result").getJSONObject("position"))
+      assertNull(PrivateReaderService.instance)
+      // An active-book sentinel has no player: touching the service bookmark path would fail.
+      val service = PrivateReaderService()
+      PrivateReaderService::class.java.getDeclaredField("bookId").apply { isAccessible = true }.set(service, bookId)
+      useService(service)
+      try {
+        val activeVisual = command("bookmarkVisual", visualArgs)
+        assertTrue(activeVisual.toString(), activeVisual.getBoolean("ok"))
+        assertPosition(visualPosition, activeVisual.getJSONObject("result").getJSONObject("position"))
+        assertEquals(bookId, service.activeBookId())
+        assertEquals(narration.toString(), source.book(bookId).getJSONObject("position").toString())
+        val removed = command("deleteBookmark", JSONObject().put("bookId", bookId)
+          .put("bookmarkId", activeVisual.getJSONObject("result").getString("id")))
+        assertTrue(removed.toString(), removed.getBoolean("ok"))
+      } finally {
+        useService(null)
+      }
+      val reopened = open(context).book(bookId)
+      assertEquals(narration.toString(), reopened.getJSONObject("position").toString())
+      assertEquals(2, reopened.getJSONArray("bookmarks").length())
+      assertPosition(visualPosition, reopened.getJSONArray("bookmarks").getJSONObject(1).getJSONObject("position"))
+      assertEquals("Selected words", reopened.getJSONArray("bookmarks").getJSONObject(1).getString("note"))
+      for ((args, error) in listOf(
+        JSONObject().put("bookId", bookId) to "BOOKMARK_NOT_FOUND",
+        JSONObject().put("bookmarkId", visual.getJSONObject("result").getString("id")) to "BOOK_NOT_REGISTERED",
+        JSONObject().put("bookId", bookId).put("bookmarkId", "missing") to "BOOKMARK_NOT_FOUND"
+      )) {
+        val rejectedDelete = command("deleteBookmark", args)
+        assertFalse(rejectedDelete.getBoolean("ok"))
+        assertEquals(error, rejectedDelete.getString("error"))
+      }
+      assertEquals(reopened.toString(), open(context).book(bookId).toString())
       val backup = source.exportState()
       useLibrary(open(freshContext(context, "shared-bridge-restore")))
       val restored = command("restore", JSONObject().put("data", backup))
@@ -119,6 +164,9 @@ class ReaderSharedContractTest {
       val book = restored.getJSONObject("result").getJSONArray("books").getJSONObject(0)
       assertPosition(expected, book.getJSONObject("position"))
       assertPosition(expected, book.getJSONArray("bookmarks").getJSONObject(0).getJSONObject("position"))
+      assertEquals(2, book.getJSONArray("bookmarks").length())
+      assertPosition(visualPosition, book.getJSONArray("bookmarks").getJSONObject(1).getJSONObject("position"))
+      assertEquals("Selected words", book.getJSONArray("bookmarks").getJSONObject(1).getString("note"))
       val legacy = JSONObject(expected.getJSONObject("locator").toString()).put("type", "epub").apply { remove("kind") }
       val rejected = command("position", JSONObject().put("bookId", bookId).put("locator", legacy)
         .put("offsetMs", expected.getLong("offsetMs")))
@@ -132,6 +180,12 @@ class ReaderSharedContractTest {
       assertTrue(added.toString(), added.getBoolean("ok"))
       val link = added.getJSONObject("result").getJSONArray("books").getJSONObject(1)
       val linkId = link.getString("id")
+      val beforeWrongBook = ReaderLibrary.get(context).exportState()
+      val wrongBookDelete = command("deleteBookmark", JSONObject().put("bookId", linkId)
+        .put("bookmarkId", visual.getJSONObject("result").getString("id")))
+      assertFalse(wrongBookDelete.getBoolean("ok"))
+      assertEquals("BOOKMARK_NOT_FOUND", wrongBookDelete.getString("error"))
+      assertEquals(beforeWrongBook, ReaderLibrary.get(context).exportState())
       val favorite = command("set_favorite", JSONObject().put("bookId", linkId).put("favorite", true))
       assertTrue(favorite.toString(), favorite.getBoolean("ok"))
       assertTrue(favorite.getJSONObject("result").getJSONArray("books").getJSONObject(1).getBoolean("favorite"))

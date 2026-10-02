@@ -79,9 +79,9 @@ export async function androidPrivateCommand<T>(command: string, args: Record<str
     return androidReaderRequest<T>("position", { bookId: args.bookId, locator: position.locator, offsetMs: position.offsetMs });
   }
   if (command === "bookmark" && (args.position as ReaderPosition | undefined)?.locator) {
-    await androidPrivateCommand("save_position", { bookId: args.bookId, position: args.position });
+    return androidReaderRequest<T>("bookmarkVisual", args);
   }
-  const names: Record<string, string> = { bookmark: "bookmark", update_bookmark: "updateBookmark", reorder: "reorder", relink: "relink", restore: "restore" };
+  const names: Record<string, string> = { bookmark: "bookmark", update_bookmark: "updateBookmark", delete_bookmark: "deleteBookmark", reorder: "reorder", relink: "relink", restore: "restore" };
   if (names[command]) return androidReaderRequest<T>(names[command], args);
   throw new Error(`The Android reader does not support ${command}. No desktop fallback was attempted.`);
 }

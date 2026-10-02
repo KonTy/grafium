@@ -435,7 +435,22 @@ internal class ReaderLibrary private constructor(private val context: Context) {
     save()
   }
 
-  @Synchronized fun bookmarkAt(bookId: String, position: JSONObject, note: String): JSONObject {
+  @Synchronized fun bookmarkVisual(bookId: String, raw: JSONObject, note: String): JSONObject {
+    val book = mutableBook(bookId)
+    require(book.getString("kind") == "epub") { "EPUB_REQUIRED" }
+    require(raw.keys().asSequence().toSet() == setOf("locator", "offsetMs")) { "INVALID_POSITION" }
+    val offset = raw.get("offsetMs")
+    require(offset is Number && offset.toDouble() == offset.toLong().toDouble() &&
+      offset.toLong() in 0..9_007_199_254_740_991L) { "INVALID_POSITION" }
+    val position = JSONObject().put("locator", ReaderNarrationUploads.canonicalLocator(raw.get("locator")))
+      .put("offsetMs", offset.toLong())
+    return storeBookmark(bookId, position, note, updatePosition = false)
+  }
+
+  @Synchronized fun bookmarkAt(bookId: String, position: JSONObject, note: String): JSONObject =
+    storeBookmark(bookId, position, note, updatePosition = true)
+
+  private fun storeBookmark(bookId: String, position: JSONObject, note: String, updatePosition: Boolean): JSONObject {
     require(note.length <= 4096) { "NOTE_TOO_LONG" }
     val book = mutableBook(bookId)
     if (book.has("sourceUrl")) externalPosition(book, position)
@@ -445,7 +460,7 @@ internal class ReaderLibrary private constructor(private val context: Context) {
     val marks = book.getJSONArray("bookmarks")
     require(marks.length() < 50000) { "BOOKMARK_LIMIT: export your private history" }
     marks.put(mark)
-    book.put("position", position)
+    if (updatePosition) book.put("position", position)
     save()
     return JSONObject(mark.toString())
   }
@@ -524,6 +539,15 @@ internal class ReaderLibrary private constructor(private val context: Context) {
     mark.put("note", note).put("bookId", bookId)
     save()
     return JSONObject(mark.toString())
+  }
+
+  @Synchronized fun deleteBookmark(bookId: String, bookmarkId: String): JSONObject {
+    val marks = mutableBook(bookId).getJSONArray("bookmarks")
+    val index = (0 until marks.length()).find { marks.getJSONObject(it).getString("id") == bookmarkId }
+      ?: throw IllegalArgumentException("BOOKMARK_NOT_FOUND")
+    marks.remove(index)
+    save()
+    return library()
   }
 
   /** Merge recovery never replaces current progress, grants, settings, or edited notes. */

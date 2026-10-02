@@ -3,6 +3,7 @@
   import { autofocus } from "../lib/autofocus";
   import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
   import { handleMenuKeydown } from "../lib/menuKeyboard";
+  import { bindingTitle, bindingAria, shortcutTitle, shortcutAria } from "../lib/shortcuts";
 
   interface Props {
     uiZoom?: number;
@@ -95,13 +96,13 @@
       <div class="zoom-section">
         <div class="zoom-label">Zoom {Math.round(uiZoom * 100)}%</div>
         <div class="zoom-controls">
-          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomOut(); }} title="Zoom out (Ctrl+-)">−</button>
-          <button role="menuitem" class="zoom-reset" onclick={() => { closeMenu(); onZoomReset(); }} title="Reset zoom (Ctrl+0)">100%</button>
-          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomIn(); }} title="Zoom in (Ctrl+Plus)">+</button>
+          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomOut(); }} title={bindingTitle("Zoom out", "mod+-")} aria-label="Zoom out" aria-keyshortcuts={bindingAria("mod+-")}>−</button>
+          <button role="menuitem" class="zoom-reset" onclick={() => { closeMenu(); onZoomReset(); }} title={bindingTitle("Reset zoom", "mod+0")} aria-label="Reset zoom" aria-keyshortcuts={bindingAria("mod+0")}>100%</button>
+          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomIn(); }} title={bindingTitle("Zoom in", "mod+=")} aria-label="Zoom in" aria-keyshortcuts={bindingAria("mod+=")}>+</button>
         </div>
       </div>
       <div class="menu-separator"></div>
-      <button role="menuitem" class="menu-item" onclick={openSettings}>
+      <button role="menuitem" class="menu-item" onclick={openSettings} title={shortcutTitle("Settings", "toggle-settings")} aria-keyshortcuts={shortcutAria("toggle-settings")}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>

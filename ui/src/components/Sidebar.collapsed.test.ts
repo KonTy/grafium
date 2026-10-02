@@ -28,6 +28,16 @@ describe("collapsed sidebar icon rail", () => {
     expect(titleBar).toContain("class:collapsed={!sidebarVisible}");
   });
 
+  it("shows registered navigation hints but does not invent shortcuts for dynamic actions", () => {
+    for (const [label, id] of [["Journal", "go-journal"], ["Library", "go-library"], ["Studies", "go-studies"],
+      ["Tasks", "go-tasks"], ["All Pages", "go-all-pages"], ["Settings", "toggle-settings"]]) {
+      expect(sidebar).toContain(`shortcutTitle("${label}", "${id}")`);
+    }
+    expect(sidebar).toContain('title="Create new page"');
+    expect(sidebar).toContain('title="Jobs"');
+    expect(sidebar).not.toContain('title="Expand sidebar (Ctrl+B)"');
+  });
+
   it("focuses navigation without retaining the duplicate search UI", () => {
     expect(sidebar).toContain("export function focusNavigation()");
     expect(sidebar).toContain('".nav-item.active"');
@@ -36,6 +46,8 @@ describe("collapsed sidebar icon rail", () => {
     expect(sidebar).not.toContain("sidebarSearch");
     expect(app).toContain("sidebarRef?.focusNavigation()");
     expect(app).not.toContain("toggle-search");
-    expect(app).not.toContain("focusSearch");
+    expect(sidebar).not.toContain("focusSearch");
+    expect(app).not.toContain("sidebarRef?.focusSearch");
+    expect(app).toContain("privateLibraryRef?.focusSearch()");
   });
 });

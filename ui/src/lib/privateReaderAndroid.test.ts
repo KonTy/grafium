@@ -84,4 +84,33 @@ describe("Android private reader bridge", () => {
       bookId: book.id, locator: sharedPosition.locator, offsetMs: 2370,
     });
   });
+  it("bookmarks the selected visual range without saving position or calling the service bookmark", async () => {
+    const position = { offsetMs: 0, locator: { ...sharedPosition.locator, cfi: "epubcfi(/6/4!/4/2,/1:4,/1:19)" } };
+    const args = { bookId: book.id, position, note: "Selected passage" };
+    await androidPrivateCommand("bookmark", args);
+    expect(requests.map(({ command, args }) => ({ command, args }))).toEqual([
+      { command: "bookmarkVisual", args },
+    ]);
+  });
+  it("maps confirmed bookmark deletion without a playback command", async () => {
+    const args = { bookId: book.id, bookmarkId: "selected-mark" };
+    await androidPrivateCommand("delete_bookmark", args);
+    expect(requests.map(({ command, args }) => ({ command, args }))).toEqual([
+      { command: "deleteBookmark", args },
+    ]);
+  });
+  it("surfaces visual bookmark and deletion errors without service or position fallbacks", async () => {
+    window.PrivateReaderBridge = { request(json) {
+      const request = JSON.parse(json);
+      requests.push(request);
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent("private-reader-response", {
+        detail: { id: request.id, ok: false, error: "PRIVATE_STATE_WRITE_FAILED" },
+      })));
+    } };
+    await expect(androidPrivateCommand("bookmark", { bookId: book.id, position: sharedPosition, note: "Selected words" }))
+      .rejects.toThrow("PRIVATE_STATE_WRITE_FAILED");
+    await expect(androidPrivateCommand("delete_bookmark", { bookId: book.id, bookmarkId: "selected-mark" }))
+      .rejects.toThrow("PRIVATE_STATE_WRITE_FAILED");
+    expect(requests.map(request => request.command)).toEqual(["bookmarkVisual", "deleteBookmark"]);
+  });
 });

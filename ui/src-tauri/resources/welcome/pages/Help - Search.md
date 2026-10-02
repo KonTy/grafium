@@ -15,7 +15,7 @@ press it again while focused there to collapse it. The old sidebar-search
 shortcut **Ctrl+Shift+K** / **Cmd+Shift+K** has been removed.
 
 **Ctrl+F** / **Cmd+F** focuses an existing filter in views such as All Pages,
-Graph, or Settings. Those filters narrow the current view; they do not open
+Graph, Library, or Settings. Those filters narrow the current view; they do not open
 another graph-search dialog.
 
 ## Files or placeholders in All Pages

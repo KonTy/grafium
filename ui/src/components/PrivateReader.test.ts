@@ -15,7 +15,7 @@ import { startAndroidPrivateNarration } from "../lib/privateReaderSegments";
 import { stopPrivatePlayback } from "../lib/privateReaderPlayback";
 import { startPrivateReadAloud } from "../lib/privateReaderVoice";
 import { sha256 } from "@noble/hashes/sha256";
-import { readerFlow } from "../lib/readerPreferences";
+import { readerFlow, readerTextSize } from "../lib/readerPreferences";
 import { bionicReaderEnabled } from "../lib/bionicReader";
 
 const book: ReaderBook = { id: "private", title: "Device-only EPUB", available: true, kind: "epub", tracks: [], position: null, bookmarks: [] };
@@ -23,7 +23,8 @@ let component: ReturnType<typeof mount> | undefined;
 beforeEach(() => {
   invoke.mockReset();
   openDialog.mockReset();
-  readerFlow.set("paginated"); bionicReaderEnabled.set(false);
+  readerFlow.set("paginated"); readerTextSize.set(100); bionicReaderEnabled.set(false);
+  vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn() });
   privateLibrary.set({ libraryPath: "/outside-graph", books: [book] });
   invoke.mockImplementation(async (command, args) => command.endsWith("read_epub") ? new ArrayBuffer(8)
     : command.endsWith("record_activity") ? {
@@ -40,6 +41,58 @@ afterEach(async () => {
   delete window.PrivateReaderBridge;
 });
 describe("private reader components", () => {
+  it.each(["timeout", "close"])("rejects unconfirmed bookmark captures on %s without a saved bookmark", async failure => {
+    const visual = mount(PrivateBookReader, { target: document.body, props: { bookId: book.id } });
+    component = visual;
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    const frame = document.querySelector("iframe")!;
+    const token = decodeURIComponent(frame.src).match(/const token="([^"]+)"/)![1];
+    window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, origin: "null",
+      data: { channel: "grafium-book", token, type: "ready", toc: [], annotations: true, notice: "" } }));
+    flushSync();
+    vi.useFakeTimers();
+    try {
+      const pending = visual.captureBookmark();
+      const rejected = expect(pending).rejects.toThrow(failure === "timeout" ? "Nothing was saved" : "closed");
+      if (failure === "timeout") await vi.advanceTimersByTimeAsync(10001);
+      else { await unmount(visual); component = undefined; }
+      await rejected;
+      expect(invoke.mock.calls.some(([command]) => command === "reader_add_bookmark")).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each(["button", "shortcut", "frame shortcut"])("captures an exact bookmark through %s without replacing narration progress", async action => {
+    const locator = { kind: "epub" as const, cfi: "epubcfi(/6/2!/4/2/1,:4,:12)", rendererVersion: BOOK_RENDERER_VERSION };
+    const saved = { locator: { ...locator, cfi: "epubcfi(/6/2!/4/8)" }, offsetMs: 2370, voiceId: "saved-voice" };
+    privateLibrary.set({ libraryPath: "/outside-graph", books: [{ ...book, position: saved }] });
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (...args) => args[0] === "reader_snapshot" ? get(privateLibrary) : original(...args));
+    component = mount(PrivateReaderBook, { target: document.body, props: { bookId: book.id, onBack: vi.fn() } });
+    await vi.waitFor(() => expect(document.querySelector("iframe")).not.toBeNull());
+    const frame = document.querySelector("iframe")!;
+    const token = decodeURIComponent(frame.src).match(/const token="([^"]+)"/)![1];
+    const send = (data: Record<string, unknown>) => {
+      window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, origin: "null",
+        data: { channel: "grafium-book", token, ...data } }));
+      flushSync();
+    };
+    send({ type: "ready", toc: [], annotations: true, notice: "" });
+    const post = vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation(message => {
+      if (message.type === "capture-bookmark") queueMicrotask(() => send({
+        type: "bookmark-captured", requestId: message.requestId, location: locator, quote: "Two words from the exact selected passage.",
+      }));
+    });
+    if (action === "shortcut") {
+      const event = new CustomEvent("grafium-bookmark", { cancelable: true });
+      window.dispatchEvent(event); expect(event.defaultPrevented).toBe(true);
+    } else if (action === "frame shortcut") send({ type: "bookmark" });
+    else [...document.querySelectorAll("button")].find(button => button.textContent === "Bookmark")!.click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_add_bookmark", {
+      bookId: book.id, position: { offsetMs: 0, locator }, note: "Two words",
+    }));
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: "capture-bookmark" }), "*");
+    expect(get(privateLibrary).books[0].position).toEqual(saved);
+    expect(invoke.mock.calls.some(([command]) => command === "reader_save_position")).toBe(false);
+  });
   it("reports manual reading interactions, not mounting or passive layout, and uses renderer progress", async () => {
     const onActivity = vi.fn(); const onProgress = vi.fn();
     component = mount(PrivateBookReader, { target: document.body, props: { bookId: book.id, onActivity, onProgress } });

@@ -84,7 +84,9 @@ export function formatBinding(binding: string): string {
 
 function formatBindingPart(part: string): string {
   const lower = part.toLowerCase();
-  if (lower === "mod" || lower === "ctrl" || lower === "control" || lower === "meta") return "Ctrl";
+  if (lower === "mod") return isMac() ? "Cmd" : "Ctrl";
+  if (lower === "ctrl" || lower === "control") return "Ctrl";
+  if (lower === "meta") return "Cmd";
   if (lower === "shift") return "Shift";
   if (lower === "alt") return "Alt";
   if (part.length === 1) return part.toUpperCase();
@@ -93,4 +95,37 @@ function formatBindingPart(part: string): string {
 
 export function formatBindingList(bindings: string[]): string {
   return bindings.map(formatBinding).join(" | ");
+}
+
+function isMac(): boolean {
+  return typeof navigator !== "undefined" && navigator.platform.includes("Mac");
+}
+
+export function bindingTitle(label: string, ...bindings: string[]): string {
+  return bindings.length ? `${label} (${formatBindingList(bindings)})` : label;
+}
+
+export function shortcutTitle(label: string, actionId: string): string {
+  return bindingTitle(label, ...actionBindings(actionId));
+}
+
+function actionBindings(actionId: string): string[] {
+  return [...new Set(keymap_manager.getShortcuts()
+    .filter(({ id }) => id === actionId).map(({ binding }) => binding))];
+}
+
+/** ARIA represents simultaneous keys, not navigation chord sequences. */
+export function bindingAria(binding: string): string {
+  return binding.split("+").map((part) => {
+    const lower = part.toLowerCase();
+    if (lower === "mod") return isMac() ? "Meta" : "Control";
+    if (lower === "ctrl" || lower === "control") return "Control";
+    if (lower === "meta") return "Meta";
+    return lower === "alt" ? "Alt" : lower === "shift" ? "Shift" : part;
+  }).join("+");
+}
+
+export function shortcutAria(actionId: string): string | undefined {
+  return actionBindings(actionId).filter((binding) => !binding.includes(" "))
+    .map(bindingAria).join(" ") || undefined;
 }

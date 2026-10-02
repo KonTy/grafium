@@ -12,6 +12,7 @@
   import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo, getPage } from "../lib/api";
   import { isOriginalBookPage } from "../lib/books";
   import type { Page } from "../lib/api";
+  import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
 
   interface Props {
     currentPage?: Page | null;
@@ -226,7 +227,7 @@
 <aside class="sidebar" class:collapsed bind:this={rootEl}>
   <div class="sidebar-header" class:collapsed>
     {#if collapsed}
-      <button class="sidebar-toggle" onclick={onExpand} title="Expand sidebar (Ctrl+B)" aria-label="Expand sidebar">
+      <button class="sidebar-toggle" onclick={onExpand} title={shortcutTitle("Expand sidebar", "toggle-left-sidebar")} aria-keyshortcuts={shortcutAria("toggle-left-sidebar")} aria-label="Expand sidebar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <rect x="3" y="4" width="18" height="16" rx="2" />
           <path d="M9 4v16M13 9l3 3-3 3" stroke-linecap="round" stroke-linejoin="round" />
@@ -234,7 +235,7 @@
       </button>
     {:else}
       <GraphMenu onGraphChanged={handleSidebarGraphChanged} />
-      <button class="sidebar-toggle" onclick={onCollapse} title="Collapse sidebar (Ctrl+B)" aria-label="Collapse sidebar">
+      <button class="sidebar-toggle" onclick={onCollapse} title={shortcutTitle("Collapse sidebar", "toggle-left-sidebar")} aria-keyshortcuts={shortcutAria("toggle-left-sidebar")} aria-label="Collapse sidebar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <rect x="3" y="4" width="18" height="16" rx="2" />
           <path d="M9 4v16M16 9l-3 3 3 3" stroke-linecap="round" stroke-linejoin="round" />
@@ -244,7 +245,7 @@
   </div>
 
   <nav class="nav-items">
-    <button class="nav-item" class:active={currentView === "journal"} onclick={navigateToJournal} title="Journal" aria-label="Journal">
+    <button class="nav-item" class:active={currentView === "journal"} onclick={navigateToJournal} title={shortcutTitle("Journal", "go-journal")} aria-keyshortcuts={shortcutAria("go-journal")} aria-label="Journal">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
         <line x1="16" y1="2" x2="16" y2="6"></line>
@@ -253,7 +254,7 @@
       </svg>
       <span>Journal</span>
     </button>
-    <button class="nav-item" class:active={currentView === "statistics"} onclick={() => onNavigate("__statistics__")} title="Tasks" aria-label="Tasks">
+    <button class="nav-item" class:active={currentView === "statistics"} onclick={() => onNavigate("__statistics__")} title={shortcutTitle("Tasks", "go-tasks")} aria-keyshortcuts={shortcutAria("go-tasks")} aria-label="Tasks">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M18 20V10"></path>
         <path d="M12 20V4"></path>
@@ -261,22 +262,22 @@
       </svg>
       <span>Tasks</span>
     </button>
-    <button class="nav-item" class:active={currentView === "library"} onclick={() => onNavigate("__library__")} title="Library" aria-label="Library">
+    <button class="nav-item" class:active={currentView === "library"} onclick={() => onNavigate("__library__")} title={shortcutTitle("Library", "go-library")} aria-label="Library">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 3h4v18H3zM10 3h4v18h-4zM17 3l4 1v17l-4-1z" /></svg>
       <span>Library</span>
     </button>
-    <button class="nav-item" class:active={currentView === "studies"} onclick={() => onNavigate("__studies__")} title="Studies" aria-label="Studies">
+    <button class="nav-item" class:active={currentView === "studies"} onclick={() => onNavigate("__studies__")} title={shortcutTitle("Studies", "go-studies")} aria-label="Studies">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 4h7l3 3 3-3h7v16h-7l-3 2-3-2H2zM12 7v15" /></svg>
       <span>Studies</span>
     </button>
-    <button class="nav-item" class:active={currentView === "all-pages"} onclick={() => onNavigate("__all_pages__")} title="All Pages" aria-label="All Pages">
+    <button class="nav-item" class:active={currentView === "all-pages"} onclick={() => onNavigate("__all_pages__")} title={shortcutTitle("All Pages", "go-all-pages")} aria-keyshortcuts={shortcutAria("go-all-pages")} aria-label="All Pages">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
         <polyline points="14 2 14 8 20 8"></polyline>
       </svg>
       <span>All Pages</span>
     </button>
-    <button class="nav-item" class:active={currentView === "graph"} onclick={() => onNavigate("__graph__")} title="Graph View" aria-label="Graph View">
+    <button class="nav-item" class:active={currentView === "graph"} onclick={() => onNavigate("__graph__")} title={shortcutTitle("Graph View", "go-graph")} aria-keyshortcuts={shortcutAria("go-graph")} aria-label="Graph View">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="5" cy="6" r="2"></circle>
         <circle cx="19" cy="6" r="2"></circle>
@@ -287,7 +288,7 @@
       </svg>
       <span>Graph View</span>
     </button>
-    <button class="nav-item" class:active={currentView === "flashcards"} onclick={() => onNavigate("__flashcards__")} title="Flashcards" aria-label="Flashcards">
+    <button class="nav-item" class:active={currentView === "flashcards"} onclick={() => onNavigate("__flashcards__")} title={shortcutTitle("Flashcards", "go-flashcards")} aria-keyshortcuts={shortcutAria("go-flashcards")} aria-label="Flashcards">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"></rect>
         <path d="M12 8v8"></path>
@@ -295,7 +296,7 @@
       </svg>
       <span>Flashcards</span>
     </button>
-    <button class="nav-item" class:active={currentView === "chat"} onclick={() => onNavigate("__chat__")} title="Chat" aria-label="Chat">
+    <button class="nav-item" class:active={currentView === "chat"} onclick={() => onNavigate("__chat__")} title={shortcutTitle("Chat", "go-chat")} aria-keyshortcuts={shortcutAria("go-chat")} aria-label="Chat">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
       </svg>
@@ -308,7 +309,7 @@
       </svg>
       <span>Jobs</span>
     </button>
-    <button class="nav-item" class:active={currentView === "settings"} onclick={() => onNavigate("__settings__")} title="Settings" aria-label="Settings">
+    <button class="nav-item" class:active={currentView === "settings"} onclick={() => onNavigate("__settings__")} title={shortcutTitle("Settings", "toggle-settings")} aria-keyshortcuts={shortcutAria("toggle-settings")} aria-label="Settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"></circle>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -362,7 +363,7 @@
         <span>Create</span>
       {/if}
     </button>
-    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_media__") } title="Import from video/audio (URL or file)" aria-label="Import media">
+    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_media__") } title={shortcutTitle("Import from video/audio (URL or file)", "import-media")} aria-keyshortcuts={shortcutAria("import-media")} aria-label="Import media">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polygon points="23 7 16 12 23 17 23 7"></polygon>
         <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
@@ -371,7 +372,7 @@
         <span>Import Media</span>
       {/if}
     </button>
-    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_books__") } title="Import PDF or ebook folder" aria-label="Import books">
+    <button class="create-btn" class:compact={compactSidebar || collapsed} onclick={() => onNavigate("__import_books__") } title={shortcutTitle("Import PDF or ebook folder", "import-books")} aria-keyshortcuts={shortcutAria("import-books")} aria-label="Import books">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
         <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"></path>

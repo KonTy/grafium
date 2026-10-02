@@ -8,12 +8,12 @@ process.env.TMPDIR = runtimeDir;
 const { chromium } = require("playwright");
 const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
 
-async function openFixture(browser, continuous = false, width = 1400) {
+async function openFixture(browser, continuous = false, width = 1400, libraryBooks = null) {
   const page = await browser.newPage({ viewport: { width, height: 1100 } });
   page.setDefaultTimeout(8_000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => {
+  await page.addInitScript((libraryBooks) => {
     if (window !== window.top) return;
     localStorage.setItem("grafium.session.lastLocation", JSON.stringify({
       kind: "page", title: "Emoji reader regression",
@@ -67,6 +67,8 @@ async function openFixture(browser, continuous = false, width = 1400) {
         const state = window.__emojiReader;
         state.calls.push({ cmd, args: structuredClone(args) });
         switch (cmd) {
+          case "reader_snapshot":
+          case "reader_rescan": return { libraryPath: libraryBooks ? "/synthetic/library" : null, books: libraryBooks ?? [] };
           case "get_page": {
             const found = pages.find((item) => item.id === args.id || item.title === args.title);
             if (!found) throw new Error("Page not found");
@@ -123,7 +125,7 @@ async function openFixture(browser, continuous = false, width = 1400) {
         }
       },
     };
-  });
+  }, libraryBooks);
   await page.goto(continuous ? new URL("tests/fixtures/unified-editor.html", BASE_URL).href : BASE_URL,
     { waitUntil: "networkidle" });
   if (continuous) {
@@ -131,6 +133,10 @@ async function openFixture(browser, continuous = false, width = 1400) {
     assert.equal(await page.locator(".prototype-error").count(), 0);
     assert.ok(await page.evaluate(() => window.__emojiReader.calls.some((call) => call.cmd === "get_page_source")));
   } else await page.locator('[data-block-id="draft"]').first().waitFor();
+  if (libraryBooks) {
+    assert.deepEqual(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("reader_snapshot")),
+      { libraryPath: "/synthetic/library", books: libraryBooks }, "the Library fixture must seed its native snapshot on every app load");
+  }
   return { page, continuous, errors };
 }
 
@@ -194,7 +200,7 @@ async function saveAndPreview(fixture, expected) {
   await page.waitForFunction((expected) =>
     window.__emojiReader.blocks.find((block) => block.id === "draft")?.content === expected, expected);
   // A real blur returns the edited block to its preview, without source replacement.
-  await page.getByTitle("Bionic Speedreader", { exact: true }).focus();
+  await page.getByRole("button", { name: continuous ? "Bionic Speedreader" : "Search", exact: true }).focus();
   await rendered(fixture, "draft").waitFor();
   const state = await page.evaluate(() => ({
     source: window.__emojiReader.source,
@@ -253,7 +259,9 @@ async function readerCase(browser, continuous) {
   const fixture = await openFixture(browser, continuous);
   const { page } = fixture;
   const mode = continuous ? "isolated continuous component" : "classic";
-  const toggle = page.getByTitle("Bionic Speedreader", { exact: true });
+  const toggle = () => continuous
+    ? page.getByTitle("Bionic Speedreader", { exact: true }).click()
+    : page.keyboard.press("ControlOrMeta+Alt+b");
   const root = continuous ? ".unified-page-editor" : ".page-content";
   await rendered(fixture, "rich").locator('.grafium-icon[aria-label="star"]').waitFor();
   assert.equal(await rendered(fixture, "rich").locator(".grafium-icon").count(), 1);
@@ -267,24 +275,23 @@ async function readerCase(browser, continuous) {
     source: window.__emojiReader.source,
     writes: window.__emojiReader.writes.length,
   }));
-  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
-  await toggle.click();
+  assert.equal(await page.locator(`${root} .bionic-word`).count(), 0);
+  if (!continuous) assert.equal(await page.locator(".titlebar .bionic-toggle-icon").count(), 0);
+  await toggle();
   await rendered(fixture, "prose").locator(".bionic-word").first().waitFor({ timeout: 2_000 });
-  assert.equal(await toggle.getAttribute("aria-pressed"), "true");
   assert.equal(await page.locator(`${root} code .bionic-word, ${root} pre .bionic-word, ${root} .katex .bionic-word, ${root} .task-checkbox .bionic-word, ${root} .task-marker .bionic-word, ${root} .priority .bionic-word, ${root} .grafium-icon .bionic-word`).count(), 0);
   assert.equal(await page.evaluate(() => localStorage.getItem("grafium.reader.bionic")), "1");
-  await toggle.click();
+  await toggle();
   await page.waitForFunction((root) => !document.querySelector(`${root} .bionic-word`), root);
-  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+  assert.equal(await page.evaluate(() => localStorage.getItem("grafium.reader.bionic")), "0");
   assert.equal(await rendered(fixture, "prose").innerText(), "Observatory notes connect distant ideas with careful observations.");
   assert.deepEqual(await page.evaluate(() => ({
     source: window.__emojiReader.source,
     writes: window.__emojiReader.writes.length,
   })), before, "reader toggling must not issue any note/source writes");
-  await toggle.click();
+  await toggle();
   await page.reload({ waitUntil: "networkidle" });
-  await page.getByTitle("Bionic Speedreader", { exact: true }).waitFor();
-  assert.equal(await page.getByTitle("Bionic Speedreader", { exact: true }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.evaluate(() => localStorage.getItem("grafium.reader.bionic")), "1");
   await page.locator(".rendered-content .bionic-word").first().waitFor();
   await finish(fixture, `${mode}: live Bionic toggles existing previews, skips code/math/task markers, and survives reload without note edits`);
 }
@@ -310,9 +317,127 @@ async function nativeArrowCase(browser, continuous) {
       return { source: view.state.doc.toString(), selection: view.state.selection.toJSON() };
     }), before, "native-dispatch completion navigation must not move the text caret or edit source");
   }
+
   await acceptWithKeyboard(page, "★ star");
   await saveAndPreview(fixture, ":icon-star:");
   await finish(fixture, `${continuous ? "continuous" : "classic"}: native vertical-arrow callback moves completion selection, not the caret`);
+}
+
+async function globalReaderShortcutCase(browser) {
+    const fixture = await openFixture(browser);
+    const { page } = fixture;
+    const editor = page.locator('[data-block-id="draft"] .cm-content');
+    await page.locator('[data-block-id="draft"] .block-content').first().click();
+    await editor.waitFor();
+    const before = await page.evaluate(() => ({
+      source: window.__emojiReader.source, writes: window.__emojiReader.writes.length,
+    }));
+    await page.keyboard.press("ControlOrMeta+Alt+b");
+    await rendered(fixture, "prose").locator(".bionic-word").first().waitFor();
+    assert.equal(await editor.evaluate(element => element.contains(document.activeElement)), true);
+    assert.deepEqual(await page.evaluate(() => ({
+      source: window.__emojiReader.source, writes: window.__emojiReader.writes.length,
+    })), before, "Bionic shortcut must not apply bold or write the focused note");
+
+    await page.evaluate(() => {
+      const mac = navigator.platform.includes("Mac");
+      for (const extra of [{ repeat: true }, { isComposing: true }, { shiftKey: true }]) {
+        document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "b", code: "KeyB", ctrlKey: !mac, metaKey: mac, altKey: true,
+          bubbles: true, cancelable: true, ...extra,
+        }));
+      }
+    });
+    assert.equal(await page.evaluate(() => localStorage.getItem("grafium.reader.bionic")), "1");
+
+    await page.keyboard.press("ControlOrMeta+Shift+p");
+    await page.getByRole("dialog", { name: "Command palette", exact: true }).waitFor();
+    await page.keyboard.press("ControlOrMeta+Alt+b");
+    assert.equal(await page.evaluate(() => localStorage.getItem("grafium.reader.bionic")), "1",
+      "reader hotkeys must not steal a modal's keys");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+      window.__bookmarkShortcutCount = 0;
+      window.addEventListener("grafium-bookmark", event => {
+        event.preventDefault();
+        window.__bookmarkShortcutCount++;
+      }, { once: true });
+    });
+    await page.keyboard.press("ControlOrMeta+Alt+m");
+    assert.equal(await page.evaluate(() => window.__bookmarkShortcutCount), 1);
+    assert.equal(await page.getByText("Open a book in Library or start Library playback", { exact: false }).count(), 0);
+    await page.keyboard.press("ControlOrMeta+Alt+m");
+    await page.getByText("Open a book in Library or start Library playback", { exact: false }).waitFor();
+    await finish(fixture, "global reader shortcuts preserve editor text, reject repeats/composition/modals, and route bookmarks honestly");
+}
+
+async function librarySearchCase(browser, phone) {
+  const fixture = await openFixture(browser, false, phone ? 420 : 1400,
+    ["Distant stars", "Ocean tides"].map((title, index) => ({
+      id: `shelf-${index}`, title, kind: "epub", available: true,
+      tracks: [], bookmarks: [], position: null,
+    })));
+  const { page } = fixture;
+  await page.getByRole("button", { name: "Library", exact: true }).first().click();
+  const search = page.getByRole("searchbox", { name: "Search Library", exact: true });
+  await search.waitFor();
+  await search.fill("stars");
+  assert.deepEqual(await page.locator(".private-library .book-title").allTextContents(), ["Distant stars"]);
+  await page.getByRole("button", { name: "Rescan", exact: true }).focus();
+  await page.keyboard.press("ControlOrMeta+f");
+  assert.equal(await search.evaluate(element => document.activeElement === element), true);
+  assert.deepEqual(await search.evaluate(element => [element.selectionStart, element.selectionEnd]), [0, 5]);
+  assert.match(await search.getAttribute("title"), /Search Library \((Ctrl|Cmd)-F\)/);
+  const bounds = await search.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const parent = element.closest(".private-library").getBoundingClientRect();
+    return { width: box.width, height: box.height, x: box.x, right: box.right, parentX: parent.x, parentRight: parent.right };
+  });
+  assert.ok(bounds.height >= 40 && bounds.width >= (phone ? 200 : 300), JSON.stringify(bounds));
+  assert.ok(bounds.x >= bounds.parentX && bounds.right <= bounds.parentRight + 1, "search stays inside the shelf");
+  await page.keyboard.press("ControlOrMeta+Shift+p");
+  const palette = page.getByRole("dialog", { name: "Command palette", exact: true });
+  await palette.waitFor();
+  await page.keyboard.press("ControlOrMeta+f");
+  assert.equal(await palette.evaluate(element => element.contains(document.activeElement)), true,
+    "Library search must not steal focus from an open command palette");
+  await finish(fixture, `Library Ctrl/Cmd+F selects its query with a wider bounded search field on ${phone ? "phone" : "desktop"}`);
+}
+
+async function libraryTypePersistenceCase(browser) {
+  const fixture = await openFixture(browser, false, 1400, [
+    { id: "reading", title: "Reading", kind: "epub", available: false, tracks: [], bookmarks: [], position: null },
+    { id: "listening", title: "Listening", kind: "audio", available: false, favorite: true, tracks: [], bookmarks: [], position: null },
+  ]);
+  const { page } = fixture;
+  const openShelf = () => page.getByRole("button", { name: "Library", exact: true }).first().click();
+  const filter = page.locator(".private-library .filters select");
+  const search = page.getByRole("searchbox", { name: "Search Library", exact: true });
+  await openShelf();
+  await filter.selectOption("audio");
+  assert.deepEqual(await page.locator(".private-library .book-title").allTextContents(), ["Listening"]);
+  await search.fill("Listen");
+  await page.getByRole("button", { name: "★ Favorites", exact: true }).click();
+  await page.getByRole("button", { name: "Listening", exact: true }).click();
+  await page.getByRole("heading", { name: "Listening", exact: true }).waitFor();
+  await page.getByRole("button", { name: "← Library", exact: true }).click();
+  await filter.waitFor();
+  assert.equal(await filter.inputValue(), "audio", "opening and returning from a book retains Audio");
+  assert.equal(await search.inputValue(), "", "search keeps its existing nonpersistent behavior");
+  assert.equal(await page.getByRole("button", { name: "★ Favorites", exact: true }).getAttribute("aria-pressed"), "false");
+  assert.equal(await page.evaluate(() => localStorage.getItem("grafium.library.mediaType")), "audio");
+  await page.reload({ waitUntil: "networkidle" });
+  await openShelf();
+  await filter.waitFor();
+  assert.equal(await filter.inputValue(), "audio", "a fresh app instance restores the saved type");
+  assert.deepEqual(await page.locator(".private-library .book-title").allTextContents(), ["Listening"]);
+  await filter.selectOption("all");
+  await page.reload({ waitUntil: "networkidle" });
+  await openShelf();
+  await filter.waitFor();
+  assert.equal(await filter.inputValue(), "all", "resetting to All types is also remembered");
+  assert.deepEqual(await page.locator(".private-library .book-title").allTextContents(), ["Listening", "Reading"]);
+  await finish(fixture, "Library media type survives book navigation and app reload without persisting search or Favorites");
 }
 
 async function headingLayoutCase(browser, phone) {
@@ -409,7 +534,13 @@ async function wikiPreservationCase(browser) {
       catch (error) { failures.push(error); console.error(`FAIL ${run.name}:`, error); }
     }
     if (process.env.UI_TEST_CASE !== "preservation") {
+      try { await globalReaderShortcutCase(browser); }
+      catch (error) { failures.push(error); console.error("FAIL global reader shortcuts:", error); }
+      try { await libraryTypePersistenceCase(browser); }
+      catch (error) { failures.push(error); console.error("FAIL Library type persistence:", error); }
       for (const phone of [false, true]) {
+        try { await librarySearchCase(browser, phone); }
+        catch (error) { failures.push(error); console.error(`FAIL Library search ${phone ? "phone" : "desktop"}:`, error); }
         try { await headingLayoutCase(browser, phone); }
         catch (error) { failures.push(error); console.error(`FAIL ${phone ? "phone" : "narrow"} heading:`, error); }
       }

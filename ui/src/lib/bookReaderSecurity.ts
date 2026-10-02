@@ -49,15 +49,19 @@ export function sanitizeBookDocument(source: string): string {
 
 export interface BookTocItem { label: string; target: string | number; depth: number }
 export interface ReaderTextSegment { text: string; locator: Extract<BookLocation, { kind: "epub" }> }
+export interface ReaderBookmarkCapture { location: BookLocation; quote: string }
 export type ReaderMessage =
   | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number; language?: string; direction?: "ltr" | "rtl" }
   | { type: "location"; location: BookLocation; label: string; fraction?: number }
   | { type: "selection"; quote: string; location: BookLocation }
+  | ({ type: "bookmark-captured"; requestId: string } & ReaderBookmarkCapture)
   | { type: "clear-selection" }
   | { type: "error"; message: string }
   | { type: "read-aloud-segments"; requestId: string; section: number; sectionCount: number; nextOffset: number | null; segments: ReaderTextSegment[] }
   | { type: "help" }
   | { type: "navigation" }
+  | { type: "bookmark" }
+  | { type: "toggle-bionic" }
   | { type: "toggle-controls" }
   | { type: "exit-fullscreen" }
   | { type: "toggle-fullscreen" }
@@ -69,6 +73,9 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
     || event.data.channel !== "grafium-book" || event.data.token !== token) return null;
   const m = event.data;
   switch (m.type) {
+    case "bookmark-captured":
+      return typeof m.requestId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(m.requestId)
+        && isBookLocation(m.location) && typeof m.quote === "string" && m.quote.length <= 512 ? m : null;
     case "read-aloud-segments":
       return typeof m.requestId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(m.requestId)
         && Number.isSafeInteger(m.section) && m.section >= 0
@@ -95,7 +102,7 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
     case "selection": return isBookLocation(m.location) && typeof m.quote === "string"
       && m.quote.trim().length > 0 && m.quote.length <= 200000 ? m : null;
     case "clear-selection": case "open-notes": case "help": case "navigation": return m;
-    case "toggle-controls": case "exit-fullscreen": case "toggle-fullscreen":
+    case "toggle-controls": case "exit-fullscreen": case "toggle-fullscreen": case "bookmark": case "toggle-bionic":
       return Object.keys(m).every(key => ["channel", "token", "type"].includes(key)) ? { type: m.type } : null;
     case "error": return typeof m.message === "string" && m.message.length < 20000 ? m : null;
     default: return null;

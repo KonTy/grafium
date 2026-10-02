@@ -18,7 +18,7 @@ export interface ReaderBook {
 export interface ReaderSnapshot { libraryPath: string | null; books: ReaderBook[]; error?: string }
 export const privateLibrary = writable<ReaderSnapshot>({ libraryPath: null, books: [] });
 export const privateLibraryError = writable("");
-export const privateBookJump = writable<{ bookId: string; locator: BookLocation } | null>(null);
+export const privateBookJump = writable<{ bookId: string; locator: BookLocation; select?: boolean } | null>(null);
 export const privateVisualPositions = new Map<string, ReaderPosition>();
 export const privateBookLanguages = writable<Record<string, string>>({});
 export const privateVoiceLanguageSuggestion = writable<{ bookId: string; title: string; language: string } | null>(null);
@@ -206,6 +206,15 @@ export function readerTime(ms: number): string {
 export function bookmarkLabel(book: ReaderBook, position: ReaderPosition): string {
   return position.locator ? "Saved EPUB passage" :
     `${book.sourceUrl ? book.title : book.tracks.find(track => track.id === position.trackId)?.title ?? "Unavailable chapter"} · ${readerTime(position.offsetMs)}`;
+}
+
+export function bookmarkExcerpt(text: string): string {
+  const words = text.match(/[\p{L}\p{M}\p{N}]+(?:['’_-][\p{L}\p{M}\p{N}]+)*/gu);
+  return Array.from(words?.slice(0, 2).join(" ") ?? "").slice(0, 80).join("");
+}
+
+export function compactBookmarkLabel(book: ReaderBook, bookmark: ReaderBookmark): string {
+  return bookmark.note.trim().replace(/\s+/g, " ") || bookmarkLabel(book, bookmark.position);
 }
 
 export function bookmarkDate(value: string | number): string {

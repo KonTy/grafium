@@ -88,7 +88,7 @@ describe("Library destination", () => {
     await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain("direct audio/video"));
     expect(invoke).not.toHaveBeenCalledWith("reader_add_link", expect.anything());
   });
-  it("opens a journal draft only via its bookmark callback, even when source media is missing", () => {
+  it("opens a journal draft only via its bookmark menu, even when source media is missing", async () => {
     const book = source({ available: false, bookmarks: [{ id: "mark", bookId: "media", note: "Private reflection", createdAt: 1, position: { trackId: "track", offsetMs: 1000 } }] });
     privateLibrary.set({ libraryPath: "/missing", books: [book] });
     const onJournalNote = vi.fn();
@@ -97,6 +97,12 @@ describe("Library destination", () => {
     expect(document.body.textContent).toContain("Private reflection");
     expect(document.querySelector("video")).toBeNull();
     expect(onJournalNote).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>('[aria-label="Actions for bookmark: Private reflection"]')!.click();
+    flushSync();
+    const dialog = document.querySelector("dialog")!;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; dialog.dispatchEvent(new Event("close")); };
+    await vi.waitFor(() => expect(dialog.open).toBe(true));
     button("Journal note…").click();
     expect(onJournalNote).toHaveBeenCalledWith(book, book.bookmarks[0]);
     expect(invoke).not.toHaveBeenCalled();

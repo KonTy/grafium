@@ -1,14 +1,18 @@
 import { readerNavigationKey } from "../readerNavigation";
+import { readerShortcut } from "../readerHotkeys";
 
 const interactive = "a,button,input,textarea,select,[contenteditable],[role=button],[role=link]";
 const selected = doc => !!doc.getSelection()?.toString();
 
-export function installReaderInteractions(doc, { send, turn, canSwipe = () => true,
-  scrolled = () => false, scrollAtBoundary = () => false, atScrollBoundary = () => false }) {
+export function installReaderInteractions(doc, { send, turn, canSwipe = () => true, canPage = () => true,
+  scrolled = () => false, scrollAtBoundary = () => false, atScrollBoundary = () => false, scrollContainer = null }) {
   let touch;
   let scrollTouch;
   let tap;
   let tapTimer;
+  let wheelAmount = 0;
+  let wheelUntil = 0;
+  let lastWheel = 0;
   const zoomed = () => (window.visualViewport?.scale ?? 1) > 1.01
     || (doc.defaultView.visualViewport?.scale ?? 1) > 1.01;
   const blocked = target => target?.closest?.(interactive);
@@ -19,13 +23,26 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
     }
     return false;
   };
+  const verticallyScrollable = target => {
+    for (let el = target; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
+      if (el === scrollContainer) break;
+      if (el.scrollHeight > el.clientHeight + 2
+        && /auto|scroll/.test(doc.defaultView.getComputedStyle(el).overflowY)) return true;
+    }
+    return false;
+  };
   const listeners = [];
   const on = (type, listener, options = true) => {
     doc.addEventListener(type, listener, options);
     listeners.push(() => doc.removeEventListener(type, listener, options));
   };
   on("keydown", event => {
-    if (!event.isTrusted || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+    if (!event.isTrusted) return;
+    const shortcut = readerShortcut(event);
+    if (shortcut) {
+      event.preventDefault(); event.stopImmediatePropagation(); send(shortcut); return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
     const direction = readerNavigationKey(event, doc);
     if (direction) {
       event.preventDefault(); event.stopImmediatePropagation();
@@ -38,10 +55,22 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
     if (!event.repeat) send(type);
   });
   on("wheel", event => {
-    if (!event.isTrusted || !scrolled() || !event.deltaY || event.ctrlKey || event.metaKey
-      || event.altKey || event.shiftKey || blocked(event.target) || selected(doc) || zoomed()) return;
-    send("navigation");
-    if (scrollAtBoundary(event.deltaY > 0 ? "next" : "prev")) event.preventDefault();
+    if (!event.isTrusted || event.defaultPrevented || !canPage() || !event.deltaY || event.ctrlKey || event.metaKey
+      || event.altKey || event.shiftKey || event.buttons || blocked(event.target) || zoomed()
+      || Math.abs(event.deltaX) > Math.abs(event.deltaY) || verticallyScrollable(event.target)) return;
+    if (scrolled()) {
+      send("navigation");
+      if (scrollAtBoundary(event.deltaY > 0 ? "next" : "prev")) event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    if (event.timeStamp < wheelUntil) return;
+    if (event.timeStamp - lastWheel > 250 || Math.sign(wheelAmount) !== Math.sign(event.deltaY)) wheelAmount = 0;
+    lastWheel = event.timeStamp;
+    wheelAmount += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? doc.defaultView.innerHeight : 1);
+    if (Math.abs(wheelAmount) < 40) return;
+    send("navigation"); turn(wheelAmount > 0 ? "next" : "prev");
+    wheelAmount = 0; wheelUntil = event.timeStamp + 180;
   }, { capture: true, passive: false });
   on("pointerdown", event => {
     clearTimeout(tapTimer);
@@ -71,7 +100,7 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
     // navigation semantics (not guessed page indexes, and RTL stays correct).
     event.stopImmediatePropagation();
     scrollTouch = event.isTrusted && scrolled() && event.touches.length === 1
-      && !selected(doc) && !zoomed() && !blocked(event.target)
+      && !selected(doc) && !zoomed() && !blocked(event.target) && !verticallyScrollable(event.target)
       ? { x: event.touches[0].clientX, y: event.touches[0].clientY,
         next: atScrollBoundary("next"), prev: atScrollBoundary("prev") } : null;
     if (!event.isTrusted || event.touches.length !== 1 || selected(doc) || zoomed()

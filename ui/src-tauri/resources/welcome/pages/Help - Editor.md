@@ -4,6 +4,8 @@ Press **F1** while editing for quick editor help.
 
 - **Enter** creates a block; **Shift+Enter** adds a line inside it.
 - **Tab** indents; **Shift+Tab** outdents.
+- **Ctrl/Cmd+Alt+Shift+B** formats selected text as bold Markdown.
+  **Ctrl/Cmd+Alt+B** instead toggles Bionic reading without editing the source.
 - Click the compact triangle beside a heading to collapse or expand its
   children. The full gutter area remains clickable.
 - Blocks already have an outline bullet. A block starting with a Markdown list

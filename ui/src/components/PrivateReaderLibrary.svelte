@@ -5,13 +5,18 @@
   import { playPrivateAudio, privatePlayback, resumePrivatePlayback } from "../lib/privateReaderPlayback";
   import SettingsHelp from "./SettingsHelp.svelte";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
+  import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
+  import { showToast } from "../lib/toast.svelte";
+  const TYPE_KEY = "grafium.library.mediaType";
+  const MEDIA_TYPES = ["all", "epub", "audio", "video", "youtube"];
   let { onOpen, onSettings, onAddToStudies }: {
     onOpen: (bookId: string) => void; onSettings: () => void; onAddToStudies?: (book: ReaderBook) => void;
   } = $props();
   let scanning = $state(false);
   let query = $state("");
+  let searchInput: HTMLInputElement | undefined = $state();
   let favorites = $state(false);
-  let kind = $state("all");
+  let kind = $state(loadMediaType());
   let adding = $state(false);
   let link = $state("");
   let title = $state("");
@@ -20,6 +25,34 @@
   let error = $state("");
   let message = $state("");
   const books = $derived(libraryBooks($privateLibrary.books, query, favorites, kind));
+  function loadMediaType(): string {
+    try {
+      const value = window.localStorage.getItem(TYPE_KEY);
+      if (value === null) return "all";
+      if (MEDIA_TYPES.includes(value)) return value;
+      console.warn("Invalid saved Library type filter; showing all types.");
+    } catch (cause) {
+      console.warn("Could not load the Library type filter; showing all types.", cause);
+    }
+    return "all";
+  }
+
+  function setMediaType(value: string): void {
+    if (!MEDIA_TYPES.includes(value)) return;
+    kind = value;
+    try { window.localStorage.setItem(TYPE_KEY, value); }
+    catch (cause) {
+      showToast(`Could not remember the Library type filter; it may reset when you leave Library or restart: ${String(cause)}`, "error");
+    }
+  }
+
+  export function focusSearch(): boolean {
+    if (!searchInput || searchInput.disabled) return false;
+    searchInput.focus();
+    searchInput.select();
+    return true;
+  }
+
   async function run(action: () => Promise<unknown>) {
     busy = true; error = ""; message = "";
     try { await action(); } catch (cause) { error = String(cause); } finally { busy = false; }
@@ -69,8 +102,10 @@
   {#if !$privateLibrary.libraryPath}<p>Choose an external local folder in <button class="text-button" onclick={onSettings}>Settings → Library location</button>. Originals stay in that folder.</p>
   {/if}
   {#if $privateLibrary.libraryPath || $privateLibrary.books.length}
-    <div class="filters"><label class="filter">Search Library<input type="search" bind:value={query} placeholder="Title…" /></label>
-      <label>Type<select bind:value={kind}><option value="all">All types</option><option value="epub">EPUB</option><option value="audio">Audio</option><option value="video">Video</option><option value="youtube">YouTube</option></select></label>
+    <div class="filters"><label class="filter">Search Library<input type="search" bind:this={searchInput} bind:value={query}
+      data-local-search placeholder="Search titles…" title={shortcutTitle("Search Library", "search-local")}
+      aria-keyshortcuts={shortcutAria("search-local")} /></label>
+      <label>Type<select value={kind} onchange={event => setMediaType(event.currentTarget.value)}><option value="all">All types</option><option value="epub">EPUB</option><option value="audio">Audio</option><option value="video">Video</option><option value="youtube">YouTube</option></select></label>
       <button aria-pressed={favorites} onclick={() => favorites = !favorites}>★ Favorites</button>
     </div>
     <p class="empty">Recently read or played</p>
@@ -103,7 +138,8 @@
   small, .empty, .count { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
   button, input, select { font: inherit; color: var(--text-primary); border: 1px solid var(--border); background: var(--bg-primary); border-radius: 6px; padding: 7px 10px; }
   button { cursor: pointer; } button:disabled { opacity: .5; } button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .filter { display: flex; gap: 10px; align-items: center; font-size: 12px; margin: 18px 0; } input { min-width: 0; }
+  .filter { display: flex; flex: 1 1 360px; min-width: 0; gap: 10px; align-items: center; font-size: 12px; margin: 18px 0; } input { min-width: 0; }
+  .filter input { flex: 1; width: 100%; min-height: 40px; font-size: 15px; }
   .filters, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   .link-form { display: flex; flex-direction: column; gap: 12px; margin: 20px 0; }
   .link-form label { display: flex; flex-direction: column; gap: 5px; }
@@ -113,5 +149,5 @@
   .kind { font-size: 9px; letter-spacing: .1em; color: var(--accent); }
   .book-title, .text-button { padding: 0; border: 0; background: none; text-align: left; color: var(--accent); }
   .book-title { font-weight: 600; overflow-wrap: anywhere; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
-  @media (max-width: 500px) { .private-library { padding: 14px; } .count { display: none; } .filter { align-items: stretch; flex-direction: column; } li { flex-wrap: wrap; } .book-main { flex-basis: 100%; } }
+  @media (max-width: 500px) { .private-library { padding: 14px; } .count { display: none; } .filter { flex-basis: 100%; align-items: stretch; flex-direction: column; margin-bottom: 0; } li { flex-wrap: wrap; } .book-main { flex-basis: 100%; } }
 </style>

@@ -33,7 +33,9 @@ const turn = direction => {
   commandQueue = commandQueue.then(() => adapter?.turn(direction)).catch(error).finally(() => { turning = false; });
 };
 const removeInteractions = installReaderInteractions(document, {
+  scrollContainer: root,
   send, turn, canSwipe: () => !!adapter && adapter.canSwipe(),
+  canPage: () => !!adapter,
   scrolled: () => adapter?.scrolled?.() ?? false,
   scrollAtBoundary: direction => adapter?.scrollAtBoundary?.(direction) ?? false,
   atScrollBoundary: direction => adapter?.atScrollBoundary?.(direction) ?? false,
@@ -68,7 +70,11 @@ window.addEventListener("message", event => {
       else if (m.type === "turn" && ["prev", "next", "left", "right"].includes(m.direction)) await adapter.turn(m.direction);
       else if (m.type === "flow" && ["paginated", "scrolled"].includes(m.value)) await adapter.flow?.(m.value);
       else if (m.type === "bionic" && typeof m.enabled === "boolean") await adapter.bionic?.(m.enabled);
-      else if (m.type === "goto" && isBookLocation(m.location)) await adapter.goTo(m.location);
+      else if (m.type === "goto" && isBookLocation(m.location)) await adapter.goTo(m.location, m.select === true);
+      else if (m.type === "capture-bookmark" && typeof m.requestId === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(m.requestId)) {
+        if (!adapter.captureBookmark) throw new Error("Private bookmarks are unavailable for this reader.");
+        send("bookmark-captured", { requestId: m.requestId, ...adapter.captureBookmark() });
+      }
       else if (m.type === "toc" && (typeof m.target === "string" || Number.isSafeInteger(m.target)))
         await adapter.toc(m.target);
       else if (m.type === "size" && Number.isFinite(m.value) && m.value >= 75 && m.value <= 200)
@@ -259,10 +265,16 @@ async function openReflowable({ bytes, format, location }) {
     view.renderer.setAttribute("margin", `${margin}px`);
     view.renderer.setStyles(bookThemeStyles(theme));
   }
-  const goTo = async value => {
+  const goTo = async (value, select = false) => {
     if (value.kind !== "epub" || value.rendererVersion !== BOOK_RENDERER_VERSION)
       throw new Error("The saved passage uses a different reader version; it was not guessed.");
     if (!await view.goTo(value.cfi)) throw new Error("The saved passage could not be found.");
+    if (select && !fixed) {
+      const resolved = view.resolveCFI(value.cfi);
+      const content = view.renderer.getContents().find(content => content.index === resolved.index);
+      if (!content) throw new Error("The bookmarked section could not be selected.");
+      await view.renderer.scrollToAnchor(resolved.anchor(content.doc), true);
+    }
   };
   const toc = tocItems(book.toc);
   if (!toc.length) book.sections.forEach((_, index) => toc.push({ label: `Section ${index + 1}`, target: index, depth: 0 }));
@@ -288,6 +300,20 @@ async function openReflowable({ bytes, format, location }) {
     scrolled: () => view.renderer.scrolled,
     scrollAtBoundary,
     atScrollBoundary,
+    captureBookmark: () => {
+      if (!fixed) {
+        for (const { doc, index } of view.renderer.getContents()) {
+          const selection = doc.getSelection();
+          if (!selection?.rangeCount || !selection.toString().trim()) continue;
+          const range = selection.getRangeAt(0);
+          if (doc.body.contains(range.commonAncestorContainer))
+            return { location: locator(view.getCFI(index, range)), quote: Array.from(range.toString()).slice(0, 240).join("") };
+        }
+      }
+      const current = view.lastLocation;
+      if (!current?.cfi) throw new Error("Wait for a visible page before bookmarking.");
+      return { location: locator(current.cfi), quote: Array.from(current.range?.toString() ?? "").slice(0, 240).join("") };
+    },
     flow: async value => {
       if (!fixed && view.renderer.scrolled !== (value === "scrolled"))
         await reflow(() => view.renderer.setAttribute("flow", value));
@@ -532,6 +558,14 @@ async function openPDF({ bytes, location }) {
     prev: () => goTo({ kind: "pdf", page: Math.max(1, pageNumber - 1) }),
     turn: step,
     canSwipe: () => zoom <= 100,
+    scrolled: () => true,
+    atScrollBoundary: direction => direction === "next"
+      ? root.scrollHeight - root.clientHeight - root.scrollTop <= 2 : root.scrollTop <= 2,
+    scrollAtBoundary: direction => {
+      const remaining = direction === "next" ? root.scrollHeight - root.clientHeight - root.scrollTop : root.scrollTop;
+      if (remaining > 2) return false;
+      turn(direction); return true;
+    },
     theme: () => {},
     goTo, toc: page => goTo({ kind: "pdf", page }),
     size: async value => { zoom = value; await render(); },

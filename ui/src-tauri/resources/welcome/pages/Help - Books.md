@@ -68,12 +68,18 @@ Grafium's **Wide mode** (**Alt+W**) changes the available reading width; book
 columns follow that width rather than retaining a fixed desktop column limit.
 Fullscreen and window resizing also reflow the text without reopening the book.
 PDF page keys first move through an enlarged page before changing pages.
+The mouse wheel turns pages in **Pages** mode. In **Continuous scroll**, or on
+an enlarged PDF page, it scrolls the current content before crossing its boundary.
+Zoom gestures and nested scrollable content keep their own behavior.
+Reflowable **Text size** is remembered across books and restarts; PDF zoom is separate.
 PDF and fixed-layout EPUB do not offer text reflow; DjVu is not an original-reader
 format. PDF may contain selectable text, not only images; reliable conversion or
 OCR is a separate workflow, not lossless reflow of the original.
 
-The **B** button enables **Bionic reading**, emphasizing word beginnings. It shares
-the top-bar B preference for notes. This is optional presentation, not a change
+The book's **B** button or **Ctrl/Cmd+Alt+B** enables **Bionic reading**, emphasizing
+word beginnings. The shortcut also toggles the same preference for notes; there
+is no separate top-bar B button. Hover controls to see their shortcuts.
+This is optional presentation, not a change
 to book text or a guaranteed reading-speed improvement. Code, math, and artwork
 are left alone. Positions, quoted selections, and passage-note anchors remain
 compatible when changing Bionic mode, layout, text size, or window width.
@@ -82,6 +88,8 @@ Select a passage, open the right panel's **Notes** tab, and choose
 **Use selection**. Write your thoughts and **Save note**. A note can also apply
 to the whole book without a selected passage. Open a saved note's passage to
 return to its location.
+Private **Ctrl/Cmd+Alt+M** bookmarks belong to the external Library, not these
+graph-imported originals. Use **Book notes** for passages in graph books.
 
 New book notes share one adjacent JSON-LD file: `1.epub` has `1.jsonld`
 (not `1.annotations.jsonld`). Markdown note bodies, quoted text, passage

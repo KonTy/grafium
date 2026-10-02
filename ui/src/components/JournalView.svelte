@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
   import { onDestroy, setContext, tick, untrack } from "svelte";
   import KeyboardSelectionToolbar from "./KeyboardSelectionToolbar.svelte";
   import { createKeyboardBlockSelection, KEYBOARD_BLOCK_SELECTION, type SelectionDirection } from "../lib/keyboardBlockSelection.svelte";
@@ -729,7 +730,8 @@
         class="journal-nav-btn goto-date-btn"
         type="button"
         aria-label="Go to date"
-        title="Go to date (Ctrl/Cmd+G)"
+        title={shortcutTitle("Go to date", "go-journal-date")}
+        aria-keyshortcuts={shortcutAria("go-journal-date")}
         aria-haspopup="dialog"
         aria-expanded={goToDatePicker !== null}
         disabled={loading || goingToDate}
@@ -744,7 +746,8 @@
         class="journal-nav-btn"
         type="button"
         aria-label="Go to link"
-        title="Go to link (Ctrl/Cmd+L)"
+        title={shortcutTitle("Go to link", "go-link")}
+        aria-keyshortcuts={shortcutAria("go-link")}
         aria-haspopup="dialog"
         onclick={onGoToLink}
       >

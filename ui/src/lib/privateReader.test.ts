@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-import { bookmarkDate, bookmarkLabel, privateLibrary, privateLibraryError, readerNative, readerTime, refreshPrivateLibrary, savePrivateBookmark, savePrivatePosition, type ReaderBook } from "./privateReader";
+import { bookmarkDate, bookmarkLabel, bookmarkExcerpt, compactBookmarkLabel, privateLibrary, privateLibraryError, readerNative, readerTime, refreshPrivateLibrary, savePrivateBookmark, savePrivatePosition, type ReaderBook } from "./privateReader";
 import { readReaderMessage } from "./bookReaderSecurity";
 
 const book: ReaderBook = {
@@ -16,6 +16,16 @@ beforeEach(() => {
   privateLibraryError.set("");
 });
 describe("private reader persistence boundary", () => {
+  it("makes bounded Unicode labels without rewriting saved private notes", () => {
+    expect(bookmarkExcerpt("  “Слово второе”, then more words")).toBe("Слово второе");
+    expect(bookmarkExcerpt("One")).toBe("One");
+    expect(bookmarkExcerpt("!!!")).toBe("");
+    expect(Array.from(bookmarkExcerpt("é".repeat(200)))).toHaveLength(80);
+    const mark = { id: "mark", bookId: book.id, createdAt: 1, note: "  Existing\nlong private comment  ", position: { trackId: "track-2", offsetMs: 0 } };
+    expect(compactBookmarkLabel(book, mark)).toBe("Existing long private comment");
+    expect(mark.note).toBe("  Existing\nlong private comment  ");
+    expect(compactBookmarkLabel(book, { ...mark, note: " " })).toBe("Chapter 2 · 0:00");
+  });
   it("saves native app-level positions without graph identifiers", async () => {
     invoke.mockResolvedValue(undefined);
     const position = { trackId: "track-2", offsetMs: 12345 };

@@ -1607,7 +1607,7 @@
               run: (view) => applyToggleWrap(view, "*"),
             },
             {
-              key: "Mod-Alt-b",
+              key: "Mod-Alt-Shift-b",
               run: (view) => applyToggleWrap(view, "**"),
             },
             {

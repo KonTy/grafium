@@ -46,9 +46,67 @@ function stubActions() {
 afterEach(() => {
   keymap_manager.register([]);
   keymap_manager.isEditing = false;
+  vi.restoreAllMocks();
 });
 
 describe("keymap dual-mode matching", () => {
+  it.each(["Linux", "MacIntel"])("runs reader shortcuts in an editor on %s, retaining existing B/M actions", (platform) => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+    const actions = { ...stubActions(), toggleBionicReader: vi.fn(), bookmark: vi.fn() };
+    registerDefaultShortcuts(actions);
+    keymap_manager.isEditing = true;
+    const mod = { ctrlKey: platform === "Linux", metaKey: platform === "MacIntel" };
+    for (const code of ["KeyB", "KeyM"]) {
+      const event = keyEvent({ ...mod, altKey: true, key: "и", code });
+      expect(keymap_manager.handleKeydown(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(actions.toggleBionicReader).toHaveBeenCalledOnce();
+    expect(actions.bookmark).toHaveBeenCalledOnce();
+    keymap_manager.handleKeydown(keyEvent({ ...mod, key: "b", code: "KeyB" }));
+    keymap_manager.handleKeydown(keyEvent({ ...mod, shiftKey: true, key: "B", code: "KeyB" }));
+    keymap_manager.handleKeydown(keyEvent({ altKey: true, key: "b", code: "KeyB" }));
+    keymap_manager.handleKeydown(keyEvent({ altKey: true, key: "m", code: "KeyM" }));
+    expect(actions.toggleSidebar).toHaveBeenCalledOnce();
+    expect(actions.toggleRightSidebar).toHaveBeenCalledOnce();
+    expect(actions.importBooks).toHaveBeenCalledOnce();
+    expect(actions.importMedia).toHaveBeenCalledOnce();
+    expect(keymap_manager.getShortcuts().filter(({ id }) => id === "toggle-bionic" || id === "bookmark"))
+      .toMatchObject([{ navOnly: false }, { navOnly: false }]);
+  });
+
+  it("does not toggle or bookmark on repeat, composition, AltGraph, or extra modifiers", () => {
+    const actions = { ...stubActions(), toggleBionicReader: vi.fn(), bookmark: vi.fn() };
+    registerDefaultShortcuts(actions);
+    for (const code of ["KeyB", "KeyM"]) {
+      for (const extra of [{ repeat: true }, { isComposing: true }, { shiftKey: true }, { metaKey: true }]) {
+        expect(keymap_manager.handleKeydown(keyEvent({ key: "b", code, ctrlKey: true, altKey: true, ...extra }))).toBe(false);
+      }
+      const altGraph = keyEvent({ code, ctrlKey: true, altKey: true });
+      vi.spyOn(altGraph, "getModifierState").mockReturnValue(true);
+      expect(keymap_manager.handleKeydown(altGraph)).toBe(false);
+    }
+    expect(actions.toggleBionicReader).not.toHaveBeenCalled();
+    expect(actions.bookmark).not.toHaveBeenCalled();
+  });
+
+  it("runs a reader shortcut even after an unfinished navigation chord", () => {
+    const toggleBionicReader = vi.fn();
+    registerDefaultShortcuts({ ...stubActions(), toggleBionicReader });
+    keymap_manager.handleKeydown(keyEvent({ key: "g" }));
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "b", code: "KeyB", ctrlKey: true, altKey: true }))).toBe(true);
+    expect(toggleBionicReader).toHaveBeenCalledOnce();
+  });
+
+  it("only advertises contextual F1 help when a callback exists", () => {
+    const actions = stubActions();
+    registerDefaultShortcuts(actions);
+    expect(keymap_manager.handleKeydown(keyEvent({ key: "F1" }))).toBe(true);
+    expect(actions.toggleHelp).toHaveBeenCalledOnce();
+    registerDefaultShortcuts({ ...actions, toggleHelp: undefined });
+    expect(keymap_manager.getShortcuts().some(({ id }) => id === "help")).toBe(false);
+  });
+
   it("opens Library separately without intercepting text entry", () => {
     const goLibrary = vi.fn();
     registerDefaultShortcuts({ ...stubActions(), goLibrary });
@@ -147,7 +205,7 @@ describe("keymap dual-mode matching", () => {
     expect(actions.goChat).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])("toggles the right pane with Ctrl-Shift-B (editing: %s) and leaves bold to the editor", (editing) => {
+  it.each([false, true])("toggles the right pane with Ctrl-Shift-B (editing: %s) and leaves unregistered combos alone", (editing) => {
     const actions = stubActions();
     registerDefaultShortcuts(actions);
     keymap_manager.isEditing = editing;

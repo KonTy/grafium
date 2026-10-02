@@ -43,7 +43,7 @@ export function helpPageTitle(context: HelpContext): string {
 
 export function closeSettingsHelpForContextualHelp(target: EventTarget | null): void {
   if (target instanceof Element) {
-    target.closest("dialog[data-settings-help-dialog][open]")
+    target.closest("dialog[data-settings-help-dialog][open], dialog[open][data-reader-menu]")
       ?.dispatchEvent(new Event("cancel", { cancelable: true }));
   }
 }

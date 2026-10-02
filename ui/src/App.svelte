@@ -18,7 +18,8 @@
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import { readerOwnsNavigation } from "./lib/readerNavigation";
-  import { loadReaderFlowPreference } from "./lib/readerPreferences";
+  import { loadReaderFlowPreference, loadReaderTextSizePreference } from "./lib/readerPreferences";
+  import { readerShortcut } from "./lib/readerHotkeys";
   import TitleBar from "./components/TitleBar.svelte";
   import Toaster from "./components/Toaster.svelte";
   import PrivateReaderToolbar from "./components/PrivateReaderToolbar.svelte";
@@ -27,7 +28,7 @@
   import { privateLibrary, refreshPrivateLibrary, type ReaderBook, type ReaderBookmark } from "./lib/privateReader";
   import { libraryBookmarkJournalSnippet, routeLibraryLink } from "./lib/libraryLinks";
   import { studyClockItem } from "./lib/studyLibrary";
-  import { attachPrivatePlayback } from "./lib/privateReaderPlayback";
+  import { attachPrivatePlayback, privatePlayback, bookmarkPrivatePlayback } from "./lib/privateReaderPlayback";
   import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import BookImportDialog from "./components/BookImportDialog.svelte";
@@ -86,6 +87,7 @@
   let shuttingDown = $state(false);
   let privateBookId = $state<string | null>(null);
   let privateBookmarkId = $state<string | undefined>();
+  let privateLibraryRef: { focusSearch: () => boolean } | undefined = $state();
   onMount(attachPrivatePlayback);
 
   async function openPrivateBook(bookId: string, bookmarkId?: string) {
@@ -532,6 +534,31 @@
 
   function toggleBionicReader() {
     setBionicReaderEnabled(!bionicReaderMode);
+  }
+
+  async function bookmarkCurrentReading() {
+    if (!window.dispatchEvent(new CustomEvent("grafium-bookmark", { cancelable: true }))) return;
+    // A graph original has annotations, not Library bookmarks. Never bookmark
+    // unrelated background audio while the user is reading that original.
+    if (currentView === "page" && currentPage && isOriginalBookPage(currentPage)) {
+      showToast("Use the book's Notes panel to save a passage, or open a Library item to add a bookmark.", "info", {
+        label: "Open Notes", run: () => openReferencePanelTab("notes"),
+      });
+      return;
+    }
+    if ($privatePlayback.bookId && ["playing", "paused"].includes($privatePlayback.status)
+      && !(currentView === "library" && privateBookId && privateBookId !== $privatePlayback.bookId)) {
+      try {
+        await bookmarkPrivatePlayback();
+        showToast("Library bookmark saved on this device.", "success");
+      } catch (cause) {
+        showToast(`Could not save Library bookmark: ${String(cause)}`, "error");
+      }
+      return;
+    }
+    showToast("Open a book in Library or start Library playback to add a bookmark. For graph books, use the Notes panel.", "info", {
+      label: "Open Library", run: () => { void navigateToPage("__library__"); },
+    });
   }
 
   function resetSidebarWidth() {
@@ -1128,6 +1155,8 @@
   }
 
   function focusLocalSearch(): boolean {
+    if (hasKeyboardOverlay(document)) return false;
+    if (currentView === "library") return privateLibraryRef?.focusSearch() ?? false;
     const el = document.querySelector("[data-local-search]") as HTMLInputElement | null;
     if (!el || el.disabled || el.closest("[hidden]") || el.getClientRects().length === 0) return false;
     el.focus();
@@ -1251,6 +1280,9 @@
     },
     toggleTheme: () => openThemeSettings(),
     toggleSettings: () => toggleSettingsView(),
+    toggleBionicReader,
+    bookmark: () => { void bookmarkCurrentReading(); },
+    toggleHelp: () => openCurrentContextualHelp(document.activeElement),
     toggleWideMode,
     toggleZenMode: () => {
       zenMode = !zenMode;
@@ -1277,8 +1309,42 @@
     }
   }
 
+  function openCurrentContextualHelp(eventTarget: EventTarget | null) {
+    const section =
+      eventTarget instanceof Element
+        ? eventTarget.closest("[data-help-context]")?.getAttribute("data-help-context") ?? null
+        : null;
+    const context = isHelpContext(section) ? section : null;
+    const currentContext: HelpContext =
+      context ||
+      (currentView === "library" && privateBookId ? "reader" : null) ||
+      ((
+        {
+          page: currentPage && (isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)) ? "books" : "editor",
+          journal: "journal",
+          "all-pages": "search",
+          graph: "graph",
+          flashcards: "flashcards",
+          statistics: "tasks",
+          studies: "studies",
+          library: "library",
+          chat: "chat",
+          settings: "settings",
+          jobs: "general",
+        } as Record<string, HelpContext>
+      )[currentView] ?? "general");
+    closeSettingsHelpForContextualHelp(eventTarget);
+    void openContextualHelp(currentContext);
+  }
+
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    if (readerShortcut(e)) {
+      if (hasKeyboardOverlay(document)) return;
+      keymap_manager.handleKeydown(e);
+      return;
+    }
     const reader = document.querySelector(".reading-surface");
     if (reader && !hasKeyboardOverlay(document)
       && (readerOwnsNavigation(e, reader) || e.key === "F8" || e.key === "F11" || (e.key === "Escape"
@@ -1286,32 +1352,7 @@
     if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      const eventTarget = e.target;
-      const section =
-        eventTarget instanceof Element
-          ? eventTarget.closest("[data-help-context]")?.getAttribute("data-help-context") ?? null
-          : null;
-      const context = isHelpContext(section) ? section : null;
-      const currentContext: HelpContext =
-        context ||
-        (currentView === "library" && privateBookId ? "reader" : null) ||
-        ((
-          {
-            page: currentPage && (isOriginalBookPage(currentPage) || isBookAnnotationPage(currentPage)) ? "books" : "editor",
-            journal: "journal",
-            "all-pages": "search",
-            graph: "graph",
-            flashcards: "flashcards",
-            statistics: "tasks",
-            studies: "studies",
-            library: "library",
-            chat: "chat",
-            settings: "settings",
-            jobs: "general",
-          } as Record<string, HelpContext>
-        )[currentView] ?? "general");
-      closeSettingsHelpForContextualHelp(eventTarget);
-      void openContextualHelp(currentContext);
+      if (!e.repeat) openCurrentContextualHelp(e.target);
       return;
     }
 
@@ -2377,6 +2418,7 @@
     loadNarrowPaddingPreference();
     loadBionicReaderPreference();
     loadReaderFlowPreference();
+    loadReaderTextSizePreference();
   });
 </script>
 
@@ -2396,8 +2438,6 @@
       onGoToLink={openGoToLink}
       onOpenSearch={openGlobalSearch}
       onOpenSettings={() => navigateToPage("__settings__")}
-      bionicReaderMode={bionicReaderMode}
-      onToggleBionicReader={toggleBionicReader}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}
@@ -2519,7 +2559,7 @@
             onActivity={() => studyClock?.activity()} />
         {/key}
       {:else}
-        <PrivateReaderLibrary onOpen={bookId => { void openPrivateBook(bookId); }}
+        <PrivateReaderLibrary bind:this={privateLibraryRef} onOpen={bookId => { void openPrivateBook(bookId); }}
           onSettings={openPrivateLibrarySettings} onAddToStudies={book => { void addLibraryToStudies(book); }} />
       {/if}
     {:else if currentView === "studies"}

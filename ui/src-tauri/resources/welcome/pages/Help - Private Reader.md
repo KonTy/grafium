@@ -47,6 +47,19 @@ stalled storage, or operating-system suspension can exceed that target.
 Bookmarks acknowledged as saved are durable independently of the next periodic
 checkpoint.
 
+Use **Ctrl/Cmd+Alt+M** or **Bookmark** in a Library book. Selected EPUB text saves
+that exact word or passage; without a selection, the bookmark saves the visible
+page. Creating a visual bookmark does not replace the saved narration voice or
+spoken offset. Outside a visual book, the shortcut bookmarks active playback.
+Graph-imported original books use **Book notes** instead.
+
+Bookmarks are compact single-line rows. Automatic EPUB labels use one or two
+words; click a row to return and select its saved passage. Its **…** menu offers
+**Go to**, **Edit**, **Delete…**, and **Journal note…**. Editing changes the private
+label/comment, not the passage anchor. Deletion requires confirmation and does
+not delete the source book. Hover a row for the full label, position, and time.
+Journal notes require your review before entering ordinary graph storage.
+
 Android headphone play/pause controls address the native player. Android
 background playback, interruptions, and button delivery still need testing on
 your actual handset. A browser test is not proof of screen-off behavior.
@@ -82,8 +95,9 @@ Links, selected text, and pinch/vertical-scroll gestures do not toggle it.
 Use **Fullscreen** in the bar or **F11** to fill the display; **Escape** leaves
 fullscreen (or closes the bar when not fullscreen). The bar holds chapter
 navigation, text size, **Bookmark**, Library navigation, and expandable
-**Bookmarks** and **Reading options** for favorites, Studies, relinking,
-voice settings, and read-aloud. Errors remain visible rather than hiding there.
+**Bookmarks**. The **…** on the first controls row opens favorites, Studies,
+relinking, voice settings, and read-aloud without scrolling past bookmarks.
+Errors remain visible rather than hiding there. Hover controls for keyboard hints.
 
 Swipe horizontally in **Pages** mode or use the arrow icons. **Arrow Left /
 Arrow Right** follow the book's reading direction; **Page Up / Page Down** always
@@ -97,11 +111,14 @@ restarts, and reflowable EPUB text wraps to wide or narrow windows.
 Use Grafium's **Wide mode** (**Alt+W**) outside fullscreen to widen or narrow
 the reading area. Book text follows its available width rather than a fixed
 desktop column limit; resizing and fullscreen keep the same book mounted.
+The mouse wheel turns pages in **Pages** mode, or scrolls within the chapter
+before crossing to the next/previous chapter in **Continuous scroll**.
 Touch behavior depends on your WebView and device; physical phone validation
 is still needed.
 
-Use **B** for optional **Bionic reading**: word beginnings become bold without
-rewriting the book. It shares the top-bar B preference for rendered notes.
+Use **B** in the reading bar or **Ctrl/Cmd+Alt+B** for optional **Bionic reading**:
+word beginnings become bold without rewriting the book. The global shortcut also
+controls this preference for rendered notes; the top-bar B button is removed.
 Code, math, and artwork are unchanged. Bookmarks and narration passage anchors
 work with Bionic on or off. Appearance changes do not overwrite a saved voice
 or an offset within a spoken passage. Bionic is a preference, not a promised
@@ -110,6 +127,7 @@ reading-speed improvement.
 Reflowable book text follows Grafium's background, text, and link colors, including
 live theme changes. **Text size** scales the actual letters, including books with
 publisher-defined fixed font sizes, rather than merely widening line spacing.
+Your chosen text size is remembered across books and app restarts.
 Illustrations, scanned PDF pages, and fixed-layout artwork retain their original
 colors. Reading appearance never rewrites the source file.
 Fixed-layout EPUB does not offer continuous text reflow or Bionic mode.

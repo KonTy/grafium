@@ -9,6 +9,20 @@ const book: BookInfo = { id: "book", pageId: "page", title: "Book", format: "epu
   sourceSha256: "hash", readingLocation: null, indexingWarning: null };
 const locator = { kind: "epub" as const, cfi: "epubcfi(/6/2!/4/2:0)", rendererVersion: BOOK_RENDERER_VERSION };
 describe("original book boundaries", () => {
+  it("validates private bookmark captures and payload-free reader shortcuts", () => {
+    const envelope = { channel: "grafium-book", token: "secret" };
+    const read = (payload: Record<string, unknown>) => readReaderMessage(new MessageEvent("message", {
+      source: window, origin: "null", data: { ...envelope, ...payload },
+    }), window, "secret");
+    const capture = { type: "bookmark-captured", requestId: "capture-123", location: locator, quote: "Two words" };
+    expect(read(capture)).toMatchObject(capture);
+    for (const invalid of [{ requestId: "" }, { requestId: "x".repeat(81) }, { quote: "x".repeat(513) },
+      { location: { ...locator, cfi: "" } }, { token: "wrong" }]) expect(read({ ...capture, ...invalid })).toBeNull();
+    for (const type of ["bookmark", "toggle-bionic"]) {
+      expect(read({ type })).toEqual({ type });
+      expect(read({ type, command: "unexpected" })).toBeNull();
+    }
+  });
   it("only routes complete original-book metadata", () => {
     const page = { properties: { "book-id": "book", "book-format": "epub", "book-source-sha256": "hash", "book-source": "assets/book.epub" } } as unknown as Page;
     expect(isOriginalBookPage(page)).toBe(true);

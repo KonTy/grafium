@@ -3,6 +3,9 @@
 **Library** is your app-private media shelf, separate from your graph and from
 **Studies**, your learning plan. Open it from the main navigation or use `g l`
 in navigation mode. Tasks remains a separate workspace.
+Use **Ctrl/Cmd+F** to focus Library's wide search field and filter your shelf.
+The media-type filter (for example, Audio) is remembered on this device when
+you return from a book and after restarting Grafium.
 
 ## Your active pile
 
@@ -34,6 +37,11 @@ Podcast-feed subscriptions are not part of this feature.
 
 Bookmark during playback without naming it or interrupting the media. Review
 the saved position later, replay it, or add a private bookmark comment.
+In a visual EPUB, **Ctrl/Cmd+Alt+M** saves selected text or, without a selection,
+the visible page. Compact bookmark rows use a short label; click to return and
+highlight the passage. The row's **…** offers **Go to**, **Edit**, confirmed
+**Delete…**, and **Journal note…**. Outside a visual book, the shortcut bookmarks
+active playback. Reading controls show their keyboard hints on hover.
 **Write to journal** deliberately inserts a link and any selected bookmark
 comment into today's journal for further writing. That note is ordinary graph
 content and follows the graph's sharing and sync rules.
@@ -55,7 +63,10 @@ device testing; this change does not establish screen-off compatibility.
 
 ## Add to a learning plan
 
-Use **Add to Studies** and choose a topic, then confirm **Add study**. The plan
+Use **Add to Studies** and choose a topic, then confirm **Add study**. This
+action is in the visual reader's first-row **…** menu, alongside Favorite,
+Relink source, and read-aloud options. You do not need to scroll past bookmarks.
+The plan
 stores a reference to the Library item, not another copy of its media, position,
 or bookmarks. Opening that plan entry uses the same Library reader.
 Removing the study entry removes its plan/time history, not the Library item.

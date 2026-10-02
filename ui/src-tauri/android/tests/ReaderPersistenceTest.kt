@@ -170,6 +170,96 @@ class ReaderPersistenceTest {
     assertThrows(IllegalArgumentException::class.java) { library.updateBookmark("book-a", "missing", "note") }
   }
 
+  @Test fun visualRangeAndPageBookmarksPreserveNarrationAcrossRestart() {
+    val library = open()
+    val locator = JSONObject().put("kind", "epub").put("cfi", "epubcfi(/6/2!/4/2/1:0)")
+      .put("rendererVersion", "foliate-test")
+    val narration = JSONObject().put("locator", locator).put("offsetMs", 2370)
+      .put("ttsOrdinal", 4).put("voiceId", "fixture-voice").put("sourceHash", ReaderPolicy.stableId("source"))
+      .put("sourceTrackId", ReaderPolicy.stableId("source-track"))
+    library.narrationCheckpoint("book-b", narration)
+    val before = library.book("book-b").apply { remove("bookmarks") }.toString()
+    for (cfi in listOf("epubcfi(/6/4!/4/2,/1:4,/1:19)", "epubcfi(/6/6!/4/2/1:0)")) {
+      val visual = JSONObject().put("offsetMs", 0)
+        .put("locator", JSONObject(locator.toString()).put("cfi", cfi))
+      val mark = library.bookmarkVisual("book-b", visual, "Selected passage — $cfi")
+      assertEquals(0, mark.getJSONObject("position").getLong("offsetMs"))
+      assertEquals(visual.getJSONObject("locator").toString(), mark.getJSONObject("position").getJSONObject("locator").toString())
+      assertEquals("Selected passage — $cfi", mark.getString("note"))
+    }
+    val reopened = open().book("book-b")
+    val marks = reopened.getJSONArray("bookmarks")
+    assertEquals(2, marks.length())
+    assertEquals("epubcfi(/6/4!/4/2,/1:4,/1:19)",
+      marks.getJSONObject(0).getJSONObject("position").getJSONObject("locator").getString("cfi"))
+    assertEquals("Selected passage — epubcfi(/6/4!/4/2,/1:4,/1:19)", marks.getJSONObject(0).getString("note"))
+    assertEquals(before, reopened.apply { remove("bookmarks") }.toString())
+  }
+
+  @Test fun invalidVisualBookmarksDoNotMutateAnyHistory() {
+    val library = open()
+    val position = JSONObject().put("offsetMs", 0).put("locator", JSONObject().put("kind", "epub")
+      .put("cfi", "epubcfi(/6/4!/4/2,/1:4,/1:19)").put("rendererVersion", "foliate-test"))
+    val before = library.exportState()
+    assertEquals("EPUB_REQUIRED", assertThrows(IllegalArgumentException::class.java) {
+      library.bookmarkVisual("book-a", position, "Wrong book kind")
+    }.message)
+    assertEquals("BOOK_NOT_REGISTERED", assertThrows(IllegalArgumentException::class.java) {
+      library.bookmarkVisual("missing", position, "")
+    }.message)
+    for (bad in listOf(
+      JSONObject(position.toString()).put("offsetMs", -1),
+      JSONObject(position.toString()).put("offsetMs", 0.5),
+      JSONObject(position.toString()).put("offsetMs", "0"),
+      JSONObject(position.toString()).put("trackId", "chapter-1"),
+      JSONObject(position.toString()).apply { remove("locator") },
+      JSONObject(position.toString()).put("locator", "epubcfi(/6/2!/4/2)"),
+      JSONObject(position.toString()).apply { getJSONObject("locator").put("kind", "pdf") },
+      JSONObject(position.toString()).apply { getJSONObject("locator").put("cfi", "not-a-cfi") }
+    )) {
+      assertThrows(IllegalArgumentException::class.java) { library.bookmarkVisual("book-b", bad, "") }
+      assertEquals(before, library.exportState())
+    }
+    assertThrows(IllegalArgumentException::class.java) { library.bookmarkVisual("book-b", position, "x".repeat(4097)) }
+    assertEquals(before, library.exportState())
+    assertEquals(before, open().exportState())
+  }
+
+  @Test fun bookmarkDeletionIsScopedDurableAndPreservesSourceAndProgress() {
+    val library = open()
+    val first = library.bookmark("book-a", "chapter-1", 100, "Keep first")
+    val deleted = library.bookmark("book-a", "chapter-1", 200, "Delete this")
+    val last = library.bookmark("book-a", "chapter-2", 2370, "Keep last")
+    val before = library.exportState()
+    val otherBook = library.book("book-b").toString()
+    val bookWithoutMarks = library.book("book-a").apply { remove("bookmarks") }.toString()
+    for (id in listOf("", "missing")) {
+      assertEquals("BOOKMARK_NOT_FOUND", assertThrows(IllegalArgumentException::class.java) {
+        library.deleteBookmark("book-a", id)
+      }.message)
+      assertEquals("BOOK_NOT_REGISTERED", assertThrows(IllegalArgumentException::class.java) {
+        library.deleteBookmark(id, deleted.getString("id"))
+      }.message)
+    }
+    assertEquals("BOOKMARK_NOT_FOUND", assertThrows(IllegalArgumentException::class.java) {
+      library.deleteBookmark("book-b", deleted.getString("id"))
+    }.message)
+    assertEquals(before, library.exportState())
+    assertEquals(before, open().exportState())
+    library.deleteBookmark("book-a", deleted.getString("id"))
+    val reopened = open().book("book-a")
+    val marks = reopened.getJSONArray("bookmarks")
+    assertEquals(2, marks.length())
+    assertEquals(first.toString(), marks.getJSONObject(0).toString())
+    assertEquals(last.toString(), marks.getJSONObject(1).toString())
+    assertEquals(bookWithoutMarks, reopened.apply { remove("bookmarks") }.toString())
+    assertEquals(otherBook, open().book("book-b").toString())
+    assertEquals("BOOKMARK_NOT_FOUND", assertThrows(IllegalArgumentException::class.java) {
+      library.deleteBookmark("book-a", deleted.getString("id"))
+    }.message)
+    assertEquals(library.exportState(), open().exportState())
+  }
+
   @Test fun restoreMergesHistoryWithoutRestoringGrantsOrOverwritingNewProgress() {
     val library = open()
     val id = ReaderPolicy.stableId("restored-book")

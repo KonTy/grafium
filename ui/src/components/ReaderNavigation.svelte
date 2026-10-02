@@ -2,6 +2,8 @@
   import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
   import { readerFlow, setReaderFlow } from "../lib/readerPreferences";
   import type { ReaderTurn } from "../lib/readerNavigation";
+  import { formatBinding } from "../lib/shortcuts";
+  import { BIONIC_SHORTCUT } from "../lib/readerHotkeys";
 
   let { ready, reflowable, direction = "ltr", onNavigate }: {
     ready: boolean; reflowable: boolean; direction?: "ltr" | "rtl";
@@ -32,7 +34,7 @@
     <option value="paginated">Pages</option>
     <option value="scrolled">Continuous scroll</option>
   </select>
-  <button class="page-turn" aria-label="Bionic reading" title="Bionic reading: emphasize word beginnings"
+  <button class="page-turn" aria-label="Bionic reading" title={`Bionic reading (${formatBinding(BIONIC_SHORTCUT)})`}
     aria-pressed={$bionicReaderEnabled} disabled={!ready} onclick={() => setBionicReaderEnabled(!$bionicReaderEnabled)}>
     <strong aria-hidden="true">B</strong>
   </button>

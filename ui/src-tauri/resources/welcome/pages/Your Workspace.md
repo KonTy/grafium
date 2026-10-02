@@ -12,7 +12,11 @@ By default, narrow page layout leaves 15% padding on each side; you can adjust t
 
 Bullet threading draws one connected path through the nested branch you are editing, without unrelated guide fragments. Parent headings stay compact and aligned with headings that have no children. Use it with [[Writing/Outline]] to see how a branch holds together.
 
-The top-bar **B** button toggles **Bionic Speedreader**: bold word beginnings in rendered notes, without rewriting the Markdown. It leaves code, math, and icons alone. Try it as a reading preference, not a promise that you must read faster.
+**Ctrl/Cmd+Alt+B** toggles **Bionic Speedreader**: bold word beginnings in rendered notes and reflowable books, without rewriting their source. The book controls also offer **B**; the top bar no longer needs a separate button. It leaves code, math, and icons alone. Try it as a reading preference, not a promise that you must read faster. Hover controls to see available keyboard shortcuts.
+
+To format a selected word as bold Markdown in the block editor, use
+**Ctrl/Cmd+Alt+Shift+B**. The extra Shift distinguishes source formatting from
+the global Bionic presentation shortcut.
 
 For a little visual shorthand, try the emoji and symbolic icon picker in [[Writing/Formatting]]: `/emoji`, `/icon`, or `/em` followed by a search word.
 

@@ -497,7 +497,7 @@ for (const unifiedPage of [false, true]) cases.push([
     assert.equal(await page.evaluate(() => window.__shortcutEditor.state.doc.toString()), original);
   },
 ]);
-cases.push(["Ctrl-Alt-B formats bold in the block editor instead of toggling the right pane", {}, async (page) => {
+cases.push(["Ctrl-Alt-Shift-B formats bold without conflicting with global Bionic reading", {}, async (page) => {
   await page.keyboard.press("Control+Shift+b");
   await page.locator(".reference-panel").waitFor({ state: "detached" });
   await focus(page, "b0");
@@ -507,7 +507,7 @@ cases.push(["Ctrl-Alt-B formats bold in the block editor instead of toggling the
     const anchor = view.state.doc.toString().indexOf("synthetic note");
     view.dispatch({ selection: { anchor, head: anchor + "synthetic note".length } });
   });
-  await page.keyboard.press("Control+Alt+b");
+  await page.keyboard.press("Control+Alt+Shift+b");
   assert.equal(await editorText(page), original.replace("synthetic note", "**synthetic note**"));
   assert.equal(await page.locator(".reference-panel").count(), 0);
   await page.keyboard.press("Control+z");

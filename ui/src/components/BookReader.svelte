@@ -13,8 +13,8 @@
   import type { StudyProgress } from "../lib/studies";
   import ReadingSurface from "./ReadingSurface.svelte";
   import ReaderNavigation from "./ReaderNavigation.svelte";
-  import { readerFlow } from "../lib/readerPreferences";
-  import { bionicReaderEnabled } from "../lib/bionicReader";
+  import { readerFlow, readerTextSize, READER_TEXT_SIZES, setReaderTextSize } from "../lib/readerPreferences";
+  import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
   import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
 
   let { page, graphPath, onStudyProgress }: {
@@ -132,6 +132,10 @@
         void surface?.toggleFullscreen();
       } else if (message.type === "exit-fullscreen") {
         void surface?.dismiss();
+      } else if (message.type === "toggle-bionic") {
+        setBionicReaderEnabled(!get(bionicReaderEnabled));
+      } else if (message.type === "bookmark") {
+        showToast("Use Book notes for this imported book. Private bookmarks are available in Library.", "error");
       } else if (message.type === "ready" && !invalidated) {
         clearTimeout(openTimer); loading = false; ready = true;
         sendCommand("theme", { theme: readReaderTheme() });
@@ -207,6 +211,10 @@
   });
 
   $effect(() => {
+    const textSize = $readerTextSize;
+    if (ready && annotations && !pdfPages) untrack(() => sendCommand("size", { value: textSize }));
+  });
+  $effect(() => {
     const flow = $readerFlow, enabled = $bionicReaderEnabled;
     if (ready) untrack(() => {
       sendCommand("flow", { value: flow });
@@ -263,20 +271,22 @@
           }} /> / {pdfPages}</label>
       {/if}
       <label>{pdfPages ? "Zoom" : "Text size"}
-        <select aria-label={pdfPages ? "PDF zoom" : "Book text size"} bind:value={size} disabled={!ready || (!pdfPages && !annotations)}
-          onchange={event => sendCommand("size", { value: Number(event.currentTarget.value) })}>
-          {#each [75, 90, 100, 115, 130, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}
+        <select aria-label={pdfPages ? "PDF zoom" : "Book text size"} value={pdfPages ? size : $readerTextSize}
+          title={pdfPages ? "PDF zoom" : "Book text size (remembered across books and restarts)"} disabled={!ready || (!pdfPages && !annotations)}
+          onchange={event => {
+            const value = Number(event.currentTarget.value);
+            if (pdfPages) { size = value; sendCommand("size", { value }); }
+            else setReaderTextSize(value);
+          }}>
+          {#each READER_TEXT_SIZES as value}<option {value}>{value}%</option>{/each}
         </select>
       </label>
       <button type="button" disabled={!book} onclick={openNotes}>{selection ? "Note selection" : "Book notes"}</button>
     {#if label}<p class="position" aria-live="polite">{label}</p>{/if}
     {/snippet}
-    {#snippet actions()}
-    {#if notice && !invalidated}<p class="notice">{notice}</p>{/if}
-    {#if book?.indexingWarning}<p class="notice">Text indexing: {book.indexingWarning}</p>{/if}
-    {/snippet}
     {#snippet children()}
-    {#if invalidated && notice}<p class="notice">{notice}</p>{/if}
+    {#if notice}<p class="notice">{notice}</p>{/if}
+    {#if book?.indexingWarning}<p class="notice">Text indexing: {book.indexingWarning}</p>{/if}
     {#if monitorError}<p class="notice" role="status">{monitorError}</p>{/if}
     {#if positionError}<div role="alert">{positionError} <button onclick={() => { void saveNow(); }}>Retry position save</button></div>{/if}
     {#if error}<div role="alert">{error} <button onclick={() => retry++}>Reload book</button></div>{/if}

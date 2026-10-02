@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { formatBinding, formatBindingList, groupShortcutRows } from "./shortcuts";
-import type { Shortcut } from "./keymap";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { bindingTitle, bindingAria, formatBinding, formatBindingList, groupShortcutRows, shortcutTitle, shortcutAria } from "./shortcuts";
+import { keymap_manager, type Shortcut } from "./keymap";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  keymap_manager.register([]);
+});
 
 describe("formatBinding", () => {
   it("renders modifier combos in Ctrl-Shift-J form", () => {
@@ -16,6 +21,32 @@ describe("formatBinding", () => {
 
   it("leaves vim chords unchanged", () => {
     expect(formatBinding("g j")).toBe("g j");
+  });
+
+  it("distinguishes the macOS platform modifier from an explicit Control key", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    expect(formatBinding("mod+alt+b")).toBe("Cmd-Alt-B");
+    expect(formatBinding("ctrl+k")).toBe("Ctrl-K");
+    expect(formatBinding("meta+k")).toBe("Cmd-K");
+    expect(bindingAria("mod+alt+m")).toBe("Meta+Alt+m");
+    expect(bindingTitle("Zoom in", "mod+=")).toBe("Zoom in (Cmd-=)");
+  });
+});
+
+describe("registered shortcut hints", () => {
+  it("shows real aliases, leaving unbound actions and ARIA chord sequences alone", () => {
+    keymap_manager.register([
+      { id: "journal", binding: "g j", action: () => {} },
+      { id: "journal", binding: "mod+shift+j", action: () => {} },
+      { id: "journal", binding: "mod+shift+j", action: () => {} },
+      { id: "library", binding: "g l", action: () => {} },
+    ]);
+    expect(shortcutTitle("Journal", "journal")).toBe("Journal (g j | Ctrl-Shift-J)");
+    expect(shortcutAria("journal")).toBe("Control+Shift+j");
+    expect(shortcutTitle("Library", "library")).toBe("Library (g l)");
+    expect(shortcutAria("library")).toBeUndefined();
+    expect(shortcutTitle("Delete", "delete")).toBe("Delete");
+    expect(shortcutAria("delete")).toBeUndefined();
   });
 });
 

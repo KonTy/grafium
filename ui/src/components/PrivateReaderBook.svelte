@@ -1,12 +1,15 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import PrivateBookReader from "./PrivateBookReader.svelte";
   import LibraryMedia from "./LibraryMedia.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
+  import ReaderMenu from "./ReaderMenu.svelte";
   import { showToast } from "../lib/toast.svelte";
   import { requestLibraryMedia } from "../lib/library";
-  import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
+  import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, bookmarkExcerpt, compactBookmarkLabel, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
+  import { formatBinding } from "../lib/shortcuts";
+  import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
   import { playPrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   import { startPrivateReadAloud } from "../lib/privateReaderVoice";
@@ -23,6 +26,10 @@
   let message = $state("");
   let editing = $state("");
   let note = $state("");
+  let deleting = $state("");
+  let visualReader = $state<PrivateBookReader>();
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
   const android = isAndroidReader();
   let relinking = $state(false);
   let replacementBookId = $state("");
@@ -35,6 +42,16 @@
   const reading = $derived(book?.kind === "epub" && book.available && !missingInitialBookmark);
   let reportedPlayback = "";
   let reportedProgress = "";
+  $effect(() => {
+    if (!book?.available) return;
+    const receive = (event: Event) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      if (!busy) void run(bookmark, "Bookmark saved on this device.");
+    };
+    window.addEventListener("grafium-bookmark", receive);
+    return () => window.removeEventListener("grafium-bookmark", receive);
+  });
   $effect(() => {
     const id = initialBookmarkId;
     const current = book;
@@ -70,7 +87,7 @@
   async function run(action: () => Promise<unknown>, success = "") {
     busy = true; error = ""; message = "";
     try { await action(); if (success && reading) showToast(success); else message = success; }
-    catch (cause) { error = String(cause); }
+    catch (cause) { error = String(cause); if (disposed) showToast(error, "error"); }
     finally { busy = false; }
   }
   async function relink(directory?: boolean) {
@@ -95,12 +112,16 @@
   }
   async function jump(bookmark: ReaderBookmark) {
     if (!book) return;
-    if (bookmark.position.locator) privateBookJump.set({ bookId, locator: bookmark.position.locator });
+    if (bookmark.position.locator) privateBookJump.set({ bookId, locator: bookmark.position.locator, select: true });
     else if (book.kind === "video" || book.kind === "youtube" || (book.sourceUrl && android)) requestLibraryMedia(bookId, bookmark.position);
     else await playPrivateAudio(book, bookmark.position);
   }
   async function bookmark() {
-    if ($privatePlayback.bookId === bookId && $privatePlayback.status !== "stopped") await bookmarkPrivatePlayback();
+    if (book?.kind === "epub") {
+      if (!reading || !visualReader) throw new Error("Open an available EPUB before bookmarking.");
+      const captured = await visualReader.captureBookmark();
+      await savePrivateBookmark(bookId, { offsetMs: 0, locator: captured.location }, bookmarkExcerpt(captured.quote));
+    } else if ($privatePlayback.bookId === bookId && $privatePlayback.status !== "stopped") await bookmarkPrivatePlayback();
     else {
       const current = privateVisualPositions.get(bookId) ?? book?.position;
       if (!current) throw new Error("Open a passage or chapter before bookmarking.");
@@ -114,7 +135,7 @@
       <div class="actions">
         <button disabled={busy} aria-pressed={book.favorite ?? false} onclick={() => run(() => setPrivateFavorite(bookId, !book!.favorite))}>{book.favorite ? "★ Favorite" : "☆ Favorite"}</button>
         {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
-        {#if !reading}<button disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
+        {#if !reading}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
         {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
         <SettingsHelp title="Private reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
       </div>
@@ -134,15 +155,52 @@
     <section class="bookmarks" aria-label="Private bookmarks">
       {#if !book.bookmarks.length}<p class="hint">No bookmarks yet.</p>{/if}
       <ul>{#each book.bookmarks as mark (mark.id)}
-        <li><div class="bookmark-heading"><button disabled={busy || !book.available} onclick={() => run(() => jump(mark))}>{bookmarkLabel(book, mark.position)}</button><time datetime={bookmarkDate(mark.createdAt)}>{bookmarkDate(mark.createdAt) ? new Date(mark.createdAt).toLocaleString() : "Unknown date"}</time></div>
+        <li>
+          <div class="bookmark-row">
+            <button class="bookmark-jump" disabled={busy || !book.available}
+              title={`${compactBookmarkLabel(book, mark)}\n${bookmarkLabel(book, mark.position)}\n${bookmarkDate(mark.createdAt) ? new Date(mark.createdAt).toLocaleString() : "Unknown date"}`}
+              aria-label={`Go to bookmark: ${compactBookmarkLabel(book, mark)}`} onclick={() => run(() => jump(mark))}>
+              <span>{compactBookmarkLabel(book, mark)}</span>
+            </button>
+            <ReaderMenu label={`Actions for bookmark: ${compactBookmarkLabel(book, mark)}`} heading="Bookmark actions">
+              {#snippet children(close)}
+                <button disabled={busy || !book.available} onclick={() => { close(); void run(() => jump(mark)); }}>Go to</button>
+                <button disabled={busy} onclick={async () => {
+                  close(); deleting = ""; editing = mark.id; note = mark.note;
+                  await tick(); document.getElementById(`bookmark-note-${mark.id}`)?.focus();
+                }}>Edit</button>
+                <button disabled={busy} onclick={async () => {
+                  close(); editing = ""; deleting = mark.id;
+                  await tick(); document.getElementById(`bookmark-cancel-${mark.id}`)?.focus();
+                }}>Delete…</button>
+                {#if onJournalNote}<button onclick={() => { close(); onJournalNote?.(book!, mark); }}>Journal note…</button>{/if}
+              {/snippet}
+            </ReaderMenu>
+          </div>
           {#if editing === mark.id}
             <form onsubmit={event => { event.preventDefault(); void run(async () => {
               await readerNative("update_bookmark", { bookId, bookmarkId: mark.id, note }); await refreshPrivateLibrary(); editing = "";
-            }, "Private note saved."); }}><label>Private bookmark note<textarea bind:value={note} maxlength="4096" rows="3"></textarea></label><div class="actions"><button disabled={busy}>Save private note</button><button type="button" onclick={() => editing = ""}>Cancel</button></div></form>
-          {:else}
-            {#if mark.note}<p class="note">{mark.note}</p>{/if}
-            <button class="text-button" onclick={() => { editing = mark.id; note = mark.note; }}>{mark.note ? "Edit private note" : "Add private note"}</button>
-            {#if onJournalNote}<button class="text-button journal" onclick={() => onJournalNote?.(book!, mark)}>Journal note…</button>{/if}
+            }, "Private bookmark saved."); }}>
+              <label>Bookmark label / private note<textarea id={`bookmark-note-${mark.id}`} bind:value={note} maxlength="4096" rows="3"
+                onkeydown={event => {
+                  if (!busy && !event.repeat && !event.isComposing && !event.altKey
+                    && (event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                    event.preventDefault(); event.currentTarget.form?.requestSubmit();
+                  }
+                }}></textarea></label>
+              <div class="actions"><button title="Save (Ctrl/Cmd+Enter)" disabled={busy}>Save</button><button type="button" onclick={() => editing = ""}>Cancel</button></div>
+            </form>
+          {:else if deleting === mark.id}
+            <div class="delete-bookmark" role="group" aria-label="Confirm bookmark deletion">
+              <p>Delete “{compactBookmarkLabel(book, mark)}”? Only this bookmark and its private note will be removed. The book and reading position stay unchanged.</p>
+              <div class="actions">
+                <button id={`bookmark-cancel-${mark.id}`} disabled={busy} onclick={() => deleting = ""}>Cancel</button>
+                <button disabled={busy} onclick={() => run(async () => {
+                  await readerNative("delete_bookmark", { bookId, bookmarkId: mark.id });
+                  await refreshPrivateLibrary(); deleting = "";
+                }, "Bookmark deleted.")}>Delete bookmark</button>
+              </div>
+            </div>
           {/if}
         </li>
       {/each}</ul>
@@ -204,7 +262,7 @@
         {/each}
       </ol></details>{/if}
     {:else if book.kind === "epub" && book.available}
-      <PrivateBookReader {bookId} {onActivity} {onProgress} {onBack}
+      <PrivateBookReader bind:this={visualReader} {bookId} {onActivity} {onProgress} {onBack}
         onBookmark={() => { if (!busy) void run(bookmark, "Bookmark saved on this device."); }}
         actions={bookActions} bookmarks={privateBookmarks} status={readingStatus} />
     {:else if book.available}
@@ -217,16 +275,21 @@
 <style>
   .private-detail { max-width: 1100px; margin: auto; padding: 24px clamp(16px, 4vw, 48px); color: var(--text-primary); }
   .private-detail.reading { display: flex; flex-direction: column; max-width: none; height: 100%; min-height: 0; padding: 0; margin: 0; }
-  header, .actions, .bookmark-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; margin-top: 20px; }
+  header, .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; margin-top: 20px; }
   h1 { margin: 5px 0; font-size: 27px; overflow-wrap: anywhere; } h2 { font-size: 18px; } h2 span { color: var(--text-muted); font-weight: 400; }
-  .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .1em; } .hint, small, time { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .1em; } .hint, small { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
   button, textarea { font: inherit; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
   button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; } button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .primary { color: var(--accent); } .chapters, .bookmarks { margin-top: 24px; } summary { cursor: pointer; font-weight: 600; }
+  .primary { color: var(--accent); } .chapters { margin-top: 24px; } .bookmarks { margin-top: 8px; } summary { cursor: pointer; font-weight: 600; }
   ol, ul { list-style: none; padding: 0; } li { border-bottom: 1px solid var(--border); padding: 12px 0; } ol li { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; }
   .chapter { border: 0; padding: 2px 0; text-align: left; background: none; } ol small { grid-column: 1; overflow-wrap: anywhere; } .order { display: flex; gap: 5px; grid-column: 2; grid-row: 1 / 3; }
-  .bookmark-heading { justify-content: space-between; } .note { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .text-button { border: 0; padding: 5px 0; color: var(--accent); background: none; } label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; } textarea { resize: vertical; }
-  .journal { margin-left: 16px; }
+  .bookmarks li { padding: 2px 0; }
+  .bookmark-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .bookmark-jump { display: block; flex: 1; min-width: 0; border: 0; padding: 6px 4px; text-align: left; background: none; }
+  .bookmark-jump span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bookmark-jump:hover { background: var(--bg-hover); }
+  label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; } textarea { resize: vertical; }
+  .delete-bookmark { padding: 8px; background: var(--bg-secondary); font-size: 13px; }
+  @media (pointer: coarse) { .bookmark-jump { min-height: 44px; } }
   .unavailable { padding: 12px; border: 1px solid var(--border); border-radius: 8px; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
 </style>

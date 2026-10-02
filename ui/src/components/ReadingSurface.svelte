@@ -4,6 +4,9 @@
   import { hasKeyboardOverlay } from "../lib/mainPaneScroll";
   import { showToast } from "../lib/toast.svelte";
   import { readerNavigationKey, readerOwnsNavigation, type ReaderTurn } from "../lib/readerNavigation";
+  import ReaderMenu from "./ReaderMenu.svelte";
+  import { formatBinding } from "../lib/shortcuts";
+  import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
 
   let { children, navigation, actions, bookmarks, onBack, onBookmark, onNavigate }: {
     children: Snippet; navigation: Snippet; actions?: Snippet; bookmarks?: Snippet;
@@ -27,6 +30,7 @@
       else handle?.focus({ preventScroll: true });
     });
   }
+  export function bookmark() { onBookmark?.(); }
   export async function exitFullscreen() {
     if (!session || busy) return;
     busy = true;
@@ -105,14 +109,18 @@
   <div id={`${id}-controls`} class="reading-controls" hidden={!controlsOpen}>
     <nav aria-label="Reading controls">
       {@render navigation()}
-      {#if onBookmark}<button onclick={onBookmark}>Bookmark</button>{/if}
-      <button disabled={busy} aria-pressed={expanded} aria-keyshortcuts="F11" onclick={() => { void toggleFullscreen(); }}>
+      {#if onBookmark}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} onclick={onBookmark}>Bookmark</button>{/if}
+      <button title="Fullscreen (F11; Escape to leave)" disabled={busy} aria-pressed={expanded} aria-keyshortcuts="F11" onclick={() => { void toggleFullscreen(); }}>
         {expanded ? "Exit fullscreen" : "Fullscreen"}
       </button>
       {#if onBack}<button onclick={async () => { await exitFullscreen(); if (!session) onBack?.(); }}>Library</button>{/if}
+      {#if actions}
+        <ReaderMenu label="More reading actions" heading="Reading actions" closeOnAction>
+          {#snippet children()}{@render actions()}{/snippet}
+        </ReaderMenu>
+      {/if}
     </nav>
     {#if bookmarks}<details><summary>Bookmarks</summary>{@render bookmarks()}</details>{/if}
-    {#if actions}<details><summary>Reading options</summary>{@render actions()}</details>{/if}
   </div>
   {#if error}<div class="fullscreen-error" role="alert">{error}</div>{/if}
 </section>
@@ -126,7 +134,7 @@
   .controls-handle:hover, .controls-handle:focus-visible, .controls-handle[aria-expanded="true"] { opacity: 1; }
   .reading-controls { position: absolute; z-index: 1; inset: auto 0 0; max-height: min(75%, 600px); overflow-y: auto; padding: 12px max(62px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: var(--bg-secondary); border-top: 1px solid var(--border); box-shadow: 0 -4px 18px #0003; }
   .reading-controls[hidden] { display: none; }
-  nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  nav { position: sticky; top: -12px; z-index: 3; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; background: var(--bg-secondary); }
   button { font: inherit; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; min-height: 40px; cursor: pointer; }
   button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button:disabled { opacity: .5; cursor: default; }

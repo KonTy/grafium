@@ -103,7 +103,7 @@ internal class PrivateReaderBridge(
         }
         "library", "rescan", "remove", "reorder", "position", "relink", "volumeSettings", "readEpub",
         "set_favorite", "record_activity", "add_link", "external_position", "external_bookmark",
-        "voiceStatus", "selectVoice", "downloadVoice", "narrationPrepare", "updateBookmark", "restore",
+        "voiceStatus", "selectVoice", "downloadVoice", "narrationPrepare", "updateBookmark", "deleteBookmark", "bookmarkVisual", "restore",
         "narrationBegin", "narrationAppend", "narrationCommit", "narrationCancel", "narrationAbort" -> {
           if (command in setOf("remove", "relink", "reorder") &&
             PrivateReaderService.instance?.activeBookId() == args.optString("bookId"))
@@ -129,6 +129,8 @@ internal class PrivateReaderBridge(
               "relink" -> { library.relink(args.getString("bookId"), args.getString("replacementBookId")); library.library() }
               "volumeSettings" -> library.setVolume(args)
               "updateBookmark" -> library.updateBookmark(args.getString("bookId"), args.getString("bookmarkId"), args.getString("note"))
+              "deleteBookmark" -> library.deleteBookmark(args.optString("bookId"), args.optString("bookmarkId"))
+              "bookmarkVisual" -> library.bookmarkVisual(args.getString("bookId"), args.getJSONObject("position"), args.optString("note"))
               "restore" -> library.restore(args.getString("data"))
               "voiceStatus" -> ReaderSpeechEngine(activity).status()
               "selectVoice" -> ReaderSpeechEngine(activity).select(args.getString("voiceId"), args.getString("language"))

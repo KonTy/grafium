@@ -2,14 +2,14 @@
   import { untrack, type Snippet } from "svelte";
   import ReadingSurface from "./ReadingSurface.svelte";
   import ReaderNavigation from "./ReaderNavigation.svelte";
-  import { readerFlow } from "../lib/readerPreferences";
-  import { bionicReaderEnabled } from "../lib/bionicReader";
+  import { readerFlow, readerTextSize, READER_TEXT_SIZES, setReaderTextSize } from "../lib/readerPreferences";
+  import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
   import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
   import { get } from "svelte/store";
   import { BOOK_FRAME_SANDBOX, readReaderMessage, readerFrameURL, type BookTocItem } from "../lib/bookReaderSecurity";
   import { privateBookJump, privateLibrary, privateVisualPositions, readerNative, privateLibraryError, refreshPrivateLibrary, privateBookLanguages, privateVoiceLanguageSuggestion } from "../lib/privateReader";
   import type { BookLocation } from "../lib/bookLocations";
-  import type { ReaderTextSegment, ReaderMessage } from "../lib/bookReaderSecurity";
+  import type { ReaderTextSegment, ReaderMessage, ReaderBookmarkCapture } from "../lib/bookReaderSecurity";
   import { registerPrivateSegments } from "../lib/privateReaderSegments";
   import { privatePlayback } from "../lib/privateReaderPlayback";
   import { sha256 } from "@noble/hashes/sha256";
@@ -28,10 +28,11 @@
   let label = $state("");
   let fraction = $state<number | undefined>();
   let toc = $state<BookTocItem[]>([]);
-  let size = $state(100);
   let retry = $state(0);
   let send: (type: string, data?: Record<string, unknown>) => void = () => {};
   let bootstrap = () => {};
+  let capture: () => Promise<ReaderBookmarkCapture> = async () => { throw new Error("Wait for the book to open before bookmarking."); };
+  export function captureBookmark() { return capture(); }
 
   $effect(() => {
     const id = bookId;
@@ -50,6 +51,7 @@
     let openTimer: ReturnType<typeof setTimeout> | undefined;
     let writing = Promise.resolve();
     const requests = new Map<string, { resolve: (message: Extract<ReaderMessage, { type: "read-aloud-segments" }>) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    const bookmarkRequests = new Map<string, { resolve: (capture: ReaderBookmarkCapture) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     ready = false; url = ""; error = ""; label = ""; fraction = undefined; toc = [];
     function flush() {
       clearTimeout(timer);
@@ -74,6 +76,22 @@
       if (["prev", "next", "turn", "toc", "goto"].includes(type)) navigationPending = true;
       else if (["size", "flow", "bionic", "theme"].includes(type)) navigationPending = false;
       if (!disposed) frame?.contentWindow?.postMessage({ channel: "grafium-book", token, type, ...data }, "*");
+    };
+    capture = () => {
+      if (disposed || !ready || !sourceAvailable) return Promise.reject(new Error("Open an available book before bookmarking."));
+      const requestId = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          bookmarkRequests.delete(requestId);
+          reject(new Error("The reader did not confirm the bookmark location. Nothing was saved."));
+        }, 10000);
+        bookmarkRequests.set(requestId, { resolve, reject, timer });
+        send("capture-bookmark", { requestId });
+      });
+    };
+    const rejectBookmarks = (cause: Error) => {
+      for (const request of bookmarkRequests.values()) { clearTimeout(request.timer); request.reject(cause); }
+      bookmarkRequests.clear();
     };
     const unregisterSegments = registerPrivateSegments(id, async () => {
       if (!ready) throw new Error("Wait for the isolated EPUB reader to finish loading.");
@@ -110,6 +128,14 @@
     const receive = (event: MessageEvent) => {
       const message = readReaderMessage(event, frame?.contentWindow ?? null, token);
       if (!message || disposed) return;
+      if (message.type === "bookmark-captured") {
+        const request = bookmarkRequests.get(message.requestId);
+        if (!request) return;
+        clearTimeout(request.timer); bookmarkRequests.delete(message.requestId);
+        if (!sourceAvailable || message.location.kind !== "epub") request.reject(new Error("The bookmark source is unavailable or invalid."));
+        else request.resolve({ location: message.location, quote: message.quote });
+        return;
+      }
       if (message.type === "read-aloud-segments") {
         const request = requests.get(message.requestId);
         if (request) { clearTimeout(request.timer); requests.delete(message.requestId); request.resolve(message); }
@@ -133,12 +159,15 @@
         clearTimeout(openTimer); error = message.message;
         for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error(message.message)); }
         requests.clear();
+        rejectBookmarks(new Error(message.message));
       }
       else if (message.type === "help") void surface?.exitFullscreen().then(() =>
         frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true })));
       else if (message.type === "toggle-controls") surface?.toggleControls();
       else if (message.type === "toggle-fullscreen") void surface?.toggleFullscreen();
       else if (message.type === "exit-fullscreen") void surface?.dismiss();
+      else if (message.type === "bookmark") surface?.bookmark();
+      else if (message.type === "toggle-bionic") setBionicReaderEnabled(!get(bionicReaderEnabled));
       else if (message.type === "selection" && sourceAvailable) onActivity?.();
       else if (message.type === "navigation") navigationPending = true;
       else if (message.type === "location" && message.location.kind === "epub") {
@@ -197,11 +226,16 @@
       unregisterSegments();
       for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error("Private reader closed during narration preparation.")); }
       requests.clear();
+      rejectBookmarks(new Error("The reader closed before its bookmark was captured."));
       privateVisualPositions.delete(id);
       window.removeEventListener("message", receive); window.removeEventListener("pagehide", flush);
       window.removeEventListener("focus", checkSource);
       stopTheme();
     };
+  });
+  $effect(() => {
+    const size = $readerTextSize;
+    if (ready && reflowable) untrack(() => send("size", { value: size }));
   });
   $effect(() => {
     const flow = $readerFlow, enabled = $bionicReaderEnabled;
@@ -213,7 +247,7 @@
   $effect(() => {
     const jump = $privateBookJump;
     if (ready && jump?.bookId === bookId) {
-      send("goto", { location: jump.locator });
+      send("goto", { location: jump.locator, select: jump.select === true });
       privateBookJump.set(null);
     }
   });
@@ -229,7 +263,7 @@
       if (item) send("toc", { target: item.target });
       event.currentTarget.value = "";
     }}><option disabled value="">Contents…</option>{#each toc as item, index}<option value={index}>{"—".repeat(item.depth)} {item.label}</option>{/each}</select>
-    <label>Text size<select aria-label="Book text size" bind:value={size} disabled={!ready || !reflowable} onchange={event => { onActivity?.(); send("size", { value: Number(event.currentTarget.value) }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
+    <label>Text size<select aria-label="Book text size" title="Book text size (remembered across books and restarts)" value={$readerTextSize} disabled={!ready || !reflowable} onchange={event => { onActivity?.(); setReaderTextSize(Number(event.currentTarget.value)); }}>{#each READER_TEXT_SIZES as value}<option {value}>{value}%</option>{/each}</select></label>
     <small>{label}</small>
   {/snippet}
   {#snippet children()}
