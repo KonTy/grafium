@@ -143,6 +143,18 @@ async function main() {
     };
     await open("epub", epub());
     const initialChapter = page.frames().find(f => f.url() === "about:srcdoc");
+    for (const flow of ["paginated", "scrolled", "paginated"]) {
+      await page.evaluate(value => send("flow", { value }), flow);
+      await page.waitForTimeout(150);
+      const wideWidth = await initialChapter.locator("#passage").evaluate(el => el.getBoundingClientRect().width);
+      assert(wideWidth > 950 * .8, `${flow} prose must use the available wide reader, not a fixed 720px column: ${wideWidth}`);
+      await page.evaluate(() => { document.querySelector("iframe").style.width = "500px"; });
+      await initialChapter.waitForFunction(() => document.querySelector("#passage").getBoundingClientRect().width < 500);
+      const narrowWidth = await initialChapter.locator("#passage").evaluate(el => el.getBoundingClientRect().width);
+      assert(narrowWidth > 500 * .8, `${flow} prose should reflow to the narrower reader: ${narrowWidth}`);
+      await page.evaluate(() => { document.querySelector("iframe").style.width = "950px"; });
+      await initialChapter.waitForFunction(() => document.querySelector("#passage").getBoundingClientRect().width > 950 * .8);
+    }
     assert.equal(await initialChapter.locator("body").evaluate(el => getComputedStyle(el).backgroundColor), "rgb(0, 0, 0)");
     assert.equal(await initialChapter.locator("#passage").evaluate(el => getComputedStyle(el).color), "rgb(0, 255, 65)");
     assert.equal(await initialChapter.locator("#local-link").evaluate(el => getComputedStyle(el).color), "rgb(128, 255, 255)");
@@ -457,6 +469,20 @@ async function main() {
         "Untrusted synthetic keyboard events cannot request fullscreen");
       await touchChapter.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "F8", bubbles: true })));
       assert.equal(await controls(), count, "Untrusted synthetic shortcuts cannot toggle controls");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate(() => { document.querySelector("iframe").style.cssText = "width:350px;height:740px"; });
+      await page.waitForTimeout(200);
+      before = await cfi();
+      await swipe([[290, 410], [240, 410], [180, 410], [90, 410]]);
+      await page.waitForFunction(value => messages.findLast(m => m.type === "location").location.cfi !== value, before);
+      await page.evaluate(() => send("flow", { value: "scrolled" }));
+      const phoneRuntime = page.frames().find(f => f.url().startsWith("data:text/html"));
+      await phoneRuntime.waitForFunction(() => document.querySelector("foliate-view").renderer.scrolled);
+      await page.waitForTimeout(150);
+      const phoneStart = await phoneRuntime.evaluate(() => document.querySelector("foliate-view").renderer.start);
+      await swipe([[175, 600], [175, 530], [175, 430], [175, 280]]);
+      await phoneRuntime.waitForFunction(start => document.querySelector("foliate-view").renderer.start > start, phoneStart);
+      await page.setViewportSize({ width: 1000, height: 850 });
       await cdp.detach();
       console.log("Reader interactions: trusted touch paging, selection/vertical/pinch guards, surface taps, link exclusion, F8/fullscreen keys passed.");
     }

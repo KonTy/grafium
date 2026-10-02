@@ -94,6 +94,9 @@ Choose **Continuous scroll** to read vertically, continuing into adjacent
 chapters at their boundaries. Page keys move an overlapping screenful of text
 instead of skipping the rest of a long chapter. Layout is remembered across
 restarts, and reflowable EPUB text wraps to wide or narrow windows.
+Use Grafium's **Wide mode** (**Alt+W**) outside fullscreen to widen or narrow
+the reading area. Book text follows its available width rather than a fixed
+desktop column limit; resizing and fullscreen keep the same book mounted.
 Touch behavior depends on your WebView and device; physical phone validation
 is still needed.
 

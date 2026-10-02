@@ -64,6 +64,9 @@ in the reading bar. Scroll mode moves through chapters automatically at their
 boundaries; its page keys advance an overlapping screenful rather than skipping
 a chapter when the lettering is large. The layout preference survives restart.
 Text wraps to the available width, including narrow phone-sized windows.
+Grafium's **Wide mode** (**Alt+W**) changes the available reading width; book
+columns follow that width rather than retaining a fixed desktop column limit.
+Fullscreen and window resizing also reflow the text without reopening the book.
 PDF page keys first move through an enlarged page before changing pages.
 PDF and fixed-layout EPUB do not offer text reflow; DjVu is not an original-reader
 format. PDF may contain selectable text, not only images; reliable conversion or

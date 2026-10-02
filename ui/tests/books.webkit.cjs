@@ -69,7 +69,7 @@ const { epub, mobi, pdf } = require("./books.ui.cjs");
           const selection = messages.find(message => message.type === 'selection');
           frame.style.width = '320px';
           send('size', {value:200}); send('bionic', {enabled:true}); send('flow', {value:'scrolled'});
-          const checkAppearance = (enabled, scrolled) => new Promise((resolve, reject) => {
+          const checkAppearance = (enabled, scrolled, minWidth = 0, maxWidth = 320) => new Promise((resolve, reject) => {
             let attempts = 0;
             const timer = setInterval(() => {
               frame.contentWindow.postMessage({type:'native-fixture-probe', cfi:selection.location.cfi}, '*');
@@ -78,15 +78,19 @@ const { epub, mobi, pdf } = require("./books.ui.cjs");
                 clearInterval(timer);
                 reject(new Error(fixture.format + ': native appearance/CFI failed: ' + JSON.stringify({probe, failure})));
               } else if (probe?.bold === enabled && probe?.scrolled === scrolled
-                && probe.quote === selection.quote && probe.width <= 320 && probe.fontSize >= 24) {
+                && probe.quote === selection.quote && probe.width > minWidth && probe.width <= maxWidth && probe.fontSize >= 24) {
                 clearInterval(timer); resolve();
               }
             }, 100);
           });
           await checkAppearance(true, true);
+          frame.style.width = '1100px';
+          await checkAppearance(true, true, 880, 1100);
           send('bionic', {enabled:false}); send('flow', {value:'paginated'});
+          await checkAppearance(false, false, 880, 1100);
+          frame.style.width = '320px';
           await checkAppearance(false, false);
-          completed.push({format:fixture.format + '-reflow', narrow:true, bionic:true, canonicalQuote:true, layouts:2});
+          completed.push({format:fixture.format + '-reflow', narrow:true, wide:true, bionic:true, canonicalQuote:true, layouts:2});
         }
         if (fixture.format === 'epub') {
           const narration = [];

@@ -156,6 +156,17 @@ async function openReflowable({ bytes, format, location }) {
   let bionic = false;
   const margin = 24;
   const interactions = new Map();
+  const fitInlineSize = () => {
+    if (fixed) return;
+    const doc = view.renderer?.getContents()[0]?.doc;
+    if (!doc) return;
+    const vertical = /^(vertical|sideways)/.test(doc.defaultView.getComputedStyle(doc.body).writingMode);
+    const available = vertical ? root.clientHeight : root.clientWidth;
+    if (available <= 0) return;
+    const value = `${available}px`;
+    if (view.renderer.getAttribute("max-inline-size") !== value)
+      view.renderer.setAttribute("max-inline-size", value);
+  };
   const styleBook = () => {
     if (fixed) return;
     for (const { doc } of view.renderer.getContents()) applyBookTheme(doc, theme, fontSize);
@@ -227,6 +238,7 @@ async function openReflowable({ bytes, format, location }) {
     if (fixed) return;
     applyBookTheme(doc, theme, fontSize);
     setBookBionic(doc, bionic);
+    fitInlineSize();
     let timer;
     doc.addEventListener("selectionchange", () => {
       clearTimeout(timer);
@@ -265,6 +277,9 @@ async function openReflowable({ bytes, format, location }) {
     await view.init({ showTextStart: true });
     if (location) error(new Error("Saved position belongs to a different reader version. Opened at the beginning."));
   }
+  const resize = new ResizeObserver(fitInlineSize);
+  if (!fixed) resize.observe(root);
+  fitInlineSize();
   return {
     next: () => step("next"), prev: () => step("prev"), goTo,
     turn: direction => step(direction === "left" ? (book.dir === "rtl" ? "next" : "prev")
@@ -335,6 +350,7 @@ async function openReflowable({ bytes, format, location }) {
       await paint();
     },
     destroy: () => {
+      resize.disconnect();
       for (const cleanup of interactions.values()) cleanup();
       interactions.clear();
       view.close(); book.destroy?.(); void zip?.close();

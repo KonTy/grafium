@@ -32,6 +32,7 @@ describe("contextual help", () => {
       expect(page).toContain("Swipe");
       expect(page).toContain("Page Up / Page Down");
       expect(page).toContain("Continuous scroll");
+      expect(page).toContain("Alt+W");
       expect(page).toContain("Bionic");
     }
     expect(readerHelp).toContain("actual letters");

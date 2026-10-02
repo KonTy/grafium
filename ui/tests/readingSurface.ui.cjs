@@ -61,6 +61,19 @@ function syntheticBook() {
     await reader.getByRole("button", { name: "Show reading controls" }).click();
     assert.equal(await controls.isVisible(), true);
     assert.deepEqual(await frame.boundingBox(), before, "Showing controls must not repaginate the book");
+    if (!await page.locator(".app-shell").evaluate(el => el.classList.contains("wide-mode"))) {
+      await page.keyboard.press("Alt+w");
+      await page.waitForFunction(() => document.querySelector(".app-shell.wide-mode"));
+    }
+    const wideFrame = await frame.boundingBox();
+    await chapter.waitForFunction(width => document.querySelector("#p0").getBoundingClientRect().width > width * .75, wideFrame.width);
+    const wideText = await chapter.locator("#p0").evaluate(el => el.getBoundingClientRect().width);
+    await page.keyboard.press("Alt+w");
+    await page.waitForFunction(() => !document.querySelector(".app-shell.wide-mode"));
+    await chapter.waitForFunction(width => document.querySelector("#p0").getBoundingClientRect().width < width * .9, wideText);
+    await page.keyboard.press("Alt+w");
+    await page.waitForFunction(() => document.querySelector(".app-shell.wide-mode"));
+    await chapter.waitForFunction(width => document.querySelector("#p0").getBoundingClientRect().width > width * .95, wideText);
     const small = await chapter.locator("#p0 span").evaluate(element => parseFloat(getComputedStyle(element).fontSize));
     await controls.locator("label select").selectOption("200");
     await page.waitForTimeout(150);
