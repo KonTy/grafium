@@ -1266,6 +1266,7 @@
     helpVisible = true;
     helpLoading = true;
     try {
+      if (document.fullscreenElement) await document.exitFullscreen();
       helpContent = await loadHelpPage(context);
     } catch (error) {
       helpContent = `# Help unavailable\n\nCould not load the bundled help page.\n\n\`${errorText(error)}\``;
@@ -1276,6 +1277,10 @@
 
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
+    const reader = document.querySelector(".reading-surface");
+    if (reader && !hasKeyboardOverlay(document)
+      && (e.key === "F8" || e.key === "F11" || (e.key === "Escape"
+        && (reader.classList.contains("expanded") || reader.querySelector('[aria-expanded="true"]'))))) return;
     if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();

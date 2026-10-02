@@ -24,6 +24,16 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("documents the quiet reader's controls, fullscreen, theme and real text sizing", () => {
+    for (const page of [readerHelp, booksHelp]) {
+      expect(page).toContain("F8");
+      expect(page).toContain("F11");
+      expect(page).toContain("Escape");
+      expect(page).toContain("Swipe");
+    }
+    expect(readerHelp).toContain("actual letters");
+    expect(readerHelp).toMatch(/original\s+colors/);
+  });
   it("routes Library independently and explains reference-only study plans", async () => {
     expect(helpPageTitle("library")).toBe("Help - Library");
     expect(isHelpContext("library")).toBe(true);

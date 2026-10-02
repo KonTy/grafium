@@ -275,6 +275,10 @@ impl ReaderStore {
             .flat_map(|book| book.files.iter().cloned())
             .collect();
         let mut document = self.document.clone();
+        // Concurrent verification scans may refresh availability while reading
+        // checkpoints are saved. Only changed registrations invalidate a scan;
+        // an explicit library selection still invalidates older work.
+        let mut registrations_changed = select_library;
         if select_library {
             document.library = Some(root.clone());
         }
@@ -309,6 +313,7 @@ impl ReaderStore {
                         existing.book.tracks.push(track(&file));
                     }
                     existing.files.push(file);
+                    registrations_changed = true;
                 }
                 if !existing.manual_order {
                     existing
@@ -352,6 +357,7 @@ impl ReaderStore {
                     manual_order: false,
                     authorized: true,
                 });
+                registrations_changed = true;
             }
         }
         for stored in &mut document.books {
@@ -376,7 +382,9 @@ impl ReaderStore {
             stored.book.error = (!stored.book.available).then(|| "Source missing, inaccessible, or replaced. History is retained; relink explicitly.".into());
         }
         self.commit(document)?;
-        self.generation = self.generation.wrapping_add(1);
+        if registrations_changed {
+            self.generation = self.generation.wrapping_add(1);
+        }
         self.error = None;
         Ok(self.snapshot())
     }

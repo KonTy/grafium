@@ -1,5 +1,6 @@
 import DOMPurify from "dompurify";
 import { isBookLocation, type BookLocation } from "./bookLocations";
+import { DEFAULT_READER_THEME, isReaderTheme, type ReaderTheme } from "./bookReaderTheme";
 
 // No remote, graph, file, IPC, plugin, or app-origin URLs are permitted inside a book.
 export const BOOK_CONTENT_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline' blob:; img-src blob: data:; font-src blob: data:; media-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
@@ -57,6 +58,9 @@ export type ReaderMessage =
   | { type: "read-aloud-segments"; requestId: string; section: number; sectionCount: number; nextOffset: number | null; segments: ReaderTextSegment[] }
   | { type: "help" }
   | { type: "navigation" }
+  | { type: "toggle-controls" }
+  | { type: "exit-fullscreen" }
+  | { type: "toggle-fullscreen" }
   | { type: "open-notes" };
 
 /** An opaque frame has origin "null"; source identity plus a per-mount secret is mandatory. */
@@ -90,13 +94,17 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
     case "selection": return isBookLocation(m.location) && typeof m.quote === "string"
       && m.quote.trim().length > 0 && m.quote.length <= 200000 ? m : null;
     case "clear-selection": case "open-notes": case "help": case "navigation": return m;
+    case "toggle-controls": case "exit-fullscreen": case "toggle-fullscreen":
+      return Object.keys(m).every(key => ["channel", "token", "type"].includes(key)) ? { type: m.type } : null;
     case "error": return typeof m.message === "string" && m.message.length < 20000 ? m : null;
     default: return null;
   }
 }
 
-export function readerFrameURL(token: string): string {
+export function readerFrameURL(token: string, theme: ReaderTheme = DEFAULT_READER_THEME): string {
   if (!/^[a-zA-Z0-9-]+$/.test(token)) throw new Error("Invalid reader bridge token");
+  if (!isReaderTheme(theme)) throw new Error("Invalid reader theme");
+  const palette = Object.fromEntries(Object.keys(DEFAULT_READER_THEME).map(key => [key, theme[key as keyof ReaderTheme]]));
   const csp = `default-src 'none'; script-src 'nonce-${token}' 'wasm-unsafe-eval'; worker-src data:; connect-src blob:; frame-src 'self' blob: about:; style-src 'unsafe-inline' blob:; img-src blob: data:; font-src blob: data:; base-uri 'none'; form-action 'none'; object-src 'none'`;
   // A data document has a unique opaque origin even with allow-same-origin. srcdoc would
   // inherit the privileged app origin; never substitute it here. Nested book srcdoc frames
@@ -104,6 +112,6 @@ export function readerFrameURL(token: string): string {
   // Only a tiny trusted bootstrap belongs in the URL (Chromium rejects huge data URLs).
   // The parent transfers the offline bundle once; neither book frames nor remote senders
   // can supply executable code because source, channel, and mount token must all match.
-  const bootstrap = `const token=${JSON.stringify(token)};function boot(e){const m=e.data;if(e.source!==parent||!m||m.channel!=="grafium-book"||m.token!==token||m.type!=="bootstrap"||typeof m.runtime!=="string")return;removeEventListener("message",boot);globalThis.GRAFIUM_BOOK_TOKEN=token;const script=document.createElement("script");script.nonce=token;script.textContent=m.runtime;document.body.append(script)}addEventListener("message",boot);`;
-  return "data:text/html;charset=utf-8," + encodeURIComponent(`<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body,#reader{margin:0;width:100%;height:100%;overflow:hidden}body{background:#fff;color:#161616}foliate-view{display:block;width:100%;height:100%}</style></head><body><div id="reader"></div><script nonce="${token}">${bootstrap}</script></body></html>`);
+  const bootstrap = `const token=${JSON.stringify(token)};function boot(e){const m=e.data;if(e.source!==parent||!m||m.channel!=="grafium-book"||m.token!==token||m.type!=="bootstrap"||typeof m.runtime!=="string")return;removeEventListener("message",boot);globalThis.GRAFIUM_BOOK_TOKEN=token;globalThis.GRAFIUM_BOOK_THEME=${JSON.stringify(palette)};const script=document.createElement("script");script.nonce=token;script.textContent=m.runtime;document.body.append(script)}addEventListener("message",boot);`;
+  return "data:text/html;charset=utf-8," + encodeURIComponent(`<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body,#reader{margin:0;width:100%;height:100%;overflow:hidden}body{background:${theme.background};color:${theme.text}}foliate-view{display:block;width:100%;height:100%}</style></head><body><div id="reader"></div><script nonce="${token}">${bootstrap}</script></body></html>`);
 }

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { untrack, type Snippet } from "svelte";
+  import ReadingSurface from "./ReadingSurface.svelte";
+  import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
   import { get } from "svelte/store";
   import { BOOK_FRAME_SANDBOX, readReaderMessage, readerFrameURL, type BookTocItem } from "../lib/bookReaderSecurity";
   import { privateBookJump, privateLibrary, privateVisualPositions, readerNative, privateLibraryError, refreshPrivateLibrary, privateBookLanguages, privateVoiceLanguageSuggestion } from "../lib/privateReader";
@@ -8,7 +11,11 @@
   import { privatePlayback } from "../lib/privateReaderPlayback";
   import { sha256 } from "@noble/hashes/sha256";
   import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
-  let { bookId, onActivity, onProgress }: { bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void } = $props();
+  let { bookId, onActivity, onProgress, actions, bookmarks, status, onBack, onBookmark }: {
+    bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void;
+    actions?: Snippet; bookmarks?: Snippet; status?: Snippet; onBack?: () => void; onBookmark?: () => void;
+  } = $props();
+  let surface = $state<ReadingSurface>();
   let frame = $state<HTMLIFrameElement>();
   let url = $state("");
   let ready = $state(false);
@@ -104,6 +111,7 @@
       }
       if (message.type === "ready") {
         clearTimeout(openTimer); ready = true; toc = message.toc;
+        send("theme", { theme: readReaderTheme() });
         if (message.language) {
           privateBookLanguages.update(languages => ({ ...languages, [id]: message.language! }));
           privateVoiceLanguageSuggestion.set({ bookId: id, title: book?.title ?? "Private EPUB", language: message.language });
@@ -120,7 +128,11 @@
         for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error(message.message)); }
         requests.clear();
       }
-      else if (message.type === "help") frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+      else if (message.type === "help") void surface?.exitFullscreen().then(() =>
+        frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true })));
+      else if (message.type === "toggle-controls") surface?.toggleControls();
+      else if (message.type === "toggle-fullscreen") void surface?.toggleFullscreen();
+      else if (message.type === "exit-fullscreen") void surface?.dismiss();
       else if (message.type === "selection" && sourceAvailable) onActivity?.();
       else if (message.type === "navigation") navigationPending = true;
       else if (message.type === "location" && message.location.kind === "epub") {
@@ -147,6 +159,7 @@
       }
     };
     window.addEventListener("message", receive);
+    const stopTheme = untrack(() => observeReaderTheme(theme => send("theme", { theme })));
     window.addEventListener("pagehide", flush);
     const checkSource = () => {
       void refreshPrivateLibrary(true).then(() => {
@@ -169,7 +182,7 @@
         const digest = crypto.subtle ? await crypto.subtle.digest("SHA-256", data) : sha256(new Uint8Array(data));
         sourceHash = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
         if (disposed) return;
-        bytes = data; url = readerFrameURL(token);
+        bytes = data; url = readerFrameURL(token, readReaderTheme());
         openTimer = setTimeout(() => { if (!disposed) error = "The isolated reader did not initialize. Reload to retry."; }, 45000);
       } catch (cause) { if (!disposed) error = String(cause); }
     })();
@@ -181,6 +194,7 @@
       privateVisualPositions.delete(id);
       window.removeEventListener("message", receive); window.removeEventListener("pagehide", flush);
       window.removeEventListener("focus", checkSource);
+      stopTheme();
     };
   });
   $effect(() => {
@@ -193,7 +207,8 @@
 </script>
 
 <section class="private-book" data-help-context="reader" aria-label="Private EPUB reader">
-  <div class="controls">
+  <ReadingSurface bind:this={surface} {actions} {bookmarks} {onBack} {onBookmark}>
+  {#snippet navigation()}
     <button disabled={!ready} onclick={() => send("prev")}>Previous</button>
     <button disabled={!ready} onclick={() => send("next")}>Next</button>
     <select disabled={!ready} aria-label="Private book contents" value="" onchange={event => {
@@ -201,20 +216,23 @@
       if (item) send("toc", { target: item.target });
       event.currentTarget.value = "";
     }}><option disabled value="">Contents…</option>{#each toc as item, index}<option value={index}>{"—".repeat(item.depth)} {item.label}</option>{/each}</select>
-    <label>Text size<select bind:value={size} disabled={!ready} onchange={() => { onActivity?.(); send("size", { value: size }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
+    <label>Text size<select bind:value={size} disabled={!ready} onchange={event => { onActivity?.(); send("size", { value: Number(event.currentTarget.value) }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
     <small>{label}</small>
-  </div>
+  {/snippet}
+  {#snippet children()}
+  {@render status?.()}
   {#if error}<p role="alert">{error} <button onclick={() => retry++}>Reload book</button></p>{/if}
   {#if !ready && !error}<p role="status">Opening isolated offline EPUB…</p>{/if}
   {#if url}<iframe bind:this={frame} src={url} sandbox={BOOK_FRAME_SANDBOX} title="Private EPUB content" onload={() => bootstrap()}></iframe>{/if}
+  {/snippet}
+  </ReadingSurface>
 </section>
 
 <style>
-  .private-book { display: flex; flex-direction: column; min-height: 65vh; }
-  .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+  .private-book { display: flex; flex-direction: column; min-height: 0; height: 100%; flex: 1; }
   button, select { font: inherit; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 7px; max-width: 220px; }
   button { cursor: pointer; } button:disabled { opacity: .5; } label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  iframe { border: 1px solid var(--border); border-radius: 8px; width: 100%; flex: 1; min-height: 60vh; background: #fff; }
+  iframe { border: 0; width: 100%; flex: 1; min-height: 0; background: var(--bg-primary); }
   small { color: var(--text-muted); } [role="alert"] { color: var(--danger, #c44); overflow-wrap: anywhere; }
 </style>

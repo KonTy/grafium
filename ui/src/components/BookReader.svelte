@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { get } from "svelte/store";
   import { listen } from "@tauri-apps/api/event";
   import type { Page } from "../lib/api";
@@ -10,11 +11,14 @@
   import { BOOK_FRAME_SANDBOX, readerFrameURL, readReaderMessage, type BookTocItem } from "../lib/bookReaderSecurity";
   import { showToast } from "../lib/toast.svelte";
   import type { StudyProgress } from "../lib/studies";
+  import ReadingSurface from "./ReadingSurface.svelte";
+  import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
 
   let { page, graphPath, onStudyProgress }: {
     page: Page; graphPath: string; onStudyProgress?: (progress: StudyProgress) => void;
   } = $props();
   let frame = $state<HTMLIFrameElement>();
+  let surface = $state<ReadingSurface>();
   let url = $state("");
   let book = $state.raw<BookInfo | null>(null);
   let loading = $state(true);
@@ -37,7 +41,8 @@
   let verifySource: () => Promise<boolean> = async () => false;
   const selection = $derived(book ? selectionForBook($bookSelection, graphPath, book) : null);
 
-  function openNotes() {
+  async function openNotes() {
+    await surface?.exitFullscreen();
     if (book) window.dispatchEvent(new CustomEvent("book-open-notes", {
       detail: { graphPath, bookId: book.id, pageId: book.pageId },
     }));
@@ -116,9 +121,16 @@
       const message = readReaderMessage(event, frame?.contentWindow ?? null, token);
       if (!message || disposed || !activeBook) return;
       if (message.type === "help") {
-        frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true }));
+        void surface?.exitFullscreen().then(() => frame?.dispatchEvent(new KeyboardEvent("keydown", { key: "F1", bubbles: true, cancelable: true })));
+      } else if (message.type === "toggle-controls") {
+        surface?.toggleControls();
+      } else if (message.type === "toggle-fullscreen") {
+        void surface?.toggleFullscreen();
+      } else if (message.type === "exit-fullscreen") {
+        void surface?.dismiss();
       } else if (message.type === "ready" && !invalidated) {
         clearTimeout(openTimer); loading = false; ready = true;
+        sendCommand("theme", { theme: readReaderTheme() });
         toc = message.toc; notice = message.notice; annotations = message.annotations; pdfPages = message.pages ?? 0;
       } else if (message.type === "error") {
         clearTimeout(openTimer); loading = false; error = message.message;
@@ -138,6 +150,7 @@
       } else if (message.type === "open-notes") openNotes();
     };
     window.addEventListener("message", receive);
+    const stopTheme = untrack(() => observeReaderTheme(theme => sendCommand("theme", { theme })));
     window.addEventListener("pagehide", flush);
     window.addEventListener("focus", revalidate);
     document.addEventListener("visibilitychange", revalidate);
@@ -167,7 +180,7 @@
         runtime = await response.text();
         if (disposed) return;
         if (!(data instanceof ArrayBuffer)) throw new Error("The backend did not return binary book bytes.");
-        bytes = data; url = readerFrameURL(token);
+        bytes = data; url = readerFrameURL(token, readReaderTheme());
         openTimer = setTimeout(() => {
           if (!disposed) { loading = false; error = "The isolated reader did not initialize. This WebView may not support the required offline frame/worker APIs."; }
         }, 45000);
@@ -182,6 +195,7 @@
       window.removeEventListener("focus", revalidate);
       document.removeEventListener("visibilitychange", revalidate);
       unlisten?.();
+      stopTheme();
       const selected = get(bookSelection);
       if (selected?.graphPath === graph && selected.pageId === pageId) bookSelection.set(null);
     };
@@ -216,9 +230,8 @@
 </script>
 
 <section class="book-reader" aria-label="Original book reader" data-help-context="books" data-book-page-id={page.id}>
-  <header>
-    <h1>{book?.title || page.title}</h1>
-    <div class="reader-toolbar">
+  <ReadingSurface bind:this={surface}>
+    {#snippet navigation()}
       <button type="button" disabled={!ready} onclick={() => sendCommand("prev")}>Previous</button>
       <button type="button" disabled={!ready} onclick={() => sendCommand("next")}>Next</button>
       {#if toc.length}
@@ -240,38 +253,40 @@
       {/if}
       <label>{pdfPages ? "Zoom" : "Text size"}
         <select aria-label={pdfPages ? "PDF zoom" : "Book text size"} bind:value={size} disabled={!ready || (!pdfPages && !annotations)}
-          onchange={() => sendCommand("size", { value: Number(size) })}>
+          onchange={event => sendCommand("size", { value: Number(event.currentTarget.value) })}>
           {#each [75, 90, 100, 115, 130, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}
         </select>
       </label>
       <button type="button" disabled={!book} onclick={openNotes}>{selection ? "Note selection" : "Book notes"}</button>
-    </div>
     {#if label}<p class="position" aria-live="polite">{label}</p>{/if}
-    {#if notice}<p class="notice">{notice}</p>{/if}
-    {#if monitorError}<p class="notice" role="status">{monitorError}</p>{/if}
+    {/snippet}
+    {#snippet actions()}
+    {#if notice && !invalidated}<p class="notice">{notice}</p>{/if}
     {#if book?.indexingWarning}<p class="notice">Text indexing: {book.indexingWarning}</p>{/if}
+    {/snippet}
+    {#snippet children()}
+    {#if invalidated && notice}<p class="notice">{notice}</p>{/if}
+    {#if monitorError}<p class="notice" role="status">{monitorError}</p>{/if}
     {#if positionError}<div role="alert">{positionError} <button onclick={() => { void saveNow(); }}>Retry position save</button></div>{/if}
     {#if error}<div role="alert">{error} <button onclick={() => retry++}>Reload book</button></div>{/if}
-  </header>
   {#if loading}<p role="status" class="loading">Opening local original book…</p>{/if}
   {#if url}
     <iframe bind:this={frame} src={url} sandbox={BOOK_FRAME_SANDBOX} title="Isolated original book"
       referrerpolicy="no-referrer" onload={() => openFrame()}></iframe>
   {/if}
+    {/snippet}
+  </ReadingSurface>
 </section>
 
 <style>
   .book-reader { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; height:100%; color:var(--text-primary); background:var(--bg-primary); }
-  header { padding:12px 18px 8px; flex-shrink:0; border-bottom:1px solid var(--border); }
-  h1 { font-size:19px; margin:0 0 10px; }
-  .reader-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
   label { display:flex; align-items:center; gap:5px; font-size:12px; }
   button,select,input { font:inherit; font-size:12px; color:var(--text-primary); background:var(--bg-tertiary); border:1px solid var(--border); border-radius:5px; padding:6px 8px; min-height:32px; }
   select { max-width:260px; }
   input { width:64px; }
   button { cursor:pointer; } button:disabled { opacity:.5; cursor:default; }
   button:focus-visible,select:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  iframe { flex:1; min-height:280px; width:100%; border:0; background:white; }
+  iframe { flex:1; min-height:0; width:100%; border:0; background:var(--bg-primary); }
   .notice,.position { color:var(--text-secondary); font-size:12px; margin:6px 0 0; }
   [role="alert"] { font-size:12px; padding:6px 0; color:var(--danger,var(--text-primary)); }
   .loading { padding:10px 18px; }

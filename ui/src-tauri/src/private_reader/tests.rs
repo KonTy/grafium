@@ -647,6 +647,93 @@ fn checkpoints_saved_during_scan_survive_and_old_library_scan_is_rejected() {
     assert!(store.finish_scan(Ok(stale)).is_err());
 }
 
+#[test]
+fn overlapping_epub_verification_scans_preserve_concurrent_reader_metadata() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let book = store.snapshot().books.remove(0);
+    let generation = store.generation();
+    let first = store.prepare_scan().unwrap().run().unwrap();
+    let second = store.prepare_scan().unwrap().run().unwrap();
+    let saved: ReaderPosition = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/private-reader-position.json"
+    ))
+    .unwrap();
+    let progress = ReaderProgress {
+        position: 0.4,
+        total: 1.0,
+        anchor: saved.locator.as_ref().unwrap().cfi.clone(),
+        label: "Reading".into(),
+    };
+    store.save_position(&book.id, saved.clone()).unwrap();
+    store
+        .record_activity(&book.id, Some(progress.clone()))
+        .unwrap();
+    store.finish_scan(Ok(first)).unwrap();
+    store.set_favorite(&book.id, true).unwrap();
+    let bookmark = store
+        .add_bookmark(&book.id, saved.clone(), "Keep".into())
+        .unwrap();
+    let used = store.snapshot().books[0].last_used_at;
+    let snapshot = store.finish_scan(Ok(second)).unwrap();
+    assert!(snapshot.error.is_none());
+    assert!(snapshot.books[0].available);
+    assert_eq!(store.generation(), generation);
+    assert_eq!(store.read_epub(&book.id).unwrap(), b"PK");
+    let reopened = ReaderStore::load(f.state.clone()).unwrap();
+    let recovered = &reopened.snapshot().books[0];
+    assert_eq!(recovered.position, Some(saved));
+    assert_eq!(recovered.progress, Some(progress));
+    assert_eq!(recovered.last_used_at, used);
+    assert!(used > 0 && recovered.favorite);
+    assert_eq!(recovered.bookmarks[0].id, bookmark.id);
+}
+
+#[test]
+fn scan_that_registers_new_sources_still_invalidates_older_verification() {
+    for new_source in ["Novel/2.mp3", "new.epub"] {
+        let f = Fixture::new();
+        f.put("Novel/1.mp3", b"one");
+        let mut store = f.store();
+        let generation = store.generation();
+        let stale = store.prepare_scan().unwrap().run().unwrap();
+        f.put(new_source, b"new");
+        store.rescan().unwrap();
+        assert_ne!(store.generation(), generation);
+        let before = store.export().unwrap();
+        assert!(store
+            .finish_scan(Ok(stale))
+            .unwrap_err()
+            .contains("registrations changed"));
+        assert_eq!(store.export().unwrap(), before);
+    }
+}
+
+#[test]
+fn unchanged_scan_generation_does_not_authorize_replaced_epub_or_root() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let book = store.snapshot().books.remove(0);
+    let generation = store.generation();
+    let pending = store.prepare_scan().unwrap().run().unwrap();
+    f.put("book.epub", b"replacement");
+    store.rescan().unwrap();
+    assert_eq!(store.generation(), generation);
+    store.finish_scan(Ok(pending)).unwrap();
+    assert!(store.read_epub(&book.id).is_err());
+    let pending = store.prepare_scan().unwrap().run().unwrap();
+    fs::rename(&f.root, f._directory.path().join("original")).unwrap();
+    fs::create_dir(&f.root).unwrap();
+    f.put("book.epub", b"PK");
+    assert!(store
+        .finish_scan(Ok(pending))
+        .unwrap_err()
+        .contains("registrations changed"));
+    assert!(store.read_epub(&book.id).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn fifo_replacement_is_rejected_without_waiting_for_a_writer() {

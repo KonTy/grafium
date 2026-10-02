@@ -47,7 +47,7 @@ describe("book reader host", () => {
     });
     window.addEventListener("keydown", help);
     send({ type: "help" });
-    expect(help).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(help).toHaveBeenCalledOnce());
     window.removeEventListener("keydown", help);
     send({ type: "selection", quote: "Passage", location: { kind: "epub", cfi: "epubcfi(/6/2)", rendererVersion: BOOK_RENDERER_VERSION } });
     expect(get(bookSelection)?.sourceSha256).toBe("first");
@@ -57,13 +57,13 @@ describe("book reader host", () => {
     ipc.changed?.({ payload: { graphPath: "/graph" } });
     await vi.waitFor(() => expect(document.body.textContent).not.toContain("Text is not indexed yet."));
     expect(get(bookSelection)?.sourceSha256).toBe("first");
-    expect(document.querySelector<HTMLButtonElement>(".reader-toolbar button")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Reading controls"] button')?.disabled).toBe(false);
     changed = true;
     ipc.changed?.({ payload: { graphPath: "/graph" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("Stale read-only snapshot"));
     expect(get(bookSelection)).toBeNull();
     send({ type: "selection", quote: "Stale quote", location: { kind: "epub", cfi: "epubcfi(/6/2)", rendererVersion: BOOK_RENDERER_VERSION } });
     expect(get(bookSelection)).toBeNull();
-    expect(document.querySelector<HTMLButtonElement>(".reader-toolbar button")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>('[aria-label="Reading controls"] button')?.disabled).toBe(true);
   });
 });

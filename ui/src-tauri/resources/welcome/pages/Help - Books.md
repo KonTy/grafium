@@ -1,7 +1,7 @@
 # Books: originals and editable copies
 
 For linked external EPUBs and audiobook folders without graph copies, use
-**Settings > Library location** and the private library in Studies instead.
+**Settings > Library location** and the top-level Library instead.
 That app-private reader does not index books for graph AI or sync them.
 See [[Help - Private Reader]]. The import workflow below intentionally makes
 graph copies and retains its existing graph search, annotation, and sync behavior.
@@ -45,6 +45,14 @@ page…** removes only that source's annotations after confirmation.
 Open an original from **Books** to use the reader rather than the Markdown
 editor. Use chapter navigation or page controls to move through it. The reader
 remembers your last location.
+
+The reader starts with its controls hidden. Tap the reading surface, press **F8**,
+or click the small corner button to reveal navigation, text size, and **Book notes**.
+Use **Fullscreen** or **F11** for an unobstructed page; **Escape** leaves fullscreen.
+Swipe horizontally to turn pages without opening the controls.
+Reflowable text follows Grafium's theme and scales its actual lettering when
+you change text size. Images and fixed-layout/PDF page artwork retain their
+original colors; PDFs use page zoom rather than text reflow.
 
 Select a passage, open the right panel's **Notes** tab, and choose
 **Use selection**. Write your thoughts and **Save note**. A note can also apply

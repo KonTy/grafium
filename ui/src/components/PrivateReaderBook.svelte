@@ -4,6 +4,7 @@
   import PrivateBookReader from "./PrivateBookReader.svelte";
   import LibraryMedia from "./LibraryMedia.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
+  import { showToast } from "../lib/toast.svelte";
   import { requestLibraryMedia } from "../lib/library";
   import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
   import { playPrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
@@ -31,6 +32,7 @@
   let ignoredBookmark = $state<string | null>(null);
   const missingInitialBookmark = $derived(!!initialBookmarkId && !!book
     && !book.bookmarks.some(mark => mark.id === initialBookmarkId) && ignoredBookmark !== initialBookmarkId);
+  const reading = $derived(book?.kind === "epub" && book.available && !missingInitialBookmark);
   let reportedPlayback = "";
   let reportedProgress = "";
   $effect(() => {
@@ -67,7 +69,7 @@
   });
   async function run(action: () => Promise<unknown>, success = "") {
     busy = true; error = ""; message = "";
-    try { await action(); message = success; }
+    try { await action(); if (success && reading) showToast(success); else message = success; }
     catch (cause) { error = String(cause); }
     finally { busy = false; }
   }
@@ -107,20 +109,51 @@
   }
 </script>
 
-<section class="private-detail" data-help-context="reader">
-  <button onclick={onBack}>← Library</button>
+{#snippet bookActions()}
   {#if book}
-    <header><div><p class="eyebrow">APP-PRIVATE · {book.kind.toUpperCase()}</p><h1>{book.title}</h1></div>
       <div class="actions">
         <button disabled={busy} aria-pressed={book.favorite ?? false} onclick={() => run(() => setPrivateFavorite(bookId, !book!.favorite))}>{book.favorite ? "★ Favorite" : "☆ Favorite"}</button>
         {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
-        <button disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>
+        {#if !reading}<button disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
         {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
         <SettingsHelp title="Private reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
       </div>
-    </header>
-    {#if !book.available}<p class="unavailable">Source unavailable. Progress and bookmarks have been retained. Reconnect the library or relink this book; a different chapter will never be chosen silently.</p>{/if}
-    {#if book.error}<p class="error" role="alert">{book.error}</p>{/if}
+      {#if reading}
+        <div class="actions">
+          <button disabled={busy} onclick={() => run(() => startPrivateReadAloud(bookId))}>Resume read aloud</button>
+          <button disabled={busy} onclick={() => run(() => startPrivateReadAloud(bookId, true))}>Read aloud from start</button>
+          {#if onVoiceSettings}<button onclick={onVoiceSettings}>Choose voice and language…</button>{/if}
+        </div>
+        {#if $privateBookLanguages[bookId]}<small>Book language: {$privateBookLanguages[bookId]}</small>{/if}
+      {/if}
+  {/if}
+{/snippet}
+
+{#snippet privateBookmarks()}
+  {#if book}
+    <section class="bookmarks" aria-label="Private bookmarks">
+      {#if !book.bookmarks.length}<p class="hint">No bookmarks yet.</p>{/if}
+      <ul>{#each book.bookmarks as mark (mark.id)}
+        <li><div class="bookmark-heading"><button disabled={busy || !book.available} onclick={() => run(() => jump(mark))}>{bookmarkLabel(book, mark.position)}</button><time datetime={bookmarkDate(mark.createdAt)}>{bookmarkDate(mark.createdAt) ? new Date(mark.createdAt).toLocaleString() : "Unknown date"}</time></div>
+          {#if editing === mark.id}
+            <form onsubmit={event => { event.preventDefault(); void run(async () => {
+              await readerNative("update_bookmark", { bookId, bookmarkId: mark.id, note }); await refreshPrivateLibrary(); editing = "";
+            }, "Private note saved."); }}><label>Private bookmark note<textarea bind:value={note} maxlength="4096" rows="3"></textarea></label><div class="actions"><button disabled={busy}>Save private note</button><button type="button" onclick={() => editing = ""}>Cancel</button></div></form>
+          {:else}
+            {#if mark.note}<p class="note">{mark.note}</p>{/if}
+            <button class="text-button" onclick={() => { editing = mark.id; note = mark.note; }}>{mark.note ? "Edit private note" : "Add private note"}</button>
+            {#if onJournalNote}<button class="text-button journal" onclick={() => onJournalNote?.(book!, mark)}>Journal note…</button>{/if}
+          {/if}
+        </li>
+      {/each}</ul>
+    </section>
+  {/if}
+{/snippet}
+
+{#snippet readingStatus()}
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if message}<p role="status">{message}</p>{/if}
+  {#if book}
     {#if audioRelinkChoice}
       <section class="relink" aria-label="Choose audiobook replacement type">
         <p>Choose the entire top-level audiobook folder, even if it contains only one chapter. Use a file only for an MP3 stored directly in the library root.</p>
@@ -142,8 +175,20 @@
         <div class="actions"><button disabled={busy || (android ? !replacementBookId : !replacementPath)}>Confirm relink</button><button type="button" onclick={() => relinking = false}>Cancel</button></div>
       </form>
     {/if}
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
-    {#if message}<p role="status">{message}</p>{/if}
+  {/if}
+{/snippet}
+
+<section class="private-detail" class:reading data-help-context="reader">
+  {#if !reading}<button onclick={onBack}>← Library</button>{/if}
+  {#if book}
+    {#if !reading}
+    <header><div><p class="eyebrow">APP-PRIVATE · {book.kind.toUpperCase()}</p><h1>{book.title}</h1></div>
+      {@render bookActions()}
+    </header>
+    {/if}
+    {#if !book.available}<p class="unavailable">Source unavailable. Progress and bookmarks have been retained. Reconnect the library or relink this book; a different chapter will never be chosen silently.</p>{/if}
+    {#if book.error}<p class="error" role="alert">{book.error}</p>{/if}
+    {#if !reading}{@render readingStatus()}{/if}
     {#if missingInitialBookmark}
       <p class="error" role="alert">This bookmark is no longer in the local Library. No replacement position was opened.</p>
       <button onclick={() => ignoredBookmark = initialBookmarkId ?? null}>Open current saved place</button>
@@ -159,42 +204,19 @@
         {/each}
       </ol></details>{/if}
     {:else if book.kind === "epub" && book.available}
-      {#if $privateBookLanguages[bookId]}
-        <p class="hint">Book language suggestion: <strong>{$privateBookLanguages[bookId]}</strong>.
-          {#if onVoiceSettings}<button class="text-button" onclick={onVoiceSettings}>Choose voice and language…</button>{/if}
-          Metadata never changes your voice or downloads a model automatically.</p>
-      {/if}
-      <div class="actions">
-        <button disabled={busy} onclick={() => run(() => startPrivateReadAloud(bookId))}>Resume read aloud</button>
-        <button disabled={busy} onclick={() => run(() => startPrivateReadAloud(bookId, true))}>Read aloud from start</button>
-        <span class="hint">{android ? "Your complete narration queue and progress are owned by the native offline service after preparation." : "Uses your installed offline voice. Playback continues when you leave this page."}</span>
-      </div>
-      <PrivateBookReader {bookId} {onActivity} {onProgress} />
+      <PrivateBookReader {bookId} {onActivity} {onProgress} {onBack}
+        onBookmark={() => { if (!busy) void run(bookmark, "Bookmark saved on this device."); }}
+        actions={bookActions} bookmarks={privateBookmarks} status={readingStatus} />
     {:else if book.available}
       {#key bookId}<LibraryMedia {book} {onPlayback} {onActivity} {onProgress} />{/key}
     {/if}
-    <section class="bookmarks" aria-label="Private bookmarks">
-      <h2>Private bookmarks <span>{book.bookmarks.length}</span></h2>
-      {#if !book.bookmarks.length}<p class="hint">Capture a passage or listening position here or from the global reader toolbar.</p>{/if}
-      <ul>{#each book.bookmarks as mark (mark.id)}
-        <li><div class="bookmark-heading"><button disabled={busy || !book.available} onclick={() => run(() => jump(mark))}>{bookmarkLabel(book, mark.position)}</button><time datetime={bookmarkDate(mark.createdAt)}>{bookmarkDate(mark.createdAt) ? new Date(mark.createdAt).toLocaleString() : "Unknown date"}</time></div>
-          {#if editing === mark.id}
-            <form onsubmit={event => { event.preventDefault(); void run(async () => {
-              await readerNative("update_bookmark", { bookId, bookmarkId: mark.id, note }); await refreshPrivateLibrary(); editing = "";
-            }, "Private note saved."); }}><label>Private bookmark note<textarea bind:value={note} maxlength="4096" rows="3"></textarea></label><div class="actions"><button disabled={busy}>Save private note</button><button type="button" onclick={() => editing = ""}>Cancel</button></div></form>
-          {:else}
-            {#if mark.note}<p class="note">{mark.note}</p>{/if}
-            <button class="text-button" onclick={() => { editing = mark.id; note = mark.note; }}>{mark.note ? "Edit private note" : "Add private note"}</button>
-            {#if onJournalNote}<button class="text-button journal" onclick={() => onJournalNote?.(book!, mark)}>Journal note…</button>{/if}
-          {/if}
-        </li>
-      {/each}</ul>
-    </section>
+    {#if !reading}<h2>Private bookmarks <span>{book.bookmarks.length}</span></h2>{@render privateBookmarks()}{/if}
   {:else}<p role="alert">This source is not in the local library. Return to Library and rescan.</p>{/if}
 </section>
 
 <style>
   .private-detail { max-width: 1100px; margin: auto; padding: 24px clamp(16px, 4vw, 48px); color: var(--text-primary); }
+  .private-detail.reading { display: flex; flex-direction: column; max-width: none; height: 100%; min-height: 0; padding: 0; margin: 0; }
   header, .actions, .bookmark-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; margin-top: 20px; }
   h1 { margin: 5px 0; font-size: 27px; overflow-wrap: anywhere; } h2 { font-size: 18px; } h2 span { color: var(--text-muted); font-weight: 400; }
   .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .1em; } .hint, small, time { color: var(--text-muted); font-size: 12px; line-height: 1.6; }

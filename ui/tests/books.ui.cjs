@@ -25,8 +25,8 @@ function epub(fixed = false) {
     "font.ttf": font,
     "book.opf": `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">synthetic</dc:identifier><dc:title>Offline Reader Test</dc:title><dc:language>en</dc:language>${fixed ? '<meta property="rendition:layout">pre-paginated</meta>' : ""}</metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="font" href="font.ttf" media-type="font/ttf"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>`,
     "nav.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="one.xhtml">First chapter</a></li><li><a href="two.xhtml">Second chapter</a></li></ol></nav></body></html>`,
-    "one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title><meta name="viewport" content="width=600,height=800"/><style>@import "https://blocked.invalid/style";@font-face{font-family:FixtureFont;src:url(font.ttf)}#passage{font-family:FixtureFont}body{background-image:url(https://blocked.invalid/css)}</style></head><body onload="top.pwned=true"><script>top.pwned=true;fetch('https://blocked.invalid/script')</script><h1>First chapter</h1><p id="passage">Select this original passage for a saved note.</p><img src="https://blocked.invalid/image" onerror="top.pwned=true"/><a href="javascript:top.pwned=true">Unsafe link</a>${repeated}</body></html>`,
-    "two.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title><meta name="viewport" content="width=600,height=800"/></head><body><h1>Second chapter</h1><p>Return to the first passage.</p></body></html>`,
+    "one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title><meta name="viewport" content="width=600,height=800"/><style>@import "https://blocked.invalid/style";@font-face{font-family:FixtureFont;src:url(font.ttf)}#passage{font-family:FixtureFont}body{background-image:url(https://blocked.invalid/css);background-color:white;color:black}h1{font-size:24px !important}p{font-size:10px !important;line-height:14px !important;color:black !important;background:white !important}</style></head><body onload="top.pwned=true"><script>top.pwned=true;fetch('https://blocked.invalid/script')</script><h1>First chapter</h1><p id="passage" style="font-size:10pt !important;color:black !important;background:white !important">Select this original passage for a saved note.</p><p id="nested-font" style="font-size:12px !important">Hierarchy <span style="font-size:9pt !important">nested <em style="font-size:75% !important">smaller</em></span></p><svg xmlns="http://www.w3.org/2000/svg" id="artwork" width="16" height="16" style="color:#321abc;background:white;width:1em;height:1em"><rect width="8" height="16" fill="currentColor"/></svg><img src="https://blocked.invalid/image" onerror="top.pwned=true"/><a href="javascript:top.pwned=true">Unsafe link</a><a id="local-link" href="#passage" style="color:blue !important">Local link</a>${repeated}</body></html>`,
+    "two.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title><meta name="viewport" content="width=600,height=800"/></head><body style="background:white;color:black"><h1>Second chapter</h1><p style="font-size:9pt !important">Return to the first passage.</p></body></html>`,
   }).map(([name, value]) => [name, typeof value === "string" ? strToU8(value) : value])));
 }
 function mobi() {
@@ -83,7 +83,9 @@ async function main() {
     await new Promise(resolve => server.close(resolve));
     throw error;
   }
-  const page = await browser.newPage({ viewport: { width: 1000, height: 850 } });
+  const page = await browser.newPage({ viewport: { width: 1000, height: 850 }, hasTouch: true });
+  const matrix = { background: "#000000", text: "#00ff41", link: "#80ffff",
+    selectionBackground: "#00ff41", selectionText: "#000000" };
   const requests = [];
   const browserErrors = [];
   await page.route("https://blocked.invalid/**", route => {
@@ -98,13 +100,13 @@ async function main() {
   try {
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     const open = async (format, bytes, location = null) => {
-      await page.evaluate(({ runtime, format, data, location }) => {
+      await page.evaluate(({ runtime, format, data, location, theme }) => {
         document.querySelector("iframe")?.remove();
         window.messages = [];
         const frame = document.createElement("iframe");
         frame.style.cssText = "width:950px;height:750px";
         frame.sandbox = BookSecurity.BOOK_FRAME_SANDBOX;
-        frame.src = BookSecurity.readerFrameURL("test-secret");
+        frame.src = BookSecurity.readerFrameURL("test-secret", theme);
         window.send = (type, payload = {}) => frame.contentWindow.postMessage({ channel: "grafium-book", token: "test-secret", type, ...payload }, "*");
         window.onmessage = event => {
           const m = BookSecurity.readReaderMessage(event, frame.contentWindow, "test-secret");
@@ -115,7 +117,7 @@ async function main() {
           window.send("open", { bytes: Uint8Array.from(data).buffer, format, location });
         };
         document.body.append(frame);
-      }, { runtime, format, data: [...bytes], location });
+      }, { runtime, format, data: [...bytes], location, theme: matrix });
       try {
         await page.waitForFunction(() => messages.some(m => m.type === "location") || messages.some(m => m.type === "error"), null, { timeout: 30000 });
       } catch (e) {
@@ -137,11 +139,81 @@ async function main() {
       return page.evaluate(() => messages.findLast(m => m.type === "selection"));
     };
     await open("epub", epub());
+    const initialChapter = page.frames().find(f => f.url() === "about:srcdoc");
+    assert.equal(await initialChapter.locator("body").evaluate(el => getComputedStyle(el).backgroundColor), "rgb(0, 0, 0)");
+    assert.equal(await initialChapter.locator("#passage").evaluate(el => getComputedStyle(el).color), "rgb(0, 255, 65)");
+    assert.equal(await initialChapter.locator("#local-link").evaluate(el => getComputedStyle(el).color), "rgb(128, 255, 255)");
+    const captureArtwork = async () => {
+      const bounds = await initialChapter.locator("#artwork").boundingBox();
+      // Exclude fractional bounding-box edges that sample the surrounding page.
+      return page.screenshot({ clip: { x: Math.ceil(bounds.x) + 1, y: Math.ceil(bounds.y) + 1,
+        width: Math.floor(bounds.width) - 2, height: Math.floor(bounds.height) - 2 } });
+    };
+    const artworkPixels = await captureArtwork();
+    await initialChapter.locator("#passage").evaluate(el => { window.originalPassage = el; });
+    const initialLocation = await page.evaluate(() => messages.findLast(m => m.type === "location").location);
+    await page.evaluate(theme => send("theme", { theme: { ...theme, background: "#fafafa", text: "#123456" } }), matrix);
+    await initialChapter.waitForFunction(() => getComputedStyle(document.querySelector("#passage")).color === "rgb(18, 52, 86)");
+    assert(await initialChapter.evaluate(() => originalPassage === document.querySelector("#passage")), "Live themes never reload a chapter");
+    assert.deepEqual(await captureArtwork(), artworkPixels,
+      "SVG currentColor and publisher image backgrounds retain identical pixels across themes");
+    assert.deepEqual(await page.evaluate(() => messages.findLast(m => m.type === "location").location), initialLocation);
+    await page.evaluate(theme => send("theme", { theme }), matrix);
     const selection = await selectBook();
     await page.frames().find(f => f.url() === "about:srcdoc").locator("#passage").click();
     await page.keyboard.press("F1");
     await page.waitForFunction(() => messages.some(m => m.type === "help"));
+    await page.keyboard.press("F11");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => messages.some(m => m.type === "toggle-fullscreen") && messages.some(m => m.type === "exit-fullscreen"));
+    const shortcutControls = await page.evaluate(() => messages.filter(m => m.type === "toggle-controls").length);
+    await page.keyboard.press("Shift+F8");
+    await page.keyboard.press("a");
+    assert.equal(await page.evaluate(() => messages.filter(m => m.type === "toggle-controls").length), shortcutControls,
+      "Modified shortcuts and ordinary typing never toggle controls");
+    await page.keyboard.press("F8");
+    await page.waitForFunction(n => messages.filter(m => m.type === "toggle-controls").length === n + 1, shortcutControls);
     assert.match(selection.quote, /original passage/);
+    const readFontSizes = frame => frame.evaluate(() => {
+      const selectors = ["#passage", "h1", "#nested-font", "#nested-font span", "#nested-font em"];
+      return selectors.map(selector => parseFloat(getComputedStyle(document.querySelector(selector)).fontSize));
+    });
+    const baselineFonts = await readFontSizes(initialChapter);
+    assert(Math.abs(baselineFonts[0] - 13.3333) < .01, "Fixture includes publisher absolute pt with inline !important");
+    assert.equal(baselineFonts[2], 12, "Fixture includes absolute px with !important");
+    assert.equal(baselineFonts[3], 12, "Nested publisher 9pt !important computes to 12px");
+    assert.equal(baselineFonts[4], 9, "Relative nested typography retains its smaller hierarchy");
+    const artSize = await initialChapter.locator("#artwork").evaluate(el => ({ width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height }));
+    await page.evaluate(() => { send("size", { value: 200 }); send("size", { value: 200 }); });
+    await initialChapter.waitForFunction(() => parseFloat(getComputedStyle(document.querySelector("#passage")).fontSize) > 26);
+    const doubledFonts = await readFontSizes(initialChapter);
+    doubledFonts.forEach((value, i) => assert(Math.abs(value - baselineFonts[i] * 2) < .01,
+      `Actual computed glyph font-size doubles without compounding: ${value} vs ${baselineFonts[i]}`));
+    assert.deepEqual(await initialChapter.locator("#artwork").evaluate(el => ({ width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height })),
+      artSize, "Font scaling preserves em-sized artwork dimensions");
+    await page.evaluate(theme => send("theme", { theme: { ...theme, text: "#12ab34" } }), matrix);
+    await initialChapter.waitForFunction(() => getComputedStyle(document.querySelector("#passage")).color === "rgb(18, 171, 52)");
+    assert.deepEqual(await readFontSizes(initialChapter), doubledFonts, "Theme changes do not compound typography");
+    await page.evaluate(location => send("goto", { location }), selection.location);
+    await initialChapter.waitForFunction(() => {
+      const rect = document.querySelector("#passage").getBoundingClientRect();
+      return rect.right > 0 && rect.left < innerWidth;
+    });
+    assert(await initialChapter.evaluate(() => originalPassage === document.querySelector("#passage")),
+      "Scaling retains the live document and saved passage locator");
+    await page.evaluate(() => send("toc", { target: "two.xhtml" }));
+    await page.waitForFunction(() => messages.findLast(m => m.type === "location")?.label.includes("Second chapter"));
+    const sizedSecondChapter = page.frames().find(f => f.url() === "about:srcdoc");
+    assert.equal(await sizedSecondChapter.locator("p").evaluate(el => parseFloat(getComputedStyle(el).fontSize)), 24,
+      "New chapter scales its own 9pt baseline once");
+    await page.evaluate(location => send("goto", { location }), selection.location);
+    await page.waitForFunction(() => messages.findLast(m => m.type === "location")?.label.includes("First chapter"));
+    const reloadedChapter = page.frames().find(f => f.url() === "about:srcdoc");
+    assert.deepEqual(await readFontSizes(reloadedChapter), doubledFonts, "Returning chapters do not compound scaling");
+    await page.evaluate(theme => { send("size", { value: 100 }); send("theme", { theme }); }, matrix);
+    await reloadedChapter.waitForFunction(() => parseFloat(getComputedStyle(document.querySelector("#passage")).fontSize) < 14);
+    assert.deepEqual(await readFontSizes(reloadedChapter), baselineFonts, "100% restores publisher typography exactly");
+    console.log("EPUB font scaling: actual px/pt-important glyph sizes double; hierarchy, artwork, locator and repeated/theme/chapter changes passed.");
     assert.equal(requests.length, 0, "book network requests must never leave the browser");
     assert.equal(await page.evaluate(() => pwned), false);
     const chapter = page.frames().find(f => f.url() === "about:srcdoc");
@@ -188,10 +260,31 @@ async function main() {
     assert(chunks.length >= 3, "a long text node is split into bounded narration chunks");
     assert.equal(new Set(chunks.map(segment => segment.locator.cfi)).size, chunks.length,
       "each chunk of the same paragraph has a distinct actual-renderer CFI");
+    const middlePassage = narration.find(segment => segment.text.includes("Offline paragraph 70."));
+    await page.evaluate(location => send("goto", { location }), middlePassage.locator);
+    const middleParagraph = page.frames().find(f => f.url() === "about:srcdoc").locator("p").filter({ hasText: "Offline paragraph 70." });
+    const visibleMiddle = async () => {
+      const bounds = await middleParagraph.boundingBox();
+      assert(bounds && bounds.x >= 0 && bounds.x < 950 && bounds.y >= 0 && bounds.y < 750,
+        `Current reading passage stays visible after text reflow: ${JSON.stringify(bounds)}`);
+    };
+    await page.waitForTimeout(150);
+    await visibleMiddle();
+    await page.evaluate(() => send("size", { value: 200 }));
+    await middleParagraph.evaluate(el => new Promise(resolve => {
+      const check = () => parseFloat(getComputedStyle(el).fontSize) === 20 ? resolve() : requestAnimationFrame(check);
+      check();
+    }));
+    await page.waitForTimeout(150);
+    await visibleMiddle();
+    await page.evaluate(() => send("size", { value: 100 }));
     const secondChapter = narration.find(segment => segment.text.includes("Return to the first passage."));
     assert(secondChapter, "narration includes the second chapter before it has been displayed");
     await page.evaluate(location => send("goto", { location }), secondChapter.locator);
     await page.waitForFunction(() => messages.findLast(m => m.type === "location")?.label.includes("Second chapter"));
+    const secondFrame = page.frames().find(f => f.url() === "about:srcdoc");
+    assert.equal(await secondFrame.locator("body").evaluate(el => getComputedStyle(el).backgroundColor), "rgb(0, 0, 0)");
+    assert.equal(await secondFrame.locator("p").evaluate(el => getComputedStyle(el).color), "rgb(0, 255, 65)");
     assert.equal(requests.length, 0, "full-spine narration extraction must remain offline");
     console.log("EPUB narration: bounded pagination, full spine, canonical jumpable CFI, and no script/network access passed.");
     await page.evaluate(location => { send("notes", { locations: [location] }); send("toc", { target: "two.xhtml" }); }, selection.location);
@@ -206,6 +299,65 @@ async function main() {
     await open("epub", epub(), selection.location);
     assert.match(await page.evaluate(() => messages.findLast(m => m.type === "location").label), /First chapter/);
     console.log("EPUB: render, TOC, selection, annotation, resize/font jump, reopen, script/network/IPC isolation passed.");
+
+    if (browserType === chromium) {
+      await page.setViewportSize({ width: 1000, height: 850 });
+      await open("epub", epub());
+      const cdp = await page.context().newCDPSession(page);
+      const swipe = async (points, multi = false) => {
+        const touchPoints = p => [{ x: p[0], y: p[1], id: 1 },
+          ...(multi ? [{ x: p[0] + 50, y: p[1] + 50, id: 2 }] : [])];
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: touchPoints(points[0]) });
+        for (const p of points.slice(1))
+          await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: touchPoints(p) });
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      };
+      const cfi = () => page.evaluate(() => messages.findLast(m => m.type === "location").location.cfi);
+      let before = await cfi();
+      await swipe([[650, 400], [590, 400], [450, 400], [300, 400]]);
+      await page.waitForFunction(value => messages.findLast(m => m.type === "location").location.cfi !== value, before);
+      before = await cfi();
+      await swipe([[300, 400], [380, 400], [500, 400], [650, 400]]);
+      await page.waitForFunction(value => messages.findLast(m => m.type === "location").location.cfi !== value, before);
+      const touchChapter = page.frames().find(f => f.url() === "about:srcdoc");
+      await selectBook();
+      before = await cfi();
+      await swipe([[650, 400], [590, 400], [450, 400], [300, 400]]);
+      assert.equal(await cfi(), before, "Swipe never steals an existing text selection");
+      await touchChapter.evaluate(() => getSelection().removeAllRanges());
+      await swipe([[450, 300], [450, 350], [450, 430]]);
+      assert.equal(await cfi(), before, "Vertical gestures never turn a page");
+      await swipe([[450, 300], [400, 300], [350, 300]], true);
+      assert.equal(await cfi(), before, "Multitouch never turns a page");
+      await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+      await swipe([[650, 400], [590, 400], [450, 400], [300, 400]]);
+      assert.equal(await cfi(), before, "Single-finger panning after pinch zoom never turns a page");
+      // Reset any visual viewport zoom introduced by the browser's pinch behavior.
+      await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+      const controls = () => page.evaluate(() => messages.filter(m => m.type === "toggle-controls").length);
+      let count = await controls();
+      await page.touchscreen.tap(485, 400);
+      await page.waitForFunction(n => messages.filter(m => m.type === "toggle-controls").length === n + 1, count);
+      count = await controls();
+      await page.touchscreen.tap(850, 650);
+      await page.waitForFunction(n => messages.filter(m => m.type === "toggle-controls").length === n + 1, count);
+      count = await controls();
+      await selectBook();
+      await page.touchscreen.tap(850, 650);
+      await page.waitForTimeout(350);
+      assert.equal(await controls(), count, "Tapping to dismiss a selection never toggles controls");
+      await touchChapter.evaluate(() => getSelection().removeAllRanges());
+      await touchChapter.locator("#local-link").tap();
+      await page.waitForTimeout(350);
+      assert.equal(await controls(), count, "Link taps never toggle controls");
+      await touchChapter.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "F11", bubbles: true })));
+      assert.equal(await page.evaluate(() => messages.filter(m => m.type === "toggle-fullscreen").length), 0,
+        "Untrusted synthetic keyboard events cannot request fullscreen");
+      await touchChapter.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "F8", bubbles: true })));
+      assert.equal(await controls(), count, "Untrusted synthetic shortcuts cannot toggle controls");
+      await cdp.detach();
+      console.log("Reader interactions: trusted touch paging, selection/vertical/pinch guards, surface taps, link exclusion, F8/fullscreen keys passed.");
+    }
 
     const fb2 = strToU8(`<?xml version="1.0"?><FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0"><description><title-info><genre>prose</genre><author><first-name>Test</first-name><last-name>Fixture</last-name></author><book-title>FB2 Fixture</book-title><lang>en</lang></title-info></description><body><section id="chapter"><title><p>FB2 chapter</p></title><p id="passage">Select this original passage in FB2.</p></section></body></FictionBook>`);
     await open("fb2", fb2);
@@ -222,10 +374,36 @@ async function main() {
     await open("epub", epub(true));
     assert.equal(await page.evaluate(() => messages.find(m => m.type === "ready").annotations), false);
     assert.match(await page.evaluate(() => messages.find(m => m.type === "ready").notice), /Fixed-layout/);
+    const fixedFrame = page.frames().find(f => f.url() === "about:srcdoc");
+    assert.equal(await fixedFrame.locator("body").evaluate(el => getComputedStyle(el).backgroundColor), "rgb(255, 255, 255)",
+      "Fixed-layout publisher backgrounds remain unchanged");
+    assert.equal(await fixedFrame.locator("#passage").evaluate(el => getComputedStyle(el).color), "rgb(0, 0, 0)");
+    const fixedFont = await fixedFrame.locator("#passage").evaluate(el => getComputedStyle(el).fontSize);
+    await page.evaluate(() => send("size", { value: 200 }));
+    await page.waitForTimeout(100);
+    assert.equal(await fixedFrame.locator("#passage").evaluate(el => getComputedStyle(el).fontSize), fixedFont,
+      "Fixed-layout publisher typography is not scaled");
     console.log("Fixed-layout EPUB: rendering works; unsupported passage annotations are explicitly unavailable.");
 
     await open("pdf", pdf());
     const pdfFrame = page.frames().find(f => f.url().startsWith("data:text/html"));
+    const pdfPixels = await pdfFrame.locator(".pdf-page canvas").evaluate(canvas => [...canvas.getContext("2d").getImageData(0, 0, 1, 1).data]);
+    await page.evaluate(theme => send("theme", { theme: { ...theme, background: "#123456" } }), matrix);
+    await pdfFrame.waitForFunction(() => document.body.style.backgroundColor === "rgb(18, 52, 86)");
+    assert.deepEqual(await pdfFrame.locator(".pdf-page canvas").evaluate(canvas => [...canvas.getContext("2d").getImageData(0, 0, 1, 1).data]), pdfPixels,
+      "Theme changes never recolor or rerender PDF pixels");
+    if (browserType === chromium) {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: 450, y: 500, id: 1 }] });
+      for (const y of [460, 400, 300])
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: 450, y, id: 1 }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await pdfFrame.waitForFunction(() => document.querySelector("#reader").scrollTop > 0);
+      assert.equal(await page.evaluate(() => messages.findLast(m => m.type === "location").location.page), 1,
+        "PDF vertical touch scrolling remains native and does not turn pages");
+      await pdfFrame.evaluate(() => { document.querySelector("#reader").scrollTop = 0; });
+      await cdp.detach();
+    }
     await pdfFrame.locator(".textLayer span").first().click();
     await page.keyboard.press("F1");
     await page.waitForFunction(() => messages.some(m => m.type === "help"));

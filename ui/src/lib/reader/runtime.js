@@ -9,29 +9,44 @@ import { sha1 } from "@noble/hashes/sha1";
 import * as pdfjs from "pdfjs-dist/build/pdf.mjs";
 import { sanitizeBookDocument, localBookLink } from "../bookReaderSecurity";
 import { BOOK_RENDERER_VERSION, isBookLocation } from "../bookLocations";
+import { DEFAULT_READER_THEME, isReaderTheme } from "../bookReaderTheme";
+import { applyBookTheme, bookThemeStyles } from "./theme";
+import { installReaderInteractions } from "./interactions";
 
 const token = globalThis.GRAFIUM_BOOK_TOKEN;
 delete globalThis.GRAFIUM_BOOK_TOKEN;
+let theme = isReaderTheme(globalThis.GRAFIUM_BOOK_THEME) ? globalThis.GRAFIUM_BOOK_THEME : DEFAULT_READER_THEME;
+delete globalThis.GRAFIUM_BOOK_THEME;
 const root = document.getElementById("reader");
 const send = (type, data = {}) => parent.postMessage({ channel: "grafium-book", token, type, ...data }, "*");
 const error = e => send("error", { message: e instanceof Error ? e.message : String(e) });
-function forwardHelp(event) {
-  if (event.key === "F1" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-    event.preventDefault(); event.stopPropagation(); send("help");
-  }
-}
-document.addEventListener("keydown", forwardHelp, true);
 const urls = new Set();
 const blobURL = blob => { const url = URL.createObjectURL(blob); urls.add(url); return url; };
 let adapter;
 let initialized = false;
 let commandQueue = Promise.resolve();
+const turn = direction => {
+  commandQueue = commandQueue.then(() => adapter?.turn(direction)).catch(error);
+};
+const removeInteractions = installReaderInteractions(document, {
+  send, turn, canSwipe: () => !!adapter && adapter.canSwipe(),
+});
+function applyFrameTheme() {
+  document.body.style.backgroundColor = theme.background;
+  document.body.style.color = theme.text;
+  root.style.backgroundColor = theme.background;
+}
+applyFrameTheme();
 
 window.addEventListener("message", event => {
   const m = event.data;
   if (event.source !== parent || !m || m.channel !== "grafium-book" || m.token !== token) return;
   commandQueue = commandQueue.then(async () => {
-    if (m.type === "open" && !initialized) {
+    if (m.type === "theme" && isReaderTheme(m.theme)) {
+      theme = m.theme;
+      applyFrameTheme();
+      adapter?.theme();
+    } else if (m.type === "open" && !initialized) {
       if (!(m.bytes instanceof ArrayBuffer) || !["epub", "fb2", "mobi", "azw3", "pdf"].includes(m.format))
         throw new Error("Invalid book transfer");
       initialized = true;
@@ -55,6 +70,7 @@ window.addEventListener("message", event => {
   }).catch(error);
 });
 window.addEventListener("unload", () => {
+  removeInteractions();
   adapter?.destroy();
   for (const url of urls) URL.revokeObjectURL(url);
 });
@@ -121,6 +137,13 @@ async function openReflowable({ bytes, format, location }) {
   root.append(view);
   let highlights = [];
   const fixed = book.rendition?.layout === "pre-paginated";
+  let fontSize = 100;
+  const interactions = new Map();
+  const styleBook = () => {
+    if (fixed) return;
+    for (const { doc } of view.renderer.getContents()) applyBookTheme(doc, theme, fontSize);
+    view.renderer.setStyles(bookThemeStyles(theme));
+  };
   const locator = cfi => ({ kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION });
   const paint = async () => {
     if (fixed) return;
@@ -142,8 +165,14 @@ async function openReflowable({ bytes, format, location }) {
   });
   view.addEventListener("load", event => {
     const { doc, index } = event.detail;
-    doc.addEventListener("keydown", forwardHelp, true);
+    for (const [previous, cleanup] of interactions) {
+      if (!fixed || !previous.defaultView?.frameElement?.isConnected) { cleanup(); interactions.delete(previous); }
+    }
+    interactions.set(doc, installReaderInteractions(doc, {
+      send, turn, canSwipe: () => !view.renderer.scrolled,
+    }));
     if (fixed) return;
+    applyBookTheme(doc, theme, fontSize);
     let timer;
     doc.addEventListener("selectionchange", () => {
       clearTimeout(timer);
@@ -170,7 +199,7 @@ async function openReflowable({ bytes, format, location }) {
   if (!fixed) {
     view.renderer.setAttribute("max-column-count", "1");
     view.renderer.setAttribute("gap", "7%");
-    view.renderer.setStyles("html{color:#161616;background:#fff}body{font-size:100%}");
+    view.renderer.setStyles(bookThemeStyles(theme));
   }
   const goTo = async value => {
     if (value.kind !== "epub" || value.rendererVersion !== BOOK_RENDERER_VERSION)
@@ -192,6 +221,9 @@ async function openReflowable({ bytes, format, location }) {
   }
   return {
     next: () => view.next(), prev: () => view.prev(), goTo,
+    turn: direction => direction === "right" ? view.goRight() : view.goLeft(),
+    canSwipe: () => !view.renderer.scrolled,
+    theme: styleBook,
     segments: async ({ requestId, section, offset }) => {
       if (format !== "epub" || fixed) throw new Error("Read aloud requires a reflowable EPUB.");
       if (book.sections.length > 10000 || section >= book.sections.length)
@@ -232,7 +264,8 @@ async function openReflowable({ bytes, format, location }) {
       if (!await view.goTo(target)) throw new Error("The contents entry could not be opened.");
     },
     size: value => {
-      if (!fixed) view.renderer.setStyles(`html{color:#161616;background:#fff}body{font-size:${value}% !important}`);
+      fontSize = value;
+      styleBook();
     },
     notes: async locations => {
       if (fixed) return;
@@ -240,7 +273,11 @@ async function openReflowable({ bytes, format, location }) {
       highlights = [...new Set(locations.filter(l => l.kind === "epub" && l.rendererVersion === BOOK_RENDERER_VERSION).map(l => l.cfi))];
       await paint();
     },
-    destroy: () => { view.close(); book.destroy?.(); void zip?.close(); },
+    destroy: () => {
+      for (const cleanup of interactions.values()) cleanup();
+      interactions.clear();
+      view.close(); book.destroy?.(); void zip?.close();
+    },
   };
 }
 
@@ -270,7 +307,7 @@ async function openPDF({ bytes, location }) {
   const pdf = await loading.promise;
   const style = document.createElement("style");
   style.textContent = `
-    #reader{overflow:auto;background:#e4e4e4}.pdf-page{position:relative;margin:12px auto;background:white;--scale-round-x:1px;--scale-round-y:1px}
+    #reader{overflow:auto}.pdf-page{position:relative;margin:12px auto;background:white;--scale-round-x:1px;--scale-round-y:1px}
     .pdf-page canvas{display:block}.textLayer{position:absolute;inset:0;overflow:clip;line-height:1;text-size-adjust:none;transform-origin:0 0}
     .textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%}
     .textLayer{--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor)*var(--min-font-size));--min-font-size-inv:calc(1/var(--min-font-size))}
@@ -404,6 +441,9 @@ async function openPDF({ bytes, location }) {
   return {
     next: () => goTo({ kind: "pdf", page: Math.min(pdf.numPages, pageNumber + 1) }),
     prev: () => goTo({ kind: "pdf", page: Math.max(1, pageNumber - 1) }),
+    turn: direction => goTo({ kind: "pdf", page: Math.max(1, Math.min(pdf.numPages, pageNumber + (direction === "right" ? 1 : -1))) }),
+    canSwipe: () => zoom <= 100,
+    theme: () => {},
     goTo, toc: page => goTo({ kind: "pdf", page }),
     size: async value => { zoom = value; await render(); },
     notes: locations => { highlights = locations; paint(); },

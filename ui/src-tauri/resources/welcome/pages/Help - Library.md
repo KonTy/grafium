@@ -12,6 +12,12 @@ or favoriting it does not count as reading. Favorite items for easy access.
 Progress reflects a playback or reading position, not mastery of the material.
 Unknown media duration must not be mistaken for completion.
 
+Visual books open with their controls hidden. A single tap, **F8**, or the small
+corner button reveals the reading bar, including bookmarks and **Fullscreen**
+(**F11**, **Escape** to leave). Swipe to turn pages. Text-based books follow the
+Grafium theme; illustrations retain their original colors. See
+[[Help - Private Reader]] for text sizing, gestures, and read-aloud options.
+
 Choose a local folder in **Settings > Library location** for EPUBs, audiobooks,
 downloaded podcast audio, and supported videos. Files stay in that folder:
 Library does not import them into the graph or modify the originals.

@@ -117,6 +117,7 @@ function syntheticBook() {
     await openBook();
     const reader = page.getByRole("region", { name: "Original book reader" });
     await reader.waitFor();
+    await reader.getByRole("button", { name: "Show reading controls", exact: true }).click();
     await reader.getByRole("button", { name: "Next", exact: true }).waitFor();
     await page.waitForFunction(() => !document.querySelector(".book-reader button")?.disabled);
     const chapter = await chapterLoaded;
@@ -159,6 +160,7 @@ function syntheticBook() {
     assert.equal(await annotationEditor.locator(".cm-editor").count(), 0);
     await annotationEditor.getByRole("button", { name: "Return to book", exact: true }).click();
     await reader.waitFor();
+    await reader.getByRole("button", { name: "Show reading controls", exact: true }).click();
     await page.waitForFunction(() => !document.querySelector(".book-reader button")?.disabled);
     await reader.getByRole("button", { name: /notes/i }).first().click();
     await notes.waitFor();
@@ -221,6 +223,7 @@ function syntheticBook() {
     await page.locator('[data-block-id="b0"]').first().waitFor();
     await openBook();
     await reader.waitFor();
+    await page.keyboard.press("F8");
     await page.waitForFunction(() => !document.querySelector(".book-reader button")?.disabled);
     await reader.getByRole("button", { name: /notes/i }).first().click();
     await notes.getByRole("textbox", { name: "Book note", exact: true }).waitFor();

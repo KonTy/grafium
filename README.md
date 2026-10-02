@@ -190,6 +190,7 @@ guessed into a different block.
 | Original-book library | Copy EPUB, PDF, FB2, MOBI, or AZW3 into the graph, read the original under Books, and keep notes with Markdown bodies in one adjacent JSON-LD file (`1.epub` → `1.jsonld`). Source files remain unchanged. Extracted text feeds graph search and configured AI indexing; extraction warnings are shown explicitly. |
 | Optional book conversion | Check **Convert to editable Markdown** to retain the existing folder/file conversion workflow for EPUB, PDF, HTML, Markdown, text, FB2, and additional formats through optional Calibre tools. Unchecked imports preserve originals. Existing converted books are not migrated. |
 | Reading structure | Keep paragraphs nested under detected chapter and section headings, with referenced media where extraction is supported. |
+| Distraction-free reading | Read with hidden controls; tap, press F8, or use the corner button to reveal them. F11 enters fullscreen, Escape exits, and horizontal swipes turn pages. Reflowable text follows Grafium's theme with real font scaling; image and fixed-layout artwork retain their colors. |
 | Scanned PDF OCR | Extract text locally with Poppler and Tesseract; optional ImageMagick helps extract figure regions. |
 | Audio/video processing | Turn supported media sources into notes with transcripts; local transcription needs its model and supporting tools. |
 | Background jobs | Follow longer-running imports and processing, cancel supported running jobs, and clear finished entries without blocking the editor. |

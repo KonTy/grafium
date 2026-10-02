@@ -195,8 +195,8 @@ describe("private reader components", () => {
     });
     window.addEventListener("keydown", help);
     send({ type: "help" });
+    await vi.waitFor(() => expect(help).toHaveBeenCalledOnce());
     window.removeEventListener("keydown", help);
-    expect(help).toHaveBeenCalledOnce();
     send({ type: "location", location: locator, label: "Chapter 1" });
     send({ type: "selection", location: locator, quote: "Private passage" });
     window.dispatchEvent(new Event("pagehide"));

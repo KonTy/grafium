@@ -72,6 +72,29 @@ watching system volume changes and does not require root or system changes.
 
 ## EPUB and offline speech
 
+### Just the book
+
+Books open without a title banner or permanent controls. Tap once on a reading
+surface, press **F8**, or use the small corner button to show or hide the reading
+bar. The bar overlays the page without restarting the book or changing its place.
+Links, selected text, and pinch/vertical-scroll gestures do not toggle it.
+
+Use **Fullscreen** in the bar or **F11** to fill the display; **Escape** leaves
+fullscreen (or closes the bar when not fullscreen). The bar holds chapter
+navigation, text size, **Bookmark**, Library navigation, and expandable
+**Bookmarks** and **Reading options** for favorites, Studies, relinking,
+voice settings, and read-aloud. Errors remain visible rather than hiding there.
+
+Swipe horizontally to turn pages. Previous/Next buttons and keyboard navigation
+remain available. Touch behavior depends on your WebView and device; physical
+phone validation is still needed.
+
+Reflowable book text follows Grafium's background, text, and link colors, including
+live theme changes. **Text size** scales the actual letters, including books with
+publisher-defined fixed font sizes, rather than merely widening line spacing.
+Illustrations, scanned PDF pages, and fixed-layout artwork retain their original
+colors. Reading appearance never rewrites the source file.
+
 The visual EPUB reader blocks book scripts and external resources. DRM is not
 supported. The private reader does not import EPUB text into graph search,
 embeddings, or Chat. Use a local, compatible voice for read-aloud; unavailable
