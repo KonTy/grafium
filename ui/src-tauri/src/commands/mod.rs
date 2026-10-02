@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod assistant;
+pub mod assistant_workflows;
 pub mod blocks;
 pub mod books;
 pub mod chat;

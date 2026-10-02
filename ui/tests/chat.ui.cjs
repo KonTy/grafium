@@ -54,6 +54,7 @@ const cases = [
     assert.equal(await context(page).inputValue(), "none");
     assert.equal(await mode(page).inputValue(), "answer");
     assert.equal(await composer(page).getByRole("combobox").count(), 2, "one context and one mode selector");
+    assert.equal(await panel(page).getByRole("combobox", { name: "ASK action" }).count(), 1);
     assert.equal(await panel(page).getByRole("checkbox", { name: /Internet|Research/ }).count(), 0);
     assert.equal(await button(page, "Send").isDisabled(), true);
     let call = await send(page, "Research and verify this claim; search the internet for test results");

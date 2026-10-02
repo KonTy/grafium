@@ -18,7 +18,7 @@ describe("Unified conversation components", () => {
     expect(conversation).not.toContain("shouldUseWebResearchForBlock");
   });
 
-  it("offers exactly one explicit context and mode picker without keyword routing", () => {
+  it("offers exactly one explicit context and web-mode picker without implicit web routing", () => {
     expect(conversation.match(/aria-label="Mode"/g)).toHaveLength(1);
     expect(conversation.match(/aria-label="Context"/g)).toHaveLength(1);
     for (const kind of ["selection", "block", "section", "page", "book", "graph", "none"]) {
@@ -51,8 +51,9 @@ describe("Unified conversation components", () => {
     expect(conversation).toContain("if (untrack(() => assistantConversationRunning(destination))) return");
     expect(conversation).toContain("blockIds: [...view.selection.blockIds]");
     expect(conversation).toContain("Use selection");
-    expect(conversation).toContain('value={view.context.kind} disabled={running}');
-    expect(conversation).toContain('value={view.mode} disabled={running}');
+    expect(conversation).toContain('value={view.context.kind} disabled={busy}');
+    expect(conversation).toContain('value={view.mode} disabled={busy || !!requestedWorkflow}');
+    expect(conversation).toContain('const busy = $derived(running || planning || applyingPlan || !!workflowRun)');
   });
 
   it("expands the identical conversation ID without cancelling streams on unmount", () => {

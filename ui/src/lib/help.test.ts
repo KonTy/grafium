@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./help";
 import { vi } from "vitest";
 import chatHelp from "../../src-tauri/resources/welcome/pages/Help - Chat.md?raw";
+import tasksHelp from "../../src-tauri/resources/welcome/pages/Help - Tasks.md?raw";
+import workflowCard from "../components/AssistantWorkflowCard.svelte?raw";
 import aiHelp from "../../src-tauri/resources/welcome/pages/AI Setup And Privacy.md?raw";
 import searchHelp from "../../src-tauri/resources/welcome/pages/Help - Search.md?raw";
 import booksHelp from "../../src-tauri/resources/welcome/pages/Help - Books.md?raw";
@@ -24,6 +26,16 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("explains reviewed ASK actions in the existing Chat and Tasks contexts", () => {
+    expect(workflowCard).toContain('data-help-context="chat"');
+    expect(helpPageTitle("chat")).toBe("Help - Chat");
+    for (const phrase of ["Group open tasks", "Find related topics", "Clean up draft", "Stop analysis", "Apply", "Private Library"]) {
+      expect(chatHelp).toContain(phrase);
+    }
+    expect(tasksHelp).toContain("does not duplicate TODOs");
+    expect(tasksHelp).toContain("[[Help - Chat]]");
+    expect(chatHelp).toContain("not copied");
+  });
   it("documents the quiet reader's controls, fullscreen, theme and real text sizing", () => {
     for (const page of [readerHelp, booksHelp]) {
       expect(page).toContain("F8");

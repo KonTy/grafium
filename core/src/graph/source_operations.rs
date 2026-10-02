@@ -48,19 +48,303 @@ fn publish(path: &Path, expected: Option<&[u8]>, content: &[u8]) -> Result<Publi
             fs::remove_file(stage)?;
             return Err(error.into());
         }
-        fs::remove_file(stage)?;
+        // Publication already succeeded; an orphaned staging link is harmless.
+        let _ = fs::remove_file(stage);
         None
     };
-    #[cfg(unix)]
-    fs::File::open(path.parent().unwrap())?.sync_all()?;
-    Ok(PublishedSource {
+    let publication = PublishedSource {
         path: path.to_owned(),
         previous,
         published: content.to_vec(),
-    })
+    };
+    #[cfg(unix)]
+    if let Err(error) = fs::File::open(path.parent().unwrap()).and_then(|file| file.sync_all()) {
+        publication.rollback()?;
+        return Err(error.into());
+    }
+    Ok(publication)
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+
+    fn blocks() -> Vec<BlockCreateSpec> {
+        ["First reviewed block", "Fail reviewed insertion"].into_iter().enumerate()
+            .map(|(order, content)| BlockCreateSpec {
+                id: None, parent: BlockCreateParent::Root, order_index: order as i32,
+                content: content.into(), block_type: BlockType::Text,
+                properties: serde_json::json!({}),
+            }).collect()
+    }
+
+    #[test]
+    fn reviewed_workflow_database_failure_leaves_no_new_page_or_partial_blocks() -> Result<()> {
+        let directory = tempfile::tempdir_in(".")?;
+        let graph = Graph::open(directory.path())?;
+        graph.db.conn()?.execute_batch(
+            "CREATE TRIGGER workflow_failure BEFORE INSERT ON blocks
+             WHEN NEW.content='Fail reviewed insertion'
+             BEGIN SELECT RAISE(ABORT,'Synthetic workflow insertion failure'); END;",
+        )?;
+        assert!(graph.insert_reviewed_workflow("Reviewed failure", None, blocks()).is_err());
+        assert!(graph.db.find_page_by_title("Reviewed failure")?.is_none());
+        assert!(!graph.pages_dir.join("Reviewed failure.md").exists());
+        let page = graph.create_page_with_content("Original", false, "- Original\n")?;
+        let before = graph.db.list_blocks_for_page(&page.id)?;
+        let original = graph.get_page_source(&page.id)?;
+        assert!(graph.insert_reviewed_workflow("", Some((&page.id, &before, &original)), blocks()).is_err());
+        assert_eq!(graph.db.list_blocks_for_page(&page.id)?, before);
+        assert_eq!(graph.get_page_source(&page.id)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn reviewed_workflow_stale_file_and_publication_collision_preserve_bytes() -> Result<()> {
+        let directory = tempfile::tempdir_in(".")?;
+        let graph = Graph::open(directory.path())?;
+        let page = graph.create_page_with_content("Original", false, "- Original\n")?;
+        let before = graph.db.list_blocks_for_page(&page.id)?;
+        let original = graph.get_page_source(&page.id)?;
+        let path = graph.page_filesystem_path(&page.id)?;
+        fs::write(&path, "External edit")?;
+        assert!(graph.insert_reviewed_workflow("", Some((&page.id, &before, &original)), blocks()).is_err());
+        assert_eq!(fs::read_to_string(&path)?, "External edit");
+        assert!(publish(&path, None, b"must not replace").is_err());
+        assert_eq!(fs::read_to_string(&path)?, "External edit");
+        Ok(())
+    }
+
+    #[test]
+    fn reviewed_workflow_commit_failure_rolls_back_published_file() -> Result<()> {
+        let directory = tempfile::tempdir_in(".")?;
+        let graph = Graph::open(directory.path())?;
+        let page = graph.create_page_with_content("Original", false, "- Original\n")?;
+        let before = graph.db.list_blocks_for_page(&page.id)?;
+        let original = graph.get_page_source(&page.id)?;
+        graph.db.conn()?.execute_batch(
+            "CREATE TABLE workflow_deferred_failure (
+                page_id TEXT REFERENCES pages(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER workflow_commit_failure AFTER INSERT ON blocks
+             WHEN NEW.content='Fail reviewed insertion'
+             BEGIN INSERT INTO workflow_deferred_failure VALUES ('missing-synthetic-page'); END;",
+        )?;
+        assert!(graph.insert_reviewed_workflow("Commit failure", None, blocks()).is_err());
+        assert!(graph.db.find_page_by_title("Commit failure")?.is_none());
+        assert!(!graph.pages_dir.join("Commit failure.md").exists());
+        let mut append = blocks();
+        for spec in &mut append {
+            spec.order_index += 1;
+        }
+        let error = graph.insert_reviewed_workflow(
+            "", Some((&page.id, &before, &original)), append,
+        ).unwrap_err();
+        assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+        assert_eq!(graph.get_page_source(&page.id)?, original);
+        assert_eq!(graph.db.list_blocks_for_page(&page.id)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn reviewed_workflow_page_scan_rejects_more_than_4096_without_truncation() -> Result<()> {
+        let directory = tempfile::tempdir_in(".")?;
+        let graph = Graph::open(directory.path())?;
+        graph.db.conn()?.execute_batch(
+            "WITH RECURSIVE numbers(n) AS (
+                SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<4097
+             )
+             INSERT INTO pages(id,title,file_path,created_at,updated_at,is_journal,properties)
+             SELECT 'synthetic-'||n,'Synthetic '||n,'journals/synthetic-'||n||'.md',0,0,1,'{}'
+             FROM numbers;",
+        )?;
+        let error = graph.reviewed_workflow_page_ids(4096).unwrap_err().to_string();
+        assert!(error.contains("More than 4096 file-backed pages"));
+        assert!(error.contains("nothing was truncated"));
+        assert_eq!(graph.reviewed_workflow_page_ids(4097)?.len(), 4097);
+        Ok(())
+    }
 }
 
 impl Graph {
+    /// Bounded read helpers for reviewed workflows; no LIMIT silently drops input.
+    pub fn reviewed_workflow_page_ids(&self, maximum: usize) -> Result<Vec<String>> {
+        let conn = self.db.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id FROM pages WHERE file_path IS NOT NULL ORDER BY id LIMIT ?1",
+        )?;
+        let ids = statement.query_map([(maximum + 1) as i64], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        if ids.len() > maximum {
+            return Err(CoreError::Other(format!(
+                "More than {maximum} file-backed pages: workflow scan refused; nothing was truncated"
+            )));
+        }
+        Ok(ids)
+    }
+
+    pub fn reviewed_workflow_blocks(
+        &self, page_id: &str, source: &[u8], max_blocks: usize, max_bytes: usize,
+    ) -> Result<Vec<Block>> {
+        let conn = self.db.conn()?;
+        let (count, bytes): (i64, i64) = conn.query_row(
+            "SELECT count(*), COALESCE(sum(length(CAST(content AS BLOB)) + length(CAST(properties AS BLOB))),0)
+             FROM blocks WHERE page_id=?1",
+            [page_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if count > max_blocks as i64 || bytes > max_bytes as i64 {
+            return Err(CoreError::Other("Workflow source exceeds block/byte limits; nothing was truncated".into()));
+        }
+        let indexed: Option<String> = conn.query_row(
+            "SELECT sha256 FROM source_file_revisions WHERE page_id=?1",
+            [page_id], |row| row.get(0),
+        ).ok();
+        if indexed.as_deref() != Some(format!("{:x}", Sha256::digest(source)).as_str()) {
+            return Err(CoreError::Other("Source changed outside Grafium. Wait for indexing and start again".into()));
+        }
+        self.db.list_blocks_for_page_in_connection(&conn, page_id)
+    }
+
+    pub fn reviewed_workflow_open_tasks(
+        &self, max_count: usize, max_bytes: usize,
+    ) -> Result<Vec<crate::db::tasks::OpenTaskRow>> {
+        let conn = self.db.conn()?;
+        let (count, bytes): (i64, i64) = conn.query_row(
+            "SELECT count(*),COALESCE(sum(length(CAST(b.content AS BLOB))),0)
+             FROM tasks t JOIN blocks b ON b.id=t.block_id
+             WHERE t.state IN ('TODO','DOING','NOW','LATER')",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if count > max_count as i64 || bytes > max_bytes as i64 {
+            return Err(CoreError::Other("Open tasks exceed workflow count/byte limits; nothing was truncated".into()));
+        }
+        drop(conn);
+        self.db.list_open_task_rows()
+    }
+
+    /// Publish one reviewed insertion, rolling back the entire index transaction
+    /// and its file publication together. Unlike create_blocks this never leaves
+    /// a partially inserted tree or an empty new destination after failure.
+    pub fn insert_reviewed_workflow(
+        &self,
+        title: &str,
+        source: Option<(&str, &[Block], &str)>,
+        specs: Vec<BlockCreateSpec>,
+    ) -> Result<(Page, Vec<Block>)> {
+        let _operation = self.source_operations.lock();
+        if specs.is_empty() || specs.len() > 513 {
+            return Err(CoreError::Other("Invalid reviewed insertion size".into()));
+        }
+        let existing = source
+            .as_ref()
+            .map(|(id, _, _)| self.db.get_page_by_id(id))
+            .transpose()?;
+        if let Some(page) = &existing {
+            self.ensure_page_writable(page)?;
+            let (_, expected, _) = source.unwrap();
+            if self.db.list_blocks_for_page(&page.id)? != expected {
+                return Err(CoreError::Other("Reviewed source changed".into()));
+            }
+        } else if self.db.find_page_by_title(title)?.is_some() {
+            return Err(CoreError::Other(
+                "Destination already exists; choose a new reference-page title".into(),
+            ));
+        }
+        let path = match &existing {
+            Some(page) => self.resolve_page_file_path(page)?,
+            None => self.page_file_path(title, false)?,
+        };
+        self.ensure_path_inside_graph(&path)?;
+        let original = source.map(|(_, _, original)| original);
+        if let Some(original) = original {
+            if fs::read_to_string(&path)? != original {
+                return Err(CoreError::Other("Reviewed source changed on disk".into()));
+            }
+        } else if path.exists() {
+            return Err(CoreError::Other("Destination file already exists".into()));
+        }
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let page = if let Some(page) = existing {
+            page
+        } else {
+            let occupied: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pages WHERE lower(title)=lower(?1))",
+                [title],
+                |row| row.get(0),
+            )?;
+            if occupied {
+                return Err(CoreError::Other("Destination already exists".into()));
+            }
+            self.db.upsert_page_in_connection(
+                &tx,
+                title,
+                false,
+                Some(&self.relative_graph_path(&path)),
+                &serde_json::json!({}),
+            )?
+        };
+        let mut inserted: Vec<Block> = Vec::with_capacity(specs.len());
+        for (index, spec) in specs.into_iter().enumerate() {
+            if spec.id.is_some() || spec.properties != serde_json::json!({}) {
+                return Err(CoreError::Other("Reviewed blocks cannot inject identity or properties".into()));
+            }
+            let parent = match spec.parent {
+                BlockCreateParent::Root => None,
+                BlockCreateParent::NewBlock(parent) if parent < index => Some(inserted[parent].id.clone()),
+                _ => return Err(CoreError::Other("Reviewed parent must be an earlier new block".into())),
+            };
+            let id = Uuid::new_v4().to_string();
+            self.db.insert_block_raw_in_connection(
+                &tx, &id, &page.id, parent.as_deref(), spec.order_index,
+                &spec.content, spec.block_type.clone(), &spec.properties,
+            )?;
+            self.index_summary_content(&tx, &id, &spec.content)?;
+            inserted.push(Block {
+                id, page_id: page.id.clone(), parent_id: parent,
+                order_index: spec.order_index, content: spec.content,
+                block_type: spec.block_type, properties: spec.properties,
+                created_at: 0, updated_at: 0,
+            });
+        }
+        let all = self.db.list_blocks_for_page_in_connection(&tx, &page.id)?;
+        for inserted in &mut inserted {
+            *inserted = all.iter().find(|block| block.id == inserted.id)
+                .ok_or_else(|| CoreError::Other("Inserted block disappeared".into()))?.clone();
+        }
+        let suffix = parser::serialize_page(&serde_json::json!({}), &inserted);
+        let content = match original {
+            Some(original) => format!("{original}\n{suffix}"),
+            None => suffix,
+        };
+        if !self.summary_markup_matches(&page, &all, &path, &content) {
+            return Err(CoreError::Other(
+                "Reviewed Markdown cannot preserve the proposed tree and original source; revise the draft".into(),
+            ));
+        }
+        self.restore_changed_content_assets(&path, original.unwrap_or(""), &content)?;
+        let publication = publish(&path, original.map(str::as_bytes), content.as_bytes())?;
+        let result = (|| -> Result<()> {
+            if fs::read(&path)? != content.as_bytes() {
+                return Err(CoreError::Other("Concurrent external edit preserved".into()));
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            publication.rollback()?;
+            return Err(error);
+        }
+        if let Some(backup) = publication.previous {
+            let _ = fs::remove_file(backup);
+        }
+        self.note_self_write(&path);
+        self.remember_indexed_content_hash(&path, Self::content_hash(&content));
+        drop(conn);
+        self.mark_page_dirty(&page.id);
+        self.record_page_edit(&page.id, "app");
+        Ok((page, inserted))
+    }
+
     pub(super) fn reconcile_moved_markdown_sources(
         &self,
         files: &[PathBuf],

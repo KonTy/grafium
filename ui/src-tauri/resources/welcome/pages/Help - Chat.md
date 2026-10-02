@@ -6,6 +6,57 @@ you want references or a focused answer.
 
 For current outside information, use the research controls and review sources.
 
+## Ask AI to organize and draft
+
+Use ordinary requests, or choose **Ask / act** beside the composer:
+
+- **Group open tasks:** "Group all my TODOs by similarity and flag possible
+  duplicates." Grafium reads the current graph's open tasks and proposes a new
+  reference page with topic groups and advisory duplicate candidates.
+- **Find related topics:** open the source note, then ask "Find notes related to
+  this page and create a page with references." The proposal links real notes
+  and explains the connections; it does not invent destination pages.
+- **Clean up draft:** choose **Selection**, **Block including children**,
+  **Section / Chapter**, or **This page**, then ask "Clean up these rough notes."
+  Apply appends a **Suggested rewrite** below the original on that same page.
+  The original is not replaced or deleted.
+  Task-looking draft lines are quoted rather than becoming additional tasks.
+  Cleanup can reword and organize complete paragraphs or sibling groups while
+  retaining links, numbers, and nested notes. Large drafts are organized within
+  disclosed batches; review their meaning and overall order before applying.
+
+The action scope is shown before sending. Task grouping uses all open tasks in
+the current graph; topic discovery reads saved Markdown notes in that graph.
+Private Library books, listening history, and bookmarks are excluded. These
+actions use the configured model, without web searches or an embedding-index
+requirement. An external model receives the supplied note/task text according
+to your normal AI settings. Large scopes take multiple model requests and may
+incur provider charges. **Stop analysis** cancels without saving a draft.
+
+Every result has an editable **Proposed changes** card. Inspect the readable
+task references, coverage, and uncertainty; use **Edit draft** to revise the
+text, headings, or grouping. Choose a new page title where offered.
+**Apply** is the only save action. **Dismiss** returns the request to the
+composer. Failed or cancelled analysis never silently applies partial output.
+Oversized inputs and model-context limits produce an explicit error or disclosed
+coverage, not a claim to have read material that was skipped.
+Snapshots allow up to 4,096 pages, 10,000 blocks, and 4 MiB of source text.
+Previews expire after 30 minutes; regenerate an expired preview before applying.
+Unsupported Markdown structures are rejected rather than silently flattened.
+
+Task groups are a saved review page of `((block-id))` references, **not copied
+TODOs** and not a rewrite of the Tasks query. Original task order, dates, and
+states remain unchanged. Related work is not necessarily duplicate work:
+review the source tasks yourself before merging, cancelling, or deleting any.
+The grouping is a snapshot; rerun the request after substantial source changes.
+
+Apply checks the captured graph and source snapshot again. If notes changed
+during review, regenerate the proposal rather than overwriting newer work.
+Existing destination pages are not silently reused. Insertions support Undo;
+undoing a new reference page's content may leave its empty page behind.
+Unapplied proposals are session UI state, not durable notes: Apply before
+closing the conversation or application if you want to keep one.
+
 ## Watching it work
 
 Native model safety warnings appear beside **Model & index status**. Insufficient

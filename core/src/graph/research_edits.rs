@@ -1390,7 +1390,7 @@ impl Graph {
         Ok(())
     }
 
-    fn summary_markup_matches(
+    pub(super) fn summary_markup_matches(
         &self,
         page: &Page,
         blocks: &[Block],
@@ -1426,7 +1426,7 @@ impl Graph {
                 .all(|(a, b)| a.id == b.id && a.matches_block(b))
     }
 
-    fn index_summary_content(
+    pub(super) fn index_summary_content(
         &self,
         conn: &rusqlite::Connection,
         block_id: &str,

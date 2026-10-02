@@ -5,6 +5,11 @@
   import AssistantDiagnostics from "./AssistantDiagnostics.svelte";
   import PageAssistantTools from "./PageAssistantTools.svelte";
   import AIEditPlanCard from "./AIEditPlanCard.svelte";
+  import AssistantWorkflowCard from "./AssistantWorkflowCard.svelte";
+  import {
+    applyAssistantWorkflow, detectAssistantWorkflow, prepareAssistantWorkflow, WORKFLOW_LABELS, WORKFLOW_REQUESTS,
+    type AssistantWorkflowKind, type WorkflowProposal,
+  } from "../lib/assistantWorkflows";
   import ChatStatusTrail from "./ChatStatusTrail.svelte";
   import { isNearBottom, scrollToBottom } from "../lib/scrollToBottom";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
@@ -14,8 +19,8 @@
   import { buildPlannerPrompt, hydratePlan, looksLikeEditRequest, parseEditPlan, type EditAction } from "../lib/aiActions";
   import { applyEditPlan, summarizeApplyResult, type BlockTarget } from "../lib/aiActionsApply";
   import { captureResearchSource } from "../lib/researchSource";
-  import { runUndoOperation } from "../lib/undoStack";
-  import { flushPageEditors, withPageEditorsLocked } from "../lib/editorPersistence";
+  import { pushUndo, runUndoOperation } from "../lib/undoStack";
+  import { flushAllPageEditors, flushPageEditors, reloadPageEditors, withPageEditorsLocked } from "../lib/editorPersistence";
   import { assistantContextInfo, type AssistantContext, type AssistantContextInfo, type AssistantMode } from "../lib/assistant";
   import {
     assistantConversationChanges, updateAssistantConversation, assistantConversationRunning,
@@ -61,6 +66,10 @@
   let planResult = $state("");
   let planLinks = $state<{ id: string; title: string }[]>([]);
   let pendingPlan = $state<{ request: string; actions: EditAction[] } | null>(null);
+  let workflowChoice = $state<"auto" | AssistantWorkflowKind>("auto");
+  let workflowRun = $state<{ controller: AbortController } | null>(null);
+  let workflowProgress = $state("");
+  let pendingWorkflow = $state<WorkflowProposal | null>(null);
   let pointerDown = false;
   let refocusPending = false;
   const view = $derived.by(() => {
@@ -68,11 +77,14 @@
     return { ...thread, messages: thread.messages.map((message) => ({ ...message })) };
   });
   const running = $derived(assistantConversationRunning(view));
+  const busy = $derived(running || planning || applyingPlan || !!workflowRun);
+  const requestedWorkflow = $derived(workflowChoice === "auto" ? detectAssistantWorkflow(view.draft) : workflowChoice);
   const status = $derived(statusDisplay(view.state ?? initialState(), now, reducedMotion));
   const trail = $derived(statusTrail(view.state ?? initialState(), now, reducedMotion));
   const provider = $derived(assistantProvider(config));
   const contextPageId = $derived(thread.sourcePageId ?? ("pageId" in view.context ? view.context.pageId : null));
   const focusedBlockId = $derived(blockId ?? (anchor?.pageId === contextPageId ? anchor?.blockId : null));
+  const workflowIdentity = $derived(JSON.stringify([thread.id, thread.graphPath, contextPageId, view.context]));
   const pageLabel = $derived(info?.isJournal ? "This day" : "This page");
   const selection = $derived(view.context.kind === "selection" ? view.context.selection : null);
   const scopeUnavailable = $derived(
@@ -82,6 +94,16 @@
   const thinkingTone = $derived<ChatThinkingTone>(status.kind === "stalled" ? "stalled"
     : status.phase === "searching_web" || status.phase === "reading_sources" ? "web"
     : status.phase === "thinking" ? "thinking" : "working");
+
+  $effect(() => {
+    workflowIdentity;
+    return () => untrack(() => {
+      workflowRun?.controller.abort();
+      workflowRun = null;
+      pendingWorkflow = null;
+      workflowProgress = "";
+    });
+  });
 
   $effect(() => {
     if (!active) return;
@@ -232,7 +254,7 @@
   });
 
   function chooseContext(kind: string) {
-    if (running) return;
+    if (busy) return;
     const pageId = contextPageId;
     let context: AssistantContext;
     let label = "";
@@ -256,15 +278,100 @@
   }
 
   async function send() {
-    if (running || checking || !connected || scopeUnavailable || !thread.draft.trim()) return;
+    if (busy || checking || !connected || !thread.draft.trim()) return;
     const request = thread.draft.trim();
     followAnswer = true;
     inputEl?.focus();
+    if (requestedWorkflow) { await proposeWorkflow(requestedWorkflow, request); return; }
+    if (scopeUnavailable) return;
     // An instruction ("add that to my journal") should change notes, not produce
     // another paragraph of prose. Questions skip this entirely so ordinary chat
     // keeps its current latency.
     if (looksLikeEditRequest(request) && (await proposeEdits(request))) return;
     await sendAssistantQuestion(thread, thread.context, thread.contextLabel);
+  }
+
+  async function proposeWorkflow(kind: AssistantWorkflowKind, request: string) {
+    const operation = { controller: new AbortController() };
+    const destination = thread;
+    workflowRun = operation;
+    pendingWorkflow = null; pendingPlan = null; planError = ""; planResult = ""; planLinks = [];
+    const current = () => workflowRun?.controller === operation.controller && !operation.controller.signal.aborted;
+    try {
+      await flushAllPageEditors();
+      if (!current()) return;
+      const proposal = await prepareAssistantWorkflow(kind, destination.graphPath, destination.context,
+        contextPageId, request, { signal: operation.controller.signal,
+          onProgress: message => { if (current()) workflowProgress = message; } });
+      if (!current()) return;
+      pendingWorkflow = proposal;
+      destination.draft = "";
+      workflowChoice = "auto";
+      updateAssistantConversation();
+      await tick();
+      scrollToBottom(scrollEl);
+    } catch (cause) {
+      if (workflowRun?.controller !== operation.controller) return;
+      planError = operation.controller.signal.aborted ? "Analysis stopped. No changes were saved."
+        : `Could not prepare changes: ${cause instanceof Error ? cause.message : String(cause)}`;
+    } finally {
+      if (workflowRun?.controller === operation.controller) {
+        workflowRun = null; workflowProgress = "";
+      }
+    }
+  }
+
+  function dismissWorkflow() {
+    if (pendingWorkflow && !thread.draft.trim()) {
+      thread.draft = pendingWorkflow.request;
+      updateAssistantConversation();
+    }
+    pendingWorkflow = null; planError = "";
+    inputEl?.focus();
+  }
+
+  async function applyWorkflow() {
+    const proposal = pendingWorkflow;
+    if (!proposal || busy) return;
+    applyingPlan = true; planError = "";
+    let refreshError = "";
+    try {
+      if (proposal.snapshot.graphPath !== thread.graphPath) throw new Error("The graph changed. Prepare the action again.");
+      const apply = async () => {
+        await flushAllPageEditors();
+        const result = await applyAssistantWorkflow(proposal);
+        pushUndo({ type: "insert_blocks", pageId: result.pageId, anchorBlockId: null,
+          beforeContent: null, afterContent: null, insertedBlocks: result.insertedBlocks });
+        return result;
+      };
+      const result = await runUndoOperation(() => proposal.snapshot.kind === "rewrite" && proposal.snapshot.sourcePageId
+        ? withPageEditorsLocked(proposal.snapshot.sourcePageId, async () => {
+            const result = await apply();
+            try { await reloadPageEditors(result.pageId); }
+            catch (cause) {
+              console.error("ASK draft saved, but editor refresh failed", cause);
+              refreshError = `The draft was saved, but the editor could not refresh: ${String(cause)}. Reopen the page before editing.`;
+            }
+            return result;
+          }) : apply());
+      window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId: result.pageId } }));
+      planResult = `${result.pageCreated ? "Created reference page" : "Appended suggested rewrite"}: ${result.pageTitle}. Original sources unchanged. Undo removes the inserted blocks.`;
+      planLinks = [{ id: result.pageId, title: result.pageTitle }];
+      pendingWorkflow = null;
+      planError = refreshError;
+    } catch (cause) {
+      planError = `Could not apply the changes: ${cause instanceof Error ? cause.message : String(cause)}`;
+    } finally { applyingPlan = false; }
+  }
+
+  function chooseWorkflow(value: string) {
+    if (busy || (value !== "auto" && !(value in WORKFLOW_LABELS))) return;
+    workflowChoice = value as "auto" | AssistantWorkflowKind;
+    if (value !== "auto" && (!thread.draft.trim() || Object.values(WORKFLOW_REQUESTS).includes(thread.draft))) {
+      thread.draft = WORKFLOW_REQUESTS[value as AssistantWorkflowKind];
+      updateAssistantConversation();
+    }
+    inputEl?.focus();
   }
 
   function lastAnswer(): string {
@@ -366,7 +473,8 @@
   }
 
   function shortcut(question: string) {
-    if (running) return;
+    if (busy) return;
+    workflowChoice = "auto";
     thread.draft = question;
     updateAssistantConversation();
     inputEl?.focus();
@@ -388,7 +496,7 @@
     </div>
     <div class="header-actions">
       {#if compact && onExpand}<button class="quiet-button" onclick={() => onExpand?.(thread.id)} title="Open this same conversation in full Chat">Expand</button>{/if}
-      <button class="quiet-button" disabled={running || (!view.messages.length && !view.draft)}
+      <button class="quiet-button" disabled={busy || (!view.messages.length && !view.draft)}
         onclick={() => { newAssistantConversation(thread); inputEl?.focus(); }}>New conversation</button>
     </div>
   </header>
@@ -437,10 +545,16 @@
     {/each}
     {#if view.error}<p class="error-message" role="alert">{view.error}</p>{/if}
     {#if planning}<p class="status-message" role="status"><span class="shimmer">Working out what to change…</span></p>{/if}
+    {#if workflowRun}<p class="status-message" role="status">{workflowProgress || "Preparing analysis…"} No notes are being changed.</p>{/if}
+    {#if pendingWorkflow}
+      <AssistantWorkflowCard proposal={pendingWorkflow} applying={applyingPlan} error={planError}
+        onApply={applyWorkflow} onDismiss={dismissWorkflow}
+        onEdit={update => { if (pendingWorkflow && !applyingPlan) pendingWorkflow = { ...pendingWorkflow, ...update }; }} />
+    {/if}
     {#if pendingPlan}
       <AIEditPlanCard request={pendingPlan.request} actions={pendingPlan.actions}
         applying={applyingPlan} error={planError} onApply={applyPlan} onDismiss={dismissPlan} />
-    {:else if planError}
+    {:else if planError && !pendingWorkflow}
       <p class="error-message" role="alert">{planError}</p>
     {/if}
     {#if planResult}
@@ -464,20 +578,29 @@
   <div class="conversation-controls">
     <div class="context-preview">
       <span title={view.contextLabel}>{running ? "Answering with" : "Context"}: {view.contextLabel}</span>
-      {#if view.selection && !view.selectionError && !running}
+      <label class="workflow-choice">
+        <select aria-label="ASK action" title="Ask / act" value={workflowChoice} disabled={busy} onchange={event => chooseWorkflow(event.currentTarget.value)}>
+          <option value="auto">Ask / act…</option>
+          {#each Object.entries(WORKFLOW_LABELS) as [kind, label]}<option value={kind}>{label}</option>{/each}
+        </select>
+      </label>
+      {#if view.selection && !view.selectionError && !busy}
         <button class="text-button" onmousedown={(event) => event.preventDefault()} onclick={() => chooseContext("selection")}>Use selection</button>
       {/if}
     </div>
-    {#if !running && view.context.kind === "block" && focusedBlockId && view.context.blockId !== focusedBlockId}
+    {#if !busy && view.context.kind === "block" && focusedBlockId && view.context.blockId !== focusedBlockId}
       <button class="text-button refresh-context" onclick={() => chooseContext("block")}>Use the newly focused block</button>
-    {:else if !running && view.context.kind === "section" && info?.section && view.context.blockId !== info.section.blockId}
+    {:else if !busy && view.context.kind === "section" && info?.section && view.context.blockId !== info.section.blockId}
       <button class="text-button refresh-context" onclick={() => chooseContext("section")}>Use section: {info.section.title}</button>
     {/if}
     {#if selection}<blockquote class="selection-preview">{selection.text}</blockquote>
     {:else if blockPreview}<blockquote class="selection-preview">{blockPreview}</blockquote>{/if}
+    {#if requestedWorkflow}
+      <p class="mode-hint">Action scope: {requestedWorkflow === "tasks" ? "all open tasks in this graph" : requestedWorkflow === "topics" ? "this page and saved Markdown notes in this graph" : "the selected writing on this page"}. Review before saving.</p>
+    {/if}
     <form class="conversation-composer" role="group" aria-label="Chat composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
       <textarea bind:this={inputEl} aria-label="Message" placeholder="Ask a question…" rows="2" value={view.draft}
-        disabled={running} onblur={onInputBlur}
+        disabled={busy} onblur={onInputBlur}
         oninput={(event) => { thread.draft = event.currentTarget.value; updateAssistantConversation(); }}
         onkeydown={(event) => {
           if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) {
@@ -486,7 +609,7 @@
         }}></textarea>
       <div class="composer-options" bind:this={footerEl}>
         <label>Context
-          <select aria-label="Context" value={view.context.kind} disabled={running} onchange={(event) => chooseContext(event.currentTarget.value)}>
+          <select aria-label="Context" value={view.context.kind} disabled={busy} onchange={(event) => chooseContext(event.currentTarget.value)}>
             <option value="selection" disabled={!view.selection || !!view.selectionError}>Selection</option>
             <option value="block" disabled={!focusedBlockId}>Block including children</option>
             <option value="section" disabled={!info?.section}>Section / Chapter</option>
@@ -497,16 +620,18 @@
           </select>
         </label>
         <label>Mode
-          <select aria-label="Mode" value={view.mode} disabled={running} title={assistantModes[view.mode].description}
+          <select aria-label="Mode" value={view.mode} disabled={busy || !!requestedWorkflow} title={assistantModes[view.mode].description}
             onchange={(event) => { thread.mode = event.currentTarget.value as AssistantMode; updateAssistantConversation(); }}>
             {#each Object.entries(assistantModes) as [mode, choice]}<option value={mode}>{choice.label}</option>{/each}
           </select>
         </label>
-        {#if running}<button type="button" class="send-button stop-button" onclick={() => void stopAssistantConversation(thread)}>Stop</button>
-        {:else}<button class="send-button" type="submit" disabled={!view.draft.trim() || !connected || checking || scopeUnavailable || planning}>{planning ? "Planning…" : "Send"}</button>{/if}
+        {#if workflowRun}<button type="button" class="send-button stop-button" disabled={workflowRun.controller.signal.aborted}
+          onclick={() => workflowRun?.controller.abort()}>Stop analysis</button>
+        {:else if running}<button type="button" class="send-button stop-button" onclick={() => void stopAssistantConversation(thread)}>Stop</button>
+        {:else}<button class="send-button" type="submit" disabled={!view.draft.trim() || !connected || checking || (scopeUnavailable && !requestedWorkflow) || busy}>{planning ? "Planning…" : "Send"}</button>{/if}
       </div>
     </form>
-    <p class="mode-hint">{assistantModes[view.mode].description}</p>
+    <p class="mode-hint">{requestedWorkflow || workflowRun ? "Analysis uses your configured model without web searches. Large scopes require multiple model requests." : assistantModes[view.mode].description}</p>
     <details class="privacy-note assistant-disclosure">
       <summary>Model &amp; web privacy</summary>
       <div class="assistant-disclosure-body">
@@ -546,6 +671,8 @@
   .conversation-controls { flex-shrink: 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; max-height: 62%; overflow-y: auto; }
   .context-preview { display: flex; justify-content: space-between; gap: 8px; color: var(--text-secondary); font-size: 12px; }
   .context-preview > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .workflow-choice { flex-shrink: 0; }
+  .workflow-choice select { width: 140px; max-width: 40vw; font-size: 11px; padding: 2px; }
   .text-button { border: none; background: transparent; color: var(--accent); padding: 0; text-decoration: underline; flex-shrink: 0; }
   .refresh-context { align-self: flex-start; font-size: 12px; }
   .selection-preview { margin: 0; font-size: 12px; line-height: 1.4; max-height: 56px; overflow: auto; border-left: 1px solid var(--border); padding-left: 8px; color: var(--text-secondary); overflow-wrap: anywhere; flex-shrink: 0; }
