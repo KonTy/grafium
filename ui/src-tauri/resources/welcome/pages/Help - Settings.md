@@ -160,7 +160,13 @@ directory under `.grafium/asset-trash/`, retaining their original relative folde
 structure. The result lists the files moved and the absolute recovery directory.
 Under **Asset trash**, choose **List trash** or **Refresh trash** to review the
 original path, full trash path (including its batch ID), size, and SHA-256
-fingerprint of each file. Select individual copies or
+fingerprint of each file. **Open containing folder** beside a file opens that
+specific trash copy's folder in your system's default file manager (the
+directory MIME handler on Linux). It does not restore or delete anything.
+External file-browser access is unavailable on Android and reports an error.
+Refresh trash after changing files outside Grafium; deleting them externally
+also removes the bytes that Undo needs.
+Select individual copies or
 **Select all trash**, then choose **Restore selected…** or **Restore all…**.
 Restoration returns files to their original paths, not deleted notes.
 **Never overwrite an existing original**: Grafium refuses conflicts and keeps

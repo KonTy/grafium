@@ -723,6 +723,10 @@ export function listAssetTrash(): Promise<AssetTrashScan> {
   return invoke("list_asset_trash", {});
 }
 
+export function openAssetTrashContainingFolder(graphPath: string, asset: AssetTrashEntry): Promise<void> {
+  return invoke("open_asset_trash_containing_folder", { graphPath, asset });
+}
+
 export function restoreTrashedAssets(graphPath: string, assets: AssetTrashEntry[]): Promise<AssetTrashResult> {
   return invoke("restore_trashed_assets", { graphPath, assets });
 }

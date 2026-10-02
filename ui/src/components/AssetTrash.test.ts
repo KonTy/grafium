@@ -94,6 +94,44 @@ describe("persistent asset trash", () => {
     expect(cleanupSource).toContain("<AssetTrash />");
     expect(settingsHelp).toContain("Undo cannot recover permanently deleted attachments");
     expect(settingsHelp).toContain("**Never overwrite an existing original**");
+    expect(settingsHelp).toContain("**Open containing folder**");
+    expect(settingsHelp).toContain("directory MIME handler on Linux");
+  });
+
+  it("opens the selected copy's containing folder without restoring or purging it", async () => {
+    await list();
+    let resolve!: () => void;
+    vi.mocked(invoke).mockReturnValueOnce(new Promise<void>((done) => { resolve = done; }));
+    const row = host.querySelectorAll(".trash-list li")[1];
+    await click(button("Open containing folder", row));
+    expect(invoke).toHaveBeenLastCalledWith("open_asset_trash_containing_folder", {
+      graphPath: preview.graph_path, asset: assets[1],
+    });
+    expect(button("Open containing folder", row).disabled).toBe(true);
+    expect(button("Refresh trash").disabled).toBe(true);
+    expect(button("Restore all 2…").disabled).toBe(true);
+    expect(button("Permanently delete all 2…").disabled).toBe(true);
+    expect(host.querySelector("dialog")).toBeNull();
+    resolve();
+    await vi.waitFor(() => expect(button("Open containing folder", row).disabled).toBe(false));
+    expect(host.querySelectorAll(".trash-list li")).toHaveLength(2);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows folder-opening errors and uses the refreshed graph on retry", async () => {
+    await list();
+    vi.mocked(invoke).mockRejectedValueOnce("file browser unavailable");
+    await click(button("Open containing folder", host.querySelectorAll(".trash-list li")[0]));
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("file browser unavailable");
+    expect(host.querySelectorAll(".trash-list li")).toHaveLength(2);
+    vi.mocked(invoke).mockResolvedValueOnce({ graph_path: "/synthetic/other", assets: [assets[0]] });
+    await click(button("Refresh trash"));
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await click(button("Open containing folder"));
+    expect(invoke).toHaveBeenLastCalledWith("open_asset_trash_containing_folder", {
+      graphPath: "/synthetic/other", asset: assets[0],
+    });
+    expect(host.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("focuses Cancel in permanent deletion confirmation; Cancel and Escape leave bytes untouched", async () => {
@@ -108,6 +146,7 @@ describe("persistent asset trash", () => {
     expect(dialog.textContent).toContain(preview.graph_path);
     expect(dialog.textContent).toContain(assets[0].trash_filename);
     expect(document.activeElement).toBe(button("Cancel"));
+    expect(button("Open containing folder", host.querySelectorAll(".trash-list li")[0]).disabled).toBe(true);
     expect(invoke).toHaveBeenCalledTimes(1);
     await click(button("Cancel"));
     expect(host.querySelector("dialog")).toBeNull();
@@ -216,6 +255,7 @@ describe("persistent asset trash", () => {
     expect(button("Restore all 2…").disabled).toBe(true);
     expect(button("Permanently delete all 2…").disabled).toBe(true);
     expect(button("Refresh trash").disabled).toBe(false);
+    expect(button("Open containing folder", host.querySelectorAll(".trash-list li")[0]).disabled).toBe(true);
   });
 
   it("refreshes graph binding for subsequent operations while keeping graph-labelled receipts", async () => {

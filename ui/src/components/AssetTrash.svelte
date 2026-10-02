@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { listAssetTrash, purgeTrashedAssets, restoreTrashedAssets } from "../lib/api";
+  import { listAssetTrash, openAssetTrashContainingFolder, purgeTrashedAssets, restoreTrashedAssets } from "../lib/api";
   import type { AssetTrashEntry, AssetTrashScan } from "../lib/api";
   import { dialogKeydown } from "../lib/modal";
 
@@ -9,6 +9,7 @@
   let selected = $state<string[]>([]);
   let loading = $state(false);
   let working = $state(false);
+  let openingFolder = $state(false);
   let scanValid = $state(false);
   let error = $state("");
   let results = $state<{ graphPath: string; action: Action; confirmed: AssetTrashEntry[]; errors: string[] }[]>([]);
@@ -19,7 +20,7 @@
   let trigger: HTMLElement | null = null;
   const componentId = $props.id();
   const descriptionId = `${componentId}-trash-description`;
-  const busy = $derived(loading || working);
+  const busy = $derived(loading || working || openingFolder);
   const selectedAssets = $derived(scan?.assets.filter((asset) => selected.includes(asset.trash_filename)) ?? []);
   const unavailable = $derived(busy || !!pending || !scanValid);
 
@@ -43,6 +44,19 @@
       error = `Trash list failed: ${String(e)}. Refresh trash before continuing.`;
     } finally {
       loading = false;
+    }
+  }
+
+  async function openContainingFolder(asset: AssetTrashEntry) {
+    if (!scan || unavailable) return;
+    openingFolder = true;
+    error = "";
+    try {
+      await openAssetTrashContainingFolder(scan.graph_path, asset);
+    } catch (e) {
+      error = `Could not open containing folder: ${String(e)}. Refresh trash if the file was moved or removed.`;
+    } finally {
+      openingFolder = false;
     }
   }
 
@@ -129,6 +143,8 @@
               <span><code>{asset.filename}</code><br /><small>Trash: <code>{asset.trash_filename}</code></small><br /><small>SHA-256: <code>{asset.sha256}</code></small></span>
             </label>
             <span class="size" title={`${asset.size} bytes`}>{formatBytes(asset.size)}</span>
+            <button disabled={unavailable} onclick={() => openContainingFolder(asset)}
+              title={`Open the folder containing ${asset.trash_filename} in your default file manager`}>Open containing folder</button>
           </li>
         {/each}
       </ul>
@@ -190,7 +206,8 @@
   .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   label { display: flex; gap: 8px; align-items: center; min-width: 0; }
   .trash-list { padding: 0; list-style: none; max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
-  .trash-list li { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 8px; border-bottom: 1px solid var(--border); }
+  .trash-list li { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px; border-bottom: 1px solid var(--border); }
+  .trash-list li label { flex: 1 1 240px; }
   .trash-list li:last-child { border-bottom: none; }
   .size { white-space: nowrap; }
   .error { color: var(--danger); }

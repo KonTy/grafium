@@ -342,7 +342,10 @@ exhaustive check of every possible reference.
 Moved attachments retain their relative paths under a unique
 `.grafium/asset-trash/` directory. Results show the absolute recovery directory.
 In **Settings > Asset Cleanup > Asset trash**, choose **List trash** or
-**Refresh trash** to see original paths, trash paths, and sizes. Restore selected
+**Refresh trash** to see original paths, trash paths, and sizes. **Open containing
+folder** opens that trash copy's folder in the default system file manager
+(Linux uses the directory MIME handler), without restoring or deleting it.
+Refresh after external file changes. Restore selected
 or all copies to their original graph-relative paths. **Never overwrite an
 existing original**: restoration refuses conflicts and keeps the trash copy.
 Restoring files does not recreate deleted notes. Only confirmed changes leave

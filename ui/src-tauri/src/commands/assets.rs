@@ -311,6 +311,23 @@ pub async fn list_asset_trash(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn open_asset_trash_containing_folder(
+    state: State<'_, AppState>,
+    graph_path: String,
+    asset: grafium_core::graph::asset_trash::AssetTrashEntry,
+) -> Result<(), String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = graph
+            .asset_trash_containing_folder(&graph_path, &asset)
+            .map_err(|e| e.to_string())?;
+        super::pages::open_path_in_file_browser(&path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn restore_trashed_assets(
     state: State<'_, AppState>,
     graph_path: String,

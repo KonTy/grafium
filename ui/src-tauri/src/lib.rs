@@ -1411,6 +1411,7 @@ pub fn run() {
             commands::assets::find_orphaned_assets,
             commands::assets::trash_assets,
             commands::assets::list_asset_trash,
+            commands::assets::open_asset_trash_containing_folder,
             commands::assets::restore_trashed_assets,
             commands::assets::purge_trashed_assets,
             commands::knowledge::ai_get_config,

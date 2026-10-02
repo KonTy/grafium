@@ -370,7 +370,7 @@ pub fn open_book_folder_in_file_browser(
     open_path_in_file_browser(&path)
 }
 
-fn open_path_in_file_browser(path: &Path) -> Result<(), String> {
+pub(super) fn open_path_in_file_browser(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let mut command = Command::new("explorer");

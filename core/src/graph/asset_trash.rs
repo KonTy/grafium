@@ -226,7 +226,24 @@ impl Graph {
         })
     }
 
-    fn validated_trash_entry(&self, root: &Path, entry: &AssetTrashEntry) -> Result<PathBuf> {
+    pub fn asset_trash_containing_folder(
+        &self,
+        graph_path: &str,
+        entry: &AssetTrashEntry,
+    ) -> Result<PathBuf> {
+        let _operation = self.source_operations.lock();
+        let root = self.root_dir.canonicalize()?;
+        if root.to_string_lossy() != graph_path {
+            return Err(error("The active graph changed. Refresh trash before continuing."));
+        }
+        let path = Self::checked_trash_entry_path(&root, entry)?;
+        Ok(path
+            .parent()
+            .ok_or_else(|| error("Trashed file has no containing folder"))?
+            .to_path_buf())
+    }
+
+    fn checked_trash_entry_path(root: &Path, entry: &AssetTrashEntry) -> Result<PathBuf> {
         let relative = Path::new(&entry.trash_filename);
         let mut parts = relative
             .strip_prefix(TRASH)
@@ -244,9 +261,15 @@ impl Graph {
             return Err(error("Invalid original attachment path"));
         }
         let path = checked_path(root, relative)?;
-        if !fs::symlink_metadata(&path)?.is_file()
-            || fingerprint(&path)? != (entry.size, entry.sha256.clone())
-        {
+        if !fs::symlink_metadata(&path)?.is_file() {
+            return Err(error("Trashed file changed since preview; refresh before continuing"));
+        }
+        Ok(path)
+    }
+
+    fn validated_trash_entry(&self, root: &Path, entry: &AssetTrashEntry) -> Result<PathBuf> {
+        let path = Self::checked_trash_entry_path(root, entry)?;
+        if fingerprint(&path)? != (entry.size, entry.sha256.clone()) {
             return Err(error(
                 "Trashed file changed since preview; refresh before continuing",
             ));

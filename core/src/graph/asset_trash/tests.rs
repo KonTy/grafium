@@ -28,6 +28,86 @@ fn spec(block: &Block) -> BlockCreateSpec {
 }
 
 #[test]
+fn trash_containing_folder_resolves_each_copy_without_changing_bytes() -> Result<()> {
+    let (_dir, graph) = setup();
+    for bytes in [b"first".as_slice(), b"second".as_slice()] {
+        put(&graph, "assets/nested/archive file.zip", bytes);
+        let scan = graph.scan_unused_assets()?;
+        assert_eq!(graph.trash_unused_assets(&scan.graph_path, &scan.assets)?.moved.len(), 1);
+    }
+    let scan = graph.list_asset_trash()?;
+    assert_eq!(scan.assets.len(), 2);
+    let mut folders = HashSet::new();
+    for entry in &scan.assets {
+        let file = graph.root_dir.canonicalize()?.join(&entry.trash_filename);
+        let before = fs::read(&file)?;
+        let folder = graph.asset_trash_containing_folder(&scan.graph_path, entry)?;
+        assert_eq!(folder, file.parent().unwrap());
+        assert!(folders.insert(folder));
+        assert_eq!(fs::read(file)?, before);
+        assert!(!graph.root_dir.join(&entry.filename).exists());
+    }
+    assert_eq!(graph.list_asset_trash()?.assets.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn trash_containing_folder_rejects_stale_and_invalid_previews() -> Result<()> {
+    let (_dir, graph) = setup();
+    put(&graph, "assets/archive.zip", b"archive");
+    let scan = graph.scan_unused_assets()?;
+    graph.trash_unused_assets(&scan.graph_path, &scan.assets)?;
+    let scan = graph.list_asset_trash()?;
+    let entry = &scan.assets[0];
+    for graph_path in ["", "/different/graph"] {
+        assert!(graph.asset_trash_containing_folder(graph_path, entry)
+            .unwrap_err().to_string().contains("active graph changed"));
+    }
+    for path in [
+        "../assets/archive.zip",
+        "assets/archive.zip",
+        ".grafium/asset-trash/.purged/archive.zip",
+        ".grafium/asset-trash/not-a-batch/assets/archive.zip",
+        &format!("/{}", entry.trash_filename),
+        &entry.trash_filename.replace("/assets/", "/../assets/"),
+    ] {
+        let mut invalid = entry.clone();
+        invalid.trash_filename = path.into();
+        assert!(graph.asset_trash_containing_folder(&scan.graph_path, &invalid).is_err(), "{path}");
+    }
+    let mut mismatched = entry.clone();
+    mismatched.filename = "assets/other.zip".into();
+    assert!(graph.asset_trash_containing_folder(&scan.graph_path, &mismatched).is_err());
+    graph.restore_trashed_assets(&scan.graph_path, &scan.assets)?;
+    assert!(graph.asset_trash_containing_folder(&scan.graph_path, entry).is_err());
+    assert_eq!(fs::read(graph.root_dir.join("assets/archive.zip"))?, b"archive");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn trash_containing_folder_rejects_symlinked_batches() -> Result<()> {
+    let (_dir, graph) = setup();
+    let outside = TempDir::new()?;
+    fs::create_dir(outside.path().join("assets"))?;
+    fs::write(outside.path().join("assets/archive.zip"), b"outside")?;
+    let batch = Uuid::new_v4();
+    fs::create_dir_all(graph.root_dir.join(TRASH))?;
+    std::os::unix::fs::symlink(outside.path(), graph.root_dir.join(TRASH).join(batch.to_string()))?;
+    let entry = AssetTrashEntry {
+        filename: "assets/archive.zip".into(),
+        trash_filename: format!("{TRASH}/{batch}/assets/archive.zip"),
+        size: 7,
+        sha256: String::new(),
+    };
+    assert!(graph.asset_trash_containing_folder(
+        graph.root_dir.canonicalize()?.to_str().unwrap(), &entry
+    ).unwrap_err().to_string().contains("Symbolic link"));
+    assert_eq!(fs::read(outside.path().join("assets/archive.zip"))?, b"outside");
+    Ok(())
+}
+
+#[test]
 fn deleting_subtree_restoring_and_redoing_preserves_all_attachment_bytes() -> Result<()> {
     let (_dir, graph) = setup();
     let page = graph.create_page_with_content("Attachments", false,
