@@ -2478,7 +2478,7 @@
       {/if}
     {/if}
 
-    <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode}>
+    <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode} class:chat-content={chatActive}>
     {#key graphGeneration}
     {#if studySaveError || activeStudy}
     <div class="study-session-controls">
@@ -2695,6 +2695,7 @@
         <LazyView load={loadChatView} name="chat">
           {#snippet children(ChatView)}
             <ChatView active={chatActive} conversationId={expandedConversationId}
+              readingInset={wideMode || zenMode ? 0 : narrowPaddingPct}
               onOpenSettings={() => handleNavigate("__settings__")}
               onNavigate={handleNavigate}
               onFindLinks={handleFindLinksForPage} />

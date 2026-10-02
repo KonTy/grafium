@@ -77,13 +77,11 @@ describe("narrow-screen guards", () => {
     // the full 300px, and it stays 300px while the drawer is open because
     // the drawer overlays rather than displaces.
     const css = styleOf("ChatSwitcher.svelte");
-    const drawer = css.slice(css.indexOf("@media (max-width: 560px)"));
-    expect(drawer, "ChatSwitcher lost its drawer breakpoint").not.toBe("");
-    expect(ruleIn(drawer, ".switcher")).toContain("position: absolute");
-    expect(ruleIn(drawer, ".switcher")).toContain("transform: translateX(-102%)");
+    expect(ruleIn(css, ".switcher.drawer")).toContain("position: absolute");
+    expect(ruleIn(css, ".switcher.drawer")).toContain("transform: translateX(-102%)");
     // Out of flow but still on the page is a tab stop the user cannot see.
-    expect(ruleIn(drawer, ".switcher:not(.open)")).toContain("visibility: hidden");
-    expect(ruleIn(drawer, ".switcher.open")).toContain("transform: translateX(0)");
+    expect(ruleIn(css, ".switcher.drawer:not(.open)")).toContain("visibility: hidden");
+    expect(ruleIn(css, ".switcher.drawer.open")).toContain("transform: translateX(0)");
   });
 
   it("only shows the chat drawer toggle where the drawer exists", () => {
@@ -92,10 +90,8 @@ describe("narrow-screen guards", () => {
     const css = styleOf("ChatView.svelte");
     expect(ruleIn(css, ".chat-bar")).toContain("display: none");
     expect(ruleIn(css, ".scrim")).toContain("display: none");
-    const narrow = css.slice(css.indexOf("@media (max-width: 560px)"));
-    expect(narrow, "ChatView lost its drawer breakpoint").not.toBe("");
-    expect(ruleIn(narrow, ".chat-bar")).toContain("display: flex");
-    expect(ruleIn(narrow, ".scrim")).toContain("display: block");
+    expect(ruleIn(css, ".compact .chat-bar")).toContain("display: flex");
+    expect(ruleIn(css, ".compact .scrim")).toContain("display: block");
   });
 
   it("anchors the chat drawer to the conversation host", () => {

@@ -49,6 +49,68 @@ const metrics = (page) => composer(page).evaluate((node) => {
 });
 
 const cases = [
+  ["Chat history docks to navigation and resizes independently of reading width", { global: true }, async (page) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const history = page.locator("#chat-switcher");
+    const separator = page.getByRole("separator", { name: "Resize conversations", exact: true });
+    const geometry = () => page.evaluate(() => {
+      const bounds = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+      return { main: bounds(".main-content"), history: bounds("#chat-switcher"), chat: bounds(".chat-view .assistant-conversation") };
+    });
+    await separator.waitFor();
+    await frames(page);
+    let wide = await geometry();
+    assert.ok(Math.abs(wide.history.x - wide.main.x) <= 1, "history starts at the menu edge, without the reading gutter");
+    assert.equal(Math.round(wide.history.width), 240);
+    await input(page).fill("Keep this draft during layout changes.");
+    await page.keyboard.press("Alt+w");
+    await frames(page);
+    const narrow = await geometry();
+    assert.ok(Math.abs(narrow.history.x - wide.history.x) <= 1);
+    assert.ok(narrow.history.width > wide.history.width + 100, "narrowing chat gives the left margin to history");
+    assert.ok(narrow.chat.width < wide.chat.width);
+    const divider = await separator.boundingBox();
+    await page.mouse.move(divider.x + divider.width / 2, divider.y + divider.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(divider.x + divider.width / 2 + 120, divider.y + divider.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await frames(page);
+    assert.ok(Math.abs((await geometry()).history.width - narrow.history.width - 120) <= 2);
+    assert.equal(await input(page).inputValue(), "Keep this draft during layout changes.");
+    await separator.focus();
+    await separator.press("ArrowLeft");
+    await frames(page);
+    assert.equal(await separator.evaluate(node => node === document.activeElement), true);
+    const resized = (await geometry()).history.width;
+    assert.ok(Math.abs(resized - narrow.history.width - 100) <= 2);
+    await leaveChat(page);
+    await returnToChat(page);
+    assert.ok(Math.abs((await geometry()).history.width - resized) <= 1);
+    await page.reload({ waitUntil: "networkidle" });
+    await returnToChat(page);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await frames(page);
+    assert.ok(Math.abs((await geometry()).history.width - 340) <= 2, "width adjustment survives restart; fixture restores wide mode");
+    await separator.dblclick();
+    await frames(page);
+    assert.equal(Math.round((await geometry()).history.width), 240);
+    await page.setViewportSize({ width: 760, height: 680 });
+    await frames(page);
+    const toggle = page.getByRole("button", { name: "Chats", exact: true });
+    await toggle.waitFor();
+    assert.equal(await separator.count(), 0, "a narrow Chat area gets a drawer even in a desktop-width window");
+    const before = (await geometry()).chat.width;
+    await toggle.click();
+    await history.waitFor({ state: "visible" });
+    assert.ok(Math.abs((await geometry()).chat.width - before) <= 1, "drawer does not squeeze the active conversation");
+    await page.keyboard.press("Escape");
+    await history.waitFor({ state: "hidden" });
+    assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await separator.waitFor();
+    wide = await geometry();
+    assert.equal(Math.round(wide.history.width), 240);
+  }],
   ["Global Chat defaults to No notes and Answer without automatic web from research wording", { global: true }, async (page) => {
     await focused(page);
     assert.equal(await context(page).inputValue(), "none");
@@ -167,7 +229,8 @@ const cases = [
       await page.setViewportSize({ width: Math.max(320, width - 160), height: height - 100 });
       await frames(page);
       const resized = await metrics(page);
-      assert.ok(resized.height <= resized.limit + 1, "resizing recalculates the cap without typing");
+      assert.ok(resized.height <= resized.limit + 1,
+        `resizing recalculates the cap without typing at ${width - 160}x${height - 100}: ${JSON.stringify(resized)}`);
       assert.ok(resized.height >= resized.limit - 2);
       assert.equal(resized.contained && resized.unobscured, true,
         `resized ${Math.max(320, width - 160)}x${height - 100}: ${JSON.stringify(resized)}`);

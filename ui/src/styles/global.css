@@ -464,7 +464,7 @@ ul.grafium-list-dot > li {
   margin: 0 !important;
 }
 
-.app-shell:not(.wide-mode) .main-content {
+.app-shell:not(.wide-mode) .main-content:not(.chat-content) {
   padding-left: var(--narrow-padding-x) !important;
   padding-right: var(--narrow-padding-x) !important;
 }

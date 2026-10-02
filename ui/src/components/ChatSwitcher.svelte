@@ -14,12 +14,13 @@
   import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { SvelteSet } from "svelte/reactivity";
 
-  let { graphPath, currentId, onSelect, open = false }: {
+  let { graphPath, currentId, onSelect, open = false, drawer = false }: {
     graphPath: string;
     currentId: string | null;
     onSelect: (thread: AssistantThread) => void;
     /** Only consulted below the drawer breakpoint, where the list is off-canvas. */
     open?: boolean;
+    drawer?: boolean;
   } = $props();
 
   let renamingId = $state<string | null>(null);
@@ -177,7 +178,7 @@
   }
 </script>
 
-<div id="chat-switcher" class="switcher" class:selecting={selected.size > 0} class:open>
+<div id="chat-switcher" class="switcher" class:selecting={selected.size > 0} class:open class:drawer>
   <div class="switcher-head">
     <h2>{selected.size > 0 ? `${selected.size} selected` : "Chats"}</h2>
     <button
@@ -262,13 +263,13 @@
 {/if}
 
 <style>
-  .switcher { display: flex; flex-direction: column; min-height: 0; width: 200px; flex: 0 0 auto; border-right: 1px solid var(--border-color, #ddd); padding-right: 10px; margin-right: 12px; }
+  .switcher { display: flex; flex-direction: column; min-height: 0; min-width: 0; box-sizing: border-box; width: var(--chat-history-width, 240px); flex: 0 0 auto; padding: 16px 8px; background: var(--bg-primary); }
   .switcher-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-  h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary, #666); }
+  h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary, #666); }
   .delete-chats { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; padding: 3px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text-secondary); cursor: pointer; transition: color 120ms ease, border-color 120ms ease; }
   .delete-chats:hover:not(:disabled) { color: var(--danger); border-color: var(--border); }
   .delete-chats:disabled { opacity: 0.4; cursor: default; }
-  .new-chat { font-size: 11px; padding: 3px 7px; border: 1px solid var(--border-color, #ddd); border-radius: 4px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary); cursor: pointer; }
+  .new-chat { flex-shrink: 0; font-size: 11px; padding: 3px 7px; border: 1px solid var(--border-color, #ddd); border-radius: 4px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary); cursor: pointer; }
   .new-chat:disabled { opacity: 0.5; cursor: default; }
   ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
   li { display: flex; align-items: center; gap: 2px; border-radius: 4px; }
@@ -306,40 +307,34 @@
   .context-menu { position: fixed; z-index: 2147483000; border-radius: 6px; padding: 4px; min-width: 150px; }
   .context-menu-item { display: flex; align-items: center; width: 100%; padding: 7px 10px; background: none; border: none; border-radius: 4px; color: var(--text-secondary); font-size: 13px; cursor: pointer; text-align: left; }
   .context-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
-  @media (max-width: 640px) { .switcher { width: 132px; } }
-
-  /* Below this the list and the conversation cannot share a row: 132px of chat
-     list plus its margins left under half a 320px screen for the conversation
-     itself. It becomes an off-canvas drawer that ChatView opens. */
-  @media (max-width: 560px) {
-    .switcher {
-      position: absolute;
-      inset: 0 auto 0 0;
-      z-index: 20;
-      width: min(240px, 78vw);
-      padding: 10px;
-      margin-right: 0;
-      border-right: 1px solid var(--border-color, #ddd);
-      background: var(--bg-primary);
-      box-shadow: 4px 0 18px rgba(0, 0, 0, 0.32);
-      transform: translateX(-102%);
-      /* visibility flips at 0% when opening and 100% when closing, so the
-         panel stays on screen for its slide-out instead of vanishing. */
-      transition: transform 160ms ease, visibility 160ms;
-    }
-
-    .switcher.open {
-      transform: translateX(0);
-    }
-
-    /* A closed drawer must not be a tab stop parked off-screen. */
-    .switcher:not(.open) {
-      visibility: hidden;
-    }
+  .switcher.drawer {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: min(240px, 78vw);
+    padding: 10px;
+    margin-right: 0;
+    border-right: 1px solid var(--border-color, #ddd);
+    background: var(--bg-primary);
+    box-shadow: 4px 0 18px rgba(0, 0, 0, 0.32);
+    transform: translateX(-102%);
+    /* visibility flips at 0% when opening and 100% when closing, so the
+       panel stays on screen for its slide-out instead of vanishing. */
+    transition: transform 160ms ease, visibility 160ms;
   }
 
-  @media (max-width: 560px) and (prefers-reduced-motion: reduce) {
-    .switcher {
+  .switcher.drawer.open {
+    transform: translateX(0);
+  }
+
+  /* A closed drawer must not be a tab stop parked off-screen. */
+  .switcher.drawer:not(.open) {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .switcher.drawer {
       transition: none;
     }
   }

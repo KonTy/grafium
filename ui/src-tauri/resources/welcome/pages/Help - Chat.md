@@ -6,6 +6,20 @@ you want references or a focused answer.
 
 For current outside information, use the research controls and review sources.
 
+## Arrange conversations
+
+The conversation list is docked immediately beside the main navigation menu.
+Drag the divider between **Chats** and the conversation to resize it; your
+adjustment is remembered on this device. Double-click the divider to reset.
+You can also focus **Resize conversations** with Tab and use Left/Right
+(Shift for larger steps), Home for the minimum, or End for the maximum.
+
+**Alt+W** switches wide/narrow reading. In narrow mode, the left reading margin
+becomes extra space for conversation titles instead of an empty gutter.
+The right reading margin remains, and resizing keeps the active chat usable.
+When the available Chat area is too small for both panels, **Chats** opens an
+overlay drawer. Select a conversation, press Escape, or tap outside to close it.
+
 ## Ask AI to organize and draft
 
 Use ordinary requests, or choose **Ask / act** beside the composer:

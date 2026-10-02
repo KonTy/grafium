@@ -26,6 +26,12 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("documents docked, resizable conversation history in Chat help", () => {
+    expect(helpPageTitle("chat")).toBe("Help - Chat");
+    for (const phrase of ["docked immediately", "Resize conversations", "Double-click", "Alt+W", "overlay drawer"]) {
+      expect(chatHelp).toContain(phrase);
+    }
+  });
   it("explains reviewed ASK actions in the existing Chat and Tasks contexts", () => {
     expect(workflowCard).toContain('data-help-context="chat"');
     expect(helpPageTitle("chat")).toBe("Help - Chat");

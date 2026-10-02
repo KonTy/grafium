@@ -219,7 +219,7 @@
     const focused = document.activeElement;
     if (focused instanceof Element && focused !== inputEl
       && !(afterRun && focused.matches(".send-button"))
-      && focused.closest("input, textarea, select, button, a, summary, [contenteditable=true]")) return;
+      && focused.closest("input, textarea, select, button, a, summary, [contenteditable=true], [role=separator]")) return;
     inputEl.focus();
   }
   function onInputBlur() {
