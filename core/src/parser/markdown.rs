@@ -287,8 +287,9 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
                 continue;
             }
 
-            // Ignore synthetic empty bullets from prior corruption.
-            if continuation.trim().is_empty() || continuation.trim() == "-" {
+            // Ignore synthetic empty bullets from prior corruption, but keep
+            // literal blank code lines: reviewed Markdown must round-trip them.
+            if continuation.trim() == "-" {
                 consumed += 1;
                 continue;
             }
