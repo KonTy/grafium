@@ -3,18 +3,18 @@ import conversation from "./AssistantConversation.svelte?raw";
 import card from "./AIEditPlanCard.svelte?raw";
 
 describe("Chat edit actions", () => {
-  it("only plans edits for instructions and still answers when planning fails", () => {
+  it("only plans edits for instructions and does not restart failed or cancelled planning", () => {
     // Planning costs a second model round trip. Questions must not pay for it.
     expect(conversation).toContain("if (looksLikeEditRequest(request) && (await proposeEdits(request))) return;");
     expect(conversation).toContain("await sendAssistantQuestion(thread, thread.context, thread.contextLabel);");
-    // A thrown planner returns false rather than propagating, so `send` falls
-    // through to a normal answer instead of leaving the user with silence.
-    expect(conversation).toMatch(/catch \(cause\) \{\s*console\.error\("Could not plan edits:", cause\);\s*return false;/);
+    expect(conversation).toContain("collectAssistantPlan(thread.graphPath, prompt, thread.context, controller.signal)");
+    expect(conversation).toContain('planError = "Planning stopped. No changes were saved."');
+    expect(conversation).toContain("planError = `Could not plan edits:");
     expect(conversation).toContain("if (!plan.actions.length) return false;");
   });
 
   it("reuses the previous answer verbatim instead of asking the model to retype it", () => {
-    expect(conversation).toContain("hydratePlan(parseEditPlan(response.answer), answer)");
+    expect(conversation).toContain("hydratePlan(parseEditPlan(response), answer)");
     expect(conversation).toContain('find((message) => message.role === "assistant")?.content');
   });
 

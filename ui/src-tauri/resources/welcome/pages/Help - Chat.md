@@ -20,9 +20,33 @@ The right reading margin remains, and resizing keeps the active chat usable.
 When the available Chat area is too small for both panels, **Chats** opens an
 overlay drawer. Select a conversation, press Escape, or tap outside to close it.
 
+## Message controls
+
+The framed conversation area contains your messages; model diagnostics are not
+chat messages. Type in the shaded composer at the bottom.
+
+- **Up arrow / Send:** send the message, or press Enter. Shift+Enter adds a line.
+  While an answer, edit plan, or action analysis is running, the same control
+  becomes a **Stop** square. It cancels that request; partial answers stay visible.
+  Saving an already approved change is not interrupted.
+- **Notes context:** choose which notes to include. **No notes** excludes note
+  retrieval; **This page**, **Selection**, and the other choices set explicit scope.
+- **Answer mode:** choose **Answer — no web**, **Web search**, or **Deep web research**.
+- **Actions:** choose a Summary, Explain, or Compare prompt, or a reviewable
+  note action. Prompt shortcuts fill the draft without sending it.
+- **Model & index status icon**, beside Send: inspect the configured model,
+  CPU/GPU status, index progress, and privacy guidance. Its icon and outline
+  distinguish working, warning, and error states; keyboard and hover labels
+  name the state. Open it for **Index now**, **Retry on GPU** when supported,
+  **Retry status** after a status failure, or **Configure provider**.
+
+The status menu closes with Escape or a click outside it. Actionable model
+warnings remain flagged beside the composer; open **Model status** for details
+and recovery instructions. Retrying never bypasses GPU safety or approval.
+
 ## Ask AI to organize and draft
 
-Use ordinary requests, or choose **Ask / act** beside the composer:
+Use ordinary requests, or choose **Actions** inside the composer:
 
 - **Group open tasks:** "Group all my TODOs by similarity and flag possible
   duplicates." Grafium reads the current graph's open tasks and proposes a new
@@ -73,7 +97,8 @@ closing the conversation or application if you want to keep one.
 
 ## Watching it work
 
-Native model safety warnings appear beside **Model & index status**. Insufficient
+Native model safety warnings are flagged beside the composer, with details in
+the **Model & index status** menu. Insufficient
 or unknown GPU headroom selects CPU when RAM permits; retrying GPU does not
 override the admission checks. Recovery notices link to Settings, where a
 particular model can be authorized for one GPU attempt after an unconfirmed exit.

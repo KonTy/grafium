@@ -15,7 +15,8 @@
   import { assistantModes, assistantProvider } from "./assistantPresentation";
   import { getPage, listBlocks } from "../lib/api";
   import { isOriginalBookPage } from "../lib/books";
-  import { aiAsk, aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
+  import { aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
+  import { collectAssistantPlan } from "../lib/assistantPlanning";
   import { buildPlannerPrompt, hydratePlan, looksLikeEditRequest, parseEditPlan, type EditAction } from "../lib/aiActions";
   import { applyEditPlan, summarizeApplyResult, type BlockTarget } from "../lib/aiActionsApply";
   import { captureResearchSource } from "../lib/researchSource";
@@ -58,9 +59,13 @@
   let inputEl: HTMLTextAreaElement | undefined;
   let paneEl: HTMLElement | undefined;
   let footerEl: HTMLDivElement | undefined;
+  let diagnostics = $state<{ openMenu: () => void }>();
+  let modelNotice = $state<{ text: string; error: boolean } | null>(null);
+  function updateModelNotice(notice: { text: string; error: boolean } | null) { modelNotice = notice; }
   let followAnswer = $state(true);
   let blockPreview = $state("");
   let planning = $state(false);
+  let planningController = $state<AbortController | null>(null);
   let applyingPlan = $state(false);
   let planError = $state("");
   let planResult = $state("");
@@ -98,6 +103,7 @@
   $effect(() => {
     workflowIdentity;
     return () => untrack(() => {
+      planningController?.abort();
       workflowRun?.controller.abort();
       workflowRun = null;
       pendingWorkflow = null;
@@ -197,7 +203,9 @@
 
   function resizeComposer() {
     if (!inputEl || !paneEl) return;
-    const maximum = Math.max(32, Math.floor(paneEl.clientHeight / 2) - (footerEl?.offsetHeight ?? 64) - 2);
+    const style = getComputedStyle(paneEl);
+    const availableHeight = paneEl.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+    const maximum = Math.max(32, Math.floor(availableHeight / 2) - (footerEl?.offsetHeight ?? 64) - 2);
     inputEl.style.height = "0px";
     inputEl.style.height = `${Math.min(maximum, Math.max(48, inputEl.scrollHeight))}px`;
     inputEl.style.overflowY = inputEl.scrollHeight > maximum ? "auto" : "hidden";
@@ -381,27 +389,35 @@
   /**
    * Ask the model for an edit plan. Returns true when a card is showing.
    *
-   * Any failure returns false so `send` falls through to a normal answer: the
-   * user asked for something, and a broken planner should never mean silence.
+   * Only a valid non-action response falls through to ordinary chat.
+   * Cancellation or provider errors must never start another model request.
    */
   async function proposeEdits(request: string): Promise<boolean> {
+    const controller = new AbortController();
+    const identity = workflowIdentity;
+    planningController = controller;
     planning = true;
     planError = "";
     try {
       const answer = lastAnswer();
       const prompt = buildPlannerPrompt(request, answer, !!focusedBlockId);
-      const response = await aiAsk(prompt, undefined, [],
-        contextPageId ? { pageId: contextPageId, blockId: focusedBlockId ?? undefined } : undefined);
-      const plan = hydratePlan(parseEditPlan(response.answer), answer);
+      const response = await collectAssistantPlan(thread.graphPath, prompt, thread.context, controller.signal);
+      const plan = hydratePlan(parseEditPlan(response), answer);
       if (!plan.actions.length) return false;
       pendingPlan = { request, actions: plan.actions };
       thread.draft = "";
       updateAssistantConversation();
       return true;
     } catch (cause) {
+      if (controller.signal.aborted) {
+        if (identity === workflowIdentity) planError = "Planning stopped. No changes were saved.";
+        return true;
+      }
       console.error("Could not plan edits:", cause);
-      return false;
+      planError = `Could not plan edits: ${cause instanceof Error ? cause.message : String(cause)}`;
+      return true;
     } finally {
+      planningController = null;
       planning = false;
     }
   }
@@ -492,7 +508,6 @@
   <header class="conversation-header">
     <div class="source-heading">
       <strong>{view.sourcePageTitle || "Chat"}</strong>
-      <button class="model-badge" onclick={onOpenSettings} title={provider.detail}>{provider.label} <span>· {provider.detail}</span></button>
     </div>
     <div class="header-actions">
       {#if compact && onExpand}<button class="quiet-button" onclick={() => onExpand?.(thread.id)} title="Open this same conversation in full Chat">Expand</button>{/if}
@@ -510,18 +525,6 @@
       </div>
     {:else if contextPageId && info && readOnlySource}
       <p>Original books are read-only. Chat uses indexed book text; save your own writing in Notes rather than rewriting the book.</p>
-    {/if}
-    <AssistantDiagnostics {active} {running} {onOpenSettings} />
-    {#if !view.messages.length}
-      <div class="empty-message">
-        <p>{view.sourcePageId ? "Ask about what you’re reading" : "What would you like to explore?"}</p>
-        <span>Choose your notes context and a mode. Answers never change your notes.</span>
-        <div class="shortcuts">
-          <button class="quiet-button" onclick={() => shortcut("Summarize the main ideas in the chosen context.")}>Summary</button>
-          <button class="quiet-button" onclick={() => shortcut("Explain the main idea in the chosen context, with an example.")}>Explain</button>
-          <button class="quiet-button" onclick={() => shortcut("Compare the ideas in the chosen context: ")}>Compare</button>
-        </div>
-      </div>
     {/if}
     {#each view.messages as message, index}
       <div class="conversation-turn">
@@ -576,18 +579,15 @@
   </div>
 
   <div class="conversation-controls">
-    <div class="context-preview">
-      <span title={view.contextLabel}>{running ? "Answering with" : "Context"}: {view.contextLabel}</span>
-      <label class="workflow-choice">
-        <select aria-label="ASK action" title="Ask / act" value={workflowChoice} disabled={busy} onchange={event => chooseWorkflow(event.currentTarget.value)}>
-          <option value="auto">Ask / act…</option>
-          {#each Object.entries(WORKFLOW_LABELS) as [kind, label]}<option value={kind}>{label}</option>{/each}
-        </select>
-      </label>
-      {#if view.selection && !view.selectionError && !busy}
-        <button class="text-button" onmousedown={(event) => event.preventDefault()} onclick={() => chooseContext("selection")}>Use selection</button>
-      {/if}
-    </div>
+    {#if modelNotice}
+      <div class="model-notice" class:error={modelNotice.error} role={modelNotice.error ? "alert" : "status"}>
+        <span>{modelNotice.text}</span>
+        <button type="button" class="text-button" onclick={() => diagnostics?.openMenu()}>Model status</button>
+      </div>
+    {/if}
+    {#if view.selection && !view.selectionError && !busy}
+      <button class="text-button refresh-context" onmousedown={(event) => event.preventDefault()} onclick={() => chooseContext("selection")}>Use selection</button>
+    {/if}
     {#if !busy && view.context.kind === "block" && focusedBlockId && view.context.blockId !== focusedBlockId}
       <button class="text-button refresh-context" onclick={() => chooseContext("block")}>Use the newly focused block</button>
     {:else if !busy && view.context.kind === "section" && info?.section && view.context.blockId !== info.section.blockId}
@@ -599,7 +599,7 @@
       <p class="mode-hint">Action scope: {requestedWorkflow === "tasks" ? "all open tasks in this graph" : requestedWorkflow === "topics" ? "this page and saved Markdown notes in this graph" : "the selected writing on this page"}. Review before saving.</p>
     {/if}
     <form class="conversation-composer" role="group" aria-label="Chat composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
-      <textarea bind:this={inputEl} aria-label="Message" placeholder="Ask a question…" rows="2" value={view.draft}
+      <textarea bind:this={inputEl} aria-label="Message" placeholder="Ask a question or describe a task…" rows="2" value={view.draft}
         disabled={busy} onblur={onInputBlur}
         oninput={(event) => { thread.draft = event.currentTarget.value; updateAssistantConversation(); }}
         onkeydown={(event) => {
@@ -608,8 +608,8 @@
           }
         }}></textarea>
       <div class="composer-options" bind:this={footerEl}>
-        <label>Context
-          <select aria-label="Context" value={view.context.kind} disabled={busy} onchange={(event) => chooseContext(event.currentTarget.value)}>
+        <label class="context-choice"><span class="control-label">Notes context</span>
+          <select aria-label="Context" title={`Notes to include: ${view.contextLabel}`} value={view.context.kind} disabled={busy} onchange={(event) => chooseContext(event.currentTarget.value)}>
             <option value="selection" disabled={!view.selection || !!view.selectionError}>Selection</option>
             <option value="block" disabled={!focusedBlockId}>Block including children</option>
             <option value="section" disabled={!info?.section}>Section / Chapter</option>
@@ -619,33 +619,67 @@
             <option value="none">No notes</option>
           </select>
         </label>
-        <label>Mode
+        <label class="mode-choice"><span class="control-label">Answer mode</span>
           <select aria-label="Mode" value={view.mode} disabled={busy || !!requestedWorkflow} title={assistantModes[view.mode].description}
             onchange={(event) => { thread.mode = event.currentTarget.value as AssistantMode; updateAssistantConversation(); }}>
             {#each Object.entries(assistantModes) as [mode, choice]}<option value={mode}>{choice.label}</option>{/each}
           </select>
         </label>
-        {#if workflowRun}<button type="button" class="send-button stop-button" disabled={workflowRun.controller.signal.aborted}
-          onclick={() => workflowRun?.controller.abort()}>Stop analysis</button>
-        {:else if running}<button type="button" class="send-button stop-button" onclick={() => void stopAssistantConversation(thread)}>Stop</button>
-        {:else}<button class="send-button" type="submit" disabled={!view.draft.trim() || !connected || checking || (scopeUnavailable && !requestedWorkflow) || busy}>{planning ? "Planning…" : "Send"}</button>{/if}
+        <label class="workflow-choice"><span class="control-label">Prompts and actions</span>
+          <select aria-label="ASK action" title="Choose a prompt or a reviewable note action" value={workflowChoice} disabled={busy}
+            onchange={event => {
+              const prompts: Record<string, string> = {
+                summary: "Summarize the main ideas in the chosen context.",
+                explain: "Explain the main idea in the chosen context, with an example.",
+                compare: "Compare the ideas in the chosen context: ",
+              };
+              const question = prompts[event.currentTarget.value];
+              if (question) { shortcut(question); event.currentTarget.value = "auto"; }
+              else chooseWorkflow(event.currentTarget.value);
+            }}>
+            <option value="auto">Actions</option>
+            <optgroup label="Draft a question"><option value="summary">Summary</option><option value="explain">Explain</option><option value="compare">Compare</option></optgroup>
+            <optgroup label="Reviewable changes">{#each Object.entries(WORKFLOW_LABELS) as [kind, label]}<option value={kind}>{label}</option>{/each}</optgroup>
+          </select>
+        </label>
+        <div class="send-actions">
+          {#key thread.graphPath}
+            <AssistantDiagnostics bind:this={diagnostics} {active} running={busy} {provider} {connected} {checking}
+              noNotesExcludesHistory={view.context.kind === "none" && view.messages.length > 0}
+              onNotice={updateModelNotice} {onOpenSettings} />
+          {/key}
+          {#if workflowRun || running || planning}
+            <button type="button" class="send-button stop-button"
+              aria-label={workflowRun ? "Stop analysis" : "Stop"} title={workflowRun ? "Stop analysis" : planning ? "Stop planning" : "Stop generating"}
+              disabled={!!workflowRun?.controller.signal.aborted || !!planningController?.signal.aborted}
+              onclick={() => { if (workflowRun) workflowRun.controller.abort(); else if (planningController) planningController.abort(); else void stopAssistantConversation(thread); }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
+            </button>
+          {:else}
+            <button class="send-button" type="submit"
+              aria-label={applyingPlan ? "Saving changes" : "Send"}
+              title={applyingPlan ? "Saving reviewed changes" : "Send message (Enter)"}
+              disabled={!view.draft.trim() || !connected || checking || (scopeUnavailable && !requestedWorkflow) || busy}>
+              {#if applyingPlan}
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" stroke-dasharray="12 6" /></svg>
+              {:else}
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>
+              {/if}
+            </button>
+          {/if}
+        </div>
       </div>
     </form>
-    <p class="mode-hint">{requestedWorkflow || workflowRun ? "Analysis uses your configured model without web searches. Large scopes require multiple model requests." : assistantModes[view.mode].description}</p>
-    <details class="privacy-note assistant-disclosure">
-      <summary>Model &amp; web privacy</summary>
-      <div class="assistant-disclosure-body">
-        {#if view.context.kind === "none" && view.messages.length}
-          <p>No notes excludes earlier note-backed answers from the next request. They remain visible in this transcript.</p>
-        {/if}
-        <p>Prompts and selected excerpts go to the configured model. For web modes, Grafium contacts search engines and websites, then forwards results to your model server or service—even if that server has no internet. Endpoint location alone does not guarantee privacy. Grafium never switches models automatically.</p>
-      </div>
-    </details>
+    {#if requestedWorkflow || workflowRun}
+      <p class="mode-hint">Analysis uses your configured model without web searches. Large scopes require multiple model requests.</p>
+    {:else if view.mode !== "answer"}
+      <p class="mode-hint">{assistantModes[view.mode].description}</p>
+    {/if}
   </div>
 </section>
 
 <style>
-  .assistant-conversation { display: flex; flex-direction: column; flex: 1; height: 100%; min-width: 0; min-height: 0; gap: 10px; color: var(--text-primary); font-size: 13px; container-type: inline-size; }
+  .assistant-conversation { --chat-outline: color-mix(in srgb, var(--text-secondary) 42%, var(--bg-primary)); display: flex; flex-direction: column; flex: 1; height: 100%; min-width: 0; min-height: 0; box-sizing: border-box; padding: 10px; border: 1px solid var(--chat-outline); border-radius: 10px; gap: 10px; color: var(--text-primary); background: var(--bg-primary); font-size: 13px; container-type: inline-size; }
   .conversation-header { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 8px; flex-shrink: 0; }
   .source-heading { min-width: 0; flex: 1 1 180px; display: grid; gap: 4px; }
   .source-heading strong { font-size: 15px; overflow-wrap: anywhere; }
@@ -653,44 +687,38 @@
   button, textarea, select { font: inherit; }
   button { cursor: pointer; border-radius: 5px; }
   button:disabled, select:disabled { cursor: default; opacity: .55; }
-  button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  textarea:focus-visible { outline: none; }
   .quiet-button { color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); padding: 5px 8px; }
   .quiet-button:hover:not(:disabled) { background: var(--bg-hover); }
-  .model-badge { text-align: left; border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-  .model-badge:hover { color: var(--accent); }
-  .model-badge span { display: inline; }
   .conversation-scroll { flex: 1; min-height: 40px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 12px; overscroll-behavior: contain; padding-bottom: 14px; }
   .conversation-scroll > :global(*) { flex-shrink: 0; }
   .conversation-turn { min-width: 0; }
   .conversation-scroll :global(.msg) { min-width: 0; overflow-wrap: anywhere; }
   .conversation-scroll :global(.msg pre), .conversation-scroll :global(.msg table) { max-width: 100%; overflow-x: auto; }
   .answer-badges { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--text-secondary); font-size: 11px; margin-bottom: 5px; }
-  .empty-message { padding: 24px 2px; line-height: 1.55; color: var(--text-secondary); }
-  .empty-message p { color: var(--text-primary); font-weight: 600; margin: 0 0 6px; }
-  .shortcuts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   .conversation-controls { flex-shrink: 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; max-height: 62%; overflow-y: auto; }
-  .context-preview { display: flex; justify-content: space-between; gap: 8px; color: var(--text-secondary); font-size: 12px; }
-  .context-preview > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .workflow-choice { flex-shrink: 0; }
-  .workflow-choice select { width: 140px; max-width: 40vw; font-size: 11px; padding: 2px; }
+  .control-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .text-button { border: none; background: transparent; color: var(--accent); padding: 0; text-decoration: underline; flex-shrink: 0; }
   .refresh-context { align-self: flex-start; font-size: 12px; }
   .selection-preview { margin: 0; font-size: 12px; line-height: 1.4; max-height: 56px; overflow: auto; border-left: 1px solid var(--border); padding-left: 8px; color: var(--text-secondary); overflow-wrap: anywhere; flex-shrink: 0; }
-  .conversation-composer { border: 1px solid var(--border); background: var(--bg-primary); border-radius: 7px; min-width: 0; flex-shrink: 0; }
-  .conversation-composer:focus-within { border-color: var(--accent); }
+  .conversation-composer { border: 1px solid var(--chat-outline); background: var(--bg-secondary); border-radius: 9px; min-width: 0; flex-shrink: 0; }
+  .conversation-composer:focus-within { border-color: var(--text-secondary); }
   textarea { display: block; box-sizing: border-box; width: 100%; height: 64px; min-height: 32px; resize: none; border: none; padding: 10px; color: var(--text-primary); background: transparent; line-height: 1.5; }
   textarea::placeholder { color: var(--text-secondary); }
-  .composer-options { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 6px 8px 8px; }
-  .composer-options label { display: grid; flex: 1 1 150px; min-width: 0; gap: 4px; color: var(--text-secondary); font-size: 12px; }
-  select { width: 100%; min-width: 0; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border); padding: 5px; border-radius: 4px; }
-  .send-button { border: 1px solid transparent; padding: 6px 12px; margin-left: auto; color: var(--btn-primary-fg, var(--bg-primary)); background: var(--btn-primary-bg, var(--accent)); }
+  .composer-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; }
+  .composer-options label { display: flex; flex: 1 1 100px; min-width: 0; color: var(--text-secondary); font-size: 12px; }
+  .composer-options .mode-choice { flex-basis: 120px; }
+  .composer-options .workflow-choice { flex: 0 1 86px; }
+  select { width: 100%; min-width: 0; height: 30px; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border); padding: 4px; border-radius: 5px; }
+  .send-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
+  .send-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 50%; padding: 0; color: var(--btn-primary-fg, var(--bg-primary)); background: var(--btn-primary-bg, var(--accent)); }
   .send-button:hover:not(:disabled) { filter: brightness(1.1); }
   .stop-button { background: var(--bg-secondary); color: var(--text-primary); border-color: var(--border); }
   .error-message { color: var(--danger, #c0392b); overflow-wrap: anywhere; margin: 0; font-size: 12px; line-height: 1.5; }
-  .connection-notice, .mode-hint, .privacy-note, .status-message { margin: 0; line-height: 1.5; overflow-wrap: anywhere; font-size: 12px; color: var(--text-secondary); }
-  .privacy-note { flex-shrink: 0; }
-  .privacy-note p { margin: 0; }
-  .privacy-note p + p { margin-top: 8px; }
-  @container (max-width: 380px) { .composer-options label { flex-basis: calc(50% - 8px); } .model-badge span { display: none; } }
+  .connection-notice, .mode-hint, .status-message { margin: 0; line-height: 1.5; overflow-wrap: anywhere; font-size: 12px; color: var(--text-secondary); }
+  .model-notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; color: var(--text-secondary); font-size: 12px; }
+  .model-notice.error { color: var(--danger); }
+  @container (max-width: 380px) { .composer-options .context-choice, .composer-options .mode-choice { flex-basis: calc(50% - 4px); } .composer-options .workflow-choice { flex-basis: 120px; } }
   @media (max-height: 550px) { .selection-preview { max-height: 28px; } .mode-hint { display: none; } .assistant-conversation { gap: 6px; } }
 </style>

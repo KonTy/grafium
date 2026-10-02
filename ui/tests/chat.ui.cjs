@@ -20,26 +20,30 @@ async function returnToChat(page) {
 async function focused(page) {
   await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Message");
 }
+const modelStatus = page => panel(page).getByRole("button", { name: /^Model & index status/ });
+const modelMenu = page => panel(page).getByRole("dialog", { name: "Model & index status", exact: true });
 const metrics = (page) => composer(page).evaluate((node) => {
   const input = node.querySelector("textarea");
   const pane = node.closest(".assistant-conversation");
   const style = getComputedStyle(pane);
   const bounds = node.getBoundingClientRect();
+  const controls = [...node.querySelectorAll("textarea, select, label, button")]
+    .filter(control => control.getClientRects().length && !control.closest("[popover]"));
   return {
     height: bounds.height, bottom: bounds.bottom,
     limit: (pane.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)) / 2,
     inputHeight: input.clientHeight, scrollHeight: input.scrollHeight, overflow: getComputedStyle(input).overflowY,
     transcriptHeight: pane.querySelector(".chat-log").clientHeight,
-    contained: [...node.querySelectorAll("textarea, select, label, button")].every((control) => {
+    contained: controls.every((control) => {
       const rect = control.getBoundingClientRect();
       return rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
         && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1;
     }),
-    unobscured: [...node.querySelectorAll("select, button")].every((control) => {
+    unobscured: controls.filter(control => control.matches("select, button")).every((control) => {
       const rect = control.getBoundingClientRect();
       return control.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
     }),
-    obscured: [...node.querySelectorAll("select, button")].flatMap((control) => {
+    obscured: controls.filter(control => control.matches("select, button")).flatMap((control) => {
       const rect = control.getBoundingClientRect();
       const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
       return control.contains(hit) ? [] : [{ control: control.getAttribute("aria-label") || control.textContent,
@@ -49,6 +53,100 @@ const metrics = (page) => composer(page).evaluate((node) => {
 });
 
 const cases = [
+  ["Chat has a quiet empty transcript and status actions beside icon send and stop controls", { global: true }, async (page) => {
+    const log = panel(page).locator(".chat-log");
+    assert.equal((await log.innerText()).trim(), "");
+    assert.equal(await panel(page).getByText("What would you like to explore?", { exact: true }).count(), 0);
+    assert.equal(await panel(page).getByText("Context: No notes", { exact: true }).count(), 0);
+    assert.equal(await button(page, "Send").innerText(), "");
+    assert.equal(await button(page, "Send").locator("svg").count(), 1);
+    assert.equal(await composer(page).getByRole("button", { name: /^Model & index status/ }).count(), 1);
+    const actions = composer(page).getByRole("combobox", { name: "ASK action" });
+    await actions.selectOption("summary");
+    assert.equal(await input(page).inputValue(), "Summarize the main ideas in the chosen context.");
+    assert.equal(await page.evaluate(() => window.__assistantFixture.requests.length), 0, "a prompt shortcut only fills a draft");
+    await modelStatus(page).click();
+    await modelMenu(page).waitFor();
+    const fits = await modelMenu(page).evaluate(node => {
+      const r = node.getBoundingClientRect();
+      return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight;
+    });
+    assert.equal(fits, true);
+    await page.keyboard.press("Escape");
+    await modelMenu(page).waitFor({ state: "hidden" });
+    assert.equal(await modelStatus(page).evaluate(node => node === document.activeElement), true);
+    await page.evaluate(() => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__assistantFixture.helpContexts = [];
+      window.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (command === "help_get_page") {
+          window.__assistantFixture.helpContexts.push(args.context);
+          return Promise.resolve("# Help - Chat\nSynthetic message controls guidance.");
+        }
+        return invoke(command, args);
+      };
+    });
+    await modelStatus(page).click();
+    await modelMenu(page).waitFor();
+    await page.keyboard.press("F1");
+    await page.getByRole("dialog", { name: "Help - Chat", exact: true }).waitFor();
+    await modelMenu(page).waitFor({ state: "hidden" });
+    assert.deepEqual(await page.evaluate(() => window.__assistantFixture.helpContexts), ["chat"]);
+    await page.getByRole("button", { name: "Close help" }).click();
+    await input(page).fill("Keep the draft while opening status");
+    await page.setViewportSize({ width: 360, height: 640 });
+    await modelStatus(page).click();
+    await modelMenu(page).waitFor();
+    assert.equal(await modelMenu(page).evaluate(node => {
+      const r = node.getBoundingClientRect();
+      return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight;
+    }), true, "status menu fits a phone viewport without clipping");
+    await page.keyboard.press("Escape");
+    await page.setViewportSize({ width: 1200, height: 900 });
+    await page.evaluate(() => { window.__assistantFixture.hold = true; });
+    const call = await send(page, "Show how the stop icon works", true);
+    assert.equal(await button(page, "Stop").innerText(), "");
+    assert.equal(await button(page, "Stop").locator("svg rect").count(), 1);
+    await button(page, "Stop").click();
+    await page.waitForFunction(() => window.__assistantFixture.cancellations.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__assistantFixture.cancellations), [call.args.requestId]);
+    await button(page, "Send").waitFor();
+  }],
+  ["Chat stop also cancels edit planning without falling back to another request", { global: true }, async (page) => {
+    await page.evaluate(() => { window.__assistantFixture.hold = true; });
+    await input(page).fill("Add that to my journal");
+    await button(page, "Send").click();
+    await page.waitForFunction(() => window.__assistantFixture.requests.length === 1);
+    const call = await page.evaluate(() => window.__assistantFixture.requests[0]);
+    assert.equal(call.cmd, "assistant_chat");
+    assert.equal(call.args.mode, "answer");
+    assert.deepEqual(call.args.context, { kind: "none" });
+    await button(page, "Stop").click();
+    await panel(page).getByRole("alert").filter({ hasText: "Planning stopped" }).waitFor();
+    assert.equal(await page.evaluate(() => window.__assistantFixture.requests.length), 1);
+    assert.deepEqual(await page.evaluate(() => window.__assistantFixture.cancellations), [call.args.requestId]);
+    assert.equal(await input(page).inputValue(), "Add that to my journal");
+  }],
+  ["Chat streaming edit plans still require review and surface failures without another model call", { global: true }, async (page) => {
+    await page.evaluate(() => { window.__assistantFixture.hold = true; });
+    const request = "Add this to my journal";
+    const call = await send(page, request, true);
+    await finish(page, call.args.requestId, JSON.stringify({ actions: [{
+      type: "append_to_journal", title: "Proposed journal note", content: "A synthetic draft",
+      source: "text", tags: [], date: "2026-10-02",
+    }] }));
+    const proposal = panel(page).getByRole("group", { name: "Proposed changes to your notes" });
+    await proposal.waitFor();
+    assert.equal(await proposal.getByLabel("Text", { exact: true }).inputValue(), "A synthetic draft");
+    assert.equal(await page.evaluate(() => window.__assistantFixture.writes.length), 0);
+    await proposal.getByRole("button", { name: "Dismiss", exact: true }).click();
+    assert.equal(await input(page).inputValue(), request);
+    const failed = await send(page, request, true);
+    await finish(page, failed.args.requestId, { error: "Synthetic planning failure", done: true });
+    await panel(page).getByRole("alert").filter({ hasText: "Synthetic planning failure" }).waitFor();
+    assert.equal(await page.evaluate(() => window.__assistantFixture.requests.length), 2);
+    assert.equal(await proposal.count(), 0);
+  }],
   ["Chat history docks to navigation and resizes independently of reading width", { global: true }, async (page) => {
     await page.setViewportSize({ width: 1600, height: 900 });
     const history = page.locator("#chat-switcher");
@@ -115,7 +213,7 @@ const cases = [
     await focused(page);
     assert.equal(await context(page).inputValue(), "none");
     assert.equal(await mode(page).inputValue(), "answer");
-    assert.equal(await composer(page).getByRole("combobox").count(), 2, "one context and one mode selector");
+    assert.equal(await composer(page).getByRole("combobox").count(), 3, "notes, mode and actions share the composer");
     assert.equal(await panel(page).getByRole("combobox", { name: "ASK action" }).count(), 1);
     assert.equal(await panel(page).getByRole("checkbox", { name: /Internet|Research/ }).count(), 0);
     assert.equal(await button(page, "Send").isDisabled(), true);
@@ -144,8 +242,9 @@ const cases = [
     assert.deepEqual(call.args.history, []);
   }],
   ["Spark API endpoint offers all three Grafium modes without vendor tools or exposed keys", { global: true }, async (page) => {
-    await panel(page).getByRole("button", { name: /Model server \/ API endpoint/ }).waitFor();
-    assert.ok((await panel(page).innerText()).includes("spark.lan:8000"));
+    await modelStatus(page).click();
+    await modelMenu(page).getByText(/Model server \/ API endpoint/).waitFor();
+    assert.ok((await modelMenu(page).innerText()).includes("spark.lan:8000"));
     assert.equal(await panel(page).getByRole("button", { name: /Cloud service/ }).count(), 0);
     assert.deepEqual(await mode(page).locator("option").evaluateAll((options) =>
       options.map(({ value, disabled }) => ({ value, disabled }))), [
@@ -153,6 +252,8 @@ const cases = [
     ]);
     await panel(page).getByText("Model & web privacy", { exact: true }).click();
     await panel(page).getByText(/Grafium contacts search engines and websites/).waitFor();
+    await page.keyboard.press("Escape");
+    await modelMenu(page).waitFor({ state: "hidden" });
     for (const selected of ["answer", "web", "deep"]) {
       await mode(page).selectOption(selected);
       await mode(page).focus();
@@ -200,6 +301,11 @@ const cases = [
     await context(page).press("Tab");
     assert.equal(await mode(page).evaluate((node) => node === document.activeElement), true);
     await mode(page).press("Tab");
+    const actions = composer(page).getByRole("combobox", { name: "ASK action" });
+    assert.equal(await actions.evaluate((node) => node === document.activeElement), true);
+    await actions.press("Tab");
+    assert.equal(await modelStatus(page).evaluate((node) => node === document.activeElement), true);
+    await modelStatus(page).press("Tab");
     assert.equal(await button(page, "Send").evaluate((node) => node === document.activeElement), true);
   }],
   ["Chat caps the whole composer at half the pane across themes sizes and soft wrapping", { global: true }, async (page) => {
@@ -340,10 +446,10 @@ const cases = [
       window.__assistantFixture.config.cloud.llm_model = "Refreshed Spark model";
       window.dispatchEvent(new Event("ai-configuration-changed"));
     });
-    await panel(page).getByRole("button", { name: /Refreshed Spark model/ }).waitFor();
+    await modelStatus(page).click();
+    await modelMenu(page).getByText(/Refreshed Spark model/).waitFor();
     assert.equal(await input(page).inputValue(), draft);
     assert.equal(await button(page, "Send").isEnabled(), true);
-    await panel(page).getByText("Model & index status", { exact: true }).click();
     await panel(page).getByText(/No semantic index yet/).waitFor();
     assert.equal(await button(page, "Index now").isDisabled(), true);
     await page.evaluate(() => {

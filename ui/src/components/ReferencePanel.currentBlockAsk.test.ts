@@ -100,7 +100,7 @@ describe("Unified conversation components", () => {
     expect(conversation).toContain("resizeComposer");
     expect(conversation).toContain('role="group" aria-label="Chat composer"');
     expect(conversation).toContain('aria-label="Message"');
-    expect(conversation).toContain("Math.floor(paneEl.clientHeight / 2) - (footerEl?.offsetHeight");
+    expect(conversation).toContain("Math.floor(availableHeight / 2) - (footerEl?.offsetHeight");
   });
 
   it("restores full Chat focus without collapsing transcript or outside-to-inside drag selections", () => {
