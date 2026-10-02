@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import RuntimeRecovery from "./RuntimeRecovery.svelte";
+  import SettingsHelp from "./SettingsHelp.svelte";
   import {
     aiGetConfig,
     aiSetConfig,
@@ -416,12 +417,14 @@
     {#if enabled}
       <!-- Mode selection -->
       <div class="field-group">
-        <span class="field-label" id="ai-mode-label">Mode</span>
+        <div class="help-row">
+          <span class="field-label" id="ai-mode-label">Mode</span>
+          <SettingsHelp title="AI mode"><p>{MODE_DESCRIPTIONS[mode]}</p></SettingsHelp>
+        </div>
         <div class="choice-row" role="group" aria-labelledby="ai-mode-label">
           <button class="choice-btn" class:active={mode === "local"} onclick={() => (mode = "local")}>Local</button>
           <button class="choice-btn" class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
         </div>
-        <p class="field-hint">{MODE_DESCRIPTIONS[mode]}</p>
       </div>
 
       <!-- Local settings -->
@@ -429,32 +432,42 @@
         <div class="settings-section">
           <h4>Local Provider</h4>
           <div class="field-group">
-            <span class="field-label" id="ai-local-provider-label">Provider</span>
+            <div class="help-row">
+              <span class="field-label" id="ai-local-provider-label">Provider</span>
+              <SettingsHelp title="Local AI provider"><p>{LOCAL_PROVIDER_DESCRIPTIONS[localProvider]}</p></SettingsHelp>
+            </div>
             <div class="choice-row" role="group" aria-labelledby="ai-local-provider-label">
               <button class="choice-btn" class:active={localProvider === "openai_compatible"} onclick={() => selectLocalProvider("openai_compatible")}>vLLM / OpenAI-compatible</button>
               <button class="choice-btn" class:active={localProvider === "ollama"} onclick={() => selectLocalProvider("ollama")}>Ollama</button>
               <button class="choice-btn" class:active={localProvider === "huggingface"} onclick={() => selectLocalProvider("huggingface")}>Embedded</button>
             </div>
-            <p class="field-hint">{LOCAL_PROVIDER_DESCRIPTIONS[localProvider]}</p>
           </div>
 
           {#if localProvider === "huggingface"}
             <!-- Embedded (llama.cpp): no server/URL/key involved at all. -->
             <div class="field-group">
-              <label class="field-label" for="ai-local-models-dir">Models Directory</label>
+              <div class="help-row">
+                <label class="field-label" for="ai-local-models-dir">Models Directory</label>
+                <SettingsHelp title="Local models directory">
+                  <p>Point this at a folder you already keep local models in (shared with Ollama, LM
+                    Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
+                    Leave blank to use Grafium's own managed models folder.</p>
+                </SettingsHelp>
+              </div>
               <div class="browse-row">
                 <input type="text" id="ai-local-models-dir" bind:value={localModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
                 <button type="button" class="browse-btn" onclick={browseLocalModelsDir}>Browse...</button>
                 <button type="button" class="browse-btn" onclick={refreshLocalModelOptions} title="Re-scan this folder">Refresh</button>
               </div>
-              <p class="field-hint">
-                Point this at a folder you already keep local models in (shared with Ollama, LM
-                Studio, another app, etc.) so Grafium never duplicates multi-gigabyte model files.
-                Leave blank to use Grafium's own managed models folder.
-              </p>
             </div>
             <div class="field-group">
-              <label class="field-label" for="ai-local-model-file">Embedded LLM Model File (GGUF)</label>
+              <div class="help-row">
+                <label class="field-label" for="ai-local-model-file">Embedded LLM Model File (GGUF)</label>
+                <SettingsHelp title="Embedded chat model">
+                  <p>Download a chat GGUF file into the Models Directory above,
+                    then hit Refresh — it'll show up here instead of needing to be typed by hand.</p>
+                </SettingsHelp>
+              </div>
               {#if localModelOptions.length > 0}
                 <select id="ai-local-model-file" bind:value={localModelPath} class="field-select">
                   <option value="">Auto-detect (only chat GGUF file in folder)</option>
@@ -469,13 +482,21 @@
                 {/if}
               {:else}
                 <p class="field-hint">
-                  No chat GGUF files found yet in the Models Directory above. Download one there,
-                  then hit Refresh — it'll show up here instead of needing to be typed by hand.
+                  No chat GGUF files found yet in the Models Directory above.
                 </p>
               {/if}
             </div>
             <div class="field-group">
-              <label class="field-label" for="ai-local-embedding-model-file">Embedding Model File (GGUF)</label>
+              <div class="help-row">
+                <label class="field-label" for="ai-local-embedding-model-file">Embedding Model File (GGUF)</label>
+                <SettingsHelp title="Embedding model">
+                  <p>Powers semantic search, indexing, and "Analyze this Page" — separate from the
+                    chat model above.</p>
+                  <p>Download an embedding GGUF file (e.g. nomic-embed-text-v1.5-GGUF or
+                    bge-small-en-v1.5-gguf from Hugging Face) into the Models Directory above, then
+                    hit Refresh.</p>
+                </SettingsHelp>
+              </div>
               {#if localEmbeddingModelOptions.length > 0}
                 <select id="ai-local-embedding-model-file" bind:value={localEmbeddingModelPath} class="field-select">
                   <option value="">Auto-detect (only embedding GGUF file in folder)</option>
@@ -483,16 +504,10 @@
                     <option value={m.file_name}>{m.file_name} ({fmtModelSize(m.size_bytes)})</option>
                   {/each}
                 </select>
-                <p class="field-hint">
-                  Powers semantic search, indexing, and "Analyze this Page" — separate from the
-                  chat model above.
-                </p>
               {:else}
                 <p class="field-hint warning">
                   No embedding GGUF file found yet, so semantic search / "Analyze this Page"
-                  is disabled. Download one (e.g. nomic-embed-text-v1.5-GGUF or
-                  bge-small-en-v1.5-gguf from Hugging Face) into the Models Directory above, then
-                  hit Refresh.
+                  is disabled.
                 </p>
               {/if}
             </div>
@@ -568,7 +583,8 @@
       {/if}
 
 
-      <div class="settings-section">
+      <div class="settings-section field-group">
+        <div class="help-row">
         <button
           class="advanced-toggle"
           type="button"
@@ -578,10 +594,14 @@
           <span>Advanced concept-edge prompt</span>
           <span>{promptAdvancedOpen ? "Hide" : "Edit"}</span>
         </button>
-        <p class="field-hint">
-          Controls what AI edges consider worth linking. Grafium still enforces the
-          fixed JSON schema, so change the selection criteria here, not the output format.
-        </p>
+        <SettingsHelp title="Concept-edge prompt">
+          <p>Controls what AI edges consider worth linking. Grafium still enforces the
+            fixed JSON schema, so change the selection criteria here, not the output format.</p>
+          <p>Advanced: weak or schema-breaking instructions can reduce edge quality. Keep the
+            prompt focused on durable graph concepts; the backend will append the required
+            {`{ term, qualified }[]`} output contract.</p>
+        </SettingsHelp>
+        </div>
         {#if promptAdvancedOpen}
           <div class="field-group">
             <div class="prompt-header">
@@ -596,11 +616,6 @@
               bind:value={conceptEdgePrompt}
               spellcheck="false"
             ></textarea>
-            <p class="field-hint warning">
-              Advanced: weak or schema-breaking instructions can reduce edge quality. Keep the
-              prompt focused on durable graph concepts; the backend will append the required
-              {`{ term, qualified }[]`} output contract.
-            </p>
           </div>
         {/if}
       </div>
@@ -635,32 +650,42 @@
          video and transcribing it locally doesn't need chat or search at
          all, and is the thing "Import Video" reaches for regardless. -->
     <div class="settings-section">
-      <h4>Whisper Transcription (video/audio import)</h4>
-      <p class="field-hint">
-        When importing a video/audio URL, Grafium scrapes existing captions
-        first (fast, free). If none exist, it falls back to transcribing the
-        audio locally with Whisper — no cloud service or API key involved.
-      </p>
+      <div class="help-row">
+        <h4>Whisper Transcription (video/audio import)</h4>
+        <SettingsHelp title="Whisper transcription">
+          <p>When importing a video/audio URL, Grafium scrapes existing captions
+            first (fast, free). If none exist, it falls back to transcribing the
+            audio locally with Whisper — no cloud service or API key involved.</p>
+        </SettingsHelp>
+      </div>
       <label class="toggle-row">
         <input type="checkbox" bind:checked={mediaEnabled} />
         <span>Fall back to local Whisper transcription when no captions exist</span>
       </label>
       {#if mediaEnabled}
         <div class="field-group">
-          <label class="field-label" for="media-models-dir">Models Directory</label>
+          <div class="help-row">
+            <label class="field-label" for="media-models-dir">Models Directory</label>
+            <SettingsHelp title="Whisper models directory">
+              <p>Point this at a folder you already keep local models in so Grafium never duplicates
+                multi-gigabyte model files. Leave blank to use Grafium's own managed models folder
+                (the same one Embedded local chat uses).</p>
+            </SettingsHelp>
+          </div>
           <div class="browse-row">
             <input type="text" id="media-models-dir" bind:value={mediaModelsDir} class="field-input" placeholder="e.g. ~/Documents/models — shared folder to search for model files" />
             <button type="button" class="browse-btn" onclick={browseMediaModelsDir}>Browse...</button>
             <button type="button" class="browse-btn" onclick={refreshMediaModelOptions} title="Re-scan this folder">Refresh</button>
           </div>
-          <p class="field-hint">
-            Point this at a folder you already keep local models in so Grafium never duplicates
-            multi-gigabyte model files. Leave blank to use Grafium's own managed models folder
-            (the same one Embedded local chat uses).
-          </p>
         </div>
         <div class="field-group">
-          <label class="field-label" for="media-model-file">Whisper Model File</label>
+          <div class="help-row">
+            <label class="field-label" for="media-model-file">Whisper Model File</label>
+            <SettingsHelp title="Whisper model file">
+              <p>Download a Whisper model into the Models Directory above
+                (e.g. ggml-base.en.bin), then hit Refresh.</p>
+            </SettingsHelp>
+          </div>
           {#if mediaModelOptions.length > 0}
             <select id="media-model-file" bind:value={mediaModelPath} class="field-select">
               <option value="">Auto-detect (only Whisper model in folder)</option>
@@ -670,8 +695,7 @@
             </select>
           {:else}
             <p class="field-hint">
-              No Whisper model files found yet in the Models Directory above. Download one there
-              (e.g. ggml-base.en.bin), then hit Refresh.
+              No Whisper model files found yet in the Models Directory above.
             </p>
           {/if}
         </div>
@@ -696,6 +720,16 @@
 </div>
 
 <style>
+  .help-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .help-row h4 {
+    margin: 0;
+  }
+
   .ai-settings {
     display: flex;
     flex-direction: column;

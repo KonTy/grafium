@@ -150,4 +150,27 @@ describe("applySettingsSearch", () => {
     applySettingsSearch(root, "");
     expect(root.querySelectorAll("[hidden]")).toHaveLength(0);
   });
+
+  it("keeps heading context when a subsection heading shares a row with help", () => {
+    const root = document.createElement("div");
+    root.innerHTML = `
+      <details class="settings-section">
+        <summary><span class="section-title">AI</span></summary>
+        <div class="ai-settings">
+          <div class="settings-section" id="speech">
+            <div class="help-row"><h4>Whisper transcription</h4>
+              <div class="settings-help"><button>?</button><div hidden>Local speech recognition</div></div>
+            </div>
+            <div class="field-group">Language <input value="en" /></div>
+            <div class="field-group">Model <input value="base" /></div>
+          </div>
+        </div>
+      </details>`;
+    expect(applySettingsSearch(root, "whisper language").sections).toBe(1);
+    expect(root.querySelector<HTMLElement>("#speech")?.hidden).toBe(false);
+    const fields = [...root.querySelectorAll<HTMLElement>(".field-group")];
+    expect(fields.map((field) => field.hidden)).toEqual([false, true]);
+    expect(applySettingsSearch(root, "speech recognition").sections).toBe(1);
+    expect(root.querySelector(".settings-help div")?.hasAttribute("hidden")).toBe(true);
+  });
 });

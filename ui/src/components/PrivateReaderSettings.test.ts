@@ -29,6 +29,21 @@ afterEach(async () => {
 });
 const button = (label: string) => [...document.querySelectorAll("button")].find(element => element.textContent?.trim() === label)!;
 describe("native private history backup UI", () => {
+  it("moves instructions into help without hiding library and accessibility status or controls", async () => {
+    component = mount(PrivateReaderSettings, { target: document.body });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Accessibility service:"));
+    for (const text of ["Discover EPUBs", "No screen-content access", "Export only app-private records", "Android exports and restores"]) {
+      const paragraph = [...document.querySelectorAll("p")].find(p => p.textContent?.includes(text))!;
+      expect(paragraph.closest("[hidden]")).not.toBeNull();
+    }
+    const status = [...document.querySelectorAll("p")].find(p => p.textContent?.includes("Accessibility service:"))!;
+    expect(status.closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector(".path")?.closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector(".badge")?.textContent).toBe("UNVERIFIED");
+    expect(button("Choose local folder…").closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector("label button, summary button")).toBeNull();
+  });
+
   it("uses matching native export/restore pickers and accepts the actual successful merge response", async () => {
     component = mount(PrivateReaderSettings, { target: document.body });
     flushSync();

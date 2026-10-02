@@ -4,6 +4,7 @@
   import { appearance } from "../lib/appearance";
   import { getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import AssetCleanup from "./AssetCleanup.svelte";
+  import SettingsHelp from "./SettingsHelp.svelte";
   import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
@@ -326,12 +327,14 @@
       <span class="section-title">Sync</span>
     </summary>
     <div class="section-content">
+    <SettingsHelp title="Sync">
     <p class="section-desc">
       Sync your notes to one or more independent USB drives, network shares, or WebDAV servers.
       Add each location separately and sync them whenever it is available. Independent book notes
       combine automatically; competing versions need a manual merge in that book's Notes tab.
       Review other file conflicts in the right panel's Conflicts tab.
     </p>
+    </SettingsHelp>
 
     {#if syncMessage}
       <div class="sync-message" class:error={syncMessage.startsWith("Error") || syncMessage.startsWith("Sync failed")}>
@@ -476,13 +479,12 @@
       <span class="section-title">Theme</span>
     </summary>
     <div class="section-content">
-      <p class="section-desc">
-        {#if smplosThemeName}
+      {#if smplosThemeName}
+        <p class="section-desc">
           smplos detected — current system theme: <strong>{smplosThemeName}</strong>
-        {:else}
-          Select a color theme for Grafium.
-        {/if}
-      </p>
+        </p>
+      {/if}
+      <SettingsHelp title="Theme and transparency">
       <p class="section-desc">
         Colorful headings, tags, and callouts use each theme's own palette:
         vivid on dark backgrounds, deeper on light backgrounds for readability.
@@ -493,6 +495,7 @@
         desktops. Explicit palettes stay opaque. Text and icons do not fade when focus changes.
         Menus, book pages, media, and the 3D space scene keep their readability backgrounds.
       </p>
+      </SettingsHelp>
       {#if $appearance.error}
         <p class="section-desc" role="alert">{$appearance.error}</p>
       {/if}
@@ -537,7 +540,9 @@
       <span class="section-title">Keyboard Shortcuts</span>
     </summary>
     <div class="section-content">
-    <p class="section-desc">Chords such as <kbd>g j</kbd> work after Escape (navigation mode). Modifier shortcuts work while editing.</p>
+    <SettingsHelp title="Keyboard shortcuts">
+      <p class="section-desc">Chords such as <kbd>g j</kbd> work after Escape (navigation mode). Modifier shortcuts work while editing.</p>
+    </SettingsHelp>
 
     <div class="keymap-list">
       {#each [...getShortcutRowsByCategory()] as [category, rows]}
@@ -581,11 +586,16 @@
            or a move to another machine. This copies it into the markdown. It
            edits notes in bulk, so it previews first and copies the graph
            before writing. -->
+      <div class="setting-topic">
+      <h3>Completion history</h3>
+      <SettingsHelp title="Completion history">
       <p class="setting-desc">
         Tasks completed before Grafium recorded completions in your files still have
         their timestamp in the database only, where it will not survive a rebuild or
         a move to another machine. This writes them into the markdown.
       </p>
+      </SettingsHelp>
+      </div>
       <button class="sync-btn" onclick={previewBackfill} disabled={backfillBusy}>
         {backfillBusy ? "Working…" : "Check what would change"}
       </button>
@@ -597,7 +607,7 @@
       {#if backfillPreview}
         {#if backfillPreview.tasks_updated === 0}
           <p class="setting-desc" style="margin-top: 8px; color: var(--accent);">
-            Nothing to do — every completed task already records when it was finished.
+            Completion history is up to date.
           </p>
         {:else}
           <p class="setting-desc" style="margin-top: 8px;">
@@ -639,10 +649,12 @@
       <span class="about-app-name">Grafium</span>
       <span class="about-version">v{appVersion}</span>
     </div>
+    <SettingsHelp title="About Grafium">
     <p class="section-desc">
       A fast, file-first personal knowledge management app.
       Your notes are stored as plain markdown files — edit them anywhere.
     </p>
+    </SettingsHelp>
     <div class="about-details">
       <div class="detail-row">
         <span class="detail-label">Stack</span>
@@ -662,6 +674,8 @@
 </div>
 
 <style>
+  .setting-topic { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .setting-topic h3 { margin: 0; font-size: 15px; }
   .settings-page :global([hidden]) {
     display: none !important;
   }

@@ -4,6 +4,7 @@
   import type { AssetCleanupResult, AssetCleanupScan, OrphanedAsset } from "../lib/api";
   import { dialogKeydown } from "../lib/modal";
   import AssetTrash from "./AssetTrash.svelte";
+  import SettingsHelp from "./SettingsHelp.svelte";
 
   let scan = $state<AssetCleanupScan | null>(null);
   let selected = $state<string[]>([]);
@@ -87,12 +88,18 @@
 </script>
 
 <div class="asset-cleanup" data-help-context="settings">
+  <div class="topic-heading">
+  <h2>Unused attachments</h2>
+  <SettingsHelp title="Unused attachments">
   <p>Deleting text or blocks automatically moves newly unreferenced attachments to persistent graph-local trash. Undo restores their references and files while the attachments remain in trash. Shared references are kept conservatively. Whole-page attachment cleanup uses the same recoverable trash.</p>
   <p>AI chat history does not keep pages or attachments alive. Quoted links, citations, and conversation context do not prevent cleanup; old chat links may stop opening. Save content as a note if its attachments should be kept.</p>
   <p>Find unreferenced attachments, including ZIP archives, not just images. Review the full graph-relative paths before moving anything.</p>
   <p><strong>Save pending edits first.</strong> Unsaved editor drafts cannot be checked. The scan checks indexed references and saved graph text, including Markdown, JSON-LD notes, and configuration. Conservative filename matches can retain duplicates.</p>
   <p>References inside binary archives or books are not inspected. This is a conservative scan of supported sources, not proof that every possible reference has been found.</p>
   <p>Files move to recoverable graph-local trash, not permanent deletion. Trash is never synced, but removal of the original files will sync. No disk space is freed until you explicitly choose Permanently delete in Asset trash below. Undo cannot recover purged attachments.</p>
+  <p>To recover, choose List trash or Refresh trash below, then Restore. Never overwrite an existing original: restore refuses conflicts. Failed or partial attempts may leave recovery copies even when the original was not moved. Trash keeps the original folder structure and is never automatically purged.</p>
+  </SettingsHelp>
+  </div>
   <button bind:this={scanButton} onclick={scanAssets} disabled={busy || !!pending}>
     {scanning ? "Scanning…" : scan ? "Re-scan" : "Scan for orphaned assets"}
   </button>
@@ -145,7 +152,6 @@
       {/if}
       {#if result.trash_path}
         <p>Recovery directory: <code>{result.trash_path}</code></p>
-        <p>To recover, choose List trash or Refresh trash below, then Restore. Never overwrite an existing original: restore refuses conflicts. Failed or partial attempts may leave recovery copies even when the original was not moved. Trash keeps the original folder structure and is never automatically purged.</p>
       {/if}
       {#if result.errors.length}
         <div role="alert" class="error">
@@ -177,6 +183,8 @@
 </div>
 
 <style>
+  .topic-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .topic-heading h2 { margin: 0; }
   .asset-cleanup { font-size: 13px; color: var(--text-secondary); }
   p { margin: 10px 0; line-height: 1.5; }
   code, .error { overflow-wrap: anywhere; }

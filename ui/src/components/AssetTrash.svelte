@@ -3,6 +3,7 @@
   import { listAssetTrash, openAssetTrashContainingFolder, purgeTrashedAssets, restoreTrashedAssets } from "../lib/api";
   import type { AssetTrashEntry, AssetTrashScan } from "../lib/api";
   import { dialogKeydown } from "../lib/modal";
+  import SettingsHelp from "./SettingsHelp.svelte";
 
   type Action = "restore" | "purge";
   let scan = $state<AssetTrashScan | null>(null);
@@ -106,10 +107,14 @@
 </script>
 
 <section class="asset-trash" data-help-context="settings" aria-label="Asset trash">
+  <div class="topic-heading">
   <h2>Asset trash</h2>
+  <SettingsHelp title="Asset trash">
   <p>Deleted attachments and manual cleanup use the same persistent, device-local graph trash, which is never synced. Undo restores deleted text or blocks and their attachments while the files remain in trash. Restore below recovers files only; it does not recreate deleted notes.</p>
   <p>Never overwrite an existing original: Restore refuses that path and keeps the trash copy. Trash is never automatically purged. <strong>Permanently delete frees disk space, but Undo cannot recover permanently deleted attachments.</strong></p>
   <p>If Undo reports multiple versions of an attachment, review each copy's trash path (including its batch ID), size, and SHA-256 fingerprint. Select the intended version, Restore it, then retry Undo. Other copies remain in trash; Grafium does not silently substitute them for a purged version.</p>
+  </SettingsHelp>
+  </div>
   <button bind:this={refreshButton} onclick={loadTrash} disabled={busy || !!pending}>
     {loading ? "Loading trash…" : scan ? "Refresh trash" : "List trash"}
   </button>
@@ -195,6 +200,8 @@
 </section>
 
 <style>
+  .topic-heading { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .topic-heading h2 { margin: 0; }
   .asset-trash { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 8px; }
   h2 { font-size: 18px; }
   p { margin: 10px 0; line-height: 1.5; }

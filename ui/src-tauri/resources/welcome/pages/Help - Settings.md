@@ -3,6 +3,19 @@
 Settings controls Grafium's appearance, graph behavior, indexing, AI features,
 and synchronization.
 
+Settings keeps controls and current results visible, with explanations behind
+small **?** buttons. Click or keyboard-activate a **?** to open that topic's help.
+Use **Close** or **Escape** to return to the same button; Tab stays within the
+help dialog. **Filter settings** also searches the hidden help text without
+expanding it. **F1** still opens the full contextual help page, including from
+inside a topic dialog.
+
+Errors, operational status, and warnings in action confirmations stay visible.
+In Asset Cleanup, **Completion history** has its own help button explaining
+the preview-and-backup operation; its preview and completion results remain
+beside the controls. **Unused attachments** and **Asset trash** each have their
+own help button rather than repeating instructions above every list.
+
 On Linux, local deployment installs the matching Grafium launcher and icon
 files. New windows use the stable `grafium` application ID, even when the native
 executable is named `grafium-bin`. If an already-running window retains a generic

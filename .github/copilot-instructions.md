@@ -1,5 +1,13 @@
 # Grafium contribution instructions
 
+## Keep everyday UI concise
+
+Keep controls, current results, errors, and actionable warnings visible, but put
+explanatory prose behind on-demand help rather than repeating it in the main UI.
+In Settings, reuse `SettingsHelp` for compact, labelled `?` buttons with
+keyboard-accessible dialogs. Keep help searchable and preserve contextual F1.
+Never hide destructive-action warnings or consent requirements in optional help.
+
 ## Keep contextual help current
 
 Whenever functionality or user-facing behavior changes:

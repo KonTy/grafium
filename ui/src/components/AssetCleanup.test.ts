@@ -80,6 +80,15 @@ async function confirm(result: AssetCleanupResult) {
 describe("recoverable asset cleanup", () => {
   it("scans explicitly, shows busy state, full ZIP paths and sizes, and uses Settings F1 help", async () => {
     expect(invoke).not.toHaveBeenCalled();
+    expect(host.querySelector("dialog")).toBeNull();
+    expect(host.querySelector(".asset-cleanup > p")).toBeNull();
+    const help = host.querySelector<HTMLButtonElement>('[aria-label="Help: Unused attachments"]')!;
+    expect(help).not.toBeNull();
+    await click(help);
+    expect(host.querySelector("dialog")?.open).toBe(true);
+    expect(host.querySelector("dialog")?.textContent).toContain("Save pending edits first");
+    await click(button("Close"));
+    expect(host.querySelector("dialog")).toBeNull();
     expect(host.textContent).toContain("Save pending edits first");
     expect(host.textContent).toContain("AI chat history does not keep pages or attachments alive");
     expect(host.textContent).toContain("No disk space is freed");

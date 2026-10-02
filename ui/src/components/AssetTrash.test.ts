@@ -73,6 +73,12 @@ async function confirm(action: "restore" | "purge", result: AssetTrashResult) {
 describe("persistent asset trash", () => {
   it("loads explicitly, shows original/trash paths and sizes, and reuses Settings F1 guidance", async () => {
     expect(invoke).not.toHaveBeenCalled();
+    expect(host.querySelector(".asset-trash > p")).toBeNull();
+    const help = host.querySelector<HTMLButtonElement>('[aria-label="Help: Asset trash"]')!;
+    await click(help);
+    expect(host.querySelector("dialog")?.textContent).toContain("Undo cannot recover permanently deleted attachments");
+    await click(button("Close"));
+    expect(host.querySelector("dialog")).toBeNull();
     let resolve!: (value: AssetTrashScan) => void;
     vi.mocked(invoke).mockReturnValueOnce(new Promise<AssetTrashScan>((done) => { resolve = done; }));
     await click(button("List trash"));

@@ -39,6 +39,13 @@ export function helpPageTitle(context: HelpContext): string {
   return HELP_PAGES[context];
 }
 
+export function closeSettingsHelpForContextualHelp(target: EventTarget | null): void {
+  if (target instanceof Element) {
+    target.closest("dialog[data-settings-help-dialog][open]")
+      ?.dispatchEvent(new Event("cancel", { cancelable: true }));
+  }
+}
+
 export async function loadHelpPage(context: HelpContext): Promise<string> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<string>("help_get_page", { context });

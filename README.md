@@ -88,6 +88,11 @@ behind the normal graph. It is decorative, not an astronomical map.
 
 ## Feature reference
 
+Settings keeps explanations behind compact **?** help buttons. Click a button
+for its topic, or use **F1** for the full contextual guide. Settings search
+includes hidden guidance without expanding it; errors, current results, and
+destructive-action confirmation warnings remain visible.
+
 ### Writing and reading
 
 | Feature | What you can do |

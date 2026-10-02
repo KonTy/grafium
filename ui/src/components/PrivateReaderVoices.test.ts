@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 import PrivateReaderVoices from "./PrivateReaderVoices.svelte";
 import { privateVoiceLanguageSuggestion } from "../lib/privateReader";
+import { applySettingsSearch } from "../lib/settingsSearch";
 
 let component: ReturnType<typeof mount> | undefined;
 const manifest = { schema_version: 1, id: "local", name: "Local voice", language: "en-US",
@@ -36,6 +37,16 @@ describe("cross-platform offline voice settings", () => {
     await vi.waitFor(() => expect(button("Use book language suggestion").disabled).toBe(false));
     expect(document.body.textContent).toContain("MODEL_HASH_MISMATCH");
     expect(document.body.textContent).toContain("Reimport the damaged voice package");
+    expect(document.querySelector('[role="alert"]')?.closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector("p.notice")?.closest("[hidden], dialog")).toBeNull();
+    for (const text of ["Choose an installed voice", "Languages are taken", "Android uses the embedded", "This only fills", "Paste a trusted manifest"]) {
+      const paragraph = [...document.querySelectorAll("p")].find(p => p.textContent?.includes(text))!;
+      expect(paragraph.closest("[hidden]")).not.toBeNull();
+    }
+    expect(document.querySelector(".consent")?.closest("[hidden], dialog")).toBeNull();
+    const licenseWarning = [...document.querySelectorAll("p")].find(p => p.textContent?.includes("Hashes verify"))!;
+    expect(licenseWarning.closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector("label button, summary button")).toBeNull();
     expect(document.body.textContent).not.toContain("unavailable in this build");
     expect(button("Choose local Piper environment…")).toBeUndefined();
     button("Use book language suggestion").click(); flushSync();
@@ -63,5 +74,23 @@ describe("cross-platform offline voice settings", () => {
     expect(document.body.textContent).toContain("/chosen/venv/bin/piper");
     button("Choose local Piper environment…").click();
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("private_voice_configure_runtime", { executablePath: "/new/venv/bin/piper" }));
+  });
+
+  it("keeps the manifest field with matching download help during settings search", async () => {
+    invoke.mockImplementation(async command => command === "private_voice_status"
+      ? { available: true, runtime: "piper-onnx-v1", selection: null } : []);
+    const root = document.createElement("div");
+    const section = document.createElement("details");
+    section.className = "settings-section";
+    section.innerHTML = '<summary class="section-title">Private reader</summary>';
+    root.append(section);
+    document.body.append(root);
+    component = mount(PrivateReaderVoices, { target: section });
+    flushSync();
+    applySettingsSearch(root, "artifact URLs");
+    const manifestField = section.querySelector("textarea")!;
+    expect(manifestField.closest(".field-group")).not.toBeNull();
+    expect(manifestField.closest("[hidden]")).toBeNull();
+    expect(section.querySelector('button[aria-label="Help: Voice model download"]')?.closest("[hidden]")).toBeNull();
   });
 });

@@ -57,7 +57,7 @@
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Page } from "./lib/api";
-  import { helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./lib/help";
+  import { closeSettingsHelpForContextualHelp, helpPageTitle, isHelpContext, loadHelpPage, type HelpContext } from "./lib/help";
   import { recordStudyActivity, type StudyItem, type StudyProgress } from "./lib/studies";
   import { StudyTracker, type StudyClockState } from "./lib/studyTracker";
   import { trackReading } from "./lib/studyReading";
@@ -1244,6 +1244,7 @@
             jobs: "general",
           } as Record<string, HelpContext>
         )[currentView] ?? "general");
+      closeSettingsHelpForContextualHelp(eventTarget);
       void openContextualHelp(currentContext);
       return;
     }

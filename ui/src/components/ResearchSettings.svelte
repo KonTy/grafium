@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsHelp from "./SettingsHelp.svelte";
   // Research settings — the search-engine registry a student can extend, plus
   // the editable prompt for every step of the agentic research workflow. Visual
   // language deliberately mirrors AISettings.svelte (same field-group /
@@ -196,12 +197,14 @@
 </script>
 
 <div class="research-settings">
-  <h3>Research</h3>
-  <p class="field-hint">
-    Configure the search engines the deep-research workflow uses, and edit the
-    prompt for each step of that workflow. This is the same workflow the
-    <strong>Research</strong> checkbox under the Chat box runs.
-  </p>
+  <div class="help-row">
+    <h3>Research</h3>
+    <SettingsHelp title="Research settings">
+      <p>Configure the search engines the deep-research workflow uses, and edit the
+        prompt for each step of that workflow. This is the same workflow the
+        <strong>Research</strong> checkbox under the Chat box runs.</p>
+    </SettingsHelp>
+  </div>
 
   {#if isLoading}
     <div class="loading shimmer">Loading research settings…</div>
@@ -222,12 +225,14 @@
 
     <!-- ── Engines ─────────────────────────────────────────────────────── -->
     <div class="settings-section">
-      <h4>Search engines</h4>
-      <p class="field-hint">
-        Each engine's query URL uses a <code>{"{query}"}</code> placeholder — it's
-        replaced with your search terms (URL-encoded) when the engine runs.
-        Built-in engines can be turned off but not deleted.
-      </p>
+      <div class="help-row">
+        <h4>Search engines</h4>
+        <SettingsHelp title="Search engines">
+          <p>Each engine's query URL uses a <code>{"{query}"}</code> placeholder — it's
+            replaced with your search terms (URL-encoded) when the engine runs.
+            Built-in engines can be turned off but not deleted.</p>
+        </SettingsHelp>
+      </div>
 
       {#if enabledCount === 0}
         <p class="field-hint warning">
@@ -347,15 +352,24 @@
           </div>
 
           <div class="field-group">
-            <label class="field-label" for="add-eng-url">Query URL</label>
+            <div class="help-row">
+              <label class="field-label" for="add-eng-url">Query URL</label>
+              <SettingsHelp title="Search engine query URL">
+                <p>Must contain <code>{"{query}"}</code> where the search terms go.</p>
+              </SettingsHelp>
+            </div>
             <input id="add-eng-url" type="text" class="field-input" bind:value={draft.url_template} placeholder="https://example.com/search?q={'{query}'}" />
-            <p class="field-hint">Must contain <code>{"{query}"}</code> where the search terms go.</p>
           </div>
 
           {#if draft.kind === "Html" && draft.selectors}
             <div class="field-row">
               <div class="field-group">
-                <label class="field-label" for="add-eng-sel-result">Result selector</label>
+                <div class="help-row">
+                  <label class="field-label" for="add-eng-sel-result">Result selector</label>
+                  <SettingsHelp title="HTML result selectors">
+                    <p>CSS selectors, relative to each result container.</p>
+                  </SettingsHelp>
+                </div>
                 <input id="add-eng-sel-result" type="text" class="field-input" bind:value={draft.selectors.result} placeholder=".result" />
               </div>
               <div class="field-group">
@@ -373,11 +387,17 @@
                 <input id="add-eng-sel-snippet" type="text" class="field-input" bind:value={draft.selectors.snippet} placeholder=".snippet" />
               </div>
             </div>
-            <p class="field-hint">CSS selectors, relative to each result container.</p>
           {:else if draft.kind === "Json" && draft.json_paths}
             <div class="field-row">
               <div class="field-group">
-                <label class="field-label" for="add-eng-path-results">Results path</label>
+                <div class="help-row">
+                  <label class="field-label" for="add-eng-path-results">Results path</label>
+                  <SettingsHelp title="JSON result paths">
+                    <p>Dotted paths into the JSON response, e.g. <code>message.items</code> then <code>title.0</code>.
+                      Set <strong>URL prefix</strong> only when the API returns relative URLs like <code>/works/OL123W</code>
+                      — it's prepended so each citation is an absolute, openable link.</p>
+                  </SettingsHelp>
+                </div>
                 <input id="add-eng-path-results" type="text" class="field-input" bind:value={draft.json_paths.results} placeholder="data" />
               </div>
               <div class="field-group">
@@ -401,7 +421,6 @@
                 <input id="add-eng-path-url-prefix" type="text" class="field-input" bind:value={draft.json_paths.url_prefix} placeholder="https://openlibrary.org" />
               </div>
             </div>
-            <p class="field-hint">Dotted paths into the JSON response, e.g. <code>message.items</code> then <code>title.0</code>. Set <strong>URL prefix</strong> only when the API returns relative URLs like <code>/works/OL123W</code> — it's prepended so each citation is an absolute, openable link.</p>
           {/if}
 
           {#if draftErrors.length > 0}
@@ -422,21 +441,25 @@
 
     <!-- ── Workflow ────────────────────────────────────────────────────── -->
     <div class="settings-section">
-      <h4>Workflow</h4>
-      <p class="field-hint">
-        These prompts drive the agentic research loop, shown in the order they
-        run. Edit them to change how each step behaves.
-      </p>
+      <div class="help-row">
+        <h4>Workflow</h4>
+        <SettingsHelp title="Research workflow">
+          <p>These prompts drive the agentic research loop, shown in the order they
+            run. Edit them to change how each step behaves.</p>
+        </SettingsHelp>
+      </div>
 
       {#each RESEARCH_PROMPT_STEPS as step, i (step.key)}
         <div class="field-group prompt-block">
           <div class="prompt-head">
-            <label class="field-label prompt-label" for={`research-prompt-${step.key}`}>
-              {i + 1}. {step.label}
-            </label>
+            <div class="help-row">
+              <label class="field-label prompt-label" for={`research-prompt-${step.key}`}>
+                {i + 1}. {step.label}
+              </label>
+              <SettingsHelp title={step.label}><p>{step.explanation}</p></SettingsHelp>
+            </div>
             <button type="button" class="link-btn" onclick={() => resetPrompt(step.key)}>Reset to default</button>
           </div>
-          <p class="field-hint">{step.explanation}</p>
           <textarea
             id={`research-prompt-${step.key}`}
             class="field-textarea"
@@ -450,6 +473,15 @@
         <button type="button" class="action-btn" onclick={resetAllPrompts}>Reset all prompts to defaults</button>
       </div>
 
+      <div class="field-group">
+      <div class="help-row">
+        <span class="field-label">Research limits</span>
+        <SettingsHelp title="Research limits">
+          <p><strong>Max rounds:</strong> How many search-and-refine rounds it may run before answering.</p>
+          <p><strong>Max sources:</strong> The most sources it will read in full across the whole run.</p>
+          <p><strong>Results per query:</strong> How many hits each search pulls back before choosing what to read.</p>
+        </SettingsHelp>
+      </div>
       <div class="field-row limits-row">
         <div class="field-group">
           <label class="field-label" for="research-max-rounds">Max rounds</label>
@@ -461,7 +493,6 @@
             max={RESEARCH_LIMITS.max_rounds.max}
             bind:value={config.max_rounds}
           />
-          <p class="field-hint">How many search-and-refine rounds it may run before answering.</p>
         </div>
         <div class="field-group">
           <label class="field-label" for="research-max-sources">Max sources</label>
@@ -473,7 +504,6 @@
             max={RESEARCH_LIMITS.max_sources.max}
             bind:value={config.max_sources}
           />
-          <p class="field-hint">The most sources it will read in full across the whole run.</p>
         </div>
         <div class="field-group">
           <label class="field-label" for="research-results-per-query">Results per query</label>
@@ -485,18 +515,20 @@
             max={RESEARCH_LIMITS.results_per_query.max}
             bind:value={config.results_per_query}
           />
-          <p class="field-hint">How many hits each search pulls back before choosing what to read.</p>
         </div>
       </div>
+      </div>
 
-      <label class="toggle-row">
-        <input type="checkbox" bind:checked={config.ocr_enabled} />
-        <span>Read text inside scanned PDFs and images (OCR)</span>
-      </label>
-      <p class="field-hint">
-        Needs the <code>tesseract</code> tool installed on your system. If it isn't
-        found, OCR is simply skipped and the rest of the research still runs.
-      </p>
+      <div class="help-row setting-row">
+        <label class="toggle-row">
+          <input type="checkbox" bind:checked={config.ocr_enabled} />
+          <span>Read text inside scanned PDFs and images (OCR)</span>
+        </label>
+        <SettingsHelp title="Research OCR">
+          <p>Needs the <code>tesseract</code> tool installed on your system. If it isn't
+            found, OCR is simply skipped and the rest of the research still runs.</p>
+        </SettingsHelp>
+      </div>
     </div>
 
     <div class="actions-section">
@@ -513,6 +545,16 @@
 </div>
 
 <style>
+  .help-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .help-row h4 {
+    margin: 0;
+  }
+
   .research-settings {
     display: flex;
     flex-direction: column;

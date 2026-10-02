@@ -1,5 +1,6 @@
 /** Logical controls/rows; nested labels and hints stay with their control. */
 export const SETTINGS_ITEM_SELECTOR = [
+  ".settings-help",
   ".setting-row",
   ".keymap-row",
   ".theme-card",
@@ -77,7 +78,7 @@ export function applySettingsSearch(root: HTMLElement, query: string): SettingsS
     const title = heading ? searchText(heading) : "";
     const titleMatch = matches(title);
     const groupTitles = new Map(groups.map((group) => {
-      const heading = group.querySelector(":scope > h3, :scope > h4");
+      const heading = group.querySelector(":scope > h3, :scope > h4, :scope > .help-row > h3, :scope > .help-row > h4");
       return [group, heading ? searchText(heading) : ""];
     }));
     for (const el of items) {
