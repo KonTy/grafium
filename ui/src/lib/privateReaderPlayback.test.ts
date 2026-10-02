@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-import { bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, privatePlayback, resumePrivatePlayback, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL } from "./privateReaderPlayback";
+import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, privatePlayback, resumePrivatePlayback, seekPrivateAudioPosition, skipPrivateAudio, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL } from "./privateReaderPlayback";
 import { privateLibrary, type ReaderBook } from "./privateReader";
 
 class FakeAudio extends EventTarget {
   currentTime = 0; preload = ""; src = ""; error = null;
+  duration = 120;
+  seekable = { length: 1, start: () => 0, end: () => this.duration };
   play = vi.fn(async () => {});
   pause = vi.fn();
   load() { if (this.src) queueMicrotask(() => this.dispatchEvent(new Event("loadedmetadata"))); }
@@ -32,6 +34,37 @@ beforeEach(() => {
 afterEach(async () => { await stopPrivatePlayback(); vi.unstubAllGlobals(); });
 
 describe("app-owned private playback", () => {
+  it("reports actual duration and time, seeks without restarting, and refuses unavailable timelines", async () => {
+    await playPrivateAudio(book);
+    const audio = elements.at(-1)!;
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 120000, seekable: true });
+    audio.currentTime = 34.5; audio.dispatchEvent(new Event("timeupdate"));
+    expect(get(privatePlayback).position?.offsetMs).toBe(34500);
+    await pausePrivatePlayback();
+    const plays = audio.play.mock.calls.length;
+    await seekPrivateAudioPosition(60000);
+    expect(audio.currentTime).toBe(60);
+    expect(get(privatePlayback).status).toBe("paused");
+    expect(audio.play.mock.calls.length).toBe(plays);
+    await skipPrivateAudio(-15000);
+    expect(audio.currentTime).toBe(45);
+    audio.duration = Infinity; audio.dispatchEvent(new Event("durationchange"));
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 0, seekable: false });
+    await expect(seekPrivateAudioPosition(10000)).rejects.toThrow("unavailable");
+    audio.duration = 120; audio.seekable.length = 0; audio.dispatchEvent(new Event("progress"));
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 120000, seekable: false });
+    await expect(skipPrivateAudio(15000)).rejects.toThrow("unavailable");
+    audio.seekable.length = 1;
+  });
+  it("keeps native Android duration/seek capability honest and clears it for narration", () => {
+    const state = { bookId: book.id, trackId: "stable-2", offsetMs: 1234, playing: true, buffering: false, error: null, durationMs: 120000 };
+    applyAndroidState(state);
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 120000, seekable: false });
+    applyAndroidState({ ...state, seekable: true });
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 120000, seekable: true });
+    applyAndroidState({ ...state, mode: "tts", locator: { kind: "epub", cfi: "epubcfi(/6/2)", rendererVersion: "test" }, seekable: true });
+    expect(get(privatePlayback)).toMatchObject({ durationMs: 0, seekable: false });
+  });
   it("accepts only native loopback transport, never full-file base64 or remote URLs", () => {
     expect(validatePrivateMediaURL("http://127.0.0.1:1234/capability")).toContain("127.0.0.1");
     for (const value of ["https://example.com/audio.mp3", "data:audio/mp3;base64,AAAA", "file:///book.mp3", "http://localhost:1234/book", "http://user@127.0.0.1:1234/book"])
@@ -137,5 +170,18 @@ describe("app-owned private playback", () => {
     await opening;
     expect(get(privatePlayback).status).toBe("stopped");
     expect(elements.at(-1)?.src ?? "").toBe("");
+  });
+  it("cancels pending metadata without waiting for timeout or restarting after Stop", async () => {
+    await playPrivateAudio(book);
+    const audio = elements.at(-1)!;
+    const load = vi.spyOn(audio, "load").mockImplementation(() => {});
+    const opening = playPrivateAudio(book);
+    try {
+      await vi.waitFor(() => expect(get(privatePlayback).status).toBe("loading"));
+      await stopPrivatePlayback();
+      await opening;
+      expect(get(privatePlayback)).toMatchObject({ status: "stopped", error: "" });
+      expect(audio.src).toBe("");
+    } finally { load.mockRestore(); }
   });
 });

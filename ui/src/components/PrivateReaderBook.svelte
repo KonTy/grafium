@@ -3,6 +3,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import PrivateBookReader from "./PrivateBookReader.svelte";
   import LibraryMedia from "./LibraryMedia.svelte";
+  import PrivateReaderToolbar from "./PrivateReaderToolbar.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
   import ReaderMenu from "./ReaderMenu.svelte";
   import { showToast } from "../lib/toast.svelte";
@@ -137,7 +138,7 @@
         {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
         {#if !reading}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
         {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
-        <SettingsHelp title="Private reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
+        <SettingsHelp title="Library reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
       </div>
       {#if reading}
         <div class="actions">
@@ -152,7 +153,7 @@
 
 {#snippet privateBookmarks()}
   {#if book}
-    <section class="bookmarks" aria-label="Private bookmarks">
+    <section class="bookmarks" aria-label="Bookmarks">
       {#if !book.bookmarks.length}<p class="hint">No bookmarks yet.</p>{/if}
       <ul>{#each book.bookmarks as mark (mark.id)}
         <li>
@@ -180,7 +181,7 @@
           {#if editing === mark.id}
             <form onsubmit={event => { event.preventDefault(); void run(async () => {
               await readerNative("update_bookmark", { bookId, bookmarkId: mark.id, note }); await refreshPrivateLibrary(); editing = "";
-            }, "Private bookmark saved."); }}>
+            }, "Bookmark saved."); }}>
               <label>Bookmark label / private note<textarea id={`bookmark-note-${mark.id}`} bind:value={note} maxlength="4096" rows="3"
                 onkeydown={event => {
                   if (!busy && !event.repeat && !event.isComposing && !event.altKey
@@ -251,7 +252,11 @@
       <p class="error" role="alert">This bookmark is no longer in the local Library. No replacement position was opened.</p>
       <button onclick={() => ignoredBookmark = initialBookmarkId ?? null}>Open current saved place</button>
     {:else if book.kind === "audio" && !(book.sourceUrl && android)}
-      <div class="actions"><button class="primary" disabled={busy || !book.available} onclick={() => run(() => playPrivateAudio(book!))}>{book.position ? "Resume audio" : "Play audio"}</button></div>
+      {#if $privatePlayback.bookId === bookId && $privatePlayback.status !== "stopped"}
+        <PrivateReaderToolbar {bookId} />
+      {:else}
+        <div class="actions"><button class="primary" disabled={busy || !book.available} onclick={() => run(() => playPrivateAudio(book!))}>{book.position ? "Resume audio" : "Play audio"}</button></div>
+      {/if}
       {#if book.tracks.length}<details class="chapters" open><summary>Chapters · {book.tracks.length}</summary><ol>
         {#each book.tracks as track, index (track.id)}
           <li><button class="chapter" disabled={busy || !book.available || track.available === false} onclick={() => run(() => playPrivateAudio(book!, { trackId: track.id, offsetMs: 0 }))}>{track.title}</button>
@@ -268,7 +273,7 @@
     {:else if book.available}
       {#key bookId}<LibraryMedia {book} {onPlayback} {onActivity} {onProgress} />{/key}
     {/if}
-    {#if !reading}<h2>Private bookmarks <span>{book.bookmarks.length}</span></h2>{@render privateBookmarks()}{/if}
+    {#if !reading}<h2>Bookmarks <span>{book.bookmarks.length}</span></h2>{@render privateBookmarks()}{/if}
   {:else}<p role="alert">This source is not in the local library. Return to Library and rescan.</p>{/if}
 </section>
 

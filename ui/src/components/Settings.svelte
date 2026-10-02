@@ -314,7 +314,7 @@
   </details>
 
   <details class="settings-section" data-help-context="reader" data-settings-section="library" bind:this={librarySectionEl}>
-    <summary class="section-header"><span class="section-title">Private reader · Library location</span></summary>
+    <summary class="section-header"><span class="section-title">Library</span></summary>
     <div class="section-content"><PrivateReaderSettings /></div>
   </details>
 

@@ -135,7 +135,7 @@
       } else if (message.type === "toggle-bionic") {
         setBionicReaderEnabled(!get(bionicReaderEnabled));
       } else if (message.type === "bookmark") {
-        showToast("Use Book notes for this imported book. Private bookmarks are available in Library.", "error");
+        showToast("Use Book notes for this imported book. Bookmarks are available in Library.", "error");
       } else if (message.type === "ready" && !invalidated) {
         clearTimeout(openTimer); loading = false; ready = true;
         sendCommand("theme", { theme: readReaderTheme() });

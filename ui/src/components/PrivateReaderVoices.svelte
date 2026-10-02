@@ -6,6 +6,7 @@
   import { voiceCommand, type PrivateVoiceManifest, type PrivateVoiceStatus } from "../lib/privateReaderVoice";
   import { privateVoiceLanguageSuggestion } from "../lib/privateReader";
   import SettingsHelp from "./SettingsHelp.svelte";
+  import ReaderVoiceSetup from "./ReaderVoiceSetup.svelte";
   const android = isAndroidReader();
   let voices = $state<PrivateVoiceManifest[]>([]);
   let status = $state<PrivateVoiceStatus | null>(null);
@@ -53,6 +54,10 @@
       {/if}
     </SettingsHelp>
   </div>
+    <div class="help-row">
+      <span>Get offline voices</span>
+      <SettingsHelp title="Get offline voices"><ReaderVoiceSetup {android} /></SettingsHelp>
+    </div>
     {#if status?.reason}<p class="notice">{status.reason}</p>{/if}
     {#if status?.installationErrors?.length}
       <div class="error" role="alert"><strong>Voice packages need attention</strong><ul>
@@ -112,13 +117,16 @@
       <button disabled={busy} onclick={() => run(refresh)}>Refresh voices</button>
     </div>
     <details>
-      <summary>Explicit model download</summary>
+      <summary>Advanced: download from a manifest</summary>
       <div class="field-group">
       <div class="help-row">
         <label for="private-voice-manifest">Manifest JSON</label>
         <SettingsHelp title="Voice model download">
           <p>Paste a trusted manifest with direct HTTPS artifact URLs, byte sizes, SHA-256 hashes, runtime and license metadata.
             Downloads do not include book data. Redirects, URL credentials and query strings are not accepted.</p>
+          <p>A model's .onnx.json is a Piper configuration, not a Grafium download manifest.
+            Hugging Face and GitHub model downloads usually redirect; use Get offline voices and local import for those.
+            The preparation command creates an offline-import manifest, not a download manifest.</p>
         </SettingsHelp>
       </div>
       <textarea id="private-voice-manifest" rows="8" maxlength="524288" bind:value={manifestText} spellcheck="false" placeholder="Paste a verified voice manifest"></textarea>

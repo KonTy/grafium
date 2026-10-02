@@ -82,7 +82,7 @@ describe("cross-platform offline voice settings", () => {
     const root = document.createElement("div");
     const section = document.createElement("details");
     section.className = "settings-section";
-    section.innerHTML = '<summary class="section-title">Private reader</summary>';
+    section.innerHTML = '<summary class="section-title">Library</summary>';
     root.append(section);
     document.body.append(root);
     component = mount(PrivateReaderVoices, { target: section });

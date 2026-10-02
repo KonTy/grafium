@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { androidPrivateCommand, androidReaderRequest, normalizeAndroidReaderPosition } from "./privateReaderAndroid";
-import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, playPrivateAudio, privatePlayback, stopPrivatePlayback } from "./privateReaderPlayback";
+import { applyAndroidState, attachPrivatePlayback, bookmarkPrivatePlayback, checkpointPrivatePlayback, playPrivateAudio, privatePlayback, seekPrivateAudioPosition, stopPrivatePlayback } from "./privateReaderPlayback";
 import { privateLibrary, type ReaderBook } from "./privateReader";
 import { get } from "svelte/store";
 import { BOOK_RENDERER_VERSION } from "./bookLocations";
@@ -29,6 +29,45 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 describe("Android private reader bridge", () => {
+  it("restores background service controls and seeks only when native capability is reported", async () => {
+    const detach = attachPrivatePlayback();
+    try {
+      await vi.waitFor(() => expect(requests.some(request => request.command === "state")).toBe(true));
+      await vi.waitFor(() => expect(get(privatePlayback)).toMatchObject({ bookId: book.id, status: "playing", seekable: false }));
+      await expect(seekPrivateAudioPosition(20000)).rejects.toThrow("unavailable");
+      window.dispatchEvent(new CustomEvent("private-reader-state", { detail: {
+        bookId: book.id, trackId: "doc-1", offsetMs: 3500, durationMs: 90000, seekable: true,
+        playing: false, buffering: false, error: null,
+      } }));
+      expect(get(privatePlayback)).toMatchObject({ status: "paused", durationMs: 90000, seekable: true });
+      await seekPrivateAudioPosition(20000);
+      expect(requests.find(request => request.command === "seek")?.args).toEqual({ offsetMs: 20000 });
+      await stopPrivatePlayback();
+      expect(get(privatePlayback)).toMatchObject({ status: "stopped", bookId: null, seekable: false });
+      expect(requests.some(request => request.command === "media_url")).toBe(false);
+    } finally { detach(); }
+  });
+  it("restores service Stop controls even while the Library refresh is stalled", async () => {
+    const bridge = window.PrivateReaderBridge!;
+    let libraryRequest = "";
+    window.PrivateReaderBridge = { request(json) {
+      const request = JSON.parse(json);
+      if (request.command === "library") libraryRequest = request.id;
+      else bridge.request(json);
+    } };
+    privateLibrary.set({ libraryPath: null, books: [] });
+    const detach = attachPrivatePlayback();
+    try {
+      await vi.waitFor(() => expect(get(privatePlayback)).toMatchObject({ bookId: book.id, status: "playing" }));
+      await stopPrivatePlayback();
+      expect(requests.some(request => request.command === "stop")).toBe(true);
+    } finally {
+      detach();
+      window.dispatchEvent(new CustomEvent("private-reader-response", {
+        detail: { id: libraryRequest, ok: false, error: "Library unavailable" },
+      }));
+    }
+  });
   it("controls native playback and captures bookmarks in the service, not at a stale UI offset", async () => {
     await playPrivateAudio(book);
     expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500 });

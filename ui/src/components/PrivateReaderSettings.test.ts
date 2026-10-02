@@ -39,6 +39,8 @@ describe("native private history backup UI", () => {
     const status = [...document.querySelectorAll("p")].find(p => p.textContent?.includes("Accessibility service:"))!;
     expect(status.closest("[hidden], dialog")).toBeNull();
     expect(document.querySelector(".path")?.closest("[hidden], dialog")).toBeNull();
+    expect(document.querySelector('.path')?.textContent).toBe("No library selected");
+    expect(document.querySelector('button[aria-label="Help: Library location"]')).not.toBeNull();
     expect(document.querySelector(".badge")?.textContent).toBe("UNVERIFIED");
     expect(button("Choose local folder…").closest("[hidden], dialog")).toBeNull();
     expect(document.querySelector("label button, summary button")).toBeNull();

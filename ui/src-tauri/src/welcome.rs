@@ -6,7 +6,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
-const SEED_VERSION: u8 = 60;
+const SEED_VERSION: u8 = 61;
 
 struct Resource {
     path: &'static str,
@@ -496,8 +496,18 @@ mod tests {
                     }
                 }
             }
-            for reference in resource.content.split("](").skip(1) {
+            for (offset, _) in resource.content.match_indices("](") {
+                let reference = &resource.content[offset + 2..];
                 let target = reference.split(')').next().unwrap();
+                let image = resource.content[..offset]
+                    .rsplit_once('[')
+                    .is_some_and(|(prefix, _)| prefix.ends_with('!'));
+                if !image && target.starts_with("https://") {
+                    let url =
+                        reqwest::Url::parse(target).expect("Valid external documentation link");
+                    assert!(url.host_str().is_some(), "{} -> {target}", resource.path);
+                    continue;
+                }
                 // The Markdown renderer treats legacy ../assets as graph-relative.
                 let relative = target.strip_prefix("../").unwrap_or(target);
                 let asset = grafium_core::graph::resolve_asset_path(temp.path(), relative)

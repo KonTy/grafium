@@ -1,4 +1,4 @@
-# Private reader
+# Library reading and listening
 
 The private library is separate from your graph's imported Books and study
 history. Choose **Library location** in Settings, then open the private library
@@ -36,7 +36,19 @@ choose a genuinely local folder if your books must remain on this device.
 ## Playback and bookmarks
 
 The app-wide player provides **Bookmark**, **Pause/Resume**, and **Stop** while
-you work elsewhere in Grafium. Stop retains your place. A bookmark is a private
+you work elsewhere in Grafium. The open audiobook also has its own visible
+**Play/Resume**, **Pause**, **Stop**, and seek controls, so you do not have to find
+the app toolbar to stop it. Stop retains your place and remains available while
+another player operation is pending. Playback does not start merely by opening
+a book.
+
+Use the seek slider to move within the **current chapter**, not across the entire
+audiobook. It becomes available when the player reports a finite duration and
+supports seeking. Unknown duration or an unseekable stream shows a reason rather
+than a working-looking timeline. Read-aloud uses saved passages and does not
+offer a misleading seconds-based seek slider.
+
+A bookmark is a private
 saved location, not an automatically created note or graph page. A save error
 means the location was not confirmed as durable; do not assume it was saved.
 Listening checkpoints normally run every four seconds on Linux and every three
@@ -179,6 +191,61 @@ its isolation namespaces are also required; a blocked sandbox is an error,
 not permission to run speech without isolation.
 
 ### Voice packages on either platform
+
+In **Settings > Library**, open **?** beside **Get offline voices** for a complete
+worked example, download buttons, and copyable commands. Those commands are not
+executed by Grafium and do not request administrator access.
+
+The example is **LJ Speech high**, a single US-English voice at **22,050 Hz**.
+The [model author](https://brycebeattie.com/files/tts/) declares that model public
+domain; the [dataset](https://keithito.com/LJ-Speech-Dataset/#license) is public
+domain in the US. Review jurisdiction-specific terms and preserve bundled
+phonemizer notices. This is not a license to redistribute copyrighted books.
+Other voices have different licenses; do not reuse this example's license fields.
+
+1. **Linux:** get `en_US-ljspeech-high.onnx` (about 114 MB) and its matching
+   `en_US-ljspeech-high.onnx.json` from the
+   [official Piper voice folder](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/ljspeech/high).
+   Keep both filenames unchanged together in a new folder. Install/configure
+   Piper as described above; the model alone is not the engine.
+2. **Android:** the engine is already embedded. Download the
+   [Sherpa-converted archive](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-ljspeech-high.tar.bz2)
+   (about 116 MB) and extract it on a computer. Keep
+   `en_US-ljspeech-high.onnx`, `tokens.txt`, and the complete `espeak-ng-data/`
+   directory with its subdirectories. Follow the
+   [upstream model instructions](https://k2-fsa.github.io/sherpa/onnx/tts/all/English/vits-piper-en_US-ljspeech-high.html).
+   Do not substitute the Linux ONNX, import the compressed archive, or install an
+   upstream APK instead of a voice.
+3. **Both:** save the voice folder's `MODEL_CARD` next to the ONNX file, with no
+   added `.txt` extension. In that directory, run the **Copy package preparation
+   command** from the platform-specific setup guide. It uses Python 3 in a
+   POSIX terminal (Linux, macOS, or WSL); Android packages can be prepared on a
+   computer and then copied intact to local phone storage.
+   The helper reads only local files, calculates sizes/hashes, and creates
+   `manifest.json`. It never downloads or converts a model and refuses to replace
+   an existing manifest. Original voice files stay unchanged.
+4. **Import offline model…:** on Linux select the new `manifest.json`; on Android
+   select the complete prepared folder. A Piper `.onnx.json` is a model
+   configuration, **not** Grafium's manifest. Select the installed voice and
+   matching language, then **Save voice and language**.
+5. Open an EPUB and choose **… > Read aloud from start**. Missing files, incompatible
+   models, or blocked Linux isolation produce an error, not a cloud fallback.
+
+There is not yet a one-click voice catalog. Download buttons open your browser
+and contact the hosting service, without sending book content. Hugging Face and
+GitHub model URLs normally redirect, so use browser download and local import;
+they are not compatible with the redirect-free **Advanced: download from a
+manifest** control. The generated offline-import manifest has no download URLs
+and is not intended for that advanced control.
+
+For other languages, browse [Piper samples](https://rhasspy.github.io/piper-samples/)
+and [Piper voice documentation](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md).
+Android additionally requires a matching converted Piper/VITS voice from the
+[Sherpa catalog](https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/index.html);
+not every engine in that catalog is supported. Adjust the helper's ID, name,
+language, sample rate and license to match that voice's actual metadata.
+Reading web samples contacts the provider; synthesis of your books after setup
+uses local files. Locally calculated hashes do not authenticate the publisher.
 
 Linux packages declare runtime `piper-onnx-v1`; Android packages declare
 `sherpa-vits-v1`. The Android app includes its native engine and does not use the

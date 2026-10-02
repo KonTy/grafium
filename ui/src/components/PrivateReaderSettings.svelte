@@ -59,14 +59,14 @@
 <section data-help-context="reader" class="private-settings">
   <div class="help-row">
     <h3>Library location</h3>
-    <SettingsHelp title="Private library location">
+    <SettingsHelp title="Library location">
       <p>Discover EPUBs and audiobooks in an external local folder. An audiobook folder may contain nested disc folders; each loose MP3 in the library root is a separate book.</p>
       <p>Device-local books, listening progress, and automatic bookmarks never enter graph sync or AI.
         Intentionally written journal [[Book title]] notes are ordinary shared graph content.
         Do not choose a cloud-backed folder if you need originals to remain only on this device; external backup and whole-device policies are outside Grafium’s control.</p>
     </SettingsHelp>
   </div>
-  <p class="path">{$privateLibrary.libraryPath || "No private library selected"}</p>
+  <p class="path">{$privateLibrary.libraryPath || "No library selected"}</p>
   <div class="actions"><button disabled={busy} onclick={() => run(choose)}>Choose local folder…</button><button disabled={busy || !$privateLibrary.libraryPath} onclick={() => run(() => refreshPrivateLibrary(true))}>Rescan library</button></div>
   {#if android}
     <section class="volume">

@@ -87,8 +87,12 @@ existing tutorial graphs, and installing a build does not restart a running app.
 
 ## Private library
 
-**Library location** selects an external audiobook/EPUB library for the private
-reader in Library. This is an app-level setting, independent of the active graph.
+The **Library** section contains **Library location**, which selects an external
+audiobook/EPUB folder. This is an app-level setting, independent of the active graph.
+Under **Get offline voices**, open **?** for platform-specific download links,
+Linux Piper setup, a copyable offline package-preparation command, and exact import
+steps. Browser downloads are not automatic installation; select and save the
+installed voice and language afterward.
 Source media is not copied into the graph. Automatic bookmarks and progress stay
 outside graph sync and AI indexing. Deliberately written journal notes such as
 `[[Book title]]` remain ordinary graph content with ordinary sharing settings.

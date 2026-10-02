@@ -227,6 +227,12 @@ grant alone does not establish key delivery. Do not equate headphone play/pause
 support with phone-volume-key compatibility. Local speech requires a compatible
 installed runtime and licensed voice; missing prerequisites must not trigger a
 cloud or system-default voice fallback.
+In **Settings > Library**, **Get offline voices > ?** provides verified provider
+links, platform-specific steps, and a copyable local manifest-preparation command.
+Linux Piper and Android Sherpa use different model packages. Downloads open in
+your browser; neither an engine nor a model is silently installed. See the
+[voice setup guide](ui/src-tauri/resources/welcome/pages/Help%20-%20Private%20Reader.md)
+for licensing, import, and offline-synthesis boundaries.
 
 ### Live queries
 
@@ -409,7 +415,7 @@ overwritten by system changes.
 | Chat | `Alt+C` |
 | Left / right sidebar | `Ctrl/Cmd+B` / `Ctrl/Cmd+Shift+B` |
 | Bionic reading | `Ctrl/Cmd+Alt+B` |
-| Private Library bookmark | `Ctrl/Cmd+Alt+M` |
+| Library bookmark | `Ctrl/Cmd+Alt+M` |
 | Bold selection in the block editor | `Ctrl/Cmd+Alt+Shift+B` |
 | Scroll the main page, book, journal, or task pane (even while editing) | `Page Up` / `Page Down` |
 | Graph / Flashcards / Tasks | `Ctrl/Cmd+Shift+G` / `F` / `T` |

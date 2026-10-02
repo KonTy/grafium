@@ -32,7 +32,9 @@
   let publishedPosition: number | null = null;
   let autoPlayRequested = false;
   let generation = 0;
-  let playing = false;
+  let playing = $state(false);
+  let stopped = $state(false);
+  let seekable = $state(false);
   const sourceIdentity = $derived(`${graphPath}\0${item.id}\0${item.kind}\0${item.source}`);
 
   $effect(() => {
@@ -42,6 +44,7 @@
     untrack(() => {
       onPlayback(false);
       playing = false;
+      stopped = false; seekable = false;
       mediaSource = ""; embedSource = ""; transportOrigin = ""; externalSource = ""; error = ""; ready = false;
       resumed = false; autoPlayRequested = false; resumeFailed = false; resumeNotice = ""; publishedPosition = null; loading = false; checkpointSaved = false;
       progress = finiteStudyProgress(item.progress.position, item.progress.total, item.progress.label, item.progress.anchor);
@@ -147,7 +150,7 @@
       youtubeCommand("addEventListener", ["onError"]);
       if (autoplay && !autoPlayRequested) { autoPlayRequested = true; youtubeCommand("playVideo"); }
     } else if (data.event === "onError") {
-      onPlayback(false); loading = false;
+      playing = false; onPlayback(false); loading = false;
       error = "This YouTube video is unavailable or cannot be embedded. Open it in your browser instead.";
     } else if (data.event === "onStateChange") {
       youtubeState(data.info);
@@ -182,6 +185,7 @@
   function metadataReady() {
     if (!media || media.readyState < 1) return;
     ready = true;
+    updateSeekable();
     if (!resumed) {
       try {
         media.currentTime = Number.isFinite(media.duration) && media.duration > 0 ? Math.min(resumePosition, media.duration) : resumePosition;
@@ -207,11 +211,46 @@
     }
   }
   function mediaProgress() {
-    if (media && resumed) publish(media.currentTime, media.duration);
+    if (media && resumed) { updateSeekable(); publish(media.currentTime, media.duration); }
   }
-  function mediaPlaying() { playing = true; if (!resumeFailed) error = ""; onPlayback(true); onActivity?.(); }
+  function updateSeekable() {
+    seekable = !!media && Number.isFinite(media.duration) && media.duration > 0 && media.seekable.length > 0;
+  }
+  async function play() {
+    const current = generation;
+    autoPlayRequested = true; stopped = false;
+    if (item.kind === "youtube") { youtubeCommand("playVideo"); return; }
+    if (!media) return;
+    try { await media.play(); }
+    catch (cause) { if (current === generation) error = `Could not start playback: ${String(cause)}`; }
+  }
+  function pause(stop = false) {
+    autoPlayRequested = true;
+    stopped = stop;
+    if (item.kind === "youtube") youtubeCommand("pauseVideo");
+    else media?.pause();
+    mediaStopped();
+  }
+  export function pausePlayback() { pause(); }
+  function seek(event: Event) {
+    const target = Number((event.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(target) || progress.total <= 0 || !media || !seekable) {
+      error = "Seeking is unavailable for this source.";
+      return;
+    }
+    try {
+      let available = false;
+      for (let index = 0; index < media.seekable.length; index++)
+        if (target >= media.seekable.start(index) && target <= media.seekable.end(index)) available = true;
+      if (!available) throw new Error("This position is outside the media's available seek range.");
+      media.currentTime = target;
+      mediaProgress();
+    } catch (cause) { error = `Could not seek: ${String(cause)}`; }
+  }
+  function mediaPlaying() { playing = true; stopped = false; if (!resumeFailed) error = ""; onPlayback(true); onActivity?.(); }
   function mediaStopped() { mediaProgress(); playing = false; onPlayback(false); }
   function mediaError() {
+    playing = false; seekable = false;
     onPlayback(false);
     error = "The media could not be played. Check that the asset exists or the URL points directly to a supported audio/video file.";
   }
@@ -285,14 +324,32 @@
     <div class:audio-player={item.kind === "audio"}>
       {#if item.kind === "audio"}
         <div class="audio-heading"><span aria-hidden="true">♫</span><h2>{item.title}</h2></div>
-        <audio bind:this={media} src={mediaSource} controls preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></audio>
+        <audio bind:this={media} src={mediaSource} controls preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></audio>
       {:else}
         <!-- This is a user-selected source, not an authored video with supplied captions. -->
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={media} src={mediaSource} controls playsinline preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></video>
+        <video bind:this={media} src={mediaSource} controls playsinline preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></video>
       {/if}
     </div>
     <p class="muted">Press Play to begin. Your saved place is restored once the media is ready.</p>
+  {/if}
+  {#if item.kind === "audio" || item.kind === "video" || item.kind === "youtube"}
+    <section class="transport" aria-label="Media playback controls">
+      <div class="transport-actions">
+        <button disabled={!ready || playing || resumeFailed} onclick={play}>{progress.position > 0 ? "Resume" : "Play"}</button>
+        <button disabled={!playing} onclick={() => pause()}>Pause</button>
+        <button class="stop" onclick={() => pause(true)}>Stop</button>
+        <span role="status">{stopped ? "Stopped" : playing ? "Playing" : ready ? "Paused" : "Loading"} · {studyTime(progress.position)}{progress.total > 0 ? ` / ${studyTime(progress.total)}` : ""}</span>
+      </div>
+      <label>Seek {item.kind === "audio" ? "audio" : "video"}
+        <input type="range" min="0" max={progress.total || 1} step="1" value={progress.position}
+          aria-valuetext={`${studyTime(progress.position)}${progress.total ? ` of ${studyTime(progress.total)}` : ""}`}
+          disabled={!ready || progress.total <= 0 || !seekable} onchange={seek} />
+      </label>
+      {#if item.kind === "youtube"}<small>Use the video's own timeline; embedded seeking availability is not reported.</small>
+      {:else if progress.total <= 0}<small>Duration unknown; seeking unavailable.</small>
+      {:else if !seekable}<small>Seeking unavailable for this source.</small>{/if}
+    </section>
   {/if}
   {#if loading}<p class="muted" role="status">Loading player…</p>{/if}
   {#if resumeNotice}<p class="muted" role="status">{resumeNotice}</p>{/if}
@@ -314,6 +371,12 @@
   button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .primary { color: var(--accent); border-color: var(--accent); }
   .external { font-size: 12px; margin: 8px 0; } .browser-note { display: block; }
   .resume-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .transport { margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
+  .transport-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .transport-actions span { font-size: 12px; }
+  .stop { border-color: var(--accent); font-weight: 600; }
+  .transport input { padding: 0; accent-color: var(--accent); width: 100%; }
+  @media (pointer: coarse) { .transport button { min-height: 44px; } .transport input { min-height: 32px; } }
   .website { border: 1px solid var(--border); border-radius: 12px; padding: 28px; background: var(--bg-secondary); }
   .website-icon { font-size: 30px; color: var(--accent); margin-bottom: 12px; } .website p { color: var(--text-secondary); line-height: 1.6; font-size: 13px; } .source { overflow-wrap: anywhere; }
   form { border-top: 1px solid var(--border); margin-top: 28px; padding-top: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; } h3 { margin: 12px 0 0; font-size: 15px; }

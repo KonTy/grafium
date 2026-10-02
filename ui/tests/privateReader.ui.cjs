@@ -1,5 +1,9 @@
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
+const { mkdtempSync, readFileSync, unlinkSync, rmdirSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const { openEditor } = require("./keyboardSelection.ui.cjs");
 
 function silentAudio() {
@@ -14,7 +18,21 @@ function silentAudio() {
   return bytes;
 }
 
+function syntheticVideo() {
+  const directory = mkdtempSync(join(tmpdir(), "grafium-playback-"));
+  const path = join(directory, "fixture.webm");
+  try {
+    execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+      "color=c=blue:s=160x90:r=5:d=20", "-threads", "1", "-c:v", "libvpx", path]);
+    return readFileSync(path);
+  } finally {
+    try { unlinkSync(path); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    rmdirSync(directory);
+  }
+}
+
 (async () => {
+  const videoBytes = syntheticVideo();
   const browser = await chromium.launch({ headless: true });
   try {
     const { page, errors } = await openEditor(browser, {
@@ -32,6 +50,16 @@ function silentAudio() {
             },
           });
         });
+        await page.route("http://127.0.0.1:5199/reader-fixture.webm", route => {
+          const range = route.request().headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+          const start = range ? Number(range[1]) : 0;
+          const end = range?.[2] ? Math.min(Number(range[2]), videoBytes.length - 1) : videoBytes.length - 1;
+          return route.fulfill({
+            status: range ? 206 : 200, contentType: "video/webm", body: videoBytes.subarray(start, end + 1),
+            headers: { "Access-Control-Allow-Origin": "*", "Accept-Ranges": "bytes",
+              ...(range ? { "Content-Range": `bytes ${start}-${end}/${videoBytes.length}` } : {}) },
+          });
+        });
         await page.addInitScript(() => {
           if (window !== window.top) return;
           const OriginalAudio = window.Audio;
@@ -47,6 +75,16 @@ function silentAudio() {
                 id: "private-book", title: "Private listening fixture", kind: "audio", available: true,
                 tracks: [{ id: "track-one", title: "Chapter 1", relativePath: "Fixture/1.mp3", available: true }],
                 position: { trackId: "track-one", offsetMs: 12000 }, bookmarks: [],
+              }, {
+                id: "direct-audio", title: "Direct audio fixture", kind: "audio", available: true,
+                sourceUrl: "http://127.0.0.1:5199/reader-fixture.wav", tracks: [], position: null, bookmarks: [],
+              }, {
+                id: "direct-video", title: "Direct video fixture", kind: "video", available: true,
+                sourceUrl: "http://127.0.0.1:5199/reader-fixture.webm", tracks: [], position: null, bookmarks: [],
+              }, {
+                id: "local-video", title: "Local video fixture", kind: "video", available: true,
+                tracks: [{ id: "video-track", title: "Video", relativePath: "Fixture/video.webm", available: true }],
+                position: null, bookmarks: [],
               }],
               writes: [], graph: "/synthetic/keyboard-selection", failBookmark: false,
             };
@@ -58,10 +96,16 @@ function silentAudio() {
                 switch (command) {
                   case "reader_snapshot": case "reader_rescan":
                     return structuredClone({ libraryPath: fixture.libraryPath, books: fixture.books });
-                  case "reader_media_url": return "http://127.0.0.1:5199/reader-fixture.wav";
+                  case "reader_media_url": return `http://127.0.0.1:5199/reader-fixture.${args.bookId === "local-video" ? "webm" : "wav"}`;
                   case "reader_save_position":
-                    fixture.books[0].position = structuredClone(args.position);
+                    fixture.books.find(book => book.id === args.bookId).position = structuredClone(args.position);
                     return;
+                  case "reader_record_activity": {
+                    const book = fixture.books.find(book => book.id === args.bookId);
+                    book.lastUsedAt = Date.now();
+                    book.progress = structuredClone(args.progress);
+                    return structuredClone({ libraryPath: fixture.libraryPath, books: fixture.books });
+                  }
                   case "reader_add_bookmark": {
                     if (fixture.failBookmark) throw new Error("Synthetic durable bookmark failure");
                     const bookmark = {
@@ -97,27 +141,32 @@ function silentAudio() {
     });
     page.setDefaultTimeout(15000);
     const sidebar = page.locator(".sidebar");
-    await sidebar.getByRole("button", { name: "Studies", exact: true }).click();
+    await sidebar.getByRole("button", { name: "Library", exact: true }).click();
     await page.getByRole("button", { name: "Private listening fixture", exact: true }).click();
-    await page.getByRole("button", { name: "Resume audiobook", exact: true }).click();
-    const toolbar = page.getByRole("region", { name: "Private reader playback" });
+    assert.equal(await page.evaluate(() => !!window.__privateAudio && !window.__privateAudio.paused), false, "opening Library must not autoplay");
+    await page.getByRole("button", { name: "Resume audio", exact: true }).click();
+    const toolbar = page.getByRole("region", { name: "Library playback" });
     await toolbar.getByRole("button", { name: "Pause", exact: true }).waitFor();
     await page.waitForFunction(() => window.__privateAudio && !window.__privateAudio.paused && window.__privateAudio.currentTime >= 12);
+    const inPage = page.getByRole("region", { name: "Audiobook playback", exact: true });
+    await inPage.getByRole("button", { name: "Stop", exact: true }).waitFor({ state: "visible" });
+    await toolbar.getByRole("slider", { name: "Seek audio" }).waitFor({ state: "visible" });
+    await page.waitForFunction(() => !document.querySelector('[aria-label="Library playback"] input[type="range"]').disabled);
+    assert.equal(await toolbar.getByRole("slider").getAttribute("max"), "90000");
     await sidebar.getByRole("button", { name: "All Pages", exact: true }).click();
     await toolbar.getByRole("button", { name: "Pause", exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.__privateAudio.paused), false);
     await toolbar.getByRole("button", { name: "Pause", exact: true }).click();
     await toolbar.getByRole("button", { name: "Resume", exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.__privateAudio.paused), true);
-    await page.evaluate(() => new Promise(resolve => {
-      window.__privateAudio.addEventListener("seeked", resolve, { once: true });
-      window.__privateAudio.currentTime = 31.25;
-    }));
+    await toolbar.getByRole("slider").fill("31000");
+    await page.waitForFunction(() => Math.abs(window.__privateAudio.currentTime - 31) < .1);
+    assert.equal(await page.evaluate(() => window.__privateAudio.paused), true, "seek preserves pause");
     await toolbar.getByRole("button", { name: "Bookmark", exact: true }).click();
     await toolbar.getByText("Bookmark saved on this device.").waitFor();
     const captured = await page.evaluate(() => window.__privateReaderFixture.books[0].bookmarks[0].position);
     assert.equal(captured.trackId, "track-one");
-    assert.ok(Math.abs(captured.offsetMs - 31250) < 100, `bookmark samples the actual player, not the last checkpoint: ${JSON.stringify(captured)}`);
+    assert.ok(Math.abs(captured.offsetMs - 31000) < 100, `bookmark samples the actual player, not the last checkpoint: ${JSON.stringify(captured)}`);
     await page.evaluate(() => { window.__privateReaderFixture.failBookmark = true; });
     await toolbar.getByRole("button", { name: "Bookmark", exact: true }).click();
     await toolbar.getByRole("alert").getByText(/Synthetic durable bookmark failure/).waitFor();
@@ -129,20 +178,63 @@ function silentAudio() {
     await page.waitForFunction(() => window.__privateReaderFixture.graph === "/synthetic/other");
     await toolbar.getByRole("button", { name: "Pause", exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.__privateAudio.paused), false);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const stopBounds = await toolbar.getByRole("button", { name: "Stop", exact: true }).boundingBox();
+    assert.ok(stopBounds && stopBounds.x >= 0 && stopBounds.x + stopBounds.width <= 390 && stopBounds.y + stopBounds.height <= 844, "Stop must remain onscreen on a phone-width viewport");
+    await toolbar.getByRole("slider").focus();
+    await page.keyboard.press("ArrowRight");
+    await page.setViewportSize({ width: 1280, height: 900 });
     await toolbar.getByRole("button", { name: "Bookmark", exact: true }).focus();
     await page.keyboard.press("F1");
     await page.getByText("Private reading help fixture.").waitFor();
     await page.keyboard.press("Escape");
     await toolbar.getByRole("button", { name: "Stop", exact: true }).click();
     await toolbar.waitFor({ state: "hidden" });
+    assert.equal(await page.evaluate(() => window.__privateAudio.paused), true);
+    await sidebar.getByRole("button", { name: "Library", exact: true }).click();
+    await page.getByRole("button", { name: "Direct audio fixture", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__privateAudio.paused), true);
+    await page.getByRole("button", { name: "Play audio", exact: true }).click();
+    await toolbar.getByRole("button", { name: "Pause", exact: true }).waitFor();
+    await page.waitForFunction(() => !window.__privateAudio.paused && window.__privateAudio.currentTime > 0);
+    await sidebar.getByRole("button", { name: "All Pages", exact: true }).click();
+    await toolbar.getByRole("button", { name: "Stop", exact: true }).click();
+    await toolbar.waitFor({ state: "hidden" });
+    assert.equal(await page.evaluate(() => window.__privateAudio.paused), true);
+    for (const title of ["Direct video fixture", "Local video fixture"]) {
+      await sidebar.getByRole("button", { name: "Library", exact: true }).click();
+      await page.getByRole("button", { name: title, exact: true }).click();
+      assert.equal(await page.locator("video").count(), 0, "opening video details must not autoplay");
+      await page.getByRole("button", { name: "Play", exact: true }).click();
+      const controls = page.getByRole("region", { name: "Media playback controls" });
+      await page.waitForFunction(() => {
+        const video = document.querySelector("video");
+        return video && !video.paused && video.videoWidth === 160 && video.currentTime > 0;
+      });
+      await controls.getByRole("button", { name: "Pause", exact: true }).click();
+      assert.equal(await page.locator("video").evaluate(video => video.paused), true);
+      await controls.getByRole("slider", { name: "Seek video" }).fill("10");
+      await page.waitForFunction(() => Math.abs(document.querySelector("video").currentTime - 10) < .1);
+      assert.equal(await page.locator("video").evaluate(video => video.paused), true);
+      await controls.getByRole("button", { name: "Resume", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector("video").paused);
+      await controls.getByRole("button", { name: "Stop", exact: true }).click();
+      await controls.getByRole("status").getByText(/Stopped/).waitFor();
+      assert.equal(await page.locator("video").evaluate(video => video.paused), true);
+      await controls.getByRole("button", { name: "Resume", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector("video").paused);
+      await page.locator("video").evaluate(video => { window.__foregroundVideo = video; });
+      await sidebar.getByRole("button", { name: "All Pages", exact: true }).click();
+      assert.equal(await page.evaluate(() => window.__foregroundVideo.paused && !window.__foregroundVideo.getAttribute("src")), true);
+    }
     const state = await page.evaluate(() => ({
       progress: window.__privateReaderFixture.books[0].position,
       graphWrites: window.__selectionState.calls.filter(call =>
         call.cmd === "create_page" || call.cmd === "create_block" && call.args.content.trim()),
     }));
-    assert.ok(state.progress.offsetMs >= 31250);
+    assert.ok(state.progress.offsetMs >= 31000);
     assert.deepEqual(state.graphWrites, [], "reading and bookmarks must not create graph pages or note content");
     assert.deepEqual(errors, []);
-    console.log("PASS private reader: real audio resume, app/graph navigation, current-position durable bookmarks, save errors, stop and F1");
+    console.log("PASS private reader: real local/direct audio and video controls, seek/pause/stop, no autoplay, narrow viewport, navigation, private persistence and F1");
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

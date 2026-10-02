@@ -8,6 +8,7 @@ export const isAndroidReader = () => typeof navigator !== "undefined" && /Androi
 export interface AndroidReaderState {
   bookId: string | null; trackId: string | null; offsetMs: number;
   playing: boolean; buffering: boolean; error: string | null; durationMs: number;
+  seekable?: boolean;
   mode?: "audio" | "tts"; ttsLoading?: boolean; ordinal?: number; segmentCount?: number;
   locator?: BookLocation | string | null;
 }

@@ -172,6 +172,29 @@ describe("Library destination", () => {
 });
 
 describe("Library foreground player", () => {
+  it("saves paused seeks without recording listening and yields to resumed background playback", async () => {
+    component = mount(LibraryMedia, { target: document.body, props: { book: source() } });
+    flushSync(); button("Resume playback").click();
+    await vi.waitFor(() => expect(document.querySelector("video")).not.toBeNull());
+    const video = document.querySelector("video")!;
+    Object.defineProperties(video, {
+      readyState: { value: 1 }, duration: { value: 100 },
+      seekable: { value: { length: 1, start: () => 0, end: () => 100 } },
+    });
+    video.dispatchEvent(new Event("loadedmetadata")); flushSync();
+    const timeline = document.querySelector<HTMLInputElement>('input[type="range"]')!;
+    timeline.value = "60"; timeline.dispatchEvent(new Event("change", { bubbles: true }));
+    button("Stop").click(); flushSync();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_save_position", {
+      bookId: "media", position: { trackId: "track", offsetMs: 60000 },
+    }));
+    expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
+    video.dispatchEvent(new Event("playing")); flushSync();
+    const pauses = vi.mocked(video.pause).mock.calls.length;
+    privatePlayback.set({ bookId: "another", title: "Background audio", mode: "audio", status: "playing", position: null, error: "" });
+    flushSync();
+    expect(video.pause).toHaveBeenCalledTimes(pauses + 1);
+  });
   it("streams registered local video only on Play, records actual movement, and stops on leaving", async () => {
     const book = source();
     component = mount(LibraryMedia, { target: document.body, props: { book } });

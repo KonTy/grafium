@@ -8,6 +8,7 @@ import { webStudyUrl } from "./studySources";
 export interface ReaderPlaybackState {
   bookId: string | null; title: string; mode: "audio" | "tts"; status: "stopped" | "playing" | "paused" | "loading";
   position: ReaderPosition | null; error: string;
+  durationMs?: number; seekable?: boolean;
 }
 export interface PrivateNarrationAdapter {
   pause(): Promise<void>; resume(): Promise<void>; stop(): Promise<void>;
@@ -25,6 +26,7 @@ let writing = Promise.resolve();
 let activeBook: ReaderBook | null = null;
 let activityPosition: ReaderPosition | null = null;
 let cancelPreparation: (() => void) | null = null;
+let cancelAudioLoad: (() => void) | null = null;
 
 export function registerPrivatePreparation(cancel: () => void): () => void {
   cancelPreparation?.();
@@ -34,6 +36,12 @@ export function registerPrivatePreparation(cancel: () => void): () => void {
 
 function patch(value: Partial<ReaderPlaybackState>) { privatePlayback.update(state => ({ ...state, ...value })); }
 function fail(cause: unknown) { patch({ error: String(cause) }); }
+function updateAudioProgress() {
+  const state = get(privatePlayback);
+  if (!audio?.src || state.mode !== "audio" || state.status === "stopped") return;
+  const durationMs = Number.isFinite(audio.duration) && audio.duration > 0 ? Math.round(audio.duration * 1000) : 0;
+  patch({ position: position(), durationMs, seekable: durationMs > 0 && audio.seekable.length > 0 });
+}
 function position(): ReaderPosition | null {
   const state = get(privatePlayback);
   return state.mode === "audio" && audio && state.position
@@ -65,6 +73,8 @@ function player(): HTMLAudioElement {
   if (audio) return audio;
   audio = new Audio();
   audio.preload = "metadata";
+  for (const event of ["loadedmetadata", "durationchange", "progress", "timeupdate", "seeked"])
+    audio.addEventListener(event, updateAudioProgress);
   audio.addEventListener("error", () => {
     patch({ status: "paused", error: `Playback failed (${audio?.error?.code ?? "unknown"}). Check that the library source is still accessible.` });
   });
@@ -107,7 +117,7 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
   activeBook = book;
   const selected = { trackId, offsetMs: saved?.offsetMs ?? 0 };
   activityPosition = selected;
-  patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "" });
+  patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "", durationMs: 0, seekable: false });
   try {
     if (isAndroidReader()) {
       const state = await androidReaderRequest<AndroidReaderState>("play", { bookId: book.id, ...selected });
@@ -119,39 +129,56 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
     const element = player();
     element.src = url;
     await new Promise<void>((resolve, reject) => {
-      const cleanup = () => { element.removeEventListener("loadedmetadata", ready); element.removeEventListener("error", failed); clearTimeout(timeout); };
+      const cleanup = () => {
+        element.removeEventListener("loadedmetadata", ready); element.removeEventListener("error", failed); clearTimeout(timeout);
+        if (cancelAudioLoad === ready) cancelAudioLoad = null;
+      };
       const ready = () => { cleanup(); resolve(); };
       const failed = () => { cleanup(); reject(new Error("The audio source could not be loaded.")); };
       const timeout = setTimeout(() => { cleanup(); reject(new Error("Timed out loading the audio source.")); }, 30000);
       element.addEventListener("loadedmetadata", ready, { once: true });
       element.addEventListener("error", failed, { once: true });
+      cancelAudioLoad = ready;
       element.load();
     });
     if (request !== generation) return;
     element.currentTime = selected.offsetMs / 1000;
+    updateAudioProgress();
     await element.play();
     if (request === generation) patch({ status: "playing" });
   } catch (cause) {
-    if (request === generation) { audio?.pause(); patch({ status: "paused", error: String(cause) }); }
+    if (request !== generation) return;
+    audio?.pause(); patch({ status: "paused", error: String(cause) });
     throw cause;
   }
 }
 
 export async function pausePrivatePlayback(): Promise<void> {
+  const request = generation;
   if (narration) await narration.pause();
-  else if (isAndroidReader()) { applyAndroidState(await androidReaderRequest<AndroidReaderState>("pause")); return; }
-  else { audio?.pause(); try { await checkpointPrivatePlayback(); } finally { patch({ status: "paused" }); } }
-  patch({ status: "paused" });
+  else if (isAndroidReader()) {
+    const state = await androidReaderRequest<AndroidReaderState>("pause");
+    if (request === generation) applyAndroidState(state);
+    return;
+  }
+  else { audio?.pause(); try { await checkpointPrivatePlayback(); } finally { if (request === generation) patch({ status: "paused" }); } }
+  if (request === generation) patch({ status: "paused" });
 }
 export async function resumePrivatePlayback(): Promise<void> {
+  const request = generation;
   if (narration) await narration.resume();
-  else if (isAndroidReader()) { applyAndroidState(await androidReaderRequest<AndroidReaderState>("resume")); return; }
+  else if (isAndroidReader()) {
+    const state = await androidReaderRequest<AndroidReaderState>("resume");
+    if (request === generation) applyAndroidState(state);
+    return;
+  }
   else if (audio?.src) await audio.play();
   else throw new Error("No reader is ready to resume. Open the book again.");
-  patch({ status: "playing", error: "" });
+  if (request === generation) patch({ status: "playing", error: "" });
 }
 export async function stopPrivatePlayback(): Promise<void> {
   ++generation;
+  cancelAudioLoad?.();
   cancelPreparation?.();
   cancelPreparation = null;
   if (narration) {
@@ -166,22 +193,38 @@ export async function stopPrivatePlayback(): Promise<void> {
   }
   if (audio?.src) {
     audio.pause();
-    try { await checkpointPrivatePlayback(); }
-    finally { audio.removeAttribute("src"); audio.load(); patch({ status: "stopped" }); }
+    const checkpoint = checkpointPrivatePlayback();
+    audio.removeAttribute("src"); audio.load(); patch({ status: "stopped" });
+    await checkpoint;
   }
   patch({ status: "stopped" });
 }
 export async function skipPrivateAudio(deltaMs: number): Promise<void> {
-  if (!narration && isAndroidReader() && get(privatePlayback).mode === "audio") {
-    applyAndroidState(await androidReaderRequest<AndroidReaderState>("seek", {
-      offsetMs: Math.max(0, (get(privatePlayback).position?.offsetMs ?? 0) + deltaMs),
-    }));
+  await seekPrivateAudioPosition((position()?.offsetMs ?? 0) + deltaMs);
+}
+export async function seekPrivateAudioPosition(offsetMs: number): Promise<void> {
+  const state = get(privatePlayback);
+  if (!Number.isFinite(offsetMs)) throw new Error("The requested playback position is invalid.");
+  if (narration || state.mode !== "audio" || !state.seekable || !state.durationMs || state.status === "stopped")
+    throw new Error("Seeking is unavailable until this player reports a seekable duration.");
+  const target = Math.max(0, Math.min(state.durationMs, offsetMs));
+  if (isAndroidReader()) {
+    const request = generation;
+    const next = await androidReaderRequest<AndroidReaderState>("seek", {
+      offsetMs: Math.round(target),
+    });
+    if (request === generation) applyAndroidState(next);
     return;
   }
   if (narration || !audio?.src || get(privatePlayback).mode !== "audio")
     throw new Error("Seeking is only available for the active audiobook.");
-  const maximum = Number.isFinite(audio.duration) ? audio.duration : Number.MAX_SAFE_INTEGER;
-  audio.currentTime = Math.max(0, Math.min(maximum, audio.currentTime + deltaMs / 1000));
+  const seconds = target / 1000;
+  let available = false;
+  for (let index = 0; index < audio.seekable.length; index++)
+    if (seconds >= audio.seekable.start(index) && seconds <= audio.seekable.end(index)) available = true;
+  if (!available) throw new Error("This position is outside the media's available seek range.");
+  audio.currentTime = seconds;
+  updateAudioProgress();
   await checkpointPrivatePlayback();
 }
 export async function bookmarkPrivatePlayback(): Promise<void> {
@@ -202,7 +245,7 @@ export async function bookmarkPrivatePlayback(): Promise<void> {
 export async function claimPrivateNarration(book: ReaderBook, adapter: PrivateNarrationAdapter): Promise<void> {
   await stopPrivatePlayback();
   narration = adapter;
-  patch({ bookId: book.id, title: book.title, mode: "tts", status: "loading", position: book.position, error: "" });
+  patch({ bookId: book.id, title: book.title, mode: "tts", status: "loading", position: book.position, error: "", durationMs: 0, seekable: false });
 }
 export function updatePrivateNarration(update: Partial<ReaderPlaybackState>): void { patch(update); }
 
@@ -217,10 +260,12 @@ export function applyAndroidState(state: AndroidReaderState): void {
       : state.trackId ? { trackId: state.trackId, offsetMs: state.offsetMs } : null);
   } catch (cause) { locatorError = String(cause); }
   patch({
-    bookId: state.bookId, title: book?.title ?? get(privatePlayback).title,
+    bookId: state.bookId, title: (book?.title ?? (get(privatePlayback).bookId === state.bookId ? get(privatePlayback).title : "")) || "Background playback",
     mode: state.mode === "tts" ? "tts" : "audio",
     status: state.buffering || state.ttsLoading ? "loading" : state.playing ? "playing" : state.bookId ? "paused" : "stopped",
     position: nativePosition, error: state.error || locatorError,
+    durationMs: state.mode !== "tts" && Number.isFinite(state.durationMs) && state.durationMs > 0 ? state.durationMs : 0,
+    seekable: state.mode !== "tts" && state.seekable === true && state.durationMs > 0,
   });
 }
 
@@ -228,8 +273,11 @@ export function attachPrivatePlayback(): () => void {
   if (!isAndroidReader()) return () => {};
   const receive = (event: Event) => applyAndroidState((event as CustomEvent<AndroidReaderState>).detail);
   const restore = () => {
-    void refreshPrivateLibrary().then(() => androidReaderRequest<AndroidReaderState>("state"))
-      .then(applyAndroidState).catch(fail);
+    void androidReaderRequest<AndroidReaderState>("state").then(applyAndroidState).catch(fail);
+    void refreshPrivateLibrary().then(() => {
+      const book = get(privateLibrary).books.find(item => item.id === get(privatePlayback).bookId);
+      if (book) patch({ title: book.title });
+    }).catch(fail);
   };
   window.addEventListener("private-reader-state", receive);
   window.addEventListener("focus", restore);

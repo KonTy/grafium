@@ -4,18 +4,19 @@
   import LibrarySourcePlayer from "./LibrarySourcePlayer.svelte";
   import { readerNative, privateLibraryError, privateVisualPositions, type ReaderBook, type ReaderPosition } from "../lib/privateReader";
   import { libraryMediaRequest, saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
-  import { pausePrivatePlayback, privatePlayback, validatePrivateMediaURL } from "../lib/privateReaderPlayback";
+  import { pausePrivatePlayback, stopPrivatePlayback, privatePlayback, validatePrivateMediaURL } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   let { book, onPlayback, onActivity, onProgress }: {
     book: ReaderBook; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
     onProgress?: (progress: LibraryProgress) => void;
   } = $props();
   let started = $state(false);
+  let foregroundPlayer = $state<LibrarySourcePlayer>();
   let opening = $state(false);
   let error = $state("");
   let playerKey = $state(0);
   let initial = $state<ReaderPosition | null>(null);
-  let pending: { id: string; position: ReaderPosition; progress: LibraryProgress } | null = null;
+  let pending: { id: string; position: ReaderPosition; progress: LibraryProgress; active: boolean } | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastPosition = 0;
   const unsupported = $derived(isAndroidReader() && !book.sourceUrl);
@@ -28,7 +29,8 @@
   async function start(position = book.position) {
     opening = true; error = "";
     try {
-      if (get(privatePlayback).status === "playing") await pausePrivatePlayback();
+      if (get(privatePlayback).status === "loading") await stopPrivatePlayback();
+      else if (get(privatePlayback).status === "playing") await pausePrivatePlayback();
       flush();
       initial = position; lastPosition = (position?.offsetMs ?? 0) / 1000; playerKey++; started = true;
     } catch (cause) { error = String(cause); }
@@ -44,7 +46,7 @@
     clearTimeout(timer); timer = undefined;
     const captured = pending; pending = null;
     if (!captured) return;
-    void saveLibraryCheckpoint(captured.id, captured.position, captured.progress).catch(cause => {
+    void saveLibraryCheckpoint(captured.id, captured.position, captured.progress, captured.active).catch(cause => {
       error = `Library position not saved: ${String(cause)}`;
       privateLibraryError.set(error);
     });
@@ -55,10 +57,10 @@
       ...(!book.sourceUrl ? { trackId: initial?.trackId ?? book.tracks[0]?.id } : {}),
     };
     privateVisualPositions.set(book.id, position);
-    if (!active || value.position === lastPosition) return;
+    if (value.position === lastPosition) return;
     lastPosition = value.position;
     onProgress?.(value);
-    pending = { id: book.id, position, progress: value };
+    pending = { id: book.id, position, progress: value, active };
     timer ??= setTimeout(flush, 1000);
   }
   function playback(playing: boolean) {
@@ -68,6 +70,9 @@
     else if (get(privatePlayback).status === "playing")
       void pausePrivatePlayback().catch(cause => { error = String(cause); });
   }
+  $effect(() => {
+    if ($privatePlayback.status === "playing") untrack(() => foregroundPlayer?.pausePlayback());
+  });
   $effect(() => {
     const request = $libraryMediaRequest;
     if (request?.bookId === book.id && !unsupported) {
@@ -84,7 +89,7 @@
   {#if unsupported}
     <p role="alert">Local video playback is not supported on Android yet. Your Library history is retained; play this source on desktop.</p>
   {:else if started}
-    {#key playerKey}<LibrarySourcePlayer {item} autoplay={true} helpContext="library"
+    {#key playerKey}<LibrarySourcePlayer bind:this={foregroundPlayer} {item} autoplay={true} helpContext="library"
       resolveMedia={book.sourceUrl ? undefined : mediaURL} onProgress={progress} onPlayback={playback} />{/key}
     <p class="status">{book.kind === "audio" ? "Network audio on Android stops when you leave this player." : "Video and YouTube stop when you leave this player."}</p>
   {:else}

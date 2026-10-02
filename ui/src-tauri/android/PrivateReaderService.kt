@@ -190,7 +190,8 @@ class PrivateReaderService : MediaSessionService() {
   }
   fun seek(offsetMs: Long): JSONObject {
     require(bookId != null && offsetMs >= 0) { "INVALID_POSITION" }
-    player.seekTo(offsetMs)
+    require(narrator == null && player.isCurrentMediaItemSeekable && player.duration > 0) { "SEEK_UNAVAILABLE" }
+    player.seekTo(offsetMs.coerceAtMost(player.duration))
     persist()
     publish()
     return state()
@@ -237,6 +238,7 @@ class PrivateReaderService : MediaSessionService() {
     .put("trackId", player.currentMediaItem?.mediaId ?: JSONObject.NULL)
     .put("offsetMs", player.currentPosition.coerceAtLeast(0))
     .put("durationMs", player.duration.takeIf { it != C.TIME_UNSET } ?: 0)
+    .put("seekable", narrator == null && player.isCurrentMediaItemSeekable && player.duration > 0)
     .put("playing", player.isPlaying).put("buffering", player.playbackState == Player.STATE_BUFFERING)
     .put("error", error ?: JSONObject.NULL).put("checkpointIntervalMs", 3000)
     .put("mode", if (narrator != null) "tts" else "audio")

@@ -52,13 +52,22 @@ private Library history and access to the source to follow them. A missing
 item or bookmark is reported rather than opening a different source.
 
 Private audio/read-aloud playback can continue while you use other workspaces.
+Audiobooks have visible **Play/Resume**, **Pause**, **Stop**, and current-chapter
+seek controls in their page as well as the persistent app player. Stop retains
+the position. Direct audio/video players also expose explicit transport controls;
+opening a source does not automatically start playback. Seek is enabled only
+when duration and actual seek capability are known; otherwise its disabled
+state explains why. Read-aloud is passage-based, and YouTube uses its embedded
+timeline rather than an invented seek range.
 Video and embedded-player behavior depends on the available player/platform;
 do not assume a hidden or unsupported player is still playing.
 Local video is currently supported on desktop, not Android. Online audio/video
 on Android plays only while its Library player is open in the foreground;
 it does not use the native background audiobook service.
 For offline speech, backup/restore, and opt-in Android volume-key bookmarking,
-see [[Help - Private Reader]]. Phone hardware behavior still requires physical
+see [[Help - Private Reader]]. **Settings > Library > Get offline voices > ?**
+provides download sources, package preparation, and separate Linux/Android import
+steps; there is no silent or one-click engine installation. Phone hardware behavior still requires physical
 device testing; this change does not establish screen-off compatibility.
 
 ## Add to a learning plan
