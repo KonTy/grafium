@@ -12,6 +12,9 @@
   import { showToast } from "../lib/toast.svelte";
   import type { StudyProgress } from "../lib/studies";
   import ReadingSurface from "./ReadingSurface.svelte";
+  import ReaderNavigation from "./ReaderNavigation.svelte";
+  import { readerFlow } from "../lib/readerPreferences";
+  import { bionicReaderEnabled } from "../lib/bionicReader";
   import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
 
   let { page, graphPath, onStudyProgress }: {
@@ -23,6 +26,7 @@
   let book = $state.raw<BookInfo | null>(null);
   let loading = $state(true);
   let ready = $state(false);
+  let direction = $state<"ltr" | "rtl">("ltr");
   let error = $state("");
   let positionError = $state("");
   let invalidated = $state(false);
@@ -132,6 +136,7 @@
         clearTimeout(openTimer); loading = false; ready = true;
         sendCommand("theme", { theme: readReaderTheme() });
         toc = message.toc; notice = message.notice; annotations = message.annotations; pdfPages = message.pages ?? 0;
+        direction = message.direction ?? "ltr";
       } else if (message.type === "error") {
         clearTimeout(openTimer); loading = false; error = message.message;
       } else if (message.type === "location" && !invalidated && compatibleBookLocation(activeBook, message.location)) {
@@ -202,6 +207,13 @@
   });
 
   $effect(() => {
+    const flow = $readerFlow, enabled = $bionicReaderEnabled;
+    if (ready) untrack(() => {
+      sendCommand("flow", { value: flow });
+      sendCommand("bionic", { enabled });
+    });
+  });
+  $effect(() => {
     $bookNoteChanges;
     if (!ready || !book) return;
     const source = book;
@@ -230,10 +242,9 @@
 </script>
 
 <section class="book-reader" aria-label="Original book reader" data-help-context="books" data-book-page-id={page.id}>
-  <ReadingSurface bind:this={surface}>
+  <ReadingSurface bind:this={surface} onNavigate={ready ? direction => sendCommand("turn", { direction }) : undefined}>
     {#snippet navigation()}
-      <button type="button" disabled={!ready} onclick={() => sendCommand("prev")}>Previous</button>
-      <button type="button" disabled={!ready} onclick={() => sendCommand("next")}>Next</button>
+      <ReaderNavigation {ready} {direction} reflowable={annotations && !pdfPages} onNavigate={direction => sendCommand("turn", { direction })} />
       {#if toc.length}
         <select aria-label="Book contents" disabled={!ready} value="" onchange={e => {
           const item = toc[Number(e.currentTarget.value)];

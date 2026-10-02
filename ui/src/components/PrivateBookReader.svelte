@@ -1,6 +1,9 @@
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
   import ReadingSurface from "./ReadingSurface.svelte";
+  import ReaderNavigation from "./ReaderNavigation.svelte";
+  import { readerFlow } from "../lib/readerPreferences";
+  import { bionicReaderEnabled } from "../lib/bionicReader";
   import { observeReaderTheme, readReaderTheme } from "../lib/bookReaderTheme";
   import { get } from "svelte/store";
   import { BOOK_FRAME_SANDBOX, readReaderMessage, readerFrameURL, type BookTocItem } from "../lib/bookReaderSecurity";
@@ -19,6 +22,8 @@
   let frame = $state<HTMLIFrameElement>();
   let url = $state("");
   let ready = $state(false);
+  let reflowable = $state(false);
+  let direction = $state<"ltr" | "rtl">("ltr");
   let error = $state("");
   let label = $state("");
   let fraction = $state<number | undefined>();
@@ -66,8 +71,8 @@
       return writing;
     }
     send = (type, data = {}) => {
-      if (["prev", "next", "toc", "goto"].includes(type)) navigationPending = true;
-      else if (type === "size") navigationPending = false;
+      if (["prev", "next", "turn", "toc", "goto"].includes(type)) navigationPending = true;
+      else if (["size", "flow", "bionic", "theme"].includes(type)) navigationPending = false;
       if (!disposed) frame?.contentWindow?.postMessage({ channel: "grafium-book", token, type, ...data }, "*");
     };
     const unregisterSegments = registerPrivateSegments(id, async () => {
@@ -111,6 +116,7 @@
       }
       if (message.type === "ready") {
         clearTimeout(openTimer); ready = true; toc = message.toc;
+        reflowable = message.annotations; direction = message.direction ?? "ltr";
         send("theme", { theme: readReaderTheme() });
         if (message.language) {
           privateBookLanguages.update(languages => ({ ...languages, [id]: message.language! }));
@@ -198,6 +204,13 @@
     };
   });
   $effect(() => {
+    const flow = $readerFlow, enabled = $bionicReaderEnabled;
+    if (ready) untrack(() => {
+      send("flow", { value: flow });
+      send("bionic", { enabled });
+    });
+  });
+  $effect(() => {
     const jump = $privateBookJump;
     if (ready && jump?.bookId === bookId) {
       send("goto", { location: jump.locator });
@@ -207,16 +220,16 @@
 </script>
 
 <section class="private-book" data-help-context="reader" aria-label="Private EPUB reader">
-  <ReadingSurface bind:this={surface} {actions} {bookmarks} {onBack} {onBookmark}>
+  <ReadingSurface bind:this={surface} {actions} {bookmarks} {onBack} {onBookmark}
+    onNavigate={ready ? direction => send("turn", { direction }) : undefined}>
   {#snippet navigation()}
-    <button disabled={!ready} onclick={() => send("prev")}>Previous</button>
-    <button disabled={!ready} onclick={() => send("next")}>Next</button>
+    <ReaderNavigation {ready} {reflowable} {direction} onNavigate={direction => send("turn", { direction })} />
     <select disabled={!ready} aria-label="Private book contents" value="" onchange={event => {
       const item = toc[Number(event.currentTarget.value)];
       if (item) send("toc", { target: item.target });
       event.currentTarget.value = "";
     }}><option disabled value="">Contents…</option>{#each toc as item, index}<option value={index}>{"—".repeat(item.depth)} {item.label}</option>{/each}</select>
-    <label>Text size<select bind:value={size} disabled={!ready} onchange={event => { onActivity?.(); send("size", { value: Number(event.currentTarget.value) }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
+    <label>Text size<select aria-label="Book text size" bind:value={size} disabled={!ready || !reflowable} onchange={event => { onActivity?.(); send("size", { value: Number(event.currentTarget.value) }); }}>{#each [75, 100, 125, 150, 175, 200] as value}<option {value}>{value}%</option>{/each}</select></label>
     <small>{label}</small>
   {/snippet}
   {#snippet children()}

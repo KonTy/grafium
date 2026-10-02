@@ -1,8 +1,12 @@
+import { readerNavigationKey } from "../readerNavigation";
+
 const interactive = "a,button,input,textarea,select,[contenteditable],[role=button],[role=link]";
 const selected = doc => !!doc.getSelection()?.toString();
 
-export function installReaderInteractions(doc, { send, turn, canSwipe = () => true }) {
+export function installReaderInteractions(doc, { send, turn, canSwipe = () => true,
+  scrolled = () => false, scrollAtBoundary = () => false, atScrollBoundary = () => false }) {
   let touch;
+  let scrollTouch;
   let tap;
   let tapTimer;
   const zoomed = () => (window.visualViewport?.scale ?? 1) > 1.01
@@ -22,11 +26,23 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
   };
   on("keydown", event => {
     if (!event.isTrusted || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+    const direction = readerNavigationKey(event, doc);
+    if (direction) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      send("navigation"); turn(direction); return;
+    }
+    if (event.isComposing || event.defaultPrevented) return;
     const type = { F1: "help", F8: "toggle-controls", Escape: "exit-fullscreen", F11: "toggle-fullscreen" }[event.key];
     if (!type) return;
     event.preventDefault(); event.stopPropagation();
     if (!event.repeat) send(type);
   });
+  on("wheel", event => {
+    if (!event.isTrusted || !scrolled() || !event.deltaY || event.ctrlKey || event.metaKey
+      || event.altKey || event.shiftKey || blocked(event.target) || selected(doc) || zoomed()) return;
+    send("navigation");
+    if (scrollAtBoundary(event.deltaY > 0 ? "next" : "prev")) event.preventDefault();
+  }, { capture: true, passive: false });
   on("pointerdown", event => {
     clearTimeout(tapTimer);
     tap = event.isTrusted && event.isPrimary && event.button === 0 && !blocked(event.target)
@@ -54,6 +70,10 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
     // vertical scroll/selection. Replace that handler, keeping its goLeft/goRight
     // navigation semantics (not guessed page indexes, and RTL stays correct).
     event.stopImmediatePropagation();
+    scrollTouch = event.isTrusted && scrolled() && event.touches.length === 1
+      && !selected(doc) && !zoomed() && !blocked(event.target)
+      ? { x: event.touches[0].clientX, y: event.touches[0].clientY,
+        next: atScrollBoundary("next"), prev: atScrollBoundary("prev") } : null;
     if (!event.isTrusted || event.touches.length !== 1 || selected(doc) || zoomed()
       || blocked(event.target) || horizontallyScrollable(event.target) || !canSwipe()) { touch = null; return; }
     const t = event.touches[0];
@@ -61,6 +81,10 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
   }, options);
   on("touchmove", event => {
     event.stopImmediatePropagation();
+    if (scrollTouch) {
+      if (event.touches.length !== 1 || selected(doc) || zoomed()) scrollTouch = null;
+      else if (Math.abs(event.touches[0].clientY - scrollTouch.y) > 12) send("navigation");
+    }
     if (!touch) return;
     if (event.touches.length !== 1 || zoomed() || selected(doc) || event.timeStamp - touch.time > 600) { touch = null; return; }
     const t = [...event.touches].find(t => t.identifier === touch.id);
@@ -71,6 +95,15 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
   }, options);
   on("touchend", event => {
     event.stopImmediatePropagation();
+    if (scrollTouch && event.isTrusted && !event.touches.length && event.changedTouches.length === 1
+      && !selected(doc) && !zoomed()) {
+      const dx = event.changedTouches[0].clientX - scrollTouch.x;
+      const dy = event.changedTouches[0].clientY - scrollTouch.y;
+      const direction = dy < 0 ? "next" : "prev";
+      if (Math.abs(dy) > 48 && Math.abs(dy) > Math.abs(dx) * 1.7
+        && scrollTouch[direction] && scrollAtBoundary(direction) && event.cancelable) event.preventDefault();
+    }
+    scrollTouch = null;
     const start = touch;
     touch = null;
     if (!event.isTrusted || !start || event.touches.length || selected(doc) || zoomed() || !canSwipe()
@@ -84,6 +117,6 @@ export function installReaderInteractions(doc, { send, turn, canSwipe = () => tr
     send("navigation");
     turn(dx < 0 ? "right" : "left");
   }, options);
-  on("touchcancel", event => { event.stopImmediatePropagation(); touch = null; tap = null; }, options);
+  on("touchcancel", event => { event.stopImmediatePropagation(); touch = null; scrollTouch = null; tap = null; }, options);
   return () => { clearTimeout(tapTimer); listeners.forEach(remove => remove()); };
 }

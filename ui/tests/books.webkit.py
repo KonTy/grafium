@@ -26,6 +26,23 @@ manager.connect("script-message-received::result", received)
 # Native automation, not a reader command: select visible fixture words as a
 # user would, without weakening the shipped opaque-frame bridge or its CSP.
 manager.add_script(WebKit2.UserScript.new("""
+addEventListener('message', event => {
+  if (event.source !== parent || event.data?.type !== 'native-fixture-probe') return;
+  const view = document.querySelector('foliate-view');
+  if (!view?.renderer) return;
+  const doc = view.renderer.getContents()[0]?.doc;
+  if (!doc) return;
+  const passage = doc.querySelector('#passage') || [...doc.querySelectorAll('p')].find(p => p.textContent.startsWith('Select this'));
+  let bold = false;
+  const walker = doc.createTreeWalker(passage, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) bold ||= parseFloat(doc.defaultView.getComputedStyle(walker.currentNode.parentElement).fontWeight) >= 700;
+  let quote;
+  try { quote = view.resolveCFI(event.data.cfi).anchor(doc).toString(); }
+  catch (error) { quote = String(error); }
+  parent.postMessage({channel:'reader-native-probe', scrolled:view.renderer.scrolled, bold, quote,
+    width:passage.getBoundingClientRect().width,
+    fontSize:parseFloat(doc.defaultView.getComputedStyle(passage).fontSize)}, '*');
+});
 let attempts = 0;
 const selectFixture = setInterval(() => {
   if (++attempts > 100) return clearInterval(selectFixture);

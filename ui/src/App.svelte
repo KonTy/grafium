@@ -17,6 +17,8 @@
   import { revealStartupWindow } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
+  import { readerOwnsNavigation } from "./lib/readerNavigation";
+  import { loadReaderFlowPreference } from "./lib/readerPreferences";
   import TitleBar from "./components/TitleBar.svelte";
   import Toaster from "./components/Toaster.svelte";
   import PrivateReaderToolbar from "./components/PrivateReaderToolbar.svelte";
@@ -55,6 +57,7 @@
   import {
     loadBionicReaderPreference as readBionicReaderPreference,
     setBionicReaderEnabled,
+    bionicReaderEnabled,
   } from "./lib/bionicReader";
   import { listen } from "@tauri-apps/api/event";
   import { documentDir, downloadDir, homeDir } from "@tauri-apps/api/path";
@@ -359,7 +362,7 @@
     refresh: () => Promise<void>;
   } | null = $state(null);
   let showBlockGuides = $state(true);
-  let bionicReaderMode = $state(false);
+  const bionicReaderMode = $derived($bionicReaderEnabled);
   let zenMode = $state(false);
   let wideMode = $state(true);
   const DEFAULT_NARROW_PADDING_PCT = 15;
@@ -524,12 +527,11 @@
   }
 
   function loadBionicReaderPreference() {
-    bionicReaderMode = readBionicReaderPreference();
+    readBionicReaderPreference();
   }
 
   function toggleBionicReader() {
-    bionicReaderMode = !bionicReaderMode;
-    setBionicReaderEnabled(bionicReaderMode);
+    setBionicReaderEnabled(!bionicReaderMode);
   }
 
   function resetSidebarWidth() {
@@ -1279,7 +1281,7 @@
   function handleGlobalKeydown(e: KeyboardEvent) {
     const reader = document.querySelector(".reading-surface");
     if (reader && !hasKeyboardOverlay(document)
-      && (e.key === "F8" || e.key === "F11" || (e.key === "Escape"
+      && (readerOwnsNavigation(e, reader) || e.key === "F8" || e.key === "F11" || (e.key === "Escape"
         && (reader.classList.contains("expanded") || reader.querySelector('[aria-expanded="true"]'))))) return;
     if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
@@ -2374,6 +2376,7 @@
     loadShowBlockGuidesPreference();
     loadNarrowPaddingPreference();
     loadBionicReaderPreference();
+    loadReaderFlowPreference();
   });
 </script>
 

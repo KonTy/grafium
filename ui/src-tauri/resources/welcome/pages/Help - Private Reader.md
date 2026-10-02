@@ -85,15 +85,33 @@ navigation, text size, **Bookmark**, Library navigation, and expandable
 **Bookmarks** and **Reading options** for favorites, Studies, relinking,
 voice settings, and read-aloud. Errors remain visible rather than hiding there.
 
-Swipe horizontally to turn pages. Previous/Next buttons and keyboard navigation
-remain available. Touch behavior depends on your WebView and device; physical
-phone validation is still needed.
+Swipe horizontally in **Pages** mode or use the arrow icons. **Arrow Left /
+Arrow Right** follow the book's reading direction; **Page Up / Page Down** always
+go previous/next, including with the bar hidden. Selected text, editing controls,
+menus, and other panes keep their own keys.
+
+Choose **Continuous scroll** to read vertically, continuing into adjacent
+chapters at their boundaries. Page keys move an overlapping screenful of text
+instead of skipping the rest of a long chapter. Layout is remembered across
+restarts, and reflowable EPUB text wraps to wide or narrow windows.
+Touch behavior depends on your WebView and device; physical phone validation
+is still needed.
+
+Use **B** for optional **Bionic reading**: word beginnings become bold without
+rewriting the book. It shares the top-bar B preference for rendered notes.
+Code, math, and artwork are unchanged. Bookmarks and narration passage anchors
+work with Bionic on or off. Appearance changes do not overwrite a saved voice
+or an offset within a spoken passage. Bionic is a preference, not a promised
+reading-speed improvement.
 
 Reflowable book text follows Grafium's background, text, and link colors, including
 live theme changes. **Text size** scales the actual letters, including books with
 publisher-defined fixed font sizes, rather than merely widening line spacing.
 Illustrations, scanned PDF pages, and fixed-layout artwork retain their original
 colors. Reading appearance never rewrites the source file.
+Fixed-layout EPUB does not offer continuous text reflow or Bionic mode.
+For graph-imported FB2, MOBI, AZW3, and PDF capabilities, see [[Help - Books]];
+the external private ebook library currently discovers EPUB files.
 
 The visual EPUB reader blocks book scripts and external resources. DRM is not
 supported. The private reader does not import EPUB text into graph search,

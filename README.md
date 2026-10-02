@@ -110,7 +110,8 @@ destructive-action confirmation warnings remain visible.
 | Commands and templates | Use the editor's command menus rather than memorizing every Markdown pattern. |
 | Emoji and icon picker | Type `/emoji` for emoji, `/icon` for built-in symbolic icons, or `/em` for both; add search words and choose from the completions in either editor. |
 | Portable icons | Emoji are stored as literal characters. Icon shortcodes such as `:icon-star:` remain readable in source and render as icons outside code. |
-| Bionic Speedreader | Toggle the top-bar **B** button to emphasize word beginnings in rendered notes. It changes presentation, not the Markdown, and leaves code and math alone. |
+| Bionic reading | Toggle **B** in the top bar or book controls to emphasize word beginnings in rendered notes and reflowable ebooks. It changes presentation, not source text or saved passage anchors, and leaves code and math alone. |
+| Book navigation | Arrow icons, Left/Right, and Page Up/Down navigate original books. Reflowable EPUB/FB2/MOBI/AZW3 offer remembered paged or continuous scrolling layouts, responsive text, and real font scaling; PDFs retain their page layout. |
 | Callouts | Insert styled notes, warnings, tips, and other supported callout templates. |
 | Selection actions | Turn selected bullets into TODOs or tasks back into bullets, and make links from selected text. |
 | Reading notes | Open the right panel's **Notes** tab, select a passage and choose **Use selection**, then write and **Save note**. Notes can also apply to the whole current page, book, or journal day. No AI is required. |

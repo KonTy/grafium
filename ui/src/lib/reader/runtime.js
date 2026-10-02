@@ -12,6 +12,7 @@ import { BOOK_RENDERER_VERSION, isBookLocation } from "../bookLocations";
 import { DEFAULT_READER_THEME, isReaderTheme } from "../bookReaderTheme";
 import { applyBookTheme, bookThemeStyles } from "./theme";
 import { installReaderInteractions } from "./interactions";
+import { installBionicCFI, setBookBionic } from "./bionic";
 
 const token = globalThis.GRAFIUM_BOOK_TOKEN;
 delete globalThis.GRAFIUM_BOOK_TOKEN;
@@ -25,11 +26,17 @@ const blobURL = blob => { const url = URL.createObjectURL(blob); urls.add(url); 
 let adapter;
 let initialized = false;
 let commandQueue = Promise.resolve();
+let turning = false;
 const turn = direction => {
-  commandQueue = commandQueue.then(() => adapter?.turn(direction)).catch(error);
+  if (turning) return;
+  turning = true;
+  commandQueue = commandQueue.then(() => adapter?.turn(direction)).catch(error).finally(() => { turning = false; });
 };
 const removeInteractions = installReaderInteractions(document, {
   send, turn, canSwipe: () => !!adapter && adapter.canSwipe(),
+  scrolled: () => adapter?.scrolled?.() ?? false,
+  scrollAtBoundary: direction => adapter?.scrollAtBoundary?.(direction) ?? false,
+  atScrollBoundary: direction => adapter?.atScrollBoundary?.(direction) ?? false,
 });
 function applyFrameTheme() {
   document.body.style.backgroundColor = theme.background;
@@ -41,6 +48,10 @@ applyFrameTheme();
 window.addEventListener("message", event => {
   const m = event.data;
   if (event.source !== parent || !m || m.channel !== "grafium-book" || m.token !== token) return;
+  if (adapter && m.type === "turn" && ["prev", "next", "left", "right"].includes(m.direction)) {
+    turn(m.direction);
+    return;
+  }
   commandQueue = commandQueue.then(async () => {
     if (m.type === "theme" && isReaderTheme(m.theme)) {
       theme = m.theme;
@@ -54,6 +65,9 @@ window.addEventListener("message", event => {
     } else if (adapter) {
       if (m.type === "next") await adapter.next();
       else if (m.type === "prev") await adapter.prev();
+      else if (m.type === "turn" && ["prev", "next", "left", "right"].includes(m.direction)) await adapter.turn(m.direction);
+      else if (m.type === "flow" && ["paginated", "scrolled"].includes(m.value)) await adapter.flow?.(m.value);
+      else if (m.type === "bionic" && typeof m.enabled === "boolean") await adapter.bionic?.(m.enabled);
       else if (m.type === "goto" && isBookLocation(m.location)) await adapter.goTo(m.location);
       else if (m.type === "toc" && (typeof m.target === "string" || Number.isSafeInteger(m.target)))
         await adapter.toc(m.target);
@@ -134,15 +148,53 @@ async function openReflowable({ bytes, format, location }) {
   // Audio overlays can drive navigation and are not part of this offline reader.
   for (const section of book.sections) section.mediaOverlay = null;
   const view = new View();
+  installBionicCFI(view);
   root.append(view);
   let highlights = [];
   const fixed = book.rendition?.layout === "pre-paginated";
   let fontSize = 100;
+  let bionic = false;
+  const margin = 24;
   const interactions = new Map();
   const styleBook = () => {
     if (fixed) return;
     for (const { doc } of view.renderer.getContents()) applyBookTheme(doc, theme, fontSize);
     view.renderer.setStyles(bookThemeStyles(theme));
+  };
+  const atScrollBoundary = direction => {
+    const renderer = view.renderer;
+    return renderer.scrolled && (direction === "next"
+      ? renderer.viewSize - renderer.end <= 2 : renderer.start <= 2);
+  };
+  const scrollAtBoundary = direction => {
+    if (!atScrollBoundary(direction)) return false;
+    turn(direction);
+    return true;
+  };
+  const step = direction => {
+    const distance = view.renderer.scrolled ? Math.max(1, view.renderer.size - margin * 2) * .9 : undefined;
+    return direction === "next" ? view.next(distance) : view.prev(distance);
+  };
+  const reflow = async change => {
+    const cfi = view.lastLocation?.cfi;
+    const selections = view.renderer.getContents().flatMap(({ doc, index }) => {
+      const selection = doc.getSelection();
+      if (!selection?.rangeCount || selection.isCollapsed) return [];
+      const range = selection.getRangeAt(0);
+      return [{ doc, cfi: view.getCFI(index, range), backward: selection.anchorNode === range.endContainer
+        && selection.anchorOffset === range.endOffset }];
+    });
+    change();
+    view.renderer.render();
+    if (cfi) await view.goTo(cfi);
+    for (const { doc, cfi, backward } of selections) {
+      const range = view.resolveCFI(cfi).anchor(doc);
+      const selection = doc.getSelection();
+      selection.setBaseAndExtent(
+        backward ? range.endContainer : range.startContainer, backward ? range.endOffset : range.startOffset,
+        backward ? range.startContainer : range.endContainer, backward ? range.startOffset : range.endOffset);
+    }
+    await paint();
   };
   const locator = cfi => ({ kind: "epub", cfi, rendererVersion: BOOK_RENDERER_VERSION });
   const paint = async () => {
@@ -170,9 +222,11 @@ async function openReflowable({ bytes, format, location }) {
     }
     interactions.set(doc, installReaderInteractions(doc, {
       send, turn, canSwipe: () => !view.renderer.scrolled,
+      scrolled: () => view.renderer.scrolled, scrollAtBoundary, atScrollBoundary,
     }));
     if (fixed) return;
     applyBookTheme(doc, theme, fontSize);
+    setBookBionic(doc, bionic);
     let timer;
     doc.addEventListener("selectionchange", () => {
       clearTimeout(timer);
@@ -185,20 +239,12 @@ async function openReflowable({ bytes, format, location }) {
         }
       }, 80);
     });
-    doc.addEventListener("keydown", event => {
-      if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
-        && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
-        if (doc.defaultView.getSelection()?.toString()) return;
-        event.preventDefault();
-        send("navigation");
-        void (event.key === "ArrowRight" ? view.goRight() : view.goLeft()).catch(error);
-      }
-    });
   });
   await view.open(book);
   if (!fixed) {
     view.renderer.setAttribute("max-column-count", "1");
     view.renderer.setAttribute("gap", "7%");
+    view.renderer.setAttribute("margin", `${margin}px`);
     view.renderer.setStyles(bookThemeStyles(theme));
   }
   const goTo = async value => {
@@ -211,7 +257,7 @@ async function openReflowable({ bytes, format, location }) {
   const metadataLanguage = Array.isArray(book.metadata?.language) ? book.metadata.language[0] : book.metadata?.language;
   const language = typeof metadataLanguage === "string" && metadataLanguage.length <= 63
     && /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/.test(metadataLanguage) ? metadataLanguage : undefined;
-  send("ready", { toc, annotations: !fixed, language, notice: fixed
+  send("ready", { toc, annotations: !fixed, language, direction: book.dir === "rtl" ? "rtl" : "ltr", notice: fixed
     ? "Fixed-layout book: passage selection and highlighting are unavailable. Whole-book notes remain available."
     : "Local book · text selections can be saved as passage notes. Book scripts and external resources are blocked." });
   if (location && location.kind === "epub" && location.rendererVersion === BOOK_RENDERER_VERSION) await goTo(location);
@@ -220,9 +266,24 @@ async function openReflowable({ bytes, format, location }) {
     if (location) error(new Error("Saved position belongs to a different reader version. Opened at the beginning."));
   }
   return {
-    next: () => view.next(), prev: () => view.prev(), goTo,
-    turn: direction => direction === "right" ? view.goRight() : view.goLeft(),
+    next: () => step("next"), prev: () => step("prev"), goTo,
+    turn: direction => step(direction === "left" ? (book.dir === "rtl" ? "next" : "prev")
+      : direction === "right" ? (book.dir === "rtl" ? "prev" : "next") : direction),
     canSwipe: () => !view.renderer.scrolled,
+    scrolled: () => view.renderer.scrolled,
+    scrollAtBoundary,
+    atScrollBoundary,
+    flow: async value => {
+      if (!fixed && view.renderer.scrolled !== (value === "scrolled"))
+        await reflow(() => view.renderer.setAttribute("flow", value));
+    },
+    bionic: async enabled => {
+      if (fixed || enabled === bionic) return;
+      bionic = enabled;
+      await reflow(() => {
+        for (const { doc } of view.renderer.getContents()) setBookBionic(doc, enabled);
+      });
+    },
     theme: styleBook,
     segments: async ({ requestId, section, offset }) => {
       if (format !== "epub" || fixed) throw new Error("Read aloud requires a reflowable EPUB.");
@@ -438,10 +499,22 @@ async function openPDF({ bytes, location }) {
       current.overlay.firstElementChild?.scrollIntoView({ block: "center" });
     }
   };
+  const step = async direction => {
+    const forward = direction === "next" || direction === "right";
+    const remaining = forward ? root.scrollHeight - root.clientHeight - root.scrollTop : root.scrollTop;
+    if (remaining > 2) {
+      root.scrollBy({ top: root.clientHeight * .9 * (forward ? 1 : -1), behavior: "instant" });
+    } else {
+      const page = Math.max(1, Math.min(pdf.numPages, pageNumber + (forward ? 1 : -1)));
+      if (page === pageNumber) return;
+      await goTo({ kind: "pdf", page });
+      if (!forward) root.scrollTop = root.scrollHeight;
+    }
+  };
   return {
     next: () => goTo({ kind: "pdf", page: Math.min(pdf.numPages, pageNumber + 1) }),
     prev: () => goTo({ kind: "pdf", page: Math.max(1, pageNumber - 1) }),
-    turn: direction => goTo({ kind: "pdf", page: Math.max(1, Math.min(pdf.numPages, pageNumber + (direction === "right" ? 1 : -1))) }),
+    turn: step,
     canSwipe: () => zoom <= 100,
     theme: () => {},
     goTo, toc: page => goTo({ kind: "pdf", page }),

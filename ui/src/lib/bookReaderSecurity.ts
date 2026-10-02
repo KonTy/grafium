@@ -50,7 +50,7 @@ export function sanitizeBookDocument(source: string): string {
 export interface BookTocItem { label: string; target: string | number; depth: number }
 export interface ReaderTextSegment { text: string; locator: Extract<BookLocation, { kind: "epub" }> }
 export type ReaderMessage =
-  | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number; language?: string }
+  | { type: "ready"; toc: BookTocItem[]; annotations: boolean; notice: string; pages?: number; language?: string; direction?: "ltr" | "rtl" }
   | { type: "location"; location: BookLocation; label: string; fraction?: number }
   | { type: "selection"; quote: string; location: BookLocation }
   | { type: "clear-selection" }
@@ -85,6 +85,7 @@ export function readReaderMessage(event: MessageEvent, source: Window | null, to
         && ((typeof t.target === "string" && t.target.length < 16384) || Number.isSafeInteger(t.target))
         && Number.isInteger(t.depth) && t.depth >= 0 && t.depth < 100)
         && typeof m.annotations === "boolean" && typeof m.notice === "string"
+        && (m.direction === undefined || m.direction === "ltr" || m.direction === "rtl")
         && (m.language === undefined || typeof m.language === "string" && m.language.length <= 63
           && /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/.test(m.language))
         && (m.pages === undefined || Number.isSafeInteger(m.pages) && m.pages > 0) ? m : null;

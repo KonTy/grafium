@@ -33,7 +33,9 @@ const { epub, mobi, pdf } = require("./books.ui.cjs");
         frame.style.cssText = 'width:1100px;height:760px;border:0';
         frame.sandbox = BookSecurity.BOOK_FRAME_SANDBOX;
         const messages = [];
+        let probe;
         const receive = event => {
+          if (event.source === frame.contentWindow && event.data?.channel === 'reader-native-probe') probe = event.data;
           const message = BookSecurity.readReaderMessage(event, frame.contentWindow, token);
           if (message) messages.push(message);
         };
@@ -63,6 +65,29 @@ const { epub, mobi, pdf } = require("./books.ui.cjs");
             }
           }, 200);
         });
+        if (fixture.format !== 'pdf') {
+          const selection = messages.find(message => message.type === 'selection');
+          frame.style.width = '320px';
+          send('size', {value:200}); send('bionic', {enabled:true}); send('flow', {value:'scrolled'});
+          const checkAppearance = (enabled, scrolled) => new Promise((resolve, reject) => {
+            let attempts = 0;
+            const timer = setInterval(() => {
+              frame.contentWindow.postMessage({type:'native-fixture-probe', cfi:selection.location.cfi}, '*');
+              const failure = messages.find(message => message.type === 'error');
+              if (failure || ++attempts > 60) {
+                clearInterval(timer);
+                reject(new Error(fixture.format + ': native appearance/CFI failed: ' + JSON.stringify({probe, failure})));
+              } else if (probe?.bold === enabled && probe?.scrolled === scrolled
+                && probe.quote === selection.quote && probe.width <= 320 && probe.fontSize >= 24) {
+                clearInterval(timer); resolve();
+              }
+            }, 100);
+          });
+          await checkAppearance(true, true);
+          send('bionic', {enabled:false}); send('flow', {value:'paginated'});
+          await checkAppearance(false, false);
+          completed.push({format:fixture.format + '-reflow', narrow:true, bionic:true, canonicalQuote:true, layouts:2});
+        }
         if (fixture.format === 'epub') {
           const narration = [];
           for (let section = 0; section < 2; section++) {

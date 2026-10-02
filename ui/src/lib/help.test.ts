@@ -30,9 +30,14 @@ describe("contextual help", () => {
       expect(page).toContain("F11");
       expect(page).toContain("Escape");
       expect(page).toContain("Swipe");
+      expect(page).toContain("Page Up / Page Down");
+      expect(page).toContain("Continuous scroll");
+      expect(page).toContain("Bionic");
     }
     expect(readerHelp).toContain("actual letters");
     expect(readerHelp).toMatch(/original\s+colors/);
+    expect(booksHelp).toContain("DjVu is not an original-reader");
+    expect(readerHelp).toContain("offset within a spoken passage");
   });
   it("routes Library independently and explains reference-only study plans", async () => {
     expect(helpPageTitle("library")).toBe("Help - Library");

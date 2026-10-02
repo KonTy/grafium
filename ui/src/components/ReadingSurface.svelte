@@ -3,10 +3,12 @@
   import { enterReaderFullscreen, type ReaderFullscreen } from "../lib/readerFullscreen";
   import { hasKeyboardOverlay } from "../lib/mainPaneScroll";
   import { showToast } from "../lib/toast.svelte";
+  import { readerNavigationKey, readerOwnsNavigation, type ReaderTurn } from "../lib/readerNavigation";
 
-  let { children, navigation, actions, bookmarks, onBack, onBookmark }: {
+  let { children, navigation, actions, bookmarks, onBack, onBookmark, onNavigate }: {
     children: Snippet; navigation: Snippet; actions?: Snippet; bookmarks?: Snippet;
     onBack?: () => void; onBookmark?: () => void;
+    onNavigate?: (direction: ReaderTurn) => void;
   } = $props();
   const id = $props.id();
   let root = $state<HTMLElement>();
@@ -64,7 +66,10 @@
   }
   function keydown(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing || hasKeyboardOverlay(document)) return;
-    if (event.key === "F8" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (onNavigate && root && readerOwnsNavigation(event, root)) {
+      const direction = readerNavigationKey(event, document)!;
+      event.preventDefault(); event.stopImmediatePropagation(); onNavigate(direction);
+    } else if (event.key === "F8" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopImmediatePropagation(); toggleControls();
     } else if (event.key === "F11" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopImmediatePropagation(); void toggleFullscreen();

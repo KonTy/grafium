@@ -1,7 +1,8 @@
 import { writable } from "svelte/store";
+import { BIONIC_WORD_RE as WORD_RE, bionicPrefixLength } from "./bionicText";
+export { bionicPrefixLength } from "./bionicText";
 
 const STORAGE_KEY = "grafium.reader.bionic";
-const WORD_RE = /[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N}'’_-]*/gu;
 const SKIP_TAGS = new Set(["CODE", "PRE", "SCRIPT", "STYLE", "TEXTAREA", "INPUT", "KBD", "SAMP"]);
 const SKIP_SELECTOR = [
   ".bionic-word",
@@ -46,13 +47,6 @@ export function loadBionicReaderPreference(): boolean {
   }
   bionicReaderEnabled.set(enabled);
   return enabled;
-}
-
-export function bionicPrefixLength(word: string): number {
-  const chars = Array.from(word);
-  if (chars.length <= 1) return chars.length;
-  if (chars.length <= 3) return 1;
-  return Math.max(1, Math.ceil(chars.length * 0.42));
 }
 
 function shouldSkipTextNode(node: Text, root: HTMLElement): boolean {

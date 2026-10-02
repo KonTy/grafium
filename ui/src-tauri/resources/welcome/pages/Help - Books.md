@@ -54,6 +54,27 @@ Reflowable text follows Grafium's theme and scales its actual lettering when
 you change text size. Images and fixed-layout/PDF page artwork retain their
 original colors; PDFs use page zoom rather than text reflow.
 
+Use the arrow icons or **Arrow Left / Arrow Right** to turn pages; arrows follow
+the book's reading direction. **Page Up / Page Down** always mean previous/next.
+Shortcuts leave text selections, editable fields, menus, and other panes alone.
+They also work while the controls are hidden.
+
+For reflowable EPUB, FB2, MOBI, and AZW3, choose **Pages** or **Continuous scroll**
+in the reading bar. Scroll mode moves through chapters automatically at their
+boundaries; its page keys advance an overlapping screenful rather than skipping
+a chapter when the lettering is large. The layout preference survives restart.
+Text wraps to the available width, including narrow phone-sized windows.
+PDF page keys first move through an enlarged page before changing pages.
+PDF and fixed-layout EPUB do not offer text reflow; DjVu is not an original-reader
+format. PDF may contain selectable text, not only images; reliable conversion or
+OCR is a separate workflow, not lossless reflow of the original.
+
+The **B** button enables **Bionic reading**, emphasizing word beginnings. It shares
+the top-bar B preference for notes. This is optional presentation, not a change
+to book text or a guaranteed reading-speed improvement. Code, math, and artwork
+are left alone. Positions, quoted selections, and passage-note anchors remain
+compatible when changing Bionic mode, layout, text size, or window width.
+
 Select a passage, open the right panel's **Notes** tab, and choose
 **Use selection**. Write your thoughts and **Save note**. A note can also apply
 to the whole book without a selected passage. Open a saved note's passage to

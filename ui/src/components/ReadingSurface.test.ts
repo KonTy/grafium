@@ -36,13 +36,28 @@ async function openBook() {
   });
   const frame = document.querySelector("iframe")!;
   const token = decodeURIComponent(frame.src).match(/const token="([^"]+)"/)![1];
-  return { frame, send(type: string, origin = "null") {
+  return { frame, send(type: string, origin = "null", data: Record<string, unknown> = {}) {
     window.dispatchEvent(new MessageEvent("message", { source: frame.contentWindow, origin,
-      data: { channel: "grafium-book", token, type } }));
+      data: { channel: "grafium-book", token, type, ...data } }));
     flushSync();
   } };
 }
 describe("distraction-free book reading", () => {
+  it("routes host page keys only from the reader, not editing or another pane", async () => {
+    const { frame, send } = await openBook();
+    send("ready", "null", { toc: [], annotations: true, notice: "" });
+    const post = vi.spyOn(frame.contentWindow!, "postMessage");
+    const event = new KeyboardEvent("keydown", { key: "PageDown", bubbles: true, cancelable: true });
+    handle().dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: "turn", direction: "next" }), "*");
+    post.mockClear();
+    document.querySelector("select")!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    const outside = document.createElement("button"); document.body.append(outside);
+    outside.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown", bubbles: true }));
+    expect(post).not.toHaveBeenCalled();
+    expect(document.querySelector("iframe")).toBe(frame);
+  });
   it("starts with only the book and one handle; toggles without reloading or recording activity", async () => {
     const { frame, send } = await openBook();
     const controls = document.querySelector<HTMLElement>(".reading-controls")!;

@@ -118,7 +118,7 @@ function syntheticBook() {
     const reader = page.getByRole("region", { name: "Original book reader" });
     await reader.waitFor();
     await reader.getByRole("button", { name: "Show reading controls", exact: true }).click();
-    await reader.getByRole("button", { name: "Next", exact: true }).waitFor();
+    await reader.getByRole("button", { name: "Next page", exact: true }).waitFor();
     await page.waitForFunction(() => !document.querySelector(".book-reader button")?.disabled);
     const chapter = await chapterLoaded;
     const passage = chapter.locator("#passage");
@@ -234,7 +234,7 @@ function syntheticBook() {
       window.dispatchEvent(new Event("focus"));
     });
     await reader.getByText(/Stale read-only snapshot/).waitFor();
-    assert.equal(await reader.getByRole("button", { name: "Next", exact: true }).isDisabled(), true);
+    assert.equal(await reader.getByRole("button", { name: "Next page", exact: true }).isDisabled(), true);
     await page.evaluate(saved => {
       const fixture = window.__bookFixture, state = window.__selectionState;
       fixture.sourceMissing = true;

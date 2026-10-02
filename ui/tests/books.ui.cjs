@@ -11,7 +11,7 @@ const path = require("node:path");
 
 const UNICODE_PASSAGE = `Unicode ${"x".repeat(311)}\u{1F600} end.`;
 
-function epub(fixed = false) {
+function epub(fixed = false, rtl = false) {
   const repeated = Array.from({ length: 145 }, (_, n) => `<p>Offline paragraph ${n}. A book can remember its place across window and font size changes.</p>`).join("")
     + `<p>${UNICODE_PASSAGE}</p>`
     + `<p id="long-chunks">${"CanonicalLongChunk ".repeat(80)}</p>`;
@@ -23,7 +23,7 @@ function epub(fixed = false) {
     "META-INF/container.xml": `<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
     "META-INF/encryption.xml": `<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#"><EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/><CipherData><CipherReference URI="font.ttf"/></CipherData></EncryptedData></encryption>`,
     "font.ttf": font,
-    "book.opf": `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">synthetic</dc:identifier><dc:title>Offline Reader Test</dc:title><dc:language>en</dc:language>${fixed ? '<meta property="rendition:layout">pre-paginated</meta>' : ""}</metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="font" href="font.ttf" media-type="font/ttf"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>`,
+    "book.opf": `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">synthetic</dc:identifier><dc:title>Offline Reader Test</dc:title><dc:language>en</dc:language>${fixed ? '<meta property="rendition:layout">pre-paginated</meta>' : ""}</metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/><item id="font" href="font.ttf" media-type="font/ttf"/></manifest><spine page-progression-direction="${rtl ? "rtl" : "ltr"}"><itemref idref="one"/><itemref idref="two"/></spine></package>`,
     "nav.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="one.xhtml">First chapter</a></li><li><a href="two.xhtml">Second chapter</a></li></ol></nav></body></html>`,
     "one.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title><meta name="viewport" content="width=600,height=800"/><style>@import "https://blocked.invalid/style";@font-face{font-family:FixtureFont;src:url(font.ttf)}#passage{font-family:FixtureFont}body{background-image:url(https://blocked.invalid/css);background-color:white;color:black}h1{font-size:24px !important}p{font-size:10px !important;line-height:14px !important;color:black !important;background:white !important}</style></head><body onload="top.pwned=true"><script>top.pwned=true;fetch('https://blocked.invalid/script')</script><h1>First chapter</h1><p id="passage" style="font-size:10pt !important;color:black !important;background:white !important">Select this original passage for a saved note.</p><p id="nested-font" style="font-size:12px !important">Hierarchy <span style="font-size:9pt !important">nested <em style="font-size:75% !important">smaller</em></span></p><svg xmlns="http://www.w3.org/2000/svg" id="artwork" width="16" height="16" style="color:#321abc;background:white;width:1em;height:1em"><rect width="8" height="16" fill="currentColor"/></svg><img src="https://blocked.invalid/image" onerror="top.pwned=true"/><a href="javascript:top.pwned=true">Unsafe link</a><a id="local-link" href="#passage" style="color:blue !important">Local link</a>${repeated}</body></html>`,
     "two.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title><meta name="viewport" content="width=600,height=800"/></head><body style="background:white;color:black"><h1>Second chapter</h1><p style="font-size:9pt !important">Return to the first passage.</p></body></html>`,
@@ -132,7 +132,10 @@ async function main() {
       const chapter = page.frames().find(f => f.url() === "about:srcdoc");
       assert(chapter, "Foliate chapter rendered in an isolated srcdoc");
       await chapter.locator("#passage").evaluate(el => {
-        const range = document.createRange(); range.selectNodeContents(el);
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), nodes = [];
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        const range = document.createRange();
+        range.setStart(nodes[0], 0); range.setEnd(nodes.at(-1), nodes.at(-1).length);
         getSelection().removeAllRanges(); getSelection().addRange(range);
       });
       await page.waitForFunction(() => messages.some(m => m.type === "selection"));
@@ -300,6 +303,105 @@ async function main() {
     assert.match(await page.evaluate(() => messages.findLast(m => m.type === "location").label), /First chapter/);
     console.log("EPUB: render, TOC, selection, annotation, resize/font jump, reopen, script/network/IPC isolation passed.");
 
+    await open("epub", epub());
+    const navigationFrame = page.frames().find(f => f.url().startsWith("data:text/html"));
+    const navigationChapter = page.frames().find(f => f.url() === "about:srcdoc");
+    const currentCFI = () => page.evaluate(() => messages.findLast(m => m.type === "location").location.cfi);
+    await navigationChapter.locator("#passage").click();
+    for (const key of ["PageDown", "PageUp", "ArrowRight", "ArrowLeft"]) {
+      const before = await currentCFI();
+      await page.keyboard.press(key);
+      await page.waitForFunction(value => messages.findLast(m => m.type === "location").location.cfi !== value, before);
+      await page.waitForTimeout(120);
+    }
+    let untouched = await currentCFI();
+    await navigationChapter.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown", bubbles: true })));
+    await page.keyboard.press("Control+PageDown");
+    assert.equal(await currentCFI(), untouched, "Untrusted and modified paging do not navigate");
+    await page.evaluate(() => { messages = messages.filter(m => m.type !== "selection"); });
+    const canonicalSelection = await selectBook();
+    untouched = await currentCFI();
+    await page.keyboard.press("PageDown");
+    assert.equal(await currentCFI(), untouched, "Paging never steals a selected passage");
+    await selectBook();
+    await page.evaluate(() => send("bionic", { enabled: true }));
+    await navigationChapter.waitForFunction(() => {
+      const walker = document.createTreeWalker(document.querySelector("#passage"), NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) if (parseFloat(getComputedStyle(walker.currentNode.parentElement).fontWeight) >= 700) return true;
+      return false;
+    });
+    await navigationChapter.waitForFunction(quote => getSelection().toString() === quote, canonicalSelection.quote, { timeout: 5000 }).catch(async cause => {
+      console.error("Bionic selection diagnostics:", await navigationFrame.evaluate(cfi => {
+        const view = document.querySelector("foliate-view"), doc = view.renderer.getContents()[0].doc;
+        const selection = doc.getSelection();
+        return { quote: view.resolveCFI(cfi).anchor(doc).toString(), selected: selection.toString(),
+          anchor: selection.anchorNode?.nodeName, offset: selection.anchorOffset, focus: selection.focusOffset };
+      }, canonicalSelection.location.cfi), await page.evaluate(() => messages.slice(-5)));
+      throw cause;
+    });
+    await page.evaluate(() => { messages = messages.filter(m => m.type !== "selection"); });
+    const bionicSelection = await selectBook();
+    assert.deepEqual(bionicSelection.location, canonicalSelection.location, "Bionic selection retains the exact canonical CFI");
+    const resolveQuote = location => navigationFrame.evaluate(cfi => {
+      const view = document.querySelector("foliate-view");
+      return view.resolveCFI(cfi).anchor(view.renderer.getContents()[0].doc).toString();
+    }, location.cfi);
+    assert.equal(await resolveQuote(canonicalSelection.location), canonicalSelection.quote, "Pre-Bionic notes resolve with Bionic on");
+    await page.evaluate(location => {
+      send("notes", { locations: [location] }); send("flow", { value: "scrolled" }); send("size", { value: 200 });
+      document.querySelector("iframe").style.width = "320px";
+    }, canonicalSelection.location);
+    await navigationFrame.waitForFunction(() => document.querySelector("foliate-view").renderer.scrolled);
+    await navigationChapter.waitForFunction(() => parseFloat(getComputedStyle(document.querySelector("#passage")).fontSize) > 26);
+    await page.waitForTimeout(250);
+    assert.equal(await resolveQuote(canonicalSelection.location), canonicalSelection.quote, "Narrow scrolling reflow preserves notes");
+    const narrowParagraph = await navigationChapter.locator("#passage").boundingBox();
+    assert(narrowParagraph.width <= 320 && narrowParagraph.height > 30, `Large text genuinely wraps to narrow width: ${JSON.stringify(narrowParagraph)}`);
+    await navigationChapter.evaluate(() => getSelection().removeAllRanges());
+    await navigationChapter.locator("#passage").click();
+    const scrollState = () => navigationFrame.evaluate(() => {
+      const renderer = document.querySelector("foliate-view").renderer;
+      return { start: renderer.start, end: renderer.end, size: renderer.size,
+        total: renderer.viewSize, index: renderer.getContents()[0].index };
+    });
+    const beforeScroll = await scrollState();
+    await page.keyboard.press("PageDown");
+    await navigationFrame.waitForFunction(start => document.querySelector("foliate-view").renderer.start > start, beforeScroll.start);
+    const afterScroll = await scrollState();
+    assert.equal(afterScroll.index, beforeScroll.index, "Large text steps within the chapter, not past unread content");
+    assert(afterScroll.start - beforeScroll.start <= (beforeScroll.size - 48) * .91, "Viewport steps retain overlapping text");
+    await page.evaluate(location => send("goto", { location }), chunks.at(-1).locator);
+    await page.waitForTimeout(150);
+    for (let attempt = 0; attempt < 12 && (await scrollState()).index === 0; attempt++) {
+      const state = await scrollState();
+      await page.mouse.move(160, 350);
+      await page.mouse.wheel(0, Math.max(800, state.total));
+      await page.waitForTimeout(200);
+    }
+    assert.equal((await scrollState()).index, 1, "Scrolling flows automatically into the next chapter");
+    await page.mouse.wheel(0, -1000); await page.waitForTimeout(250);
+    assert.equal((await scrollState()).index, 0, "Scrolling back crosses the chapter boundary");
+    await page.evaluate(location => {
+      send("bionic", { enabled: false }); send("flow", { value: "paginated" }); send("goto", { location });
+    }, bionicSelection.location);
+    await navigationFrame.waitForFunction(() => !document.querySelector("foliate-view").renderer.scrolled);
+    await page.waitForTimeout(150);
+    assert.equal(await resolveQuote(bionicSelection.location), canonicalSelection.quote, "Bionic-created notes resolve after disabling and changing chapters");
+    assert.deepEqual(await page.evaluate(() => messages.filter(m => m.type === "error")), []);
+    await open("epub", epub(), bionicSelection.location);
+    const reopenedRuntime = page.frames().find(f => f.url().startsWith("data:text/html"));
+    assert.equal(await reopenedRuntime.evaluate(cfi => {
+      const view = document.querySelector("foliate-view");
+      return view.resolveCFI(cfi).anchor(view.renderer.getContents()[0].doc).toString();
+    }, bionicSelection.location.cfi), canonicalSelection.quote, "Bionic notes survive a pristine reader restart");
+    await open("epub", epub(false, true));
+    assert.equal(await page.evaluate(() => messages.find(m => m.type === "ready").direction), "rtl");
+    await page.frames().find(f => f.url() === "about:srcdoc").locator("#passage").click();
+    untouched = await currentCFI();
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForFunction(value => messages.findLast(m => m.type === "location").location.cfi !== value, untouched);
+    console.log("Navigation: trusted page/arrows, RTL, narrow 200% text, continuous chapter boundaries, Bionic canonical notes/restart/selection passed.");
+
     if (browserType === chromium) {
       await page.setViewportSize({ width: 1000, height: 850 });
       await open("epub", epub());
@@ -434,6 +536,22 @@ async function main() {
     await page.evaluate(location => send("goto", { location }), pdfSelection.location);
     await page.waitForFunction(() => messages.findLast(m => m.type === "location")?.location.page === 1);
     assert(await pdfFrame.locator(".pdf-highlights i").count() > 0);
+    await page.evaluate(() => send("size", { value: 200 }));
+    await pdfFrame.waitForFunction(() => document.querySelector(".pdf-page").getBoundingClientRect().height > 1500);
+    await pdfFrame.locator("#reader").evaluate(el => {
+      getSelection().removeAllRanges(); el.tabIndex = 0; el.focus(); el.scrollTop = 0;
+    });
+    await page.keyboard.press("PageDown");
+    await pdfFrame.waitForFunction(() => document.querySelector("#reader").scrollTop > 0);
+    assert.equal(await page.evaluate(() => messages.findLast(m => m.type === "location").location.page), 1,
+      "Page Down moves through enlarged PDF text before changing pages");
+    for (let attempt = 0; attempt < 12 && await page.evaluate(() => messages.findLast(m => m.type === "location").location.page === 1); attempt++) {
+      await page.keyboard.press("PageDown"); await page.waitForTimeout(120);
+    }
+    assert.equal(await page.evaluate(() => messages.findLast(m => m.type === "location").location.page), 2);
+    await page.keyboard.press("PageUp");
+    await page.waitForFunction(() => messages.findLast(m => m.type === "location").location.page === 1);
+    assert(await pdfFrame.locator("#reader").evaluate(el => el.scrollTop > 0), "Going back lands at the previous PDF page's bottom");
     await open("pdf", pdf(), { kind: "pdf", page: 2 });
     assert.equal(await page.evaluate(() => messages.findLast(m => m.type === "location").location.page), 2);
     assert.equal(await page.evaluate(() => pwned), false);

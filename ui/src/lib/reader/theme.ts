@@ -73,6 +73,14 @@ export function applyBookTheme(doc: Document, theme: ReaderTheme, size = 100) {
     styles.set(doc, style);
   }
   style.textContent = bookThemeStyles(theme);
+  doc.body.style.setProperty("inline-size", "auto", "important");
+  doc.body.style.setProperty("min-inline-size", "0", "important");
+  for (const el of doc.body.querySelectorAll<HTMLElement>("p,div,section,article,blockquote,h1,h2,h3,h4,h5,h6")) {
+    if (el.closest(visual) || /absolute|fixed/.test(win.getComputedStyle(el).position)) continue;
+    el.style.setProperty("max-inline-size", "100%", "important");
+    el.style.setProperty("min-inline-size", "0", "important");
+    el.style.setProperty("overflow-wrap", "anywhere", "important");
+  }
   for (const el of [doc.documentElement, doc.body, ...doc.body.querySelectorAll<HTMLElement>("*")]) {
     if (el.closest(visual) || el.namespaceURI !== "http://www.w3.org/1999/xhtml"
       || ["STYLE", "SCRIPT", "LINK"].includes(el.tagName)) continue;

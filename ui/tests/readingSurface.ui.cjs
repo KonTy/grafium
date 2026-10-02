@@ -94,7 +94,28 @@ function syntheticBook() {
     assert(await reader.locator(".controls-handle").isVisible());
     const mobile = await frame.boundingBox();
     assert(mobile.width <= 390 && mobile.height > 400, JSON.stringify(mobile));
+    await reader.getByRole("button", { name: "Show reading controls" }).click();
+    await controls.getByRole("combobox", { name: "Reading layout" }).selectOption("scrolled");
+    await controls.getByRole("button", { name: "Bionic reading", exact: true }).click();
+    await runtime.waitForFunction(() => document.querySelector("foliate-view").renderer.scrolled);
+    assert.equal(await page.getByTitle("Bionic Speedreader", { exact: true }).getAttribute("aria-pressed"), "true",
+      "Book Bionic mode and the app's top-bar preference stay synchronized");
+    await reader.getByRole("button", { name: "Hide reading controls" }).click();
+    const start = await runtime.evaluate(() => document.querySelector("foliate-view").renderer.start);
+    await page.keyboard.press("PageDown");
+    await runtime.waitForFunction(start => document.querySelector("foliate-view").renderer.start > start, start);
+    assert.equal(await page.evaluate(() => window.__readingFixture.reads), 1, "Mode changes and host Page Down keep the existing reader mounted");
+    await page.setViewportSize(viewport);
+    await page.locator(".sidebar").getByRole("button", { name: "Library", exact: true }).click();
+    await page.locator(".book-title").click();
+    await reader.locator("iframe").waitFor();
+    await page.waitForFunction(() => window.__readingFixture.reads === 2);
+    const reopened = page.frames().find(frame => frame.url().startsWith("data:text/html"));
+    await reopened.waitForFunction(() => document.querySelector("foliate-view")?.renderer?.scrolled);
+    await reader.getByRole("button", { name: "Show reading controls" }).click();
+    assert.equal(await controls.getByRole("combobox", { name: "Reading layout" }).inputValue(), "scrolled");
+    assert.equal(await controls.getByRole("button", { name: "Bionic reading", exact: true }).getAttribute("aria-pressed"), "true");
     assert.deepEqual(errors, []);
-    console.log("Reading surface: hidden chrome, real font scaling, live theme, F8, fullscreen, locator-preserving layout and mobile PASS");
+    console.log("Reading surface: hidden chrome, scaling, theme, F8/fullscreen, mobile, host paging, remembered flow and shared Bionic PASS");
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

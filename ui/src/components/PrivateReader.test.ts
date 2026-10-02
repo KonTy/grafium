@@ -15,12 +15,15 @@ import { startAndroidPrivateNarration } from "../lib/privateReaderSegments";
 import { stopPrivatePlayback } from "../lib/privateReaderPlayback";
 import { startPrivateReadAloud } from "../lib/privateReaderVoice";
 import { sha256 } from "@noble/hashes/sha256";
+import { readerFlow } from "../lib/readerPreferences";
+import { bionicReaderEnabled } from "../lib/bionicReader";
 
 const book: ReaderBook = { id: "private", title: "Device-only EPUB", available: true, kind: "epub", tracks: [], position: null, bookmarks: [] };
 let component: ReturnType<typeof mount> | undefined;
 beforeEach(() => {
   invoke.mockReset();
   openDialog.mockReset();
+  readerFlow.set("paginated"); bionicReaderEnabled.set(false);
   privateLibrary.set({ libraryPath: "/outside-graph", books: [book] });
   invoke.mockImplementation(async (command, args) => command.endsWith("read_epub") ? new ArrayBuffer(8)
     : command.endsWith("record_activity") ? {
@@ -58,7 +61,7 @@ describe("private reader components", () => {
     send({ type: "selection", location: locator, quote: "Read this passage" });
     expect(onActivity).toHaveBeenCalledTimes(2);
     expect(invoke).not.toHaveBeenCalledWith("reader_record_activity", expect.anything());
-    [...document.querySelectorAll("button")].find(button => button.textContent === "Next")!.click();
+    document.querySelector<HTMLButtonElement>('[aria-label="Next page"]')!.click();
     send({ type: "location", location: locator, label: "Halfway", fraction: .5 });
     expect(onActivity).toHaveBeenCalledTimes(3);
     expect(onProgress).toHaveBeenLastCalledWith({ position: .5, total: 1, anchor: locator.cfi, label: "Halfway" });
@@ -136,6 +139,9 @@ describe("private reader components", () => {
     send({ type: "location", location: { ...locator, cfi: "epubcfi(/6/2!/4/2)" }, label: "Initial visible page" });
     document.querySelector<HTMLSelectElement>("label select")!.dispatchEvent(new Event("change", { bubbles: true }));
     send({ type: "location", location: { ...locator, cfi: "epubcfi(/6/2!/4/4)" }, label: "Reflowed visible page" });
+    readerFlow.set("scrolled"); bionicReaderEnabled.set(true); flushSync();
+    send({ type: "location", location: { ...locator, cfi: "epubcfi(/6/2!/4/6)" }, label: "Scrolling Bionic layout" });
+    expect(document.querySelector("iframe")).toBe(frame);
     await new Promise(resolve => setTimeout(resolve, 650));
     expect(invoke.mock.calls.some(([command]) => command === "reader_save_position")).toBe(false);
     expect(get(privateLibrary).books[0].position).toEqual(position);
@@ -163,7 +169,7 @@ describe("private reader components", () => {
     } else if (action === "bookmark") {
       privateBookJump.set({ bookId: book.id, locator }); flushSync();
     } else if (action === "frame navigation") send({ type: "navigation" });
-    else [...document.querySelectorAll("button")].find(button => button.textContent === action)!.click();
+    else document.querySelector<HTMLButtonElement>(`[aria-label="${action} page"]`)!.click();
     send({ type: "location", location: locator, label: "Explicit destination" });
     window.dispatchEvent(new Event("pagehide"));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_save_position", {
