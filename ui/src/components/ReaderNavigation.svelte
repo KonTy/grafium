@@ -34,11 +34,14 @@
     <option value="paginated">Pages</option>
     <option value="scrolled">Continuous scroll</option>
   </select>
-  <button class="page-turn" aria-label="Bionic reading" title={`Bionic reading (${formatBinding(BIONIC_SHORTCUT)})`}
-    aria-pressed={$bionicReaderEnabled} disabled={!ready} onclick={() => setBionicReaderEnabled(!$bionicReaderEnabled)}>
-    <strong aria-hidden="true">B</strong>
-  </button>
 {/if}
+<button class="page-turn" aria-label="Bionic reading"
+  title={!ready ? "Bionic reading is available after the book opens" : !reflowable
+    ? "Bionic reading is unavailable for PDF or fixed-layout pages" : `Bionic reading (${formatBinding(BIONIC_SHORTCUT)})`}
+  aria-pressed={reflowable && $bionicReaderEnabled} disabled={!ready || !reflowable}
+  onclick={() => setBionicReaderEnabled(!$bionicReaderEnabled)}>
+  <span><strong>B</strong>ionic</span>
+</button>
 
 <style>
   button, select { font: inherit; font-size: 12px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; min-height: 44px; padding: 7px; }

@@ -9,6 +9,7 @@ import { privateLibrary, type ReaderBook } from "./privateReader";
 import { stopPrivatePlayback, privatePlayback } from "./privateReaderPlayback";
 import { BOOK_RENDERER_VERSION } from "./bookLocations";
 import { get } from "svelte/store";
+import { speechPlaybackRate } from "./readerPlaybackPreferences";
 
 const hash = "a".repeat(64);
 const locator = { kind: "epub" as const, cfi: "epubcfi(/6/2!/4/2)", rendererVersion: BOOK_RENDERER_VERSION };
@@ -17,6 +18,7 @@ const idle = { bookId: null, trackId: null, offsetMs: 0, durationMs: 0, playing:
 let unregister = () => {};
 beforeEach(() => {
   request.mockReset();
+  speechPlaybackRate.set(1);
   request.mockImplementation(async command => {
     if (command === "voiceStatus") return { available: true, selection: { voice_id: "local", language: "ja" } };
     if (command === "narrationBegin") return { uploadId: "transaction", sourceHash: hash };
@@ -42,9 +44,16 @@ describe("transactional Android canonical narration", () => {
     expect(request.mock.calls.map(([command]) => command)).toEqual([
       "voiceStatus", "narrationBegin", "narrationAppend", "narrationAppend", "narrationCommit", "narrationStart",
     ]);
-    expect(request).toHaveBeenLastCalledWith("narrationStart", { bookId: book.id, fromBeginning: true });
+    expect(request).toHaveBeenLastCalledWith("narrationStart", { bookId: book.id, fromBeginning: true, playbackRate: 1 });
     unregister();
     expect(get(privatePlayback)).toMatchObject({ mode: "tts", status: "playing" });
+  });
+  it("passes the selected narration rate without rewriting canonical source segments", async () => {
+    speechPlaybackRate.set(4);
+    await startAndroidPrivateNarration(book.id);
+    expect(request).toHaveBeenLastCalledWith("narrationStart", { bookId: book.id, fromBeginning: false, playbackRate: 4 });
+    const segment = request.mock.calls.find(([command]) => command === "narrationAppend")![1].segments[0];
+    expect(segment).toEqual({ text: "Canonical paragraph 0", locator, ordinal: 0 });
   });
   it("rejects an EPUB changed since the isolated frame opened before uploading any text", async () => {
     request.mockImplementation(async command => command === "voiceStatus" ? { available: true, selection: {} }

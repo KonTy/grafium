@@ -8,8 +8,9 @@
   import { formatBinding } from "../lib/shortcuts";
   import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
 
-  let { children, navigation, actions, bookmarks, onBack, onBookmark, onNavigate }: {
+  let { children, navigation, actions, bookmarks, bookmarkCount = 0, onBack, onBookmark, onNavigate }: {
     children: Snippet; navigation: Snippet; actions?: Snippet; bookmarks?: Snippet;
+    bookmarkCount?: number;
     onBack?: () => void; onBookmark?: () => void;
     onNavigate?: (direction: ReaderTurn) => void;
   } = $props();
@@ -17,6 +18,9 @@
   let root = $state<HTMLElement>();
   let handle = $state<HTMLButtonElement>();
   let controlsOpen = $state(false);
+  let bookmarksOpen = $state(false);
+  let bookmarkDetails = $state<HTMLDetailsElement>();
+  let previousBookmarkCount: number | undefined;
   let expanded = $state(false);
   let busy = $state(false);
   let error = $state("");
@@ -31,6 +35,15 @@
     });
   }
   export function bookmark() { onBookmark?.(); }
+  export function revealBookmarks() {
+    controlsOpen = true; bookmarksOpen = true;
+    void tick().then(() => bookmarkDetails?.querySelector("li:last-child")?.scrollIntoView({ block: "nearest" }));
+  }
+  $effect(() => {
+    const count = bookmarkCount;
+    if (previousBookmarkCount !== undefined && count > previousBookmarkCount) revealBookmarks();
+    previousBookmarkCount = count;
+  });
   export async function exitFullscreen() {
     if (!session || busy) return;
     busy = true;
@@ -110,6 +123,8 @@
     <nav aria-label="Reading controls">
       {@render navigation()}
       {#if onBookmark}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} onclick={onBookmark}>Bookmark</button>{/if}
+      {#if bookmarks}<button aria-expanded={bookmarksOpen} aria-controls={`${id}-bookmarks`}
+        onclick={() => { if (bookmarksOpen) bookmarksOpen = false; else revealBookmarks(); }}>Bookmarks ({bookmarkCount})</button>{/if}
       <button title="Fullscreen (F11; Escape to leave)" disabled={busy} aria-pressed={expanded} aria-keyshortcuts="F11" onclick={() => { void toggleFullscreen(); }}>
         {expanded ? "Exit fullscreen" : "Fullscreen"}
       </button>
@@ -120,7 +135,9 @@
         </ReaderMenu>
       {/if}
     </nav>
-    {#if bookmarks}<details><summary>Bookmarks</summary>{@render bookmarks()}</details>{/if}
+    {#if bookmarks}<details id={`${id}-bookmarks`} bind:this={bookmarkDetails} bind:open={bookmarksOpen}>
+      <summary>Bookmarks ({bookmarkCount})</summary>{@render bookmarks()}
+    </details>{/if}
   </div>
   {#if error}<div class="fullscreen-error" role="alert">{error}</div>{/if}
 </section>

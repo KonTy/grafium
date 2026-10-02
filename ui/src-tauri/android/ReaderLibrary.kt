@@ -13,6 +13,12 @@ import java.util.UUID
 /** Only the platform external-storage provider is permitted: no cloud-provider fallback. */
 internal object ReaderPolicy {
   const val LOCAL_AUTHORITY = "com.android.externalstorage.documents"
+  fun playbackRate(value: Any?): Float {
+    require(value is Number && value.toDouble().isFinite() && value.toDouble() in 0.5..4.0) {
+      "INVALID_PLAYBACK_RATE: expected a finite number from 0.5 to 4"
+    }
+    return value.toFloat()
+  }
   val audioExtensions = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav")
   fun normalizeLink(kind: String, value: String): String {
     require(kind in setOf("audio", "video", "youtube") && value.length <= 8192 &&
@@ -221,6 +227,19 @@ internal class ReaderLibrary private constructor(private val context: Context) {
   @Synchronized fun externalBookmark(bookId: String, raw: JSONObject, note: String): JSONObject =
     bookmarkAt(bookId, externalPosition(mutableBook(bookId), raw), note)
   @Synchronized fun volume(): JSONObject = JSONObject(data.getJSONObject("volume").toString())
+  @Synchronized fun playbackRate(mode: String): Float {
+    require(mode in setOf("audio", "tts")) { "INVALID_PLAYBACK_MODE" }
+    if (!data.has("playbackRates")) return 1f
+    val rates = data.getJSONObject("playbackRates")
+    return if (rates.has(mode)) ReaderPolicy.playbackRate(rates.get(mode)) else 1f
+  }
+  @Synchronized fun setPlaybackRate(mode: String, value: Any?) {
+    require(mode in setOf("audio", "tts")) { "INVALID_PLAYBACK_MODE" }
+    val rate = ReaderPolicy.playbackRate(value)
+    val rates = if (data.has("playbackRates")) JSONObject(data.getJSONObject("playbackRates").toString()) else JSONObject()
+    data.put("playbackRates", rates.put(mode, rate))
+    save()
+  }
   @Synchronized fun setVolume(args: JSONObject): JSONObject {
     require(args.optString("key", "up") in setOf("up", "down")) { "INVALID_VOLUME_KEY" }
     require(args.optString("gesture", "longPress") == "longPress") { "ONLY_LONG_PRESS_SUPPORTED" }

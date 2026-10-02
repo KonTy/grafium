@@ -97,6 +97,26 @@ describe("distraction-free book reading", () => {
     await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain("Permission denied"));
     expect(document.querySelector(".reading-surface.expanded")).toBeNull();
   });
+  it("reveals newly saved bookmarks with a count without reloading the book", async () => {
+    const { frame } = await openBook();
+    const scroll = vi.fn();
+    const originalScroll = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const added = { ...book.bookmarks[0], id: "new-mark", note: "New passage" };
+      privateLibrary.set({ libraryPath: "/fixture", books: [{ ...book, bookmarks: [...book.bookmarks, added] }] });
+      await vi.waitFor(() => {
+        expect(document.querySelector<HTMLElement>(".reading-controls")!.hidden).toBe(false);
+        expect(document.querySelector<HTMLDetailsElement>(".reading-controls details")!.open).toBe(true);
+        expect(button("Bookmarks (2)").getAttribute("aria-expanded")).toBe("true");
+        expect(document.querySelector('[aria-label="Go to bookmark: New passage"]')).not.toBeNull();
+        expect(scroll).toHaveBeenCalled();
+      });
+      expect(document.querySelector("iframe")).toBe(frame);
+      button("Bookmarks (2)").click(); flushSync();
+      expect(document.querySelector<HTMLDetailsElement>(".reading-controls details")!.open).toBe(false);
+    } finally { Element.prototype.scrollIntoView = originalScroll; }
+  });
   it("restores a fullscreen entry that finishes after the reader is closed", async () => {
     let finish!: (session: { exit: typeof api.exit; isActive: typeof api.isActive }) => void;
     api.enter.mockReturnValue(new Promise(resolve => { finish = resolve; }));

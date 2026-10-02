@@ -102,13 +102,16 @@ function syntheticBook() {
     await page.keyboard.press("Control+Alt+m");
     await page.waitForFunction(() => window.__readingFixture.book.bookmarks.length === 1);
     assert.equal(await page.evaluate(() => window.__readingFixture.book.bookmarks[0].note), "synthetic");
+    await reader.getByRole("button", { name: "Go to bookmark: synthetic", exact: true }).waitFor({ state: "visible" });
+    assert.equal(await controls.getByRole("button", { name: "Bookmarks (1)", exact: true }).getAttribute("aria-expanded"), "true");
+    assert.equal(await controls.getByRole("button", { name: "Bionic reading", exact: true }).innerText(), "Bionic");
     await chapter.evaluate(() => getSelection().removeAllRanges());
     await controls.getByRole("button", { name: "Bookmark", exact: true }).click();
     await page.waitForFunction(() => window.__readingFixture.book.bookmarks.length === 2);
     const marks = await page.evaluate(() => window.__readingFixture.book.bookmarks);
     assert.notEqual(marks[0].position.locator.cfi, marks[1].position.locator.cfi, "Whole-page and selected-word bookmarks have distinct canonical anchors");
     assert(marks[1].note.split(" ").length <= 2, "Automatic bookmark labels stay short");
-    await reader.locator("summary").filter({ hasText: /^Bookmarks$/ }).click();
+    assert.equal(await controls.getByRole("button", { name: "Bookmarks (2)", exact: true }).getAttribute("aria-expanded"), "true");
     await reader.getByRole("button", { name: "Go to bookmark: synthetic", exact: true }).click();
     await chapter.waitForFunction(() => getSelection().toString() === "synthetic");
     await reader.getByRole("button", { name: "Actions for bookmark: synthetic", exact: true }).click();
@@ -140,7 +143,7 @@ function syntheticBook() {
     await actions.waitFor({ state: "detached" });
     await page.waitForFunction(() => window.__readingFixture.book.favorite === true);
     await reader.locator(".reading-controls").evaluate(el => { el.scrollTop = 0; });
-    await reader.locator("summary").filter({ hasText: /^Bookmarks$/ }).click();
+    await controls.getByRole("button", { name: "Bookmarks (302)", exact: true }).click();
     await page.evaluate(() => {
       document.documentElement.style.setProperty("--bg-primary", "#000000");
       document.documentElement.style.setProperty("--text-primary", "#00ff00");

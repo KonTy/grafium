@@ -76,9 +76,11 @@ PDF and fixed-layout EPUB do not offer text reflow; DjVu is not an original-read
 format. PDF may contain selectable text, not only images; reliable conversion or
 OCR is a separate workflow, not lossless reflow of the original.
 
-The book's **B** button or **Ctrl/Cmd+Alt+B** enables **Bionic reading**, emphasizing
+The book's **Bionic** button, **Menu > Bionic reading**, or **Ctrl/Cmd+Alt+B**
+enables **Bionic reading**, emphasizing
 word beginnings. The shortcut also toggles the same preference for notes; there
-is no separate top-bar B button. Hover controls to see their shortcuts.
+is no separate top-bar B button. The book control remains visible but disabled
+while loading or for fixed-layout pages; hover for the reason or shortcut.
 This is optional presentation, not a change
 to book text or a guaranteed reading-speed improvement. Code, math, and artwork
 are left alone. Positions, quoted selections, and passage-note anchors remain

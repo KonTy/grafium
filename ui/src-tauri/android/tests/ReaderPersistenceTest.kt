@@ -49,6 +49,26 @@ class ReaderPersistenceTest {
     assertFalse(File(context.filesDir, "private-reader/library.json").exists())
   }
 
+  @Test fun playbackRatesArePrivateModeSpecificAndSurviveRecreationWithoutChangingProgress() {
+    val library = open()
+    assertEquals(1f, library.playbackRate("audio"))
+    assertEquals(1f, library.playbackRate("tts"))
+    library.checkpoint("book-a", "chapter-2", 42001)
+    val books = library.books().toString()
+    library.setPlaybackRate("audio", 4)
+    library.setPlaybackRate("tts", 2.5)
+    assertEquals(4f, open().playbackRate("audio"))
+    assertEquals(2.5f, open().playbackRate("tts"))
+    assertEquals(books, open().books().toString())
+    val before = library.exportState()
+    for (rate in listOf(null, "2", true, Double.NaN, Double.POSITIVE_INFINITY, 0.49, 4.01)) {
+      assertThrows(IllegalArgumentException::class.java) { library.setPlaybackRate("audio", rate) }
+      assertThrows(IllegalArgumentException::class.java) { library.setPlaybackRate("tts", rate) }
+    }
+    assertEquals(before, library.exportState())
+    assertEquals(before, open().exportState())
+  }
+
   @Test fun libraryMetadataDefaultsAndExplicitActivitySurviveLegacyWrites() {
     val library = open()
     assertFalse(library.book("book-a").getBoolean("favorite"))

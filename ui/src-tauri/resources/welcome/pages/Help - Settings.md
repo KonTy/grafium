@@ -93,6 +93,10 @@ Under **Get offline voices**, open **?** for platform-specific download links,
 Linux Piper setup, a copyable offline package-preparation command, and exact import
 steps. Browser downloads are not automatic installation; select and save the
 installed voice and language afterward.
+**Read-aloud speed** selects **0.5×–4×** and applies to active narration as well as
+future sessions. It is remembered separately from audio/video speed. It speeds
+up local speech playback, not neural generation; slower hardware may need to
+prepare the next passage between clips.
 Source media is not copied into the graph. Automatic bookmarks and progress stay
 outside graph sync and AI indexing. Deliberately written journal notes such as
 `[[Book title]]` remain ordinary graph content with ordinary sharing settings.

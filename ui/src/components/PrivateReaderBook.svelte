@@ -269,7 +269,7 @@
     {:else if book.kind === "epub" && book.available}
       <PrivateBookReader bind:this={visualReader} {bookId} {onActivity} {onProgress} {onBack}
         onBookmark={() => { if (!busy) void run(bookmark, "Bookmark saved on this device."); }}
-        actions={bookActions} bookmarks={privateBookmarks} status={readingStatus} />
+        actions={bookActions} bookmarks={privateBookmarks} bookmarkCount={book.bookmarks.length} status={readingStatus} />
     {:else if book.available}
       {#key bookId}<LibraryMedia {book} {onPlayback} {onActivity} {onProgress} />{/key}
     {/if}

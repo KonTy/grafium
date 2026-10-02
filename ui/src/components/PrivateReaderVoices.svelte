@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
-  import { stopPrivatePlayback } from "../lib/privateReaderPlayback";
+  import { stopPrivatePlayback, configurePrivateSpeechRate } from "../lib/privateReaderPlayback";
+  import { PLAYBACK_RATES, speechPlaybackRate } from "../lib/readerPlaybackPreferences";
   import { voiceCommand, type PrivateVoiceManifest, type PrivateVoiceStatus } from "../lib/privateReaderVoice";
   import { privateVoiceLanguageSuggestion } from "../lib/privateReader";
   import SettingsHelp from "./SettingsHelp.svelte";
@@ -89,6 +90,15 @@
       </div>
     {/if}
     <div class="fields">
+      <label>Read-aloud speed<select aria-label="Read-aloud speed" value={$speechPlaybackRate} disabled={busy}
+        onchange={event => {
+          const rate = Number(event.currentTarget.value);
+          event.currentTarget.value = String($speechPlaybackRate);
+          void run(async () => { await configurePrivateSpeechRate(rate); message = "Read-aloud speed saved. Voice and passage position are unchanged."; });
+        }}>
+        {#if !PLAYBACK_RATES.includes($speechPlaybackRate)}<option value={$speechPlaybackRate}>{$speechPlaybackRate}×</option>{/if}
+        {#each PLAYBACK_RATES as rate}<option value={rate}>{rate}×</option>{/each}
+      </select></label>
       <label>Installed voice<select bind:value={voiceId} disabled={busy} onchange={event => { language = voices.find(voice => voice.id === event.currentTarget.value)?.language ?? ""; }}>
         <option value="" disabled>{voices.length ? "Select a voice…" : "No installed voices"}</option>
         {#each voices as voice}<option value={voice.id}>{voice.name} · {voice.language}</option>{/each}

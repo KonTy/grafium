@@ -4,12 +4,14 @@ const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { boundedVoiceAudio, startPrivateReadAloud, voiceCommand } from "./privateReaderVoice";
 import { privateLibrary } from "./privateReader";
-import { privatePlayback, stopPrivatePlayback, pausePrivatePlayback, resumePrivatePlayback, bookmarkPrivatePlayback } from "./privateReaderPlayback";
+import { privatePlayback, stopPrivatePlayback, pausePrivatePlayback, resumePrivatePlayback, bookmarkPrivatePlayback, configurePrivateSpeechRate } from "./privateReaderPlayback";
+import { mediaPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 import { registerPrivateSegments } from "./privateReaderSegments";
 import { BOOK_RENDERER_VERSION } from "./bookLocations";
 import type { ReaderTextSegment } from "./bookReaderSecurity";
 
 class FakeAudio extends EventTarget {
+  playbackRate = 1; defaultPlaybackRate = 1; preservesPitch = false;
   currentTime = 0; duration = 20; preload = ""; src = ""; error = null;
   play = vi.fn(async () => {}); pause = vi.fn();
   load() { if (this.src) queueMicrotask(() => this.dispatchEvent(new Event("loadedmetadata"))); }
@@ -29,6 +31,8 @@ function wave() {
   return value;
 }
 beforeEach(() => {
+  mediaPlaybackRate.set(1); speechPlaybackRate.set(1);
+  vi.stubGlobal("localStorage", { setItem: vi.fn(), getItem: vi.fn(() => null) });
   invoke.mockReset(); elements.length = 0;
   vi.stubGlobal("Audio", class extends FakeAudio { constructor() { super(); elements.push(this); } });
   vi.stubGlobal("speechSynthesis", { speak: vi.fn(() => { throw new Error("Forbidden system speech"); }) });
@@ -56,6 +60,26 @@ afterEach(async () => {
 });
 
 describe("native private narration", () => {
+  it("changes speech up to 4x live and between clips while preserving canonical voice-aware offsets", async () => {
+    await configurePrivateSpeechRate(2);
+    await startPrivateReadAloud("book", true);
+    expect(elements[0].playbackRate).toBe(2);
+    elements[0].currentTime = 2.37;
+    await configurePrivateSpeechRate(4);
+    expect(elements[0].playbackRate).toBe(4); expect(elements[0].preservesPitch).toBe(true);
+    expect(elements[0].currentTime).toBe(2.37);
+    expect(get(privatePlayback).playbackRate).toBe(4);
+    expect(get(mediaPlaybackRate)).toBe(1);
+    await bookmarkPrivatePlayback();
+    expect(invoke).toHaveBeenCalledWith("reader_add_bookmark", expect.objectContaining({
+      position: { locator: segment(0).locator, offsetMs: 2370, voiceId: "voice" },
+    }));
+    elements[0].dispatchEvent(new Event("ended"));
+    await vi.waitFor(() => expect(get(privateLibrary).books[0].position?.locator).toEqual(segment(1).locator));
+    expect(elements[0].playbackRate).toBe(4);
+    expect(invoke).not.toHaveBeenCalledWith("private_voice_synthesize", expect.objectContaining({ speed: 4 }));
+    expect(window.speechSynthesis.speak).not.toHaveBeenCalled();
+  });
   it("uses exact renderer chunks and durably resumes the same voice's saved clip offset", async () => {
     privateLibrary.update(snapshot => ({ ...snapshot, books: snapshot.books.map(book => ({
       ...book, position: { locator: segment(1).locator, offsetMs: 1500, voiceId: "voice" },
@@ -151,7 +175,7 @@ describe("native private narration", () => {
     } };
     try {
       await startPrivateReadAloud("book", true);
-      expect(calls.find(call => call.command === "narrationStart")?.args).toEqual({ bookId: "book", fromBeginning: true });
+      expect(calls.find(call => call.command === "narrationStart")?.args).toEqual({ bookId: "book", fromBeginning: true, playbackRate: 1 });
       expect(calls.some(call => call.command === "narrationPrepare")).toBe(false);
       expect(elements).toHaveLength(0);
       expect(invoke).not.toHaveBeenCalled();

@@ -6,6 +6,7 @@ import { claimPrivateNarration, updatePrivateNarration } from "./privateReaderPl
 import { androidReaderRequest, isAndroidReader } from "./privateReaderAndroid";
 import { canonicalNarrationBatches, collectPrivateSegments, startAndroidPrivateNarration, type CanonicalNarrationSegment } from "./privateReaderSegments";
 import { saveLibraryCheckpoint } from "./library";
+import { applyReaderPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 
 export interface PrivateVoiceManifest {
   schema_version: number; id: string; name: string; language: string; runtime: string;
@@ -73,6 +74,7 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
   let lastPosition = "";
   let played = false;
   const pending = new Map<number, Promise<Clip>>();
+  let stopRate = () => {};
   const current = () => active ? {
     offsetMs: Math.max(0, Math.round(audio.currentTime * 1000)), locator: active.locator, voiceId,
   } : null;
@@ -136,22 +138,24 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
     if (!Number.isFinite(audio.duration) || offsetMs / 1000 > audio.duration + 1)
       throw new Error("The saved voice clip offset is incompatible; restart narration from the beginning.");
     audio.currentTime = Math.min(offsetMs / 1000, audio.duration);
+    applyReaderPlaybackRate(audio, get(speechPlaybackRate));
     loading = false;
     played = false;
     await checkpoint();
     if (stopped || request !== generation) return;
-    updatePrivateNarration({ position: current(), status: paused ? "paused" : "playing" });
+    updatePrivateNarration({ position: current(), status: paused ? "paused" : "playing", playbackRate: audio.playbackRate });
     if (!paused) { await audio.play(); played = true; }
     if (ordinal + 1 < queue.length) void fetchClip(ordinal + 1);
   };
   await claimPrivateNarration(book, {
+    setRate: rate => { applyReaderPlaybackRate(audio, rate); },
     pause: async () => { paused = true; audio.pause(); await checkpoint(); },
     resume: async () => {
       if (loading || !audio.src) throw new Error("Wait for the native voice to prepare, or restart after an error.");
       paused = false; await audio.play(); played = true;
     },
     stop: async () => {
-      stopped = true; audio.pause(); clearInterval(timer);
+      stopped = true; audio.pause(); clearInterval(timer); stopRate();
       if (request === generation) ++generation;
       try { await checkpoint(); }
       finally {
@@ -168,13 +172,18 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
     },
   });
   if (stopped || request !== generation) return;
+  stopRate = speechPlaybackRate.subscribe(rate => {
+    if (stopped || request !== generation) return;
+    try { applyReaderPlaybackRate(audio, rate); updatePrivateNarration({ playbackRate: audio.playbackRate }); }
+    catch (cause) { fail(cause); }
+  });
   audio.addEventListener("error", () => fail(new Error("Offline speech playback failed.")));
   audio.addEventListener("ended", () => {
     void (async () => {
       await checkpoint();
       if (stopped || !active) return;
       if (active.ordinal + 1 >= queue.length) {
-        paused = true; clearInterval(timer);
+        paused = true; clearInterval(timer); stopRate();
         updatePrivateNarration({ status: "stopped" });
         return;
       }

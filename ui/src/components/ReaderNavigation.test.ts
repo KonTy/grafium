@@ -41,6 +41,15 @@ describe("reader navigation controls", () => {
     expect(button("Next page").disabled).toBe(true);
     expect(button("Next page").getAttribute("aria-keyshortcuts")).toBe("ArrowLeft PageDown");
     expect(document.querySelector("select")).toBeNull();
-    expect(button("Bionic reading")).toBeNull();
+    expect(button("Bionic reading").disabled).toBe(true);
+    expect(button("Bionic reading").textContent).toBe("Bionic");
+    expect(button("Bionic reading").title).toContain("after the book opens");
+  });
+  it("explains why Bionic is disabled rather than hiding it for fixed-layout books", () => {
+    component = mount(ReaderNavigation, { target: document.body,
+      props: { ready: true, reflowable: false, onNavigate: vi.fn() } });
+    flushSync();
+    expect(button("Bionic reading").disabled).toBe(true);
+    expect(button("Bionic reading").title).toContain("fixed-layout");
   });
 });

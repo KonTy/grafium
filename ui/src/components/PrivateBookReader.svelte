@@ -14,9 +14,10 @@
   import { privatePlayback } from "../lib/privateReaderPlayback";
   import { sha256 } from "@noble/hashes/sha256";
   import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
-  let { bookId, onActivity, onProgress, actions, bookmarks, status, onBack, onBookmark }: {
+  let { bookId, onActivity, onProgress, actions, bookmarks, bookmarkCount = 0, status, onBack, onBookmark }: {
     bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void;
     actions?: Snippet; bookmarks?: Snippet; status?: Snippet; onBack?: () => void; onBookmark?: () => void;
+    bookmarkCount?: number;
   } = $props();
   let surface = $state<ReadingSurface>();
   let frame = $state<HTMLIFrameElement>();
@@ -254,7 +255,7 @@
 </script>
 
 <section class="private-book" data-help-context="reader" aria-label="Private EPUB reader">
-  <ReadingSurface bind:this={surface} {actions} {bookmarks} {onBack} {onBookmark}
+  <ReadingSurface bind:this={surface} {actions} {bookmarks} {bookmarkCount} {onBack} {onBookmark}
     onNavigate={ready ? direction => send("turn", { direction }) : undefined}>
   {#snippet navigation()}
     <ReaderNavigation {ready} {reflowable} {direction} onNavigate={direction => send("turn", { direction })} />

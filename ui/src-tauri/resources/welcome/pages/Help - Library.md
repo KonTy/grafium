@@ -59,6 +59,11 @@ opening a source does not automatically start playback. Seek is enabled only
 when duration and actual seek capability are known; otherwise its disabled
 state explains why. Read-aloud is passage-based, and YouTube uses its embedded
 timeline rather than an invented seek range.
+**Speed** supports **0.5×–4×** for audiobooks and direct audio/video. It is
+remembered on this device and can change during playback without resetting the
+position. Read-aloud has its own speed in the player and **Settings > Library**.
+YouTube uses its embedded player's supported speed controls; Grafium does not
+promise 4× or apply the direct-media preference to an unsupported provider.
 Video and embedded-player behavior depends on the available player/platform;
 do not assume a hidden or unsupported player is still playing.
 Local video is currently supported on desktop, not Android. Online audio/video

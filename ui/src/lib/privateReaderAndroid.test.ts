@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { androidPrivateCommand, androidReaderRequest, normalizeAndroidReaderPosition } from "./privateReaderAndroid";
-import { applyAndroidState, attachPrivatePlayback, bookmarkPrivatePlayback, checkpointPrivatePlayback, playPrivateAudio, privatePlayback, seekPrivateAudioPosition, stopPrivatePlayback } from "./privateReaderPlayback";
+import { applyAndroidState, attachPrivatePlayback, bookmarkPrivatePlayback, checkpointPrivatePlayback, playPrivateAudio, privatePlayback, seekPrivateAudioPosition, setPrivatePlaybackRate, stopPrivatePlayback } from "./privateReaderPlayback";
 import { privateLibrary, type ReaderBook } from "./privateReader";
 import { get } from "svelte/store";
 import { BOOK_RENDERER_VERSION } from "./bookLocations";
 import sharedPosition from "../../tests/fixtures/private-reader-position.json";
+import { mediaPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 
 const book: ReaderBook = { id: "native", title: "SAF book", available: true, kind: "audio", tracks: [
   { id: "doc-1", title: "1.mp3", relativePath: "Disc 1/1.mp3" },
@@ -12,6 +13,8 @@ const book: ReaderBook = { id: "native", title: "SAF book", available: true, kin
 let requests: { id: string; command: string; args: Record<string, unknown> }[] = [];
 beforeEach(() => {
   requests = [];
+  mediaPlaybackRate.set(1);
+  speechPlaybackRate.set(1);
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
   privateLibrary.set({ libraryPath: "Local documents", books: [book] });
   window.PrivateReaderBridge = { request(json) {
@@ -70,7 +73,7 @@ describe("Android private reader bridge", () => {
   });
   it("controls native playback and captures bookmarks in the service, not at a stale UI offset", async () => {
     await playPrivateAudio(book);
-    expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500 });
+    expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500, playbackRate: 1 });
     expect(get(privatePlayback).status).toBe("playing");
     await bookmarkPrivatePlayback();
     expect(requests.find(request => request.command === "bookmark")?.args).toEqual({ bookId: book.id });
@@ -138,6 +141,61 @@ describe("Android private reader bridge", () => {
       { command: "deleteBookmark", args },
     ]);
   });
+  it("sends native speed commands and uses the service's acknowledged rate", async () => {
+    window.PrivateReaderBridge = { request(json) {
+      const request = JSON.parse(json);
+      requests.push(request);
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent("private-reader-response", { detail: {
+        id: request.id, ok: true, result: { playbackRate: 3.5 },
+      } })));
+    } };
+    await expect(androidReaderRequest("setPlaybackRate", { rate: 4 })).resolves.toEqual({ playbackRate: 3.5 });
+    expect(requests.map(({ command, args }) => ({ command, args }))).toEqual([
+      { command: "setPlaybackRate", args: { rate: 4 } },
+    ]);
+  });
+  it("does not report a new active speed until the service confirms it", async () => {
+    const state = { bookId: book.id, trackId: "doc-1", offsetMs: 3500, durationMs: 90000,
+      playing: false, buffering: false, error: null, playbackRate: 1.75 };
+    applyAndroidState(state);
+    mediaPlaybackRate.set(1.75);
+    const original = window.PrivateReaderBridge!;
+    let pendingId = "";
+    window.PrivateReaderBridge = { request(json) {
+      const request = JSON.parse(json);
+      if (request.command === "setPlaybackRate") { pendingId = request.id; requests.push(request); }
+      else original.request(json);
+    } };
+    const pending = setPrivatePlaybackRate(4);
+    expect(get(privatePlayback).playbackRate).toBe(1.75);
+    expect(get(mediaPlaybackRate)).toBe(1.75);
+    window.dispatchEvent(new CustomEvent("private-reader-response", { detail: {
+      id: pendingId, ok: true, result: { ...state, playbackRate: 4 },
+    } }));
+    await pending;
+    expect(get(privatePlayback)).toMatchObject({ playbackRate: 4, status: "paused", position: { trackId: "doc-1", offsetMs: 3500 } });
+    expect(get(mediaPlaybackRate)).toBe(4);
+    expect(get(speechPlaybackRate)).toBe(1);
+    expect(requests.map(({ command, args }) => ({ command, args }))).toEqual([
+      { command: "setPlaybackRate", args: { rate: 4 } },
+    ]);
+  });
+  it("rejects missing native speed confirmation without fabricating player state", async () => {
+    applyAndroidState({ bookId: book.id, trackId: "doc-1", offsetMs: 3500, durationMs: 90000,
+      playing: false, buffering: false, error: null, playbackRate: 1.75 });
+    mediaPlaybackRate.set(1.75);
+    await expect(setPrivatePlaybackRate(4)).rejects.toThrow("did not confirm");
+    expect(get(privatePlayback).playbackRate).toBe(1.75);
+    expect(get(mediaPlaybackRate)).toBe(1.75);
+  });
+  it.each([NaN, Infinity, -Infinity, 0, 0.49, 4.01, "2", null, undefined])(
+    "rejects invalid speed %s before serializing or dispatching any native command", async rate => {
+      await expect(androidReaderRequest("setPlaybackRate", { rate })).rejects.toThrow("INVALID_PLAYBACK_RATE");
+      await expect(androidReaderRequest("play", { bookId: book.id, playbackRate: rate })).rejects.toThrow("INVALID_PLAYBACK_RATE");
+      await expect(androidReaderRequest("narrationStart", { bookId: book.id, playbackRate: rate })).rejects.toThrow("INVALID_PLAYBACK_RATE");
+      expect(requests).toEqual([]);
+    },
+  );
   it("surfaces visual bookmark and deletion errors without service or position fallbacks", async () => {
     window.PrivateReaderBridge = { request(json) {
       const request = JSON.parse(json);

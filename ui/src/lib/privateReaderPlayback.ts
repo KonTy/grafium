@@ -4,15 +4,17 @@ import { androidReaderRequest, isAndroidReader, normalizeAndroidReaderPosition, 
 import { refreshPrivateLibrary } from "./privateReader";
 import { saveLibraryCheckpoint, type LibraryProgress } from "./library";
 import { webStudyUrl } from "./studySources";
+import { applyReaderPlaybackRate, mediaPlaybackRate, speechPlaybackRate, setMediaPlaybackRate, setSpeechPlaybackRate, validateReaderPlaybackRate } from "./readerPlaybackPreferences";
 
 export interface ReaderPlaybackState {
   bookId: string | null; title: string; mode: "audio" | "tts"; status: "stopped" | "playing" | "paused" | "loading";
   position: ReaderPosition | null; error: string;
-  durationMs?: number; seekable?: boolean;
+  durationMs?: number; seekable?: boolean; playbackRate?: number;
 }
 export interface PrivateNarrationAdapter {
   pause(): Promise<void>; resume(): Promise<void>; stop(): Promise<void>;
   bookmark(): Promise<void>;
+  setRate?(rate: number): void;
 }
 export const privatePlayback = writable<ReaderPlaybackState>({
   bookId: null, title: "", mode: "audio", status: "stopped", position: null, error: "",
@@ -36,6 +38,11 @@ export function registerPrivatePreparation(cancel: () => void): () => void {
 
 function patch(value: Partial<ReaderPlaybackState>) { privatePlayback.update(state => ({ ...state, ...value })); }
 function fail(cause: unknown) { patch({ error: String(cause) }); }
+mediaPlaybackRate.subscribe(rate => {
+  if (!audio || isAndroidReader() || get(privatePlayback).mode !== "audio" || get(privatePlayback).status === "stopped") return;
+  try { applyReaderPlaybackRate(audio, rate); patch({ playbackRate: audio.playbackRate }); }
+  catch (cause) { fail(cause); }
+});
 function updateAudioProgress() {
   const state = get(privatePlayback);
   if (!audio?.src || state.mode !== "audio" || state.status === "stopped") return;
@@ -117,16 +124,17 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
   activeBook = book;
   const selected = { trackId, offsetMs: saved?.offsetMs ?? 0 };
   activityPosition = selected;
-  patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "", durationMs: 0, seekable: false });
+  patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "", durationMs: 0, seekable: false, playbackRate: undefined });
   try {
     if (isAndroidReader()) {
-      const state = await androidReaderRequest<AndroidReaderState>("play", { bookId: book.id, ...selected });
+      const state = await androidReaderRequest<AndroidReaderState>("play", { bookId: book.id, ...selected, playbackRate: get(mediaPlaybackRate) });
       if (request === generation) applyAndroidState(state);
       return;
     }
     const url = remote ?? validatePrivateMediaURL(await readerNative<string>("media_url", { bookId: book.id, trackId }));
     if (request !== generation) return;
     const element = player();
+    applyReaderPlaybackRate(element, get(mediaPlaybackRate));
     element.src = url;
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {
@@ -143,6 +151,8 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
     });
     if (request !== generation) return;
     element.currentTime = selected.offsetMs / 1000;
+    applyReaderPlaybackRate(element, get(mediaPlaybackRate));
+    patch({ playbackRate: element.playbackRate });
     updateAudioProgress();
     await element.play();
     if (request === generation) patch({ status: "playing" });
@@ -163,6 +173,36 @@ export async function pausePrivatePlayback(): Promise<void> {
   }
   else { audio?.pause(); try { await checkpointPrivatePlayback(); } finally { if (request === generation) patch({ status: "paused" }); } }
   if (request === generation) patch({ status: "paused" });
+}
+export async function setPrivatePlaybackRate(rate: number): Promise<void> {
+  validateReaderPlaybackRate(rate);
+  const state = get(privatePlayback);
+  const request = generation;
+  if (!state.bookId || state.status === "stopped") throw new Error("Start playback before changing its speed.");
+  if (isAndroidReader()) {
+    const next = await androidReaderRequest<AndroidReaderState>("setPlaybackRate", { rate });
+    if (request !== generation) throw new Error("Playback changed before its speed was confirmed.");
+    if (typeof next.playbackRate !== "number" || !Number.isFinite(next.playbackRate)
+      || Math.abs(next.playbackRate - rate) > 0.001 || next.bookId !== state.bookId)
+      throw new Error("The native player did not confirm the requested playback speed.");
+    applyAndroidState(next);
+  } else if (narration) {
+    if (!narration.setRate) throw new Error("This narration player cannot change speed.");
+    narration.setRate(rate);
+    patch({ playbackRate: rate });
+  } else {
+    if (!audio?.src) throw new Error("No audio is ready for a speed change.");
+    applyReaderPlaybackRate(audio, rate);
+    patch({ playbackRate: audio.playbackRate });
+  }
+  if (state.mode === "tts") setSpeechPlaybackRate(rate);
+  else setMediaPlaybackRate(rate);
+}
+export async function configurePrivateSpeechRate(rate: number): Promise<void> {
+  validateReaderPlaybackRate(rate);
+  const state = get(privatePlayback);
+  if (state.bookId && state.mode === "tts" && state.status !== "stopped") await setPrivatePlaybackRate(rate);
+  else setSpeechPlaybackRate(rate);
 }
 export async function resumePrivatePlayback(): Promise<void> {
   const request = generation;
@@ -245,7 +285,7 @@ export async function bookmarkPrivatePlayback(): Promise<void> {
 export async function claimPrivateNarration(book: ReaderBook, adapter: PrivateNarrationAdapter): Promise<void> {
   await stopPrivatePlayback();
   narration = adapter;
-  patch({ bookId: book.id, title: book.title, mode: "tts", status: "loading", position: book.position, error: "", durationMs: 0, seekable: false });
+  patch({ bookId: book.id, title: book.title, mode: "tts", status: "loading", position: book.position, error: "", durationMs: 0, seekable: false, playbackRate: undefined });
 }
 export function updatePrivateNarration(update: Partial<ReaderPlaybackState>): void { patch(update); }
 
@@ -259,6 +299,13 @@ export function applyAndroidState(state: AndroidReaderState): void {
       ? { offsetMs: state.offsetMs, locator: state.locator }
       : state.trackId ? { trackId: state.trackId, offsetMs: state.offsetMs } : null);
   } catch (cause) { locatorError = String(cause); }
+  let rate = 1;
+  if ("playbackRate" in state && state.playbackRate !== undefined) {
+    try {
+      if (typeof state.playbackRate !== "number") throw new Error("Native playback speed is invalid.");
+      validateReaderPlaybackRate(state.playbackRate); rate = state.playbackRate;
+    } catch (cause) { locatorError = String(cause); }
+  }
   patch({
     bookId: state.bookId, title: (book?.title ?? (get(privatePlayback).bookId === state.bookId ? get(privatePlayback).title : "")) || "Background playback",
     mode: state.mode === "tts" ? "tts" : "audio",
@@ -266,6 +313,7 @@ export function applyAndroidState(state: AndroidReaderState): void {
     position: nativePosition, error: state.error || locatorError,
     durationMs: state.mode !== "tts" && Number.isFinite(state.durationMs) && state.durationMs > 0 ? state.durationMs : 0,
     seekable: state.mode !== "tts" && state.seekable === true && state.durationMs > 0,
+    playbackRate: rate,
   });
 }
 

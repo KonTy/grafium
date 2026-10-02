@@ -19,6 +19,7 @@
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import { readerOwnsNavigation } from "./lib/readerNavigation";
   import { loadReaderFlowPreference, loadReaderTextSizePreference } from "./lib/readerPreferences";
+  import { loadReaderPlaybackPreferences } from "./lib/readerPlaybackPreferences";
   import { readerShortcut } from "./lib/readerHotkeys";
   import TitleBar from "./components/TitleBar.svelte";
   import Toaster from "./components/Toaster.svelte";
@@ -2419,6 +2420,7 @@
     loadBionicReaderPreference();
     loadReaderFlowPreference();
     loadReaderTextSizePreference();
+    loadReaderPlaybackPreferences();
   });
 </script>
 

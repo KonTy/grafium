@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, privatePlayback, resumePrivatePlayback, seekPrivateAudioPosition, skipPrivateAudio, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL } from "./privateReaderPlayback";
+import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, privatePlayback, resumePrivatePlayback, seekPrivateAudioPosition, skipPrivateAudio, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL, setPrivatePlaybackRate } from "./privateReaderPlayback";
+import { mediaPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 import { privateLibrary, type ReaderBook } from "./privateReader";
 
 class FakeAudio extends EventTarget {
+  playbackRate = 1; defaultPlaybackRate = 1; preservesPitch = false;
   currentTime = 0; preload = ""; src = ""; error = null;
   duration = 120;
   seekable = { length: 1, start: () => 0, end: () => this.duration };
@@ -21,6 +23,8 @@ const book: ReaderBook = {
   position: { trackId: "stable-2", offsetMs: 10000 }, bookmarks: [],
 };
 beforeEach(() => {
+  mediaPlaybackRate.set(1); speechPlaybackRate.set(1);
+  vi.stubGlobal("localStorage", { setItem: vi.fn(), getItem: vi.fn(() => null) });
   invoke.mockReset();
   invoke.mockImplementation(async (command: string, args) => command.endsWith("media_url") ? "http://127.0.0.1:38721/secret/track"
     : command.endsWith("record_activity") ? {
@@ -34,6 +38,22 @@ beforeEach(() => {
 afterEach(async () => { await stopPrivatePlayback(); vi.unstubAllGlobals(); });
 
 describe("app-owned private playback", () => {
+  it("applies remembered 4x across chapters and changes speed without resetting bookmarks", async () => {
+    mediaPlaybackRate.set(4);
+    await playPrivateAudio(book);
+    const audio = elements.at(-1)!;
+    expect(audio.playbackRate).toBe(4); expect(audio.preservesPitch).toBe(true);
+    audio.currentTime = 23.7;
+    await pausePrivatePlayback();
+    await setPrivatePlaybackRate(2);
+    expect(audio.playbackRate).toBe(2); expect(audio.currentTime).toBe(23.7);
+    expect(get(privatePlayback)).toMatchObject({ status: "paused", playbackRate: 2 });
+    expect(get(speechPlaybackRate)).toBe(1);
+    await bookmarkPrivatePlayback();
+    expect(invoke).toHaveBeenCalledWith("reader_add_bookmark", expect.objectContaining({ position: { trackId: "stable-2", offsetMs: 23700 } }));
+    await playPrivateAudio(book, { trackId: "stable-10", offsetMs: 0 });
+    expect(audio.playbackRate).toBe(2); expect(audio.currentTime).toBe(0);
+  });
   it("reports actual duration and time, seeks without restarting, and refuses unavailable timelines", async () => {
     await playPrivateAudio(book);
     const audio = elements.at(-1)!;

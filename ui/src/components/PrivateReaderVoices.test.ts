@@ -7,6 +7,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 import PrivateReaderVoices from "./PrivateReaderVoices.svelte";
 import { privateVoiceLanguageSuggestion } from "../lib/privateReader";
 import { applySettingsSearch } from "../lib/settingsSearch";
+import { get } from "svelte/store";
+import { mediaPlaybackRate, speechPlaybackRate } from "../lib/readerPlaybackPreferences";
 
 let component: ReturnType<typeof mount> | undefined;
 const manifest = { schema_version: 1, id: "local", name: "Local voice", language: "en-US",
@@ -16,9 +18,25 @@ const button = (label: string) => [...document.querySelectorAll("button")].find(
 beforeEach(() => { invoke.mockReset(); open.mockReset(); privateVoiceLanguageSuggestion.set(null); });
 afterEach(async () => {
   if (component) await unmount(component);
-  component = undefined; document.body.replaceChildren(); delete window.PrivateReaderBridge; vi.restoreAllMocks();
+  component = undefined; document.body.replaceChildren(); delete window.PrivateReaderBridge; vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 describe("cross-platform offline voice settings", () => {
+  it("remembers a separate 4x speech speed without downloading or changing the voice", async () => {
+    const setItem = vi.fn();
+    vi.stubGlobal("localStorage", { setItem });
+    mediaPlaybackRate.set(1.5); speechPlaybackRate.set(1);
+    invoke.mockImplementation(async command => command === "private_voice_status"
+      ? { available: true, runtime: "piper-onnx-v1", selection: null } : []);
+    component = mount(PrivateReaderVoices, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>('[aria-label="Read-aloud speed"]')?.disabled).toBe(false));
+    const select = document.querySelector<HTMLSelectElement>('[aria-label="Read-aloud speed"]')!;
+    select.value = "4"; select.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(get(speechPlaybackRate)).toBe(4));
+    expect(get(mediaPlaybackRate)).toBe(1.5);
+    expect(setItem).toHaveBeenCalledWith("grafium.library.speechPlaybackRate", "4");
+    expect(invoke.mock.calls.every(([command]) => ["private_voice_status", "private_voice_installed"].includes(command))).toBe(true);
+    mediaPlaybackRate.set(1); speechPlaybackRate.set(1);
+  });
   it("renders native installation errors and offers metadata language without selecting or downloading", async () => {
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
     privateVoiceLanguageSuggestion.set({ bookId: "book", title: "Private EPUB", language: "eu-ES" });

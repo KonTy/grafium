@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AppMenu from "./AppMenu.svelte";
 import GraphMenu from "./GraphMenu.svelte";
 import { keymap_manager } from "../lib/keymap";
+import { bionicReaderEnabled } from "../lib/bionicReader";
+import { get } from "svelte/store";
 
 /**
  * The seeded help promises `↑`/`↓` move through the menus opened from a button.
@@ -39,6 +41,7 @@ afterEach(() => {
   component = null;
   host.remove();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   keymap_manager.register([]);
 });
 
@@ -58,6 +61,23 @@ it("shows platform-correct zoom and registered settings hints without claiming A
   expect(settings?.getAttribute("aria-keyshortcuts")).toBe("Alt+s");
   const about = [...menu.querySelectorAll("button")].find(button => button.textContent?.includes("About"));
   expect(about?.getAttribute("aria-keyshortcuts")).toBeNull();
+});
+
+it("keeps Bionic discoverable in the app menu and shares its global preference", () => {
+  bionicReaderEnabled.set(false);
+  const setItem = vi.fn();
+  vi.stubGlobal("localStorage", { setItem });
+  component = mount(AppMenu, { target: host });
+  flushSync();
+  const menu = openMenu(host.querySelector<HTMLElement>(".menu-trigger")!);
+  const toggle = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find(button => button.textContent?.includes("Bionic reading: Off"))!;
+  expect(toggle.getAttribute("aria-keyshortcuts")).toContain("Alt+b");
+  toggle.click(); flushSync();
+  expect(get(bionicReaderEnabled)).toBe(true);
+  expect(setItem).toHaveBeenCalledWith("grafium.reader.bionic", "1");
+  expect(host.querySelector('[role="menu"]')).toBeNull();
+  bionicReaderEnabled.set(false);
 });
 
 function openMenu(trigger: HTMLElement): HTMLElement {

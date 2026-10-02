@@ -48,6 +48,18 @@ supports seeking. Unknown duration or an unseekable stream shows a reason rather
 than a working-looking timeline. Read-aloud uses saved passages and does not
 offer a misleading seconds-based seek slider.
 
+The player **Speed** selector supports **0.5×–4×**, including changes while playing
+or paused. Audio and direct video share one remembered device-local speed;
+read-aloud has a separate remembered speed, also available in
+**Settings > Library > Read-aloud speed**. Changing speed does not move your
+place or change bookmark timestamps: positions remain in original media time.
+Pitch is preserved by supported players. Unsupported rate changes show an error
+rather than pretending to apply them.
+
+Read-aloud accelerates locally generated speech playback; it does not make the
+neural engine generate speech faster or change the selected voice. At high
+speeds, playback may wait for the next passage to finish generating.
+
 A bookmark is a private
 saved location, not an automatically created note or graph page. A save error
 means the location was not confirmed as durable; do not assume it was saved.
@@ -71,6 +83,9 @@ words; click a row to return and select its saved passage. Its **…** menu offe
 label/comment, not the passage anchor. Deletion requires confirmation and does
 not delete the source book. Hover a row for the full label, position, and time.
 Journal notes require your review before entering ordinary graph storage.
+The reading bar shows **Bookmarks (count)**. Saving a new bookmark opens that
+list and brings the new row into view; it is not hidden behind a closed section.
+Use the counted button to open or close the list again.
 
 Android headphone play/pause controls address the native player. Android
 background playback, interruptions, and button delivery still need testing on
@@ -128,9 +143,11 @@ before crossing to the next/previous chapter in **Continuous scroll**.
 Touch behavior depends on your WebView and device; physical phone validation
 is still needed.
 
-Use **B** in the reading bar or **Ctrl/Cmd+Alt+B** for optional **Bionic reading**:
+Use **Bionic** in the reading bar, **Menu > Bionic reading**, or
+**Ctrl/Cmd+Alt+B** for optional **Bionic reading**:
 word beginnings become bold without rewriting the book. The global shortcut also
-controls this preference for rendered notes; the top-bar B button is removed.
+controls this preference for rendered notes. The reading-bar button remains
+visible but disabled while opening or on fixed-layout pages; hover for the reason.
 Code, math, and artwork are unchanged. Bookmarks and narration passage anchors
 work with Bionic on or off. Appearance changes do not overwrite a saved voice
 or an offset within a spoken passage. Bionic is a preference, not a promised

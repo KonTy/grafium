@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { privatePlayback, pausePrivatePlayback, resumePrivatePlayback, stopPrivatePlayback, bookmarkPrivatePlayback, skipPrivateAudio, seekPrivateAudioPosition } from "../lib/privateReaderPlayback";
+  import { privatePlayback, pausePrivatePlayback, resumePrivatePlayback, stopPrivatePlayback, bookmarkPrivatePlayback, skipPrivateAudio, seekPrivateAudioPosition, setPrivatePlaybackRate } from "../lib/privateReaderPlayback";
+  import { PLAYBACK_RATES, mediaPlaybackRate, speechPlaybackRate } from "../lib/readerPlaybackPreferences";
   import { readerTime } from "../lib/privateReader";
   import { formatBinding } from "../lib/shortcuts";
   import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
@@ -10,6 +11,7 @@
   let error = $state("");
   const duration = $derived($privatePlayback.durationMs ?? 0);
   const canSeek = $derived($privatePlayback.mode === "audio" && $privatePlayback.seekable && duration > 0);
+  const rate = $derived($privatePlayback.playbackRate ?? ($privatePlayback.mode === "tts" ? $speechPlaybackRate : $mediaPlaybackRate));
   async function stop() {
     stopping = true; feedback = ""; error = "";
     try { await stopPrivatePlayback(); }
@@ -33,6 +35,19 @@
       <small>{$privatePlayback.status} · {readerTime($privatePlayback.position?.offsetMs ?? 0)}{duration > 0 ? ` / ${readerTime(duration)}` : ""}</small>
     </div>
     <div class="actions">
+      <label>Speed
+        <select aria-label={$privatePlayback.mode === "tts" ? "Read-aloud speed" : "Audio playback speed"}
+          title="Remembered playback speed; read aloud has its own setting"
+          value={rate} disabled={busy || stopping || $privatePlayback.status === "loading"}
+          onchange={event => {
+            const selected = Number(event.currentTarget.value);
+            event.currentTarget.value = String(rate);
+            void run(() => setPrivatePlaybackRate(selected));
+          }}>
+          {#if !PLAYBACK_RATES.includes(rate)}<option value={rate}>{rate}×</option>{/if}
+          {#each PLAYBACK_RATES as speed}<option value={speed}>{speed}×</option>{/each}
+        </select>
+      </label>
       {#if $privatePlayback.mode === "audio"}
         <button disabled={busy || stopping || !canSeek || $privatePlayback.status === "loading"} aria-label="Back 15 seconds" onclick={() => run(() => skipPrivateAudio(-15000))}>−15s</button>
         <button disabled={busy || stopping || !canSeek || $privatePlayback.status === "loading"} aria-label="Forward 15 seconds" onclick={() => run(() => skipPrivateAudio(15000))}>+15s</button>
@@ -61,6 +76,8 @@
   .identity { display: flex; flex: 1; min-width: 120px; flex-direction: column; gap: 3px; overflow: hidden; }
   .privacy { font-size: 9px; color: var(--accent); letter-spacing: .1em; }
   button { font: inherit; color: var(--text-primary); border: 1px solid var(--border); background: var(--bg-primary); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+  select { font: inherit; color: var(--text-primary); border: 1px solid var(--border); background: var(--bg-primary); border-radius: 6px; padding: 7px; }
+  select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .title { font-weight: 600; text-align: left; border: 0; padding: 0; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; } small { color: var(--text-muted); font-size: 11px; }
   .stop { border-color: var(--accent); font-weight: 600; }

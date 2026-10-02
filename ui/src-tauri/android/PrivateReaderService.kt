@@ -9,6 +9,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.datasource.DefaultDataSource
@@ -66,6 +67,7 @@ class PrivateReaderService : MediaSessionService() {
       }
     }
     player = ExoPlayer.Builder(this).setMediaSourceFactory(DefaultMediaSourceFactory(sources)).build().apply {
+      playbackParameters = PlaybackParameters(library.playbackRate("audio"), 1f)
       setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
         .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true)
       setHandleAudioBecomingNoisy(true)
@@ -106,7 +108,8 @@ class PrivateReaderService : MediaSessionService() {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
           // Notification/headphone clients may control transport, but cannot inject URLs or replace the native queue.
           val commands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
-            .remove(Player.COMMAND_SET_MEDIA_ITEM).remove(Player.COMMAND_CHANGE_MEDIA_ITEMS).build()
+            .remove(Player.COMMAND_SET_MEDIA_ITEM).remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
+            .remove(Player.COMMAND_SET_SPEED_AND_PITCH).build()
           return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailablePlayerCommands(commands).build()
         }
       }).build()
@@ -117,6 +120,7 @@ class PrivateReaderService : MediaSessionService() {
   override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = session
 
   fun play(args: JSONObject): JSONObject {
+    val rate = requestedPlaybackRate(args, "audio")
     val id = args.getString("bookId")
     val book = library.book(id)
     require(book.getString("kind") == "audio") { "OFFLINE_VOICE_REQUIRED: EPUB narration needs an installed offline engine" }
@@ -140,6 +144,7 @@ class PrivateReaderService : MediaSessionService() {
         .setMediaMetadata(MediaMetadata.Builder().setTitle(track.getString("title"))
           .setAlbumTitle(book.getString("title")).setIsPlayable(true).build()).build()
     }
+    library.setPlaybackRate("audio", rate)
     persist()
     narrator?.close()
     narrator = null
@@ -153,6 +158,7 @@ class PrivateReaderService : MediaSessionService() {
       resources.clear()
       queue.forEach { resources[it.localConfiguration!!.uri.toString()] = id to it.mediaId }
       player.setMediaItems(queue, index, offset)
+      player.playbackParameters = PlaybackParameters(rate, 1f)
       player.prepare()
       player.play()
     } finally { replacing = false }
@@ -162,6 +168,20 @@ class PrivateReaderService : MediaSessionService() {
   }
 
   fun pause(): JSONObject { player.pause(); persist(); publish(); return state() }
+  private fun requestedPlaybackRate(args: JSONObject, mode: String): Float =
+    if (args.has("playbackRate")) ReaderPolicy.playbackRate(args.get("playbackRate")) else library.playbackRate(mode)
+
+  fun setPlaybackRate(value: Any?): JSONObject {
+    val rate = ReaderPolicy.playbackRate(value)
+    require(bookId != null) { "NO_ACTIVE_BOOK: select a book before changing playback speed" }
+    val mode = if (narrator != null) "tts" else "audio"
+    val previous = library.playbackRate(mode)
+    library.setPlaybackRate(mode, rate)
+    try { player.playbackParameters = PlaybackParameters(rate, 1f) }
+    catch (failure: Exception) { library.setPlaybackRate(mode, previous); throw failure }
+    publish()
+    return state()
+  }
   fun resume(): JSONObject {
     require(bookId != null) { "NO_ACTIVE_BOOK: select a book to resume saved progress" }
     if (player.playbackState == Player.STATE_IDLE) player.prepare()
@@ -240,6 +260,7 @@ class PrivateReaderService : MediaSessionService() {
     .put("durationMs", player.duration.takeIf { it != C.TIME_UNSET } ?: 0)
     .put("seekable", narrator == null && player.isCurrentMediaItemSeekable && player.duration > 0)
     .put("playing", player.isPlaying).put("buffering", player.playbackState == Player.STATE_BUFFERING)
+    .put("playbackRate", player.playbackParameters.speed)
     .put("error", error ?: JSONObject.NULL).put("checkpointIntervalMs", 3000)
     .put("mode", if (narrator != null) "tts" else "audio")
     .put("ttsLoading", ttsLoading).put("ordinal", ttsOrdinal).put("segmentCount", narrator?.count ?: 0)
@@ -254,6 +275,7 @@ class PrivateReaderService : MediaSessionService() {
   }
 
   fun startNarration(args: JSONObject): JSONObject {
+    val rate = requestedPlaybackRate(args, "tts")
     val id = args.getString("bookId")
     val book = library.book(id)
     require(book.getString("kind") == "epub" && book.optBoolean("available")) { "EPUB_SOURCE_UNAVAILABLE" }
@@ -264,6 +286,7 @@ class PrivateReaderService : MediaSessionService() {
       savedPosition.getString("sourceTrackId") == book.getJSONArray("tracks").getJSONObject(0).getString("id")) {
       "NARRATION_SOURCE_CHANGED: choose Read from beginning explicitly"
     }
+    library.setPlaybackRate("tts", rate)
     stop()
     bookId = id
     error = null
@@ -271,6 +294,7 @@ class PrivateReaderService : MediaSessionService() {
     ttsOrdinal = 0
     narrationSourceTrackId = book.getJSONArray("tracks").getJSONObject(0).getString("id")
     ttsResumeOffset = if (fromBeginning) 0 else savedPosition.optLong("offsetMs", 0)
+    player.playbackParameters = PlaybackParameters(rate, 1f)
     player.playWhenReady = true
     val manager = getSystemService(android.app.NotificationManager::class.java)
     if (android.os.Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(android.app.NotificationChannel(

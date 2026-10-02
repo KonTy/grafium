@@ -4,6 +4,7 @@ import { androidReaderRequest, type AndroidReaderState } from "./privateReaderAn
 import { applyAndroidState, registerPrivatePreparation, stopPrivatePlayback, updatePrivateNarration } from "./privateReaderPlayback";
 import { privateLibrary, savePrivatePosition } from "./privateReader";
 import { get } from "svelte/store";
+import { speechPlaybackRate } from "./readerPlaybackPreferences";
 
 type SegmentSource = () => Promise<ReaderTextSegment[]>;
 const sources = new Map<string, { collect: SegmentSource; sourceHash: () => string }>();
@@ -79,7 +80,9 @@ export async function startAndroidPrivateNarration(bookId: string, fromBeginning
     await androidReaderRequest("narrationCommit", { uploadId });
     committed = true;
     check();
-    const state = await androidReaderRequest<AndroidReaderState>("narrationStart", { bookId, fromBeginning });
+    const state = await androidReaderRequest<AndroidReaderState>("narrationStart", {
+      bookId, fromBeginning, playbackRate: get(speechPlaybackRate),
+    });
     check();
     applyAndroidState(state);
   } catch (cause) {

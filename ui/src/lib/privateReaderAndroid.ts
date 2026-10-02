@@ -9,6 +9,7 @@ export interface AndroidReaderState {
   bookId: string | null; trackId: string | null; offsetMs: number;
   playing: boolean; buffering: boolean; error: string | null; durationMs: number;
   seekable?: boolean;
+  playbackRate?: number;
   mode?: "audio" | "tts"; ttsLoading?: boolean; ordinal?: number; segmentCount?: number;
   locator?: BookLocation | string | null;
 }
@@ -20,6 +21,11 @@ export interface ReaderVolumeCapabilities {
 }
 
 export function androidReaderRequest<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  const rateKey = command === "setPlaybackRate" ? "rate"
+    : (command === "play" || command === "narrationStart") && "playbackRate" in args ? "playbackRate" : null;
+  if (rateKey && (typeof args[rateKey] !== "number" || !Number.isFinite(args[rateKey])
+    || (args[rateKey] as number) < 0.5 || (args[rateKey] as number) > 4))
+    return Promise.reject(new Error("INVALID_PLAYBACK_RATE: expected a finite number from 0.5 to 4"));
   const bridge = window.PrivateReaderBridge;
   if (!bridge) return Promise.reject(new Error("The native Android private reader bridge is unavailable. This WebView cannot safely play books in the background."));
   return new Promise<T>((resolve, reject) => {

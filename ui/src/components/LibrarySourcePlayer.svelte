@@ -4,6 +4,7 @@
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import type { StudyItem, StudyProgress } from "../lib/studies";
   import { finiteStudyProgress, normalizeStudySource, studyPercent, studyTime, webStudyUrl, youtubeVideoId } from "../lib/studySources";
+  import { PLAYBACK_RATES, mediaPlaybackRate, setMediaPlaybackRate, applyReaderPlaybackRate } from "../lib/readerPlaybackPreferences";
 
   let { graphPath = "", item, onProgress, onPlayback, onActivity, autoplay = true, resolveMedia, helpContext = "studies" }: {
     graphPath?: string; item: Pick<StudyItem, "id" | "kind" | "source" | "title" | "progress">;
@@ -19,6 +20,8 @@
   let transportOrigin = $state("");
   let externalSource = $state("");
   let error = $state("");
+  let rateError = $state("");
+  let appliedPlaybackRate = $state(1);
   let loading = $state(false);
   let ready = $state(false);
   let resumeFailed = $state(false);
@@ -46,6 +49,7 @@
       playing = false;
       stopped = false; seekable = false;
       mediaSource = ""; embedSource = ""; transportOrigin = ""; externalSource = ""; error = ""; ready = false;
+      rateError = ""; appliedPlaybackRate = $mediaPlaybackRate;
       resumed = false; autoPlayRequested = false; resumeFailed = false; resumeNotice = ""; publishedPosition = null; loading = false; checkpointSaved = false;
       progress = finiteStudyProgress(item.progress.position, item.progress.total, item.progress.label, item.progress.anchor);
       resumePosition = progress.position; checkpoint = progress.label; checkpointPercent = studyPercent(progress);
@@ -119,6 +123,39 @@
     };
   });
 
+  $effect(() => {
+    const target = media;
+    const rate = $mediaPlaybackRate;
+    if (target) untrack(() => applySpeed(target, rate));
+  });
+
+  function applySpeed(target: HTMLMediaElement, rate: number): boolean {
+    try {
+      applyReaderPlaybackRate(target, rate);
+      rateError = "";
+      return true;
+    } catch (cause) {
+      rateError = `Could not change playback speed: ${String(cause)}`;
+      return false;
+    } finally {
+      appliedPlaybackRate = target.playbackRate;
+    }
+  }
+  function changeSpeed(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const rate = Number(select.value);
+    if (!media || item.kind === "youtube") return;
+    if (applySpeed(media, rate)) {
+      try { setMediaPlaybackRate(rate); }
+      catch (cause) { rateError = `Could not save playback speed: ${String(cause)}`; }
+    }
+    // A rejected rate may leave state unchanged, so also restore the native select.
+    select.value = String(appliedPlaybackRate);
+  }
+  function mediaRateChanged() {
+    if (media) appliedPlaybackRate = media.playbackRate;
+  }
+
   function postToYoutube(data: Record<string, unknown>) {
     if (transportOrigin) frame?.contentWindow?.postMessage(JSON.stringify(data), transportOrigin);
   }
@@ -184,6 +221,7 @@
   }
   function metadataReady() {
     if (!media || media.readyState < 1) return;
+    const speedApplied = applySpeed(media, $mediaPlaybackRate);
     ready = true;
     updateSeekable();
     if (!resumed) {
@@ -199,7 +237,7 @@
       }
     }
     publish(media.currentTime, media.duration);
-    if (autoplay && !autoPlayRequested) {
+    if (autoplay && !autoPlayRequested && speedApplied) {
       autoPlayRequested = true;
       const current = generation;
       void media.play().catch(cause => {
@@ -324,11 +362,11 @@
     <div class:audio-player={item.kind === "audio"}>
       {#if item.kind === "audio"}
         <div class="audio-heading"><span aria-hidden="true">♫</span><h2>{item.title}</h2></div>
-        <audio bind:this={media} src={mediaSource} controls preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></audio>
+        <audio bind:this={media} src={mediaSource} controls preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onratechange={mediaRateChanged} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></audio>
       {:else}
         <!-- This is a user-selected source, not an authored video with supplied captions. -->
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={media} src={mediaSource} controls playsinline preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></video>
+        <video bind:this={media} src={mediaSource} controls playsinline preload="metadata" onloadedmetadata={metadataReady} ondurationchange={metadataReady} onratechange={mediaRateChanged} onprogress={updateSeekable} ontimeupdate={mediaProgress} onseeked={mediaProgress} onplaying={mediaPlaying} onpause={mediaStopped} onended={mediaStopped} onwaiting={() => onPlayback(false)} onstalled={() => onPlayback(false)} onerror={mediaError}></video>
       {/if}
     </div>
     <p class="muted">Press Play to begin. Your saved place is restored once the media is ready.</p>
@@ -339,8 +377,25 @@
         <button disabled={!ready || playing || resumeFailed} onclick={play}>{progress.position > 0 ? "Resume" : "Play"}</button>
         <button disabled={!playing} onclick={() => pause()}>Pause</button>
         <button class="stop" onclick={() => pause(true)}>Stop</button>
+        <label class="speed-control">Speed
+          <select value={item.kind === "youtube" ? "provider" : appliedPlaybackRate}
+            disabled={item.kind === "youtube" || !media}
+            aria-describedby={item.kind === "youtube" ? `${frameId}-speed-provider` : rateError ? `${frameId}-speed-error` : undefined}
+            onchange={changeSpeed}>
+            {#if item.kind === "youtube"}
+              <option value="provider">YouTube controls</option>
+            {:else}
+              {#each PLAYBACK_RATES as rate}<option value={rate}>{rate}×</option>{/each}
+              {#if !PLAYBACK_RATES.some(rate => rate === appliedPlaybackRate)}
+                <option value={appliedPlaybackRate}>{appliedPlaybackRate}× (actual)</option>
+              {/if}
+            {/if}
+          </select>
+        </label>
         <span role="status">{stopped ? "Stopped" : playing ? "Playing" : ready ? "Paused" : "Loading"} · {studyTime(progress.position)}{progress.total > 0 ? ` / ${studyTime(progress.total)}` : ""}</span>
       </div>
+      {#if item.kind === "youtube"}<p class="muted" id={`${frameId}-speed-provider`}>Use YouTube's own speed controls; available speeds are set by YouTube.</p>{/if}
+      {#if rateError}<p class="error" role="alert" id={`${frameId}-speed-error`}>{rateError}</p>{/if}
       <label>Seek {item.kind === "audio" ? "audio" : "video"}
         <input type="range" min="0" max={progress.total || 1} step="1" value={progress.position}
           aria-valuetext={`${studyTime(progress.position)}${progress.total ? ` of ${studyTime(progress.total)}` : ""}`}
@@ -366,17 +421,18 @@
   .audio-heading { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; } .audio-heading span { font-size: 40px; color: var(--accent); } h2 { font-size: 20px; margin: 0; }
   .playback-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; font-size: 12px; color: var(--text-secondary); }
   .muted, small, .browser-note { color: var(--text-muted); font-size: 12px; } .error { color: var(--accent-red, #e78284); overflow-wrap: anywhere; }
-  button, input { font: inherit; color: var(--text-primary); border: 1px solid var(--border); border-radius: 7px; background: var(--bg-primary); padding: 9px 12px; }
+  button, input, select { font: inherit; color: var(--text-primary); border: 1px solid var(--border); border-radius: 7px; background: var(--bg-primary); padding: 9px 12px; }
   button { cursor: pointer; } button:hover { background: var(--bg-hover, var(--bg-secondary)); } button:disabled { opacity: .55; cursor: default; }
-  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .primary { color: var(--accent); border-color: var(--accent); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; } .primary { color: var(--accent); border-color: var(--accent); }
   .external { font-size: 12px; margin: 8px 0; } .browser-note { display: block; }
   .resume-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .transport { margin: 16px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
   .transport-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .transport-actions span { font-size: 12px; }
+  .speed-control { width: auto; flex-direction: row; align-items: center; }
   .stop { border-color: var(--accent); font-weight: 600; }
   .transport input { padding: 0; accent-color: var(--accent); width: 100%; }
-  @media (pointer: coarse) { .transport button { min-height: 44px; } .transport input { min-height: 32px; } }
+  @media (pointer: coarse) { .transport button, .transport select { min-height: 44px; } .transport input { min-height: 32px; } }
   .website { border: 1px solid var(--border); border-radius: 12px; padding: 28px; background: var(--bg-secondary); }
   .website-icon { font-size: 30px; color: var(--accent); margin-bottom: 12px; } .website p { color: var(--text-secondary); line-height: 1.6; font-size: 13px; } .source { overflow-wrap: anywhere; }
   form { border-top: 1px solid var(--border); margin-top: 28px; padding-top: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; } h3 { margin: 12px 0 0; font-size: 15px; }

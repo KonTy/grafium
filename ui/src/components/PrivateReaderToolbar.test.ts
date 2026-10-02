@@ -7,9 +7,11 @@ import Harness from "./PrivateReaderNavigation.test.svelte";
 import { privateLibrary, type ReaderBook } from "../lib/privateReader";
 import { playPrivateAudio, privatePlayback, stopPrivatePlayback } from "../lib/privateReaderPlayback";
 import { get } from "svelte/store";
+import { mediaPlaybackRate, speechPlaybackRate } from "../lib/readerPlaybackPreferences";
 
 class FakeAudio extends EventTarget {
   src = ""; currentTime = 0; duration = 1000; preload = "";
+  playbackRate = 1; defaultPlaybackRate = 1; preservesPitch = true;
   seekable = { length: 1, start: () => 0, end: () => this.duration };
   pause = vi.fn(); play = vi.fn(async () => {});
   load() { if (this.src) queueMicrotask(() => this.dispatchEvent(new Event("loadedmetadata"))); }
@@ -22,6 +24,9 @@ let audio: FakeAudio;
 let component: ReturnType<typeof mount> | undefined;
 const button = (name: string) => [...document.querySelectorAll("button")].find(element => element.textContent?.trim() === name)!;
 beforeEach(() => {
+  audio?.pause.mockClear(); audio?.play.mockClear();
+  mediaPlaybackRate.set(1); speechPlaybackRate.set(1);
+  vi.stubGlobal("localStorage", { setItem: vi.fn() });
   invoke.mockReset();
   invoke.mockImplementation(async (command, args) => command === "reader_media_url" ? "http://127.0.0.1:1234/capability"
     : command === "reader_record_activity" ? {
@@ -38,6 +43,19 @@ afterEach(async () => {
   component = undefined; document.body.replaceChildren(); vi.unstubAllGlobals();
 });
 describe("actual global reader controls", () => {
+  it("changes actual audio to 4x from the toolbar without moving or changing the speech preference", async () => {
+    component = mount(Harness, { target: document.body });
+    await playPrivateAudio(book); flushSync();
+    const speed = document.querySelector<HTMLSelectElement>('[aria-label="Audio playback speed"]')!;
+    speed.value = "4"; speed.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(speed.value).toBe("4"));
+    expect(audio.playbackRate).toBe(4);
+    expect(audio.currentTime).toBe(12);
+    expect(get(mediaPlaybackRate)).toBe(4);
+    expect(get(speechPlaybackRate)).toBe(1);
+    button("Go to Journal").click(); flushSync();
+    expect(audio.playbackRate).toBe(4);
+  });
   it("keeps one player and working controls while the page and graph-owned content are replaced", async () => {
     component = mount(Harness, { target: document.body });
     await playPrivateAudio(book);

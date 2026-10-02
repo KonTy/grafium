@@ -4,6 +4,8 @@
   import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
   import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { bindingTitle, bindingAria, shortcutTitle, shortcutAria } from "../lib/shortcuts";
+  import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
+  import { BIONIC_SHORTCUT } from "../lib/readerHotkeys";
 
   interface Props {
     uiZoom?: number;
@@ -102,6 +104,11 @@
         </div>
       </div>
       <div class="menu-separator"></div>
+      <button role="menuitem" class="menu-item" title={bindingTitle("Bionic reading", BIONIC_SHORTCUT)}
+        aria-keyshortcuts={bindingAria(BIONIC_SHORTCUT)}
+        onclick={() => { setBionicReaderEnabled(!$bionicReaderEnabled); closeMenu(); }}>
+        <strong aria-hidden="true">B</strong><span>Bionic reading: {$bionicReaderEnabled ? "On" : "Off"}</span>
+      </button>
       <button role="menuitem" class="menu-item" onclick={openSettings} title={shortcutTitle("Settings", "toggle-settings")} aria-keyshortcuts={shortcutAria("toggle-settings")}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"></circle>

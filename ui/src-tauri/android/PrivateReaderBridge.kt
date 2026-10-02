@@ -66,6 +66,8 @@ internal class PrivateReaderBridge(
       val command = request.getString("command")
       require(command == "restore" || raw.length <= 2_000_000) { "READER_REQUEST_TOO_LARGE" }
       val args = request.optJSONObject("args") ?: JSONObject()
+      if (command in setOf("play", "narrationStart") && args.has("playbackRate"))
+        ReaderPolicy.playbackRate(args.get("playbackRate"))
       val requestId = id
       when (command) {
         "pickLocation" -> chooseLocation(id)
@@ -81,6 +83,11 @@ internal class PrivateReaderBridge(
         }
         "capabilities" -> respond(id, capabilities(activity))
         "state" -> respond(id, PrivateReaderService.instance?.state() ?: idleState())
+        "setPlaybackRate" -> {
+          val rate = ReaderPolicy.playbackRate(args.opt("rate"))
+          val service = PrivateReaderService.instance ?: throw IllegalStateException("NO_ACTIVE_BOOK")
+          respond(id, service.setPlaybackRate(rate))
+        }
         "narrationStart" -> worker.execute {
           try {
             val hash = ReaderNarrationUploads.get(activity).verifyForStart(args.getString("bookId"))
