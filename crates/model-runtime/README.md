@@ -22,8 +22,8 @@ differently licensed application.
 - `gguf`: bounded pure-Rust model metadata inspection, without initializing
   native libraries in the host process.
 - `gpu`: device-bound budget checks and matching PCI memory counters.
-- `recovery`: durable worker-lifetime leases, stale-exit quarantine, and explicit
-  one-shot retry authorization in a host-provided private state directory.
+- `recovery`: durable worker-lifetime leases and one bounded automatic GPU
+  recovery attempt per model identity in a host-provided private state directory.
 
 The host owns secret storage, settings persistence, endpoint/data-access policy,
 conversation persistence, tool authorization, and domain transactions. There is
@@ -107,6 +107,47 @@ already-delegated cgroup v2 memory controls without changing ancestor limits;
 Windows uses Job Object limits. Unsupported enforcement is reported explicitly.
 The host's recovery lease is confirmed only after process exit is observed, not
 after a single successful completion while the model remains resident.
+
+After an abnormal or unconfirmed GPU worker exit, the next actual GPU model use
+gets one automatic recovery attempt, still subject to the same RAM, VRAM,
+pressure, explicit CPU selection, and active-worker locks. Status/health reads
+never start inference or consume this credit. Local chat health checks inspect
+locked GGUF metadata only; they do not claim tensor validity or residency.
+Native validation and allocation checks still run on actual use.
+The credit is atomically persisted
+before launch and remains spent across concurrent hosts, restarts, and clean
+exits. Failed recovery remembers CPU-only fallback; `allow_once` / `retry_gpu`
+explicitly permit one additional attempt without restoring automatic credit.
+`RecoveryStore::use_cpu(key)` can decline an unused attempt and durably remember
+CPU mode for a known recovery record without loading or stopping any worker.
+It is idempotent, revokes unused manual permission, and refuses unknown, healthy,
+active-worker, or damaged-state requests. Only an explicit one-shot retry leaves
+the selected CPU state. Grafium exposes this as `ai_use_cpu_for_model({ key })`,
+returning success without a payload; clients then refresh recovery status.
+Changing model identity gives that identity its own budget; returning to a known
+identity does not reset its budget.
+
+`BlockedModel.state` distinguishes `retry_pending`, `retrying`, and `cpu_only`.
+The store/native recovery list is saved history across model identities.
+`ModelManager::filter_current_recovery` narrows it to the currently selected
+native role/file identities, without re-running automatic model selection.
+Grafium's Chat/index health uses this filtered list; switching models, switching
+to a network provider, disabling AI, or having no engine does not present old
+model recovery as current. The saved history itself is retained.
+Fresh active workers and successfully recovered, cleanly exited workers are not
+reported as blocked. An active recovery is not an approval request. Legacy v1
+journals are read without deletion and converted to v2 on the next durable write:
+unauthorized failures get the new single automatic credit, while authorized or
+in-flight legacy retries do not acquire another credit. Damaged, incomplete, or
+unsupported journals still fail closed and are never repaired by retrying.
+
+Cached CPU workers denied by recovery are re-admitted on a subsequent request
+when an attempt becomes eligible; provider preparation does not pin a transient
+recovery decision into its GPU settings. Resource-driven CPU fallback within an
+admitted worker still remains subject to native safety checks. A failed request
+is returned to the host without replay, including after partial progress/output.
+The host must retain the draft and surface the failure; a later request attempts
+bounded recovery or CPU fallback as appropriate, rather than duplicating output.
 
 Peculium's local-only inference and encrypted-storage requirements are host
 policies, not implications of an OpenAI-compatible transport name. Importing

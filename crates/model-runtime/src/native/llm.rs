@@ -235,26 +235,16 @@ impl LlmProvider for LocalLlm {
 
     fn health_check<'a>(&'a self) -> BoxFuture<'a, Result<bool>> {
         let model_path = self.model_path.clone();
-        let context_size = self.context_size;
-        let gpu_layers = self.gpu_layers;
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                match crate::native::worker::execute(
-                    crate::native::worker::WorkerRequest::ValidateLlm {
-                        model_path,
-                        context_size,
-                        gpu_layers,
-                    },
-                    Duration::from_secs(10 * 60),
-                )? {
-                    crate::native::worker::WorkerOutput::Ready => Ok(true),
-                    _ => Err(RuntimeError::Other(
-                        "native AI worker returned output while validating a model".to_string(),
-                    )),
-                }
+                // Health polling checks availability, not native tensor validity.
+                // Loading here would spend recovery credit without a user request.
+                let locked = super::model_file::LockedModelFile::acquire(&model_path)?;
+                crate::gguf::inspect_metadata(locked.path())?;
+                Ok(true)
             })
             .await
-            .map_err(|e| RuntimeError::Other(format!("LLM health worker task panicked: {e}")))?
+            .map_err(|e| RuntimeError::Other(format!("LLM health inspection task panicked: {e}")))?
         })
     }
 }
@@ -691,6 +681,31 @@ mod prompt_count_tests {
     #[test]
     fn configured_window_is_reported_without_loading_model() {
         assert_eq!(local_provider().context_window(), Some(6144));
+    }
+
+    #[tokio::test]
+    async fn health_inspects_metadata_without_starting_a_gpu_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata-only.gguf");
+        let mut metadata = b"GGUF".to_vec();
+        metadata.extend(3_u32.to_le_bytes());
+        metadata.extend(0_u64.to_le_bytes());
+        metadata.extend(1_u64.to_le_bytes());
+        let key = "general.architecture";
+        metadata.extend((key.len() as u64).to_le_bytes());
+        metadata.extend(key.as_bytes());
+        metadata.extend(8_u32.to_le_bytes());
+        metadata.extend(5_u64.to_le_bytes());
+        metadata.extend(b"llama");
+        std::fs::write(&path, metadata).unwrap();
+        let mut provider = local_provider();
+        provider.model_path = path.clone();
+        provider.gpu_layers = ALL_GPU_LAYERS;
+        for _ in 0..3 {
+            assert!(provider.health_check().await.unwrap());
+        }
+        std::fs::write(path, b"damaged synthetic metadata").unwrap();
+        assert!(provider.health_check().await.is_err());
     }
 
     #[tokio::test]

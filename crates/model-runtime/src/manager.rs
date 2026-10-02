@@ -87,6 +87,7 @@ struct Bindings {
     embeddings: Option<Arc<dyn Embedder>>,
     transcription: Option<Arc<dyn Transcriber + Send + Sync>>,
     selected_paths: Vec<PathBuf>,
+    recovery_models: Vec<(ModelRole, PathBuf)>,
     issues: Vec<ModelIssue>,
 }
 
@@ -306,6 +307,42 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Restrict saved recovery history to this manager's selected native models.
+    /// Uses the paths resolved during preparation, not a fresh automatic model
+    /// pick. File identity is rechecked so replaced model bytes are not confused
+    /// with an old failure at the same path. No worker is started.
+    pub fn filter_current_recovery(
+        &self,
+        records: Vec<crate::recovery::BlockedModel>,
+    ) -> Result<Vec<crate::recovery::BlockedModel>> {
+        #[cfg(any(feature = "llm-local", feature = "media"))]
+        {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| RuntimeError::Other("Model settings lock is poisoned".into()))?;
+            if !state.settings.enabled {
+                return Ok(Vec::new());
+            }
+            let keys: Vec<_> = state
+                .recovery_models
+                .iter()
+                .filter_map(|(role, path)| {
+                    crate::native::worker::gpu_risk_key(role.as_str(), path).ok()
+                })
+                .collect();
+            Ok(records
+                .into_iter()
+                .filter(|record| keys.contains(&record.key))
+                .collect())
+        }
+        #[cfg(not(any(feature = "llm-local", feature = "media")))]
+        {
+            let _ = records;
+            Ok(Vec::new())
+        }
+    }
+
     /// Permanently stop this process's shared native pool at application exit,
     /// cancelling queued/active native work and reporting unconfirmed cleanup.
     /// This affects every manager in the process, not independent model servers.
@@ -426,10 +463,11 @@ impl ModelManager {
             let Some(profile) = settings.backend(role) else {
                 continue;
             };
-            match self.prepare_role(role, profile) {
-                Ok((binding, path)) => {
-                    if let Some(path) = path {
-                        bindings.selected_paths.push(path);
+            let mut resolved_path = None;
+            match self.prepare_role(role, profile, &mut resolved_path) {
+                Ok(binding) => {
+                    if let Some(path) = &resolved_path {
+                        bindings.selected_paths.push(path.clone());
                     }
                     match binding {
                         Binding::Chat(provider) => bindings.chat = Some(provider),
@@ -445,6 +483,9 @@ impl ModelManager {
                         message: error.to_string(),
                     });
                 }
+            }
+            if let Some(path) = resolved_path {
+                bindings.recovery_models.push((role, path));
             }
         }
         Ok(bindings)
@@ -463,7 +504,8 @@ impl ModelManager {
         &self,
         role: ModelRole,
         profile: &BackendSettings,
-    ) -> Result<(Binding, Option<PathBuf>)> {
+        _resolved_path: &mut Option<PathBuf>,
+    ) -> Result<Binding> {
         let network = self.network.clone();
         let binding = match profile {
             BackendSettings::Ollama {
@@ -564,6 +606,7 @@ impl ModelManager {
                         models_dir.as_deref().unwrap_or(&self.models_root),
                         kind,
                     )?;
+                    *_resolved_path = Some(path.clone());
                     let binding = match role {
                         ModelRole::Chat => Binding::Chat(Arc::new(
                             crate::native::llm::LocalLlm::load(&path, *context_size, *gpu_layers)?,
@@ -577,7 +620,7 @@ impl ModelManager {
                         )),
                         _ => return Err(unsupported_role()),
                     };
-                    return Ok((binding, Some(path)));
+                    return Ok(binding);
                 }
                 #[cfg(not(feature = "llm-local"))]
                 {
@@ -602,15 +645,13 @@ impl ModelManager {
                         models_dir.as_deref().unwrap_or(&self.models_root),
                         ModelKind::Whisper,
                     )?;
-                    return Ok((
-                        Binding::Transcription(Arc::new(
-                            crate::native::transcribe::WorkerTranscriber::new(
-                                &path,
-                                language.as_deref(),
-                            ),
-                        )),
-                        Some(path),
-                    ));
+                    *_resolved_path = Some(path.clone());
+                    return Ok(Binding::Transcription(Arc::new(
+                        crate::native::transcribe::WorkerTranscriber::new(
+                            &path,
+                            language.as_deref(),
+                        ),
+                    )));
                 }
                 #[cfg(not(feature = "media"))]
                 {
@@ -621,7 +662,7 @@ impl ModelManager {
                 }
             }
         };
-        Ok((binding, None))
+        Ok(binding)
     }
 }
 
@@ -728,6 +769,76 @@ mod tests {
         invalid.schema_version = 999;
         assert!(manager.configure(invalid).is_err());
         assert_eq!(manager.status().unwrap().settings, original);
+    }
+
+    #[cfg(feature = "llm-local")]
+    #[test]
+    fn recovery_tracks_selected_role_and_file_identity_not_old_models_or_labels() {
+        use crate::recovery::{BlockedModel, RecoveryState};
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.gguf");
+        let second = directory.path().join("second.gguf");
+        std::fs::write(&first, b"synthetic metadata, never loaded").unwrap();
+        std::fs::write(&second, b"synthetic metadata, never loaded").unwrap();
+        let profile = |path: &Path| BackendSettings::Embedded {
+            model: Some(path.to_string_lossy().into_owned()),
+            models_dir: None,
+            context_size: Some(512),
+            gpu_layers: Some(1),
+        };
+        let record = |role: ModelRole, path: &Path| BlockedModel {
+            key: crate::native::worker::gpu_risk_key(role.as_str(), path).unwrap(),
+            // Labels are display-only: matching must use identity and role.
+            label: "chat: indistinguishable display label".into(),
+            reason: "synthetic previous failure".into(),
+            state: RecoveryState::RetryPending,
+        };
+        let records = vec![
+            record(ModelRole::Chat, &first),
+            record(ModelRole::Chat, &second),
+            record(ModelRole::Embeddings, &first),
+            record(ModelRole::Embeddings, &second),
+        ];
+        let manager = manager(directory.path(), MemoryCredentials::default());
+        let mut config = RuntimeSettings {
+            enabled: true,
+            chat: Some(profile(&first)),
+            ..Default::default()
+        };
+        manager.configure(config.clone()).unwrap();
+        let current = manager.filter_current_recovery(records.clone()).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].key, records[0].key);
+
+        config.chat = Some(profile(&second));
+        config.embeddings = Some(profile(&first));
+        let status = manager.configure(config.clone()).unwrap();
+        assert!(status
+            .issues
+            .iter()
+            .any(|issue| issue.role == ModelRole::Embeddings));
+        let current = manager.filter_current_recovery(records.clone()).unwrap();
+        assert_eq!(current.len(), 2);
+        assert_eq!(current[0].key, records[1].key);
+        assert_eq!(current[1].key, records[2].key);
+
+        std::fs::write(
+            &first,
+            b"replacement synthetic bytes with a different identity",
+        )
+        .unwrap();
+        let current = manager.filter_current_recovery(records.clone()).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].key, records[1].key);
+
+        config.enabled = false;
+        manager.configure(config).unwrap();
+        assert!(manager
+            .filter_current_recovery(records.clone())
+            .unwrap()
+            .is_empty());
+        manager.configure(settings("network-provider")).unwrap();
+        assert!(manager.filter_current_recovery(records).unwrap().is_empty());
     }
 
     #[test]

@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   index: vi.fn(),
   retry: vi.fn(),
+  retryModel: vi.fn(),
+  useCpu: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -15,6 +17,8 @@ vi.mock("../lib/knowledge", () => ({
   aiIndexStatus: mocks.status,
   aiIndexAllPages: mocks.index,
   aiRetryLlmOnGpu: mocks.retry,
+  aiAllowGpuRetry: mocks.retryModel,
+  aiUseCpuForModel: mocks.useCpu,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
@@ -85,19 +89,19 @@ afterEach(async () => {
 describe("native runtime diagnostics", () => {
   it("reports safety warnings to the composer while keeping the full text in the menu", async () => {
     const onNotice = vi.fn();
-    mocks.status.mockResolvedValue({ ...ready, runtime_warnings: ["GPU headroom cannot be measured; using CPU."] });
+    mocks.status.mockResolvedValue({ ...ready, runtime_warnings: ["Unexpected native warning."] });
     component = mount(AssistantDiagnostics, { target: host, props: { onNotice } });
     flushSync();
     await vi.waitFor(() => expect(trigger().dataset.status).toBe("warning"));
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
     expect(onNotice).toHaveBeenLastCalledWith({
-      text: "Model attention needed — open status to review warnings.", error: false,
+      text: "The model has a warning. Open status for details.", error: false,
     });
     trigger().click();
     flushSync();
     expect(menu().dataset.testPopoverOpen).toBe("true");
-    expect(menu().textContent).toContain("GPU headroom cannot be measured; using CPU.");
-    expect(host.querySelector('[role="status"]')?.closest('[popover]')).toBe(menu());
+    expect(menu().textContent).toContain("Unexpected native warning.");
+    expect(menu().querySelector(".runtime-details")?.hasAttribute("open")).toBe(false);
   });
 
   it("does not fetch status while an answer is running", () => {
@@ -114,7 +118,7 @@ describe("native runtime diagnostics", () => {
     expect(host.querySelector("img")).toBeNull();
   });
 
-  it("provides distinct labelled checking, ready, working, warning and error icons", async () => {
+  it("provides distinct labelled checking, ready, working, fallback and error icons", async () => {
     const result = deferred<IndexStatus>();
     mocks.status.mockReturnValueOnce(result.promise);
     const props = new SvelteMap([["checking", false], ["running", false]]);
@@ -140,13 +144,13 @@ describe("native runtime diagnostics", () => {
     assertState("working", "Model working");
     mocks.status.mockResolvedValueOnce(cpu);
     props.set("running", false); flushSync();
-    await vi.waitFor(() => expect(trigger().dataset.status).toBe("warning"));
-    assertState("warning", "running on CPU");
+    await vi.waitFor(() => expect(trigger().dataset.status).toBe("fallback"));
+    assertState("fallback", "Slower mode");
     mocks.retry.mockRejectedValueOnce(new Error("memory refused"));
     trigger().click(); flushSync();
-    button("Retry on GPU").click();
+    button("Try faster mode").click();
     await vi.waitFor(() => expect(trigger().dataset.status).toBe("error"));
-    assertState("error", "error");
+    assertState("error", "needs help");
     expect(icons.size).toBe(5);
   });
 
@@ -265,7 +269,7 @@ describe("native runtime diagnostics", () => {
     trigger().click(); flushSync();
     expect(menu().textContent).toContain("Self-hosted");
     expect(menu().textContent).toContain("Configured endpoint");
-    const privacy = menu().querySelector("details")!;
+    const privacy = menu().querySelector<HTMLDetailsElement>(".privacy-note")!;
     expect(privacy.querySelector("summary")?.textContent).toBe("Model & web privacy");
     privacy.open = true;
     expect(privacy.textContent).toContain("No notes excludes earlier note-backed answers");
@@ -288,13 +292,13 @@ describe("native runtime diagnostics", () => {
     expect(trigger().dataset.status).toBe("checking");
     expect(onNotice).toHaveBeenLastCalledWith(null);
     values.set("checking", false); flushSync();
-    expect(trigger().getAttribute("aria-label")).toContain("configure provider");
+    expect(trigger().getAttribute("aria-label")).toContain("Choose a model");
     expect(onNotice).toHaveBeenLastCalledWith({
-      text: "Model attention needed — configure a provider.", error: false,
+      text: "Choose a model to start chatting.", error: false,
     });
     trigger().click(); flushSync();
     expect(menu().textContent).not.toContain("No notes excludes earlier note-backed answers");
-    button("Configure provider").click();
+    button("Choose a model").click();
     expect(onOpenSettings).toHaveBeenCalledOnce();
     values.set("connected", true); flushSync();
     expect(onNotice).toHaveBeenLastCalledWith(null);
@@ -321,25 +325,26 @@ describe("native runtime diagnostics", () => {
     expect(onNotice).toHaveBeenLastCalledWith(null);
   });
 
-  it("preserves embedding readiness and GPU recovery approval safety gates", async () => {
+  it("offers per-model retry without an approval detour and preserves embedding readiness", async () => {
     const onOpenSettings = vi.fn();
     const onNotice = vi.fn();
     mocks.status.mockResolvedValue({ ...cpu, embedder_ready: false, runtime_recovery: [
-      { key: "private-native-key", label: "Local model", reason: "Previous worker crashed" },
+      { key: "private-native-key", label: "chat: model.gguf", reason: "Previous worker crashed", state: "cpu_only" },
     ] });
     component = mount(AssistantDiagnostics, { target: host, props: { onOpenSettings, onNotice } });
     flushSync(); await changed();
     trigger().click(); flushSync();
     expect(button("Index now").disabled).toBe(true);
-    expect(button("Retry on GPU").disabled).toBe(true);
-    button("Retry on GPU").click();
+    expect(button("Try faster mode").disabled).toBe(false);
+    button("Try faster mode").click(); flushSync();
+    expect(button("Try faster mode").disabled).toBe(true);
+    await vi.waitFor(() => expect(mocks.retryModel).toHaveBeenCalledWith("private-native-key"));
     expect(mocks.retry).not.toHaveBeenCalled();
     expect(menu().textContent).toContain("Previous worker crashed");
     expect(menu().textContent).not.toContain("private-native-key");
-    expect(onNotice).toHaveBeenLastCalledWith({
-      text: "Model attention needed — review GPU recovery approval in Settings.", error: false,
-    });
-    button("Review recovery in Settings").click(); flushSync();
+    await changed();
+    expect(onNotice).toHaveBeenLastCalledWith(null);
+    button("Change model").click(); flushSync();
     expect(onOpenSettings).toHaveBeenCalledOnce();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
@@ -354,24 +359,24 @@ describe("native runtime diagnostics", () => {
     flushSync(); await changed();
     trigger().click(); flushSync();
     running.set("value", true); flushSync();
-    expect(button("Retry on GPU").disabled).toBe(true);
-    expect(menu().textContent).toContain("including cancellation");
-    button("Retry on GPU").click();
+    expect(button("Try faster mode").disabled).toBe(true);
+    expect(menu().textContent).toContain("when the current request finishes");
+    button("Try faster mode").click();
     expect(mocks.retry).not.toHaveBeenCalled();
     running.set("value", false); flushSync(); await changed();
     const retry = deferred<null>();
     mocks.retry.mockReturnValueOnce(retry.promise);
-    button("Retry on GPU").click(); flushSync();
-    expect(button("Retrying…").disabled).toBe(true);
+    button("Try faster mode").click(); flushSync();
+    expect(button("Checking…").disabled).toBe(true);
     retry.reject(new Error("GPU admission refused"));
     await vi.waitFor(() => expect(menu().textContent).toContain("GPU admission refused"));
     expect(onNotice).toHaveBeenLastCalledWith(expect.objectContaining({ error: true }));
-    expect(button("Retry on GPU").disabled).toBe(false);
+    expect(button("Try faster mode").disabled).toBe(false);
     const updated = mocks.listen.mock.calls.find(([name]) => name === "ai-index-updated")![1];
     updated(); await changed();
     expect(menu().textContent).toContain("GPU admission refused");
-    button("Retry on GPU").click();
-    await vi.waitFor(() => expect(button("Retry on GPU")).toBeDefined());
+    button("Try faster mode").click();
+    await vi.waitFor(() => expect(button("Try faster mode")).toBeDefined());
     expect(menu().textContent).not.toContain("GPU admission refused");
   });
 
@@ -383,9 +388,52 @@ describe("native runtime diagnostics", () => {
     await vi.waitFor(() => expect(trigger().dataset.status).toBe("error"));
     expect(onNotice).toHaveBeenLastCalledWith(expect.objectContaining({ error: true }));
     trigger().click(); flushSync();
-    expect(menu().querySelector('[role="alert"]')?.textContent).toContain("native status unavailable");
+    expect(menu().querySelector('[role="alert"]')?.textContent).toBe("Couldn't check the model. Try again.");
+    expect(menu().querySelector(".runtime-details")?.textContent).toContain("native status unavailable");
     button("Retry status").click(); await changed();
     await vi.waitFor(() => expect(trigger().dataset.status).toBe("ready"));
+    expect(onNotice).toHaveBeenLastCalledWith(null);
+  });
+
+  it("keeps handled fallback and limited memory protection out of the composer alerts", async () => {
+    const onNotice = vi.fn();
+    mocks.status.mockResolvedValue({ ...cpu, runtime_warnings: [
+      "GPU headroom cannot be measured; using CPU.",
+      "Native worker hard RAM containment unavailable: cgroup is not delegated",
+    ] });
+    component = mount(AssistantDiagnostics, { target: host, props: { onNotice } });
+    flushSync(); await changed();
+    await vi.waitFor(() => expect(trigger().dataset.status).toBe("fallback"));
+    expect(onNotice).toHaveBeenLastCalledWith(null);
+    expect(host.textContent).toContain("Memory protection is limited on this computer.");
+    expect(host.querySelector(".runtime-details")?.hasAttribute("open")).toBe(false);
+  });
+
+  it("shows automatic recovery accurately without authorizing anything from status polling", async () => {
+    mocks.status.mockResolvedValue({ ...cpu, runtime_recovery: [
+      { key: "chat-key", label: "chat: model.gguf", reason: "previous exit", state: "retry_pending" },
+    ] });
+    component = mount(AssistantDiagnostics, { target: host });
+    flushSync(); await changed();
+    await vi.waitFor(() => expect(trigger().getAttribute("aria-label")).toContain("Automatic recovery is ready"));
+    expect(host.textContent).toContain("once on your next request");
+    expect(mocks.retry).not.toHaveBeenCalled();
+    expect(mocks.retryModel).not.toHaveBeenCalled();
+    trigger().click(); flushSync();
+    button("Keep slower mode").click();
+    await vi.waitFor(() => expect(mocks.useCpu).toHaveBeenCalledWith("chat-key"));
+  });
+
+  it("does not request a second retry while the native recovery attempt is active", async () => {
+    const onNotice = vi.fn();
+    mocks.status.mockResolvedValue({ ...cpu, runtime_recovery: [
+      { key: "chat-key", label: "chat: model.gguf", reason: "previous exit", state: "retrying" },
+    ] });
+    component = mount(AssistantDiagnostics, { target: host, props: { onNotice } });
+    flushSync(); await changed();
+    await vi.waitFor(() => expect(trigger().dataset.status).toBe("working"));
+    expect(host.textContent).toContain("No action needed");
+    expect(button("Try faster mode")).toBeUndefined();
     expect(onNotice).toHaveBeenLastCalledWith(null);
   });
 

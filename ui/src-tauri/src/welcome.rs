@@ -6,7 +6,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
-const SEED_VERSION: u8 = 65;
+const SEED_VERSION: u8 = 66;
 
 struct Resource {
     path: &'static str,

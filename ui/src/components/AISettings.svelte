@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import RuntimeRecovery from "./RuntimeRecovery.svelte";
+  import RuntimeWarnings from "./RuntimeWarnings.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
   import {
     aiGetConfig,
@@ -8,6 +9,7 @@
     aiDefaultConceptEdgePrompt,
     aiHealthCheck,
     aiAllowGpuRetry,
+    aiUseCpuForModel,
     aiRetryLlmOnGpu,
     aiIndexAllPages,
     aiCreateDefaultSchemas,
@@ -23,6 +25,7 @@
   let isSaving = $state(false);
   let isIndexing = $state(false);
   let retryingGpu = $state(false);
+  let speedError = $state("");
   let indexCount = $state<number | null>(null);
   let message = $state("");
   let messageType = $state<"success" | "error">("success");
@@ -267,17 +270,19 @@
 
   }
 
-  async function retryGpu(key?: string) {
+  async function retryGpu(key?: string, useCpu = false) {
     if (retryingGpu) return;
     retryingGpu = true;
+    speedError = "";
     try {
-      if (key) await aiAllowGpuRetry(key);
+      if (key && useCpu) await aiUseCpuForModel(key);
+      else if (key) await aiAllowGpuRetry(key);
       else await aiRetryLlmOnGpu();
       health = await aiHealthCheck();
-      showMessage("GPU retry requested. Memory checks still apply; active workers must finish before recovery can be changed.", "success");
+      showMessage(useCpu ? "Slower mode saved." : "Faster mode will be checked on your next request.", "success");
       window.dispatchEvent(new CustomEvent("ai-configuration-changed"));
     } catch (error) {
-      showMessage(`GPU retry was not enabled: ${String(error)}`, "error");
+      speedError = String(error);
     } finally {
       retryingGpu = false;
     }
@@ -385,27 +390,23 @@
             Not connected
           {/if}
         </span>
-        {#if health.llm_load_error}
-          <!-- The reason was always known and logged; it just never reached
-               the reader, who saw only "not connected" and had nothing to act
-               on — usually the model simply does not fit in available VRAM. -->
-          <span class="status-vectors warning" title={health.llm_load_error}>
-            {health.llm_load_error}
-          </span>
-        {:else if health.enabled && health.llm_available && !health.embedder_available}
+        {#if !health.llm_load_error && health.enabled && health.llm_available && !health.embedder_available}
           <span class="status-vectors warning">no search embedder</span>
         {:else if health.vector_count > 0}
           <span class="status-vectors">{health.vector_count} vectors</span>
         {/if}
       </div>
-      {#each health.runtime_warnings ?? [] as warning}
-        <p class="warning" role="status">{warning}</p>
-      {/each}
-      <RuntimeRecovery records={health.runtime_recovery ?? []} busy={retryingGpu} onRetry={retryGpu} />
-      {#if enabled && mode === "local" && localProvider === "huggingface"}
-        <button disabled={retryingGpu || isSaving || !savedChatModel} onclick={() => retryGpu()}>Request GPU for Chat</button>
-        {#if !savedChatModel}<p>Save the selected model settings before requesting GPU.</p>{/if}
+      {#if health.llm_load_error}
+        <p class="warning" role="alert">This model couldn't start. Choose another model below, then save.</p>
       {/if}
+      <RuntimeRecovery records={health.runtime_recovery ?? []} busy={retryingGpu || isSaving || isIndexing}
+        onRetry={retryGpu} onUseCpu={key => retryGpu(key, true)} />
+      {#if enabled && mode === "local" && localProvider === "huggingface" && !health.runtime_recovery?.length}
+        <button disabled={retryingGpu || isSaving || isIndexing || !savedChatModel} onclick={() => retryGpu()}>Try faster mode</button>
+        {#if !savedChatModel}<p>Save the selected model before changing its speed.</p>{/if}
+      {/if}
+      {#if speedError}<p class="warning" role="alert">Couldn't change model speed. Let current work finish, then try again.</p>{/if}
+      <RuntimeWarnings warnings={health.runtime_warnings ?? []} details={[health.llm_load_error ?? "", speedError]} />
     {/if}
 
     <!-- Enable toggle -->

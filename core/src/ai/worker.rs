@@ -35,6 +35,9 @@ pub fn evict_idle() -> Result<()> {
 pub fn allow_gpu_retry(key: &str) -> Result<()> {
     Ok(runtime::allow_gpu_retry(key)?)
 }
+pub fn use_cpu(key: &str) -> Result<()> {
+    Ok(runtime::use_cpu(key)?)
+}
 pub fn gpu_risk_key(workload: &str, path: &Path) -> Result<String> {
     Ok(runtime::gpu_risk_key(workload, path)?)
 }

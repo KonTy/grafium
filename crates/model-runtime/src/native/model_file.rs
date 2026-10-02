@@ -160,6 +160,10 @@ impl ModelFileLease {
 }
 
 impl WorkerLease for ModelFileLease {
+    fn reusable(&self) -> bool {
+        self.recovery.as_ref().is_none_or(|lease| lease.reusable())
+    }
+
     fn confirmed_exit(&self, expected: bool) -> Result<()> {
         // The supervisor has proved death (or that spawn never succeeded).
         // Release the model even if subsequent recovery persistence fails.

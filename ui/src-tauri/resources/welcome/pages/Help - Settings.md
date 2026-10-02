@@ -111,11 +111,13 @@ generation and embedding models separately, and index only the graph content
 you want AI to retrieve. See [[AI Setup And Privacy]] for provider, privacy,
 and troubleshooting guidance.
 
-**Native model recovery** lists models whose worker exit was not confirmed or
-which stopped abnormally. **Allow one GPU attempt** authorizes only that model's
-next attempt; it does not disable memory admission. **Request GPU for Chat**
-requests offload for the selected chat model. Active native jobs must finish
-before their worker can be evicted for a retry.
+**Model recovery** handles an unexpected worker exit automatically: one recovery
+attempt on the next request, then remembered slower mode if it fails. No
+approval is needed. **Try faster mode** requests one more attempt for that
+model; **Keep slower mode** skips a pending attempt. Active native jobs must
+finish before changing their speed. Memory checks remain in place.
+Long model filenames and diagnostic reasons are under **Technical details**.
+Chat's **Change model** button opens this section directly.
 
 ## Re-indexing the graph
 

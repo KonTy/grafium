@@ -307,6 +307,18 @@ impl KnowledgeEngine {
         self.llm_load_error.as_deref()
     }
 
+    fn current_runtime_recovery(&self) -> Vec<model_runtime::recovery::BlockedModel> {
+        let Some(manager) = &self.runtime_manager else {
+            return Vec::new();
+        };
+        manager
+            .filter_current_recovery(crate::ai::resources::runtime_recovery())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Cannot identify current model recovery records");
+                Vec::new()
+            })
+    }
+
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let llm_ok = if let Some(llm) = &self.llm {
             llm.health_check().await.unwrap_or(false)
@@ -323,7 +335,7 @@ impl KnowledgeEngine {
         Ok(HealthStatus {
             llm_load_error: self.llm_load_error.clone(),
             runtime_warnings: crate::ai::resources::runtime_warnings(),
-            runtime_recovery: crate::ai::resources::runtime_recovery(),
+            runtime_recovery: self.current_runtime_recovery(),
             enabled: self.config.enabled,
             llm_available: llm_ok,
             embedder_available: self.embedder.is_some(),
@@ -357,7 +369,7 @@ impl KnowledgeEngine {
             llm_ready: self.is_llm_ready(),
             accelerator: self.llm.as_ref().and_then(|l| l.accelerator_status()),
             runtime_warnings: crate::ai::resources::runtime_warnings(),
-            runtime_recovery: crate::ai::resources::runtime_recovery(),
+            runtime_recovery: self.current_runtime_recovery(),
         })
     }
 

@@ -91,6 +91,7 @@ const cases = [
     await page.keyboard.press("F1");
     await page.getByRole("dialog", { name: "Help - Chat", exact: true }).waitFor();
     await modelMenu(page).waitFor({ state: "hidden" });
+    await page.waitForFunction(() => window.__assistantFixture.helpContexts.length === 1);
     assert.deepEqual(await page.evaluate(() => window.__assistantFixture.helpContexts), ["chat"]);
     await page.getByRole("button", { name: "Close help" }).click();
     await input(page).fill("Keep the draft while opening status");
@@ -244,6 +245,7 @@ const cases = [
   ["Spark API endpoint offers all three Grafium modes without vendor tools or exposed keys", { global: true }, async (page) => {
     await modelStatus(page).click();
     await modelMenu(page).getByText(/Model server \/ API endpoint/).waitFor();
+    await modelMenu(page).locator(".runtime-details summary").click();
     assert.ok((await modelMenu(page).innerText()).includes("spark.lan:8000"));
     assert.equal(await panel(page).getByRole("button", { name: /Cloud service/ }).count(), 0);
     assert.deepEqual(await mode(page).locator("option").evaluateAll((options) =>
@@ -447,21 +449,22 @@ const cases = [
       window.dispatchEvent(new Event("ai-configuration-changed"));
     });
     await modelStatus(page).click();
+    await modelMenu(page).locator(".runtime-details summary").click();
     await modelMenu(page).getByText(/Refreshed Spark model/).waitFor();
     assert.equal(await input(page).inputValue(), draft);
     assert.equal(await button(page, "Send").isEnabled(), true);
-    await panel(page).getByText(/No semantic index yet/).waitFor();
+    await panel(page).getByText("Note search: not set up", { exact: true }).waitFor();
     assert.equal(await button(page, "Index now").isDisabled(), true);
     await page.evaluate(() => {
       window.__assistantFixture.index.embedder_ready = true;
       window.__assistantFixture.index.accelerator = { gpu_supported: true, on_gpu: false };
       window.__assistantFixture.emit("ai-index-updated", {});
     });
-    await button(page, "Retry on GPU").waitFor();
+    await button(page, "Try faster mode").waitFor();
     await button(page, "Index now").click();
     await panel(page).getByText("Indexed 2 pages; 0 failed.", { exact: true }).waitFor();
     await panel(page).getByText(/12 indexed chunks/).waitFor();
-    await button(page, "Retry on GPU").click();
+    await button(page, "Try faster mode").click();
     await page.waitForFunction(() => window.__assistantFixture.gpuRetries === 1);
     assert.equal(await page.evaluate(() => window.__assistantFixture.config.cloud.llm_model), "Refreshed Spark model",
       "GPU retry must not switch the configured model");
@@ -469,11 +472,79 @@ const cases = [
       window.__assistantFixture.indexFailure = true;
       window.__assistantFixture.emit("ai-index-updated", {});
     });
-    await panel(page).getByRole("alert").filter({ hasText: "Synthetic index status failure" }).waitFor();
+    await modelMenu(page).getByRole("alert").filter({ hasText: "Couldn't check the model" }).waitFor();
+    await modelMenu(page).getByText("Could not read index status: Error: Synthetic index status failure", { exact: true }).waitFor();
     await page.evaluate(() => { window.__assistantFixture.indexFailure = false; });
     await button(page, "Retry status").click();
     await button(page, "Retry status").waitFor({ state: "hidden" });
     assert.equal(await input(page).inputValue(), draft);
+  }],
+  ["Chat automatic model recovery stays concise and remembers slower-mode controls", { global: true }, async (page) => {
+    await input(page).fill("My draft survives model recovery");
+    await page.evaluate(() => {
+      window.__assistantFixture.index.runtime_recovery = [
+        { key: "synthetic-chat-key", label: "chat: very-long-synthetic-model-name.gguf",
+          reason: "Synthetic GPU worker timeout with long technical diagnostic.", state: "retry_pending" },
+      ];
+      window.__assistantFixture.index.runtime_warnings = [
+        "Native worker hard RAM containment unavailable: cgroup is not delegated to this user",
+      ];
+      window.__assistantFixture.emit("ai-index-updated", {});
+    });
+    await modelStatus(page).click();
+    await modelMenu(page).getByText("Faster mode will be tried once on your next request.", { exact: true }).waitFor();
+    assert.equal(await panel(page).locator(".model-notice").count(), 0);
+    assert.equal(await page.evaluate(() => window.__assistantFixture.gpuRetries), 0,
+      "polling never authorizes or performs GPU work");
+    assert.equal(await modelMenu(page).getByText(/Synthetic GPU worker timeout/).isVisible(), false);
+    assert.equal(await modelMenu(page).getByText(/cgroup is not delegated/).isVisible(), false);
+    await modelMenu(page).getByText("Memory protection is limited on this computer.", { exact: true }).waitFor();
+    await button(page, "Chat: Keep slower mode").click();
+    await modelMenu(page).getByText("Slower mode selected. Faster mode will not retry on its own.", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__assistantFixture.index.runtime_recovery[0].state), "cpu_only");
+    await button(page, "Chat: Try faster mode").click();
+    await modelMenu(page).getByText("Faster mode will be tried once on your next request.", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__assistantFixture.gpuRetries), 1);
+    assert.equal(await input(page).inputValue(), "My draft survives model recovery");
+    await page.evaluate(() => {
+      window.__assistantFixture.index.runtime_recovery[0].state = "retrying";
+      window.__assistantFixture.emit("ai-index-updated", {});
+    });
+    await modelMenu(page).getByText("Trying faster mode. No action needed.", { exact: true }).waitFor();
+    assert.equal(await button(page, "Chat: Try faster mode").count(), 0);
+    assert.equal(await modelMenu(page).getByText(/approval required/i).count(), 0);
+    await page.evaluate(() => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__assistantFixture.helpContexts = [];
+      window.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (command === "help_get_page") {
+          window.__assistantFixture.helpContexts.push(args.context);
+          return Promise.resolve("# Automatic model recovery\nNo approval is needed.");
+        }
+        return invoke(command, args);
+      };
+    });
+    await modelMenu(page).locator('section[aria-label="Model recovery"] summary').focus();
+    await page.keyboard.press("F1");
+    await page.getByRole("dialog", { name: "AI Setup And Privacy", exact: true }).waitFor();
+    await modelMenu(page).waitFor({ state: "hidden" });
+    await page.waitForFunction(() => window.__assistantFixture.helpContexts.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__assistantFixture.helpContexts), ["ai"]);
+  }],
+  ["Chat Change model opens the AI settings section directly and keeps the draft", { global: true }, async (page) => {
+    await input(page).fill("Keep this while I choose another model");
+    await modelStatus(page).click();
+    await button(page, "Change model").click();
+    const section = page.locator(".settings-section").filter({
+      has: page.locator("summary").filter({ hasText: "AI / Knowledge Engine (optional)" }),
+    });
+    await section.waitFor();
+    assert.equal(await section.evaluate(node => node.open), true);
+    assert.equal(await section.locator("summary").first().evaluate(node => node === document.activeElement), true);
+    const summary = await section.locator("summary").first().boundingBox();
+    assert.ok(summary.y >= 0 && summary.y < await page.evaluate(() => innerHeight));
+    await returnToChat(page);
+    assert.equal(await input(page).inputValue(), "Keep this while I choose another model");
   }],
   ["Chat graph changes cancel old work and isolate all previous context", { global: true }, async (page) => {
     await context(page).selectOption("graph");

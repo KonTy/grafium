@@ -71,18 +71,44 @@ containment is unavailable, the app says so instead of claiming it is enforced.
 Admission and pressure monitoring still apply. Hard RAM limits do not cap VRAM
 or isolate the GPU driver from the OS.
 
-## Recovery after an unconfirmed exit
+## Automatic model recovery
+
+No approval is needed for normal recovery. After an unexpected GPU worker exit,
+Grafium allows one automatic recovery attempt when you next use that model.
+It does not start inference just because you opened the status menu.
+If recovery fails, Grafium remembers slower mode across restarts instead of
+repeatedly retrying the failing setup. Slower mode keeps using the same local
+model on CPU when enough RAM is available; it never switches to a cloud model.
+
+Open the **Model & index status** icon beside Send for short status messages:
+
+- **Automatic recovery is ready:** send your next request normally.
+- **Trying faster mode:** no action is needed while that attempt runs.
+- **Slower mode:** you can continue, or press **Try faster mode** for one more
+  attempt. **Keep slower mode** skips a pending retry and remembers your choice.
+- **Change model:** opens the AI section of Settings directly. Choose another
+  model if this one still cannot run, then save.
+
+Memory checks still apply to every attempt. Changing speed does not retry a
+partially generated answer behind your back. If a request failed, its error and
+any partial answer remain visible so you decide whether to send again.
+
+### Technical details
 
 Before a GPU attempt, Grafium durably records a recovery lease in its application
 state, outside your graphs. It clears that lease only after observing the native
-worker exit. A crash, reboot, timeout, or unconfirmed exit can therefore disable
-automatic GPU attempts for that model on the next run. This is conservative:
+worker exit. A crash, reboot, timeout, or unconfirmed exit can therefore trigger
+recovery on the next run. This is conservative:
 an unconfirmed exit does not prove that the GPU caused it.
 
-Open **Settings → AI / Knowledge Engine → Native model recovery** and select
-**Allow one GPU attempt** for the affected model. The permission is consumed once;
-another abnormal exit blocks GPU again. **Request GPU for Chat** requests GPU
-offload for the selected chat model. Neither action bypasses memory checks.
+The automatic retry allowance is durably consumed before starting the worker,
+not replenished by restarting Grafium or repeatedly checking status. An active
+recovery record can remain visible until the worker exits cleanly; its presence
+alone does not mean another retry is needed. Settings also has **Model recovery**
+with the same per-model controls and expandable **Technical details**.
+**Memory protection is limited on this computer** means the OS has not supplied
+hard per-worker RAM containment. It is a separate system-configuration issue,
+not a request to approve a model. Monitoring is not a substitute for a hard cap.
 Do not delete recovery files to bypass a damaged journal; use CPU or a network
 server and inspect the reported error instead.
 
@@ -109,10 +135,10 @@ Review citations and generated edits before saving them.
 
 - No answer: check the provider, model, endpoint, and API key in Settings.
 - Local model is slow: check model size, memory, and GPU/Vulkan support.
-- CPU fallback: read the runtime warning beside **Model & index status** in
-  Chat; choose a smaller model or an inference server if necessary.
+- Slower mode: continue normally, or use **Change model** in Chat's status menu
+  to select a smaller model. Diagnostic wording is under **Technical details**.
 - Repeated native crashes: automatic retries stop. Choose a smaller model or
-  CPU/network inference; use an explicit one-shot GPU retry only when ready.
+  CPU/network inference. **Try faster mode** requests one more attempt.
 - No semantic results: configure an embedding model and run the graph index.
 - Web research unavailable: switch source scope to **Internet**.
 

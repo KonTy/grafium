@@ -47,8 +47,8 @@ describe("Global search and model diagnostics", () => {
     expect(search).toContain('aria-label="Search pages and blocks"');
     expect(search).toContain("targetBlockId: entry.match.block.id");
   });
-  it("preserves index coverage, indexing, CPU warnings and explicit GPU retry", () => {
-    for (const token of ["aiIndexStatus", "aiIndexAllPages", "aiRetryLlmOnGpu", "Running on CPU", "Index now", "Configure provider"]) {
+  it("preserves index coverage and offers simple recovery actions", () => {
+    for (const token of ["aiIndexStatus", "aiIndexAllPages", "aiRetryLlmOnGpu", "Slower mode", "Index now", "Change model", "RuntimeRecovery"]) {
       expect(diagnostics).toContain(token);
     }
     expect(diagnostics).toContain("retrying || running");

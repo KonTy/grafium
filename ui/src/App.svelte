@@ -110,6 +110,10 @@
     }
   }
 
+  function openAiSettings() {
+    void navigateToPage("__settings__").then(() => { settingsOpenSection = "ai"; });
+  }
+
   async function addLibraryToStudies(book: ReaderBook) {
     studyAddPage = null;
     studyAddLibrary = book;
@@ -2696,7 +2700,7 @@
           {#snippet children(ChatView)}
             <ChatView active={chatActive} conversationId={expandedConversationId}
               readingInset={wideMode || zenMode ? 0 : narrowPaddingPct}
-              onOpenSettings={() => handleNavigate("__settings__")}
+              onOpenSettings={openAiSettings}
               onNavigate={handleNavigate}
               onFindLinks={handleFindLinksForPage} />
           {/snippet}
@@ -2737,7 +2741,7 @@
             onNavigate={(target) => { referencePanelVisible = false; handleNavigate(target); }}
             onFindLinks={handleFindLinksForPage}
             onExpandConversation={expandAssistantConversation}
-            onOpenSettings={() => handleNavigate("__settings__")}
+            onOpenSettings={openAiSettings}
           />
         {/snippet}
       </LazyView>
@@ -2902,7 +2906,7 @@
     {#snippet children(GlobalSearchDialog)}
       <GlobalSearchDialog open={true} onClose={() => (globalSearchOpen = false)}
         onNavigate={(target) => { globalSearchOpen = false; handleNavigate(target); }}
-        onOpenSettings={() => { globalSearchOpen = false; handleNavigate("__settings__"); }} />
+        onOpenSettings={() => { globalSearchOpen = false; openAiSettings(); }} />
     {/snippet}
   </LazyView>
 {/if}

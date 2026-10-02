@@ -43,6 +43,7 @@
   }: Props = $props();
   let themeSectionEl: HTMLDetailsElement | null = $state(null);
   let librarySectionEl: HTMLDetailsElement | null = $state(null);
+  let aiSectionEl: HTMLDetailsElement | null = $state(null);
   let settingsRoot: HTMLDivElement | null = $state(null);
   let settingsQuery = $state("");
   let settingsMatchCount = $state(0);
@@ -62,6 +63,11 @@
     if (openSection === "theme" && themeSectionEl && !settingsQuery.trim()) {
       themeSectionEl.open = true;
       themeSectionEl.scrollIntoView({ block: "start" });
+    }
+    if (openSection === "ai" && aiSectionEl && !settingsQuery.trim()) {
+      aiSectionEl.open = true;
+      aiSectionEl.scrollIntoView({ block: "start" });
+      aiSectionEl.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
     }
   });
 
@@ -445,7 +451,7 @@
   </details>
 
   <!-- AI / Knowledge Section -->
-  <details class="settings-section">
+  <details class="settings-section" bind:this={aiSectionEl}>
     <summary class="section-header">
       <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M9 18l6-6-6-6"></path>

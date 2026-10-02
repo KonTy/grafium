@@ -137,6 +137,13 @@ async function installAssistantFixture(page, options = {}) {
           return { enabled: true, llm_available: fixture.connected, embedder_available: false, vector_count: 0 };
         }
         if (cmd === "ai_get_config") { fixture.configChecks++; return structuredClone(fixture.config); }
+        if (cmd === "ai_default_concept_edge_prompt") return "Extract concepts from selected notes.";
+        if (cmd === "list_local_models" || cmd === "private_voice_installed") return [];
+        if (cmd === "media_get_config") return { enabled: false };
+        if (cmd === "private_voice_status") return {
+          available: false, runtime: "piper-onnx-v1", selection: null, reason: "No synthetic voice installed.",
+        };
+        if (cmd === "reader_snapshot") return { libraryPath: null, books: [] };
         if (cmd === "ai_index_status") {
           if (fixture.indexFailure) throw new Error("Synthetic index status failure");
           return structuredClone(fixture.index);
@@ -149,6 +156,13 @@ async function installAssistantFixture(page, options = {}) {
         if (cmd === "ai_retry_llm_on_gpu") {
           fixture.gpuRetries++;
           fixture.index.accelerator.on_gpu = true;
+          return;
+        }
+        if (cmd === "ai_allow_gpu_retry" || cmd === "ai_use_cpu_for_model") {
+          const recovery = fixture.index.runtime_recovery?.find(record => record.key === args.key);
+          if (!recovery) throw new Error("Unknown synthetic recovery identity");
+          recovery.state = cmd === "ai_allow_gpu_retry" ? "retry_pending" : "cpu_only";
+          fixture.gpuRetries += cmd === "ai_allow_gpu_retry" ? 1 : 0;
           return;
         }
         if (cmd === "assistant_context_info") {

@@ -337,10 +337,15 @@ export interface RuntimeRecovery {
   key: string;
   label: string;
   reason: string;
+  state?: "retry_pending" | "retrying" | "cpu_only";
 }
 
 export function aiAllowGpuRetry(key: string): Promise<void> {
   return invoke("ai_allow_gpu_retry", { key });
+}
+
+export function aiUseCpuForModel(key: string): Promise<void> {
+  return invoke("ai_use_cpu_for_model", { key });
 }
 
 export function aiIndexStatus(): Promise<IndexStatus> {
@@ -349,7 +354,7 @@ export function aiIndexStatus(): Promise<IndexStatus> {
 
 /**
  * Request GPU offload again, subject to runtime memory admission — Chat's
- * "Retry on GPU" action. Returns refreshed accelerator status (or null).
+ * "Try faster mode" action. Returns refreshed accelerator status (or null).
  */
 export function aiRetryLlmOnGpu(): Promise<AcceleratorStatus | null> {
   return invoke("ai_retry_llm_on_gpu");

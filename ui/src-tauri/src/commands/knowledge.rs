@@ -1218,7 +1218,7 @@ pub async fn ai_health_check(state: State<'_, KnowledgeState>) -> Result<HealthS
             // model failed to load, and must not be reported as the latter.
             llm_load_error: None,
             runtime_warnings: grafium_core::ai::resources::runtime_warnings(),
-            runtime_recovery: grafium_core::ai::resources::runtime_recovery(),
+            runtime_recovery: Vec::new(),
         })
     }
 }
@@ -1258,6 +1258,23 @@ pub async fn ai_retry_llm_on_gpu(
         .ok_or_else(|| "Knowledge engine not initialized".to_string())?;
     engine.retry_llm_on_gpu().map_err(|e| e.to_string())?;
     Ok(engine.llm_accelerator_status())
+}
+
+#[tauri::command]
+pub async fn ai_use_cpu_for_model(key: String) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            grafium_core::ai::worker::use_cpu(&key).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = key;
+        Err("Native GPU recovery is unavailable on Android".into())
+    }
 }
 
 #[tauri::command]

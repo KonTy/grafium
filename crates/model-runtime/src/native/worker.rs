@@ -165,6 +165,24 @@ impl WorkerLease for RecoveryWorkerLease {
     }
 }
 
+struct CpuRecoveryLease {
+    store: RecoveryStore,
+    key: String,
+}
+
+impl WorkerLease for CpuRecoveryLease {
+    fn confirmed_exit(&self, _expected: bool) -> Result<()> {
+        // A CPU worker's outcome must not change the GPU retry budget.
+        Ok(())
+    }
+
+    fn reusable(&self) -> bool {
+        // Keep safe CPU fallback on journal/lock errors, but do not pin a
+        // formerly denied GPU request to CPU after another host releases it.
+        !self.store.gpu_available(&self.key).unwrap_or(false)
+    }
+}
+
 pub fn recovery_status() -> Vec<BlockedModel> {
     match RECOVERY.get().map(RecoveryStore::blocked) {
         Some(Ok(blocked)) => blocked,
@@ -185,6 +203,13 @@ pub fn allow_gpu_retry(key: &str) -> Result<()> {
         .ok_or_else(|| RuntimeError::Other("Persistent GPU recovery is unavailable".into()))?
         .allow_once(key)?;
     Ok(())
+}
+
+pub fn use_cpu(key: &str) -> Result<()> {
+    RECOVERY
+        .get()
+        .ok_or_else(|| RuntimeError::Other("Persistent GPU recovery is unavailable".into()))?
+        .use_cpu(key)
 }
 
 pub fn gpu_risk_key(workload: &str, path: &std::path::Path) -> Result<String> {
@@ -296,9 +321,13 @@ fn admission(request: &WorkerRequest) -> crate::error::Result<Admission> {
                     None => "Persistent GPU recovery was not configured by this host".into(),
                     Some(Ok(GpuAttempt::Allowed(_))) => unreachable!(),
                 };
-                remember_warning(&format!(
-                    "{reason}. Using CPU; GPU retry requires explicit approval."
-                ));
+                remember_warning(&format!("{reason} Using CPU for this worker."));
+                recovery = RECOVERY.get().map(|store| {
+                    Box::new(CpuRecoveryLease {
+                        store: store.clone(),
+                        key,
+                    }) as Box<dyn WorkerLease>
+                });
                 admission
                     .environment
                     .push(("MODEL_RUNTIME_NATIVE_FORCE_CPU".into(), "1".into()));
@@ -1056,6 +1085,51 @@ mod tests {
     use super::*;
     use crate::types::MessageRole;
 
+    #[test]
+    fn cached_cpu_rechecks_eligibility_without_spending_credit_or_changing_gpu_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::open(directory.path().join("synthetic-recovery")).unwrap();
+        let prepare = || match store.prepare("synthetic", "fixture").unwrap() {
+            GpuAttempt::Allowed(lease) => lease,
+            _ => panic!("expected eligible GPU attempt"),
+        };
+        let first = prepare();
+        let cpu = CpuRecoveryLease {
+            store: store.clone(),
+            key: "synthetic".into(),
+        };
+        assert!(
+            cpu.reusable(),
+            "another active worker prevents GPU admission"
+        );
+        first.confirm_exit(false).unwrap();
+        for _ in 0..3 {
+            assert!(
+                !cpu.reusable(),
+                "CPU cache must yield to the automatic attempt"
+            );
+        }
+        let trial = prepare();
+        assert!(cpu.reusable(), "active recovery cannot be duplicated");
+        trial.confirm_exit(false).unwrap();
+        assert!(cpu.reusable(), "exhausted recovery keeps CPU cached");
+        cpu.confirmed_exit(false).unwrap();
+        assert_eq!(
+            store.blocked().unwrap()[0].state,
+            crate::recovery::RecoveryState::CpuOnly
+        );
+        store.allow_once("synthetic").unwrap();
+        assert!(!cpu.reusable(), "manual retry must also bypass cached CPU");
+        std::fs::write(
+            directory.path().join("synthetic-recovery/journal.json"),
+            b"{",
+        )
+        .unwrap();
+        assert!(
+            cpu.reusable(),
+            "damaged recovery must keep safe CPU fallback"
+        );
+    }
     #[test]
     fn embedding_context_and_gpu_choices_are_part_of_the_reuse_key() {
         let request = |context_size, gpu_layers| WorkerRequest::EmbedConfigured {

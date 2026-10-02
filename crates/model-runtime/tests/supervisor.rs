@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use model_runtime::error::{Result, RuntimeError};
+use model_runtime::recovery::{GpuAttempt, RecoveryLease, RecoveryState, RecoveryStore};
 use model_runtime::supervisor::{
     Admission, RequestOptions, Supervisor, SupervisorConfig, Timeouts, WorkerLease,
 };
@@ -117,6 +118,117 @@ fn admission_environment_overrides_config_and_one_lease_covers_resident_reuse() 
     assert_eq!(*lease.events.lock().unwrap(), [true]);
     supervisor.shutdown().unwrap();
     assert_eq!(lease.attempts.load(Ordering::SeqCst), 1);
+}
+
+struct RenewableCpuLease(Arc<AtomicBool>);
+
+impl WorkerLease for RenewableCpuLease {
+    fn confirmed_exit(&self, _expected: bool) -> Result<()> {
+        Ok(())
+    }
+
+    fn reusable(&self) -> bool {
+        !self.0.load(Ordering::Acquire)
+    }
+}
+
+#[test]
+fn cached_cpu_lease_can_require_readmission_on_the_next_request() {
+    let supervisor = Supervisor::new(config()).unwrap();
+    let eligible = Arc::new(AtomicBool::new(false));
+    let first: u32 = supervisor
+        .execute_admitted(
+            0,
+            &"pid",
+            options(None, 1_000),
+            || {
+                Ok(Admission {
+                    lease: Some(Box::new(RenewableCpuLease(Arc::clone(&eligible)))),
+                    ..Default::default()
+                })
+            },
+            &mut |_: u32| {},
+        )
+        .unwrap();
+    assert_eq!(request(&supervisor, 0, "pid").unwrap(), first);
+    eligible.store(true, Ordering::Release);
+    let admissions = AtomicUsize::new(0);
+    let second: u32 = supervisor
+        .execute_admitted(
+            0,
+            &"pid",
+            options(None, 1_000),
+            || {
+                admissions.fetch_add(1, Ordering::SeqCst);
+                assert!(!alive(first), "CPU must be stopped before GPU admission");
+                Ok(Admission::default())
+            },
+            &mut |_: u32| {},
+        )
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(admissions.load(Ordering::SeqCst), 1);
+    assert_eq!(request(&supervisor, 0, "pid").unwrap(), second);
+    supervisor.shutdown().unwrap();
+}
+
+struct GpuRecoveryLease(RecoveryLease);
+
+impl WorkerLease for GpuRecoveryLease {
+    fn confirmed_exit(&self, expected: bool) -> Result<()> {
+        self.0.confirm_exit(expected)
+    }
+}
+
+#[test]
+fn automatic_recovery_failure_is_not_replayed_and_later_requests_use_cpu() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = RecoveryStore::open(directory.path().join("synthetic-recovery")).unwrap();
+    let supervisor = Supervisor::new(config()).unwrap();
+    let attempts = AtomicUsize::new(0);
+    let admit = || {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        let (lease, gpu): (Option<Box<dyn WorkerLease>>, &str) =
+            match store.prepare("synthetic-model", "fixture")? {
+                GpuAttempt::Allowed(lease) => (Some(Box::new(GpuRecoveryLease(lease))), "1"),
+                GpuAttempt::CpuOnly { .. } => (None, "0"),
+            };
+        Ok(Admission {
+            lease,
+            environment: vec![("MODEL_RUNTIME_FIXTURE_VALUE".into(), gpu.into())],
+            ..Default::default()
+        })
+    };
+    for (attempt, state) in [
+        (1, RecoveryState::RetryPending),
+        (2, RecoveryState::CpuOnly),
+    ] {
+        let mut partial_output = Vec::new();
+        let result: Result<u32> = supervisor.execute_admitted(
+            0,
+            &"crash",
+            options(None, 1_000),
+            &admit,
+            &mut |output: u32| partial_output.push(output),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            partial_output.len(),
+            1,
+            "partial output must not be replayed"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), attempt);
+        assert_eq!(store.blocked().unwrap()[0].state, state);
+    }
+    let cpu: u32 = supervisor
+        .execute_admitted(0, &"env", options(None, 1_000), &admit, &mut |_: u32| {})
+        .unwrap();
+    assert_eq!(cpu, 0);
+    assert_eq!(request(&supervisor, 0, "env").unwrap(), 0);
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    supervisor.shutdown().unwrap();
+    let reopened = RecoveryStore::open(directory.path().join("synthetic-recovery")).unwrap();
+    assert_eq!(reopened.blocked().unwrap()[0].state, RecoveryState::CpuOnly);
 }
 
 #[test]

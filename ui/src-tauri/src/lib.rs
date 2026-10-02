@@ -1428,6 +1428,7 @@ pub fn run() {
             commands::knowledge::ai_index_status,
             commands::knowledge::ai_retry_llm_on_gpu,
             commands::knowledge::ai_allow_gpu_retry,
+            commands::knowledge::ai_use_cpu_for_model,
             commands::knowledge::ai_search,
             commands::knowledge::ai_generate_references,
             commands::knowledge::ai_cancel_operation,

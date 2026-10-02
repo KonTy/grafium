@@ -1,7 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { aiIndexStatus, aiIndexAllPages, aiRetryLlmOnGpu, type IndexStatus } from "../lib/knowledge";
+  import { aiIndexStatus, aiIndexAllPages, aiRetryLlmOnGpu, aiAllowGpuRetry, aiUseCpuForModel, type IndexStatus } from "../lib/knowledge";
+  import { hasActionableRuntimeWarning, recoveryState } from "../lib/modelRecovery";
+  import RuntimeRecovery from "./RuntimeRecovery.svelte";
+  import RuntimeWarnings from "./RuntimeWarnings.svelte";
   let {
     active = true, running = false, onOpenSettings = () => {},
     provider, connected, checking = false, noNotesExcludesHistory = false, onNotice,
@@ -18,6 +21,7 @@
   const id = $props.id();
   let index = $state<IndexStatus | null>(null);
   let error = $state("");
+  let errorSummary = $state("");
   let statusError = $state("");
   let notice = $state("");
   let indexFailed = $state(false);
@@ -32,25 +36,29 @@
   let statusRequest = 0;
 
   const cpuFallback = $derived(!!index?.accelerator?.gpu_supported && !index.accelerator.on_gpu);
-  const needsRecovery = $derived(!!index?.runtime_recovery?.length);
+  const recovery = $derived(index?.runtime_recovery ?? []);
+  const retryPending = $derived(recovery.some(record => recoveryState(record) === "retry_pending"));
+  const recovering = $derived(recovery.some(record => recoveryState(record) === "retrying"));
+  const slower = $derived(cpuFallback || recovery.some(record => recoveryState(record) === "cpu_only"));
   const disconnected = $derived(!checking && (connected === false || (connected === undefined && index?.llm_ready === false)));
-  const warning = $derived(needsRecovery || cpuFallback || !!index?.runtime_warnings?.length || indexFailed || disconnected);
-  const statusKind = $derived(error || statusError ? "error" : warning ? "warning"
-    : running || indexing || retrying ? "working" : checking || loading || !index ? "checking" : "ready");
-  const statusLabel = $derived(statusKind === "error" ? "Model attention needed: error"
-    : needsRecovery ? "Model attention needed: GPU recovery approval required"
-    : cpuFallback ? "Model attention needed: running on CPU"
-    : disconnected ? "Model attention needed: configure provider"
-    : statusKind === "warning" ? "Model attention needed: warning"
+  const warning = $derived(hasActionableRuntimeWarning(index?.runtime_warnings ?? [], recovery) || indexFailed);
+  const statusKind = $derived(error || statusError ? "error"
+    : running || indexing || retrying || recovering ? "working"
+    : checking || loading || !index ? "checking"
+    : disconnected || warning ? "warning" : slower || retryPending ? "fallback" : "ready");
+  const statusLabel = $derived(statusKind === "error" ? "Model needs help"
     : statusKind === "working" ? "Model working"
-    : statusKind === "checking" ? "Checking model status" : "Model ready");
+    : statusKind === "checking" ? "Checking model status"
+    : disconnected ? "Choose a model"
+    : warning ? "Model has a warning"
+    : retryPending ? "Automatic recovery is ready"
+    : slower ? "Slower mode" : "Model ready");
   const attention = $derived.by(() => {
     if (!active) return null;
-    if (error || statusError) return { text: "Model attention needed — open status for the error and retry options.", error: true };
-    if (needsRecovery) return { text: "Model attention needed — review GPU recovery approval in Settings.", error: false };
-    if (cpuFallback) return { text: "Model attention needed — running on CPU; open status for safe GPU retry.", error: false };
-    if (disconnected) return { text: "Model attention needed — configure a provider.", error: false };
-    if (warning) return { text: "Model attention needed — open status to review warnings.", error: false };
+    if (error || statusError) return { text: errorSummary || "Couldn't check the model. Open status to try again.", error: true };
+    if (disconnected) return { text: "Choose a model to start chatting.", error: false };
+    if (indexFailed) return { text: "Some notes couldn't be indexed. You can retry.", error: false };
+    if (warning) return { text: "The model has a warning. Open status for details.", error: false };
     return null;
   });
   $effect(() => {
@@ -79,7 +87,7 @@
     const enabled = active;
     const token = ++generation;
     untrack(() => {
-      index = null; error = ""; statusError = ""; notice = "";
+      index = null; error = ""; errorSummary = ""; statusError = ""; notice = "";
       indexFailed = false; indexing = false; retrying = false; loading = false;
       if (!enabled) closeMenu(false);
     });
@@ -106,24 +114,35 @@
   async function buildIndex() {
     if (!active || indexing || !index?.embedder_ready) return;
     const token = generation;
-    indexing = true; error = ""; notice = ""; indexFailed = false;
+    indexing = true; error = ""; errorSummary = ""; notice = ""; indexFailed = false;
     try {
       const result = await aiIndexAllPages();
       if (!current(token)) return;
       notice = `Indexed ${result.pages_processed} pages; ${result.pages_failed} failed.`;
       indexFailed = result.pages_failed > 0;
       await refresh();
-    } catch (cause) { if (current(token)) error = `Could not index notes: ${String(cause)}`; }
+    } catch (cause) {
+      if (current(token)) { error = String(cause); errorSummary = "Couldn't index notes. Try Index now again."; }
+    }
     finally { if (current(token)) indexing = false; }
   }
-  async function retryGpu() {
-    if (!active || retrying || running || needsRecovery) return;
+  async function changeSpeed(key?: string, useCpu = false) {
+    if (!active || retrying || running || indexing) return;
     const token = generation;
-    retrying = true; error = "";
+    retrying = true; error = ""; errorSummary = ""; notice = "";
     try {
-      await aiRetryLlmOnGpu();
-      if (current(token)) await refresh();
-    } catch (cause) { if (current(token)) error = `Could not retry on GPU: ${String(cause)}`; }
+      if (key) {
+        if (useCpu) await aiUseCpuForModel(key);
+        else await aiAllowGpuRetry(key);
+      } else await aiRetryLlmOnGpu();
+      if (current(token)) {
+        notice = useCpu ? "Slower mode saved." : "Faster mode will be checked on your next request.";
+        await refresh();
+        window.dispatchEvent(new CustomEvent("ai-configuration-changed"));
+      }
+    } catch (cause) {
+      if (current(token)) { error = String(cause); errorSummary = "Couldn't change model speed. Try again after current work finishes, or choose another model."; }
+    }
     finally { if (current(token)) retrying = false; }
   }
 
@@ -153,6 +172,7 @@
       closeButton.focus({ preventScroll: true });
     } catch (cause) {
       error = `Could not open model status: ${String(cause)}`;
+      errorSummary = "Couldn't open model status. Try the status button again.";
     }
   }
   function closeMenu(restoreFocus = true) {
@@ -202,6 +222,8 @@
       <circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" />
     {:else if statusKind === "working"}
       <path d="M8 3h8M8 21h8M8 3v4l8 10v4M16 3v4L8 17v4" />
+    {:else if statusKind === "fallback"}
+      <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
     {:else if statusKind === "warning"}
       <path d="m12 3 10 18H2Z M12 9v5 M12 17h.01" />
     {:else if statusKind === "error"}
@@ -224,35 +246,28 @@
   </header>
   <div class="diagnostic-content">
     <p class="status-label" data-status={statusKind}>{statusLabel}</p>
-    {#if provider}<p><strong>{provider.label}</strong> · {provider.detail}</p>{/if}
+    {#if provider}<p><strong>{provider.label}</strong></p>{/if}
     {#if checking || loading}<p role="status">Checking model &amp; index status…</p>{/if}
-    {#if disconnected}<p>Connect a model in Settings to send questions. Notes and exact source retrieval do not require a semantic index.</p>{/if}
-    {#each index?.runtime_warnings ?? [] as runtimeWarning}
-      <p class="runtime-warning" role="status">{runtimeWarning}</p>
-    {/each}
-    {#if needsRecovery}
-      <p class="runtime-warning">A native model needs recovery approval before using GPU again.</p>
-      {#each index?.runtime_recovery ?? [] as recovery}
-        <p class="runtime-warning"><strong>{recovery.label}</strong>: {recovery.reason}</p>
-      {/each}
-      <button type="button" onclick={openSettings}>Review recovery in Settings</button>
-    {/if}
+    {#if disconnected}<p>Choose a working model in Settings. Your draft is kept.</p>{/if}
+    <RuntimeRecovery records={recovery} compact busy={retrying || running || indexing}
+      onRetry={key => changeSpeed(key)} onUseCpu={key => changeSpeed(key, true)} />
     {#if index}
-      <p>{index.indexed_chunks} indexed chunks · {index.total_blocks} blocks · {index.pending_pages} pages pending</p>
-      {#if !index.indexed_chunks}<p>No semantic index yet. Page and block questions still use exact source retrieval.</p>{/if}
-      {#if !index.embedder_ready}<p>Configure an embedding model to index notes and use semantic search.</p>{/if}
+      <p>Note search: {!index.embedder_ready ? "not set up" : !index.indexed_chunks ? "ready to index"
+        : index.pending_pages ? `${index.pending_pages} pages waiting` : "up to date"}</p>
       <button type="button" disabled={indexing || !index.embedder_ready} onclick={buildIndex}>{indexing ? "Indexing…" : "Index now"}</button>
-      {#if cpuFallback}
-        <p>Running on CPU despite GPU support. Retrying checks memory again; it cannot bypass the safety checks.</p>
-        {#if running}<p>GPU retry is unavailable until the current request, including cancellation, has finished.</p>{/if}
-        <button type="button" disabled={retrying || running || needsRecovery} onclick={retryGpu}>{retrying ? "Retrying…" : "Retry on GPU"}</button>
+      {#if cpuFallback && !recovery.length}
+        <p>Using slower mode to stay within this computer's limits.</p>
+        <button type="button" disabled={retrying || running || indexing} onclick={() => changeSpeed()}>{retrying ? "Checking…" : "Try faster mode"}</button>
       {/if}
     {/if}
-    {#if statusError}<p role="alert">{statusError}</p>{/if}
-    {#if error}<p role="alert">{error}</p>{/if}
+    {#if running && (cpuFallback || recovery.length)}<p>Speed controls are available when the current request finishes.</p>{/if}
+    {#if statusError}<p role="alert">Couldn't check the model. Try again.</p>{/if}
+    {#if error}<p role="alert">{errorSummary}</p>{/if}
     {#if statusError || error}<button type="button" disabled={loading || running} onclick={refresh}>Retry status</button>{/if}
     {#if notice}<p class:runtime-warning={indexFailed} role="status">{notice}</p>{/if}
-    <button type="button" onclick={openSettings}>Configure provider</button>
+    <button type="button" onclick={openSettings}>{disconnected ? "Choose a model" : "Change model"}</button>
+    <RuntimeWarnings warnings={index?.runtime_warnings ?? []} details={[provider?.detail ?? "", statusError, error,
+      index ? `${index.indexed_chunks} indexed chunks · ${index.total_blocks} blocks · ${index.pending_pages} pages pending` : ""]} />
     <details class="privacy-note">
       <summary>Model &amp; web privacy</summary>
       {#if noNotesExcludesHistory}

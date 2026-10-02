@@ -27,7 +27,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
   it("explains the compact composer, status menu and cancellable send control", () => {
-    for (const phrase of ["Up arrow / Send", "Stop", "Notes context", "Actions", "Model & index status icon", "Retry on GPU", "Saving an already approved change"]) {
+    for (const phrase of ["Up arrow / Send", "Stop", "Notes context", "Actions", "Model & index status icon", "Try faster mode", "Saving an already approved change"]) {
       expect(chatHelp).toContain(phrase);
     }
   });
@@ -182,6 +182,10 @@ describe("contextual help", () => {
     expect(aiHelp).toContain("queued and active");
     expect(aiHelp).toContain("not GPU driver or");
     expect(aiHelp).toContain("uses CPU");
+    expect(aiHelp).toContain("No approval is needed");
+    expect(aiHelp).toContain("across restarts");
+    expect(chatHelp).toContain("Change model");
+    expect(chatHelp).not.toContain("GPU safety or approval");
   });
   it("maps every supported context to a seeded help page", () => {
     const contexts: HelpContext[] = [

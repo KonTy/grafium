@@ -37,12 +37,15 @@ chat messages. Type in the shaded composer at the bottom.
 - **Model & index status icon**, beside Send: inspect the configured model,
   CPU/GPU status, index progress, and privacy guidance. Its icon and outline
   distinguish working, warning, and error states; keyboard and hover labels
-  name the state. Open it for **Index now**, **Retry on GPU** when supported,
-  **Retry status** after a status failure, or **Configure provider**.
+  name the state. Open it for **Index now**, **Try faster mode** when supported,
+  **Retry status** after a status failure, or **Change model**, which opens the
+  AI section of Settings directly.
 
 The status menu closes with Escape or a click outside it. Actionable model
-warnings remain flagged beside the composer; open **Model status** for details
-and recovery instructions. Retrying never bypasses GPU safety or approval.
+errors remain flagged beside the composer; open **Model status** for actions.
+Handled slower-mode fallback does not repeatedly ask for attention. Long
+diagnostics stay under **Technical details**. Retrying never bypasses memory
+safety checks, but normal recovery needs no approval.
 
 ## Ask AI to organize and draft
 
@@ -97,11 +100,13 @@ closing the conversation or application if you want to keep one.
 
 ## Watching it work
 
-Native model safety warnings are flagged beside the composer, with details in
-the **Model & index status** menu. Insufficient
+The **Model & index status** menu uses short status messages. Insufficient
 or unknown GPU headroom selects CPU when RAM permits; retrying GPU does not
-override the admission checks. Recovery notices link to Settings, where a
-particular model can be authorized for one GPU attempt after an unconfirmed exit.
+override the admission checks. After an unexpected worker exit, Grafium permits
+one automatic recovery attempt on the next model request. If that fails, it
+remembers slower mode across restarts. **Keep slower mode** skips a pending
+attempt; **Try faster mode** requests one more attempt explicitly. No model is
+silently replaced and no request is sent to another provider.
 See [[AI Setup And Privacy]] for worker shutdown, eviction, crash recovery, and
 device-specific GPU-memory detection.
 

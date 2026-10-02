@@ -637,7 +637,11 @@ live in the internal [`model-runtime`](crates/model-runtime) Rust workspace crat
 Grafium supplies graph access, credential/settings storage adapters, and UI.
 The crate has no graph/database or Tauri dependency and is
 not independently released. See [AI setup and runtime safety](ui/src-tauri/resources/welcome/pages/AI%20Setup%20And%20Privacy.md)
-for CPU fallback and the limits of process isolation.
+for CPU fallback and the limits of process isolation. Native GPU recovery gets
+one automatic attempt on the next model request, without an approval prompt.
+If recovery fails, Grafium remembers slower mode across restarts. Chat's status
+menu offers **Try faster mode**, **Keep slower mode**, and a direct **Change model**
+link to AI Settings; long diagnostics stay under **Technical details**.
 
 ## Contributing and license
 

@@ -31,6 +31,12 @@ pub use lifetime::{exit_without_native_cleanup, start_parent_watchdog};
 /// never merely after sending kill.
 pub trait WorkerLease: Send + Sync {
     fn confirmed_exit(&self, expected: bool) -> Result<()>;
+
+    /// Evaluated under the request queue before reuse, never during a request.
+    /// A CPU fallback can request re-admission when GPU recovery becomes eligible.
+    fn reusable(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]
@@ -282,7 +288,16 @@ impl<K: Eq + Send + 'static> Supervisor<K> {
             })
         };
         let reuse = if let Some((worker, eligible)) = previous {
-            if eligible && !worker.stopping.load(Ordering::Acquire) && worker.process.is_alive()? {
+            if eligible
+                && !worker.stopping.load(Ordering::Acquire)
+                && worker.process.is_alive()?
+                && worker
+                    .process
+                    .lease
+                    .lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.reusable())
+            {
                 Some(worker)
             } else {
                 let dead = !worker.process.is_alive()?;

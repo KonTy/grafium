@@ -4,6 +4,8 @@
 //! graph data or a synchronized folder. Hold an allowed lease for the entire
 //! native worker lifetime. Only confirm after observing that process exit;
 //! dropping a lease deliberately leaves its pending record behind.
+//! One automatic recovery attempt per identity is durably consumed on prepare.
+//! Clean exits do not replenish it; explicit manual retries grant one shot only.
 //!
 //! All instances must use the same directory on a filesystem supporting advisory
 //! locks and atomic replacement. Interrupted writes or damaged state require
@@ -24,7 +26,7 @@ use uuid::Uuid;
 
 use crate::error::{Result, RuntimeError};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_RECORDS: usize = 256;
 const MAX_KEY_BYTES: usize = 1024;
 const MAX_LABEL_BYTES: usize = 256;
@@ -71,6 +73,26 @@ pub struct BlockedModel {
     pub key: String,
     pub label: String,
     pub reason: String,
+    pub state: RecoveryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState {
+    RetryPending,
+    Retrying,
+    CpuOnly,
+}
+
+impl RecoveryState {
+    fn reason(self, failure: Failure) -> String {
+        let policy = match self {
+            Self::RetryPending => "One recovery attempt is available on the next GPU model use, subject to resource safety checks.",
+            Self::Retrying => "A recovery worker is active; no additional automatic retry is available.",
+            Self::CpuOnly => "Automatic recovery is exhausted. CPU mode is remembered until you explicitly try faster mode again.",
+        };
+        format!("{} {policy}", failure.reason())
+    }
 }
 
 /// Not cloneable: there must be one owner of a worker's recovery lifetime.
@@ -95,6 +117,23 @@ struct Journal {
 struct Record {
     key: String,
     label: String,
+    automatic_retry_spent: bool,
+    state: State,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyJournal {
+    version: u32,
+    #[serde(deserialize_with = "bounded_records")]
+    records: Vec<LegacyRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRecord {
+    key: String,
+    label: String,
     state: State,
 }
 
@@ -102,6 +141,9 @@ struct Record {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum State {
     Ready,
+    CpuOnly {
+        failure: Failure,
+    },
     Blocked {
         failure: Failure,
         authorized: bool,
@@ -123,9 +165,16 @@ enum Failure {
 impl Failure {
     fn reason(self) -> &'static str {
         match self {
-            Self::UnconfirmedExit => "The previous GPU worker has no confirmed exit (the application or worker may have crashed). GPU is disabled until an explicit one-shot retry.",
-            Self::UnexpectedExit => "The previous GPU worker exited unexpectedly or was terminated after a timeout or protocol failure. GPU is disabled until an explicit one-shot retry.",
+            Self::UnconfirmedExit => "The previous GPU worker has no confirmed exit (the application or worker may have crashed).",
+            Self::UnexpectedExit => "The previous GPU worker exited unexpectedly or was terminated after a timeout or protocol failure.",
         }
+    }
+
+    fn selected_cpu_reason(self) -> String {
+        format!(
+            "{} CPU mode was selected for this model and is remembered until you explicitly try faster mode again.",
+            self.reason()
+        )
     }
 }
 
@@ -194,6 +243,7 @@ impl RecoveryStore {
                 journal.records.push(Record {
                     key: key.into(),
                     label: label.into(),
+                    automatic_retry_spent: false,
                     state: State::Ready,
                 });
                 journal.records.len() - 1
@@ -205,39 +255,42 @@ impl RecoveryStore {
                 reason: ACTIVE_REASON.into(),
             });
         };
-        if matches!(record.state, State::Pending { .. }) {
+        let stale = matches!(record.state, State::Pending { .. });
+        if stale {
             record.state = State::Blocked {
                 failure: Failure::UnconfirmedExit,
                 authorized: false,
             };
-            self.save(&journal)?;
-            return Ok(GpuAttempt::CpuOnly {
-                reason: Failure::UnconfirmedExit.reason().into(),
-            });
         }
         let prior_failure = match record.state {
-            State::Blocked {
-                failure,
-                authorized: false,
-            } => {
+            State::CpuOnly { failure } => {
                 return Ok(GpuAttempt::CpuOnly {
-                    reason: failure.reason().into(),
+                    reason: failure.selected_cpu_reason(),
                 });
             }
             State::Blocked {
                 failure,
-                authorized: true,
-            } => Some(failure),
+                authorized: false,
+            } if record.automatic_retry_spent => {
+                let reason = RecoveryState::CpuOnly.reason(failure);
+                if stale {
+                    self.save(&journal)?;
+                }
+                return Ok(GpuAttempt::CpuOnly { reason });
+            }
+            State::Blocked { failure, .. } => Some(failure),
             State::Ready => None,
             State::Pending { .. } => unreachable!(),
         };
         let attempt = Uuid::new_v4().to_string();
         record.label = label.into();
+        // Manual permission replaces, rather than stacks with, automatic credit.
+        record.automatic_retry_spent |= prior_failure.is_some();
         record.state = State::Pending {
             attempt: attempt.clone(),
             prior_failure,
         };
-        // Authorization consumption and the pending marker are one atomic commit.
+        // Credit consumption and the pending marker are one atomic commit.
         self.save(&journal)?;
         Ok(GpuAttempt::Allowed(RecoveryLease {
             store: self.clone(),
@@ -247,9 +300,9 @@ impl RecoveryStore {
         }))
     }
 
-    /// Includes quarantines with an unused authorization or an active retry.
+    /// Reports recovery eligibility, active recovery, and exhausted fallback.
     /// A fresh, live worker is not classified as crashed. Stale attempts are
-    /// quarantined durably, without aging out any denied record.
+    /// recorded durably without consuming retry credit or starting any work.
     pub fn blocked(&self) -> Result<Vec<BlockedModel>> {
         let _mutation = self.mutation_lock()?;
         let mut journal = self.load()?;
@@ -265,16 +318,34 @@ impl RecoveryStore {
                 };
                 changed = true;
             }
-            let failure = match record.state {
-                State::Blocked { failure, .. } => Some(failure),
-                State::Pending { prior_failure, .. } => prior_failure,
+            let recovery = match record.state {
+                State::CpuOnly { failure } => Some((failure, RecoveryState::CpuOnly)),
+                State::Blocked {
+                    failure,
+                    authorized,
+                } => Some((
+                    failure,
+                    if authorized || !record.automatic_retry_spent {
+                        RecoveryState::RetryPending
+                    } else {
+                        RecoveryState::CpuOnly
+                    },
+                )),
+                State::Pending { prior_failure, .. } => {
+                    prior_failure.map(|failure| (failure, RecoveryState::Retrying))
+                }
                 State::Ready => None,
             };
-            if let Some(failure) = failure {
+            if let Some((failure, state)) = recovery {
                 blocked.push(BlockedModel {
                     key: record.key.clone(),
                     label: record.label.clone(),
-                    reason: failure.reason().into(),
+                    reason: if matches!(record.state, State::CpuOnly { .. }) {
+                        failure.selected_cpu_reason()
+                    } else {
+                        state.reason(failure)
+                    },
+                    state,
                 });
             }
         }
@@ -285,7 +356,8 @@ impl RecoveryStore {
     }
 
     /// Authorizes exactly one future preparation for a quarantined key.
-    /// Repeated calls do not accumulate credits or clear its diagnostics.
+    /// Repeated calls do not accumulate credits, replenish automatic recovery,
+    /// or clear its diagnostics.
     /// An active worker, an unknown key, or a healthy key is an error.
     pub fn allow_once(&self, key: &str) -> Result<()> {
         validate_text(key, MAX_KEY_BYTES, "key")?;
@@ -301,7 +373,7 @@ impl RecoveryStore {
             .ok_or_else(|| invalid(ACTIVE_REASON))?;
         let failure = match record.state {
             State::Pending { .. } => Failure::UnconfirmedExit,
-            State::Blocked { failure, .. } => failure,
+            State::Blocked { failure, .. } | State::CpuOnly { failure } => failure,
             State::Ready => return Err(invalid("model identity is not quarantined")),
         };
         record.state = State::Blocked {
@@ -309,6 +381,52 @@ impl RecoveryStore {
             authorized: true,
         };
         self.save(&journal)
+    }
+
+    /// Remember CPU fallback without first spending an eligible GPU attempt.
+    /// Applies only to known recovery records; never interrupts an active worker.
+    /// Explicit allow_once is the only way to leave this state.
+    pub fn use_cpu(&self, key: &str) -> Result<()> {
+        validate_text(key, MAX_KEY_BYTES, "key")?;
+        let _mutation = self.mutation_lock()?;
+        let mut journal = self.load()?;
+        let record = journal
+            .records
+            .iter_mut()
+            .find(|record| record.key == key)
+            .ok_or_else(|| invalid("cannot select CPU for an unknown model identity"))?;
+        let _attempt = self
+            .attempt_lock(key)?
+            .ok_or_else(|| invalid(ACTIVE_REASON))?;
+        let failure = match record.state {
+            State::Pending { .. } => Failure::UnconfirmedExit,
+            State::Blocked { failure, .. } => failure,
+            State::CpuOnly { .. } => return Ok(()),
+            State::Ready => return Err(invalid("model identity is not in recovery")),
+        };
+        record.automatic_retry_spent = true;
+        record.state = State::CpuOnly { failure };
+        self.save(&journal)
+    }
+
+    /// Read-only eligibility check for replacing a cached CPU fallback worker.
+    /// Actual credit consumption and concurrency arbitration remain in prepare.
+    pub fn gpu_available(&self, key: &str) -> Result<bool> {
+        validate_text(key, MAX_KEY_BYTES, "key")?;
+        let _mutation = self.mutation_lock()?;
+        let journal = self.load()?;
+        let Some(record) = journal.records.iter().find(|record| record.key == key) else {
+            return Ok(true);
+        };
+        if self.attempt_lock(key)?.is_none() {
+            return Ok(false);
+        }
+        Ok(match record.state {
+            State::CpuOnly { .. } => false,
+            State::Ready => true,
+            State::Blocked { authorized, .. } => authorized || !record.automatic_retry_spent,
+            State::Pending { .. } => !record.automatic_retry_spent,
+        })
     }
 
     fn mutation_lock(&self) -> Result<File> {
@@ -378,15 +496,70 @@ impl RecoveryStore {
             ));
         }
         let bytes = read_bounded(&self.directory.join(JOURNAL), MAX_JOURNAL_BYTES)?;
-        let journal: Journal = serde_json::from_slice(&bytes)
-            .map_err(|error| invalid(&format!("malformed journal: {error}")))?;
-        if journal.version != VERSION {
-            return Err(invalid("unsupported journal version"));
+        #[derive(Deserialize)]
+        struct Header {
+            version: u32,
         }
+        let malformed = |error| invalid(&format!("malformed journal: {error}"));
+        let header: Header = serde_json::from_slice(&bytes).map_err(malformed)?;
+        let journal: Journal = match header.version {
+            VERSION => serde_json::from_slice(&bytes).map_err(malformed)?,
+            1 => {
+                let legacy: LegacyJournal = serde_json::from_slice(&bytes).map_err(malformed)?;
+                debug_assert_eq!(legacy.version, 1);
+                if legacy
+                    .records
+                    .iter()
+                    .any(|record| matches!(record.state, State::CpuOnly { .. }))
+                {
+                    return Err(invalid("unsupported state in legacy journal"));
+                }
+                Journal {
+                    version: VERSION,
+                    records: legacy
+                        .records
+                        .into_iter()
+                        .map(|record| {
+                            // An authorized/active legacy recovery already had its
+                            // one shot. Never add another after an unconfirmed exit.
+                            let automatic_retry_spent = matches!(
+                                record.state,
+                                State::Blocked {
+                                    authorized: true,
+                                    ..
+                                } | State::Pending {
+                                    prior_failure: Some(_),
+                                    ..
+                                }
+                            );
+                            Record {
+                                key: record.key,
+                                label: record.label,
+                                automatic_retry_spent,
+                                state: record.state,
+                            }
+                        })
+                        .collect(),
+                }
+            }
+            _ => return Err(invalid("unsupported journal version")),
+        };
         let mut expected = BTreeSet::from([STORE_LOCK.to_owned(), JOURNAL.to_owned()]);
         for record in &journal.records {
             validate_text(&record.key, MAX_KEY_BYTES, "stored key")?;
             validate_text(&record.label, MAX_LABEL_BYTES, "stored label")?;
+            if !record.automatic_retry_spent
+                && matches!(
+                    record.state,
+                    State::CpuOnly { .. }
+                        | State::Pending {
+                            prior_failure: Some(_),
+                            ..
+                        }
+                )
+            {
+                return Err(invalid("recovery has no consumed or declined retry credit"));
+            }
             if let State::Pending { attempt, .. } = &record.state {
                 if Uuid::parse_str(attempt)
                     .map(|id| id.to_string() != *attempt || id.get_version_num() != 4)
@@ -496,12 +669,12 @@ fn is_model_lock(name: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
-fn bounded_records<'de, D: Deserializer<'de>>(
+fn bounded_records<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
-) -> std::result::Result<Vec<Record>, D::Error> {
-    struct Records;
-    impl<'de> Visitor<'de> for Records {
-        type Value = Vec<Record>;
+) -> std::result::Result<Vec<T>, D::Error> {
+    struct Records<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Records<T> {
+        type Value = Vec<T>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(formatter, "at most {MAX_RECORDS} model records")
@@ -521,7 +694,7 @@ fn bounded_records<'de, D: Deserializer<'de>>(
             Ok(records)
         }
     }
-    deserializer.deserialize_seq(Records)
+    deserializer.deserialize_seq(Records(std::marker::PhantomData))
 }
 
 fn check_regular(metadata: &Metadata) -> Result<()> {
@@ -738,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_leaves_marker_and_reopen_quarantines_without_aging_it_out() {
+    fn drop_leaves_marker_and_polling_never_consumes_automatic_retry() {
         let (_directory, store) = fixture();
         let lease = allowed(&store, "model/backend");
         let pending = journal_bytes(&store);
@@ -746,14 +919,23 @@ mod tests {
         assert_eq!(journal_bytes(&store), pending);
         for _ in 0..3 {
             let reopened = RecoveryStore::open(&store.directory).unwrap();
-            assert!(denied(&reopened, "model/backend").contains("no confirmed exit"));
             let blocked = reopened.blocked().unwrap();
             assert_eq!(blocked.len(), 1);
             let value = serde_json::to_value(&blocked[0]).unwrap();
             assert_eq!(value["key"], "model/backend");
             assert_eq!(value["label"], "model.gguf");
-            assert!(value["reason"].as_str().unwrap().contains("one-shot retry"));
+            assert_eq!(value["state"], "retry_pending");
+            assert!(value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("next GPU model use"));
         }
+        let trial = allowed(&store, "model/backend");
+        assert_eq!(store.blocked().unwrap()[0].state, RecoveryState::Retrying);
+        drop(trial);
+        let reopened = RecoveryStore::open(&store.directory).unwrap();
+        assert!(denied(&reopened, "model/backend").contains("no confirmed exit"));
+        assert_eq!(reopened.blocked().unwrap()[0].state, RecoveryState::CpuOnly);
     }
 
     #[test]
@@ -773,6 +955,7 @@ mod tests {
     fn authorization_is_one_shot_and_only_success_clears_quarantine() {
         let (_directory, store) = fixture();
         allowed(&store, "key").confirm_exit(false).unwrap();
+        allowed(&store, "key").confirm_exit(false).unwrap();
         assert!(denied(&store, "key").contains("exited unexpectedly"));
         store.allow_once("key").unwrap();
         store.allow_once("key").unwrap();
@@ -791,6 +974,9 @@ mod tests {
         allowed(&store, "key").confirm_exit(true).unwrap();
         assert!(reopened.blocked().unwrap().is_empty());
         allowed(&reopened, "key").confirm_exit(true).unwrap();
+        // Neither manual success nor ordinary clean exits replenish automatic credit.
+        allowed(&reopened, "key").confirm_exit(false).unwrap();
+        assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
     }
 
     #[test]
@@ -804,12 +990,11 @@ mod tests {
     }
 
     #[test]
-    fn two_instances_serialize_fresh_and_authorized_preparations() {
+    fn two_instances_serialize_fresh_and_automatic_preparations() {
         for retry in [false, true] {
             let (_directory, store) = fixture();
             if retry {
                 allowed(&store, "same").confirm_exit(false).unwrap();
-                store.allow_once("same").unwrap();
             }
             let other = RecoveryStore::open(&store.directory).unwrap();
             let barrier = Arc::new(Barrier::new(2));
@@ -856,13 +1041,208 @@ mod tests {
     fn concurrent_instances_cannot_consume_the_same_retry_twice() {
         let (_directory, store) = fixture();
         allowed(&store, "key").confirm_exit(false).unwrap();
-        store.allow_once("key").unwrap();
         let other = RecoveryStore::open(&store.directory).unwrap();
         let trial = allowed(&store, "key");
         assert!(denied(&other, "key").contains("still active"));
         drop(trial);
         assert!(denied(&other, "key").contains("no confirmed exit"));
-        assert!(denied(&store, "key").contains("one-shot retry"));
+        assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
+    }
+
+    #[test]
+    fn clean_automatic_recovery_does_not_restore_automatic_credit() {
+        let (_directory, store) = fixture();
+        allowed(&store, "key").confirm_exit(false).unwrap();
+        assert_eq!(
+            store.blocked().unwrap()[0].state,
+            RecoveryState::RetryPending
+        );
+        let trial = allowed(&store, "key");
+        let status = store.blocked().unwrap();
+        assert_eq!(
+            serde_json::to_value(&status[0]).unwrap()["state"],
+            "retrying"
+        );
+        trial.confirm_exit(true).unwrap();
+        let reopened = RecoveryStore::open(&store.directory).unwrap();
+        assert!(reopened.blocked().unwrap().is_empty());
+        allowed(&reopened, "key").confirm_exit(false).unwrap();
+        assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
+        assert_eq!(
+            serde_json::to_value(&store.blocked().unwrap()[0]).unwrap()["state"],
+            "cpu_only"
+        );
+    }
+
+    #[test]
+    fn failed_automatic_recovery_stays_cpu_only_across_restarts() {
+        let (_directory, store) = fixture();
+        allowed(&store, "key").confirm_exit(false).unwrap();
+        let trial = allowed(&RecoveryStore::open(&store.directory).unwrap(), "key");
+        assert!(store.load().unwrap().records[0].automatic_retry_spent);
+        trial.confirm_exit(false).unwrap();
+        for _ in 0..3 {
+            let reopened = RecoveryStore::open(&store.directory).unwrap();
+            assert_eq!(reopened.blocked().unwrap()[0].state, RecoveryState::CpuOnly);
+            assert!(denied(&reopened, "key").contains("Automatic recovery is exhausted"));
+        }
+        allowed(&store, "different-model")
+            .confirm_exit(true)
+            .unwrap();
+    }
+
+    #[test]
+    fn selected_cpu_is_durable_idempotent_and_only_manual_retry_leaves_it() {
+        let (_directory, store) = fixture();
+        allowed(&store, "key").confirm_exit(false).unwrap();
+        store.use_cpu("key").unwrap();
+        let saved = journal_bytes(&store);
+        for _ in 0..3 {
+            let reopened = RecoveryStore::open(&store.directory).unwrap();
+            reopened.use_cpu("key").unwrap();
+            assert_eq!(journal_bytes(&store), saved);
+            assert!(!reopened.gpu_available("key").unwrap());
+            assert!(denied(&reopened, "key").contains("CPU mode was selected"));
+            let status = reopened.blocked().unwrap();
+            assert_eq!(status[0].state, RecoveryState::CpuOnly);
+            assert!(status[0].reason.contains("exited unexpectedly"));
+        }
+        store.allow_once("key").unwrap();
+        assert_eq!(
+            store.blocked().unwrap()[0].state,
+            RecoveryState::RetryPending
+        );
+        allowed(&store, "key").confirm_exit(true).unwrap();
+        assert!(store.blocked().unwrap().is_empty());
+        allowed(&store, "key").confirm_exit(false).unwrap();
+        assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
+    }
+
+    #[test]
+    fn selected_cpu_revokes_unused_manual_retry_and_can_observe_stale_exit() {
+        let (_directory, store) = fixture();
+        drop(allowed(&store, "key"));
+        store.use_cpu("key").unwrap();
+        assert!(denied(&store, "key").contains("no confirmed exit"));
+        store.allow_once("key").unwrap();
+        store.use_cpu("key").unwrap();
+        assert!(denied(&store, "key").contains("CPU mode was selected"));
+    }
+
+    #[test]
+    fn selected_cpu_rejects_unknown_healthy_and_active_keys_without_mutation() {
+        let (_directory, store) = fixture();
+        allowed(&store, "healthy").confirm_exit(true).unwrap();
+        let active = allowed(&store, "active");
+        let before = journal_bytes(&store);
+        for key in ["unknown", "healthy", "active"] {
+            assert!(store.use_cpu(key).is_err());
+            assert_eq!(journal_bytes(&store), before);
+        }
+        active.confirm_exit(false).unwrap();
+        let retry = allowed(&store, "active");
+        let before = journal_bytes(&store);
+        assert!(store.use_cpu("active").is_err());
+        assert_eq!(journal_bytes(&store), before);
+        retry.confirm_exit(true).unwrap();
+    }
+
+    #[test]
+    fn selecting_cpu_and_preparing_recovery_are_atomically_arbitrated() {
+        let (_directory, store) = fixture();
+        allowed(&store, "key").confirm_exit(false).unwrap();
+        let other = RecoveryStore::open(&store.directory).unwrap();
+        let barrier = Barrier::new(2);
+        let (selection, attempt) = std::thread::scope(|scope| {
+            let selecting = scope.spawn(|| {
+                barrier.wait();
+                store.use_cpu("key")
+            });
+            let preparing = scope.spawn(|| {
+                barrier.wait();
+                other.prepare("key", "fixture")
+            });
+            (
+                selecting.join().unwrap(),
+                preparing.join().unwrap().unwrap(),
+            )
+        });
+        match attempt {
+            GpuAttempt::Allowed(lease) => {
+                assert!(selection.is_err());
+                lease.confirm_exit(false).unwrap();
+            }
+            GpuAttempt::CpuOnly { reason } => {
+                selection.unwrap();
+                assert!(reason.contains("CPU mode was selected"));
+            }
+        }
+        assert!(!store.gpu_available("key").unwrap());
+    }
+
+    #[test]
+    fn eligibility_reads_do_not_consume_or_reconcile_a_stale_attempt() {
+        let (_directory, store) = fixture();
+        drop(allowed(&store, "key"));
+        let pending = journal_bytes(&store);
+        for _ in 0..3 {
+            assert!(store.gpu_available("key").unwrap());
+            assert_eq!(journal_bytes(&store), pending);
+        }
+        let trial = allowed(&RecoveryStore::open(&store.directory).unwrap(), "key");
+        assert!(!store.gpu_available("key").unwrap());
+        drop(trial);
+        let consumed = journal_bytes(&store);
+        assert!(!store.gpu_available("key").unwrap());
+        assert_eq!(journal_bytes(&store), consumed);
+        assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
+    }
+
+    #[test]
+    fn legacy_journals_migrate_lazily_without_losing_failure_or_credit() {
+        for legacy_state in [
+            serde_json::json!({"status":"ready"}),
+            serde_json::json!({"status":"blocked","failure":"unexpected_exit","authorized":false}),
+            serde_json::json!({"status":"blocked","failure":"unexpected_exit","authorized":true}),
+            serde_json::json!({"status":"pending","attempt":Uuid::new_v4().to_string(),"prior_failure":null}),
+            serde_json::json!({"status":"pending","attempt":Uuid::new_v4().to_string(),"prior_failure":"unexpected_exit"}),
+        ] {
+            let (_directory, store) = fixture();
+            allowed(&store, "key").confirm_exit(true).unwrap();
+            let legacy = serde_json::to_vec(&serde_json::json!({
+                "version":1,
+                "records":[{"key":"key","label":"old label","state":legacy_state}]
+            }))
+            .unwrap();
+            fs::write(store.directory.join(JOURNAL), &legacy).unwrap();
+            let reopened = RecoveryStore::open(&store.directory).unwrap();
+            assert_eq!(journal_bytes(&store), legacy);
+            let spent = legacy_state["authorized"] == true
+                || legacy_state["prior_failure"] == "unexpected_exit";
+            assert_eq!(
+                reopened.load().unwrap().records[0].automatic_retry_spent,
+                spent
+            );
+            let status = reopened.blocked().unwrap();
+            if legacy_state["status"] == "pending" && spent {
+                assert_eq!(status[0].state, RecoveryState::CpuOnly);
+                assert!(denied(&reopened, "key").contains("no confirmed exit"));
+            } else {
+                if legacy_state["status"] != "ready" {
+                    assert_eq!(status[0].state, RecoveryState::RetryPending);
+                    assert_eq!(status[0].label, "old label");
+                }
+                allowed(&reopened, "key").confirm_exit(false).unwrap();
+                if legacy_state["status"] == "ready" {
+                    allowed(&reopened, "key").confirm_exit(false).unwrap();
+                }
+                assert!(denied(&store, "key").contains("Automatic recovery is exhausted"));
+            }
+            let migrated: serde_json::Value =
+                serde_json::from_slice(&journal_bytes(&store)).unwrap();
+            assert_eq!(migrated["version"], VERSION);
+            assert_eq!(migrated["records"][0]["automatic_retry_spent"], true);
+        }
     }
 
     #[test]
@@ -915,6 +1295,7 @@ mod tests {
             assert!(store.prepare("key", "label").is_err());
             assert!(store.blocked().is_err());
             assert!(store.allow_once("key").is_err());
+            assert!(store.use_cpu("key").is_err());
             assert_eq!(journal_bytes(&store), broken);
         }
     }
@@ -976,6 +1357,17 @@ mod tests {
             assert!(trial.confirm_exit(true).is_err());
             assert_eq!(journal_bytes(&store), damaged);
         }
+        let mut value: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        value["records"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("automatic_retry_spent");
+        let damaged = serde_json::to_vec(&value).unwrap();
+        fs::write(store.directory.join(JOURNAL), &damaged).unwrap();
+        assert!(RecoveryStore::open(&store.directory).is_err());
+        assert!(store.allow_once("key").is_err());
+        assert!(store.use_cpu("key").is_err());
+        assert_eq!(journal_bytes(&store), damaged);
     }
 
     #[test]
@@ -1046,7 +1438,7 @@ mod tests {
             .to_string()
             .contains("size limit"));
         fs::write(store.directory.join(JOURNAL), &snapshot).unwrap();
-        let record = serde_json::json!({"key":"key","label":"label","state":{"status":"ready"}});
+        let record = serde_json::json!({"key":"key","label":"label","automatic_retry_spent":false,"state":{"status":"ready"}});
         let oversized =
             serde_json::json!({"version":VERSION,"records":vec![record; MAX_RECORDS + 1]});
         fs::write(
@@ -1095,6 +1487,7 @@ mod tests {
             journal.records.push(Record {
                 key,
                 label: "model".into(),
+                automatic_retry_spent: true,
                 state: State::Blocked {
                     failure: Failure::UnexpectedExit,
                     authorized: false,
@@ -1222,9 +1615,26 @@ mod tests {
         child.0.kill().unwrap();
         child.0.wait().unwrap();
         let reopened = RecoveryStore::open(&store.directory).unwrap();
-        assert!(denied(&reopened, "subprocess").contains("no confirmed exit"));
-        reopened.allow_once("subprocess").unwrap();
+        assert_eq!(
+            reopened.blocked().unwrap()[0].state,
+            RecoveryState::RetryPending
+        );
         allowed(&reopened, "subprocess").confirm_exit(true).unwrap();
+    }
+
+    #[test]
+    fn active_recovery_process_cannot_be_retried_and_death_exhausts_credit() {
+        let (directory, store) = fixture();
+        allowed(&store, "subprocess").confirm_exit(false).unwrap();
+        let mut child = start_fixture(directory.path());
+        assert_eq!(store.blocked().unwrap()[0].state, RecoveryState::Retrying);
+        assert!(denied(&store, "subprocess").contains("still active"));
+        assert!(store.allow_once("subprocess").is_err());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let reopened = RecoveryStore::open(&store.directory).unwrap();
+        assert_eq!(reopened.blocked().unwrap()[0].state, RecoveryState::CpuOnly);
+        assert!(denied(&reopened, "subprocess").contains("Automatic recovery is exhausted"));
     }
 
     #[test]
