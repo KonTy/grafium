@@ -306,6 +306,63 @@ fn finish_job_state(inner: &mut LibraryIndexInner, job_id: &str, cancelled: bool
     rerun.then_some(pending_rebuild)
 }
 
+/// What the Jobs panel shows for a Library run: which item of how many is
+/// being worked on, how far into its media transcription is, and how many
+/// items are done and left. The bar also moves within a long file instead of
+/// sitting still for the hours a long video can take.
+#[derive(Clone)]
+struct RunProgress {
+    handle: JobHandle,
+    position: usize,
+    total: usize,
+    title: String,
+}
+
+impl RunProgress {
+    const STEPS_PER_ITEM: usize = 1000;
+
+    fn report(&self, action: &str, item_fraction: f64, detail: Option<String>) {
+        let (done, total, message, details) =
+            progress_parts(self.position, self.total, &self.title, action, item_fraction, detail);
+        self.handle.progress_with_details(done, total, message, Some(details));
+    }
+}
+
+/// The numbers and text behind [`RunProgress::report`], kept pure for tests.
+fn progress_parts(
+    position: usize,
+    total: usize,
+    title: &str,
+    action: &str,
+    item_fraction: f64,
+    detail: Option<String>,
+) -> (usize, usize, String, String) {
+    let steps = RunProgress::STEPS_PER_ITEM;
+    let within = (item_fraction.clamp(0.0, 0.999) * steps as f64) as usize;
+    let left = total.saturating_sub(position);
+    let counts = format!("{position} done, {left} left");
+    (
+        position * steps + within,
+        total * steps,
+        format!("{action} {title} ({} of {total})", position + 1),
+        match detail {
+            Some(detail) => format!("{detail} · {counts}"),
+            None => counts,
+        },
+    )
+}
+
+/// "12 of 47 min", or "52 min so far" once a file runs past its probed length.
+#[cfg(not(target_os = "android"))]
+fn transcribed_minutes(start_ms: i64, duration_hint_ms: i64) -> String {
+    let done = start_ms.max(0) / 60_000;
+    if duration_hint_ms > 0 && start_ms <= duration_hint_ms {
+        format!("{done} of {} min", (duration_hint_ms + 59_999) / 60_000)
+    } else {
+        format!("{done} min so far")
+    }
+}
+
 async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Result<(), String> {
     let store = store(&app)?;
     let (has_location, inputs) = library_inputs(&app).await?;
@@ -319,27 +376,28 @@ async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Resul
     let settings = store.settings().map_err(|e| e.to_string())?;
     let changed = selected_item_ids(actions, &statuses, &settings, &inputs, rebuild);
     let total = changed.len().max(1);
-    let mut done = 0usize;
-    for item in inputs.iter().filter(|i| changed.contains(&i.book_id)) {
+    let items = inputs.iter().filter(|i| changed.contains(&i.book_id));
+    for (position, item) in items.enumerate() {
         if handle.is_cancelled() {
             return Ok(());
         }
 
         wait_for_ai_idle(&app).await;
-        done += 1;
-        handle.progress(
-            done,
+        let progress = RunProgress {
+            handle: handle.clone(),
+            position,
             total,
-            format!("Indexing {} ({done} of {total})", item.title),
-        );
-        if let Err(error) = index_one_item(&app, &handle, &store, item, rebuild).await {
+            title: item.title.clone(),
+        };
+        progress.report("Indexing", 0.0, None);
+        if let Err(error) = index_one_item(&app, &progress, &store, item, rebuild).await {
             let _ = store.index_failed(item, &error);
         }
 
-        let _ = embed_pending(&app, &store, &handle).await;
+        let _ = embed_pending(&app, &store, &handle, Some(&progress)).await;
         emit_status(&app).await;
     }
-    let _ = embed_pending(&app, &store, &handle).await;
+    let _ = embed_pending(&app, &store, &handle, None).await;
     Ok(())
 }
 
@@ -380,7 +438,7 @@ fn selected_item_ids(
 
 async fn index_one_item(
     app: &AppHandle,
-    _handle: &JobHandle,
+    _progress: &RunProgress,
     store: &LibraryIndexStore,
     item: &LibraryItemInput,
     rebuild: bool,
@@ -425,7 +483,7 @@ async fn index_one_item(
                         .map_err(|e| e.to_string())?;
                 }
                 #[cfg(not(target_os = "android"))]
-                index_media_item(app, _handle, store, item, &due_files, rebuild).await?;
+                index_media_item(app, _progress, store, item, &due_files, rebuild).await?;
             }
         }
         LibraryItemKind::Youtube => {
@@ -468,14 +526,14 @@ async fn index_epub_item(
 #[cfg(not(target_os = "android"))]
 async fn index_media_item(
     app: &AppHandle,
-    handle: &JobHandle,
+    progress: &RunProgress,
     store: &LibraryIndexStore,
     item: &LibraryItemInput,
     due_files: &[LibraryFileInput],
     rebuild: bool,
 ) -> Result<(), String> {
-    for file in due_files {
-        if handle.is_cancelled() {
+    for (file_index, file) in due_files.iter().enumerate() {
+        if progress.handle.is_cancelled() {
             return Ok(());
         }
         wait_for_ai_idle(app).await;
@@ -485,12 +543,10 @@ async fn index_media_item(
             .track_id
             .clone()
             .unwrap_or_else(|| item.book_id.clone());
-        let title = item.title.clone();
-        handle.progress(0, 0, format!("Transcribing {title}"));
         let transcript = transcribe_local_media(
             app,
-            handle,
-            store,
+            progress,
+            (file_index, due_files.len()),
             item,
             file,
             path,
@@ -564,15 +620,61 @@ fn is_pause_reason(error: &str) -> bool {
 #[cfg(not(target_os = "android"))]
 async fn transcribe_local_media(
     app: &AppHandle,
-    handle: &JobHandle,
-    _store: &LibraryIndexStore,
+    progress: &RunProgress,
+    (file_index, file_count): (usize, usize),
     item: &LibraryItemInput,
     file: &LibraryFileInput,
     path: PathBuf,
     workdir: PathBuf,
     rebuild: bool,
 ) -> Result<(), String> {
-    let (app, handle, item, file) = (app.clone(), handle.clone(), item.clone(), file.clone());
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    let (app, item, file) = (app.clone(), item.clone(), file.clone());
+    let handle = progress.handle.clone();
+    // Where this file's transcription is, as a share of the item, so the Jobs
+    // bar holds its place while waiting for Chat.
+    let item_fraction = Arc::new(AtomicU32::new(0));
+    let track = move |detail: String| {
+        if file_count > 1 {
+            format!("track {} of {file_count}, {detail}", file_index + 1)
+        } else {
+            detail
+        }
+    };
+    let on_slice = {
+        let (progress, item_fraction, track) = (progress.clone(), item_fraction.clone(), track.clone());
+        move |start_ms: i64, duration_hint_ms: i64| {
+            let within_file = if duration_hint_ms > 0 {
+                (start_ms as f64 / duration_hint_ms as f64).min(0.99)
+            } else {
+                0.0
+            };
+            let fraction = (file_index as f64 + within_file) / file_count.max(1) as f64;
+            item_fraction.store((fraction * 1e6) as u32, Ordering::Relaxed);
+            progress.report(
+                "Transcribing",
+                fraction,
+                Some(track(transcribed_minutes(start_ms, duration_hint_ms))),
+            );
+        }
+    };
+    let waiting = {
+        let progress = progress.clone();
+        let naps = std::cell::Cell::new(0u32);
+        move || {
+            // About every two seconds, not on every short nap.
+            if naps.get() % 8 == 0 {
+                progress.report(
+                    "Waiting to transcribe",
+                    f64::from(item_fraction.load(Ordering::Relaxed)) / 1e6,
+                    Some(track("paused while Chat or search uses the model".into())),
+                );
+            }
+            naps.set(naps.get().wrapping_add(1));
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    };
     // Every slice runs ffmpeg, Whisper and SQLite synchronously: keep the whole
     // file off the async runtime so other jobs and commands keep running.
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -585,7 +687,7 @@ async fn transcribe_local_media(
             .map_err(|e| e.to_string())?;
         // The store only holds its path, so this thread opens its own handle.
         let index = self::store(&app)?;
-        let mut source = FfmpegSliceSource::new(path, workdir.clone())?;
+        let mut source = FfmpegSliceSource::new(path, workdir.clone())?.with_progress(on_slice);
         let mut slice_transcriber = WhisperSliceTranscriber {
             workdir,
             transcriber,
@@ -601,7 +703,7 @@ async fn transcribe_local_media(
                     || handle.is_cancelled(),
                     || index.settings().map_err(|e| e.to_string()),
                     || app.state::<LibraryIndexState>().ai_busy.load(Ordering::SeqCst) > 0,
-                    || std::thread::sleep(std::time::Duration::from_millis(250)),
+                    &waiting,
                 )
             },
             &mut source,
@@ -621,11 +723,12 @@ async fn transcribe_local_media(
 }
 
 #[cfg(not(target_os = "android"))]
-#[cfg(not(target_os = "android"))]
 struct FfmpegSliceSource {
     input: PathBuf,
     workdir: PathBuf,
     duration_ms: i64,
+    /// Told the start of each slice and the probed length, for progress.
+    on_slice: Box<dyn Fn(i64, i64) + Send>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -635,7 +738,13 @@ impl FfmpegSliceSource {
             duration_ms: media_duration_ms(&input)?,
             input,
             workdir,
+            on_slice: Box::new(|_, _| {}),
         })
+    }
+
+    fn with_progress(mut self, on_slice: impl Fn(i64, i64) + Send + 'static) -> Self {
+        self.on_slice = Box::new(on_slice);
+        self
     }
 }
 
@@ -646,6 +755,7 @@ impl MediaSliceSource for FfmpegSliceSource {
         start_ms: i64,
         duration_ms: i64,
     ) -> Result<MediaSlice, grafium_core::CoreError> {
+        (self.on_slice)(start_ms, self.duration_ms);
         let wav = self.workdir.join(format!("slice-{start_ms}.wav"));
         extract_audio_slice(&self.input, &wav, start_ms, duration_ms)
             .map_err(grafium_core::CoreError::Other)?;
@@ -815,6 +925,7 @@ async fn embed_pending(
     app: &AppHandle,
     store: &LibraryIndexStore,
     handle: &JobHandle,
+    progress: Option<&RunProgress>,
 ) -> Result<(), String> {
     loop {
         if handle.is_cancelled() {
@@ -834,7 +945,10 @@ async fn embed_pending(
         if batch.is_empty() {
             return Ok(());
         }
-        handle.progress(0, 0, "Embedding Library excerpts");
+        match progress {
+            Some(progress) => progress.report("Preparing search for", 0.999, None),
+            None => handle.progress(1, 1, "Preparing Library search"),
+        }
         let texts: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
         let vectors = {
             let guard = knowledge.engine.read().await;
@@ -1174,6 +1288,33 @@ mod tests {
         cleanup_cache_root(&root).unwrap();
         assert!(root.exists());
         assert!(!root.join("old-job").exists());
+    }
+
+    #[test]
+    fn jobs_show_which_item_how_far_and_how_many_are_left() {
+        let (done, total, message, details) = super::progress_parts(
+            2,
+            12,
+            "Fuel filter replacement",
+            "Transcribing",
+            0.5,
+            Some("14 of 47 min".into()),
+        );
+        assert_eq!(message, "Transcribing Fuel filter replacement (3 of 12)");
+        assert_eq!(details, "14 of 47 min · 2 done, 10 left");
+        // Two whole items plus half of the third, out of twelve.
+        assert_eq!((done, total), (2_500, 12_000));
+        let (done, _, _, details) = super::progress_parts(11, 12, "Last", "Indexing", 7.0, None);
+        assert_eq!(done, 11_999, "a finishing item never shows the run as complete");
+        assert_eq!(details, "11 done, 1 left");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn transcription_progress_counts_minutes_even_past_a_wrong_length() {
+        assert_eq!(super::transcribed_minutes(14 * 60_000, 46 * 60_000 + 1), "14 of 47 min");
+        assert_eq!(super::transcribed_minutes(0, 0), "0 min so far");
+        assert_eq!(super::transcribed_minutes(52 * 60_000, 45 * 60_000), "52 min so far");
     }
 
     #[cfg(not(target_os = "android"))]
