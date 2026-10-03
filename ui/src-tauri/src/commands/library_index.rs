@@ -165,7 +165,7 @@ pub async fn library_index_start(app: AppHandle, rebuild: bool) -> Result<String
     if !has_location {
         return Err("Choose a Library folder before indexing".into());
     }
-    start_indexing(app, rebuild)
+    start_indexing(app, rebuild, false)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -205,7 +205,7 @@ pub fn schedule_delta_run(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let _ = start_indexing(app, false);
+        let _ = start_indexing(app, false, true);
     });
 }
 
@@ -225,12 +225,15 @@ pub fn schedule_startup_delta(app: &AppHandle) {
             if !has_location {
                 return;
             }
-            let _ = start_indexing(app, false);
+            let _ = start_indexing(app, false, true);
         });
     }
 }
 
-fn start_indexing(app: AppHandle, rebuild: bool) -> Result<String, String> {
+/// `automatic` runs (opening Library, startup, settings changes) leave no
+/// entry in the job history when they find nothing to do; a run the user
+/// started always does.
+fn start_indexing(app: AppHandle, rebuild: bool, automatic: bool) -> Result<String, String> {
     let settings = store(&app)?.settings().map_err(|e| e.to_string())?;
     if !settings.enabled {
         return Err("Library indexing is disabled".into());
@@ -270,17 +273,18 @@ fn start_indexing(app: AppHandle, rebuild: bool) -> Result<String, String> {
         inner.running_job = Some(job_id.clone());
         inner.dirty = false;
     }
-    tauri::async_runtime::spawn(run_job(app.clone(), handle, rebuild));
+    tauri::async_runtime::spawn(run_job(app.clone(), handle, rebuild, automatic));
     Ok(job_id)
 }
 
-async fn run_job(app: AppHandle, handle: JobHandle, rebuild: bool) {
+async fn run_job(app: AppHandle, handle: JobHandle, rebuild: bool, automatic: bool) {
     let result = run_indexing(app.clone(), handle.clone(), rebuild).await;
     let cancelled = handle.is_cancelled();
     let job_id = handle.id().to_string();
     match result {
-        Ok(()) if cancelled => handle.cancelled(),
-        Ok(()) => handle.succeeded_with_details("Library index updated", None, None::<String>),
+        Ok(_) if cancelled => handle.cancelled(),
+        Ok(0) if automatic => handle.discard(),
+        Ok(_) => handle.succeeded_with_details("Library index updated", None, None::<String>),
         Err(_) if cancelled => handle.cancelled(),
         Err(error) => handle.failed(error),
     }
@@ -291,7 +295,9 @@ async fn run_job(app: AppHandle, handle: JobHandle, rebuild: bool) {
     };
     emit_status(&app).await;
     if let Some(pending_rebuild) = rerun {
-        let _ = start_indexing(app, pending_rebuild);
+        // A rebuild asked for during the run is the user's; a plain rerun is
+        // the follow-up to changes noticed meanwhile.
+        let _ = start_indexing(app, pending_rebuild, !pending_rebuild);
     }
 }
 
@@ -363,7 +369,8 @@ fn transcribed_minutes(start_ms: i64, duration_hint_ms: i64) -> String {
     }
 }
 
-async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Result<(), String> {
+/// Returns how much work was done: items indexed plus excerpts embedded.
+async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Result<usize, String> {
     let store = store(&app)?;
     let (has_location, inputs) = library_inputs(&app).await?;
     if !has_location {
@@ -376,13 +383,15 @@ async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Resul
     let settings = store.settings().map_err(|e| e.to_string())?;
     let changed = selected_item_ids(actions, &statuses, &settings, &inputs, rebuild);
     let total = changed.len().max(1);
+    let mut work = 0usize;
     let items = inputs.iter().filter(|i| changed.contains(&i.book_id));
     for (position, item) in items.enumerate() {
         if handle.is_cancelled() {
-            return Ok(());
+            return Ok(work);
         }
 
         wait_for_ai_idle(&app).await;
+        work += 1;
         let progress = RunProgress {
             handle: handle.clone(),
             position,
@@ -394,11 +403,11 @@ async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Resul
             let _ = store.index_failed(item, &error);
         }
 
-        let _ = embed_pending(&app, &store, &handle, Some(&progress)).await;
+        work += embed_pending(&app, &store, &handle, Some(&progress)).await.unwrap_or(0);
         emit_status(&app).await;
     }
-    let _ = embed_pending(&app, &store, &handle, None).await;
-    Ok(())
+    work += embed_pending(&app, &store, &handle, None).await.unwrap_or(0);
+    Ok(work)
 }
 
 fn selected_item_ids(
@@ -926,10 +935,11 @@ async fn embed_pending(
     store: &LibraryIndexStore,
     handle: &JobHandle,
     progress: Option<&RunProgress>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    let mut embedded = 0usize;
     loop {
         if handle.is_cancelled() {
-            return Ok(());
+            return Ok(embedded);
         }
         wait_for_ai_idle(app).await;
         let knowledge = app.state::<KnowledgeState>();
@@ -937,13 +947,13 @@ async fn embed_pending(
             let guard = knowledge.engine.read().await;
             guard.as_ref().and_then(|e| e.library_semantic_scheme())
         }) else {
-            return Ok(());
+            return Ok(embedded);
         };
         let batch = store
             .unembedded_chunks(&scheme, 24)
             .map_err(|e| e.to_string())?;
         if batch.is_empty() {
-            return Ok(());
+            return Ok(embedded);
         }
         match progress {
             Some(progress) => progress.report("Preparing search for", 0.999, None),
@@ -953,7 +963,7 @@ async fn embed_pending(
         let vectors = {
             let guard = knowledge.engine.read().await;
             let Some(engine) = guard.as_ref() else {
-                return Ok(());
+                return Ok(embedded);
             };
             match engine.embed_library_documents(&texts).await {
                 Ok(vectors) => vectors,
@@ -962,12 +972,12 @@ async fn embed_pending(
                         inner.semantic_error = Some(cap_reason(&error.to_string()));
                     }
                     tracing::warn!("Library semantic embedding unavailable: {error}");
-                    return Ok(());
+                    return Ok(embedded);
                 }
             }
         };
         let Some((scheme, vectors)) = vectors else {
-            return Ok(());
+            return Ok(embedded);
         };
         let pairs: Vec<_> = batch
             .iter()
@@ -977,6 +987,7 @@ async fn embed_pending(
         store
             .upsert_vectors(&scheme, &pairs)
             .map_err(|e| e.to_string())?;
+        embedded += pairs.len();
         if let Ok(mut inner) = app.state::<LibraryIndexState>().inner.lock() {
             inner.semantic_error = None;
         }

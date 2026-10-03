@@ -1125,6 +1125,10 @@ pub fn run() {
 
             app.manage(state);
             app.manage(commands::jobs::JobsState::new());
+            // Job history from earlier runs; app-local, never synced.
+            app.state::<commands::jobs::JobsState>()
+                .registry
+                .restore_history(app_dir.join("jobs-history.json"));
             app.manage(commands::library_index::LibraryIndexState::default());
 
             // Initialize Knowledge Engine
