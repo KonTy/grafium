@@ -380,16 +380,14 @@ ul.grafium-list-dot > li {
   /* Variant F at 3.15s. 6.3s read as sluggish rather than busy, so the
      sweep is twice as quick; `--shimmer-cycles` doubled to match, which keeps
      the give-up budget below at the same ~19s.
-     The base stops are `currentColor`, not a theme text variable, so a label
-     keeps exactly the colour it already had and only the highlight is added.
-     That matters because several themes give textPrimary and textSecondary the
-     same value, which made a two-variable gradient invisible. `--shimmer-peak`
-     is set per theme in themes.ts: white on dark, black on light. */
+     A neutral grey base keeps the sweep visible even with a pure-white
+     foreground. The peak is the theme foreground itself, never mixed toward
+     white, so light and coloured themes keep their own ink colour. */
   background-image: linear-gradient(
     100deg,
-    currentColor 37%,
-    var(--shimmer-peak, #ffffff) 50%,
-    currentColor 63%
+    #767676 37%,
+    var(--text-primary, currentColor) 50%,
+    #767676 63%
   );
   background-size: 300% 100%;
   /* Critical, and the cause of the flash this replaces: a background image
@@ -405,9 +403,7 @@ ul.grafium-list-dot > li {
   background-repeat: no-repeat;
   -webkit-background-clip: text;
   background-clip: text;
-  /* Only the *fill* goes transparent. Setting `color: transparent` as well
-     would drag `currentColor` down with it and leave the gradient — and so the
-     text — fully invisible. */
+  /* Keep the label's colour intact for the settled and reduced-motion states. */
   -webkit-text-fill-color: transparent;
   /* Deliberately finite. The sweep is a claim that work is progressing
      normally, so it has to expire: after `--shimmer-cycles` passes (~19s by

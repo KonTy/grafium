@@ -24,6 +24,9 @@ overlay drawer. Select a conversation, press Escape, or tap outside to close it.
 
 The framed conversation area contains your messages; model diagnostics are not
 chat messages. Type in the shaded composer at the bottom.
+Small person and assistant icons sit beside **You** and **Grafium AI**; the
+sender names remain visible. **Copy** beside a finished answer copies its
+Markdown and sources, without the decorative icons.
 
 - **Up arrow / Send:** send the message, or press Enter. Shift+Enter adds a line.
   While an answer, edit plan, or action analysis is running, the same control
@@ -135,6 +138,8 @@ transcript itself, above the answer: `Searching your notes`, `Thinking`,
 `Generating`, and for web research `Planning searches`, `Reading sources`,
 `Refining the search`. The current status shimmers immediately, including while
 Chat waits for the first detailed step, and a running total ticks beside it.
+The sweep moves from muted grey to your theme's foreground colour, including
+white-on-black themes; it does not change the size of the status text.
 Finished steps stay put with the time each one took, so you can see where a slow
 answer actually spent its time.
 

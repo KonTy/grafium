@@ -177,6 +177,17 @@ pub(crate) fn context_params(context: NonZeroU32, embeddings: bool) -> LlamaCont
         .with_embeddings(embeddings)
 }
 
+fn fitted_gpu_layers(fitted: i32, requested: u32) -> Option<u32> {
+    // A successful fit keeps llama.cpp's -1 (all layers) when no adjustment
+    // was needed. It is not a zero-offload result.
+    let layers = match fitted {
+        -1 => requested,
+        1.. => (fitted as u32).min(requested),
+        _ => 0,
+    };
+    (layers > 0).then_some(layers)
+}
+
 pub(crate) fn fitted_params(
     path: &Path,
     context: NonZeroU32,
@@ -214,31 +225,35 @@ pub(crate) fn fitted_params(
     .map_err(|_| RuntimeError::Other("Model path contains a NUL byte".into()))?;
     let mut margins =
         vec![crate::gpu::reserve_bytes(device.memory) as usize; llama_cpp_2::max_devices()];
-    match parameters.as_mut().fit_params(
+    let layers = match parameters.as_mut().fit_params(
         &model_path,
         &mut context_params,
         &mut margins,
         context.get(),
         llama_cpp_sys_2::GGML_LOG_LEVEL_WARN,
     ) {
-        Ok(fit) if fit.n_ctx == context.get() && parameters.n_gpu_layers() > 0 => {}
-        Ok(_) | Err(FitError::Failure) => {
-            crate::native::worker::emit_runtime_warning("The model's tensors, KV cache and compute buffers do not fit GPU headroom at the requested context; using CPU without shortening context.");
-            return Ok((cpu().map_err(|e| RuntimeError::Other(e.to_string()))?, None));
+        Ok(fit) if fit.n_ctx == context.get() => {
+            fitted_gpu_layers(parameters.n_gpu_layers(), requested_layers)
         }
+        Ok(_) | Err(FitError::Failure) => None,
         Err(FitError::Error) => {
             return Err(RuntimeError::Other(
                 "Native model memory fitting failed; inspect the model file and runtime log".into(),
             ))
         }
-    }
+    };
+    let Some(layers) = layers else {
+        crate::native::worker::emit_runtime_warning("The model's tensors, KV cache and compute buffers do not fit GPU headroom at the requested context; using CPU without shortening context.");
+        return Ok((cpu().map_err(|e| RuntimeError::Other(e.to_string()))?, None));
+    };
     device.check_pressure()?;
     let parameters = *Pin::into_inner(parameters);
-    let layers = (parameters.n_gpu_layers() as u32).min(requested_layers);
-    crate::native::worker::emit_runtime_warning(&format!(
-        "Using {} ({}) with {} GPU layers; context remains {} tokens. GPU budgets are estimates, not a driver-failure guarantee.",
-        device.description, device.name, layers, context.get(),
-    ));
+    tracing::info!(
+        device = %device.description,
+        layers,
+        context_tokens = context.get(),
+        "Native model GPU admission succeeded"
+    );
     let mut pressure = PressureWatch::new(Some(device.clone()));
     Ok((
         parameters
@@ -292,6 +307,7 @@ impl PressureWatch {
             device,
             checked_at: Instant::now() - Duration::from_secs(1),
         }
+
     }
     pub fn check(&mut self) -> Result<()> {
         if self.checked_at.elapsed() < Duration::from_millis(500) {
@@ -305,5 +321,33 @@ impl PressureWatch {
             device.check_pressure()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_fit_preserves_default_all_layers_offload() {
+        let default_layers = LlamaModelParams::default().n_gpu_layers();
+        assert_eq!(default_layers, -1);
+        assert_eq!(fitted_gpu_layers(default_layers, 999), Some(999));
+        assert_eq!(fitted_gpu_layers(default_layers, 1), Some(1));
+    }
+
+    #[test]
+    fn fitted_partial_offload_respects_the_requested_limit() {
+        assert_eq!(fitted_gpu_layers(24, 999), Some(24));
+        assert_eq!(fitted_gpu_layers(24, 8), Some(8));
+    }
+
+    #[test]
+    fn zero_offload_and_unknown_sentinels_never_enable_gpu() {
+        for fitted in [-2, -1, 0, 24] {
+            assert_eq!(fitted_gpu_layers(fitted, 0), None);
+        }
+        assert_eq!(fitted_gpu_layers(0, 999), None);
+        assert_eq!(fitted_gpu_layers(-2, 999), None);
     }
 }

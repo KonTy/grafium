@@ -63,6 +63,10 @@ context. Smaller decoding batches reduce peak memory. Host RAM estimates also us
 available architecture metadata, with a conservative fallback for other models.
 If GPU headroom is insufficient or cannot be measured, Grafium uses CPU and
 displays a runtime warning, provided RAM is sufficient.
+When the whole model fits, Grafium keeps full GPU offload; it does not treat
+the runtime's "all layers" result as a CPU-only fit. A large model on CPU can
+take minutes. Check the status menu's actual CPU/GPU result after a request,
+not just whether the computer has a graphics card.
 
 Active requests monitor RAM and the selected GPU's remaining headroom. On systems
 with delegated Linux cgroup v2 memory controls, native workers receive their own

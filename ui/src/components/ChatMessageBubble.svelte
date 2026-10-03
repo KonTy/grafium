@@ -150,7 +150,20 @@
   data-message-index={index}
 >
   <div class="msg-role">
-    {message.role === "user" ? "You" : "Grafium AI"}
+    <span class="msg-sender">
+      <svg class="sender-icon" width="12" height="12" viewBox="0 0 16 16"
+        fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true" focusable="false">
+        {#if message.role === "user"}
+          <circle cx="8" cy="5" r="2.5" />
+          <path d="M3 14v-1a5 5 0 0 1 10 0v1" />
+        {:else}
+          <rect x="2.5" y="4.5" width="11" height="9" rx="2" />
+          <path d="M8 2v2.5M1 8v2m14-2v2M6 8v1m4-1v1M6 11h4" />
+        {/if}
+      </svg>
+      <span>{message.role === "user" ? "You" : "Grafium AI"}</span>
+    </span>
     {#if message.role === "assistant" && message.webResearch}
       <span class="research-badge" title="This answer includes live web research">
         <span class="research-badge-dot" aria-hidden="true"></span>Web research
@@ -162,6 +175,12 @@
         onclick={copyMessage}
         title="Copy this answer as Markdown, with its sources"
       >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+          <path d="M10.5 3.5V3A1.5 1.5 0 0 0 9 1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h.5" />
+        </svg>
         {copied ? "Copied" : "Copy"}
       </button>
     {/if}
@@ -259,11 +278,23 @@
 
   .msg-role {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     font-size: 11px;
     color: var(--text-muted);
     margin-bottom: 4px;
+  }
+
+  .msg-sender {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .msg-role svg {
+    flex: none;
   }
 
   .msg-content {
@@ -469,6 +500,9 @@
   }
 
   .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     margin-left: auto;
     padding: 1px 8px;
     font-size: 10px;

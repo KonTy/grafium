@@ -53,6 +53,116 @@ const metrics = (page) => composer(page).evaluate((node) => {
 });
 
 const cases = [
+  ["Chat shimmer uses grey and the exact theme foreground without resizing text", { global: true }, async (page) => {
+    await page.evaluate(() => { window.__assistantFixture.hold = true; });
+    const call = await send(page, "Show progress styling", true);
+    const label = panel(page).locator(".trail-label").first();
+    await label.waitFor();
+    for (const [foreground, background] of [
+      ["rgb(255, 255, 255)", "rgb(0, 0, 0)"],
+      ["rgb(0, 0, 0)", "rgb(255, 255, 255)"],
+      ["rgb(63, 220, 142)", "rgb(0, 0, 0)"],
+    ]) {
+      await panel(page).evaluate((node, { foreground, background }) => {
+        node.style.setProperty("--text-primary", foreground);
+        node.style.setProperty("--bg-primary", background);
+      }, { foreground, background });
+      const style = await label.evaluate(node => {
+        const style = getComputedStyle(node);
+        return { image: style.backgroundImage, repeat: style.backgroundRepeat,
+          size: style.backgroundSize, font: style.fontSize,
+          animations: node.getAnimations().map(animation => ({
+            name: animation.animationName, iterations: animation.effect.getTiming().iterations,
+          })) };
+      });
+      assert.ok(style.image.includes("rgb(118, 118, 118) 37%"));
+      assert.ok(style.image.includes(`${foreground} 50%`), style.image);
+      assert.ok(style.image.includes("rgb(118, 118, 118) 63%"));
+      assert.equal(style.repeat, "no-repeat");
+      assert.equal(style.size, "300% 100%");
+      assert.deepEqual(style.animations, [{ name: "shimmer-sweep", iterations: Infinity }]);
+      await label.evaluate(node => {
+        const animation = node.getAnimations()[0];
+        animation.pause();
+        animation.currentTime = 0;
+      });
+      const before = await label.boundingBox();
+      const grey = await label.screenshot({ animations: "allow" });
+      await label.evaluate(node => { node.getAnimations()[0].currentTime = 1575; });
+      const highlight = await label.screenshot({ animations: "allow" });
+      assert.equal(grey.equals(highlight), false, `visible foreground sweep for ${foreground}`);
+      assert.deepEqual(await label.boundingBox(), before, "shimmer never changes text geometry");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await frames(page);
+      await page.waitForFunction(() => {
+        const node = document.querySelector(".assistant-conversation .trail-label");
+        const style = getComputedStyle(node);
+        return style.webkitTextFillColor === style.color;
+      });
+      const reduced = await label.evaluate(node => {
+        const style = getComputedStyle(node);
+        return { image: style.backgroundImage, fill: style.webkitTextFillColor,
+          color: style.color, font: style.fontSize, animation: style.animationName };
+      });
+      assert.equal(reduced.image, "none");
+      assert.equal(reduced.fill, reduced.color, "static text keeps its readable label colour");
+      assert.equal(reduced.font, style.font);
+      assert.equal(reduced.animation, "none");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await frames(page);
+    }
+    const finite = await label.evaluate(node => {
+      const probe = document.createElement("span");
+      probe.className = "shimmer";
+      probe.textContent = "Loading";
+      node.parentElement.append(probe);
+      const animations = probe.getAnimations();
+      const iterations = animations.find(a => a.animationName === "shimmer-sweep").effect.getTiming().iterations;
+      animations.forEach(animation => animation.finish());
+      const style = getComputedStyle(probe);
+      const result = { iterations, fill: style.webkitTextFillColor, color: style.color };
+      probe.remove();
+      return result;
+    });
+    assert.equal(finite.iterations, 6);
+    assert.equal(finite.fill, finite.color, "finite shimmer settles into solid text");
+    await finish(page, call.args.requestId, "Styling checked.");
+    assert.equal(await panel(page).locator(".shimmer").count(), 0, "finished requests stop shimmering");
+  }],
+  ["Chat sender icons preserve names and fit narrow message headers", { global: true }, async (page) => {
+    await mode(page).selectOption("web");
+    await send(page, "Explain these message icons");
+    const messages = panel(page).locator(".msg");
+    assert.equal(await messages.count(), 2);
+    for (const [index, name] of ["You", "Grafium AI"].entries()) {
+      const sender = messages.nth(index).locator(".msg-sender");
+      assert.equal((await sender.innerText()).trim(), name);
+      assert.equal(await sender.locator('svg[aria-hidden="true"][focusable="false"]').count(), 1);
+      const snapshot = await sender.ariaSnapshot();
+      assert.equal(snapshot.split(name).length - 1, 1, "sender is spoken only once");
+      assert.doesNotMatch(snapshot, /img|graphics/);
+    }
+    assert.equal(await messages.nth(1).getByRole("button", { name: "Copy", exact: true }).locator("svg").count(), 1);
+    for (const width of [1200, 360]) {
+      await page.setViewportSize({ width, height: 800 });
+      await frames(page);
+      const geometry = await messages.evaluateAll(nodes => nodes.map(node => {
+        const bounds = node.getBoundingClientRect();
+        const header = node.querySelector(".msg-role").getBoundingClientRect();
+        return { fits: [...node.querySelectorAll(".msg-sender, .msg-role svg, .copy-btn, .research-badge")].every(child => {
+          const rect = child.getBoundingClientRect();
+          return rect.left >= bounds.left && rect.right <= bounds.right
+            && rect.top >= header.top && rect.bottom <= header.bottom;
+        }), icons: [...node.querySelectorAll(".sender-icon")].map(icon => ({
+          width: icon.getBoundingClientRect().width, height: icon.getBoundingClientRect().height,
+        })) };
+      }));
+      for (const message of geometry) {
+        assert.equal(message.fits, true, "sender, badge, and copy action remain inside the message");
+        assert.deepEqual(message.icons, [{ width: 12, height: 12 }]);
+      }
+    }
+  }],
   ["Chat has a quiet empty transcript and status actions beside icon send and stop controls", { global: true }, async (page) => {
     const log = panel(page).locator(".chat-log");
     assert.equal((await log.innerText()).trim(), "");

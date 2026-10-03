@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[example]]
+name = "gpu_smoke"
+required-features = ["llm-local-vulkan"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

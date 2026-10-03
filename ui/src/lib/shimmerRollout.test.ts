@@ -46,15 +46,16 @@ describe("global shimmer", () => {
     expect(settle).toContain("-webkit-text-fill-color: currentColor");
   });
 
-  it("builds the gradient from currentColor so every theme shows something", () => {
+  it("sweeps the theme foreground over neutral grey, even when the foreground is white", () => {
     const from = css.indexOf(".shimmer {");
-    const rule = css.slice(from, css.indexOf("\n}", from));
-    // Several themes give text-primary and text-secondary the same value, so a
-    // gradient between those two would be a flat, invisible fill.
-    expect(rule).toContain("currentColor 37%");
-    expect(rule).toContain("currentColor 63%");
-    expect(rule).toContain("var(--shimmer-peak, #ffffff)");
+    const rule = declarationsOf(css.slice(from, css.indexOf("\n}", from)));
+    expect(rule).toContain("#767676 37%");
+    expect(rule).toContain("#767676 63%");
+    expect(rule).toContain("var(--text-primary, currentColor) 50%");
     expect(rule).not.toContain("var(--text-secondary)");
+    expect(rule).not.toContain("--shimmer-peak");
+    expect(rule).not.toContain("color-mix");
+    expect(rule).not.toContain("#ffffff");
   });
 
   it("never sets color:transparent, which would erase currentColor too", () => {
@@ -119,29 +120,16 @@ describe("busy labels shimmer", () => {
   });
 });
 
-describe("shimmer peak per theme", () => {
-  it("is pure white on dark themes and pure black on light ones", async () => {
-    const { themes, applyTheme } = await import("./themes");
-    const dark = themes.find((t) => t.id === "matrix")!;
-    const light = themes.find((t) => t.colors.isLight)!;
-
-    applyTheme(dark.colors);
-    expect(document.documentElement.style.getPropertyValue("--shimmer-peak")).toBe("#ffffff");
-
-    applyTheme(light.colors);
-    expect(document.documentElement.style.getPropertyValue("--shimmer-peak")).toBe("#000000");
-  });
-
+describe("shimmer foreground per theme", () => {
   it("covers every theme, including those with identical text colours", async () => {
     const { themes, applyTheme } = await import("./themes");
     const identical = themes.filter((t) => t.colors.textPrimary === t.colors.textSecondary);
-    // Guard the premise: if this ever hits zero the currentColor fix is moot.
     expect(identical.length).toBeGreaterThan(0);
 
     for (const theme of themes) {
       applyTheme(theme.colors);
-      const peak = document.documentElement.style.getPropertyValue("--shimmer-peak");
-      expect(peak, `${theme.id} has no shimmer peak`).toBe(theme.colors.isLight ? "#000000" : "#ffffff");
+      const peak = document.documentElement.style.getPropertyValue("--text-primary");
+      expect(peak, `${theme.id} must keep its foreground highlight`).toBe(theme.colors.textPrimary);
     }
   });
 });

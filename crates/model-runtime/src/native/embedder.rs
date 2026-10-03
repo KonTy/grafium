@@ -146,7 +146,7 @@ fn ensure_slot(
         context_size: Some(ctx_size.get()),
         on_gpu: device.is_some(),
         gpu_layers: Some(if device.is_some() {
-            model_params.n_gpu_layers().max(0) as u32
+            (model_params.n_gpu_layers().max(0) as u32).min(model.n_layer().saturating_add(1))
         } else {
             0
         }),
