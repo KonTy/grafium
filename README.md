@@ -443,7 +443,8 @@ menus and dialogs keep their own keyboard navigation. Graph controls are unchang
 
 | Platform | Packages |
 | --- | --- |
-| Linux | AppImage and Debian package (`.deb`) |
+| Linux x86-64 | AppImage and Debian package (`.deb`) |
+| Linux ARM64 (for example NVIDIA DGX Spark) | AppImage and Debian package (`_arm64.deb`) |
 | Windows | Installer (`.exe`) and MSI |
 | Android | APK; check the release's signing status before installing |
 
@@ -468,6 +469,11 @@ sudo apt install build-essential pkg-config cmake clang libclang-dev libssl-dev 
   libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev librsvg2-dev \
   libappindicator3-dev patchelf libvulkan-dev glslc
 ```
+
+On ARM64 Linux (for example DGX OS on NVIDIA DGX Spark), use the same packages,
+replacing `libappindicator3-dev` with `libayatana-appindicator3-dev` and adding
+`spirv-headers`. The **Linux ARM64** GitHub workflow builds the ARM64 packages on
+a native ARM runner; run it by hand or let **Release** run it for a version tag.
 
 On other Linux distributions, install the equivalent GTK 3, WebKitGTK 4.1,
 libsoup 3, librsvg, and Vulkan development packages. Windows builds need the MSVC

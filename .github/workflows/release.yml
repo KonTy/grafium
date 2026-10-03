@@ -234,6 +234,13 @@ jobs:
             target/appimage-bundle.log
           if-no-files-found: ignore
 
+  build-linux-arm64:
+    needs: [prepare-version]
+    uses: ./.github/workflows/linux-arm64.yml
+    with:
+      ref: ${{ needs.prepare-version.outputs.source_sha }}
+      version: ${{ needs.prepare-version.outputs.semver }}
+
   build-windows:
     needs: [prepare-version]
     runs-on: windows-latest
@@ -454,7 +461,7 @@ jobs:
           if-no-files-found: warn
 
   release:
-    needs: [prepare-version, build-linux, build-windows, build-android]
+    needs: [prepare-version, build-linux, build-linux-arm64, build-windows, build-android]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -476,6 +483,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/linux-artifacts/**/*
+            artifacts/linux-arm64-artifacts/**/*
             artifacts/windows-artifacts/**/*
             artifacts/android-artifacts/**/Grafium-release.apk
             artifacts/android-artifacts/**/*-release-unsigned.apk

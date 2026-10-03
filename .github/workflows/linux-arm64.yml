@@ -1,0 +1,221 @@
+name: Linux ARM64
+
+# Native aarch64 desktop packages (for example NVIDIA DGX Spark on DGX OS /
+# Ubuntu 24.04). Built on a native ARM runner rather than cross-compiled, so the
+# embedded llama.cpp/Whisper Vulkan engines and WebKitGTK link like they do on
+# the target. Run it by hand from any branch, or from Release for a version tag.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build"
+        required: true
+        type: string
+      version:
+        description: "Version stamped into the packages"
+        required: true
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Resolve version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          VER="${REQUESTED:-$CURRENT}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version: $VER"
+            exit 1
+          fi
+          echo "semver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Apply CI version
+        env:
+          VER: ${{ steps.version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          sed -i -E 's/^version = "[0-9]+\.[0-9]+\.[0-9]+"/version = "'"$VER"'"/' Cargo.toml
+          sed -i -E '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"/s//version = "'"$VER"'"/' ui/src-tauri/Cargo.toml
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/src-tauri/tauri.conf.json
+          sed -i -E 's/"version": "[0-9]+\.[0-9]+\.[0-9]+"/"version": "'"$VER"'"/' ui/package.json
+
+      - name: Install Linux dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # Ubuntu's Vulkan headers, glslc and SPIRV-Headers CMake package stand
+          # in for the LunarG SDK, which does not ship Linux ARM64 binaries.
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            cmake \
+            clang \
+            libclang-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libfuse2t64 \
+            patchelf \
+            file \
+            libvulkan-dev \
+            glslc \
+            spirv-headers
+          glslc --version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri
+          key: linux-arm64
+          cache-on-failure: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build native app before collecting runtime libraries
+        working-directory: ui
+        # On a cold build, build.rs can run before llama.cpp's normal dependency
+        # finishes. A second Cargo pass refreshes the watched bundled-libs directory.
+        run: npx tauri build --no-bundle --verbose
+
+      - name: Build Debian package
+        working-directory: ui
+        run: npx tauri build --bundles deb --verbose
+
+      - name: Smoke-check Debian package without launching Grafium
+        id: deb-smoke
+        env:
+          VERSION: ${{ steps.version.outputs.semver }}
+        run: |
+          set -euxo pipefail
+          DEB="target/release/bundle/deb/Grafium_${VERSION}_arm64.deb"
+          test "$(dpkg-deb --field "$DEB" Version)" = "$VERSION"
+          test "$(dpkg-deb --field "$DEB" Architecture)" = arm64
+          ROOT="$PWD/target/deb-smoke"
+          dpkg-deb --extract "$DEB" "$ROOT"
+          test -x "$ROOT/usr/bin/grafium"
+          file "$ROOT/usr/bin/grafium" | tee target/deb-file.log
+          grep -q 'ARM aarch64' target/deb-file.log
+          test -f "$ROOT/usr/share/applications/Grafium.desktop"
+          find "$ROOT/usr" -type f -o -type l | tee target/deb-inventory.log
+          test -f "$ROOT/usr/lib/Grafium/libllama.so.0"
+          test -f "$ROOT/usr/lib/Grafium/libggml-vulkan.so.0"
+          for LIB in target/release/bundled-libs/*.so*; do
+            cmp "$LIB" "$ROOT/usr/lib/Grafium/${LIB##*/}"
+          done
+          # Do not let the build's library directory hide missing packaged libraries.
+          env -u LD_LIBRARY_PATH ldd "$ROOT/usr/bin/grafium" | tee target/deb-ldd.log
+          if grep -q 'not found' target/deb-ldd.log; then
+            echo "::error::Debian package has unresolved runtime libraries"
+            exit 1
+          fi
+          mkdir -p target/linux-arm64-artifacts
+          cp "$DEB" target/linux-arm64-artifacts/
+
+      - name: Bundle AppImage
+        working-directory: ui
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          # Avoid the old linuxdeploy strip binary rejecting newer ELF sections.
+          NO_STRIP: "1"
+          # linuxdeploy resolves each bundled library's own dependencies through
+          # LD_LIBRARY_PATH, not the app binary's rpath (see the x86-64 job).
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release/bundled-libs
+        run: |
+          set -euo pipefail
+          # Without --verbose, Tauri discards linuxdeploy's stderr on failure.
+          npx tauri bundle --bundles appimage --verbose 2>&1 | tee ../target/appimage-bundle.log
+
+      - name: Smoke-check AppImage without launching Grafium
+        env:
+          VERSION: ${{ steps.version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          APPIMAGE="$PWD/target/release/bundle/appimage/Grafium_${VERSION}_aarch64.AppImage"
+          test -s "$APPIMAGE"
+          mkdir -p target/appimage-smoke
+          (
+            cd target/appimage-smoke
+            "$APPIMAGE" --appimage-extract >/dev/null
+            test -x squashfs-root/AppRun
+            test -x squashfs-root/usr/bin/grafium
+            test -f squashfs-root/usr/lib/Grafium/libllama.so.0
+          )
+          cp "$APPIMAGE" target/linux-arm64-artifacts/
+
+      - name: Record checksums and build provenance
+        if: ${{ !cancelled() && steps.deb-smoke.outcome == 'success' }}
+        env:
+          VERSION: ${{ steps.version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          provenance = {
+              "version": os.environ["VERSION"],
+              "architecture": "arm64",
+              "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "ref": os.environ["GITHUB_REF"],
+              "run": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path("target/linux-arm64-artifacts/linux-arm64-build-provenance.json").write_text(
+              json.dumps(provenance, indent=2) + "\n"
+          )
+          PY
+          cd target/linux-arm64-artifacts
+          sha256sum ./*.deb ./*.json > SHA256SUMS-linux-arm64.txt
+          if compgen -G '*.AppImage' >/dev/null; then
+            sha256sum ./*.AppImage >> SHA256SUMS-linux-arm64.txt
+          fi
+          sha256sum --check SHA256SUMS-linux-arm64.txt
+
+      - name: Upload Linux ARM64 artifacts
+        # Keep the verified DEB if AppImage bundling fails; the job still fails.
+        if: ${{ !cancelled() && steps.deb-smoke.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-artifacts
+          path: target/linux-arm64-artifacts/
+          if-no-files-found: error
+
+      - name: Upload Linux ARM64 packaging diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-packaging-diagnostics
+          path: |
+            target/deb-file.log
+            target/deb-ldd.log
+            target/deb-inventory.log
+            target/appimage-bundle.log
+          if-no-files-found: ignore
