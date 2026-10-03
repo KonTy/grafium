@@ -36,7 +36,8 @@ function verifyBounds(layout: CommunityLayout, spacing: number, dimensions: 2 | 
     }
     for (const other of layout.groups) {
       if (other.index <= group.index) continue;
-      expect(Math.hypot(other.center.x - group.center.x, other.center.y - group.center.y))
+      const depth = dimensions === 3 ? other.center.z - group.center.z : 0;
+      expect(Math.hypot(other.center.x - group.center.x, other.center.y - group.center.y, depth))
         .toBeGreaterThanOrEqual(group.radius + other.radius + spacing * 2.79);
     }
     for (const id of layout.isolatedIds) {
@@ -95,29 +96,70 @@ describe("createCommunityLayout", () => {
     }
   });
 
-  it("uses the same XY structure and bounds in 2D and 3D, with useful bounded depth", () => {
-    const graph = topics([6, 7, 10]);
+  it("keeps 2D flat while 3D spreads topics and their members through depth", () => {
+    const graph = topics([6, 7, 10, 9, 8, 7]);
     const flat = createCommunityLayout(graph.nodes, graph.edges, 2);
     const deep = createCommunityLayout(graph.nodes, graph.edges, 3);
-    expect(deep.groups).toEqual(flat.groups);
     expect(deep.clusterIndexById).toEqual(flat.clusterIndexById);
-    for (const [id, point] of flat.positions) {
-      expect(deep.positions.get(id)!.x).toBe(point.x);
-      expect(deep.positions.get(id)!.y).toBe(point.y);
+    expect(deep.hubIds).toEqual(flat.hubIds);
+    expect([...flat.positions.values()].every((point) => point.z === 0)).toBe(true);
+    const span = (points: { x: number; y: number; z: number }[], axis: "x" | "y" | "z") =>
+      Math.max(...points.map((point) => point[axis])) - Math.min(...points.map((point) => point[axis]));
+    const centers = deep.groups.map((group) => group.center);
+    expect(span(centers, "z")).toBeGreaterThan(0.35 * Math.max(span(centers, "x"), span(centers, "y")));
+    const everything = [...deep.positions.values()];
+    expect(span(everything, "z")).toBeGreaterThan(0.45 * Math.max(span(everything, "x"), span(everything, "y")));
+    for (const group of deep.groups) {
+      const offsets = group.nodeIds.filter((id) => id !== group.hubId).map((id) => {
+        const point = deep.positions.get(id)!;
+        return { x: point.x - group.center.x, y: point.y - group.center.y, z: point.z - group.center.z };
+      });
+      const rms = (axis: "x" | "y" | "z") =>
+        Math.sqrt(offsets.reduce((sum, offset) => sum + offset[axis] ** 2, 0) / offsets.length);
+      expect(rms("z"), `community ${group.index} is a ball, not a disc`)
+        .toBeGreaterThan(0.4 * Math.max(rms("x"), rms("y")));
     }
-    expect([...deep.positions.values()].some((p) => Math.abs(p.z) > 1)).toBe(true);
+    verifyBounds(flat, 70, 2);
     verifyBounds(deep, 70, 3);
   });
 
-  it("places disconnected unequal communities separately and isolates outside them", () => {
+  it("keeps real branches pointing outward in 3D", () => {
+    const ids = ["hub", ...Array.from({ length: 6 }, (_, i) => `arm${i}`), ...Array.from({ length: 6 }, (_, i) => `leaf${i}`)];
+    const edges = Array.from({ length: 6 }, (_, i) => [
+      { source: "hub", target: `arm${i}`, weight: 20 },
+      { source: `arm${i}`, target: `leaf${i}` },
+    ]).flat();
+    const layout = createCommunityLayout(nodes(ids), edges, 3);
+    const hub = layout.positions.get("hub")!;
+    const direction = (id: string) => {
+      const point = layout.positions.get(id)!;
+      const offset = { x: point.x - hub.x, y: point.y - hub.y, z: point.z - hub.z };
+      const size = Math.hypot(offset.x, offset.y, offset.z);
+      return { x: offset.x / size, y: offset.y / size, z: offset.z / size, size };
+    };
+    for (let i = 0; i < 6; i++) {
+      const arm = direction(`arm${i}`);
+      const leaf = direction(`leaf${i}`);
+      expect(leaf.size).toBeGreaterThan(arm.size);
+      const nearestArm = Math.max(...Array.from({ length: 6 }, (_, j) => {
+        const other = direction(`arm${j}`);
+        return other.x * leaf.x + other.y * leaf.y + other.z * leaf.z;
+      }));
+      expect(arm.x * leaf.x + arm.y * leaf.y + arm.z * leaf.z, `leaf${i} continues its own branch`).toBe(nearestArm);
+    }
+  });
+
+  it.each([2, 3] as const)("places disconnected unequal communities separately and isolates outside them in %iD", (dimensions) => {
     const graph = topics([3, 17, 5, 8], false);
     graph.nodes.push(...nodes(["isolated-a", "isolated-b", "isolated-c"]));
-    const layout = createCommunityLayout(graph.nodes, graph.edges, 2);
+    const layout = createCommunityLayout(graph.nodes, graph.edges, dimensions);
     expect(layout.groups.map((g) => g.nodeIds.length)).toEqual([17, 8, 5, 3]);
-    expect(layout.groups[0].radius).toBeGreaterThan(layout.groups[3].radius);
+    // 3D shells hold far more members per radius, so equal radii are expected there.
+    expect(layout.groups[0].radius).toBeGreaterThanOrEqual(layout.groups[3].radius);
+    if (dimensions === 2) expect(layout.groups[0].radius).toBeGreaterThan(layout.groups[3].radius);
     expect(layout.isolatedIds.size).toBe(3);
     expect(layout.positions.size).toBe(graph.nodes.length);
-    verifyBounds(layout, 70, 2);
+    verifyBounds(layout, 70, dimensions);
   });
 
   it("spreads 3D isolates evenly across a sphere, not a plane or latitude ring", () => {
@@ -149,7 +191,8 @@ describe("createCommunityLayout", () => {
     expect(createCommunityLayout([...graph.nodes].reverse(), [...graph.edges].reverse(), 3)).toEqual(layout);
     verifyBounds(layout, 70, 3);
     const flat = createCommunityLayout(graph.nodes, graph.edges, 2);
-    expect(flat.groups).toEqual(layout.groups);
+    const membership = (groups: typeof layout.groups) => groups.map((group) => [group.index, group.hubId, group.nodeIds]);
+    expect(membership(flat.groups)).toEqual(membership(layout.groups));
     expect(flat.clusterIndexById).toEqual(layout.clusterIndexById);
     expect(flat.isolatedIds).toEqual(layout.isolatedIds);
     expect([...flat.positions.values()].every((point) => point.z === 0)).toBe(true);

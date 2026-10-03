@@ -47,7 +47,9 @@ inspect its neighborhood, or zoom out to the wider graph.
 
 ![The Welcome graph in 2D, with linked communities and readable page labels](docs/images/grafium-graph-2d.png)
 
-The **3D graph** shows the same pages and accepted connections in depth. Solid
+The **3D graph** shows the same pages and accepted connections in depth. Each
+linked group forms a ball around its hub, and groups spread in all three
+directions rather than lying on one plane. Solid
 spheres, a field of varied stars, and distant galaxy images give your knowledge a
 different sense of scale. Unlinked pages sit on an imaginary sphere rather than a
 flat ring. Dates and journal connections remain visible by default.

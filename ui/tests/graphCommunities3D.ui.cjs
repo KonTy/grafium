@@ -229,6 +229,16 @@ function fixture() {
       };
     });
     assert.equal(new Set(groups.map((group) => group.color)).size, 3, "sparse bridges must not merge all topics into one color");
+    const linked = overview.nodes.filter((node) => !node.id.startsWith("isolate-"));
+    const span = (axis) => Math.max(...linked.map((node) => node[axis])) - Math.min(...linked.map((node) => node[axis]));
+    assert.ok(span("z") > 0.3 * Math.max(span("x"), span("y")), "linked topics spread through depth, not one plane");
+    for (const group of groups) {
+      const members = overview.nodes.filter((node) => distance(node, group.center) <= group.radius + 1
+        && node.color === group.color);
+      const depth = Math.max(...members.map((node) => node.z)) - Math.min(...members.map((node) => node.z));
+      const width = Math.max(...members.map((node) => node.x)) - Math.min(...members.map((node) => node.x));
+      assert.ok(depth > 0.5 * width, "each community forms a ball rather than a flat disc");
+    }
     assert.equal(byId.get("isolate-a").color, byId.get("isolate-b").color, "isolates use the same neutral color");
     assert.ok(groups.every((group) => group.color !== byId.get("isolate-a").color));
     const isolated = overview.nodes.filter((node) => node.id.startsWith("isolate-"));
