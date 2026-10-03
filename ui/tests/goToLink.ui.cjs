@@ -180,7 +180,7 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       const dateRect = await dateButton.boundingBox();
       const linkButton = page.getByRole("button", { name: "Go to link", exact: true });
       const linkRect = await linkButton.boundingBox();
-      const searchRect = await page.locator('.titlebar button[title="Search (Ctrl+K)"]').boundingBox();
+      const searchRect = await page.locator('.titlebar button[aria-label="Search"]').boundingBox();
       assert.ok(dateRect.x >= 0 && dateRect.x + dateRect.width <= linkRect.x
         && linkRect.x + linkRect.width <= searchRect.x && searchRect.x + searchRect.width <= width,
         "calendar and link fit immediately before Search on narrow screens");

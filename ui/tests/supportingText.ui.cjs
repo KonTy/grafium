@@ -59,7 +59,12 @@ async function checkText(page, selector) {
         await page.keyboard.press("Alt+s");
         const search = page.getByRole("searchbox", { name: "Filter settings", exact: true });
         await search.fill("sync");
-        await checkText(page, '[data-help-context="sync"] .section-desc, .sync-empty p');
+        await checkText(page, ".sync-empty p");
+        // Settings explanations moved behind ? help; check them where they are read.
+        await page.getByRole("button", { name: "Help: Sync", exact: true }).click();
+        await checkText(page, "dialog[data-settings-help-dialog] .section-desc");
+        await page.keyboard.press("Escape");
+        await page.locator("dialog[data-settings-help-dialog]").waitFor({ state: "detached" });
         await search.fill("AI / Knowledge Engine");
         await page.locator(".ai-settings .field-hint").first().waitFor();
         await checkText(page, ".ai-settings .field-hint");

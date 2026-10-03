@@ -52,9 +52,10 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     const titles = () => page.locator(".settings-page > details.settings-section:visible > summary .section-title").allTextContents();
     const totalSections = await sections.count();
     await search.fill("chat");
+    // Hidden ? help is searchable too: Asset Cleanup's help mentions chat history.
     await page.waitForFunction(() => [...document.querySelectorAll(".settings-page > details.settings-section")]
-      .filter((el) => !el.hidden).length === 3);
-    assert.deepEqual(await titles(), ["AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts"]);
+      .filter((el) => !el.hidden).length === 4);
+    assert.deepEqual(await titles(), ["AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts", "Asset Cleanup"]);
     const shortcuts = page.locator(".keymap-row:visible");
     assert.equal(await shortcuts.count(), 1);
     assert.match(await shortcuts.innerText(), /Go to Chat tab/);
@@ -71,7 +72,8 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     assert.deepEqual(await titles(), ["General"]);
     assert.equal(await page.locator(".setting-row:visible").count(), 1);
     assert.match(await page.locator(".setting-row:visible").innerText(), /Narrow view side padding/);
-    await search.fill("rust");
+    // A whole stack name: plain "rust" also matches "trusted" in Library voice help.
+    await search.fill("rust tauri");
     await page.waitForFunction(() => [...document.querySelectorAll(".detail-row")].some((el) => !el.hidden));
     assert.deepEqual(await titles(), ["About"]);
     assert.equal(await page.locator(".detail-row:visible").count(), 1);
@@ -83,7 +85,8 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.locator(".settings-empty").waitFor();
     assert.deepEqual(await titles(), []);
     await search.fill("");
-    await page.waitForFunction(() => !document.querySelector(".settings-page [hidden]"));
+    // Collapsed ? help keeps its searchable text in hidden containers by design.
+    await page.waitForFunction(() => !document.querySelector(".settings-page [hidden]:not([data-settings-help-text])"));
     assert.equal((await titles()).length, totalSections);
     assert.deepEqual(await page.evaluate(() => window.__settingsWrites), []);
     console.log("PASS multiword matching, section-title matches, no results, clearing and unchanged settings");

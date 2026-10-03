@@ -18,7 +18,7 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
             items: [
               entry("reading", "Reading practice", "page", "selection-page", "Health"),
               entry("cards", "Chinese cards", "flashcards", "chinese", "Chinese"),
-            ], days: [], topics: ["Health", "Chinese", "Past topic"], writes: [], receipts: new Set(),
+            ], days: [], topics: ["Health", "Chinese", "Past topic"], writes: [], receipts: new Set(), library: [],
           };
           const original = internals.invoke;
           internals.invoke = async (command, args = {}) => {
@@ -46,6 +46,18 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
               if (args.progress) item.progress = structuredClone(args.progress);
               if (args.seconds) fixture.days.push({ itemId: item.id, topic: item.topic, day: args.day, seconds: args.seconds });
               return;
+            }
+            // Media and YouTube studies reference stable Library items (app-private).
+            if (command === "reader_snapshot" || command === "reader_rescan") {
+              return structuredClone({ libraryPath: "/synthetic/library", books: fixture.library });
+            }
+            if (command === "reader_add_link") {
+              if ("graphPath" in args) throw new Error("Library links must not use the active graph");
+              fixture.library.push({
+                id: crypto.randomUUID(), title: args.title, kind: args.kind, sourceUrl: args.url,
+                available: true, tracks: [], position: null, bookmarks: [], favorite: false, lastUsedAt: 0,
+              });
+              return structuredClone({ libraryPath: "/synthetic/library", books: fixture.library });
             }
             if (command === "list_page_summaries") return window.__selectionState.pages;
             if (command === "list_flashcard_topics") return [{ topic: "chinese", total: 1, due: 1 }, { topic: "physics", total: 2, due: 1 }];
@@ -129,7 +141,9 @@ const { openEditor } = require("./keyboardSelection.ui.cjs");
     await form.getByRole("button", { name: "Add study", exact: true }).click();
     await page.locator(".library-heading select").selectOption("topic:Learning");
     await page.getByRole("button", { name: "Video lesson", exact: true }).waitFor();
-    assert.ok(await page.evaluate(() => window.__studiesFixture.items.some(item => item.kind === "youtube" && item.topic === "Learning")));
+    assert.ok(await page.evaluate(() => window.__studiesFixture.items.some(item => item.kind === "library"
+      && item.topic === "Learning" && window.__studiesFixture.library.some(book => book.id === item.source && book.kind === "youtube"))),
+      "a YouTube study references its stable Library item");
     await page.getByRole("button", { name: "+ Add study", exact: true }).click();
     await form.getByRole("option", { name: "#physics — Flashcards", exact: true }).waitFor();
     await form.getByRole("option", { name: "Chinese listening — Audio", exact: true }).waitFor();

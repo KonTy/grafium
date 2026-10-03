@@ -108,7 +108,7 @@ const blockContents = [
         }, level);
         assert.equal(actual, expected, `source H${level} matches its preview`);
         if (continuous) await page.locator(".fixture-banner").click();
-        else await page.getByTitle("Bionic Speedreader", { exact: true }).focus();
+        else await page.locator('.titlebar button[aria-label="Search"]').focus();
         await page.locator(`${content} h${level}`).first().waitFor();
       }
       assert.deepEqual(await page.evaluate(() => window.__selectionState.blocks
