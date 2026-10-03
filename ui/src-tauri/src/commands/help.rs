@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn ai_help_includes_runtime_recovery_controls() {
         let page = super::help_get_page("ai".into()).unwrap();
-        assert!(page.contains("Allow one GPU attempt"));
+        assert!(page.contains("Try faster mode"));
         assert!(page.contains("cgroup"));
     }
 }
