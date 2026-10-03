@@ -223,6 +223,24 @@ const cases = [
     assert.deepEqual(await page.evaluate(() => window.__assistantFixture.cancellations), [call.args.requestId]);
     await button(page, "Send").waitFor();
   }],
+  ["Chat shows streamed answer text while the model is still generating", { global: true }, async (page) => {
+    await page.evaluate(() => { window.__assistantFixture.hold = true; });
+    const call = await send(page, "What is love?", true);
+    const answer = panel(page).locator(".msg:not(.user) .msg-content").last();
+    for (const [delta, visible] of [["Love", "Love"], [" is", "Love is"], [" patient.", "Love is patient."]]) {
+      await page.evaluate(({ requestId, delta }) => window.__assistantFixture.emit("ai://chat_stream", {
+        request_id: requestId, phase: "generating", delta, done: false,
+      }), { requestId: call.args.requestId, delta });
+      await page.waitForFunction(({ visible }) => [...document.querySelectorAll(
+        ".assistant-conversation .msg:not(.user) .msg-content")].at(-1)?.innerText.trim() === visible, { visible });
+      assert.equal(await button(page, "Stop").count(), 1, `"${visible}" is shown before generation finishes`);
+      assert.equal(await answer.locator(".type-cursor").count(), 1, "a streaming answer shows its typing cursor");
+    }
+    await finish(page, call.args.requestId, { delta: "", done: true });
+    await button(page, "Send").waitFor();
+    assert.equal((await answer.innerText()).trim(), "Love is patient.");
+    assert.equal(await answer.locator(".type-cursor").count(), 0);
+  }],
   ["Chat stop also cancels edit planning without falling back to another request", { global: true }, async (page) => {
     await page.evaluate(() => { window.__assistantFixture.hold = true; });
     await input(page).fill("Add that to my journal");
@@ -231,7 +249,7 @@ const cases = [
     const call = await page.evaluate(() => window.__assistantFixture.requests[0]);
     assert.equal(call.cmd, "assistant_chat");
     assert.equal(call.args.mode, "answer");
-    assert.deepEqual(call.args.context, { kind: "none" });
+    assert.deepEqual(call.args.context, { kind: "graph" });
     await button(page, "Stop").click();
     await panel(page).getByRole("alert").filter({ hasText: "Planning stopped" }).waitFor();
     assert.equal(await page.evaluate(() => window.__assistantFixture.requests.length), 1);
@@ -320,9 +338,11 @@ const cases = [
     wide = await geometry();
     assert.equal(Math.round(wide.history.width), 240);
   }],
-  ["Global Chat defaults to No notes and Answer without automatic web from research wording", { global: true }, async (page) => {
+  ["Global Chat defaults to Graph and Answer without automatic web from research wording", { global: true }, async (page) => {
     await focused(page);
-    assert.equal(await context(page).inputValue(), "none");
+    assert.equal(await context(page).inputValue(), "graph");
+    assert.equal((await context(page).locator("option:checked").innerText()).trim(), "Graph");
+    assert.equal(await context(page).locator("option", { hasText: "My graph" }).count(), 0);
     assert.equal(await mode(page).inputValue(), "answer");
     assert.equal(await composer(page).getByRole("combobox").count(), 3, "notes, mode and actions share the composer");
     assert.equal(await panel(page).getByRole("combobox", { name: "ASK action" }).count(), 1);
@@ -330,24 +350,21 @@ const cases = [
     assert.equal(await button(page, "Send").isDisabled(), true);
     let call = await send(page, "Research and verify this claim; search the internet for test results");
     assert.equal(call.cmd, "assistant_chat");
-    assert.deepEqual(call.args.context, { kind: "none" });
+    assert.deepEqual(call.args.context, { kind: "graph" });
     assert.equal(call.args.mode, "answer", "wording must not enable web behind the user's back");
     assert.deepEqual(call.args.history, []);
     assert.equal(await panel(page).locator(".web-source-chip").count(), 0);
-    await context(page).selectOption("graph");
-    call = await send(page, "Use my graph for this comparison");
-    assert.deepEqual(call.args.context, { kind: "graph" });
-    assert.equal(call.args.history.length, 2);
     await context(page).selectOption("none");
     call = await send(page, "Continue without any note context");
     assert.deepEqual(call.args.context, { kind: "none" });
-    assert.deepEqual(call.args.history, [
-      { role: "user", content: "Research and verify this claim; search the internet for test results" },
-      { role: "assistant", content: "Synthetic scoped answer." },
-    ], "No notes retains safe conversation but removes all note-backed turns");
+    assert.deepEqual(call.args.history, [], "No notes removes all note-backed turns");
+    await context(page).selectOption("graph");
+    call = await send(page, "Use my graph for this comparison");
+    assert.deepEqual(call.args.context, { kind: "graph" });
+    assert.equal(call.args.history.length, 4);
     await page.reload({ waitUntil: "networkidle" });
     await returnToChat(page);
-    assert.equal(await context(page).inputValue(), "none");
+    assert.equal(await context(page).inputValue(), "graph");
     assert.equal(await mode(page).inputValue(), "answer");
     call = await send(page, "A fresh graph session");
     assert.deepEqual(call.args.history, []);
@@ -375,7 +392,7 @@ const cases = [
       const call = await send(page, `A synthetic ${selected} question`);
       assert.equal(call.cmd, "assistant_chat", "Grafium orchestration is provider-independent");
       assert.equal(call.args.mode, selected);
-      assert.deepEqual(call.args.context, { kind: "none" });
+      assert.deepEqual(call.args.context, { kind: "graph" });
       assert.equal(Object.hasOwn(call.args, "tools"), false);
       assert.equal(Object.hasOwn(call.args, "webMode"), false);
       assert.equal(JSON.stringify(call.args).includes("DO_NOT_RENDER"), false);
@@ -668,7 +685,7 @@ const cases = [
     await returnToChat(page);
     assert.equal(await panel(page).locator(".msg").count(), 0);
     assert.equal(await input(page).inputValue(), "");
-    assert.equal(await context(page).inputValue(), "none");
+    assert.equal(await context(page).inputValue(), "graph");
     await page.evaluate(() => { window.__assistantFixture.hold = false; });
     const next = await send(page, "A new graph conversation");
     assert.deepEqual(next.args.history, []);

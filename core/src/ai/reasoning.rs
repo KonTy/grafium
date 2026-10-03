@@ -221,6 +221,34 @@ impl ThinkStreamFilter {
     }
 }
 
+/// Displays filtered answer deltas as they arrive while guaranteeing that the
+/// completed display equals the trimmed answer from [`ThinkStreamFilter::finish`]:
+/// leading whitespace is skipped and trailing whitespace waits for more text.
+#[derive(Debug, Default)]
+pub(crate) struct VisibleAnswer {
+    answer: String,
+    shown: usize,
+}
+
+impl VisibleAnswer {
+    /// Accepts a [`StreamStep::Answer`] delta and returns newly displayable text.
+    pub(crate) fn push(&mut self, delta: &str) -> Option<String> {
+        self.answer.push_str(delta);
+        let visible = self.answer.trim();
+        (visible.len() > self.shown).then(|| {
+            let text = visible[self.shown..].to_string();
+            self.shown = visible.len();
+            text
+        })
+    }
+
+    /// The remainder of the final answer, or `None` if the final answer does
+    /// not extend the text already displayed.
+    pub(crate) fn finish<'a>(&self, complete: &'a str) -> Option<&'a str> {
+        complete.strip_prefix(&self.answer.trim()[..self.shown])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +490,62 @@ mod tests {
         let step = f.push("answer<");
         // "answer" flushes; the trailing "<" is withheld.
         assert_eq!(step, StreamStep::Answer("answer".to_string()));
+    }
+
+    fn display(pieces: &[&str]) -> (Vec<String>, ThinkStripResult) {
+        let mut filter = ThinkStreamFilter::new();
+        let mut visible = VisibleAnswer::default();
+        let mut shown = Vec::new();
+        for piece in pieces {
+            if let StreamStep::Answer(delta) = filter.push(piece) {
+                shown.extend(visible.push(&delta));
+            }
+        }
+        let result = filter.finish();
+        let complete = match &result {
+            ThinkStripResult::Answer(answer) => answer.as_str(),
+            ThinkStripResult::ReasoningOnly => REASONING_ONLY_MESSAGE,
+        };
+        let rest = visible
+            .finish(complete)
+            .expect("display extends the final answer");
+        if !rest.is_empty() {
+            shown.push(rest.to_string());
+        }
+        (shown, result)
+    }
+
+    #[test]
+    fn visible_answer_streams_progressively_and_matches_the_trimmed_answer() {
+        let (shown, result) = display(&[
+            "<think>", "plan", "</think>", "\n\n", "Love", " is", "\n\n", "patient", ".", "\n",
+        ]);
+        assert_eq!(shown, ["Love", " is", "\n\npatient", "."]);
+        assert_eq!(result, ThinkStripResult::Answer(shown.concat()));
+    }
+
+    #[test]
+    fn visible_answer_releases_withheld_text_and_reasoning_only_messages() {
+        let (shown, result) = display(&["Use a <", "b>tag</b>"]);
+        assert_eq!(shown.concat(), "Use a <b>tag</b>");
+        assert_eq!(result, ThinkStripResult::Answer(shown.concat()));
+        let (shown, result) = display(&["起来"]);
+        assert_eq!(
+            shown,
+            ["起来"],
+            "a short answer withheld as a possible artifact"
+        );
+        assert_eq!(result, ThinkStripResult::Answer("起来".into()));
+        let (shown, result) = display(&["<think>", "only reasoning"]);
+        assert_eq!(result, ThinkStripResult::ReasoningOnly);
+        assert_eq!(shown, [REASONING_ONLY_MESSAGE]);
+    }
+
+    #[test]
+    fn visible_answer_rejects_a_final_answer_that_contradicts_the_display() {
+        let mut visible = VisibleAnswer::default();
+        assert_eq!(visible.push("  Shown"), Some("Shown".into()));
+        assert_eq!(visible.finish("Shown text"), Some(" text"));
+        assert_eq!(visible.finish("Different"), None);
     }
 }

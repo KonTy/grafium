@@ -36,10 +36,10 @@ async fn run(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let model = LocalLlm::load(path, Some(6144), Some(999))?;
     let messages = [ChatMessage {
         role: MessageRole::User,
-        content: "What is love? Answer in one short sentence.".into(),
+        content: "What is love? Answer in two short sentences.".into(),
     }];
     let options = CompletionOptions {
-        max_tokens: Some(32),
+        max_tokens: Some(64),
         temperature: Some(0.0),
         cancel: Some(Arc::new(AtomicBool::new(false))),
         ..Default::default()
@@ -51,7 +51,14 @@ async fn run(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
             cancel.store(true, Ordering::Relaxed);
         });
         let start = Instant::now();
-        let result = model.complete(&messages, &options).await;
+        let mut first_text = None;
+        let mut pieces = Vec::new();
+        let result = model
+            .complete_stream(&messages, &options, &mut |text| {
+                first_text.get_or_insert_with(|| start.elapsed());
+                pieces.push(text.to_owned());
+            })
+            .await;
         deadline.abort();
         let answer = result?;
         let status = model
@@ -60,7 +67,10 @@ async fn run(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "{}",
             serde_json::json!({
-                "round": round, "seconds": start.elapsed().as_secs_f64(),
+                "round": round,
+                "first_text_seconds": first_text.map(|time| time.as_secs_f64()),
+                "seconds": start.elapsed().as_secs_f64(),
+                "streamed_pieces": pieces.len(),
                 "on_gpu": status.on_gpu, "gpu_layers": status.gpu_layers,
                 "answer": answer,
             })
@@ -70,6 +80,9 @@ async fn run(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         if answer.trim().is_empty() {
             return Err("model returned no text".into());
+        }
+        if pieces.len() < 2 || pieces.concat().trim() != answer {
+            return Err("generated text was not streamed incrementally and completely".into());
         }
     }
     Ok(())

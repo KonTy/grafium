@@ -288,7 +288,8 @@ Long sources may be only partially covered; this is not a full-book review.",
                 ..Default::default()
             };
             let mut filter = crate::ai::reasoning::ThinkStreamFilter::new();
-            let mut progress = BufferedGenerationProgress::default();
+            let mut visible = crate::ai::reasoning::VisibleAnswer::default();
+            let mut generating = false;
             {
                 let mut on_token = |piece: &str| {
                     if cancel_requested(&cancel) {
@@ -296,12 +297,17 @@ Long sources may be only partially covered; this is not a full-book review.",
                     }
                     match filter.push(piece) {
                         crate::ai::reasoning::StreamStep::Answer(delta) => {
-                            progress.record(&delta, on_event)
+                            if let Some(text) = visible.push(&delta) {
+                                if !std::mem::replace(&mut generating, true) {
+                                    on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                                }
+                                on_event(AskStreamEvent::Delta(&text));
+                            }
                         }
                         crate::ai::reasoning::StreamStep::Thinking => {
                             on_event(AskStreamEvent::Phase(AskPhase::Thinking))
                         }
-                        _ => {}
+                        crate::ai::reasoning::StreamStep::Idle => {}
                     }
                 };
                 llm.complete_stream(&request.messages, &options, &mut on_token)
@@ -316,8 +322,17 @@ Long sources may be only partially covered; this is not a full-book review.",
                     crate::ai::reasoning::REASONING_ONLY_MESSAGE.into()
                 }
             };
-            on_event(AskStreamEvent::Phase(AskPhase::Generating));
-            on_event(AskStreamEvent::Delta(&answer));
+            let rest = visible.finish(&answer).ok_or_else(|| {
+                CoreError::Other(
+                    "The streamed answer did not match the completed answer. Try again.".into(),
+                )
+            })?;
+            if !rest.is_empty() {
+                if !generating {
+                    on_event(AskStreamEvent::Phase(AskPhase::Generating));
+                }
+                on_event(AskStreamEvent::Delta(rest));
+            }
             outcome.sources = build_sources(&request.entries, &answer);
         }
         if web_mode == ResearchWebMode::Off {

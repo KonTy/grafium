@@ -1116,3 +1116,113 @@ async fn reading_research_cancellation_interrupts_tokenizer_notes_and_browser() 
         }
     }
 }
+
+struct StreamingModel {
+    pieces: Vec<&'static str>,
+    streamed: AtomicUsize,
+}
+
+impl LlmProvider for Arc<StreamingModel> {
+    fn name(&self) -> &str {
+        "synthetic-streaming-model"
+    }
+    fn health_check(&self) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn context_window(&self) -> Option<usize> {
+        Some(6144)
+    }
+    fn complete<'a>(
+        &'a self,
+        _messages: &'a [ChatMessage],
+        _options: &'a CompletionOptions,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async { Err(CoreError::Other("Chat answers must stream".into())) })
+    }
+    fn complete_stream<'a>(
+        &'a self,
+        _messages: &'a [ChatMessage],
+        _options: &'a CompletionOptions,
+        on_token: &'a mut (dyn FnMut(&str) + Send),
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            for piece in &self.pieces {
+                on_token(piece);
+                self.streamed.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(self.pieces.concat().trim().to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn assistant_answer_streams_visible_text_before_generation_finishes() {
+    let model = Arc::new(StreamingModel {
+        pieces: vec![
+            "<think>",
+            "PRIVATE-PLAN",
+            "</think>",
+            "\n\n",
+            "Love",
+            " is",
+            "\n\n",
+            "patient",
+            ".",
+            "\n",
+        ],
+        streamed: AtomicUsize::new(0),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = KnowledgeEngine::new(
+        dir.path(),
+        AiConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    engine.llm = Some(Box::new(model.clone()));
+    let db = crate::db::Database::in_memory().unwrap();
+    let source = AssistantSource::capture(
+        &db,
+        dir.path(),
+        &crate::knowledge::assistant_scope::AssistantContext::None {},
+    )
+    .unwrap();
+    let mut deltas = Vec::new();
+    let mut generating_at = None;
+    engine
+        .assistant_chat_using(
+            &source,
+            "What is love?",
+            &[],
+            "synthetic",
+            AssistantMode::Answer,
+            &config(),
+            &FakeBrowser::default(),
+            Some(Arc::new(AtomicBool::new(false))),
+            &mut |event| match event {
+                AskStreamEvent::Delta(text) => {
+                    deltas.push((model.streamed.load(Ordering::SeqCst), text.to_string()))
+                }
+                AskStreamEvent::Phase(AskPhase::Generating) => {
+                    generating_at.get_or_insert(deltas.len());
+                }
+                _ => {}
+            },
+        )
+        .await
+        .unwrap();
+    let shown: Vec<_> = deltas.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(shown, ["Love", " is", "\n\npatient", "."]);
+    assert_eq!(
+        generating_at,
+        Some(0),
+        "Generating precedes the first answer text"
+    );
+    assert!(
+        deltas[0].0 < model.pieces.len(),
+        "answer text must reach Chat while the model is still generating"
+    );
+    assert!(shown.iter().all(|text| !text.contains("PRIVATE-PLAN")));
+}

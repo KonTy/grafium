@@ -26,6 +26,23 @@ use crate::types::{
 };
 
 pub const ALL_GPU_LAYERS: u32 = super::llama_shared::OFFLOAD_ALL_LAYERS;
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+fn validate_prompt(messages: &[ChatMessage], options: &CompletionOptions) -> Result<()> {
+    resources::validate_prompt_bytes(messages.iter().fold(
+        options.system_prompt.as_ref().map_or(0, String::len),
+        |total, message| total.saturating_add(message.content.len()),
+    ))
+}
+
+fn generated_text(output: crate::native::worker::WorkerOutput) -> Result<String> {
+    match output {
+        crate::native::worker::WorkerOutput::Llm(output) => Ok(output),
+        _ => Err(RuntimeError::Other(
+            "native AI worker returned an unexpected result for an LLM request".to_string(),
+        )),
+    }
+}
 
 /// Resolves and validates a GGUF model, then runs each completion in a
 /// disposable host worker process.
@@ -107,30 +124,60 @@ impl LlmProvider for LocalLlm {
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let prompt_bytes = messages.iter().fold(
-                    options.system_prompt.as_ref().map_or(0, String::len),
-                    |total, message| total.saturating_add(message.content.len()),
-                );
-                resources::validate_prompt_bytes(prompt_bytes)?;
-                match crate::native::worker::execute(
+                validate_prompt(&messages, &options)?;
+                generated_text(crate::native::worker::execute(
                     crate::native::worker::WorkerRequest::Llm {
                         model_path,
                         context_size,
                         gpu_layers,
                         messages,
                         options,
+                        stream: false,
                     },
-                    Duration::from_secs(30 * 60),
-                )? {
-                    crate::native::worker::WorkerOutput::Llm(output) => Ok(output),
-                    _ => Err(RuntimeError::Other(
-                        "native AI worker returned an unexpected result for an LLM request"
-                            .to_string(),
-                    )),
-                }
+                    GENERATION_TIMEOUT,
+                )?)
             })
             .await
             .map_err(|e| RuntimeError::Other(format!("LLM worker task panicked: {e}")))?
+        })
+    }
+
+    fn complete_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        options: &'a CompletionOptions,
+        on_token: &'a mut (dyn FnMut(&str) + Send),
+    ) -> BoxFuture<'a, Result<String>> {
+        let model_path = self.model_path.clone();
+        let context_size = self.context_size;
+        let gpu_layers = self.gpu_layers;
+        let messages = messages.to_vec();
+        let options = options.clone();
+
+        Box::pin(async move {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let generation = tokio::task::spawn_blocking(move || {
+                validate_prompt(&messages, &options)?;
+                generated_text(crate::native::worker::execute_streaming(
+                    crate::native::worker::WorkerRequest::Llm {
+                        model_path,
+                        context_size,
+                        gpu_layers,
+                        messages,
+                        options,
+                        stream: true,
+                    },
+                    GENERATION_TIMEOUT,
+                    // A closed receiver means the caller abandoned this request.
+                    &mut |text| drop(sender.send(text.to_owned())),
+                )?)
+            });
+            while let Some(text) = receiver.recv().await {
+                on_token(&text);
+            }
+            generation
+                .await
+                .map_err(|e| RuntimeError::Other(format!("LLM worker task panicked: {e}")))?
         })
     }
 
@@ -206,11 +253,7 @@ impl LlmProvider for LocalLlm {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 crate::native::worker::check_cancelled(options.cancel.as_deref())?;
-                let prompt_bytes = messages.iter().fold(
-                    options.system_prompt.as_ref().map_or(0, String::len),
-                    |total, message| total.saturating_add(message.content.len()),
-                );
-                resources::validate_prompt_bytes(prompt_bytes)?;
+                validate_prompt(&messages, &options)?;
                 match crate::native::worker::execute(
                     crate::native::worker::WorkerRequest::CountPrompt {
                         model_path,
@@ -375,6 +418,7 @@ pub(crate) fn complete_in_process(
     gpu_layers: u32,
     messages: &[ChatMessage],
     options: &CompletionOptions,
+    on_text: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     ensure_slot(slot, model_path, context_size, gpu_layers)?;
     let slot = slot
@@ -394,6 +438,7 @@ pub(crate) fn complete_in_process(
         &tokens,
         options,
         slot.device.clone(),
+        on_text,
     )
 }
 
@@ -544,6 +589,7 @@ fn generate(
     tokens: &[LlamaToken],
     options: &CompletionOptions,
     device: Option<native_gpu::Device>,
+    on_text: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     resources::validate_inference_headroom("local LLM inference", context_bytes)?;
     let ctx_params = native_gpu::context_params(ctx_size, false);
@@ -591,6 +637,8 @@ fn generate(
     let mut sampler = build_sampler(model, options);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut output = String::new();
+    let stops = options.stop.as_deref().unwrap_or_default();
+    let mut released = TextRelease::default();
     // Absolute position in the sequence, which after a chunked prefill is the
     // full prompt length rather than the size of the last batch decoded.
     let mut n_cur = tokens.len() as i32;
@@ -610,14 +658,17 @@ fn generate(
             .map_err(|e| RuntimeError::Other(format!("failed to decode generated token: {e}")))?;
         output.push_str(&piece);
 
-        if let Some(hit_len) = options
-            .stop
-            .as_ref()
-            .and_then(|stops| stops.iter().find(|s| output.ends_with(s.as_str())))
+        if let Some(hit_len) = stops
+            .iter()
+            .find(|s| output.ends_with(s.as_str()))
             .map(|s| s.len())
         {
             output.truncate(output.len() - hit_len);
             break;
+        }
+        let ready = released.ready(&output, stops);
+        if !ready.is_empty() {
+            on_text(ready)?;
         }
 
         batch.clear();
@@ -629,7 +680,133 @@ fn generate(
             .map_err(|e| RuntimeError::Other(format!("llama.cpp decode failed: {e}")))?;
     }
 
+    let rest = released.finish(&output)?;
+    if !rest.is_empty() {
+        on_text(rest)?;
+    }
     Ok(output.trim().to_string())
+}
+
+/// Releases generated text in order without exposing a stop sequence: a
+/// trailing fragment that could still grow into one is withheld until the
+/// next token resolves it. Everything released is a prefix of the final,
+/// stop-truncated output.
+#[derive(Debug, Default)]
+struct TextRelease {
+    released: usize,
+}
+
+impl TextRelease {
+    /// `output` only grows between calls, except by removing a completed stop.
+    fn ready<'o>(&mut self, output: &'o str, stops: &[String]) -> &'o str {
+        let end = output.len() - pending_stop_prefix(output, stops);
+        if end <= self.released {
+            return "";
+        }
+        let start = std::mem::replace(&mut self.released, end);
+        &output[start..end]
+    }
+
+    fn finish<'o>(&mut self, output: &'o str) -> Result<&'o str> {
+        let rest = output.get(self.released..).ok_or_else(|| {
+            RuntimeError::Other("Streamed text no longer matches the generated answer".into())
+        })?;
+        self.released = output.len();
+        Ok(rest)
+    }
+}
+
+/// Length of the longest suffix of `output` that is an incomplete stop sequence.
+fn pending_stop_prefix(output: &str, stops: &[String]) -> usize {
+    stops
+        .iter()
+        .filter_map(|stop| {
+            (1..stop.len())
+                .rev()
+                .filter(|&length| stop.is_char_boundary(length))
+                .find(|&length| output.ends_with(&stop[..length]))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    /// Feeds pieces through the same order of operations as `generate`.
+    fn stream(pieces: &[&str], stops: &[&str]) -> (Vec<String>, String) {
+        let stops: Vec<String> = stops.iter().map(|stop| stop.to_string()).collect();
+        let mut release = TextRelease::default();
+        let mut output = String::new();
+        let mut shown = Vec::new();
+        for piece in pieces {
+            output.push_str(piece);
+            if let Some(stop) = stops.iter().find(|stop| output.ends_with(stop.as_str())) {
+                output.truncate(output.len() - stop.len());
+                break;
+            }
+            let ready = release.ready(&output, &stops);
+            if !ready.is_empty() {
+                shown.push(ready.to_string());
+            }
+        }
+        let rest = release.finish(&output).unwrap();
+        if !rest.is_empty() {
+            shown.push(rest.to_string());
+        }
+        (shown, output)
+    }
+
+    #[test]
+    fn text_is_released_per_token_and_reassembles_the_untrimmed_output() {
+        let (shown, output) = stream(&["\n", "Love", " is", " patient", ".\n"], &[]);
+        assert_eq!(shown, ["\n", "Love", " is", " patient", ".\n"]);
+        assert_eq!(shown.concat(), output);
+    }
+
+    #[test]
+    fn a_stop_sequence_split_across_tokens_is_never_released() {
+        let (shown, output) = stream(&["Answer", "\n\nUs", "er:", " ignored"], &["\n\nUser:"]);
+        assert_eq!(output, "Answer");
+        assert_eq!(shown.concat(), "Answer");
+        assert!(shown.iter().all(|text| !text.contains("Us")));
+    }
+
+    #[test]
+    fn a_withheld_partial_stop_is_released_when_it_does_not_complete() {
+        let (shown, output) = stream(&["A <", "|e", "nd", "ing"], &["<|end|>"]);
+        assert_eq!(output, "A <|ending");
+        assert_eq!(shown, ["A ", "<|ending"]);
+        let (shown, output) = stream(&["Done <|e"], &["<|end|>"]);
+        assert_eq!(
+            shown,
+            ["Done ", "<|e"],
+            "generation ended before the stop completed"
+        );
+        assert_eq!(shown.concat(), output);
+    }
+
+    #[test]
+    fn multibyte_stop_prefixes_stay_on_character_boundaries() {
+        let (shown, output) = stream(&["Café ", "🙂", "🙃 tail"], &["🙂🙂"]);
+        assert_eq!(shown.concat(), output);
+        assert_eq!(output, "Café 🙂🙃 tail");
+        let (shown, output) = stream(&["Café ", "🙂", "🙂"], &["🙂🙂"]);
+        assert_eq!(
+            (shown.concat(), output.as_str()),
+            ("Café ".to_string(), "Café ")
+        );
+    }
+
+    #[test]
+    fn released_text_never_overlaps_a_completed_stop() {
+        for split in 1.."xab".len() {
+            let (shown, output) = stream(&[&"xab"[..split], &"xab"[split..]], &["ab", "b"]);
+            assert_eq!(shown.concat(), output, "split at {split}");
+            assert_eq!(output, "x");
+        }
+    }
 }
 
 #[cfg(test)]

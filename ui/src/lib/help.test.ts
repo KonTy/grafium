@@ -31,6 +31,12 @@ describe("contextual help", () => {
       expect(chatHelp).toContain(phrase);
     }
   });
+  it("documents streamed answers and the Graph default context", () => {
+    for (const phrase of ["Answers appear as they are written", "built-in local", "Main Chat starts with\n  **Graph**", "**No notes**"]) {
+      expect(chatHelp).toContain(phrase);
+    }
+    expect(chatHelp).not.toContain("My graph");
+  });
   it("documents docked, resizable conversation history in Chat help", () => {
     expect(helpPageTitle("chat")).toBe("Help - Chat");
     for (const phrase of ["docked immediately", "Resize conversations", "Double-click", "Alt+W", "overlay drawer"]) {

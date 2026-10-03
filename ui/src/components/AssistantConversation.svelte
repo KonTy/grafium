@@ -25,7 +25,7 @@
   import { assistantContextInfo, type AssistantContext, type AssistantContextInfo, type AssistantMode } from "../lib/assistant";
   import {
     assistantConversationChanges, updateAssistantConversation, assistantConversationRunning,
-    sendAssistantQuestion, stopAssistantConversation, newAssistantConversation,
+    sendAssistantQuestion, stopAssistantConversation, newAssistantConversation, GRAPH_CONTEXT_LABEL,
     type AssistantThread,
   } from "../lib/assistantConversations";
   import { readingSelection } from "../lib/readingSelection";
@@ -268,7 +268,7 @@
     let label = "";
     const title = info?.pageTitle || thread.sourcePageTitle || "Source";
     if (kind === "none") { context = { kind: "none" }; label = "No notes"; }
-    else if (kind === "graph") { context = { kind: "graph" }; label = "My graph"; }
+    else if (kind === "graph") { context = { kind: "graph" }; label = GRAPH_CONTEXT_LABEL; }
     else if (kind === "page" && pageId) { context = { kind: "page", pageId }; label = `${pageLabel} · ${title}`; }
     else if (kind === "book" && info?.book) { context = { kind: "book", pageId: info.book.pageId }; label = `Whole book · ${info.book.title}`; }
     else if (kind === "book" && info?.isBook && pageId) { context = { kind: "book", pageId }; label = `Whole book · ${title}`; }
@@ -615,7 +615,7 @@
             <option value="section" disabled={!info?.section}>Section / Chapter</option>
             <option value="page" disabled={!contextPageId}>{pageLabel}</option>
             <option value="book" disabled={!info?.book && !info?.isBook}>Whole book</option>
-            <option value="graph">My graph</option>
+            <option value="graph">{GRAPH_CONTEXT_LABEL}</option>
             <option value="none">No notes</option>
           </select>
         </label>

@@ -33,7 +33,7 @@ pub use crate::transcription::TranscribeProgress as WorkerProgress;
 pub enum WorkerProgress {}
 
 pub const WORKER_ARGUMENT: &str = "--model-runtime-native-worker";
-const PROTOCOL_VERSION: &str = "3";
+const PROTOCOL_VERSION: &str = "4";
 static HOST: OnceLock<NativeHostConfig> = OnceLock::new();
 static SUPERVISOR: OnceLock<Supervisor<WorkerKey>> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -347,6 +347,8 @@ pub enum WorkerRequest {
         gpu_layers: u32,
         messages: Vec<ChatMessage>,
         options: CompletionOptions,
+        /// Send generated text as ordered `Text` events before the result.
+        stream: bool,
     },
     #[cfg(feature = "llm-local")]
     CountPrompt {
@@ -448,9 +450,19 @@ pub enum WorkerOutput {
 #[serde(untagged)]
 enum WorkerEvent {
     Progress(WorkerProgress),
-    Warning { warning: String },
-    GpuInfo { gpu_info: crate::gpu_info::GpuInfo },
-    Resident { resident: ResidentModel },
+    Warning {
+        warning: String,
+    },
+    GpuInfo {
+        gpu_info: crate::gpu_info::GpuInfo,
+    },
+    Resident {
+        resident: ResidentModel,
+    },
+    /// Provisional generated text; discarded by callers if the request fails.
+    Text {
+        text: String,
+    },
 }
 
 type WorkerResponse = Response<WorkerOutput, WorkerEvent>;
@@ -623,13 +635,32 @@ impl WorkerKey {
 }
 
 pub fn execute(request: WorkerRequest, timeout: Duration) -> Result<WorkerOutput> {
-    execute_with_progress(request, timeout, &mut |_| {})
+    execute_with_events(request, timeout, &mut |_| {}, &mut |_| {})
 }
 
 pub fn execute_with_progress(
+    request: WorkerRequest,
+    timeout: Duration,
+    on_progress: &mut dyn FnMut(WorkerProgress),
+) -> Result<WorkerOutput> {
+    execute_with_events(request, timeout, on_progress, &mut |_| {})
+}
+
+/// Delivers a streaming request's generated text in order before its output.
+/// Text is provisional: discard it if this returns an error.
+pub fn execute_streaming(
+    request: WorkerRequest,
+    timeout: Duration,
+    on_text: &mut dyn FnMut(&str),
+) -> Result<WorkerOutput> {
+    execute_with_events(request, timeout, &mut |_| {}, on_text)
+}
+
+fn execute_with_events(
     mut request: WorkerRequest,
     timeout: Duration,
     on_progress: &mut dyn FnMut(WorkerProgress),
+    on_text: &mut dyn FnMut(&str),
 ) -> Result<WorkerOutput> {
     check_cancelled(request_cancel(&request))?;
     if SHUTDOWN.load(Ordering::Acquire) {
@@ -662,6 +693,7 @@ pub fn execute_with_progress(
         &mut |event| match event {
             WorkerEvent::Progress(progress) => on_progress(progress),
             WorkerEvent::Warning { warning } => remember_warning(&warning),
+            WorkerEvent::Text { text } => on_text(&text),
             WorkerEvent::GpuInfo { gpu_info } => crate::gpu_info::remember_native_gpu(gpu_info),
             WorkerEvent::Resident { resident } => {
                 confirmed_resident = supervisor.worker_pid().map(|worker_pid| ResidentStatus {
@@ -982,6 +1014,22 @@ fn emit_progress(progress: crate::transcription::TranscribeProgress) {
     }
 }
 
+#[cfg(feature = "llm-local")]
+fn emit_text(text: &str) -> Result<()> {
+    let frame = WorkerResponse {
+        output: None,
+        error: None,
+        progress: Some(WorkerEvent::Text { text: text.into() }),
+    };
+    // A lost piece would silently corrupt the answer assembled by the host.
+    protocol::write_frame(
+        &mut io::stdout().lock(),
+        &frame,
+        protocol::DEFAULT_RESPONSE_LIMIT,
+    )
+    .map_err(|error| RuntimeError::Other(format!("Could not stream generated text: {error}")))
+}
+
 fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutput> {
     match request {
         #[cfg(feature = "llm-local")]
@@ -991,6 +1039,7 @@ fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutp
             gpu_layers,
             messages,
             options,
+            stream,
         } => crate::native::llm::complete_in_process(
             &mut state.llm,
             &model_path,
@@ -998,6 +1047,7 @@ fn dispatch(state: &mut ChildState, request: WorkerRequest) -> Result<WorkerOutp
             gpu_layers,
             &messages,
             &options,
+            &mut |text| if stream { emit_text(text) } else { Ok(()) },
         )
         .map(WorkerOutput::Llm),
         #[cfg(feature = "llm-local")]
@@ -1224,6 +1274,7 @@ mod tests {
             gpu_layers,
             messages,
             options,
+            stream: true,
         };
         let validation = WorkerRequest::ValidateLlm {
             model_path,
@@ -1271,6 +1322,39 @@ mod tests {
                 .into_output()
                 .is_err());
         }
+    }
+
+    #[test]
+    fn streamed_text_crosses_ipc_in_order_without_becoming_another_event() {
+        for text in [
+            "Love",
+            " is",
+            " 🙂 patient",
+            "",
+            "{\"warning\":\"not a warning\"}",
+        ] {
+            let response = WorkerResponse {
+                output: None,
+                error: None,
+                progress: Some(WorkerEvent::Text { text: text.into() }),
+            };
+            let response: WorkerResponse =
+                serde_json::from_slice(&serde_json::to_vec(&response).unwrap()).unwrap();
+            let protocol::Event::Progress(WorkerEvent::Text { text: decoded }) =
+                response.into_event().unwrap()
+            else {
+                panic!("streamed text was decoded as a different event")
+            };
+            assert_eq!(decoded, text);
+        }
+        let warning: WorkerResponse = serde_json::from_slice(
+            br#"{"output":null,"error":null,"progress":{"warning":"Synthetic"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            warning.into_event().unwrap(),
+            protocol::Event::Progress(WorkerEvent::Warning { .. })
+        ));
     }
 
     #[test]

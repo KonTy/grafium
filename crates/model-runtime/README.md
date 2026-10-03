@@ -164,8 +164,14 @@ exhausting the user's RAM or VRAM.
 To check a real GPU deliberately, `cargo run -p model-runtime --release
 --features llm-local-vulkan,media-vulkan --example gpu_smoke -- /path/to/model.gguf`
 uses synthetic text, a temporary recovery journal, the normal worker admission
-checks, and two 32-token requests with a 60-second cancellation deadline each.
-It does not import the model or open graphs. It reports cold/warm elapsed time
-and requires confirmed GPU residency rather than treating requested offload as
+checks, and two streamed 64-token requests with a 60-second cancellation deadline each.
+It does not import the model or open graphs. It reports cold/warm time to first
+streamed text and total time, requires the streamed pieces to reassemble the final
+answer, and requires confirmed GPU residency rather than treating requested offload as
 proof. Ordinary tests cover the fitter's `-1` all-layers sentinel, partial
 offload, and CPU-only results without loading models.
+
+Native generation streams text through ordered worker `Text` events when the
+caller uses `complete_stream`. Stop sequences are withheld until they can no
+longer match, so streamed text never contains one; streamed text is provisional
+until the request succeeds.

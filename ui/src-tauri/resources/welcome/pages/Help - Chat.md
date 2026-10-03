@@ -32,7 +32,12 @@ Markdown and sources, without the decorative icons.
   While an answer, edit plan, or action analysis is running, the same control
   becomes a **Stop** square. It cancels that request; partial answers stay visible.
   Saving an already approved change is not interrupted.
-- **Notes context:** choose which notes to include. **No notes** excludes note
+- **Answers appear as they are written**, including from the built-in local
+  model, so you can start reading before generation finishes. Reasoning-model
+  "thinking" text is never shown; only the answer itself streams.
+- **Notes context:** choose which notes to include. Main Chat starts with
+  **Graph**, which retrieves bounded relevant excerpts from this graph and sends
+  them with your question to the configured model. **No notes** excludes note
   retrieval; **This page**, **Selection**, and the other choices set explicit scope.
 - **Answer mode:** choose **Answer — no web**, **Web search**, or **Deep web research**.
 - **Actions:** choose a Summary, Explain, or Compare prompt, or a reviewable

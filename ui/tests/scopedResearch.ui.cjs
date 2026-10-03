@@ -136,8 +136,8 @@ const cases = [
     assert.equal(await context(page).inputValue(), "section", "reopening Chat preserves the selected conversation");
     await page.locator("#chat-switcher").getByRole("button", { name: "New chat", exact: true }).click();
     await page.waitForFunction(() =>
-      document.querySelector('.chat-view select[aria-label="Context"]')?.value === "none");
-    assert.equal(await context(page).inputValue(), "none", "an explicit new chat starts without source context");
+      document.querySelector('.chat-view select[aria-label="Context"]')?.value === "graph");
+    assert.equal(await context(page).inputValue(), "graph", "an explicit new chat starts with the whole graph, not the source page");
     assert.equal(await mode(page).inputValue(), "answer");
     assert.equal(await panel(page).locator(".msg").count(), 0, "source turns do not leak into global Chat");
     assert.equal(await input(page).isEnabled(), true, "the independent global composer is not locked by the source request");

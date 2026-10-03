@@ -35,8 +35,10 @@ function deferred() {
 }
 
 describe("one conversation lifecycle for both placements", () => {
-  it("defaults global to no notes and sources to the current page or whole book, with no web", () => {
-    expect(getGlobalConversation(graphPath)).toMatchObject({ context: { kind: "none" }, mode: "answer" });
+  it("defaults global to the whole graph and sources to the current page or whole book, with no web", () => {
+    expect(getGlobalConversation(graphPath)).toMatchObject({
+      context: { kind: "graph" }, contextLabel: "Graph", mode: "answer",
+    });
     expect(getSourceConversation(graphPath, "day", "2026-09-16")).toMatchObject({
       context: { kind: "page", pageId: "day" }, contextLabel: "2026-09-16", mode: "answer",
     });
@@ -106,6 +108,13 @@ describe("one conversation lifecycle for both placements", () => {
     await sendAssistantQuestion(source);
     expect(mocks.chat.mock.calls[2][0].history).toEqual([
       { role: "user", content: "General question" }, { role: "assistant", content: "A complete answer." },
+    ]);
+    source.context = { kind: "graph" };
+    source.draft = "Back to my notes";
+    await sendAssistantQuestion(source);
+    expect(mocks.chat.mock.calls[3][0].history.map((turn: { content: string }) => turn.content)).toEqual([
+      "Question about private notes", "A complete answer.", "General question", "A complete answer.",
+      "General follow-up", "A complete answer.",
     ]);
   });
 
@@ -219,9 +228,10 @@ describe("one conversation lifecycle for both placements", () => {
     newAssistantConversation(source);
     expect(source).toMatchObject({ context: { kind: "book", pageId: "book" }, mode: "answer", messages: [], history: [], draft: "" });
     expect(global.draft).toBe("My global draft");
-    global.context = { kind: "graph" };
+    global.context = { kind: "none" };
+    global.contextLabel = "No notes";
     newAssistantConversation(global);
-    expect(global.context).toEqual({ kind: "none" });
+    expect(global).toMatchObject({ context: { kind: "graph" }, contextLabel: "Graph" });
   });
 
   it("reports empty and incomplete streams rather than displaying a successful blank answer", async () => {

@@ -56,8 +56,15 @@ const sourceConversations = new Map<string, string>();
 export const assistantConversationChanges = writable(0);
 export function updateAssistantConversation(): void { assistantConversationChanges.update((version) => version + 1); }
 
+export const GRAPH_CONTEXT_LABEL = "Graph";
+
 function defaultContext(pageId: string | null, isBook: boolean): AssistantContext {
-  return pageId ? { kind: isBook ? "book" : "page", pageId } : { kind: "none" };
+  return pageId ? { kind: isBook ? "book" : "page", pageId } : { kind: "graph" };
+}
+
+function sourceContextLabel(thread: AssistantThread): string {
+  if (thread.sourcePageId) return thread.sourcePageTitle;
+  return thread.context.kind === "none" ? "No notes" : GRAPH_CONTEXT_LABEL;
 }
 
 function conversation(graphPath: string, pageId: string | null, title: string, isBook: boolean): AssistantThread {
@@ -85,7 +92,7 @@ function blankThread(
   return {
     id, title: "", titleIsCustom: false,
     graphPath, sourcePageId: pageId, sourcePageTitle: title, sourceIsBook: isBook,
-    context: defaultContext(pageId, isBook), contextLabel: pageId ? title : "No notes",
+    context: defaultContext(pageId, isBook), contextLabel: pageId ? title : GRAPH_CONTEXT_LABEL,
     mode: "answer", messages: [], history: [], historyContexts: [], draft: "", selection: null, selectionError: null,
     state: initialState(), error: null, note: "", requestId: null, generation: 0, pendingIndex: null, runContext: null,
     queuePosition: 0,
@@ -126,11 +133,14 @@ export async function sendAssistantQuestion(
     updateAssistantConversation();
     return;
   }
+  // The conversation keeps every turn; each request filters what it may send.
+  const priorHistory = thread.history.map((turn) => ({ ...turn }));
+  const priorContexts = thread.history.map((_, index) =>
+    copyAssistantContext(thread.historyContexts[index] ?? thread.context));
   // "No notes" must not smuggle earlier note-backed answers into the model through history.
-  const eligible = thread.history.map((turn, index) => ({ turn, context: thread.historyContexts[index] }))
-    .filter((entry) => frozenContext.kind !== "none" || entry.context?.kind === "none");
-  const history = eligible.map(({ turn }) => ({ ...turn }));
-  const historyContexts = eligible.map((entry) => copyAssistantContext(entry.context ?? thread.context));
+  const history = priorHistory
+    .filter((_, index) => frozenContext.kind !== "none" || priorContexts[index].kind === "none")
+    .map((turn) => ({ ...turn }));
   const mode = thread.mode;
   const generation = ++thread.generation;
   const requestId = crypto.randomUUID();
@@ -169,8 +179,8 @@ export async function sendAssistantQuestion(
         finish("The model returned no answer. Try again or check your provider in Settings.");
         return;
       }
-      thread.history = [...history, { role: "user", content: question }, { role: "assistant", content: answer.content }];
-      thread.historyContexts = [...historyContexts, copyAssistantContext(frozenContext), copyAssistantContext(frozenContext)];
+      thread.history = [...priorHistory, { role: "user", content: question }, { role: "assistant", content: answer.content }];
+      thread.historyContexts = [...priorContexts, copyAssistantContext(frozenContext), copyAssistantContext(frozenContext)];
       dispatch(thread, { type: "done", at: Date.now() });
       if (shouldAutoName) void autoNameConversation(thread, question, answer.content, generation);
     }
@@ -288,7 +298,7 @@ export function newAssistantConversation(thread: AssistantThread): void {
   thread.runContext = null;
   thread.pendingIndex = null;
   thread.context = defaultContext(thread.sourcePageId, thread.sourceIsBook);
-  thread.contextLabel = thread.sourcePageId ? thread.sourcePageTitle : "No notes";
+  thread.contextLabel = sourceContextLabel(thread);
   thread.mode = "answer";
   thread.selection = null;
   thread.selectionError = null;
@@ -440,7 +450,7 @@ export async function restoreAssistantConversations(graphPath: string): Promise<
     thread.titleIsCustom = full.title.trim().length > 0;
     thread.mode = parseMode(full.mode);
     thread.context = parseContext(full.contextJson);
-    thread.contextLabel = thread.sourcePageId ? thread.sourcePageTitle : "No notes";
+    thread.contextLabel = sourceContextLabel(thread);
     thread.messages = full.messages.map((message) => ({
       role: message.role === "assistant" ? "assistant" : "user",
       content: message.content,
