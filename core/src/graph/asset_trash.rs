@@ -63,13 +63,18 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<()> {
         let to = std::ffi::CString::new(destination.as_os_str().as_bytes())
             .map_err(|_| error("Invalid attachment path"))?;
         // SAFETY: both C strings remain alive and NUL-terminated for the call.
+        // Android's libc declares the flag as c_int; renameat2 takes c_uint.
+        #[cfg(target_os = "android")]
+        let flags = libc::RENAME_NOREPLACE as libc::c_uint;
+        #[cfg(target_os = "linux")]
+        let flags = libc::RENAME_NOREPLACE;
         let result = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
                 from.as_ptr(),
                 libc::AT_FDCWD,
                 to.as_ptr(),
-                libc::RENAME_NOREPLACE,
+                flags,
             )
         };
         if result != 0 {
