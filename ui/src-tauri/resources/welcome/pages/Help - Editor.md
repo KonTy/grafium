@@ -2,8 +2,17 @@
 
 Press **F1** while editing for quick editor help.
 
-- **Enter** creates a block; **Shift+Enter** adds a line inside it.
-- **Tab** indents; **Shift+Tab** outdents.
+- **Enter** creates a block; **Shift+Enter** adds a line inside it. At the end
+  of a block that shows its children, Enter starts its first child; at the very
+  start of a block, it adds an empty block above. The new block is saved where
+  you see it, so it stays there after a restart.
+- **Tab** indents; **Shift+Tab** outdents. An outdented block moves below its
+  old parent's remaining children, and the guide lines follow it immediately.
+- Deleting a block removes only that block: **Backspace** or **Delete** in an
+  empty block, or **Delete** on selected blocks. Its children move up into its
+  place with their own children, even when they were folded. **Undo** puts the
+  block and its children back. **Cut** still moves the whole branch, including
+  folded children, because that is what it copies.
 - **Ctrl/Cmd+Alt+Shift+B** formats selected text as bold Markdown.
   **Ctrl/Cmd+Alt+B** instead toggles Bionic reading without editing the source.
 - Click the compact triangle beside a heading to collapse or expand its

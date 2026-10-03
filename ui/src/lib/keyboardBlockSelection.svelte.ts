@@ -16,7 +16,7 @@ export interface SelectionPage {
   focusCursor(blockId: string, edge: "start" | "end", isCurrent: () => boolean): Promise<void>;
   reveal(blockId: string): Promise<void>;
   select(ids: Set<string>): void;
-  snapshots(ids: Set<string>): Block[];
+  snapshots(ids: Set<string>, withDescendants: boolean): Block[];
   clipboard(ids: Set<string>): ClipboardBlock[];
   reload(): Promise<void>;
   indent(direction: "in" | "out"): Promise<void>;
@@ -186,12 +186,18 @@ export function createKeyboardBlockSelection(
     showToast("Selected blocks copied", "success");
   }
 
-  async function remove() {
+  /**
+   * Delete removes only the selected rows: a selected parent's unselected
+   * children move up into its place. Cut copies whole branches, so it also
+   * removes the descendants it put on the clipboard.
+   */
+  async function remove(options: { withDescendants?: boolean } = {}) {
     if (!session || busy || pending) return;
+    const withDescendants = !!options.withDescendants;
     const selected = [...groups()].map(([pageId, ids]) => {
       const page = pages.get(pageId);
       if (!page) throw new Error("A selected entry is no longer available");
-      return { pageId, blocks: page.snapshots(ids) };
+      return { pageId, blocks: page.snapshots(ids, withDescendants) };
     });
     const plans = selected.map(({ pageId, blocks }) => {
       const page = pages.get(pageId)!;
@@ -217,7 +223,7 @@ export function createKeyboardBlockSelection(
     busy = true;
     try {
       try {
-        await deleteBlockSelection(selected);
+        await deleteBlockSelection(selected, { keepChildren: !withDescendants });
         clear();
       } finally {
         for (const { pageId, page } of plans) {
@@ -227,10 +233,16 @@ export function createKeyboardBlockSelection(
       if (!isCurrent()) return;
       // Collapse to the deletion gap in document order, independent of which
       // direction the selection was extended. Empty pages retain an editable row.
+      // Children the delete kept moved up into the gap, so the row after it is
+      // read from the new order: the row now following the last survivor before
+      // the gap (or the page's first row), else the next row that was after it.
       for (const plan of plans) {
         const ids = plan.page.visibleIds();
         const surviving = new Set(ids);
-        const next = plan.emptied ? ids[0] : plan.after.find((id) => surviving.has(id));
+        const previous = plan.before.find((id) => surviving.has(id));
+        const filled = previous === undefined ? ids[0] : ids[ids.indexOf(previous) + 1];
+        const next = plan.emptied ? ids[0]
+          : (filled !== undefined && !plan.before.includes(filled) ? filled : plan.after.find((id) => surviving.has(id)));
         if (next) {
           await plan.page.focusCursor(next, "start", isCurrent);
           return;
@@ -284,7 +296,7 @@ export function createKeyboardBlockSelection(
         const current = session;
         const token = revision;
         await writeClipboardText(payload().markdown);
-        if (session === current && revision === token) await remove();
+        if (session === current && revision === token) await remove({ withDescendants: true });
       };
     }
     if (!event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -294,7 +306,7 @@ export function createKeyboardBlockSelection(
       } else if (event.key === "Escape") {
         action = () => restore(true);
       } else if (event.key === "Delete" || event.key === "Backspace") {
-        action = remove;
+        action = () => remove();
       } else if (event.key === "Tab" || event.key === "ISO_Left_Tab" || event.code === "Tab") {
         action = async () => {
           revision += 1;
@@ -320,7 +332,7 @@ export function createKeyboardBlockSelection(
       const data = payload();
       event.clipboardData.setData("text/plain", data.plainText);
       event.clipboardData.setData("text/markdown", data.markdown);
-      if (event.type === "cut") void remove().catch(report);
+      if (event.type === "cut") void remove({ withDescendants: true }).catch(report);
     } catch (error) {
       report(error);
     }

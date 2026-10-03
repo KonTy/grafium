@@ -71,6 +71,9 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
         }
       },
     };
+    // Deleting rows is either a subtree delete or a restructure that deletes.
+    window.__isDeletion = (call) => call.cmd === "delete_blocks"
+      || (call.cmd === "restructure_blocks" && call.args.deleteIds.length > 0);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
       writeText: async (text) => {
         state.clipboardRequests.push(text);
@@ -228,6 +231,16 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
             state.completed.push({ cmd, pageId: args.pageId });
             return;
           }
+          case "insert_block": {
+            // Mirrors the native insert: number the displayed siblings 0..n.
+            const siblings = state.blocks.filter((sibling) => sibling.page_id === args.pageId
+              && sibling.parent_id === (args.parentId ?? null)).sort(compareBlocks);
+            const at = Math.min(args.position, siblings.length);
+            siblings.forEach((sibling, index) => { sibling.order_index = index < at ? index : index + 1; });
+            const created = block(args.pageId, `${args.pageId}-created-${++sequence}`, at, args.content, args.parentId ?? null);
+            state.blocks.push(created);
+            return structuredClone(created);
+          }
           case "create_block": {
             const created = { ...block(args.pageId, args.id ?? `${args.pageId}-created-${++sequence}`,
               args.orderIndex, args.content, args.parentId ?? null),
@@ -273,6 +286,34 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
             state.completed.push({ cmd, pageId: args.pageId });
             return structuredClone(removed);
           }
+          case "restructure_blocks": {
+            // Mirrors Graph::restructure_blocks: only listed blocks are deleted,
+            // and a batch that would strand a child under a deleted parent fails.
+            const deleting = args.deleteIds.length > 0;
+            if (deleting) {
+              state.deleteFocus.push({
+                tag: document.activeElement?.tagName,
+                restored: document.activeElement === window.__expectedClipboardFocus,
+              });
+              if (state.holdDelete) await new Promise((resolve) => state.deleteWaiters.push(resolve));
+            }
+            const deleted = new Set(args.deleteIds);
+            const next = structuredClone(state.blocks);
+            for (const id of [...deleted, ...args.moves.map((move) => move.id)]) {
+              const found = next.find((block) => block.id === id);
+              if (!found || found.page_id !== args.pageId) throw new Error(`block ${id} is not on page ${args.pageId}`);
+            }
+            for (const move of args.moves) {
+              Object.assign(next.find((block) => block.id === move.id),
+                { parent_id: move.newParentId, order_index: move.orderIndex });
+            }
+            const stranded = next.find((block) => !deleted.has(block.id) && deleted.has(block.parent_id));
+            if (stranded) throw new Error(`deleting ${stranded.parent_id} would also remove block ${stranded.id}`);
+            const removed = state.blocks.filter((block) => deleted.has(block.id));
+            state.blocks = next.filter((block) => !deleted.has(block.id));
+            state.completed.push({ cmd, pageId: args.pageId, deleting });
+            return structuredClone(removed);
+          }
           case "reorder_blocks":
             args.blockIds.forEach((id, order) => {
               const found = state.blocks.find((block) => block.id === id);
@@ -304,7 +345,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       return { handwriting: "Handwriting", audio: "Audio", mixed: "Mixed", flashcard: "Flashcard", query: "Query" }[value] ?? "Text";
     }
     async function waitForReload(pageId, cmd) {
-      if (!state.holdReload || !state.completed.some((call) => call.cmd === "delete_blocks" && call.pageId === pageId)) return;
+      if (!state.holdReload || !state.completed.some((call) => (call.cmd === "delete_blocks" || call.deleting) && call.pageId === pageId)) return;
       state.reloadReads.push({ cmd, pageId });
       state.reloadPromise ??= new Promise((resolve) => { window.__releaseReload = resolve; });
       await state.reloadPromise;
@@ -603,9 +644,15 @@ const cases = [
         "unmodified arrows return to an editor");
     }
   }],
-  ["Delete, Backspace and cut include folded descendants; single undo and redo", { typedChild: true }, async (page) => {
+  ["Delete keeps folded children, cut takes the folded branch; single undo and redo", { typedChild: true }, async (page) => {
     await fold(page, "b2", "hidden-child");
     const initial = await snapshot(page);
+    const bySnapshotOrder = (a, b) => a.page_id.localeCompare(b.page_id) || a.order_index - b.order_index || a.id.localeCompare(b.id);
+    // Deleting the selected rows lifts the folded child into b2's place.
+    const keptChildren = initial.filter((block) => !["b1", "b2"].includes(block.id)).map((block) => {
+      const moved = { "hidden-child": 1, b3: 2, b4: 3 }[block.id];
+      return moved === undefined ? block : { ...block, parent_id: null, order_index: moved };
+    }).sort(bySnapshotOrder);
     for (const operation of ["Delete", "Backspace", "cut", "toolbar"]) {
       await focus(page, "b1");
       await shift(page, "Down", ["b1", "b2"]);
@@ -614,8 +661,9 @@ const cases = [
       else await page.keyboard.press(operation);
       await page.waitForFunction(() => !window.__selectionState.blocks.some((block) => block.id === "b1"));
       const deleted = await snapshot(page);
-      assert.deepEqual(deleted, initial.filter((block) =>
-        !["b1", "b2", "hidden-child", "hidden-grandchild"].includes(block.id)));
+      assert.deepEqual(deleted, operation === "cut"
+        ? initial.filter((block) => !["b1", "b2", "hidden-child", "hidden-grandchild"].includes(block.id))
+        : keptChildren, `${operation}: removes exactly what it should`);
       await page.keyboard.press("Control+z");
       await row(page, "b1").waitFor();
       assert.deepEqual(await snapshot(page), initial, `${operation}: one undo restores exact IDs, hierarchy, order and content`);
@@ -651,7 +699,7 @@ const cases = [
     await page.waitForFunction(() => window.__selectionState.updateWaiters.length > 0);
     assert.ok(!(await copy(page)).text.includes("Second block"), "pending activation cannot copy stale block snapshots");
     await page.keyboard.press("Delete");
-    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
     await page.keyboard.type(" + keep typing");
     await release(page, "Update");
     assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), "Unsaved source + keep typing");
@@ -671,7 +719,7 @@ const cases = [
     await selected(page, []);
     assert.ok(!(await copy(page)).text.includes("Second block"));
     await page.keyboard.press("Delete");
-    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
     assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), "Recoverable edited source");
     await page.evaluate(() => { window.__selectionState.failUpdate = false; });
     await shift(page, "Down", ["b0", "b1"]);
@@ -693,9 +741,11 @@ const cases = [
     await page.keyboard.press("Delete");
     await page.waitForFunction(() => !window.__selectionState.blocks.some((block) => block.id === "day-1-b0"));
     const after = await snapshot(page, ["day-0", "day-1"]);
-    assert.deepEqual(after, before.filter((block) =>
-      !["day-0-b15", "journal-hidden", "journal-grandchild", "day-1-b0"].includes(block.id)));
-    const writes = await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks"));
+    // The folded child moves up into its deleted parent's place; nothing hidden is lost.
+    assert.deepEqual(after, before.filter((block) => !["day-0-b15", "day-1-b0"].includes(block.id))
+      .map((block) => block.id === "journal-hidden" ? { ...block, parent_id: null, order_index: 15 } : block)
+      .sort((a, b) => a.page_id.localeCompare(b.page_id) || a.order_index - b.order_index || a.id.localeCompare(b.id)));
+    const writes = await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion));
     assert.deepEqual(writes.map((call) => call.args.pageId).sort(), ["day-0", "day-1"]);
     await page.keyboard.press("Control+z");
     await page.waitForFunction(() => window.__selectionState.blocks.some((block) => block.id === "day-1-b0")
@@ -736,7 +786,7 @@ const cases = [
       await row(page, "day-1-b0").waitFor();
       await selected(page, []);
       await focused(page, cancel === "typing" ? "day-0-b15" : "day-0-b14");
-      assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+      assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
     },
   ]),
   ["journal selection awaits metadata pagination without skipping a date", { journal: true, holdListOffset: 10 }, async (page) => {
@@ -787,7 +837,7 @@ const cases = [
     await page.getByRole("heading", { name: "Keyboard selection", exact: true }).click();
     await saved(page, "b0", "First visual line");
     assert.deepEqual(await snapshot(page), before);
-    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
   }],
   ...[true, false].map((bothContinuous) => [
     `${bothContinuous ? "continuous" : "mixed classic-continuous"} journal boundary copy/delete/undo and reverse`,
@@ -872,7 +922,7 @@ const cases = [
       await page.keyboard.press("Escape");
       await selected(page, []);
       assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) =>
-        ["delete_blocks", "create_blocks", "update_block"].includes(call.cmd)).length), 0);
+        ["delete_blocks", "restructure_blocks", "create_blocks", "update_block"].includes(call.cmd)).length), 0);
     },
   ]),
   ["native bridge selects text first, promotes and extends the active shared range", {}, async (page) => {
@@ -967,7 +1017,7 @@ const cases = [
       await frames(page);
       assert.equal(await page.evaluate(() => window.__selectionState.clipboard.at(-1)), original,
         "in-flight clipboard write retains its original payload");
-      assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0,
+      assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0,
         "changing the selection invalidates the pending destructive cut");
       assert.deepEqual(await snapshot(page), before);
     },
@@ -980,7 +1030,7 @@ const cases = [
     await page.keyboard.press("Control+x");
     await page.waitForFunction(() => window.__selectionState.clipboardFallbacks.length > 0);
     await frames(page);
-    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
     assert.deepEqual(await page.evaluate(() => window.__selectionState.clipboard), []);
     assert.deepEqual(await snapshot(page), before);
     await selected(page, ["b0", "b1"]);
@@ -1021,7 +1071,7 @@ const cases = [
       assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()),
         `${original.slice(0, 2)}X${original.slice(7)}`);
     }
-    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter((call) => call.cmd === "delete_blocks").length), 0);
+    assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0);
   }],
   ...[
     ["Delete", "Down"], ["Backspace", "Down"], ["Control+x", "Down"], ["Delete", "Up"],
@@ -1032,10 +1082,15 @@ const cases = [
       await shift(page, direction, ["b1", "b2"]);
       await page.keyboard.press(key);
       await page.waitForFunction(() => !window.__selectionState.blocks.some((block) => block.id === "b1"));
-      await expectCaret(page, "b3");
-      await typeAfterDelete(page, "b3", "Next After branch", "Next ");
-      assert.equal(await page.evaluate(() => window.__selectionState.blocks.some((block) =>
-        ["b1", "b2", "hidden-child", "hidden-grandchild"].includes(block.id))), false);
+      // Delete keeps the folded child, which moves up into the gap and is now
+      // the following block; cut removed the whole branch it copied.
+      const cut = key === "Control+x";
+      const next = cut ? "b3" : "hidden-child";
+      await expectCaret(page, next);
+      await typeAfterDelete(page, next, cut ? "Next After branch" : "Next Hidden child", "Next ");
+      assert.deepEqual(await page.evaluate(() => ["b1", "b2", "hidden-child", "hidden-grandchild"]
+        .filter((id) => window.__selectionState.blocks.some((block) => block.id === id))),
+        cut ? [] : ["hidden-child", "hidden-grandchild"]);
     },
   ]),
   ["deletion gap: a trailing range focuses the previous visible block end", {}, async (page) => {
@@ -1149,16 +1204,17 @@ const cases = [
   ...[false, true].map((typeAfterFocus) => [
     `deletion gap: undo respects saved survivor history${typeAfterFocus ? " after undoing new typing first" : ""}`, {},
     async (page) => {
-      await fold(page, "b2", "hidden-child");
-      await focus(page, "b3");
+      // The survivor is the child that moves up into the gap when its parent
+      // row is deleted, so the caret lands in a block with its own history.
+      await focus(page, "hidden-child");
       await page.keyboard.type(" already edited");
       await focus(page, "b1");
-      const survivor = "After branch already edited";
-      await saved(page, "b3", survivor);
+      const survivor = "Hidden child already edited";
+      await saved(page, "hidden-child", survivor);
       const before = await snapshot(page);
       await shift(page, "Down", ["b1", "b2"]);
       await page.keyboard.press("Delete");
-      await expectCaret(page, "b3");
+      await expectCaret(page, "hidden-child");
       if (typeAfterFocus) {
         await page.keyboard.type("New ");
         assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), `New ${survivor}`);
@@ -1214,7 +1270,7 @@ if (require.main === module) (async () => {
           docLength: window.__activeEditorView?.state.doc.length,
           range: window.__activeEditorView?.state.selection.main.toJSON(),
           recentWrites: window.__selectionState.calls.filter((call) =>
-            ["update_block", "update_page_source", "delete_blocks", "create_blocks"].includes(call.cmd)).slice(-5),
+            ["update_block", "update_page_source", "delete_blocks", "restructure_blocks", "create_blocks"].includes(call.cmd)).slice(-5),
         })), null, 2));
       } finally {
         await fixture?.page.close();

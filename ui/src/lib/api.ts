@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { BlockMove } from "./blockStructure";
 import type { PageKindFilter } from "./pageTreeState";
 
 export interface Page {
@@ -253,6 +254,20 @@ export function createBlock(
   return invoke("create_block", { pageId, parentId, orderIndex, content, blockType, properties });
 }
 
+/**
+ * Insert a text block at `position` (0-based, in display order) among the
+ * children of `parentId`. The native change numbers that list 0..n, so the
+ * block is saved exactly where it is shown.
+ */
+export function insertBlock(
+  pageId: string,
+  parentId: string | null,
+  position: number,
+  content: string,
+): Promise<Block> {
+  return invoke("insert_block", { pageId, parentId, position, content });
+}
+
 export interface CreateBlockBatchItem {
   id?: string;
   parentId?: string | null;
@@ -281,6 +296,15 @@ export function deleteBlocks(pageId: string, ids: string[]): Promise<Block[]> {
 
 export function moveBlock(id: string, newParentId: string | null, orderIndex: number): Promise<void> {
   return invoke("move_block", { id, newParentId, orderIndex });
+}
+
+/**
+ * Move and delete blocks on one page as a single change (one transaction, one
+ * file write). Only listed blocks are deleted; the backend rejects a batch that
+ * would leave any block under a deleted parent. Returns the deleted blocks.
+ */
+export function restructureBlocks(pageId: string, moves: BlockMove[], deleteIds: string[] = []): Promise<Block[]> {
+  return invoke("restructure_blocks", { pageId, moves, deleteIds });
 }
 
 export function reorderBlocks(pageId: string, blockIds: string[]): Promise<void> {

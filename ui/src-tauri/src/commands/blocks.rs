@@ -1,5 +1,5 @@
 use crate::AppState;
-use grafium_core::graph::{BlockCreateParent, BlockCreateSpec};
+use grafium_core::graph::{BlockCreateParent, BlockCreateSpec, BlockMove};
 use grafium_core::models::{Block, BlockType};
 use serde::Deserialize;
 use tauri::State;
@@ -68,6 +68,27 @@ pub fn create_block(
             &content,
             bt,
             props,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn insert_block(
+    state: State<AppState>,
+    page_id: String,
+    parent_id: Option<String>,
+    position: usize,
+    content: String,
+) -> Result<Block, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .insert_block_at(
+            &page_id,
+            parent_id.as_deref(),
+            position,
+            &content,
+            BlockType::Text,
+            serde_json::json!({}),
         )
         .map_err(|e| e.to_string())
 }
@@ -154,6 +175,19 @@ pub fn move_block(
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
     graph
         .move_block(&id, new_parent_id.as_deref(), order_index)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn restructure_blocks(
+    state: State<AppState>,
+    page_id: String,
+    moves: Vec<BlockMove>,
+    delete_ids: Vec<String>,
+) -> Result<Vec<Block>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .restructure_blocks(&page_id, &moves, &delete_ids)
         .map_err(|e| e.to_string())
 }
 

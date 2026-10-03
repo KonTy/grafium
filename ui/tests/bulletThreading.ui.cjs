@@ -43,11 +43,19 @@ async function openOutline(browser, large = false, duplicateOrder = false) {
         makeBlock(`long-${i}`, "inner", i + 6, `Long outline row ${i}`)));
     }
     let sequence = 0;
+    window.__threadCalls = [];
+    const treeOrder = () => {
+      const visit = (parent) => blocks.filter((block) => block.parent_id === parent)
+        .sort((a, b) => a.order_index - b.order_index || a.created_at - b.created_at || (a.id < b.id ? -1 : 1))
+        .flatMap((block) => [block, ...visit(block.id)]);
+      return visit(null);
+    };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     window.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
       plugins: {}, transformCallback() { return ++sequence; }, unregisterCallback() {},
       invoke: async (cmd, args = {}) => {
+        window.__threadCalls.push({ cmd, args: structuredClone(args) });
         switch (cmd) {
           case "get_page":
             if (args.id === note.id || args.title === note.title) return structuredClone(note);
@@ -55,12 +63,45 @@ async function openOutline(browser, large = false, duplicateOrder = false) {
           case "get_graph_info": return { name: "Thread test", path: "/tmp/thread-test" };
           case "get_app_theme": return "github";
           case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
-          case "list_blocks": return structuredClone(blocks);
+          case "list_blocks": return structuredClone(treeOrder());
           case "update_block": {
             const block = blocks.find((item) => item.id === args.id);
             if (!block) throw new Error("Block not found");
             block.content = args.content;
             return;
+          }
+          case "insert_block": {
+            // Mirrors the native insert: number the displayed siblings 0..n.
+            const siblings = treeOrder().filter((sibling) => sibling.parent_id === (args.parentId ?? null));
+            const at = Math.min(args.position, siblings.length);
+            siblings.forEach((sibling, index) => {
+              blocks.find((block) => block.id === sibling.id).order_index = index < at ? index : index + 1;
+            });
+            const created = { ...makeBlock(`typed-${++sequence}`, args.parentId ?? null, at, args.content), created_at: 1000 };
+            blocks.push(created);
+            return structuredClone(created);
+          }
+          case "create_blocks": {
+            const created = args.blocks.map((item, index) => ({
+              ...makeBlock(item.id ?? `created-${index}`, item.parentIndex == null ? item.parentId ?? null
+                : args.blocks[item.parentIndex].id, item.orderIndex, item.content),
+              properties: structuredClone(item.properties ?? {}),
+            }));
+            blocks.push(...created);
+            return structuredClone(created);
+          }
+          case "restructure_blocks": {
+            // Mirrors the native batch: only listed blocks are deleted.
+            const deleted = new Set(args.deleteIds);
+            for (const move of args.moves) {
+              Object.assign(blocks.find((block) => block.id === move.id),
+                { parent_id: move.newParentId, order_index: move.orderIndex });
+            }
+            const stranded = blocks.find((block) => !deleted.has(block.id) && deleted.has(block.parent_id));
+            if (stranded) throw new Error(`deleting ${stranded.parent_id} would also remove ${stranded.id}`);
+            const removed = blocks.filter((block) => deleted.has(block.id));
+            blocks.splice(0, blocks.length, ...blocks.filter((block) => !deleted.has(block.id)));
+            return structuredClone(removed);
           }
           case "plugin:event|listen": return ++sequence;
           default: return [];
@@ -243,6 +284,90 @@ function assertConnected(rows, startId, endId) {
     assert.deepEqual(large.errors, []);
     await large.page.close();
     console.log("PASS continuation through virtualized preceding descendants");
+
+    const edits = await openOutline(browser);
+    const rowIds = () => edits.page.locator(".block-item").evaluateAll((rows) => rows.map((row) => row.dataset.blockId));
+    // Shift+Tab used to leave the block between its old siblings until a
+    // restart, drawing it there with guide lines from the wrong parent.
+    await focusBlock(edits.page, "first");
+    await edits.page.keyboard.press("End");
+    await edits.page.keyboard.press("Shift+Tab");
+    await edits.page.waitForFunction(() => {
+      const ids = [...document.querySelectorAll(".block-item")].map((row) => row.dataset.blockId);
+      return ids.indexOf("first") > ids.indexOf("later");
+    });
+    assert.deepEqual(await rowIds(), ["root", "second", "branch", "inner", "leaf-0", "leaf-1", "leaf-2", "leaf-3",
+      "multiline", "heading", "heading-child", "later", "first", "other-root"]);
+    await edits.page.waitForFunction(() => document.activeElement?.closest(".block-item")?.dataset.blockId === "first");
+    await edits.page.keyboard.type(" typed after outdent");
+    await edits.page.waitForFunction(() => document.activeElement?.textContent === "First sibling typed after outdent");
+    const structuralCalls = await edits.page.evaluate(() => window.__threadCalls
+      .filter((call) => ["move_block", "restructure_blocks"].includes(call.cmd)).map((call) => call.args));
+    assert.deepEqual(structuralCalls, [{
+      pageId: "thread-page", deleteIds: [], moves: [
+        { id: "first", newParentId: null, orderIndex: 1 },
+        { id: "other-root", newParentId: null, orderIndex: 2 },
+      ],
+    }], "one native change saves the outdent and the sibling it pushed down");
+    await focusBlock(edits.page, "later");
+    assertConnected(await readPath(edits.page), "root", "later");
+    await edits.page.waitForFunction(() => window.__threadCalls.some((call) =>
+      call.cmd === "update_block" && call.args.id === "first" && call.args.content === "First sibling typed after outdent"));
+
+    // Backspace in an emptied parent deletes only that block: its children
+    // move up into its place and keep their own children.
+    const innerX = (await readPath(edits.page)).find((row) => row.id === "inner").bullet.x;
+    await focusBlock(edits.page, "inner");
+    await edits.page.keyboard.press("ControlOrMeta+a");
+    await edits.page.keyboard.press("Backspace");
+    await edits.page.keyboard.press("Backspace");
+    await edits.page.locator('.block-item[data-block-id="inner"]').waitFor({ state: "detached" });
+    const lifted = await readPath(edits.page);
+    for (const id of ["leaf-0", "leaf-3", "multiline", "heading"]) {
+      assertNear({ x: lifted.find((row) => row.id === id).bullet.x, y: 0 }, { x: innerX, y: 0 },
+        `${id} moved up into the deleted block's level`);
+    }
+    assert.ok(lifted.find((row) => row.id === "heading-child").bullet.x > innerX, "grandchildren stay nested");
+    await focusBlock(edits.page, "leaf-2");
+    assertConnected(await readPath(edits.page), "root", "leaf-2");
+
+    // One app undo brings the block back with its children under it.
+    await edits.page.getByRole("heading", { name: "Threading regression" }).click();
+    await edits.page.waitForFunction(() => document.querySelectorAll(".cm-content").length === 0);
+    await edits.page.evaluate(() => window.dispatchEvent(new CustomEvent("app-undo")));
+    await edits.page.locator('.block-item[data-block-id="inner"]').waitFor();
+    assert.equal(await edits.page.locator('.block-item[data-block-id="inner"] .block-content').innerText(), "One more level");
+    const restored = await readPath(edits.page);
+    assert.ok(restored.find((row) => row.id === "leaf-0").bullet.x > innerX, "children are nested under it again");
+    await focusBlock(edits.page, "leaf-2");
+    assertConnected(await readPath(edits.page), "root", "leaf-2");
+
+    // Enter at the end of a block showing its children starts its first child,
+    // right below it, and that is also where it is saved: no reordering on reload.
+    await focusBlock(edits.page, "branch");
+    await edits.page.keyboard.press("End");
+    await edits.page.keyboard.press("Enter");
+    await edits.page.waitForFunction(() =>
+      document.activeElement?.closest(".block-item")?.dataset.blockId?.startsWith("typed-"));
+    const typedId = await edits.page.evaluate(() => document.activeElement.closest(".block-item").dataset.blockId);
+    const drawn = await rowIds();
+    assert.equal(drawn[drawn.indexOf("branch") + 1], typedId, "the new block appears right below its parent");
+    await edits.page.keyboard.type("First of the branch");
+    // Empty blocks show no bullet until their text is saved on leaving them.
+    await focusBlock(edits.page, "later");
+    await edits.page.waitForFunction((id) => window.__threadCalls.some((call) =>
+      call.cmd === "update_block" && call.args.id === id && call.args.content === "First of the branch"), typedId);
+    await focusBlock(edits.page, typedId);
+    assertConnected(await readPath(edits.page), "root", typedId);
+    await edits.page.evaluate(() => window.dispatchEvent(new CustomEvent("page-content-reload-blocks", {
+      detail: { pageId: "thread-page" },
+    })));
+    await edits.page.waitForFunction(() => window.__threadCalls.filter((call) => call.cmd === "list_blocks").length > 3);
+    await edits.page.locator(`.block-item[data-block-id="${typedId}"]`).waitFor();
+    assert.deepEqual(await rowIds(), drawn, "a reload draws the same order the editor showed");
+    assert.deepEqual(edits.errors, []);
+    await edits.page.close();
+    console.log("PASS outdent keeps tree order, caret and guide lines; deleting a parent keeps its children; undo restores; Enter saves where it draws");
   } finally {
     await browser.close();
   }

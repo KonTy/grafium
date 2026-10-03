@@ -54,7 +54,9 @@ async function fixture(browser) {
           }).join("\n\n") + "\n";
           case "update_block":
           case "update_page_source":
-          case "create_block": window.__pagingWrites.push({ cmd, args }); return;
+          case "create_block":
+          case "insert_block":
+          case "restructure_blocks": window.__pagingWrites.push({ cmd, args }); return;
           case "count_pages": return pages.length;
           case "list_pages_window": return pages.slice(args.offset, args.offset + args.limit);
           case "pages_namespace_tree": return pages.map((p) => ({

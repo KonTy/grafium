@@ -88,6 +88,73 @@ impl StartupWindow {
         }
         Ok(())
     }
+
+    #[cfg(desktop)]
+    fn is_revealed(&self) -> bool {
+        self.0.lock().map(|shown| *shown).unwrap_or(true)
+    }
+}
+
+/// A second launch was redirected to this running instance. Two processes
+/// editing one graph fight over its database and each re-indexes the other's
+/// saves, so instead bring the existing window forward. A window still
+/// starting up stays hidden: startup reveals it once the editor is ready.
+#[cfg(desktop)]
+pub fn focus_existing_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if !app.state::<StartupWindow>().is_revealed() {
+        tracing::info!("Another launch was redirected to the starting Grafium window");
+        return;
+    }
+    tracing::info!("Another launch was redirected to the open Grafium window");
+    for (action, result) in [
+        ("unminimize", window.unminimize()),
+        ("show", window.show()),
+        ("focus", window.set_focus()),
+        // Desktops that refuse to raise a window without user activation
+        // (Wayland) highlight it in the task bar instead.
+        (
+            "highlight",
+            window.request_user_attention(Some(tauri::UserAttentionType::Informational)),
+        ),
+    ] {
+        if let Err(error) = result {
+            tracing::warn!("Could not {action} the open Grafium window: {error}");
+        }
+    }
+}
+
+/// Another launch reached this instance: bring this window forward.
+#[cfg(desktop)]
+pub fn handle_second_launch(app: &tauri::AppHandle) {
+    focus_existing_window(app);
+}
+
+/// The Linux single-instance plugin panics if the session bus address is
+/// malformed; an unusual desktop must still start, just without the guard.
+#[cfg(desktop)]
+pub fn single_instance_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+            Err(std::env::VarError::NotPresent) => true,
+            Err(_) => false,
+            Ok(address) => usable_session_bus_address(&address),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Uses the plugin's own D-Bus address parser, so a value it would reject is
+/// never handed to it.
+#[cfg(target_os = "linux")]
+fn usable_session_bus_address(address: &str) -> bool {
+    address.parse::<zbus::Address>().is_ok()
 }
 
 #[cfg(desktop)]
@@ -224,6 +291,30 @@ mod tests {
             })
             .unwrap();
         assert!(recovered);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn single_instance_is_skipped_for_malformed_session_bus_addresses() {
+        use super::usable_session_bus_address as usable;
+        assert!(usable("unix:path=/run/user/1000/bus"));
+        assert!(usable("unix:abstract=/tmp/dbus-x,guid=0123456789abcdef0123456789abcdef"));
+        // zbus reads one address; the rest of a list becomes part of the guid.
+        assert!(!usable("unix:abstract=/tmp/dbus-x,guid=1;tcp:host=localhost,port=1"));
+        assert!(!usable(""));
+        assert!(!usable("disabled"));
+        assert!(!usable("unix:foo=x"));
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn redirected_launch_only_focuses_a_revealed_window() {
+        let state = StartupWindow::default();
+        assert!(!state.is_revealed(), "a starting window must stay hidden");
+        assert!(state.reveal_once(|| Err("window error".into())).is_err());
+        assert!(!state.is_revealed(), "a failed reveal is not a shown window");
+        state.reveal_once(|| Ok(())).unwrap();
+        assert!(state.is_revealed());
     }
 
     #[test]

@@ -929,7 +929,18 @@ pub fn run() {
         }
     }
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Registered first so a second launch exits before it opens the graph.
+    #[cfg(desktop)]
+    let builder = if commands::startup::single_instance_supported() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            commands::startup::handle_second_launch(app);
+        }))
+    } else {
+        tracing::warn!("The desktop session bus address is unusable; a second launch opens another window");
+        builder
+    };
+    let app = builder
         .plugin(tauri_plugin_geolocation::init())
         .manage(commands::startup::StartupWindow::default())
         .manage(private_voice::VoiceState::default())
@@ -1312,11 +1323,13 @@ pub fn run() {
             commands::blocks::list_blocks,
             commands::blocks::get_block,
             commands::blocks::create_block,
+            commands::blocks::insert_block,
             commands::blocks::create_blocks,
             commands::blocks::update_block,
             commands::blocks::delete_block,
             commands::blocks::delete_blocks,
             commands::blocks::move_block,
+            commands::blocks::restructure_blocks,
             commands::blocks::reorder_blocks,
             commands::blocks::get_block_page_title,
             commands::blocks::search_fts,
@@ -1511,6 +1524,10 @@ pub fn run() {
             };
             if let Some(code) = requested_code {
                 if shutdown_guard.begin() {
+                    // A launch from now on must start normally (and may be a
+                    // newly installed build) instead of focusing this
+                    // closing window.
+                    tauri_plugin_single_instance::destroy(app_handle);
                     if let Err(error) = app_handle.emit("app-shutdown-started", ()) {
                         tracing::warn!("Could not display shutdown status: {error}");
                     }

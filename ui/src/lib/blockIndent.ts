@@ -162,7 +162,10 @@ export function planIndentSelection(
       // Lists that only lost entries keep their stored order_index, so a group
       // indent writes just the blocks it genuinely rearranged.
       const orderIndex = renumber ? index : orig.order_index;
-      const updated: Block = { ...orig, parent_id: np, order_index: orderIndex };
+      // Unchanged blocks keep their identity so their editors are not refreshed.
+      const updated: Block = orig.parent_id === np && orig.order_index === orderIndex
+        ? orig
+        : { ...orig, parent_id: np, order_index: orderIndex };
       outBlocks.push(updated);
       if (orig.parent_id !== np || orig.order_index !== orderIndex) {
         moves.push({ id, newParentId: np, newOrderIndex: orderIndex });

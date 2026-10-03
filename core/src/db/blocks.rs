@@ -540,6 +540,43 @@ impl Database {
         Ok(())
     }
 
+    /// Make room for a new block at `position` (0-based, in display order)
+    /// among the children of `parent_id`, numbering the list 0..n so equal
+    /// order numbers left by older versions cannot misplace the new block.
+    /// Returns the order number the new block should use.
+    pub fn renumber_siblings_for_insert(
+        &self,
+        page_id: &str,
+        parent_id: Option<&str>,
+        position: usize,
+    ) -> Result<i32> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let mut siblings = {
+            let mut stmt = tx.prepare(
+                "SELECT id, order_index, created_at FROM blocks WHERE page_id = ?1 AND parent_id IS ?2",
+            )?;
+            let rows = stmt.query_map(params![page_id, parent_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?, row.get::<_, i64>(2)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        // The same order the page is displayed and saved in.
+        siblings.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)).then_with(|| a.0.cmp(&b.0)));
+        let position = position.min(siblings.len());
+        {
+            let mut stmt = tx.prepare("UPDATE blocks SET order_index = ?1 WHERE id = ?2")?;
+            for (index, (id, order_index, _)) in siblings.iter().enumerate() {
+                let wanted = if index < position { index } else { index + 1 } as i32;
+                if *order_index != wanted {
+                    stmt.execute(params![wanted, id])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(position as i32)
+    }
+
     pub(crate) fn list_blocks_for_page_in_connection(
         &self,
         conn: &Connection,

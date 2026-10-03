@@ -4,9 +4,12 @@ import {
   createBlocks,
   deleteBlocks,
   getGraphInfo,
+  listBlocks,
+  restructureBlocks,
   undoLinkCandidateAccept,
   updateBlock,
 } from "./api";
+import { applicableRestoreMoves, planDeleteKeepingChildren, type RestoreMove } from "./blockStructure";
 import {
   aiUndoSummaryInsert,
   aiReapplySummaryInsert,
@@ -45,6 +48,8 @@ export interface DeleteBlockSelectionAction {
   pageId: string;
   groups: SelectionBlockGroup[];
   placeholderIds: Record<string, string>;
+  /** Delete only the selected blocks and move their children into their place. */
+  keepChildren?: boolean;
 }
 
 export interface WritingRewriteAction {
@@ -61,6 +66,11 @@ export type UndoAction =
       type: "delete_blocks";
       blocks: Block[];
       pageId: string;
+      /**
+       * Present when the delete kept the deleted blocks' children: undo moves
+       * them back under their restored parents, and redo keeps them again.
+       */
+      restoreMoves?: RestoreMove[];
     }
   | (AiInsertSummaryResult & {
       type: "insert_summary";
@@ -348,10 +358,19 @@ async function performUndoAction(): Promise<boolean> {
       stack.push(action);
       return false;
     }
+    if (action.restoreMoves?.length) {
+      try {
+        await restructureBlocks(action.pageId, applicableRestoreMoves(await listBlocks(action.pageId), action.restoreMoves));
+      } catch (e) {
+        console.error("[undoStack] could not move kept children back:", e);
+        showToast(`The deleted block is back, but its children could not be moved back under it: ${describeError(e)}`, "error");
+      }
+    }
     pushRedo({
       type: "delete_blocks",
       blocks: restoredBlocks,
       pageId: action.pageId,
+      ...(action.restoreMoves ? { restoreMoves: action.restoreMoves } : {}),
     });
     // Notify the correct PageContent instance by pageId
     const cb = undoCallbacks.get(action.pageId);
@@ -509,17 +528,32 @@ async function performRedoAction(): Promise<boolean> {
 
   if (action.type === "delete_blocks") {
     let deletedBlocks: Block[];
+    let restoreMoves: RestoreMove[] | undefined;
     try {
-      deletedBlocks = await deleteBlocks(
-        action.pageId,
-        deepestBlocksFirst(action.blocks).map((block) => block.id)
-      );
+      if (action.restoreMoves) {
+        // Re-plan against the page as it is now, so redo never takes children with it.
+        const plan = planDeleteKeepingChildren(
+          await listBlocks(action.pageId),
+          new Set(action.blocks.map((block) => block.id)),
+        );
+        deletedBlocks = await restructureBlocks(action.pageId, plan.moves, plan.deleted.map((block) => block.id));
+        restoreMoves = plan.restoreMoves;
+      } else {
+        deletedBlocks = await deleteBlocks(
+          action.pageId,
+          deepestBlocksFirst(action.blocks).map((block) => block.id)
+        );
+      }
     } catch (e) {
       console.error("[undoStack] delete_blocks redo failed:", e);
       redoStack.push(action);
       return false;
     }
-    const redoAction = { ...action, blocks: deletedBlocks.length ? deletedBlocks : action.blocks };
+    const redoAction = {
+      ...action,
+      blocks: deletedBlocks.length ? deletedBlocks : action.blocks,
+      ...(restoreMoves ? { restoreMoves } : {}),
+    };
     pushUndoWithoutClearingRedo(redoAction);
     const cb = undoCallbacks.get(action.pageId);
     if (cb) {

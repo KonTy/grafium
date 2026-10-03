@@ -4,6 +4,7 @@ vi.mock("./api", () => ({
   createBlocks: vi.fn(),
   deleteBlocks: vi.fn(),
   listBlocks: vi.fn(),
+  restructureBlocks: vi.fn(),
   updateBlock: vi.fn(),
   acceptLinkCandidate: vi.fn(),
   undoLinkCandidateAccept: vi.fn(),
@@ -17,9 +18,10 @@ vi.mock("./toast.svelte", () => ({
   describeError: (error: unknown) => error instanceof Error ? error.message : String(error),
 }));
 
-import { createBlocks, deleteBlocks, listBlocks, updateBlock, type Block } from "./api";
+import { createBlocks, deleteBlocks, listBlocks, restructureBlocks, updateBlock, type Block } from "./api";
 import { deleteBlockSelection, type SelectionBlockGroup } from "./blockSelectionActions";
-import { canRedo, canUndo, getUndoStackSize, performRedo, performUndo, removeUndoCallback, setUndoCallback } from "./undoStack";
+import { canRedo, canUndo, getUndoStackSize, performRedo, performUndo, pushUndo, removeUndoCallback, setUndoCallback } from "./undoStack";
+import { planDeleteKeepingChildren } from "./blockStructure";
 import { showToast } from "./toast.svelte";
 
 const db = new Map<string, Block>();
@@ -119,6 +121,30 @@ beforeEach(() => {
     item.content = content;
     if (properties) item.properties = clone(properties);
     persist(item.page_id);
+  });
+  // Mirrors Graph::restructure_blocks: one atomic change that deletes only the
+  // listed blocks and refuses to leave any block under a deleted parent.
+  vi.mocked(restructureBlocks).mockImplementation(async (pageId, moves, deleteIds = []) => {
+    const deleted = new Set(deleteIds);
+    const next = new Map(pageBlocks(pageId).map((item) => [item.id, clone(item)]));
+    for (const id of [...deleted, ...moves.map((move) => move.id)]) {
+      if (!next.has(id)) throw new Error(`block ${id} is not on page ${pageId}`);
+    }
+    for (const move of moves) {
+      Object.assign(next.get(move.id)!, { parent_id: move.newParentId, order_index: move.orderIndex });
+    }
+    for (const item of next.values()) {
+      if (!deleted.has(item.id) && item.parent_id && deleted.has(item.parent_id)) {
+        throw new Error(`deleting ${item.parent_id} would also remove block ${item.id}`);
+      }
+    }
+    const removed = pageBlocks(pageId).filter((item) => deleted.has(item.id));
+    for (const item of next.values()) {
+      if (deleted.has(item.id)) db.delete(item.id);
+      else db.set(item.id, item);
+    }
+    persist(pageId);
+    return clone(removed);
   });
 });
 
@@ -393,5 +419,84 @@ describe("deleteBlockSelection", () => {
     expect(disk.get("day-1")!.some((item) => item.id === "selected")).toBe(false);
     await expect(performUndo()).resolves.toBe(true);
     expect(comparable(disk.get("day-1")!)).toEqual(comparable([selected, survivor]));
+  });
+});
+
+describe("deleting a parent keeps its children", () => {
+  const outline = () => [
+    block("before", "day-1", { order_index: 0 }),
+    block("parent", "day-1", { order_index: 1 }),
+    block("child-1", "day-1", { parent_id: "parent", order_index: 0 }),
+    block("grandchild", "day-1", { parent_id: "child-1", order_index: 0 }),
+    block("child-2", "day-1", { parent_id: "parent", order_index: 1 }),
+    block("after", "day-1", { order_index: 2 }),
+  ];
+  const shape = () => pageBlocks("day-1")
+    .map(({ id, parent_id, order_index }) => [id, parent_id, order_index])
+    .sort(([a], [b]) => String(a).localeCompare(String(b)));
+
+  it("keyboard selection Delete removes only the selected row and undo/redo are exact", async () => {
+    const original = outline();
+    seed(...original);
+    await deleteBlockSelection([group("day-1", original[1])], { keepChildren: true });
+
+    expect(db.has("parent")).toBe(false);
+    expect(shape()).toEqual([
+      ["after", null, 3],
+      ["before", null, 0],
+      ["child-1", null, 1],
+      ["child-2", null, 2],
+      ["grandchild", "child-1", 0],
+    ]);
+    expect(deleteBlocks).not.toHaveBeenCalled();
+
+    await expect(performUndo()).resolves.toBe(true);
+    expect(comparable(pageBlocks("day-1"))).toEqual(comparable(original));
+    expect(comparable(disk.get("day-1")!)).toEqual(comparable(original));
+
+    await expect(performRedo()).resolves.toBe(true);
+    expect(db.has("parent")).toBe(false);
+    expect(["child-1", "child-2", "grandchild"].every((id) => db.has(id))).toBe(true);
+    await expect(performUndo()).resolves.toBe(true);
+    expect(comparable(pageBlocks("day-1"))).toEqual(comparable(original));
+  });
+
+  it("cut still removes the complete branch it copied", async () => {
+    const original = outline();
+    seed(...original);
+    const branch = original.filter((item) => ["parent", "child-1", "grandchild", "child-2"].includes(item.id));
+    await deleteBlockSelection([group("day-1", ...branch)]);
+    expect(pageBlocks("day-1").map((item) => item.id).sort()).toEqual(["after", "before"]);
+    await expect(performUndo()).resolves.toBe(true);
+    expect(comparable(pageBlocks("day-1"))).toEqual(comparable(original));
+  });
+
+  it("Backspace on an empty parent: undo restores it and moves its children back, redo keeps them", async () => {
+    const original = outline();
+    seed(...original);
+    const plan = planDeleteKeepingChildren(pageBlocks("day-1"), new Set(["parent"]));
+    await restructureBlocks("day-1", plan.moves, plan.deleted.map((item) => item.id));
+    pushUndo({ type: "delete_blocks", blocks: plan.deleted, pageId: "day-1", restoreMoves: plan.restoreMoves });
+
+    await expect(performUndo()).resolves.toBe(true);
+    expect(comparable(pageBlocks("day-1"))).toEqual(comparable(original));
+    await expect(performRedo()).resolves.toBe(true);
+    expect(db.has("parent")).toBe(false);
+    expect(db.get("grandchild")!.parent_id).toBe("child-1");
+    expect(deleteBlocks).not.toHaveBeenCalled();
+  });
+
+  it("undo skips children the user removed after the delete instead of failing", async () => {
+    const original = outline();
+    seed(...original);
+    const plan = planDeleteKeepingChildren(pageBlocks("day-1"), new Set(["parent"]));
+    await restructureBlocks("day-1", plan.moves, plan.deleted.map((item) => item.id));
+    pushUndo({ type: "delete_blocks", blocks: plan.deleted, pageId: "day-1", restoreMoves: plan.restoreMoves });
+    db.delete("child-2");
+
+    await expect(performUndo()).resolves.toBe(true);
+    expect(db.get("parent")).toBeDefined();
+    expect(db.get("child-1")!.parent_id).toBe("parent");
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

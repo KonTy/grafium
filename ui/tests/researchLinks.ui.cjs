@@ -182,8 +182,8 @@ const group = (page, title) => page.locator(".link-candidate-row").filter({
 });
 const acceptButton = (candidate) => candidate.getByRole("button", { name: /^(Link|Link all|Fix \+ link)$/ });
 const mutationCommands = new Set([
-  "create_page", "create_block", "create_blocks", "update_block", "update_page_source",
-  "delete_block", "delete_blocks", "accept_link_candidate", "dismiss_link_candidate", "resolve_link_candidate",
+  "create_page", "create_block", "insert_block", "create_blocks", "update_block", "update_page_source",
+  "delete_block", "delete_blocks", "restructure_blocks", "accept_link_candidate", "dismiss_link_candidate", "resolve_link_candidate",
 ]);
 
 async function assertReadOnly(page, { allowResolve = false, allowNavigation = false } = {}) {

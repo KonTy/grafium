@@ -1,4 +1,13 @@
-import { createBlocks, deleteBlocks, listBlocks, updateBlock, type Block, type CreateBlockBatchItem } from "./api";
+import {
+  createBlocks,
+  deleteBlocks,
+  listBlocks,
+  restructureBlocks,
+  updateBlock,
+  type Block,
+  type CreateBlockBatchItem,
+} from "./api";
+import { applicableRestoreMoves, planDeleteKeepingChildren, type RestoreMove } from "./blockStructure";
 import {
   notifyBlockSelectionChanged,
   pushUndo,
@@ -9,6 +18,8 @@ import {
 export interface SelectionBlockGroup {
   pageId: string;
   blocks: Block[];
+  /** Set by a delete that kept children; undo moves them back. */
+  restoreMoves?: RestoreMove[];
 }
 
 function canonicalJson(value: unknown): string | undefined {
@@ -124,6 +135,14 @@ export async function applyBlockSelection(
           await createBlocks(group.pageId, restorationItems(missing));
           wrotePage = true;
         }
+        if (group.restoreMoves?.length) {
+          // Children that the delete kept go back under their restored parents.
+          const moves = applicableRestoreMoves(await listBlocks(group.pageId), group.restoreMoves);
+          if (moves.length) {
+            await restructureBlocks(group.pageId, moves);
+            wrotePage = true;
+          }
+        }
         current = await listBlocks(group.pageId);
         const restoredIds = new Set(current.map((block) => block.id));
         if (group.blocks.some((block) => !restoredIds.has(block.id))) {
@@ -136,7 +155,7 @@ export async function applyBlockSelection(
           current = current.filter((block) => block.id !== placeholder.id);
         }
       } else {
-        assertCompleteSubtrees(group, current);
+        if (!action.keepChildren) assertCompleteSubtrees(group, current);
         const ids = group.blocks.filter((block) => existingIds.has(block.id)).map((block) => block.id);
         const selectedIds = new Set(ids);
         if (current.every((block) => selectedIds.has(block.id))) {
@@ -154,7 +173,13 @@ export async function applyBlockSelection(
           wrotePage = true;
         }
         if (ids.length) {
-          await deleteBlocks(group.pageId, ids);
+          if (action.keepChildren) {
+            const plan = planDeleteKeepingChildren(current, new Set(ids));
+            await restructureBlocks(group.pageId, plan.moves, ids);
+            group.restoreMoves = plan.restoreMoves;
+          } else {
+            await deleteBlocks(group.pageId, ids);
+          }
           wrotePage = true;
         }
         current = await listBlocks(group.pageId);
@@ -174,8 +199,15 @@ export async function applyBlockSelection(
   }
 }
 
-/** Delete saved, complete subtree snapshots as one recoverable cross-page action. */
-export async function deleteBlockSelection(groups: readonly SelectionBlockGroup[]): Promise<void> {
+/**
+ * Delete saved snapshots as one recoverable cross-page action. By default the
+ * snapshots are complete subtrees (cut). With `keepChildren`, only the listed
+ * blocks are deleted and their other children move up into their place.
+ */
+export async function deleteBlockSelection(
+  groups: readonly SelectionBlockGroup[],
+  options: { keepChildren?: boolean } = {},
+): Promise<void> {
   return runUndoOperation(async () => {
     const snapshots = normalizeGroups(groups);
     if (!snapshots.length) return;
@@ -185,13 +217,14 @@ export async function deleteBlockSelection(groups: readonly SelectionBlockGroup[
       if (group.blocks.some((block) => !byId.has(block.id) || !sameSnapshot(block, byId.get(block.id)!))) {
         throw new Error("The selected blocks have changed. Save and select them again before deleting.");
       }
-      assertCompleteSubtrees(group, current);
+      if (!options.keepChildren) assertCompleteSubtrees(group, current);
     }
     const action: DeleteBlockSelectionAction = {
       type: "delete_block_selection",
       pageId: snapshots[0].pageId,
       groups: snapshots,
       placeholderIds: Object.create(null),
+      ...(options.keepChildren ? { keepChildren: true } : {}),
     };
     // Secure every snapshot before the first native call can partially mutate DB.
     pushUndo(action);

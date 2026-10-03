@@ -32,6 +32,8 @@ mod source_operations;
 mod source_integrity_tests;
 #[cfg(test)]
 mod reindex_tests;
+#[cfg(test)]
+mod restructure_tests;
 pub use research_edits::{
     AiInsertSummaryResult, SummaryLinkPlan, SummaryLinkTarget, SummaryRetainedTarget,
     SummarySiblingOrder, SummaryUndoResult, SummaryUnlinkedTarget, SummaryWrapChange,
@@ -74,6 +76,15 @@ pub struct BlockCreateSpec {
     pub content: String,
     pub block_type: BlockType,
     pub properties: serde_json::Value,
+}
+
+/// One parent/position change applied by [`Graph::restructure_blocks`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockMove {
+    pub id: String,
+    pub new_parent_id: Option<String>,
+    pub order_index: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2184,6 +2195,36 @@ impl Graph {
         Ok(created)
     }
 
+    /// Insert a block at `position` (0-based, in display order) among the
+    /// children of `parent_id`. The list is numbered 0..n in the same change,
+    /// so the block is saved exactly where the editor shows it — including on
+    /// pages whose siblings still share order numbers from older versions.
+    /// ([`Graph::create_block`] leaves an equal order number to creation time,
+    /// which moved a block typed in the middle of a list below its next
+    /// sibling after a restart.)
+    pub fn insert_block_at(
+        &self,
+        page_id: &str,
+        parent_id: Option<&str>,
+        position: usize,
+        content: &str,
+        block_type: BlockType,
+        properties: serde_json::Value,
+    ) -> Result<Block> {
+        let _operation = self.source_operations.lock();
+        self.ensure_page_id_writable(page_id)?;
+        if let Some(parent) = parent_id {
+            let parent_page = self.db.get_block_by_id(parent)?.page_id;
+            if parent_page != page_id {
+                return Err(CoreError::Other(format!(
+                    "parent block {parent} is not on page {page_id}"
+                )));
+            }
+        }
+        let order_index = self.db.renumber_siblings_for_insert(page_id, parent_id, position)?;
+        self.create_block(page_id, parent_id, order_index, content, block_type, properties)
+    }
+
     /// Create multiple blocks, updating indexes for each block and serializing
     /// the page once at the end. This keeps large multi-block paste from doing
     /// a full markdown rewrite per pasted line.
@@ -2768,6 +2809,121 @@ impl Graph {
         self.write_page_to_disk(&page)?;
         self.db.collect_generated_pages()?;
 
+        Ok(deleted_blocks)
+    }
+
+    /// Apply block moves and deletions on one page as a single change: one
+    /// database transaction and one Markdown write.
+    ///
+    /// Unlike [`Graph::delete_blocks`], nothing is deleted unless it is
+    /// listed: callers keep a deleted block's children by moving them in the
+    /// same batch. A batch that would leave a block under a deleted parent,
+    /// create a cycle, or reach into another page is rejected before
+    /// anything changes. Returns the deleted blocks in document order.
+    pub fn restructure_blocks(
+        &self,
+        page_id: &str,
+        moves: &[BlockMove],
+        delete_ids: &[String],
+    ) -> Result<Vec<Block>> {
+        let _operation = self.source_operations.lock();
+        self.ensure_page_id_writable(page_id)?;
+        if moves.is_empty() && delete_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let page = self.db.get_page_by_id(page_id)?;
+        let blocks = self.db.list_blocks_for_page(page_id)?;
+        let on_page: HashSet<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+        let not_on_page =
+            |id: &str| CoreError::Other(format!("block {id} is not on page {page_id}"));
+
+        let mut deleted = HashSet::new();
+        for id in delete_ids {
+            if !on_page.contains(id.as_str()) {
+                return Err(not_on_page(id));
+            }
+            deleted.insert(id.as_str());
+        }
+        let mut parent_of: HashMap<&str, Option<&str>> = blocks
+            .iter()
+            .map(|block| (block.id.as_str(), block.parent_id.as_deref()))
+            .collect();
+        let mut moved = HashSet::new();
+        for change in moves {
+            let id = change.id.as_str();
+            if !on_page.contains(id) {
+                return Err(not_on_page(id));
+            }
+            if deleted.contains(id) || !moved.insert(id) {
+                return Err(CoreError::Other(format!(
+                    "block {id} can only be moved once and not also deleted"
+                )));
+            }
+            if let Some(parent) = change.new_parent_id.as_deref() {
+                if !on_page.contains(parent) {
+                    return Err(not_on_page(parent));
+                }
+                if deleted.contains(parent) {
+                    return Err(CoreError::Other(format!(
+                        "block {id} cannot move under deleted block {parent}"
+                    )));
+                }
+            }
+            parent_of.insert(id, change.new_parent_id.as_deref());
+        }
+        for block in &blocks {
+            let id = block.id.as_str();
+            if deleted.contains(id) {
+                continue;
+            }
+            let mut ancestor = parent_of.get(id).copied().flatten();
+            let mut steps = 0;
+            while let Some(parent) = ancestor {
+                if deleted.contains(parent) {
+                    return Err(CoreError::Other(format!(
+                        "deleting {parent} would also remove block {id}; move it first"
+                    )));
+                }
+                steps += 1;
+                if parent == id || steps > blocks.len() {
+                    return Err(CoreError::Other(format!(
+                        "moving block {id} would place it inside itself"
+                    )));
+                }
+                ancestor = parent_of.get(parent).copied().flatten();
+            }
+        }
+
+        let deleted_blocks: Vec<Block> = blocks
+            .iter()
+            .filter(|block| deleted.contains(block.id.as_str()))
+            .cloned()
+            .collect();
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for change in moves {
+            tx.execute(
+                "UPDATE blocks SET parent_id = ?1, order_index = ?2, updated_at = ?3
+                 WHERE id = ?4 AND page_id = ?5",
+                rusqlite::params![
+                    change.new_parent_id,
+                    change.order_index,
+                    now,
+                    change.id,
+                    page_id
+                ],
+            )?;
+        }
+        for block in deleted_blocks.iter().rev() {
+            self.db.delete_block_in_connection(&tx, &block.id)?;
+        }
+        if !deleted_blocks.is_empty() {
+            self.db.collect_generated_pages_in_connection(&tx)?;
+        }
+        tx.commit()?;
+
+        self.write_page_to_disk(&page)?;
         Ok(deleted_blocks)
     }
 
@@ -4931,6 +5087,31 @@ mod tests {
         let asset_path = graph
             .pages_dir
             .join("Books/Image Cleanup/assets/figure.png");
+        fs::create_dir_all(asset_path.parent().unwrap())?;
+        fs::write(&asset_path, b"image")?;
+        let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);
+
+        graph.update_block(&block.id, "No image here", None)?;
+
+        assert!(!asset_path.exists());
+        assert_eq!(graph.list_asset_trash()?.assets.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn percent_encoded_attachment_references_are_still_tracked() -> Result<()> {
+        // Saves skip attachment bookkeeping for text that cannot name an
+        // `assets` folder; an encoded folder name must not slip past that.
+        let temp = tempdir()?;
+        let graph = Graph::open(temp.path())?;
+        let page = graph.create_page_with_content(
+            "Books/Encoded Cleanup/index",
+            false,
+            "- ![Figure](%61ssets/figure.png)\n",
+        )?;
+        let asset_path = graph
+            .pages_dir
+            .join("Books/Encoded Cleanup/assets/figure.png");
         fs::create_dir_all(asset_path.parent().unwrap())?;
         fs::write(&asset_path, b"image")?;
         let block = graph.db.list_blocks_for_page(&page.id)?.remove(0);

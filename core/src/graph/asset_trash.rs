@@ -438,6 +438,12 @@ impl Graph {
     }
 
     fn content_asset_paths(&self, source: &Path, content: &str) -> HashSet<String> {
+        // Every managed attachment lives under an `assets` folder, and only a
+        // percent-encoded reference could spell that folder differently. Most
+        // edits touch neither, so skip re-parsing the whole page on every save.
+        if !content.contains("assets") && !content.contains('%') {
+            return HashSet::new();
+        }
         let mut refs = extract_media_refs(content);
         let parsed = parser::parse_page(content, "page.md");
         let mut properties = vec![&parsed.properties];

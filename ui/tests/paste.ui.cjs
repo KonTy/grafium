@@ -46,6 +46,17 @@ async function openEditor(browser) {
             case "get_app_theme": return "dark";
             case "get_layout_preferences": return { sidebarVisible: true, wideMode: true };
             case "list_blocks": return structuredClone(state.blocks.filter((block) => block.page_id === args.pageId));
+            case "insert_block": {
+              // Mirrors the native insert: number the displayed siblings 0..n
+              // around the new block's position.
+              const siblings = state.blocks.filter((sibling) => sibling.page_id === args.pageId
+                && sibling.parent_id === (args.parentId ?? null)).sort((a, b) => a.order_index - b.order_index);
+              const at = Math.min(args.position, siblings.length);
+              siblings.forEach((sibling, index) => { sibling.order_index = index < at ? index : index + 1; });
+              const block = makeBlock(`created-${++sequence}`, args.parentId ?? null, at, args.content);
+              state.blocks.push(block);
+              return structuredClone(block);
+            }
             case "create_block": {
               const block = makeBlock(`created-${++sequence}`, args.parentId ?? null, args.orderIndex, args.content);
               state.blocks.push(block);

@@ -118,7 +118,31 @@ export function buildBlockRenderState(
   const visibleBlocks: Block[] = [];
   const visibleIndexById = new Map<string, number>();
 
-  for (const block of blocks) {
+  // Draw in tree order, not incoming array order: a structural edit that only
+  // updated parents in place must never show a block above its new siblings
+  // (and with the wrong guide lines) until the page is reloaded.
+  const ordered: Block[] = [];
+  const placed = new Set<string>();
+  const place = (parentId: string | null) => {
+    for (const child of childrenByParent.get(parentId) ?? []) {
+      if (placed.has(child.id)) continue;
+      placed.add(child.id);
+      ordered.push(child);
+      place(child.id);
+    }
+  };
+  place(null);
+  if (ordered.length < blocks.length) {
+    // Blocks whose parent is missing from the page stay visible, after the rest.
+    for (const block of blocks) {
+      if (placed.has(block.id)) continue;
+      placed.add(block.id);
+      ordered.push(block);
+      place(block.id);
+    }
+  }
+
+  for (const block of ordered) {
     getDepth(block.id);
     if (!isVisible(block.id)) continue;
     visibleIndexById.set(block.id, visibleBlocks.length);

@@ -82,6 +82,27 @@ describe("page content block render state", () => {
       blocks.filter((block) => legacyIsVisible(blocks, collapsedIds, block)).map((block) => block.id)
     );
   });
+
+  it("draws rows in tree order even when an edit left the flat list out of order", () => {
+    // An outdent used to update "moved" in place. It stayed between its old
+    // siblings in the flat list, so it was drawn above "kept" with guide lines
+    // belonging to the wrong parent until the app restarted.
+    const blocks = [
+      makeBlock("parent", null, 0),
+      makeBlock("first", "parent", 0),
+      makeBlock("moved", null, 1),
+      makeBlock("moved-child", "moved", 0),
+      makeBlock("kept", "parent", 2),
+      makeBlock("after", null, 2),
+      makeBlock("orphan", "missing-parent", 0),
+    ];
+    const state = buildBlockRenderState(blocks, new Set());
+    expect(state.visibleBlocks.map((block) => block.id)).toEqual([
+      "parent", "first", "kept", "moved", "moved-child", "after", "orphan",
+    ]);
+    expect(state.visibleIndexById.get("moved")).toBe(3);
+    expect(state.depthById.get("moved-child")).toBe(1);
+  });
 });
 
 describe("page content virtual window", () => {

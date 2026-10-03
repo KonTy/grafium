@@ -29,6 +29,12 @@ On Android, swipe inward from the left or right edge to move back through
 Grafium's page history. If there is no earlier Grafium page, the app stays open.
 When a dialog or menu is open, the same gesture closes that first.
 
+On desktop, Grafium runs as one window. Starting it again from a launcher or
+the terminal brings the open window forward, or highlights it in the task bar
+where the desktop does not allow that, instead of opening a second copy: two
+copies editing one graph would keep re-reading each other's saves and make
+typing stall.
+
 ## Dialogs and menus
 
 Every dialog can be driven from the keyboard.

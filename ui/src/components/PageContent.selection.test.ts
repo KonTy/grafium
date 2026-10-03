@@ -30,10 +30,12 @@ describe("PageContent block selection cut", () => {
     expect(source).toContain("depth: getBlockDepth(block.id)");
   });
 
-  it("deletes selected block subtrees in one backend batch", () => {
+  it("deletes only the selected blocks in one native batch; cut removes the branches it copied", () => {
     expect(source).toContain("function blocksWithDescendantsInDocumentOrder(rootIds: ReadonlySet<string>)");
-    expect(source).toContain("await deleteBlocks(page.id, deletedBlocks.map((block) => block.id));");
-    expect(source).toContain("const remaining = blocks.filter((b) => !deletedIds.has(b.id));");
+    expect(source).toContain("const plan = planDeleteKeepingChildren(blocks, deleteIds);");
+    expect(source).toContain("await restructureBlocks(page.id, plan.moves, plan.deleted.map((block) => block.id));");
+    expect(source).toContain("restoreMoves: plan.restoreMoves");
+    expect(source).toContain("await handleDeleteSelected({ withDescendants: true });");
   });
 
   it("records undo for batched multi-block paste", () => {

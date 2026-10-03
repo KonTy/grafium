@@ -230,7 +230,7 @@ function syntheticVideo() {
     const state = await page.evaluate(() => ({
       progress: window.__privateReaderFixture.books[0].position,
       graphWrites: window.__selectionState.calls.filter(call =>
-        call.cmd === "create_page" || call.cmd === "create_block" && call.args.content.trim()),
+        call.cmd === "create_page" || ["create_block", "insert_block"].includes(call.cmd) && call.args.content.trim()),
     }));
     assert.ok(state.progress.offsetMs >= 31000);
     assert.deepEqual(state.graphWrites, [], "reading and bookmarks must not create graph pages or note content");

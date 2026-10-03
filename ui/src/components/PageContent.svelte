@@ -2,6 +2,7 @@
   import { highlightTerm, clearHighlights } from "../lib/highlight";
   import { SvelteMap } from "svelte/reactivity";
   import { getContext, onDestroy, tick } from "svelte";
+  import { EditorView } from "@codemirror/view";
   import KeyboardSelectionToolbar from "./KeyboardSelectionToolbar.svelte";
   import {
     createKeyboardBlockSelection, KEYBOARD_BLOCK_SELECTION,
@@ -14,11 +15,11 @@
   import {
     listBlocks,
     createBlock,
+    insertBlock,
     createBlocks,
-    deleteBlocks,
     updateBlock,
-    moveBlock,
     reorderBlocks,
+    restructureBlocks,
     getBacklinks,
     getPage,
     renamePage,
@@ -36,6 +37,12 @@
     type LinkCandidate,
   } from "../lib/api";
   import { planIndentSelection } from "../lib/blockIndent";
+  import {
+    blocksInTreeOrder,
+    insertAtPosition,
+    planDeleteKeepingChildren,
+    withPlannedStructure,
+  } from "../lib/blockStructure";
   import {
     buildBlockRenderState,
     buildBulletThreadRoles,
@@ -255,7 +262,10 @@
         clearBlockSelection();
         selectedBlockIds = ids;
       },
-      snapshots: (ids) => blocksWithDescendantsInDocumentOrder(ids).map(snapshotBlock),
+      snapshots: (ids, withDescendants) => (withDescendants
+        ? blocksWithDescendantsInDocumentOrder(ids)
+        : blocksInTreeOrder(blocks).filter((block) => ids.has(block.id))
+      ).map(snapshotBlock),
       clipboard: (ids) => blocksWithDescendantsInDocumentOrder(ids)
         .map((block) => ({ content: block.content, depth: getBlockDepth(block.id) })),
       reload: async () => {
@@ -1794,38 +1804,6 @@
     };
   }
 
-  function blocksInTreeOrder(input: readonly Block[]): Block[] {
-    const arrayIndex = new Map(input.map((block, index) => [block.id, index]));
-    const childrenByParent = new Map<string | null, Block[]>();
-    for (const block of input) {
-      const siblings = childrenByParent.get(block.parent_id) ?? [];
-      siblings.push(block);
-      childrenByParent.set(block.parent_id, siblings);
-    }
-    for (const siblings of childrenByParent.values()) {
-      siblings.sort((a, b) => {
-        const orderDelta = a.order_index - b.order_index;
-        return orderDelta || (arrayIndex.get(a.id) ?? 0) - (arrayIndex.get(b.id) ?? 0);
-      });
-    }
-
-    const ordered: Block[] = [];
-    const seen = new Set<string>();
-    const visit = (parentId: string | null) => {
-      for (const child of childrenByParent.get(parentId) ?? []) {
-        if (seen.has(child.id)) continue;
-        seen.add(child.id);
-        ordered.push(child);
-        visit(child.id);
-      }
-    };
-    visit(null);
-    for (const block of input) {
-      if (!seen.has(block.id)) ordered.push(block);
-    }
-    return ordered;
-  }
-
   function blocksWithDescendantsInDocumentOrder(rootIds: ReadonlySet<string>): Block[] {
     const selectedOrDescendant = new Set<string>();
     const orderedBlocks = blocksInTreeOrder(blocks);
@@ -1915,62 +1893,37 @@
         }]);
       }
 
-      // Enter at the very start of a block inserts an empty sibling above it.
-      if (atStart) {
-        const parentId = block.parent_id;
-        const siblings = blocks
-          .filter((b) => b.parent_id === parentId)
-          .sort((a, b) => a.order_index - b.order_index);
-        const currentSiblingIndex = siblings.findIndex((b) => b.id === blockId);
-        const insertOrder = currentSiblingIndex >= 0 ? siblings[currentSiblingIndex].order_index : block.order_index;
-
-        // Shift siblings at/after insert point down by one to keep deterministic ordering.
-        for (const sibling of siblings) {
-          if (sibling.id === blockId) continue;
-          if (sibling.order_index >= insertOrder) {
-            await moveBlock(sibling.id, sibling.parent_id, sibling.order_index + 1);
-            sibling.order_index += 1;
-          }
-        }
-
-        const newBlock = await createBlock(page.id, parentId, insertOrder, "");
-        const idx = blocks.findIndex((b) => b.id === blockId);
-        blocks = [...blocks.slice(0, idx), newBlock, ...blocks.slice(idx)];
-        refreshCollectionAfterMutation();
-
-        requestAnimationFrame(() => {
-          focusedBlockId = newBlock.id;
-          threadBlockId = newBlock.id;
-          const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
-          if (el) {
-            el.scrollIntoView({ block: "nearest" });
-            (el as HTMLElement).click();
-          }
-        });
-        return;
-      }
-
+      // Put the new block exactly where it appears, and save it there: the
+      // editor used to draw it right below the block while saving it after
+      // that block's children, so guide lines were wrong until a restart.
+      // Positions count displayed siblings, so lists whose order numbers
+      // were shared by older versions still get the block where Enter was.
+      const children = blockRenderState.childrenByParent.get(blockId) ?? [];
+      const siblings = blockRenderState.childrenByParent.get(block.parent_id) ?? [];
+      const index = Math.max(0, siblings.findIndex((sibling) => sibling.id === blockId));
       let parentId: string | null;
-      let newOrder: number;
-
-      if (block.parent_id === null) {
-        // Top-level block: create a child under it
-        parentId = blockId;
-        newOrder = blocks.filter((b) => b.parent_id === blockId).length;
-      } else {
-        // Already a child: create a sibling (same parent)
+      let position: number;
+      if (atStart) {
+        // Enter at the very start of a block inserts an empty sibling above it.
         parentId = block.parent_id;
-        const siblings = blocks.filter((b) => b.parent_id === block.parent_id);
-        const myIdx = siblings.findIndex((b) => b.id === blockId);
-        newOrder = myIdx + 1;
+        position = index;
+      } else if (children.length > 0 && !collapsedIds.has(blockId)) {
+        // Below a block showing its children, the new block is its first child.
+        parentId = blockId;
+        position = 0;
+      } else if (block.parent_id === null && children.length === 0) {
+        // A top-level block with nothing under it gets a child.
+        parentId = blockId;
+        position = 0;
+      } else {
+        parentId = block.parent_id;
+        position = index + 1;
       }
 
-      const newBlock = await createBlock(page.id, parentId, newOrder, remainder);
-      // Insert after current block in the array
-      const idx = blocks.findIndex((b) => b.id === blockId);
-      blocks = [...blocks.slice(0, idx + 1), newBlock, ...blocks.slice(idx + 1)];
+      const newBlock = await insertBlock(page.id, parentId, position, atStart ? "" : remainder);
+      blocks = insertAtPosition(blocks, newBlock, position);
       refreshCollectionAfterMutation();
-      // Focus the new block
+
       requestAnimationFrame(() => {
         focusedBlockId = newBlock.id;
         threadBlockId = newBlock.id;
@@ -2144,44 +2097,43 @@
     }
   }
 
+  /** Blocks whose delete is still being saved; repeats for them are ignored. */
+  const deletingBlockIds = new Set<string>();
+
+  /**
+   * Backspace/Delete in an empty block removes only that block. Its children
+   * stay: they move up into its place under its parent, keeping their own
+   * subtrees, and Undo puts the block and its children back.
+   */
   async function handleDelete(blockId: string) {
-    console.log("[DELETE] handleDelete called, blockId:", blockId, "total blocks:", blocks.length);
-    if (blocks.length <= 1) { console.log("[DELETE] skipping - only 1 block left"); return; }
-    const subtree = blocksWithDescendantsInDocumentOrder(new Set([blockId]));
-    const block = subtree[0];
-    if (block) {
-      const undoBlocks = undoSnapshotsForBlocks(subtree);
-      console.log("[DELETE] pushing to undo stack, content:", undoBlocks[0].content.substring(0, 40));
-      await deleteBlocks(page.id, undoBlocks.map((snapshot) => snapshot.id));
-      pushUndo({ type: "delete_blocks", blocks: undoBlocks, pageId: page.id });
-      for (const snapshot of undoBlocks) {
-        preEditSnapshots.delete(snapshot.id);
-      }
-    } else {
-      console.log("[DELETE] block not found!");
+    // Holding Backspace repeats while the first delete is still being saved.
+    if (deletingBlockIds.has(blockId) || !blocks.some((b) => b.id === blockId)) return;
+    const plan = planDeleteKeepingChildren(blocks, new Set([blockId]));
+    // The last block of a page stays so the page remains editable.
+    if (plan.blocks.length === 0) return;
+    const visibleIds = visibleBlocks.map((b) => b.id);
+    const visibleIndex = visibleIds.indexOf(blockId);
+    const undoBlocks = undoSnapshotsForBlocks(plan.deleted);
+    deletingBlockIds.add(blockId);
+    try {
+      await restructureBlocks(page.id, plan.moves, plan.deleted.map((block) => block.id));
+    } catch (e) {
+      console.error("Failed to delete block:", e);
+      showToast(`Could not delete the block: ${e instanceof Error ? e.message : String(e)}`, "error");
       return;
+    } finally {
+      deletingBlockIds.delete(blockId);
     }
-    const idx = blocks.findIndex((b) => b.id === blockId);
-    const deletedIds = new Set(subtree.map((item) => item.id));
-    const remaining = blocks.filter((b) => !deletedIds.has(b.id));
-    if (remaining.length === 0) {
-      blocks = [await createBlock(page.id, null, 0, "")];
-    } else {
-      blocks = remaining;
+    pushUndo({ type: "delete_blocks", blocks: undoBlocks, pageId: page.id, restoreMoves: plan.restoreMoves });
+    for (const snapshot of undoBlocks) {
+      preEditSnapshots.delete(snapshot.id);
     }
+    blocks = withPlannedStructure(blocks, plan.blocks, new Set([blockId]));
     refreshCollectionAfterMutation();
-    if (subtree.some((item) => pageTreeReferencesChanged(item.content, ""))) refreshPageTrees();
-    // Focus previous block
-    const prevIdx = Math.max(0, idx - 1);
-    if (blocks[prevIdx]) {
-      requestAnimationFrame(() => {
-        const el = document.querySelector(`[data-block-id="${blocks[prevIdx].id}"] .block-content`);
-        if (el) {
-          el.scrollIntoView({ block: "nearest" });
-          (el as HTMLElement).click();
-        }
-      });
-    }
+    if (plan.deleted.some((item) => pageTreeReferencesChanged(item.content, ""))) refreshPageTrees();
+    // Continue at the end of the block above, or at the top of the page.
+    const focusTarget = visibleIndex > 0 ? visibleIds[visibleIndex - 1] : blocks[0]?.id;
+    if (focusTarget) focusBlockForEditing(focusTarget);
   }
 
   function focusBlockForEditing(blockId: string) {
@@ -2215,9 +2167,15 @@
     }
   }
 
+  /**
+   * Tab / Shift+Tab on one block. Uses the same plan as a multi-block indent,
+   * so the block lands in its real position (an outdented block goes after
+   * its old parent's remaining children) and every sibling whose position
+   * changes is saved in the same single native change. Keeping the local list
+   * in true tree order is what keeps the guide lines right without a restart.
+   */
   async function handleIndent(blockId: string, direction: "in" | "out", currentContent?: string) {
-    const idx = blocks.findIndex((b) => b.id === blockId);
-    const block = blocks[idx];
+    const block = blocks.find((b) => b.id === blockId);
     if (!block) return;
 
     // Persist latest editor text before structural move. This avoids
@@ -2230,67 +2188,46 @@
       }]);
     }
 
-    console.log("[telemetry] indent start", JSON.stringify({
-      pageId: page.id,
-      pageTitle: page.title,
-      blockId,
-      direction,
-      content: block.content.slice(0, 80),
-      currentContent: (currentContent ?? "").slice(0, 80),
-      parentId: block.parent_id,
-      orderIndex: block.order_index,
-    }));
-
+    const plan = planIndentSelection(blocks, new Set([blockId]), direction);
+    // The first child cannot indent and a top-level block cannot outdent.
+    if (plan.moves.length === 0) return;
     try {
-      if (direction === "in") {
-        // Indent: become a child of the previous sibling at the same level
-        // Find previous sibling (same parent_id, appears before in list)
-        const prevSibling = [...blocks].slice(0, idx).reverse().find(
-          (b) => b.parent_id === block.parent_id
-        );
-        if (!prevSibling) return; // Can't indent if no previous sibling
-
-        // Count existing children of prevSibling to get order_index
-        const childCount = blocks.filter((b) => b.parent_id === prevSibling.id).length;
-        await moveBlock(block.id, prevSibling.id, childCount);
-        block.parent_id = prevSibling.id;
-        block.order_index = childCount;
-        blocks = [...blocks];
-        refreshCollectionAfterMutation();
-        console.log("[telemetry] indent in done", JSON.stringify({
-          blockId: block.id,
-          newParentId: block.parent_id,
-          newOrderIndex: block.order_index,
-          prevSiblingId: prevSibling.id,
-        }));
-      } else {
-        // Outdent: become a sibling of the current parent
-        if (!block.parent_id) return; // Already at top level
-
-        const parent = blocks.find((b) => b.id === block.parent_id);
-        if (!parent) return;
-
-        // New parent is the grandparent (or null for top level)
-        const newParentId = parent.parent_id ?? null;
-        // Place after the parent in order
-        const siblingsOfParent = blocks.filter((b) => b.parent_id === newParentId);
-        const parentOrder = siblingsOfParent.findIndex((b) => b.id === parent.id);
-        const newOrder = parentOrder + 1;
-
-        // Shift siblings after insertion point
-        await moveBlock(block.id, newParentId, newOrder);
-        block.parent_id = newParentId;
-        block.order_index = newOrder;
-        blocks = [...blocks];
-        console.log("[telemetry] indent out done", JSON.stringify({
-          blockId: block.id,
-          newParentId: block.parent_id,
-          newOrderIndex: block.order_index,
-        }));
-      }
+      await restructureBlocks(page.id, plan.moves.map(({ id, newParentId, newOrderIndex }) => ({
+        id, newParentId, orderIndex: newOrderIndex,
+      })));
     } catch (e) {
       console.error("Failed to indent/outdent:", e);
+      showToast(`Could not ${direction === "in" ? "indent" : "outdent"} the block: ${e instanceof Error ? e.message : String(e)}`, "error");
+      return;
     }
+    // Read the caret now, so keys typed while the change was saved are kept.
+    const caret = focusedEditorSelection(blockId);
+    // Indenting under a folded block would hide the row and close its editor.
+    const newParentId = plan.blocks.find((b) => b.id === blockId)?.parent_id ?? null;
+    if (newParentId && collapsedIds.has(newParentId)) {
+      const expanded = new Set(collapsedIds);
+      expanded.delete(newParentId);
+      collapsedIds = expanded;
+    }
+    blocks = withPlannedStructure(blocks, plan.blocks);
+    refreshCollectionAfterMutation();
+    // An outdent moves the row below its old siblings, and moving a focused
+    // editor blurs it: put the caret back only when that happened. On long,
+    // windowed pages the row may also have left the rendered window.
+    if (caret) {
+      await tick();
+      if (!focusedEditorSelection(blockId) && await revealBlock(blockId)) {
+        blockRefs[blockId]?.restoreTextSelection(caret);
+      }
+    }
+  }
+
+  function focusedEditorSelection(blockId: string): BlockTextSelection | null {
+    const content = document.querySelector(`.block-item[data-block-id="${CSS.escape(blockId)}"] .cm-content`);
+    const view = content instanceof HTMLElement ? EditorView.findFromDOM(content) : null;
+    if (!view?.hasFocus) return null;
+    const { anchor, head } = view.state.selection.main;
+    return { anchor, head };
   }
 
   /**
@@ -2306,28 +2243,31 @@
 
     const keep = new Set(selectedBlockIds);
     try {
-      for (const move of plan.moves) {
-        await moveBlock(move.id, move.newParentId, move.newOrderIndex);
-      }
-      blocks = plan.blocks;
+      // One native change for the whole group instead of a file write per block.
+      await restructureBlocks(page.id, plan.moves.map(({ id, newParentId, newOrderIndex }) => ({
+        id, newParentId, orderIndex: newOrderIndex,
+      })));
+      blocks = withPlannedStructure(blocks, plan.blocks);
       selectedBlockIds = keep;
       refreshCollectionAfterMutation();
     } catch (e) {
       console.error("Failed to indent/outdent selection:", e);
+      showToast(`Could not move the selected blocks: ${e instanceof Error ? e.message : String(e)}`, "error");
     }
   }
 
   function handleBulletClick(blockId: string, event: MouseEvent) {
     promotedSelectionCopyText = null;
     if (event.shiftKey && selectedBlockIds.size > 0) {
-      // Range select from last selected to this block
+      // Range select from last selected to this block, over the rows you see:
+      // children hidden in a folded block are not part of the range.
       const lastSelected = [...selectedBlockIds].pop()!;
-      const startIdx = blocks.findIndex((b) => b.id === lastSelected);
-      const endIdx = blocks.findIndex((b) => b.id === blockId);
+      const startIdx = visibleBlocks.findIndex((b) => b.id === lastSelected);
+      const endIdx = visibleBlocks.findIndex((b) => b.id === blockId);
       const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
       const newSelection = new Set(selectedBlockIds);
-      for (let i = from; i <= to; i++) {
-        newSelection.add(blocks[i].id);
+      for (let i = Math.max(from, 0); i <= to; i++) {
+        newSelection.add(visibleBlocks[i].id);
       }
       selectedBlockIds = newSelection;
     } else {
@@ -2358,25 +2298,37 @@
     }
   }
 
-  async function handleDeleteSelected() {
+  /**
+   * Delete the selected blocks. Delete/Backspace removes only what is
+   * selected: unselected children move up into their deleted parent's place.
+   * Cut moves whole branches to the clipboard, so it removes the subtrees it
+   * copied (`withDescendants`).
+   */
+  async function handleDeleteSelected(options: { withDescendants?: boolean } = {}) {
     if (selectedBlockIds.size === 0) return;
     const selectedIds = new Set(selectedBlockIds);
-    const blocksToDelete = blocksWithDescendantsInDocumentOrder(selectedIds);
-    if (blocksToDelete.length === 0) return;
-    const deletedIds = new Set(blocksToDelete.map((block) => block.id));
-    const firstDeletedIdx = blocks.findIndex((b) => deletedIds.has(b.id));
+    // Delete takes the selected rows you can see; Cut takes whole branches.
+    const deleteIds = new Set(
+      (options.withDescendants
+        ? blocksWithDescendantsInDocumentOrder(selectedIds)
+        : visibleBlocks.filter((block) => selectedIds.has(block.id))
+      ).map((block) => block.id),
+    );
+    if (deleteIds.size === 0) return;
+    const firstDeletedIdx = blocksInTreeOrder(blocks).findIndex((b) => deleteIds.has(b.id));
+    const plan = planDeleteKeepingChildren(blocks, deleteIds);
 
     // Save deleted blocks for undo
-    const deletedBlocks = undoSnapshotsForBlocks(blocksToDelete);
-    await deleteBlocks(page.id, deletedBlocks.map((block) => block.id));
-    pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id });
+    const deletedBlocks = undoSnapshotsForBlocks(plan.deleted);
+    await restructureBlocks(page.id, plan.moves, plan.deleted.map((block) => block.id));
+    pushUndo({ type: "delete_blocks", blocks: deletedBlocks, pageId: page.id, restoreMoves: plan.restoreMoves });
 
     for (const block of deletedBlocks) {
       preEditSnapshots.delete(block.id);
     }
 
     let focusAfterDelete: Block | null = null;
-    const remaining = blocks.filter((b) => !deletedIds.has(b.id));
+    const remaining = withPlannedStructure(blocks, plan.blocks, deleteIds);
     if (remaining.length === 0) {
       // All blocks deleted — create a fresh empty block
       const newBlock = await createBlock(page.id, null, 0, "");
@@ -2807,7 +2759,7 @@
     if (!markdown) return;
     try {
       await writeClipboardText(markdown);
-      await handleDeleteSelected();
+      await handleDeleteSelected({ withDescendants: true });
       showSelectionCopyMessage("Cut");
     } catch (e) {
       showSelectionCopyMessage(e instanceof Error ? e.message : String(e));
@@ -2835,7 +2787,7 @@
     selectionMenu = null;
     void (async () => {
       try {
-        await handleDeleteSelected();
+        await handleDeleteSelected({ withDescendants: true });
         showSelectionCopyMessage("Cut");
       } catch (error) {
         showSelectionCopyMessage(error instanceof Error ? error.message : String(error));
@@ -2935,8 +2887,8 @@
     const endId = blockIdFromNode(sel.focusNode);
     if (!startId || !endId || startId === endId) return;
 
-    const startIdx = blocks.findIndex((b) => b.id === startId);
-    const endIdx = blocks.findIndex((b) => b.id === endId);
+    const startIdx = visibleBlocks.findIndex((b) => b.id === startId);
+    const endIdx = visibleBlocks.findIndex((b) => b.id === endId);
     // Both ends must belong to *this* PageContent instance; the journal renders
     // one instance per day, so a cross-day drag simply isn't a block selection.
     if (startIdx === -1 || endIdx === -1) return;
@@ -2944,7 +2896,7 @@
     const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
     const next = new Set<string>();
     for (let i = from; i <= to; i++) {
-      next.add(blocks[i].id);
+      next.add(visibleBlocks[i].id);
     }
 
     promotedSelectionCopyText = sel.toString().trim() || null;
@@ -2973,14 +2925,15 @@
   }
 
   function setDraggedBlockSelection(startId: string, endId: string) {
-    const startIdx = blocks.findIndex((block) => block.id === startId);
-    const endIdx = blocks.findIndex((block) => block.id === endId);
+    // Rows you can see: children hidden in a folded block are not selected.
+    const startIdx = visibleBlocks.findIndex((block) => block.id === startId);
+    const endIdx = visibleBlocks.findIndex((block) => block.id === endId);
     if (startIdx === -1 || endIdx === -1) return;
 
     const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
     const next = new Set<string>();
     for (let i = from; i <= to; i++) {
-      next.add(blocks[i].id);
+      next.add(visibleBlocks[i].id);
     }
 
     promotedSelectionCopyText = null;
@@ -3075,9 +3028,18 @@
       void cutSelectedBlocks();
     } else if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
-      handleDeleteSelected();
+      void deleteSelectedFromUi();
     } else if (e.key === "Escape") {
       clearBlockSelection();
+    }
+  }
+
+  async function deleteSelectedFromUi() {
+    try {
+      await handleDeleteSelected();
+    } catch (error) {
+      console.error("Failed to delete selected blocks:", error);
+      showToast(`Could not delete the selected blocks: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
 
@@ -3250,7 +3212,7 @@
       <button class="selection-toolbar-btn" onclick={copySelectedBlocks} disabled={analyzingSelection}>
         Copy
       </button>
-      <button class="selection-toolbar-btn danger" onclick={handleDeleteSelected} disabled={analyzingSelection}>
+      <button class="selection-toolbar-btn danger" onclick={() => void deleteSelectedFromUi()} disabled={analyzingSelection}>
         Delete
       </button>
       <button
