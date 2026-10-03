@@ -1,4 +1,5 @@
 import type { ChatSource, WebSource } from "./knowledge";
+import type { LibrarySource } from "./libraryIndex";
 import type { StreamStep } from "./chatStatus";
 
 export type ChatRole = "user" | "assistant";
@@ -11,6 +12,8 @@ export interface ChatMessageModel {
   sources?: ChatSource[];
   /** Web citations for a research answer's "From the web" section. */
   webSources?: WebSource[];
+  /** App-private Library citations for a Library-context answer; kept in memory only. */
+  librarySources?: LibrarySource[];
   /** True once this answer engaged web research — drives the "Web research" badge. */
   webResearch?: boolean;
   /**

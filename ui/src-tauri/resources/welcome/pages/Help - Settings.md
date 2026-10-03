@@ -92,7 +92,9 @@ existing tutorial graphs, and installing a build does not restart a running app.
 ## Private library
 
 The **Library** section contains **Library location**, which selects an external
-audiobook/EPUB folder. This is an app-level setting, independent of the active graph.
+audiobook/EPUB folder, and **Library search index**, which controls inside-book
+and transcript search. Turning **Search inside books and media** off leaves title
+filtering available, but disables inside-Library results and the Chat Library context. This is an app-level setting, independent of the active graph.
 Under **Get offline voices**, open **?** for platform-specific download links,
 Linux Piper setup, a copyable offline package-preparation command, and exact import
 steps. Browser downloads are not automatic installation; select and save the
@@ -101,8 +103,10 @@ installed voice and language afterward.
 future sessions. It is remembered separately from audio/video speed. It speeds
 up local speech playback, not neural generation; slower hardware may need to
 prepare the next passage between clips.
-Source media is not copied into the graph. Automatic bookmarks and progress stay
-outside graph sync and AI indexing. Deliberately written journal notes such as
+Source media is not copied into the graph. The Library index stays in app data,
+uses on-device embeddings only, and can delta-index changes or explicitly
+rebuild. Rebuild re-transcribes local media and can take a long time. Automatic bookmarks and progress stay
+outside graph sync and graph AI indexing. Deliberately written journal notes such as
 `[[Book title]]` remain ordinary graph content with ordinary sharing settings.
 See [[Help - Private Reader]] for folder layout, local voices, backups, and
 Android's unverified locked-screen volume-key compatibility.

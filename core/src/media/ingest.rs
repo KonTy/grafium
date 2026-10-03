@@ -149,6 +149,9 @@ fn normalize_to_wav(input: &Path, output: &Path) -> Result<()> {
     let result = Command::new("ffmpeg")
         .args([
             "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-i",
             &input.to_string_lossy(),
             "-ar",
@@ -166,10 +169,28 @@ fn normalize_to_wav(input: &Path, output: &Path) -> Result<()> {
         return Err(CoreError::Other(format!(
             "ffmpeg failed ({}): {}",
             result.status,
-            String::from_utf8_lossy(&result.stderr).trim()
+            stderr_tail(&result.stderr, 1000)
         )));
     }
     Ok(())
+}
+
+fn stderr_tail(stderr: &[u8], max_chars: usize) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim();
+    let len = trimmed.chars().count();
+    if len <= max_chars {
+        return trimmed.to_string();
+    }
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(max_chars.saturating_sub(3))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
 }
 
 #[cfg(test)]
@@ -202,5 +223,13 @@ mod tests {
         let source = MediaSource::LocalFile(PathBuf::from("/nonexistent/path/video.mp4"));
         let result = fetch_audio(&source, workdir.path());
         assert!(matches!(result, Err(CoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded_and_char_safe() {
+        let stderr = "é".repeat(1200);
+        let tail = stderr_tail(stderr.as_bytes(), 1000);
+        assert!(tail.starts_with("..."));
+        assert!(tail.chars().count() <= 1000);
     }
 }

@@ -19,7 +19,7 @@ beforeEach(() => {
     { id: "second", title: "Ocean tides", kind: "epub", available: true, tracks: [], bookmarks: [], position: null },
   ] });
   invoke.mockImplementation(async command => {
-    if (["reader_snapshot", "reader_rescan"].includes(command)) return get(privateLibrary);
+    if (["reader_snapshot", "reader_rescan", "library_index_status"].includes(command)) return get(privateLibrary);
   });
 });
 afterEach(async () => {
@@ -51,7 +51,7 @@ describe("Library local search", () => {
     expect(library.focusSearch()).toBe(true);
     expect(document.activeElement).toBe(input);
     expect([input.selectionStart, input.selectionEnd]).toEqual([0, 5]);
-    expect(invoke.mock.calls.every(([command]) => ["reader_snapshot", "reader_rescan"].includes(command))).toBe(true);
+    expect(invoke.mock.calls.every(([command]) => ["reader_snapshot", "reader_rescan", "library_index_status"].includes(command))).toBe(true);
   });
 
   it("does not claim to focus search when there is no configured shelf", () => {

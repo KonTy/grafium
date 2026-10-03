@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { privateLibrary, privateLibraryError, refreshPrivateLibrary, setPrivateFavorite, addPrivateLibraryLink, type ReaderBook } from "../lib/privateReader";
   import { libraryBooks, libraryLink, libraryPercent, libraryPositionLabel, requestLibraryMedia } from "../lib/library";
+  import { FALLBACK_LIBRARY_INDEX_STATUS, createStaleLibrarySearchGuard, formatLibrarySourcePosition, isLibraryIndexOffError, libraryIndexStatus, librarySearch, subscribeLibraryIndexUpdated, type LibraryIndexStatus, type LibrarySearchHit } from "../lib/libraryIndex";
   import { playPrivateAudio, privatePlayback, resumePrivatePlayback } from "../lib/privateReaderPlayback";
   import SettingsHelp from "./SettingsHelp.svelte";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
@@ -10,7 +11,7 @@
   const TYPE_KEY = "grafium.library.mediaType";
   const MEDIA_TYPES = ["all", "epub", "audio", "video", "youtube"];
   let { onOpen, onSettings, onAddToStudies }: {
-    onOpen: (bookId: string) => void; onSettings: () => void; onAddToStudies?: (book: ReaderBook) => void;
+    onOpen: (bookId: string, position?: { trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null }) => void; onSettings: () => void; onAddToStudies?: (book: ReaderBook) => void;
   } = $props();
   let scanning = $state(false);
   let query = $state("");
@@ -24,7 +25,59 @@
   let busy = $state(false);
   let error = $state("");
   let message = $state("");
+  let indexStatus = $state<LibraryIndexStatus | null>(null);
+  let indexError = $state("");
+  let contentHits = $state<LibrarySearchHit[]>([]);
+  let contentSearching = $state(false);
+  let contentError = $state("");
+  const guardedSearch = createStaleLibrarySearchGuard(librarySearch);
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let stopIndex: (() => void) | undefined;
   const books = $derived(libraryBooks($privateLibrary.books, query, favorites, kind));
+
+  const indexLine = $derived.by(() => {
+    const status = indexStatus;
+    if (!status || !($privateLibrary.libraryPath || $privateLibrary.books.length)) return "";
+    const parts: string[] = [];
+    if (status.running || status.items.pending || status.items.failed || status.items.titleOnly || status.semantic !== "ready" || status.transcription !== "ready") {
+      parts.push(`Indexed ${status.items.indexed} of ${status.items.total} items`);
+      if (status.running) parts.push("indexing now");
+      if (status.items.pending) parts.push(`${status.items.pending} pending`);
+      if (status.items.failed) parts.push(`${status.items.failed} failed`);
+      if (status.items.titleOnly) parts.push(`${status.items.titleOnly} title-only`);
+      if (status.semantic !== "ready") parts.push(status.semanticReason || `semantic ${status.semantic}`);
+      if (status.transcription !== "ready") parts.push(status.transcriptionReason || `transcription ${status.transcription}`);
+    }
+    return parts.join(" · ");
+  });
+
+  $effect(() => {
+    const text = query.trim();
+    const enabled = indexStatus?.enabled !== false;
+    clearTimeout(searchTimer);
+    guardedSearch.cancel();
+    contentError = "";
+    if (!text || !enabled) { contentHits = []; contentSearching = false; return; }
+    contentSearching = true;
+    searchTimer = setTimeout(() => {
+      void guardedSearch(text, 8).then(results => {
+        if (results === null) return;
+        contentHits = results;
+        contentSearching = false;
+      }).catch(cause => {
+        if (isLibraryIndexOffError(cause)) {
+          indexStatus = { ...FALLBACK_LIBRARY_INDEX_STATUS, enabled: false, semanticReason: "Library index is off." };
+          contentError = "";
+        } else contentError = String(cause);
+        contentHits = []; contentSearching = false;
+      });
+    }, 250);
+    return () => { clearTimeout(searchTimer); guardedSearch.cancel(); };
+  });
+
+  function openHit(hit: LibrarySearchHit) {
+    onOpen(hit.bookId, { trackId: hit.trackId, startMs: hit.startMs, quote: hit.quote, chapter: hit.chapter });
+  }
   function loadMediaType(): string {
     try {
       const value = window.localStorage.getItem(TYPE_KEY);
@@ -74,10 +127,13 @@
   }
   onMount(() => {
     void refresh();
+    void libraryIndexStatus().then(value => { indexStatus = value; }).catch(cause => { indexError = String(cause); });
+    void subscribeLibraryIndexUpdated(value => { indexStatus = value; }, message => { indexError = message; }).then(unlisten => { stopIndex = unlisten; }).catch(cause => { indexError = String(cause); });
     const focus = () => { if (!document.hidden) void refresh(); };
     window.addEventListener("focus", focus);
-    return () => window.removeEventListener("focus", focus);
+    return () => { window.removeEventListener("focus", focus); stopIndex?.(); };
   });
+  onDestroy(() => { clearTimeout(searchTimer); stopIndex?.(); });
 </script>
 
 <section class="private-library" data-help-context="library" aria-label="Library">
@@ -99,6 +155,8 @@
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if message}<p role="status">{message}</p>{/if}
   {#if $privateLibraryError}<p class="error" role="alert">{$privateLibraryError}</p>{/if}
+  {#if indexError}<p class="error compact" role="alert">Library index status unavailable: {indexError}</p>{/if}
+  {#if indexLine}<p class="index-status" role="status">{indexLine}</p>{/if}
   {#if !$privateLibrary.libraryPath}<p>Choose an external local folder in <button class="text-button" onclick={onSettings}>Settings → Library location</button>. Originals stay in that folder.</p>
   {/if}
   {#if $privateLibrary.libraryPath || $privateLibrary.books.length}
@@ -108,6 +166,25 @@
       <label>Type<select value={kind} onchange={event => setMediaType(event.currentTarget.value)}><option value="all">All types</option><option value="epub">EPUB</option><option value="audio">Audio</option><option value="video">Video</option><option value="youtube">YouTube</option></select></label>
       <button aria-pressed={favorites} onclick={() => favorites = !favorites}>★ Favorites</button>
     </div>
+    {#if query.trim()}
+      <section class="inside-results" aria-label="Inside your Library">
+        <h2>Inside your Library</h2>
+        {#if indexStatus?.enabled === false}<p class="empty">Inside search is off in Settings → Library.</p>{/if}
+        {#if contentSearching}<p class="empty" role="status">Searching indexed content…</p>{/if}
+        {#if contentError}<p class="error compact" role="alert">Inside search failed: {contentError}</p>{/if}
+        {#if indexStatus?.enabled !== false && !contentSearching && !contentError && !contentHits.length}<p class="empty">No inside matches yet.</p>{/if}
+        {#if contentHits.length}
+          <ul class="hit-list">{#each contentHits as hit, index (hit.chunkId ?? `${index}:${hit.bookId}:${hit.trackId ?? ""}:${hit.startMs ?? ""}:${hit.quote ?? hit.snippet}`)}
+            <li>
+              <button class="hit" onclick={() => openHit(hit)}>
+                <span><strong>{hit.title}</strong> <small>{hit.kind.toUpperCase()} · {formatLibrarySourcePosition(hit)}</small></span>
+                <span class="snippet">{hit.snippet}</span>
+              </button>
+            </li>
+          {/each}</ul>
+        {/if}
+      </section>
+    {/if}
     <p class="empty">Recently read or played</p>
     {#if !books.length}<p class="empty">{scanning ? "Discovering sources…" : $privateLibrary.books.length ? "No matching Library items." : "No sources discovered yet. Add files to your library folder and rescan, or add a media link."}</p>{/if}
     <ul>
@@ -149,6 +226,9 @@
   .book-main { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: start; gap: 5px; }
   .kind { font-size: 9px; letter-spacing: .1em; color: var(--accent); }
   .book-title, .text-button { padding: 0; border: 0; background: none; text-align: left; color: var(--accent); }
-  .book-title { font-weight: 600; overflow-wrap: anywhere; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
+  .book-title { font-weight: 600; overflow-wrap: anywhere; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; } .compact { font-size: 12px; }
+  .index-status { margin: 10px 0; color: var(--text-muted); font-size: 12px; } .inside-results { margin: 12px 0 18px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
+  .inside-results h2 { margin: 0 0 8px; font-size: 15px; } .hit-list li { border-top: 1px solid var(--border); padding: 8px 0; } .hit-list li:first-child { border-top: 0; }
+  .hit { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; border: 0; background: none; text-align: left; } .snippet { color: var(--text-primary); font-size: 13px; }
   @media (max-width: 500px) { .private-library { padding: 14px; } .count { display: none; } .filter { flex-basis: 100%; align-items: stretch; flex-direction: column; margin-bottom: 0; } li { flex-wrap: wrap; } .book-main { flex-basis: 100%; } }
 </style>

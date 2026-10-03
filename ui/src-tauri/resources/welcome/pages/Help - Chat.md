@@ -43,6 +43,7 @@ Markdown and sources, without the decorative icons.
   **Graph**, which retrieves bounded relevant excerpts from this graph and sends
   them with your question to the configured model. **No notes** excludes note
   retrieval; **This page**, **Selection**, and the other choices set explicit scope.
+  **Library** searches your private Library index for that request only and is available only with a chat model running on this computer. Web search is off for Library questions; cited chips open the source in Library at the timestamp or EPUB passage.
 - **Answer mode:** choose **Answer — no web**, **Web search**, or **Deep web research**.
 - **Actions:** choose a Summary, Explain, or Compare prompt, or a reviewable
   note action. Prompt shortcuts fill the draft without sending it.
@@ -80,7 +81,7 @@ Use ordinary requests, or choose **Actions** inside the composer:
 
 The action scope is shown before sending. Task grouping uses all open tasks in
 the current graph; topic discovery reads saved Markdown notes in that graph.
-Private Library books, listening history, and bookmarks are excluded. These
+Private Library books, listening history, and bookmarks are excluded unless you explicitly choose the **Library** chat context for a question. These
 actions use the configured model, without web searches or an embedding-index
 requirement. An external model receives the supplied note/task text according
 to your normal AI settings. Large scopes take multiple model requests and may

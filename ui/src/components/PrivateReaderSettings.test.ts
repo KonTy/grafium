@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 import PrivateReaderSettings from "./PrivateReaderSettings.svelte";
 
 let component: ReturnType<typeof mount> | undefined;
@@ -7,6 +10,11 @@ let requests: { command: string; args: Record<string, unknown> }[] = [];
 let corrupt = false;
 beforeEach(() => {
   requests = []; corrupt = false;
+  invoke.mockReset();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "library_index_status") return { enabled: true, transcribeMedia: true, running: false, jobId: null, items: { total: 1, indexed: 1, pending: 0, failed: 0, titleOnly: 0 }, chunks: 2, semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null, lastIndexedAt: null, errors: [] };
+    if (command === "library_index_start") return "job-1";
+  });
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
   window.PrivateReaderBridge = { request(raw) {
     const request = JSON.parse(raw);
@@ -46,6 +54,20 @@ describe("native private history backup UI", () => {
     expect(document.querySelector("label button, summary button")).toBeNull();
   });
 
+
+  it("keeps index controls visible on bad status and preserves rebuild confirmation focus", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "library_index_status") return { enabled: true, transcribeMedia: true, running: false, jobId: null, items: { total: 1, indexed: 1, pending: 0, failed: 0, titleOnly: 0 }, chunks: 2, semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null, lastIndexedAt: null, errors: [{ bookId: "b", title: "T".repeat(1000), message: "M".repeat(1000) }] };
+      if (command === "library_index_start") return "job-1";
+    });
+    component = mount(PrivateReaderSettings, { target: document.body });
+    await vi.waitFor(() => expect(button("Rebuild index")).toBeTruthy());
+    expect(document.body.textContent).toContain("…");
+    button("Rebuild index").click();
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Confirm rebuild"));
+    button("Cancel").click();
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Rebuild index"));
+  });
   it("uses matching native export/restore pickers and accepts the actual successful merge response", async () => {
     component = mount(PrivateReaderSettings, { target: document.body });
     flushSync();

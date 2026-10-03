@@ -141,6 +141,33 @@ impl ReaderStore {
         }
     }
 
+    pub fn index_records(&self) -> ReaderResult<(Option<String>, Vec<ReaderIndexRecord>)> {
+        Ok((
+            self.document.library.as_ref().map(|b| b.path.clone()),
+            self.document
+                .books
+                .iter()
+                .map(|stored| ReaderIndexRecord {
+                    book: stored.book.clone(),
+                    files: stored
+                        .files
+                        .iter()
+                        .map(|file| ReaderIndexFile {
+                            track_id: (stored.book.kind != ReaderKind::Epub)
+                                .then(|| file.id.clone()),
+                            relative_path: file.path.clone(),
+                            available: stored.book.source_url.is_none()
+                                && stored.book.tracks.iter().find(|t| t.id == file.id).map_or(
+                                    stored.book.kind == ReaderKind::Epub && stored.book.available,
+                                    |t| t.available,
+                                ),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        ))
+    }
+
     fn commit(&mut self, mut document: Document) -> ReaderResult<()> {
         document.version = VERSION;
         validate(&document)?;

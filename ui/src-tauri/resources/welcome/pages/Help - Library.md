@@ -4,6 +4,10 @@
 **Studies**, your learning plan. Open it from the main navigation or use `g l`
 in navigation mode. Tasks remains a separate workspace.
 Use **Ctrl/Cmd+F** to focus Library's wide search field and filter your shelf.
+When you type, titles still filter immediately and **Inside your Library** also
+searches indexed book text and local media transcripts. Results show a plain-text
+snippet plus a chapter or timestamp; opening one jumps to that EPUB passage or
+media time and waits for you to press Play.
 The media-type filter (for example, Audio) is remembered on this device when
 you return from a book and after restarting Grafium.
 
@@ -86,6 +90,24 @@ or bookmarks. Opening that plan entry uses the same Library reader.
 Removing the study entry removes its plan/time history, not the Library item.
 See [[Help - Studies]] for active-time tracking.
 
-Library files and automatic history stay outside graph search, Chat, and graph
-sync. Back up both your original media and private Library records; a graph
+Library files and automatic history stay outside graph search, graph sync, and graph AI. You can explicitly choose the **Library** context in Chat when the chat model runs on this computer; those Library chats are kept in memory and are not written into graphs. Back up both your original media and private Library records; a graph
 backup alone is not a backup of your Library.
+
+
+## Inside search and indexing
+
+Library indexing is app-private. Its database lives in Grafium app data, not in
+a graph folder, graph sync, graph search, or graph AI context. Delta indexing
+updates new, changed, and removed sources; **Rebuild index** starts over and
+re-transcribes local audio/video, so it can take a long time.
+
+Local EPUB text is indexed. Local audio/video can be transcribed with local
+Whisper when **Transcribe audio and video** is enabled. YouTube and direct
+network links are indexed by title only; Grafium does not fetch them for the
+index. Semantic Library search uses only Grafium's on-device embedding model.
+If a cloud embedding provider is configured, Library semantic search explains
+why it is unavailable while keyword search still works.
+
+Chat receives Library excerpts only when you choose the **Library** context for
+that question and the chat model runs on this computer. Citation chips open the cited source back in Library at the
+chapter or timestamp.

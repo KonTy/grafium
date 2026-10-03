@@ -6,11 +6,14 @@ import {
   assistantConversationRunning, stopAssistantConversation, newAssistantConversation, stopAllAssistantConversations,
 } from "./assistantConversations";
 
-const mocks = vi.hoisted(() => ({ graph: vi.fn(), flush: vi.fn(), flushAll: vi.fn(), chat: vi.fn(), cancel: vi.fn() }));
+const mocks = vi.hoisted(() => ({ graph: vi.fn(), flush: vi.fn(), flushAll: vi.fn(), chat: vi.fn(), cancel: vi.fn(), saveChatThread: vi.fn() }));
 vi.mock("./api", () => ({ getGraphInfo: mocks.graph }));
 vi.mock("./editorPersistence", () => ({ flushPageEditors: mocks.flush, flushAllPageEditors: mocks.flushAll }));
 vi.mock("./assistant", async (original) => ({
   ...await original<typeof import("./assistant")>(), assistantChat: mocks.chat, assistantCancel: mocks.cancel,
+}));
+vi.mock("./chatStore", async (original) => ({
+  ...await original<typeof import("./chatStore")>(), saveChatThread: mocks.saveChatThread,
 }));
 
 let graphNumber = 0;
@@ -22,6 +25,7 @@ beforeEach(() => {
   mocks.flush.mockResolvedValue(undefined);
   mocks.flushAll.mockResolvedValue(undefined);
   mocks.cancel.mockResolvedValue(undefined);
+  mocks.saveChatThread.mockResolvedValue(undefined);
   mocks.chat.mockImplementation(async (_request: AssistantRequest, handlers: ResearchStreamHandlers) => {
     handlers.onChunk("A complete answer.");
     handlers.onDone();
@@ -116,6 +120,118 @@ describe("one conversation lifecycle for both placements", () => {
       "Question about private notes", "A complete answer.", "General question", "A complete answer.",
       "General follow-up", "A complete answer.",
     ]);
+  });
+
+
+  it("keeps Library-only turns out of graph chat persistence and labels them Library", async () => {
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Quote the transcript";
+    await sendAssistantQuestion(thread);
+    await vi.waitFor(() => expect(thread.messages[0].contextLabel).toBe("Library"));
+    expect(mocks.chat.mock.calls[0][0].context).toEqual({ kind: "library" });
+    expect(mocks.saveChatThread).not.toHaveBeenCalled();
+    newAssistantConversation(thread);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    expect(thread.contextLabel).toBe("Library");
+  });
+
+
+
+
+
+  it("excludes Library history after switching back to Graph", async () => {
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Private transcript question";
+    await sendAssistantQuestion(thread);
+    thread.context = { kind: "graph" };
+    thread.contextLabel = "Graph";
+    thread.draft = "Graph follow-up";
+    await sendAssistantQuestion(thread);
+    expect(mocks.chat.mock.calls.at(-1)![0].history).toEqual([]);
+  });
+
+  it("does not persist a Library-derived title when later saving graph turns", async () => {
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Name from private book";
+    await sendAssistantQuestion(thread);
+    expect(thread.title).toBe("Chat");
+    mocks.saveChatThread.mockClear();
+    thread.context = { kind: "graph" };
+    thread.contextLabel = "Graph";
+    thread.draft = "Graph question";
+    await sendAssistantQuestion(thread);
+    await vi.waitFor(() => expect(mocks.saveChatThread).toHaveBeenCalled());
+    expect(mocks.saveChatThread.mock.calls.at(-1)![0].title).toBe("Chat");
+  });
+
+  it("persists non-Library page turns even when the display label says Library", async () => {
+    const thread = getSourceConversation(graphPath, "page-library", "Library");
+    thread.context = { kind: "page", pageId: "page-library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Page named Library question";
+    await sendAssistantQuestion(thread);
+    await vi.waitFor(() => expect(mocks.saveChatThread).toHaveBeenCalled());
+    const messages = mocks.saveChatThread.mock.calls.at(-1)![1];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toBe("Page named Library question");
+  });
+
+
+
+  it("turns backend local-model Library refusal into an in-memory calm answer", async () => {
+    const refusal = "Library questions need a chat model on this computer, so book and transcript text never leaves it. Choose one in Settings > AI.";
+    mocks.chat.mockImplementationOnce(async (_request: AssistantRequest, handlers: ResearchStreamHandlers) => {
+      handlers.onError?.(refusal);
+    });
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Local only?";
+    await sendAssistantQuestion(thread);
+    expect(thread.error).toBeNull();
+    expect(thread.messages[1].content).toBe(refusal);
+    expect(mocks.saveChatThread).not.toHaveBeenCalled();
+  });
+
+  it("turns backend Library-index-off errors into an in-memory calm answer", async () => {
+    mocks.chat.mockImplementationOnce(async (_request: AssistantRequest, handlers: ResearchStreamHandlers) => {
+      handlers.onError?.("Library index is off");
+    });
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Search my library";
+    await sendAssistantQuestion(thread);
+    expect(thread.error).toBeNull();
+    expect(thread.messages[1].content).toBe("Library index is off in Settings → Library.");
+    expect(mocks.saveChatThread).not.toHaveBeenCalled();
+  });
+
+  it("persists only non-Library turns from a mixed thread", async () => {
+    const thread = getGlobalConversation(graphPath);
+    thread.context = { kind: "graph" };
+    thread.contextLabel = "Graph";
+    thread.draft = "Graph question";
+    await sendAssistantQuestion(thread);
+    await vi.waitFor(() => expect(mocks.saveChatThread).toHaveBeenCalled());
+    mocks.saveChatThread.mockClear();
+    thread.context = { kind: "library" };
+    thread.contextLabel = "Library";
+    thread.draft = "Library question";
+    await sendAssistantQuestion(thread);
+    await vi.waitFor(() => expect(mocks.saveChatThread).toHaveBeenCalled());
+    const messages = mocks.saveChatThread.mock.calls.at(-1)![1];
+    expect(messages.map((message: { contextLabel: string; content: string }) => [message.contextLabel, message.content])).toEqual([
+      ["Graph", "Graph question"], ["Graph", "A complete answer."],
+    ]);
+    expect(mocks.saveChatThread.mock.calls.at(-1)![0].contextJson).not.toContain("library");
   });
 
   it("keeps a pending run alive without a mounted view and isolates other sources", async () => {

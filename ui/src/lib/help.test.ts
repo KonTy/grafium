@@ -137,6 +137,16 @@ describe("contextual help", () => {
     expect(settingsHelp).toContain("all imported originals");
     expect(settingsHelp).toContain("Removed sources are cleaned from the index, not recreated.");
   });
+
+  it("documents private Library indexing and Chat context", () => {
+    expect(libraryHelp).toContain("Inside your Library");
+    expect(libraryHelp).toContain("app data, not in");
+    expect(libraryHelp).toContain("Whisper when **Transcribe audio and video** is enabled");
+    expect(chatHelp).toContain("**Library** searches your private Library index");
+    expect(aiHelp).toContain("Library excerpts are sent only to a chat model running on this computer");
+    expect(chatHelp).toContain("available only with a chat model running on this computer");
+    expect(settingsHelp).toContain("Library search index");
+  });
   it("explains explicit revision-checked sync choices, including deletion and binary files", () => {
     expect(syncResolution).toContain('data-help-context="sync"');
     expect(syncHelp).toContain("**Confirm choice**");

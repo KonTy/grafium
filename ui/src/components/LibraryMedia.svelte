@@ -6,8 +6,8 @@
   import { libraryMediaRequest, saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
   import { pausePrivatePlayback, stopPrivatePlayback, privatePlayback, validatePrivateMediaURL } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
-  let { book, onPlayback, onActivity, onProgress }: {
-    book: ReaderBook; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
+  let { book, initialPosition = null, onPlayback, onActivity, onProgress }: {
+    book: ReaderBook; initialPosition?: ReaderPosition | null; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
     onProgress?: (progress: LibraryProgress) => void;
   } = $props();
   let started = $state(false);
@@ -16,6 +16,8 @@
   let error = $state("");
   let playerKey = $state(0);
   let initial = $state<ReaderPosition | null>(null);
+  let autoplay = $state(true);
+  let consumedInitial = false;
   let pending: { id: string; position: ReaderPosition; progress: LibraryProgress; active: boolean } | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastPosition = 0;
@@ -26,13 +28,13 @@
     source: book.sourceUrl ?? book.id,
     progress: { position: (initial?.offsetMs ?? 0) / 1000, total: 0, anchor: "", label: "" },
   });
-  async function start(position = book.position) {
+  async function start(position = book.position, shouldAutoplay = true) {
     opening = true; error = "";
     try {
       if (get(privatePlayback).status === "loading") await stopPrivatePlayback();
       else if (get(privatePlayback).status === "playing") await pausePrivatePlayback();
       flush();
-      initial = position; lastPosition = (position?.offsetMs ?? 0) / 1000; playerKey++; started = true;
+      initial = position; autoplay = shouldAutoplay; lastPosition = (position?.offsetMs ?? 0) / 1000; playerKey++; started = true;
     } catch (cause) { error = String(cause); }
     finally { opening = false; }
   }
@@ -76,7 +78,14 @@
   $effect(() => {
     const request = $libraryMediaRequest;
     if (request?.bookId === book.id && !unsupported) {
-      untrack(() => { libraryMediaRequest.set(null); void start(request.position ?? book.position); });
+      untrack(() => { libraryMediaRequest.set(null); void start(request.position ?? book.position, request.autoplay !== false); });
+    }
+  });
+  $effect(() => {
+    const requested = initialPosition;
+    if (requested && !consumedInitial && !unsupported) {
+      consumedInitial = true;
+      untrack(() => { void start(requested, false); });
     }
   });
   $effect(() => {
@@ -89,7 +98,7 @@
   {#if unsupported}
     <p role="alert">Local video playback is not supported on Android yet. Your Library history is retained; play this source on desktop.</p>
   {:else if started}
-    {#key playerKey}<LibrarySourcePlayer bind:this={foregroundPlayer} {item} autoplay={true} helpContext="library"
+    {#key playerKey}<LibrarySourcePlayer bind:this={foregroundPlayer} {item} {autoplay} helpContext="library"
       resolveMedia={book.sourceUrl ? undefined : mediaURL} onProgress={progress} onPlayback={playback} />{/key}
     <p class="status">{book.kind === "audio" ? "Network audio on Android stops when you leave this player." : "Video and YouTube stop when you leave this player."}</p>
   {:else}

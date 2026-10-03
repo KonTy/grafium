@@ -4,11 +4,15 @@ AI is optional. Grafium's editor, journal, links, graph, tasks, flashcards,
 search, imports, and sync work without an AI provider.
 
 The **private reader** uses external books without adding their text or automatic
-bookmarks to graph search, AI indexing, or Chat. Its offline speech path must not
+bookmarks to graph search, graph AI indexing, or Chat by default. Its offline speech path must not
 fall back to cloud or system-default speech. Explicit voice downloads are separate
 from synthesis and do not require book text. Manually writing a quotation or
 `[[Book title]]` note in a journal does put that text into the normal graph and
-its configured sync/AI scope. See [[Help - Private Reader]].
+its configured sync/AI scope. Library inside-search keeps its own index in app data. It uses on-device
+embeddings only, local Whisper for transcripts, and title-only indexing for
+network links. Library excerpts are sent only to a chat model running on this computer, and only when you choose
+Chat's **Library** context for that request. See [[Help - Private Reader]] and
+[[Help - Library]].
 
 ## Set up AI
 
@@ -128,8 +132,8 @@ OpenAI-compatible server when it closes.
   not receive the selected prompt and retrieved excerpts.
 - **Internet** enables web search and Research. It is separate from where the
   model runs.
-- Page, block, journal, and graph scopes limit retrieval; they do not override
-  the provider's handling after data is sent.
+- Page, block, journal, graph, and Library scopes limit retrieval; they do not
+  override the provider's handling after data is sent.
 
 Never paste passwords, private keys, health records, or confidential material
 into a cloud prompt unless you have decided that provider is appropriate.

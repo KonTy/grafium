@@ -298,9 +298,13 @@ mod tests {
     fn single_instance_is_skipped_for_malformed_session_bus_addresses() {
         use super::usable_session_bus_address as usable;
         assert!(usable("unix:path=/run/user/1000/bus"));
-        assert!(usable("unix:abstract=/tmp/dbus-x,guid=0123456789abcdef0123456789abcdef"));
+        assert!(usable(
+            "unix:abstract=/tmp/dbus-x,guid=0123456789abcdef0123456789abcdef"
+        ));
         // zbus reads one address; the rest of a list becomes part of the guid.
-        assert!(!usable("unix:abstract=/tmp/dbus-x,guid=1;tcp:host=localhost,port=1"));
+        assert!(!usable(
+            "unix:abstract=/tmp/dbus-x,guid=1;tcp:host=localhost,port=1"
+        ));
         assert!(!usable(""));
         assert!(!usable("disabled"));
         assert!(!usable("unix:foo=x"));
@@ -312,7 +316,10 @@ mod tests {
         let state = StartupWindow::default();
         assert!(!state.is_revealed(), "a starting window must stay hidden");
         assert!(state.reveal_once(|| Err("window error".into())).is_err());
-        assert!(!state.is_revealed(), "a failed reveal is not a shown window");
+        assert!(
+            !state.is_revealed(),
+            "a failed reveal is not a shown window"
+        );
         state.reveal_once(|| Ok(())).unwrap();
         assert!(state.is_revealed());
     }

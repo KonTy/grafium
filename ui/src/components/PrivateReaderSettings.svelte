@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { privateLibrary, privateLibraryError, readerNative, refreshPrivateLibrary } from "../lib/privateReader";
   import { androidReaderRequest, isAndroidReader, type ReaderVolumeCapabilities } from "../lib/privateReaderAndroid";
   import PrivateReaderVoices from "./PrivateReaderVoices.svelte";
+  import { FALLBACK_LIBRARY_INDEX_STATUS, formatLibraryLastRun, libraryIndexSettingsSet, libraryIndexStart, libraryIndexStatus, subscribeLibraryIndexUpdated, type LibraryIndexStatus } from "../lib/libraryIndex";
   import SettingsHelp from "./SettingsHelp.svelte";
   let busy = $state(false);
   let error = $state("");
@@ -11,11 +12,28 @@
   let backup = $state("");
   const android = isAndroidReader();
   let capabilities = $state<ReaderVolumeCapabilities | null>(null);
+  let indexStatus = $state<LibraryIndexStatus | null>(null);
+  let indexBusy = $state(false);
+  let indexError = $state("");
+  let confirmRebuild = $state(false);
+  let stopIndex: (() => void) | undefined;
+  let confirmRebuildButton = $state<HTMLButtonElement>();
+  let rebuildButton = $state<HTMLButtonElement>();
   async function refreshCapabilities() { capabilities = await androidReaderRequest<ReaderVolumeCapabilities>("capabilities"); }
   async function setVolume(enabled: boolean, key = capabilities?.volume.settings.key ?? "up") {
     await androidReaderRequest("volumeSettings", { enabled, key, gesture: "longPress" });
     await refreshCapabilities();
   }
+  async function refreshIndexStatus() { indexStatus = await libraryIndexStatus(); }
+  async function runIndex(action: () => Promise<void>) {
+    indexBusy = true; indexError = ""; message = "";
+    try { await action(); } catch (cause) { indexError = String(cause); }
+    finally { indexBusy = false; }
+  }
+  async function setIndex(enabled = indexStatus?.enabled ?? true, transcribeMedia = indexStatus?.transcribeMedia ?? true) {
+    indexStatus = await libraryIndexSettingsSet(enabled, transcribeMedia);
+  }
+
   async function run(action: () => Promise<void>) {
     busy = true; error = ""; message = "";
     try { await action(); } catch (cause) { error = String(cause); }
@@ -48,12 +66,15 @@
   }
   onMount(() => {
     void refreshPrivateLibrary().catch(cause => { error = String(cause); });
+    void refreshIndexStatus().catch(cause => { indexError = String(cause); indexStatus = FALLBACK_LIBRARY_INDEX_STATUS; });
+    void subscribeLibraryIndexUpdated(status => { indexStatus = status; }, message => { indexError = message; }).then(unlisten => { stopIndex = unlisten; }).catch(cause => { indexError = String(cause); });
     if (!android) return;
     void refreshCapabilities().catch(cause => { error = String(cause); });
     const changed = () => { void refreshCapabilities().catch(cause => { error = String(cause); }); };
     window.addEventListener("focus", changed);
-    return () => window.removeEventListener("focus", changed);
+    return () => { window.removeEventListener("focus", changed); stopIndex?.(); };
   });
+  onDestroy(() => { stopIndex?.(); });
 </script>
 
 <section data-help-context="reader" class="private-settings">
@@ -88,6 +109,41 @@
       <button disabled={busy} onclick={() => run(async () => { await androidReaderRequest("accessibilitySettings"); })}>Open Android accessibility settings</button>
     </section>
   {/if}
+
+  <section class="indexing">
+    <div class="help-row">
+      <h3>Library search index</h3>
+      <SettingsHelp title="Library search index">
+        <p>The Library index stays on this device in app data. It is not saved in graphs, graph sync, graph search, or graph AI context.</p>
+        <p>Local books are indexed by text. Network links are indexed by title only. Semantic search uses only Grafium’s on-device embedding model; cloud embedding providers make semantic Library search unavailable while keyword search still works.</p>
+        <p>Transcribing audio and video uses local Whisper only. It can take time and disk space; rebuilding re-transcribes everything.</p>
+        <p>Chat sends Library excerpts to your chosen chat model only when you select the Library context for that question.</p>
+      </SettingsHelp>
+    </div>
+    {#if indexStatus}
+      <label class="checkbox"><input type="checkbox" checked={indexStatus.enabled} disabled={indexBusy} onchange={event => runIndex(() => setIndex(event.currentTarget.checked, indexStatus!.transcribeMedia))} />Search inside books and media</label>
+      <label class="checkbox"><input type="checkbox" checked={indexStatus.transcribeMedia} disabled={indexBusy || !indexStatus.enabled} onchange={event => runIndex(() => setIndex(indexStatus!.enabled, event.currentTarget.checked))} />Transcribe audio and video</label>
+      <p class="path">Indexed {indexStatus.items.indexed} of {indexStatus.items.total} items · {indexStatus.chunks} chunks · {indexStatus.running ? "running" : "idle"}{indexStatus.jobId ? ` · job ${indexStatus.jobId}` : ""}</p>
+      <p>Semantic: {indexStatus.semantic}{indexStatus.semanticReason ? ` · ${indexStatus.semanticReason}` : ""}</p>
+      <p>Transcription: {indexStatus.transcription}{indexStatus.transcriptionReason ? ` · ${indexStatus.transcriptionReason}` : ""}</p>
+      <p>Last run: {formatLibraryLastRun(indexStatus.lastIndexedAt)}</p>
+      {#if indexStatus.errors.length}
+        <details open><summary>Recent indexing errors · {indexStatus.errors.length}</summary><ul>{#each indexStatus.errors as item}<li><strong>{item.title}</strong>: {item.message}</li>{/each}</ul></details>
+      {/if}
+      <div class="actions"><button disabled={indexBusy || indexStatus.running || !indexStatus.enabled} onclick={() => runIndex(async () => { const job = await libraryIndexStart(false); message = `Library indexing started (${job}).`; })}>Index changes now</button>
+        {#if confirmRebuild}
+          <button bind:this={confirmRebuildButton} disabled={indexBusy || indexStatus.running || !indexStatus.enabled} onclick={() => runIndex(async () => { const job = await libraryIndexStart(true); confirmRebuild = false; message = `Library rebuild started (${job}).`; await tick(); rebuildButton?.focus(); })}>Confirm rebuild</button>
+          <button disabled={indexBusy} onclick={async () => { confirmRebuild = false; await tick(); rebuildButton?.focus(); }}>Cancel</button>
+        {:else}
+          <button bind:this={rebuildButton} disabled={indexBusy || indexStatus.running || !indexStatus.enabled} onclick={async () => { confirmRebuild = true; await tick(); confirmRebuildButton?.focus(); }}>Rebuild index</button>
+        {/if}
+      </div>
+      {#if confirmRebuild}<p class="warning" role="alert">Rebuild re-transcribes all local audio and video and can take a long time.</p>{/if}
+    {:else}
+      <p role="status">Loading Library index status…</p>
+    {/if}
+    {#if indexError}<p role="alert" class="error">{indexError}</p>{/if}
+  </section>
   <PrivateReaderVoices />
   <details><summary>Private progress backup</summary>
     <div class="help-row">
@@ -128,6 +184,6 @@
   .actions { display: flex; gap: 10px; flex-wrap: wrap; } button, input { font: inherit; color: var(--text-primary); padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); }
   button { cursor: pointer; } button:disabled { opacity: .5; } button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   details { margin-top: 20px; } summary { cursor: pointer; } label { display: flex; flex-direction: column; gap: 7px; margin: 15px 0; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
-  .volume { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 20px; } .badge { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; margin-left: 8px; }
+  .volume, .indexing { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 20px; } .warning { color: var(--danger, #c44); font-weight: 600; } ul { margin-top: 6px; padding-left: 18px; } li { margin: 4px 0; } .badge { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; margin-left: 8px; }
   .checkbox { flex-direction: row; align-items: center; } select { color: var(--text-primary); background: var(--bg-primary); padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
 </style>

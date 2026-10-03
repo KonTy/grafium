@@ -53,6 +53,38 @@ const metrics = (page) => composer(page).evaluate((node) => {
 });
 
 const cases = [
+
+  ["Chat disables Library context when no on-device chat model is available", { global: true }, async (page) => {
+    await page.evaluate(() => {
+      window.__assistantFixture.libraryChatAvailable = false;
+      window.__assistantFixture.libraryChatReason = "Library questions need a chat model on this computer, so book and transcript text never leaves it. Choose one in Settings > AI.";
+      window.dispatchEvent(new Event("ai-configuration-changed"));
+    });
+    await panel(page).getByText("Library questions need a chat model on this computer").waitFor();
+    const libraryOptionDisabled = await context(page).evaluate(select => [...select.options].find(option => option.value === "library")?.disabled);
+    assert.equal(libraryOptionDisabled, true);
+    const call = await send(page, "Do not use library", true);
+    assert.notDeepEqual(call.args.context, { kind: "library" });
+    assert.equal(await page.evaluate(() => window.__assistantFixture.requests.some(({ args }) => args.context.kind === "library")), false);
+  }],
+
+  ["Chat Library context sends Library scope and opens source chips", { global: true }, async (page) => {
+    await page.evaluate(() => { window.__assistantFixture.allowReaderWrites = true; });
+    await mode(page).selectOption("web");
+    await context(page).selectOption("library");
+    await panel(page).getByText("Library answers stay on this device; web search is off for Library questions.").waitFor();
+    assert.equal(await mode(page).inputValue(), "answer");
+    assert.equal(await mode(page).isDisabled(), true);
+    const call = await send(page, "What did the library say?", true);
+    assert.deepEqual(call.args.context, { kind: "library" });
+    assert.equal(call.args.mode, "answer");
+    await panel(page).locator(".library-source-chip", { hasText: "Library fixture" }).waitFor();
+    await panel(page).locator(".library-source-chip", { hasText: "1:05" }).click();
+    await page.getByRole("heading", { name: "Library fixture", exact: true }).waitFor();
+    await page.getByText("Opened the cited Library position. Press Play when ready.").waitFor();
+    const readerWrites = await page.evaluate(() => window.__assistantFixture.writes.map(({ cmd }) => cmd));
+    assert.ok(readerWrites.includes("reader_rescan"), "App refreshed Library before opening the cited source");
+  }],
   ["Chat shimmer uses grey and the exact theme foreground without resizing text", { global: true }, async (page) => {
     await page.evaluate(() => { window.__assistantFixture.hold = true; });
     const call = await send(page, "Show progress styling", true);

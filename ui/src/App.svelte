@@ -88,11 +88,20 @@
   let shuttingDown = $state(false);
   let privateBookId = $state<string | null>(null);
   let privateBookmarkId = $state<string | undefined>();
+  let privateOpenTarget = $state<{ nonce: number; bookId: string; trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null } | null>(null);
   let privateLibraryRef: { focusSearch: () => boolean } | undefined = $state();
-  onMount(attachPrivatePlayback);
+  onMount(() => {
+    const detachPlayback = attachPrivatePlayback();
+    const openLibrary = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail?.bookId) openPrivateLibraryPosition(detail);
+    };
+    window.addEventListener("grafium-open-library-source", openLibrary);
+    return () => { detachPlayback?.(); window.removeEventListener("grafium-open-library-source", openLibrary); };
+  });
 
-  async function openPrivateBook(bookId: string, bookmarkId?: string) {
-    if (currentView === "library" && privateBookId === bookId && !bookmarkId) return true;
+  async function openPrivateBook(bookId: string, bookmarkId?: string, target?: { trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null }) {
+    if (currentView === "library" && privateBookId === bookId && !bookmarkId && !target) return true;
     const request = studyNavigation + 1;
     await navigateToPage("__library__");
     if (request !== studyNavigation) return false;
@@ -103,11 +112,16 @@
         throw new Error("This Library item is unavailable on this device. Restore its private library backup or relink its source.");
       privateBookId = bookId;
       privateBookmarkId = bookmarkId;
+      privateOpenTarget = target ? { ...target, bookId, nonce: Date.now() } : null;
       return true;
     } catch (cause) {
       if (request === studyNavigation) showToast(`Could not open Library item: ${String(cause)}`, "error");
       return false;
     }
+  }
+
+  function openPrivateLibraryPosition(detail: { bookId: string; trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null }) {
+    void openPrivateBook(detail.bookId, undefined, detail);
   }
 
   function openAiSettings() {
@@ -1837,6 +1851,7 @@
     }
     privateBookId = null;
     privateBookmarkId = undefined;
+    privateOpenTarget = null;
 
     // Handle special routes
     if (target === "__library__") {
@@ -2324,6 +2339,7 @@
     studyAddPage = null;
     studyAddLibrary = null;
     privateBookmarkId = undefined;
+    privateOpenTarget = null;
     goToLinkOpen = false;
     globalSearchOpen = false;
     showImportBooksDialog = false;
@@ -2558,7 +2574,7 @@
     {:else if currentView === "library"}
       {#if privateBookId}
         {#key privateBookId}
-          <PrivateReaderBook bookId={privateBookId} initialBookmarkId={privateBookmarkId}
+          <PrivateReaderBook bookId={privateBookId} initialBookmarkId={privateBookmarkId} initialOpenTarget={privateOpenTarget}
             onBack={() => { void navigateToPage("__library__"); }} onVoiceSettings={openPrivateLibrarySettings}
             onAddToStudies={book => { void addLibraryToStudies(book); }}
             onJournalNote={(book, bookmark) => { void writeLibraryBookmarkToJournal(book, bookmark); }}
@@ -2566,7 +2582,7 @@
             onActivity={() => studyClock?.activity()} />
         {/key}
       {:else}
-        <PrivateReaderLibrary bind:this={privateLibraryRef} onOpen={bookId => { void openPrivateBook(bookId); }}
+        <PrivateReaderLibrary bind:this={privateLibraryRef} onOpen={(bookId, position) => { void openPrivateBook(bookId, undefined, position); }}
           onSettings={openPrivateLibrarySettings} onAddToStudies={book => { void addLibraryToStudies(book); }} />
       {/if}
     {:else if currentView === "studies"}

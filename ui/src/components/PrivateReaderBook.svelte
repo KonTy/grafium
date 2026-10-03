@@ -11,14 +11,15 @@
   import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, bookmarkExcerpt, compactBookmarkLabel, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
   import { formatBinding } from "../lib/shortcuts";
   import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
-  import { playPrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
+  import { playPrivateAudio, cuePrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   import { startPrivateReadAloud } from "../lib/privateReaderVoice";
-  let { bookId, onBack, onVoiceSettings, onAddToStudies, onJournalNote, initialBookmarkId, onPlayback, onActivity, onProgress }: {
+  type InitialOpenTarget = { nonce: number; bookId: string; trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null };
+  let { bookId, onBack, onVoiceSettings, onAddToStudies, onJournalNote, initialBookmarkId, initialOpenTarget = null, onPlayback, onActivity, onProgress }: {
     bookId: string; onBack: () => void; onVoiceSettings?: () => void;
     onAddToStudies?: (book: ReaderBook) => void;
     onJournalNote?: (book: ReaderBook, bookmark: ReaderBookmark) => void;
-    initialBookmarkId?: string | null; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
+    initialBookmarkId?: string | null; initialOpenTarget?: InitialOpenTarget | null; onPlayback?: (playing: boolean) => void; onActivity?: () => void;
     onProgress?: (progress: ReaderProgress) => void;
   } = $props();
   const book = $derived($privateLibrary.books.find(item => item.id === bookId));
@@ -37,6 +38,7 @@
   let replacementPath = $state("");
   let audioRelinkChoice = $state(false);
   let consumedBookmark = "";
+  let consumedOpenTarget = $state(0);
   let ignoredBookmark = $state<string | null>(null);
   const missingInitialBookmark = $derived(!!initialBookmarkId && !!book
     && !book.bookmarks.some(mark => mark.id === initialBookmarkId) && ignoredBookmark !== initialBookmarkId);
@@ -63,6 +65,14 @@
       if (mark && current.available) void run(() => jump(mark));
     });
   });
+
+  $effect(() => {
+    const target = initialOpenTarget;
+    const current = book;
+    if (!target || target.bookId !== bookId || !current || consumedOpenTarget === target.nonce || !current.available) return;
+    consumedOpenTarget = target.nonce;
+    untrack(() => { void run(() => openAtTarget(current, target)); });
+  });
   $effect(() => {
     if (!book || book.kind === "video" || book.kind === "youtube" || (book.sourceUrl && android)) return;
     const state = $privatePlayback;
@@ -87,7 +97,7 @@
   });
   async function run(action: () => Promise<unknown>, success = "") {
     busy = true; error = ""; message = "";
-    try { await action(); if (success && reading) showToast(success); else message = success; }
+    try { await action(); if (success) { if (reading) showToast(success); else message = success; } }
     catch (cause) { error = String(cause); if (disposed) showToast(error, "error"); }
     finally { busy = false; }
   }
@@ -111,6 +121,37 @@
     await readerNative("reorder", { bookId, trackIds });
     await refreshPrivateLibrary();
   }
+  async function openAtTarget(current: ReaderBook, target: InitialOpenTarget) {
+    const hasTimestamp = target.startMs !== null && target.startMs !== undefined;
+    const position = hasTimestamp ? { trackId: target.trackId ?? current.position?.trackId ?? current.tracks[0]?.id, offsetMs: target.startMs ?? 0 } : null;
+    if (current.kind === "epub") {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (visualReader) {
+          try {
+            const result = await visualReader.locateQuote(target.quote, target.chapter);
+            message = result === "quote" ? "Opened the matching Library excerpt."
+              : result === "chapter" ? "Opened the indexed chapter; the exact excerpt was not found."
+              : "Opened the book start; the indexed excerpt was not found.";
+            return;
+          } catch (cause) {
+            if (!String(cause).includes("Wait for the book")) throw cause;
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw new Error("The EPUB reader was not ready to locate the Library excerpt.");
+    }
+    if (!position) {
+      message = "Opened the Library item. Use its saved place or choose a chapter to continue.";
+    } else if (current.kind === "audio" && !(current.sourceUrl && android)) {
+      await cuePrivateAudio(current, position);
+      message = `Opened ${current.title} at ${Math.floor(position.offsetMs / 60000)}:${String(Math.floor(position.offsetMs / 1000) % 60).padStart(2, "0")}. Press Play when ready.`;
+    } else {
+      requestLibraryMedia(current.id, position, false);
+      message = "Opened the cited Library position. Press Play when ready.";
+    }
+  }
+
   async function jump(bookmark: ReaderBookmark) {
     if (!book) return;
     if (bookmark.position.locator) privateBookJump.set({ bookId, locator: bookmark.position.locator, select: true });
@@ -138,7 +179,7 @@
         {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
         {#if !reading}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
         {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
-        <SettingsHelp title="Library reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and AI. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
+        <SettingsHelp title="Library reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and graph AI unless you explicitly choose the Library context in Chat. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
       </div>
       {#if reading}
         <div class="actions">
@@ -271,7 +312,7 @@
         onBookmark={() => { if (!busy) void run(bookmark, "Bookmark saved on this device."); }}
         actions={bookActions} bookmarks={privateBookmarks} bookmarkCount={book.bookmarks.length} status={readingStatus} />
     {:else if book.available}
-      {#key bookId}<LibraryMedia {book} {onPlayback} {onActivity} {onProgress} />{/key}
+      {#key bookId}<LibraryMedia {book} initialPosition={initialOpenTarget?.bookId === bookId && initialOpenTarget?.nonce === consumedOpenTarget && initialOpenTarget.startMs !== null && initialOpenTarget.startMs !== undefined ? { trackId: initialOpenTarget?.trackId ?? undefined, offsetMs: initialOpenTarget.startMs } : null} {onPlayback} {onActivity} {onProgress} />{/key}
     {/if}
     {#if !reading}<h2>Bookmarks <span>{book.bookmarks.length}</span></h2>{@render privateBookmarks()}{/if}
   {:else}<p role="alert">This source is not in the local library. Return to Library and rescan.</p>{/if}

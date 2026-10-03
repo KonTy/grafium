@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import { SvelteMap } from "svelte/reactivity";
 import { get } from "svelte/store";
-const invoke = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
+const invoke = mocks.invoke;
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ open: vi.fn() }));
 import PrivateReaderLibrary from "./PrivateReaderLibrary.svelte";
@@ -19,12 +21,20 @@ const source = (extra: Partial<ReaderBook> = {}): ReaderBook => ({
   position: { trackId: "track", offsetMs: 12000 }, bookmarks: [], ...extra,
 });
 let component: ReturnType<typeof mount> | undefined;
+let indexEnabled = true;
+let duplicateHits = false;
+let searchRejectsOff = false;
 const button = (name: string) => [...document.querySelectorAll("button")].find(element => element.textContent?.trim() === name)!;
 beforeEach(() => {
-  invoke.mockReset(); privateLibraryError.set(""); libraryMediaRequest.set(null);
+  invoke.mockReset(); mocks.listen.mockReset(); mocks.listen.mockResolvedValue(vi.fn()); privateLibraryError.set(""); indexEnabled = true; duplicateHits = false; searchRejectsOff = false; libraryMediaRequest.set(null);
   privatePlayback.set({ bookId: null, title: "", mode: "audio", status: "stopped", position: null, error: "" });
   privateLibrary.set({ libraryPath: "/library", books: [source()] });
   invoke.mockImplementation(async (command, args) => {
+    if (command === "library_index_status") return { enabled: indexEnabled, transcribeMedia: true, running: false, jobId: null, items: { total: 1, indexed: 1, pending: 0, failed: 0, titleOnly: 0 }, chunks: 2, semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null, lastIndexedAt: null, errors: [] };
+    if (command === "library_search") { if (searchRejectsOff) throw new Error("Library index is off"); return duplicateHits ? [
+      { bookId: "media", title: "Local video", kind: "video", snippet: "same snippet", trackId: "track", startMs: 65000, endMs: 90000, chapter: null, quote: null, score: 1, match: "keyword" },
+      { bookId: "media", title: "Local video", kind: "video", snippet: "same snippet", trackId: "track", startMs: 66000, endMs: 91000, chapter: null, quote: null, score: .9, match: "keyword" },
+    ] : [{ bookId: "media", title: "Local video", chunkId: "hit-1", kind: "video", snippet: "replace the fuel filter", trackId: "track", startMs: 65000, endMs: 90000, chapter: null, quote: null, score: 1, match: "keyword" }]; }
     if (command === "reader_media_url") return "http://127.0.0.1:3456/private/video";
     if (command === "study_youtube_embed") return "http://127.0.0.1:3456/private/youtube";
     if (command === "reader_set_favorite") {
@@ -65,7 +75,52 @@ describe("Library destination", () => {
     expect(document.querySelectorAll(".book-title")).toHaveLength(1);
     button("Add to Studies").click();
     expect(onAddToStudies).toHaveBeenCalledWith(expect.objectContaining({ id: "recent" }));
-    expect(invoke.mock.calls.every(([name]) => name.startsWith("reader_"))).toBe(true);
+    expect(invoke.mock.calls.every(([name]) => name.startsWith("reader_") || name.startsWith("library_index") || name === "library_search")).toBe(true);
+  });
+
+  it("shows indexed content hits and opens them at their position", async () => {
+    vi.useFakeTimers();
+    const onOpen = vi.fn();
+    component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen, onSettings: vi.fn() } });
+    await vi.waitFor(() => expect(document.querySelector('[data-local-search]')).not.toBeNull());
+    const input = document.querySelector<HTMLInputElement>('[data-local-search]')!;
+    input.value = "fuel"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(260);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Inside your Library"));
+    expect(document.body.textContent).toContain("replace the fuel filter");
+    document.querySelector<HTMLButtonElement>(".hit")!.click();
+    expect(onOpen).toHaveBeenCalledWith("media", { trackId: "track", startMs: 65000, quote: null, chapter: null });
+  });
+
+  it("does not run inside search when indexing is disabled", async () => {
+    indexEnabled = false;
+    component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen: vi.fn(), onSettings: vi.fn() } });
+    await vi.waitFor(() => expect(document.querySelector('[data-local-search]')).not.toBeNull());
+    const input = document.querySelector<HTMLInputElement>('[data-local-search]')!;
+    input.value = "fuel"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Inside search is off"));
+    expect(invoke.mock.calls.some(([command]) => command === "library_search")).toBe(false);
+  });
+
+
+  it("shows a calm off note when backend rejects inside search as disabled", async () => {
+    searchRejectsOff = true; vi.useFakeTimers();
+    component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen: vi.fn(), onSettings: vi.fn() } });
+    await vi.waitFor(() => expect(document.querySelector('[data-local-search]')).not.toBeNull());
+    const input = document.querySelector<HTMLInputElement>('[data-local-search]')!;
+    input.value = "fuel"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(260);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Inside search is off"));
+    expect(document.body.textContent).not.toContain("Inside search failed");
+  });
+  it("renders duplicate snippets as separate inside-search hits", async () => {
+    duplicateHits = true; vi.useFakeTimers();
+    component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen: vi.fn(), onSettings: vi.fn() } });
+    await vi.waitFor(() => expect(document.querySelector('[data-local-search]')).not.toBeNull());
+    const input = document.querySelector<HTMLInputElement>('[data-local-search]')!;
+    input.value = "fuel"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(260);
+    await vi.waitFor(() => expect(document.querySelectorAll(".hit")).toHaveLength(2));
   });
   it("persists favorites without moving the item, and keeps errors visible on failure", async () => {
     component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen: vi.fn(), onSettings: vi.fn() } });

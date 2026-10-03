@@ -283,9 +283,11 @@ pub async fn find_orphaned_assets(
     state: State<'_, AppState>,
 ) -> Result<grafium_core::graph::asset_cleanup::AssetCleanupScan, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
-    tauri::async_runtime::spawn_blocking(move || graph.scan_unused_assets().map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        graph.scan_unused_assets().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Move only reviewed, still-unreferenced assets into recoverable local trash.
@@ -297,8 +299,12 @@ pub async fn trash_assets(
 ) -> Result<grafium_core::graph::asset_cleanup::AssetCleanupResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        graph.trash_unused_assets(&graph_path, &assets).map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+        graph
+            .trash_unused_assets(&graph_path, &assets)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -306,8 +312,11 @@ pub async fn list_asset_trash(
     state: State<'_, AppState>,
 ) -> Result<grafium_core::graph::asset_trash::AssetTrashScan, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
-    tauri::async_runtime::spawn_blocking(move || graph.list_asset_trash().map_err(|e| e.to_string()))
-        .await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        graph.list_asset_trash().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -335,8 +344,12 @@ pub async fn restore_trashed_assets(
 ) -> Result<grafium_core::graph::asset_trash::AssetTrashResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        graph.restore_trashed_assets(&graph_path, &assets).map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+        graph
+            .restore_trashed_assets(&graph_path, &assets)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -347,8 +360,12 @@ pub async fn purge_trashed_assets(
 ) -> Result<grafium_core::graph::asset_trash::AssetTrashResult, String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        graph.purge_trashed_assets(&graph_path, &assets).map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+        graph
+            .purge_trashed_assets(&graph_path, &assets)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn extension_from_content_type(ct: &str) -> Option<&'static str> {

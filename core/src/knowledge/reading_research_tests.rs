@@ -5,10 +5,22 @@ use crate::research::{
     EngineCategory, EngineKind, JsonPaths, ResearchConfig, ResearchPrompts, SearchEngineDef,
 };
 use crate::scraping::browser::FetchedResource;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
 };
+
+fn scratch_dir(name: &str) -> PathBuf {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("reading-research-tests")
+        .join(format!("{name}-{}", N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
 #[derive(Default)]
 struct CheckedModel {
@@ -590,6 +602,325 @@ async fn assistant_none_bypasses_notes_embeddings_and_note_prompts_in_every_mode
             assert!(!outcome.web_citations.is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn assistant_library_context_retrieves_private_excerpts_and_sources() {
+    let dir = scratch_dir("library-chat");
+    let index_path = dir.join("index.sqlite");
+    let store = crate::library_index::LibraryIndexStore::open(&index_path).unwrap();
+    let item = crate::library_index::LibraryItemInput {
+        book_id: "book-1".into(),
+        title: "Garage video".into(),
+        kind: crate::library_index::LibraryItemKind::Video,
+        source_url: None,
+        available: true,
+        files: vec![crate::library_index::LibraryFileInput {
+            track_id: Some("track-1".into()),
+            relative_path: "garage.mp4".into(),
+            absolute_path: dir.join("garage.mp4"),
+            size: 42,
+            mtime_ms: 7,
+            available: true,
+        }],
+    };
+    let chunk = crate::library_index::ChunkRecord {
+        book_id: "book-1".into(),
+        title: "Garage video".into(),
+        kind: crate::library_index::LibraryItemKind::Video,
+        ordinal: 0,
+        text: "The mechanic explains how to replace the fuel filter on a Ford Escape.".into(),
+        track_id: Some("track-1".into()),
+        start_ms: Some(62_000),
+        end_ms: Some(75_000),
+        chapter: None,
+        quote: None,
+    };
+    store.index_chunks(&item, &[chunk], None, None).unwrap();
+    let model = Arc::new(CheckedModel::default());
+    let mut engine = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    engine.llm = Some(Box::new(model.clone()));
+    let source = AssistantSource::Library(crate::library_index::LibraryAssistantSource {
+        index_path,
+        limit: 4,
+    });
+    let mut events = Vec::new();
+    let outcome = engine
+        .assistant_chat_using(
+            &source,
+            "Where is the fuel filter discussed?",
+            &[],
+            "synthetic-graph",
+            AssistantMode::Answer,
+            &config(),
+            &FakeBrowser::default(),
+            Some(Arc::new(AtomicBool::new(false))),
+            &mut |event| {
+                if let AskStreamEvent::Delta(delta) = event {
+                    events.push(delta.to_string());
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outcome.sources.is_empty());
+    assert_eq!(outcome.library_sources.len(), 1);
+    assert_eq!(outcome.library_sources[0].book_id, "book-1");
+    assert_eq!(
+        outcome.library_sources[0].track_id.as_deref(),
+        Some("track-1")
+    );
+    let calls = model.calls.lock().unwrap();
+    let prompt = calls[0]
+        .1
+        .system_prompt
+        .as_deref()
+        .unwrap_or(&calls[0].0[0].content);
+    assert!(prompt.contains("private Library excerpts"));
+    assert!(prompt.contains("timestamps are approximate"));
+}
+
+#[tokio::test]
+async fn library_semantic_unavailable_in_cloud_mode_even_with_local_huggingface_leftover() {
+    let dir = scratch_dir("library-cloud-gate");
+    let mut config = AiConfig {
+        enabled: false,
+        mode: crate::ai::config::AiMode::Cloud,
+        ..Default::default()
+    };
+    config.local.as_mut().unwrap().provider = crate::ai::config::ProviderType::HuggingFace;
+    let mut engine = KnowledgeEngine::new(&dir, config).unwrap();
+    engine.embedder = Some(Box::new(ForbiddenEmbedder));
+
+    assert!(engine.library_semantic_unavailable_reason().is_some());
+    assert!(engine.library_semantic_scheme().is_none());
+    assert!(engine
+        .embed_library_documents(&["secret library text".to_string()])
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn assistant_library_context_refuses_when_index_is_off() {
+    let dir = scratch_dir("library-off-chat");
+    let index_path = dir.join("index.sqlite");
+    let store = crate::library_index::LibraryIndexStore::open(&index_path).unwrap();
+    store
+        .set_settings(&crate::library_index::LibraryIndexSettings {
+            enabled: false,
+            transcribe_media: true,
+        })
+        .unwrap();
+    let model = Arc::new(CheckedModel::default());
+    let mut engine = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    engine.llm = Some(Box::new(model));
+    let source = AssistantSource::Library(crate::library_index::LibraryAssistantSource {
+        index_path,
+        limit: 4,
+    });
+    let result = engine
+        .assistant_chat_using(
+            &source,
+            "Can you search my Library?",
+            &[],
+            "synthetic-graph",
+            AssistantMode::Answer,
+            &config(),
+            &FakeBrowser::default(),
+            Some(Arc::new(AtomicBool::new(false))),
+            &mut |_| {},
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("disabled Library context unexpectedly succeeded"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(error, "Library index is off");
+}
+
+#[tokio::test]
+async fn assistant_library_refuses_remote_chat_before_retrieval() {
+    let dir = scratch_dir("library-remote-chat");
+    let mut ai_config = AiConfig {
+        enabled: false,
+        mode: crate::ai::config::AiMode::Cloud,
+        ..Default::default()
+    };
+    ai_config.cloud = Some(crate::ai::config::CloudConfig {
+        llm_provider: crate::ai::config::ProviderType::OpenAi,
+        llm_model: "gpt-test".into(),
+        llm_api_key: None,
+        llm_base_url: None,
+        embedding_provider: crate::ai::config::ProviderType::OpenAi,
+        embedding_model: "embed-test".into(),
+        embedding_api_key: None,
+        embedding_base_url: None,
+    });
+    let mut engine = KnowledgeEngine::new(&dir, ai_config).unwrap();
+    engine.llm = Some(Box::new(Arc::new(CheckedModel::default())));
+    let source = AssistantSource::Library(crate::library_index::LibraryAssistantSource {
+        index_path: dir.join("missing.sqlite"),
+        limit: 4,
+    });
+    let browser = FakeBrowser::default();
+    let result = engine
+        .assistant_chat_using(
+            &source,
+            "Search my private Library",
+            &[],
+            "synthetic-graph",
+            AssistantMode::Deep,
+            &config(),
+            &browser,
+            Some(Arc::new(AtomicBool::new(false))),
+            &mut |_| {},
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("remote Library chat unexpectedly succeeded"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("Library questions need a chat model on this computer"));
+    assert_eq!(browser.fetches.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn library_chat_availability_allows_embedded_and_loopback_only() {
+    let dir = scratch_dir("library-chat-availability");
+    let embedded = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            mode: crate::ai::config::AiMode::Local,
+            local: Some(crate::ai::config::LocalConfig {
+                provider: crate::ai::config::ProviderType::HuggingFace,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(embedded.library_chat_unavailable_reason().is_none());
+
+    let loopback = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            mode: crate::ai::config::AiMode::Local,
+            local: Some(crate::ai::config::LocalConfig {
+                provider: crate::ai::config::ProviderType::OpenAiCompatible,
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(loopback.library_chat_unavailable_reason().is_none());
+
+    let remote = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            mode: crate::ai::config::AiMode::Local,
+            local: Some(crate::ai::config::LocalConfig {
+                provider: crate::ai::config::ProviderType::OpenAiCompatible,
+                base_url: "http://192.0.2.10:8000/v1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(remote.library_chat_unavailable_reason().is_some());
+}
+
+#[tokio::test]
+async fn assistant_library_web_mode_stays_local_and_never_calls_browser() {
+    let dir = scratch_dir("library-web-local");
+    let index_path = dir.join("index.sqlite");
+    let store = crate::library_index::LibraryIndexStore::open(&index_path).unwrap();
+    let item = crate::library_index::LibraryItemInput {
+        book_id: "book-1".into(),
+        title: "Private Library Note".into(),
+        kind: crate::library_index::LibraryItemKind::Epub,
+        source_url: None,
+        available: true,
+        files: vec![crate::library_index::LibraryFileInput {
+            track_id: None,
+            relative_path: "PRIVATE.EPUB".into(),
+            absolute_path: dir.join("PRIVATE.EPUB"),
+            size: 1,
+            mtime_ms: 1,
+            available: true,
+        }],
+    };
+    store
+        .index_chunks(
+            &item,
+            &[crate::library_index::ChunkRecord {
+                book_id: "book-1".into(),
+                title: "Private Library Note".into(),
+                kind: crate::library_index::LibraryItemKind::Epub,
+                ordinal: 0,
+                text: "private library excerpt about a cobalt lantern".into(),
+                track_id: None,
+                start_ms: None,
+                end_ms: None,
+                chapter: Some("Private".into()),
+                quote: Some("private library excerpt".into()),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+    let model = Arc::new(CheckedModel::default());
+    let mut engine = KnowledgeEngine::new(
+        &dir,
+        AiConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    engine.llm = Some(Box::new(model));
+    let source = AssistantSource::Library(crate::library_index::LibraryAssistantSource {
+        index_path,
+        limit: 4,
+    });
+    let browser = FakeBrowser::default();
+    let outcome = engine
+        .assistant_chat_using(
+            &source,
+            "Use web search on this private library excerpt",
+            &[],
+            "synthetic-graph",
+            AssistantMode::Web,
+            &config(),
+            &browser,
+            Some(Arc::new(AtomicBool::new(false))),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(browser.fetches.load(Ordering::Relaxed), 0);
+    assert_eq!(outcome.library_sources.len(), 1);
+    assert!(outcome.web_citations.is_empty());
 }
 
 #[tokio::test]

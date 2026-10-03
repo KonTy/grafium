@@ -7,7 +7,7 @@
 use crate::AppState;
 use grafium_core::AssistantResponse;
 use std::sync::atomic::Ordering;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 #[cfg(test)]
 #[path = "assistant_tests.rs"]
@@ -31,11 +31,27 @@ use super::{
 };
 
 fn capture_context(
+    app: Option<&tauri::AppHandle>,
     db: &grafium_core::db::Database,
     root: &std::path::Path,
     graph_path: &str,
     context: &AssistantContext,
 ) -> Result<AssistantSource, String> {
+    if matches!(context, AssistantContext::Library {}) {
+        let app = app.ok_or("Library chat context needs the app host")?;
+        let index_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("library-index")
+            .join("index.sqlite");
+        return Ok(AssistantSource::Library(
+            grafium_core::library_index::LibraryAssistantSource {
+                index_path,
+                limit: 8,
+            },
+        ));
+    }
     require_research_graph(root, graph_path)?;
     AssistantSource::capture(db, root, context).map_err(|e| e.to_string())
 }
@@ -71,6 +87,7 @@ pub fn assistant_context_info(
 pub async fn assistant_chat(
     app: tauri::AppHandle,
     state: State<'_, KnowledgeState>,
+    library_index: State<'_, super::library_index::LibraryIndexState>,
     app_state: State<'_, crate::AppState>,
     graph_path: String,
     question: String,
@@ -79,6 +96,7 @@ pub async fn assistant_chat(
     history: Vec<ChatTurn>,
     mode: AssistantMode,
 ) -> Result<(), String> {
+    let _ai_busy = library_index.ai_busy_guard();
     // Register before capture and model loading: Stop shares research_cancel's
     // early tombstones as well as its live flags.
     let operation = ReadingOperation::register(&state, request_id.clone())?;
@@ -87,7 +105,13 @@ pub async fn assistant_chat(
         if operation.flag.load(Ordering::Acquire) {
             return Ok(());
         }
-        let source = capture_context(&graph.db, &graph.root_dir, &graph_path, &context)?;
+        let source = capture_context(
+            Some(&app),
+            &graph.db,
+            &graph.root_dir,
+            &graph_path,
+            &context,
+        )?;
         (graph.root_dir.clone(), source)
     };
     let config = if mode == AssistantMode::Answer {
@@ -159,6 +183,11 @@ pub async fn assistant_chat(
                         .web_citations
                         .into_iter()
                         .map(WebSourceDto::from)
+                        .collect(),
+                    library_sources: outcome
+                        .library_sources
+                        .into_iter()
+                        .map(crate::commands::knowledge::LibrarySourceDto::from)
                         .collect(),
                 },
             )

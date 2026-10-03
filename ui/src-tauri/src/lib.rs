@@ -7,9 +7,9 @@ mod private_voice;
 mod private_voice_validation;
 #[cfg(not(target_os = "android"))]
 mod shutdown;
-mod welcome;
 #[cfg(target_os = "linux")]
 mod webkit_renderer;
+mod welcome;
 
 // Android-only JNI bridge: exposes grafium_core::assistant::handle_command as
 // `Java_com_grafium_app_AssistantReceiver_nativeHandleCommand` so the Kotlin
@@ -18,10 +18,11 @@ mod webkit_renderer;
 mod android_jni;
 
 use commands::graph::GraphConfig;
-use grafium_core::Graph;
 use grafium_core::source_events::{
-    is_book_source_event_path, is_note_source_event_path, reconcile_watched_paths, should_process_event,
+    is_book_source_event_path, is_note_source_event_path, reconcile_watched_paths,
+    should_process_event,
 };
+use grafium_core::Graph;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::path::PathBuf;
@@ -185,7 +186,10 @@ fn start_graph_watcher(
                             if !is_book_source_event_path(&path, &books_dir) {
                                 continue;
                             }
-                        } else if !is_note_source_event_path(&path, &[&pages_dir, &journals_dir, &knowledge_dir]) {
+                        } else if !is_note_source_event_path(
+                            &path,
+                            &[&pages_dir, &journals_dir, &knowledge_dir],
+                        ) {
                             continue;
                         }
                         // Content hashes deduplicate app writes; a recent save
@@ -229,22 +233,31 @@ fn start_graph_watcher(
             let result = reconcile_watched_paths(&active_graph, &paths, rescan);
             if let Err(error) = result {
                 eprintln!("watch source reconciliation failed: {error}");
-                if let Err(emit_error) = app.emit("graph-index-error", serde_json::json!({
-                    "graphPath": active_graph.root_dir, "message": error.to_string(),
-                })) {
+                if let Err(emit_error) = app.emit(
+                    "graph-index-error",
+                    serde_json::json!({
+                        "graphPath": active_graph.root_dir, "message": error.to_string(),
+                    }),
+                ) {
                     eprintln!("could not notify source indexing failure: {emit_error}");
                 }
             }
             if rescan || paths.iter().any(|path| path.starts_with(&books_dir)) {
-                if let Err(e) = app.emit("book-source-changed", serde_json::json!({
-                    "graphPath": active_graph.root_dir,
-                })) {
+                if let Err(e) = app.emit(
+                    "book-source-changed",
+                    serde_json::json!({
+                        "graphPath": active_graph.root_dir,
+                    }),
+                ) {
                     eprintln!("could not notify book reader of source change: {e}");
                 }
             }
-            if let Err(error) = app.emit("graph-sources-changed", serde_json::json!({
-                "graphPath": active_graph.root_dir,
-            })) {
+            if let Err(error) = app.emit(
+                "graph-sources-changed",
+                serde_json::json!({
+                    "graphPath": active_graph.root_dir,
+                }),
+            ) {
                 eprintln!("could not notify source changes: {error}");
             }
             last_event_at = None;
@@ -349,7 +362,10 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
 
                 let now_available = backend.is_available();
                 let availability_key = (snapshot.root_dir.clone(), target.id.clone());
-                let previously_available = was_available.get(&availability_key).copied().unwrap_or(false);
+                let previously_available = was_available
+                    .get(&availability_key)
+                    .copied()
+                    .unwrap_or(false);
 
                 if now_available && !previously_available {
                     // Target just became available!
@@ -372,7 +388,9 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                             &target.id,
                         );
                         match commands::sync::reconcile_sync_outcome(
-                            &app_handle, &snapshot, engine.sync(backend.as_ref()),
+                            &app_handle,
+                            &snapshot,
+                            engine.sync(backend.as_ref()),
                         ) {
                             Ok(result) => {
                                 eprintln!(
@@ -385,7 +403,9 @@ fn start_sync_monitor(app_handle: tauri::AppHandle, graph: Arc<Mutex<Graph>>) {
                                     "sync-completed",
                                     commands::sync::completion_payload(&target.name, &result),
                                 ) {
-                                    eprintln!("[sync-monitor] Could not report completion: {error}");
+                                    eprintln!(
+                                        "[sync-monitor] Could not report completion: {error}"
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -476,17 +496,26 @@ fn start_reindex_drainer(
                     Ok(g) => g,
                     Err(_) => continue,
                 };
-                (g.db.clone(), g.root_dir.to_string_lossy().into_owned(), g.take_asset_cleanup_warnings())
+                (
+                    g.db.clone(),
+                    g.root_dir.to_string_lossy().into_owned(),
+                    g.take_asset_cleanup_warnings(),
+                )
             };
             for message in asset_warnings {
-                if let Err(error) = app_handle.emit("asset-cleanup-warning", serde_json::json!({
-                    "graphPath": graph_id, "message": message,
-                })) {
+                if let Err(error) = app_handle.emit(
+                    "asset-cleanup-warning",
+                    serde_json::json!({
+                        "graphPath": graph_id, "message": message,
+                    }),
+                ) {
                     tracing::error!("Could not display attachment cleanup warning: {error}");
                 }
             }
             let guard = engine.read().await;
-            let Some(e) = guard.as_ref() else { continue; };
+            let Some(e) = guard.as_ref() else {
+                continue;
+            };
             if reconciled_graph.as_deref() != Some(graph_id.as_str()) {
                 match e.reconcile_deleted_vector_pages(&db, &graph_id).await {
                     Ok(_) => {
@@ -520,13 +549,14 @@ fn start_reindex_drainer(
             if started.elapsed() < REINDEX_STARTUP_DELAY {
                 // Leave the model unloaded while the app is opening.
             } else if e.can_index() {
-                let due = match db.list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE) {
-                    Ok(due) => due,
-                    Err(error) => {
-                        eprintln!("reindex drainer: could not list pending pages: {error}");
-                        continue;
-                    }
-                };
+                let due =
+                    match db.list_pending_reindex_due(REINDEX_DEBOUNCE_MS, REINDEX_MAX_PER_CYCLE) {
+                        Ok(due) => due,
+                        Err(error) => {
+                            eprintln!("reindex drainer: could not list pending pages: {error}");
+                            continue;
+                        }
+                    };
                 for (page_id, marked_at) in due {
                     let title = db
                         .get_page_titles(std::slice::from_ref(&page_id))
@@ -547,7 +577,9 @@ fn start_reindex_drainer(
                         Ok(embedded) => {
                             activity.page_indexed(&page_id, embedded);
                             if let Err(error) = db.clear_pending_reindex(&page_id, marked_at) {
-                                eprintln!("reindex drainer: could not acknowledge '{page_id}': {error}");
+                                eprintln!(
+                                    "reindex drainer: could not acknowledge '{page_id}': {error}"
+                                );
                             }
                             changed = true;
                         }
@@ -559,7 +591,9 @@ fn start_reindex_drainer(
                 }
                 match db.count_pending_reindex() {
                     Ok(pending) => activity.finish_if_idle(pending),
-                    Err(error) => eprintln!("reindex drainer: could not count pending pages: {error}"),
+                    Err(error) => {
+                        eprintln!("reindex drainer: could not count pending pages: {error}")
+                    }
                 }
             } else {
                 activity.pause();
@@ -937,7 +971,9 @@ pub fn run() {
             commands::startup::handle_second_launch(app);
         }))
     } else {
-        tracing::warn!("The desktop session bus address is unusable; a second launch opens another window");
+        tracing::warn!(
+            "The desktop session bus address is unusable; a second launch opens another window"
+        );
         builder
     };
     let app = builder
@@ -1089,6 +1125,7 @@ pub fn run() {
 
             app.manage(state);
             app.manage(commands::jobs::JobsState::new());
+            app.manage(commands::library_index::LibraryIndexState::default());
 
             // Initialize Knowledge Engine
             let knowledge_state = {
@@ -1121,6 +1158,7 @@ pub fn run() {
                 knowledge_state.engine.clone(),
             );
             app.manage(knowledge_state);
+            commands::library_index::schedule_startup_delta(app.handle());
 
             // On Linux, intercept Ctrl+Z/Shift+Z at the GtkWindow level
             // WebKitGTK intercepts these keys internally before JS sees them,
@@ -1278,6 +1316,11 @@ pub fn run() {
             commands::private_reader::reader_relink,
             commands::private_reader::reader_export,
             commands::private_reader::reader_restore,
+            commands::library_index::library_index_status,
+            commands::library_index::library_index_settings_set,
+            commands::library_index::library_index_start,
+            commands::library_index::library_search,
+            commands::library_index::library_chat_available,
             commands::private_voice::private_voice_status,
             commands::private_voice::private_voice_configure_runtime,
             commands::private_voice::private_voice_installed,
@@ -1511,12 +1554,15 @@ pub fn run() {
         let exit_code = app.run_return(move |app_handle, event| {
             let requested_code = match event {
                 tauri::RunEvent::WindowEvent {
-                    event: tauri::WindowEvent::CloseRequested { api, .. }, ..
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    ..
                 } => {
                     api.prevent_close();
                     Some(0)
                 }
-                tauri::RunEvent::ExitRequested { api, code, .. } if !shutdown_guard.is_complete() => {
+                tauri::RunEvent::ExitRequested { api, code, .. }
+                    if !shutdown_guard.is_complete() =>
+                {
                     api.prevent_exit();
                     Some(code.unwrap_or(0))
                 }
@@ -1533,19 +1579,23 @@ pub fn run() {
                     }
                     let handle = app_handle.clone();
                     let gate = shutdown_guard.clone();
-                    let spawned = thread::Builder::new().name("grafium-shutdown".into()).spawn(move || {
-                        let started_at = Instant::now();
-                        grafium_core::ai::worker::shutdown_pool();
+                    let spawned = thread::Builder::new()
+                        .name("grafium-shutdown".into())
+                        .spawn(move || {
+                            let started_at = Instant::now();
+                            grafium_core::ai::worker::shutdown_pool();
 
-                        // Keep the status visible long enough to register instead
-                        // of flashing for the common no-model-loaded case.
-                        let minimum_notice = Duration::from_millis(450);
-                        if let Some(remaining) = minimum_notice.checked_sub(started_at.elapsed()) {
-                            thread::sleep(remaining);
-                        }
-                        gate.complete();
-                        handle.exit(code);
-                    });
+                            // Keep the status visible long enough to register instead
+                            // of flashing for the common no-model-loaded case.
+                            let minimum_notice = Duration::from_millis(450);
+                            if let Some(remaining) =
+                                minimum_notice.checked_sub(started_at.elapsed())
+                            {
+                                thread::sleep(remaining);
+                            }
+                            gate.complete();
+                            handle.exit(code);
+                        });
                     if let Err(error) = spawned {
                         tracing::error!("Could not start shutdown thread: {error}");
                         grafium_core::ai::worker::shutdown_pool();

@@ -8,6 +8,7 @@
     type WebSource,
   } from "../lib/knowledge";
   import type { ChatMessageModel, ChatThinkingTone } from "../lib/chatMessage";
+  import { formatLibrarySourcePosition, type LibrarySource } from "../lib/libraryIndex";
 
   interface Props {
     message: ChatMessageModel;
@@ -21,6 +22,7 @@
     trailed?: boolean;
     onOpenSource?: (source: ChatSource) => void;
     onOpenWebSource?: (source: WebSource) => void;
+    onOpenLibrarySource?: (source: LibrarySource) => void;
   }
 
   let {
@@ -37,6 +39,7 @@
         openExternal(source.url).catch(() => {});
       }
     },
+    onOpenLibrarySource = () => {},
   }: Props = $props();
 
   let copied = $state(false);
@@ -59,11 +62,12 @@
     let out = message.content.trim();
 
     const graphRefs = (message.sources ?? []).map((s) => `- ${formatSourceLabel(s)}`);
+    const libraryRefs = (message.librarySources ?? []).map((s) => `- [${s.index}] ${s.title} · ${formatLibrarySourcePosition(s)}`);
     const webRefs = (message.webSources ?? []).map(
       (s) => `- ${formatWebSourceLabel(s)} (${s.url})`,
     );
-    if (graphRefs.length || webRefs.length) {
-      out += "\n\n**Sources**\n" + [...graphRefs, ...webRefs].join("\n");
+    if (graphRefs.length || libraryRefs.length || webRefs.length) {
+      out += "\n\n**Sources**\n" + [...graphRefs, ...libraryRefs, ...webRefs].join("\n");
     }
 
     try {
@@ -221,6 +225,23 @@
           <span class="source-index">[{source.index}]</span>
           <span class="source-title">{source.page_title}</span>
           {#if source.date}<span class="source-date">{source.date}</span>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+
+  {#if message.role === "assistant" && message.librarySources && message.librarySources.length > 0}
+    <div class="msg-sources library">
+      {#each message.librarySources as source}
+        <button
+          class="source-chip library-source-chip"
+          onclick={() => onOpenLibrarySource(source)}
+          title={`Open ${source.title} in Library`}
+        >
+          <span class="source-index">[{source.index}]</span>
+          <span class="source-title">{source.title}</span>
+          <span class="source-date">{formatLibrarySourcePosition(source)}</span>
         </button>
       {/each}
     </div>

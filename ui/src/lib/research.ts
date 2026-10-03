@@ -12,6 +12,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { StreamChunk, SourcesPayload, ChatSource, WebSource, ChatTurn } from "./knowledge";
 import { isResearchCancellation } from "./knowledge";
 import type { ChatScope } from "./chatScope";
+import { acceptLibrarySources, type LibrarySource } from "./libraryIndex";
 
 // ─── Payload casing (the single flip point) ──────────────────────────────────
 //
@@ -205,6 +206,7 @@ export interface ResearchStreamHandlers {
   onError?: (message: string) => void;
   onSources?: (sources: ChatSource[]) => void;
   onWebSources?: (sources: WebSource[]) => void;
+  onLibrarySources?: (sources: LibrarySource[]) => void;
   onPhase?: (phase: string) => void;
   onNote?: (note: string) => void;
   onStart?: (requestId: string) => void;
@@ -311,6 +313,10 @@ export async function researchStream(
       handlers.onSources?.(payload.sources ?? []);
       if (payload.web_sources && payload.web_sources.length > 0) {
         handlers.onWebSources?.(payload.web_sources);
+      }
+      if (payload.library_sources && payload.library_sources.length > 0) {
+        try { handlers.onLibrarySources?.(acceptLibrarySources(payload.library_sources)); }
+        catch (cause) { console.warn("[chat] Ignoring invalid Library sources:", cause); }
       }
     });
 

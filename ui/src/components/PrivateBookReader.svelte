@@ -14,6 +14,7 @@
   import { privatePlayback } from "../lib/privateReaderPlayback";
   import { sha256 } from "@noble/hashes/sha256";
   import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
+  import { findQuoteSegment, normalizeLibraryQuote, type QuoteSegment } from "../lib/privateBookQuoteMatch";
   let { bookId, onActivity, onProgress, actions, bookmarks, bookmarkCount = 0, status, onBack, onBookmark }: {
     bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void;
     actions?: Snippet; bookmarks?: Snippet; status?: Snippet; onBack?: () => void; onBookmark?: () => void;
@@ -33,7 +34,57 @@
   let send: (type: string, data?: Record<string, unknown>) => void = () => {};
   let bootstrap = () => {};
   let capture: () => Promise<ReaderBookmarkCapture> = async () => { throw new Error("Wait for the book to open before bookmarking."); };
+  const segmentRequests = new Map<string, { resolve: (message: Extract<ReaderMessage, { type: "read-aloud-segments" }>) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   export function captureBookmark() { return capture(); }
+  function requestReaderSegments(section: number, offset: number): Promise<Extract<ReaderMessage, { type: "read-aloud-segments" }>> {
+    if (!ready) return Promise.reject(new Error("Wait for the book to open before searching it."));
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { segmentRequests.delete(requestId); reject(new Error("Book search timed out.")); }, 30000);
+      segmentRequests.set(requestId, { resolve, reject, timer });
+      send("read-aloud-segments", { requestId, section, offset });
+    });
+  }
+  let citationNavigationPending = false;
+  let citationNavigationTimer: ReturnType<typeof setTimeout> | undefined;
+  function citationGoto(type: "goto" | "toc", data: Record<string, unknown>) {
+    clearTimeout(citationNavigationTimer);
+    citationNavigationPending = true;
+    citationNavigationTimer = setTimeout(() => { citationNavigationPending = false; }, 5000);
+    send(type, data);
+  }
+  export async function locateQuote(quote: string | null | undefined, chapter: string | null | undefined): Promise<"quote" | "chapter" | "start"> {
+    if (!ready) throw new Error("Wait for the book to open before searching it.");
+    const sections: QuoteSegment[][] = [];
+    let section = 0; let offset = 0; let sectionSegments: QuoteSegment[] = [];
+    while (quote && normalizeLibraryQuote(quote).length >= 40) {
+      let response: Extract<ReaderMessage, { type: "read-aloud-segments" }>;
+      try { response = await requestReaderSegments(section, offset); }
+      catch { break; }
+      sectionSegments.push(...response.segments.filter((segment): segment is QuoteSegment => segment.locator.kind === "epub"));
+      if (response.nextOffset !== null) offset = response.nextOffset;
+      else {
+        sections.push(sectionSegments);
+        sectionSegments = [];
+        if (++section < response.sectionCount) offset = 0;
+        else break;
+      }
+    }
+    if (sectionSegments.length) sections.push(sectionSegments);
+    const found = findQuoteSegment(quote, sections);
+    if (found) {
+      citationGoto("goto", { location: found.locator, select: true });
+      return "quote";
+    }
+    const chapterNeedle = normalizeLibraryQuote(chapter ?? "");
+    const chapterItem = chapterNeedle ? toc.find(item => normalizeLibraryQuote(item.label).includes(chapterNeedle)) : null;
+    if (chapterItem) {
+      citationGoto("toc", { target: chapterItem.target });
+      return "chapter";
+    }
+    if (toc[0]) citationGoto("toc", { target: toc[0].target });
+    return "start";
+  }
 
   $effect(() => {
     const id = bookId;
@@ -51,7 +102,6 @@
     let timer: ReturnType<typeof setTimeout> | undefined;
     let openTimer: ReturnType<typeof setTimeout> | undefined;
     let writing = Promise.resolve();
-    const requests = new Map<string, { resolve: (message: Extract<ReaderMessage, { type: "read-aloud-segments" }>) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     const bookmarkRequests = new Map<string, { resolve: (capture: ReaderBookmarkCapture) => void; reject: (cause: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     ready = false; url = ""; error = ""; label = ""; fraction = undefined; toc = [];
     function flush() {
@@ -99,12 +149,7 @@
       const segments: ReaderTextSegment[] = [];
       let section = 0; let offset = 0; let size = 0;
       while (!disposed) {
-        const requestId = crypto.randomUUID();
-        const response = await new Promise<Extract<ReaderMessage, { type: "read-aloud-segments" }>>((resolve, reject) => {
-          const timer = setTimeout(() => { requests.delete(requestId); reject(new Error("Read-aloud extraction timed out.")); }, 30000);
-          requests.set(requestId, { resolve, reject, timer });
-          send("read-aloud-segments", { requestId, section, offset });
-        });
+        const response = await requestReaderSegments(section, offset);
         if (response.section !== section || response.nextOffset !== null && response.nextOffset <= offset)
           throw new Error("Invalid read-aloud segment sequence.");
         for (const segment of response.segments) {
@@ -138,8 +183,8 @@
         return;
       }
       if (message.type === "read-aloud-segments") {
-        const request = requests.get(message.requestId);
-        if (request) { clearTimeout(request.timer); requests.delete(message.requestId); request.resolve(message); }
+        const request = segmentRequests.get(message.requestId);
+        if (request) { clearTimeout(request.timer); segmentRequests.delete(message.requestId); request.resolve(message); }
       }
       if (message.type === "ready") {
         clearTimeout(openTimer); ready = true; toc = message.toc;
@@ -158,8 +203,8 @@
       else if (message.type === "error") {
         navigationPending = false;
         clearTimeout(openTimer); error = message.message;
-        for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error(message.message)); }
-        requests.clear();
+        for (const request of segmentRequests.values()) { clearTimeout(request.timer); request.reject(new Error(message.message)); }
+        segmentRequests.clear();
         rejectBookmarks(new Error(message.message));
       }
       else if (message.type === "help") void surface?.exitFullscreen().then(() =>
@@ -182,6 +227,11 @@
           return;
         }
         privateVisualPositions.set(id, { offsetMs: 0, locator: message.location });
+        if (citationNavigationPending) {
+          citationNavigationPending = false;
+          clearTimeout(citationNavigationTimer);
+          return;
+        }
         const saved = get(privateLibrary).books.find(item => item.id === id)?.position;
         if (!explicitNavigation && saved?.locator && (saved.voiceId !== undefined || saved.offsetMs > 0)) return;
         pending = message.location;
@@ -223,10 +273,10 @@
       } catch (cause) { if (!disposed) error = String(cause); }
     })();
     return () => {
-      disposed = true; void flush(); clearTimeout(openTimer);
+      disposed = true; void flush(); clearTimeout(openTimer); clearTimeout(citationNavigationTimer);
       unregisterSegments();
-      for (const request of requests.values()) { clearTimeout(request.timer); request.reject(new Error("Private reader closed during narration preparation.")); }
-      requests.clear();
+      for (const request of segmentRequests.values()) { clearTimeout(request.timer); request.reject(new Error("Private reader closed during narration preparation.")); }
+      segmentRequests.clear();
       rejectBookmarks(new Error("The reader closed before its bookmark was captured."));
       privateVisualPositions.delete(id);
       window.removeEventListener("message", receive); window.removeEventListener("pagehide", flush);

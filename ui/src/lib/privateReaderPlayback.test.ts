@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, privatePlayback, resumePrivatePlayback, seekPrivateAudioPosition, skipPrivateAudio, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL, setPrivatePlaybackRate } from "./privateReaderPlayback";
+import { applyAndroidState, bookmarkPrivatePlayback, checkpointPrivatePlayback, claimPrivateNarration, pausePrivatePlayback, playPrivateAudio, cuePrivateAudio, privatePlayback, resumePrivatePlayback, seekPrivateAudioPosition, skipPrivateAudio, stopPrivatePlayback, updatePrivateNarration, validatePrivateMediaURL, setPrivatePlaybackRate } from "./privateReaderPlayback";
 import { mediaPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 import { privateLibrary, type ReaderBook } from "./privateReader";
 
@@ -84,6 +84,37 @@ describe("app-owned private playback", () => {
     expect(get(privatePlayback)).toMatchObject({ durationMs: 120000, seekable: true });
     applyAndroidState({ ...state, mode: "tts", locator: { kind: "epub", cfi: "epubcfi(/6/2)", rendererVersion: "test" }, seekable: true });
     expect(get(privatePlayback)).toMatchObject({ durationMs: 0, seekable: false });
+  });
+
+  it("sends Android timestamp cues without autoplay", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
+    const requests: { command: string; args: Record<string, unknown> }[] = [];
+    window.PrivateReaderBridge = { request(raw: string) {
+      const request = JSON.parse(raw);
+      requests.push(request);
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent("private-reader-response", { detail: { id: request.id, ok: true, result: {
+        bookId: request.args.bookId, trackId: request.args.trackId, offsetMs: request.args.offsetMs, playing: false, buffering: false, error: null, durationMs: 0,
+      } } })));
+    } };
+    await cuePrivateAudio(book, { trackId: "stable-2", offsetMs: 65000 });
+    expect(requests.at(-1)).toMatchObject({ command: "play", args: { autoplay: false, offsetMs: 65000 } });
+    expect(get(privatePlayback)).toMatchObject({ status: "paused", position: { trackId: "stable-2", offsetMs: 65000 } });
+    await stopPrivatePlayback();
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Linux");
+    delete window.PrivateReaderBridge;
+  });
+
+  it("does not save a cued citation position until playback actually moves", async () => {
+    await cuePrivateAudio(book, { trackId: "stable-10", offsetMs: 65000 });
+    await stopPrivatePlayback();
+    expect(invoke).not.toHaveBeenCalledWith("reader_save_position", expect.objectContaining({
+      position: { trackId: "stable-10", offsetMs: 65000 },
+    }));
+    await cuePrivateAudio(book, { trackId: "stable-10", offsetMs: 65000 });
+    await resumePrivatePlayback();
+    elements.at(-1)!.currentTime = 66;
+    await checkpointPrivatePlayback();
+    expect(invoke).toHaveBeenCalledWith("reader_save_position", { bookId: book.id, position: { trackId: "stable-10", offsetMs: 66000 } });
   });
   it("accepts only native loopback transport, never full-file base64 or remote URLs", () => {
     expect(validatePrivateMediaURL("http://127.0.0.1:1234/capability")).toContain("127.0.0.1");

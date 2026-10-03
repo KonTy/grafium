@@ -31,7 +31,8 @@ use grafium_core::research::{ResearchConfig, ResearchPrompts, SearchEngineDef};
 use grafium_core::scraping::browser::HttpBrowserDriver;
 
 use super::knowledge::{
-    AskSourcesPayload, AskStreamChunk, ChatScope, KnowledgeState, SourceDto, WebSourceDto,
+    AskSourcesPayload, AskStreamChunk, ChatScope, KnowledgeState, LibrarySourceDto, SourceDto,
+    WebSourceDto,
 };
 
 /// One search hit, as returned by the Settings "Test" button.
@@ -241,6 +242,11 @@ pub async fn research_deep(
                 .web_citations
                 .into_iter()
                 .map(WebSourceDto::from)
+                .collect(),
+            library_sources: outcome
+                .library_sources
+                .into_iter()
+                .map(LibrarySourceDto::from)
                 .collect(),
         },
     )
@@ -502,6 +508,11 @@ pub async fn research_scoped(
                         .web_citations
                         .into_iter()
                         .map(WebSourceDto::from)
+                        .collect(),
+                    library_sources: outcome
+                        .library_sources
+                        .into_iter()
+                        .map(crate::commands::knowledge::LibrarySourceDto::from)
                         .collect(),
                 },
             )

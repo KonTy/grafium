@@ -3,7 +3,7 @@ members = ["crates/model-runtime", "core", "ui/src-tauri", "tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.172"
+version = "0.0.173"
 edition = "2021"
 license = "AGPL-3.0-only"
 

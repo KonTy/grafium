@@ -39,7 +39,7 @@ beforeEach(() => {
     { id: "audio", title: "Listening", kind: "audio", favorite: true, available: true, tracks: [], bookmarks: [], position: null },
   ] });
   mocks.invoke.mockImplementation(async command => {
-    if (["reader_snapshot", "reader_rescan"].includes(command)) return get(privateLibrary);
+    if (["reader_snapshot", "reader_rescan", "library_index_status"].includes(command)) return get(privateLibrary);
   });
 });
 afterEach(async () => {
@@ -69,7 +69,7 @@ describe("device-local Library type filter", () => {
     expect(titles()).toEqual(["Listening"]);
     expect(document.querySelector<HTMLInputElement>('input[type="search"]')!.value).toBe("");
     expect(document.querySelector(".filters button")?.getAttribute("aria-pressed")).toBe("false");
-    expect(mocks.invoke.mock.calls.every(([command]) => ["reader_snapshot", "reader_rescan"].includes(command))).toBe(true);
+    expect(mocks.invoke.mock.calls.every(([command]) => ["reader_snapshot", "reader_rescan", "library_index_status"].includes(command))).toBe(true);
     select("all");
     expect(localStorage.getItem(TYPE_KEY)).toBe("all");
     expect(titles()).toHaveLength(2);

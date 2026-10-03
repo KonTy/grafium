@@ -89,7 +89,10 @@ fn validate_runtime(executable: &Path) -> Result<RuntimeConfiguration, String> {
         || executable.file_name().is_none_or(|s| s != "piper")
         || !fs::metadata(executable).is_ok_and(|m| m.is_file())
     {
-        return Err("Choose the bin/piper entry point of a dedicated local Python virtual environment".into());
+        return Err(
+            "Choose the bin/piper entry point of a dedicated local Python virtual environment"
+                .into(),
+        );
     }
     let executable = executable
         .canonicalize()
@@ -500,8 +503,17 @@ fn validate_sherpa_metadata(
     }
     // Sherpa 1.13.8 parses these through atoi and exits on negative values.
     for key in [
-        "add_blank", "speaker_id", "version", "num_emotions", "jieba", "blank_id",
-        "bos_id", "eos_id", "use_eos_bos", "pad_id", "has_g2pw",
+        "add_blank",
+        "speaker_id",
+        "version",
+        "num_emotions",
+        "jieba",
+        "blank_id",
+        "bos_id",
+        "eos_id",
+        "use_eos_bos",
+        "pad_id",
+        "has_g2pw",
     ] {
         if let Some(value) = metadata.get(key) {
             if value.is_empty()
@@ -905,7 +917,6 @@ impl VoiceState {
             Ok(())
         }
     }
-
 }
 
 pub fn audio_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
@@ -1307,8 +1318,17 @@ mod tests {
         }
         assert!(validate_sherpa_metadata(&voice, &metadata).is_ok());
         for key in [
-            "add_blank", "speaker_id", "version", "num_emotions", "jieba", "blank_id",
-            "bos_id", "eos_id", "use_eos_bos", "pad_id", "has_g2pw",
+            "add_blank",
+            "speaker_id",
+            "version",
+            "num_emotions",
+            "jieba",
+            "blank_id",
+            "bos_id",
+            "eos_id",
+            "use_eos_bos",
+            "pad_id",
+            "has_g2pw",
         ] {
             for value in ["-1", "2147483648", "12x", "", "1\0"] {
                 let mut invalid = metadata.clone();
@@ -1332,8 +1352,11 @@ mod tests {
         fs::create_dir_all(directory.join("espeak-ng-data")).unwrap();
         let mut model = vec![8, 8, 58, 2, 10, 0];
         for (key, value) in [
-            ("sample_rate", "22050"), ("n_speakers", "1"), ("comment", "piper"),
-            ("language", "zh"), ("voice", "cmn"),
+            ("sample_rate", "22050"),
+            ("n_speakers", "1"),
+            ("comment", "piper"),
+            ("language", "zh"),
+            ("voice", "cmn"),
         ] {
             let mut entry = vec![10, key.len() as u8];
             entry.extend_from_slice(key.as_bytes());
@@ -1349,15 +1372,22 @@ mod tests {
         for (path, role, bytes) in [
             ("voice.onnx", "model", model.as_slice()),
             ("tokens.txt", "tokens", b"a 1\n".as_slice()),
-            ("LICENSE", "license", b"Synthetic fixture license".as_slice()),
+            (
+                "LICENSE",
+                "license",
+                b"Synthetic fixture license".as_slice(),
+            ),
             ("espeak-ng-data/phontab", "espeak", b"x".as_slice()),
             ("espeak-ng-data/phonindex", "espeak", b"x".as_slice()),
             ("espeak-ng-data/phondata", "espeak", b"x".as_slice()),
         ] {
             fs::write(directory.join(path), bytes).unwrap();
             voice.artifacts.push(VoiceArtifact {
-                path: path.into(), role: role.into(), bytes: bytes.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(bytes)), url: None,
+                path: path.into(),
+                role: role.into(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                url: None,
             });
         }
         voice.validate().unwrap();
@@ -1367,17 +1397,20 @@ mod tests {
         let mut mismatch = voice.clone();
         mismatch.sample_rate = 24000;
         assert!(validate_package(&directory, &mismatch)
-            .unwrap_err().contains("raw Piper ONNX"));
+            .unwrap_err()
+            .contains("raw Piper ONNX"));
         let mut corrupted = voice.clone();
         corrupted.artifacts[0].sha256 = "0".repeat(64);
         assert!(validate_package(&directory, &corrupted)
-            .unwrap_err().contains("SHA-256"));
+            .unwrap_err()
+            .contains("SHA-256"));
         let raw_piper = [8, 8, 58, 2, 10, 0];
         fs::write(directory.join("voice.onnx"), raw_piper).unwrap();
         voice.artifacts[0].bytes = raw_piper.len() as u64;
         voice.artifacts[0].sha256 = format!("{:x}", Sha256::digest(raw_piper));
         assert!(validate_package(&directory, &voice)
-            .unwrap_err().contains("raw Piper ONNX"));
+            .unwrap_err()
+            .contains("raw Piper ONNX"));
     }
 
     #[tokio::test]

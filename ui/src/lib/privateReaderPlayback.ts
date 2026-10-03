@@ -29,6 +29,7 @@ let activeBook: ReaderBook | null = null;
 let activityPosition: ReaderPosition | null = null;
 let cancelPreparation: (() => void) | null = null;
 let cancelAudioLoad: (() => void) | null = null;
+let cuedAudio = false;
 
 export function registerPrivatePreparation(cancel: () => void): () => void {
   cancelPreparation?.();
@@ -58,7 +59,7 @@ export function checkpointPrivatePlayback(): Promise<void> {
   if (isAndroidReader()) return Promise.resolve(); // The Media3 service owns durable checkpoints.
   const state = get(privatePlayback);
   const captured = position();
-  if (!state.bookId || !captured || state.mode !== "audio") return writing;
+  if (!state.bookId || !captured || state.mode !== "audio" || (cuedAudio && state.status !== "playing")) return writing;
   patch({ position: captured });
   const bookId = state.bookId;
   const moved = state.status === "playing" && captured.offsetMs !== activityPosition?.offsetMs;
@@ -111,7 +112,7 @@ export function validatePrivateMediaURL(value: string): string {
   return url.href;
 }
 
-export async function playPrivateAudio(book: ReaderBook, saved = book.position): Promise<void> {
+async function openPrivateAudio(book: ReaderBook, saved = book.position, autoplay = true): Promise<void> {
   if (!book.available) throw new Error("This source is unavailable. Relink it before playing.");
   if (book.kind !== "audio") throw new Error("This book is not an audiobook.");
   const remote = book.sourceUrl ? webStudyUrl(book.sourceUrl).href : null;
@@ -121,14 +122,15 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
     throw new Error("The saved chapter is missing. Choose a chapter explicitly; progress was not guessed.");
   await stopPrivatePlayback();
   const request = ++generation;
+  cuedAudio = !autoplay;
   activeBook = book;
   const selected = { trackId, offsetMs: saved?.offsetMs ?? 0 };
   activityPosition = selected;
   patch({ bookId: book.id, title: book.title, mode: "audio", status: "loading", position: selected, error: "", durationMs: 0, seekable: false, playbackRate: undefined });
   try {
     if (isAndroidReader()) {
-      const state = await androidReaderRequest<AndroidReaderState>("play", { bookId: book.id, ...selected, playbackRate: get(mediaPlaybackRate) });
-      if (request === generation) applyAndroidState(state);
+      const state = await androidReaderRequest<AndroidReaderState>("play", { bookId: book.id, ...selected, playbackRate: get(mediaPlaybackRate), autoplay });
+      if (request === generation) applyAndroidState(autoplay ? state : { ...state, playing: false, buffering: false });
       return;
     }
     const url = remote ?? validatePrivateMediaURL(await readerNative<string>("media_url", { bookId: book.id, trackId }));
@@ -154,13 +156,25 @@ export async function playPrivateAudio(book: ReaderBook, saved = book.position):
     applyReaderPlaybackRate(element, get(mediaPlaybackRate));
     patch({ playbackRate: element.playbackRate });
     updateAudioProgress();
-    await element.play();
-    if (request === generation) patch({ status: "playing" });
+    if (autoplay) {
+      await element.play();
+      if (request === generation) patch({ status: "playing" });
+    } else if (request === generation) {
+      patch({ status: "paused" });
+    }
   } catch (cause) {
     if (request !== generation) return;
     audio?.pause(); patch({ status: "paused", error: String(cause) });
     throw cause;
   }
+}
+
+export function playPrivateAudio(book: ReaderBook, saved = book.position): Promise<void> {
+  return openPrivateAudio(book, saved, true);
+}
+
+export function cuePrivateAudio(book: ReaderBook, saved = book.position): Promise<void> {
+  return openPrivateAudio(book, saved, false);
 }
 
 export async function pausePrivatePlayback(): Promise<void> {
@@ -212,7 +226,7 @@ export async function resumePrivatePlayback(): Promise<void> {
     if (request === generation) applyAndroidState(state);
     return;
   }
-  else if (audio?.src) await audio.play();
+  else if (audio?.src) { cuedAudio = false; await audio.play(); }
   else throw new Error("No reader is ready to resume. Open the book again.");
   if (request === generation) patch({ status: "playing", error: "" });
 }
@@ -234,7 +248,7 @@ export async function stopPrivatePlayback(): Promise<void> {
   if (audio?.src) {
     audio.pause();
     const checkpoint = checkpointPrivatePlayback();
-    audio.removeAttribute("src"); audio.load(); patch({ status: "stopped" });
+    audio.removeAttribute("src"); audio.load(); cuedAudio = false; patch({ status: "stopped" });
     await checkpoint;
   }
   patch({ status: "stopped" });

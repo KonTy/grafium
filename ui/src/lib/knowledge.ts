@@ -1,5 +1,6 @@
 // Knowledge Engine API — AI, references, vector search, schemas.
 import { invoke } from "@tauri-apps/api/core";
+import { acceptLibrarySources, type LibrarySource, type LibrarySourceDto } from "./libraryIndex";
 
 /** Shared runtime schema, filtered to the capabilities of this application. */
 export function aiModelSettingsSchema(): Promise<Record<string, unknown>> {
@@ -113,6 +114,7 @@ export interface SourcesPayload {
   sources: ChatSource[];
   /** Web sources for a research answer; empty/absent for an ordinary answer. */
   web_sources?: WebSource[];
+  library_sources?: LibrarySourceDto[];
 }
 
 export interface AskResult {
@@ -556,6 +558,7 @@ export async function aiAskStream(
     onError?: (message: string) => void;
     onSources?: (sources: ChatSource[]) => void;
     onWebSources?: (sources: WebSource[]) => void;
+    onLibrarySources?: (sources: LibrarySource[]) => void;
     onPhase?: (phase: string) => void;
     onNote?: (note: string) => void;
     onStart?: (requestId: string) => void;
@@ -614,6 +617,10 @@ export async function aiAskStream(
       handlers.onSources?.(payload.sources ?? []);
       if (payload.web_sources && payload.web_sources.length > 0) {
         handlers.onWebSources?.(payload.web_sources);
+      }
+      if (payload.library_sources && payload.library_sources.length > 0) {
+        try { handlers.onLibrarySources?.(acceptLibrarySources(payload.library_sources)); }
+        catch (cause) { console.warn("[chat] Ignoring invalid Library sources:", cause); }
       }
     });
 

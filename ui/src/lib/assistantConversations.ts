@@ -9,6 +9,7 @@ import {
   assistantChat, assistantCancel, assistantContextPageId, copyAssistantContext,
   type AssistantContext, type AssistantMode,
 } from "./assistant";
+import { isLibraryIndexOffError } from "./libraryIndex";
 import {
   acquireChatSlot, cancelChatSlot, currentChatConcurrency, deriveChatTitle, deleteChatThread,
   listChatThreads, loadChatThread, parseContext, parseMode, queueWaitLabel,
@@ -18,6 +19,7 @@ import {
 
 export interface AssistantMessage extends ChatMessageModel {
   contextLabel?: string;
+  contextKind?: AssistantContext["kind"];
   mode?: AssistantMode;
 }
 
@@ -63,6 +65,7 @@ function defaultContext(pageId: string | null, isBook: boolean): AssistantContex
 }
 
 function sourceContextLabel(thread: AssistantThread): string {
+  if (thread.context.kind === "library") return "Library";
   if (thread.sourcePageId) return thread.sourcePageTitle;
   return thread.context.kind === "none" ? "No notes" : GRAPH_CONTEXT_LABEL;
 }
@@ -114,6 +117,10 @@ export function assistantConversationRunning(thread: AssistantThread): boolean {
   return thread.state.kind === "active" || thread.state.kind === "stalled";
 }
 
+function isLibraryChatLocalModelError(message: string): boolean {
+  return message.includes("Library questions need a chat model on this computer");
+}
+
 function dispatch(thread: AssistantThread, event: StreamEvent): void {
   thread.state = reduce(thread.state, event);
   updateAssistantConversation();
@@ -139,24 +146,29 @@ export async function sendAssistantQuestion(
     copyAssistantContext(thread.historyContexts[index] ?? thread.context));
   // "No notes" must not smuggle earlier note-backed answers into the model through history.
   const history = priorHistory
-    .filter((_, index) => frozenContext.kind !== "none" || priorContexts[index].kind === "none")
+    .filter((_, index) => {
+      const priorKind = priorContexts[index].kind;
+      if (priorKind === "library") return frozenContext.kind === "library";
+      return frozenContext.kind !== "none" || priorKind === "none";
+    })
     .map((turn) => ({ ...turn }));
-  const mode = thread.mode;
+  const mode: AssistantMode = frozenContext.kind === "library" ? "answer" : thread.mode;
   const generation = ++thread.generation;
   const requestId = crypto.randomUUID();
   const current = () => thread.generation === generation;
   const live = () => current() && assistantConversationRunning(thread);
   const assistantIndex = thread.messages.length + 1;
   thread.messages.push(
-    { role: "user", content: question, contextLabel, mode },
-    { role: "assistant", content: "", contextLabel, mode, webResearch: mode !== "answer" },
+    { role: "user", content: question, contextLabel, contextKind: frozenContext.kind, mode },
+    { role: "assistant", content: "", contextLabel, contextKind: frozenContext.kind, mode, webResearch: mode !== "answer" },
   );
   // Name it from the question straight away so the switcher never shows a
   // blank row, then let the model improve on it once there's an answer to
   // summarise. Showing the question first is what every other chat app does,
   // and it means a slow or missing model costs nothing.
-  const shouldAutoName = !thread.titleIsCustom && !thread.title.trim();
+  const shouldAutoName = !thread.titleIsCustom && !thread.title.trim() && frozenContext.kind !== "library";
   if (shouldAutoName) thread.title = deriveChatTitle(question);
+  else if (!thread.titleIsCustom && !thread.title.trim() && frozenContext.kind === "library") thread.title = "Chat";
   thread.pendingIndex = assistantIndex;
   thread.draft = "";
   thread.error = null;
@@ -182,7 +194,7 @@ export async function sendAssistantQuestion(
       thread.history = [...priorHistory, { role: "user", content: question }, { role: "assistant", content: answer.content }];
       thread.historyContexts = [...priorContexts, copyAssistantContext(frozenContext), copyAssistantContext(frozenContext)];
       dispatch(thread, { type: "done", at: Date.now() });
-      if (shouldAutoName) void autoNameConversation(thread, question, answer.content, generation);
+      if (shouldAutoName && frozenContext.kind !== "library") void autoNameConversation(thread, question, answer.content, generation);
     }
     // Keep what the run did next to the answer it produced; thread.state is
     // reset by the next question.
@@ -251,12 +263,29 @@ export async function sendAssistantQuestion(
         thread.messages[assistantIndex].webSources = sources;
         updateAssistantConversation();
       },
+      onLibrarySources(sources) {
+        if (!current()) return;
+        thread.messages[assistantIndex].librarySources = sources;
+        updateAssistantConversation();
+      },
       onDone: () => finish(),
-      onError: (message) => finish(message),
+      onError: (message) => {
+        if (frozenContext.kind === "library" && isLibraryIndexOffError(message)) {
+          thread.messages[assistantIndex].content = "Library index is off in Settings → Library.";
+          finish();
+        } else if (frozenContext.kind === "library" && isLibraryChatLocalModelError(message)) {
+          thread.messages[assistantIndex].content = message;
+          finish();
+        } else finish(message);
+      },
     });
     if (live()) finish("The answer stream ended without a completion event. Try again.");
   } catch (error) {
-    finish(String(error));
+    const message = String(error);
+    if (frozenContext.kind === "library" && isLibraryChatLocalModelError(message)) {
+      thread.messages[assistantIndex].content = message;
+      finish();
+    } else finish(message);
   } finally {
     releaseSlot?.();
     thread.queuePosition = 0;
@@ -349,25 +378,30 @@ async function autoNameConversation(
 export async function persistConversation(thread: AssistantThread): Promise<void> {
   if (!thread.messages.length) return;
   const now = Date.now();
-  const messages: StoredChatMessage[] = thread.messages.map((message, index) => ({
-    id: `${thread.id}:${index}`,
-    role: message.role,
-    content: message.content,
-    contextLabel: message.contextLabel ?? "",
-    mode: message.mode ?? "answer",
-    webResearch: message.webResearch === true,
-    sourcesJson: message.sources?.length ? JSON.stringify(message.sources) : null,
-    createdAt: now,
-  }));
+  const messages: StoredChatMessage[] = thread.messages.flatMap((message, index) => {
+    if (message.contextKind === "library") return [];
+    return [{
+      id: `${thread.id}:${index}`,
+      role: message.role,
+      content: message.content,
+      contextLabel: message.contextLabel ?? "",
+      mode: message.mode ?? "answer",
+      webResearch: message.webResearch === true,
+      sourcesJson: message.sources?.length ? JSON.stringify(message.sources) : null,
+      createdAt: now,
+    }];
+  });
+  if (!messages.length) return;
+  const persistedContext = thread.context.kind === "library" ? { kind: "graph" as const } : thread.context;
   try {
     await saveChatThread({
       id: thread.id,
-      title: thread.title,
+      title: thread.messages.some(message => message.contextKind !== "library") ? thread.title || "Chat" : "Chat",
       sourcePageId: thread.sourcePageId,
       sourcePageTitle: thread.sourcePageTitle,
       sourceIsBook: thread.sourceIsBook,
       mode: thread.mode,
-      contextJson: serializeContext(thread.context),
+      contextJson: serializeContext(persistedContext),
       createdAt: 0,
       updatedAt: now,
     }, messages);
@@ -455,6 +489,7 @@ export async function restoreAssistantConversations(graphPath: string): Promise<
       role: message.role === "assistant" ? "assistant" : "user",
       content: message.content,
       contextLabel: message.contextLabel,
+      contextKind: parseContext(full.contextJson).kind,
       mode: parseMode(message.mode),
       webResearch: message.webResearch,
       sources: message.sourcesJson ? safeParseSources(message.sourcesJson) : undefined,

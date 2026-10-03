@@ -63,6 +63,21 @@ describe("shared assistant IPC", () => {
     expect(unlisten).toHaveBeenCalledTimes(2);
   });
 
+
+  it("routes Library source citations from assistant chat", async () => {
+    const callbacks = new Map<string, (event: unknown) => void>();
+    mocks.listen.mockImplementation(async (name, callback) => { callbacks.set(name, callback); return vi.fn(); });
+    mocks.invoke.mockImplementationOnce(async () => {
+      callbacks.get("ai://chat_sources")!({ payload: { request_id: request.requestId, sources: [], library_sources: [{
+        index: 1, book_id: "book", title: "Manual", kind: "epub", track_id: null, start_ms: null, end_ms: null, chapter: "Intro", quote: "fuel filter",
+      }] } });
+      callbacks.get("ai://chat_stream")!({ payload: { request_id: request.requestId, delta: "Answer", done: true } });
+    });
+    const handlers = { onChunk: vi.fn(), onDone: vi.fn(), onLibrarySources: vi.fn() };
+    await assistantChat(request, handlers);
+    expect(handlers.onLibrarySources).toHaveBeenCalledWith([expect.objectContaining({ bookId: "book", chapter: "Intro" })]);
+  });
+
   it("does not start model or web work after Stop during listener setup", async () => {
     let active = true;
     const unlisten = vi.fn();
@@ -88,5 +103,6 @@ describe("shared assistant IPC", () => {
     expect(() => copyAssistantContext({ kind: "selection", pageId: "page", selection: { blockIds: ["a", "a"], text: "Text" } }))
       .toThrow(/Select a passage/);
     expect(copyAssistantContext({ kind: "none" })).toEqual({ kind: "none" });
+    expect(copyAssistantContext({ kind: "library" })).toEqual({ kind: "library" });
   });
 });

@@ -4,7 +4,7 @@ import { researchCancel, researchStream, type ResearchScopeInfo, type ResearchSt
 
 export type AssistantMode = "answer" | "web" | "deep";
 export type AssistantContext =
-  | { kind: "none" | "graph" }
+  | { kind: "none" | "graph" | "library" }
   | { kind: "page" | "book"; pageId: string }
   | { kind: "block" | "section"; pageId: string; blockId: string }
   | { kind: "selection"; pageId: string; selection: { blockIds: string[]; text: string } };
@@ -20,6 +20,12 @@ export interface AssistantRequest {
   context: AssistantContext;
   history: ChatTurn[];
   mode: AssistantMode;
+}
+
+export interface LibraryChatAvailability { available: boolean; reason: string | null }
+
+export function libraryChatAvailable(): Promise<LibraryChatAvailability> {
+  return invoke("library_chat_available");
 }
 
 export function assistantContextInfo(graphPath: string, pageId: string, blockId?: string): Promise<AssistantContextInfo> {

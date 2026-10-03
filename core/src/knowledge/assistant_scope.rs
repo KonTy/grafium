@@ -38,6 +38,7 @@ pub enum AssistantContext {
         page_id: String,
         selection: ReadingSelection,
     },
+    Library {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +68,7 @@ pub enum AssistantSource {
     None,
     Graph(Database),
     Reading(Vec<ReadingSource>),
+    Library(crate::library_index::LibraryAssistantSource),
 }
 
 struct Book {
@@ -174,7 +176,10 @@ fn resolve_book(db: &Database, root: &Path, page: &Page) -> Result<Option<Book>>
         return Ok(None);
     }
     if crate::graph::books::is_original_book(page) {
-        return Ok(Some(Book { root: page.clone(), pages: vec![page.id.clone()] }));
+        return Ok(Some(Book {
+            root: page.clone(),
+            pages: vec![page.id.clone()],
+        }));
     }
     if is_book_collection(page) {
         let mut pages = vec![page.id.clone()];
@@ -230,6 +235,11 @@ impl AssistantSource {
         let (page_id, scope, block_id, selection) = match context {
             AssistantContext::None {} => return Ok(Self::None),
             AssistantContext::Graph {} => return Ok(Self::Graph(db.read_snapshot()?)),
+            AssistantContext::Library {} => {
+                return Err(invalid(
+                    "Library chat context must be captured by the app host",
+                ));
+            }
             AssistantContext::Book { page_id } => {
                 let snapshot = db.read_snapshot()?;
                 let page = snapshot.get_page_by_id(page_id)?;

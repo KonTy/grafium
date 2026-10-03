@@ -89,11 +89,14 @@ pub async fn reader_set_library(
     _state: State<'_, ReaderState>,
     path: String,
 ) -> ReaderResult<ReaderSnapshot> {
-    blocking(app, move |state, directory| {
+    let app_for_schedule = app.clone();
+    let snapshot = blocking(app, move |state, directory| {
         state.revoke_media()?;
         state.set_library(directory, path)
     })
-    .await
+    .await?;
+    super::library_index::schedule_delta_run(&app_for_schedule);
+    Ok(snapshot)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -101,7 +104,10 @@ pub async fn reader_rescan(
     app: AppHandle,
     _state: State<'_, ReaderState>,
 ) -> ReaderResult<ReaderSnapshot> {
-    blocking(app, |state, directory| state.rescan(directory)).await
+    let app_for_schedule = app.clone();
+    let snapshot = blocking(app, |state, directory| state.rescan(directory)).await?;
+    super::library_index::schedule_delta_run(&app_for_schedule);
+    Ok(snapshot)
 }
 
 #[tauri::command(rename_all = "camelCase")]

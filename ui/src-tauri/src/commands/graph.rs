@@ -1,7 +1,7 @@
 use crate::AppState;
 use grafium_core::graph::GraphValidationReport;
-use grafium_core::Graph;
 use grafium_core::source_events::open_preserving_graph;
+use grafium_core::Graph;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -271,7 +271,12 @@ pub fn open_graph(
 
     state.restart_graph_watcher(&app)?;
 
-    schedule_background_reconcile(app.clone(), graph_path.clone(), db_path.clone(), metadata_dir.clone());
+    schedule_background_reconcile(
+        app.clone(),
+        graph_path.clone(),
+        db_path.clone(),
+        metadata_dir.clone(),
+    );
 
     // Notify Android companion app by writing to shared preference file
     // This allows VoiceCommandReceiver to know which graph is currently active in Tauri
@@ -281,27 +286,42 @@ pub fn open_graph(
 }
 
 pub(crate) fn schedule_background_reconcile(
-    app: AppHandle, graph_root: PathBuf, db_path: PathBuf, metadata_dir_name: String,
+    app: AppHandle,
+    graph_root: PathBuf,
+    db_path: PathBuf,
+    metadata_dir_name: String,
 ) {
     thread::spawn(move || {
         let result = open_preserving_graph(&graph_root, &db_path, &metadata_dir_name)
             .and_then(|graph| graph.reconcile_files_from_disk().map_err(|e| e.to_string()));
         if let Err(error) = result {
-            eprintln!("Background source reconciliation failed for '{}': {error}", graph_root.display());
-            if let Err(emit_error) = app.emit("graph-index-error", serde_json::json!({
-                "graphPath": graph_root, "message": error,
-            })) {
+            eprintln!(
+                "Background source reconciliation failed for '{}': {error}",
+                graph_root.display()
+            );
+            if let Err(emit_error) = app.emit(
+                "graph-index-error",
+                serde_json::json!({
+                    "graphPath": graph_root, "message": error,
+                }),
+            ) {
                 eprintln!("Could not notify graph reconciliation failure: {emit_error}");
             }
         }
-        if let Err(error) = app.emit("book-source-changed", serde_json::json!({
-            "graphPath": graph_root,
-        })) {
+        if let Err(error) = app.emit(
+            "book-source-changed",
+            serde_json::json!({
+                "graphPath": graph_root,
+            }),
+        ) {
             eprintln!("Could not notify source reconciliation: {error}");
         }
-        if let Err(error) = app.emit("graph-sources-changed", serde_json::json!({
-            "graphPath": graph_root,
-        })) {
+        if let Err(error) = app.emit(
+            "graph-sources-changed",
+            serde_json::json!({
+                "graphPath": graph_root,
+            }),
+        ) {
             eprintln!("Could not refresh graph sources: {error}");
         }
     });
@@ -419,8 +439,10 @@ pub async fn reindex_current(app: AppHandle, state: State<'_, AppState>) -> Resu
     let result = tauri::async_runtime::spawn_blocking(move || {
         let detached_graph = crate::open_graph_snapshot(&snapshot)?;
         detached_graph.reindex_all().map_err(|e| e.to_string())
-    }).await.map_err(|error| format!("Re-index worker failed: {error}"))
-        .and_then(|result| result);
+    })
+    .await
+    .map_err(|error| format!("Re-index worker failed: {error}"))
+    .and_then(|result| result);
     for event in ["book-source-changed", "graph-sources-changed"] {
         if let Err(error) = app.emit(event, serde_json::json!({ "graphPath": graph_path })) {
             tracing::warn!("Could not notify readers after reindex: {error}");

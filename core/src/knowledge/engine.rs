@@ -60,6 +60,16 @@ pub struct KnowledgeEngine {
     models_root: PathBuf,
 }
 
+fn is_loopback_url(value: &str) -> bool {
+    url::Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .is_some_and(|host| {
+            matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
+                || host.starts_with("127.")
+        })
+}
+
 impl KnowledgeEngine {
     /// Create a new Knowledge Engine.
     /// `data_dir` is the app's data directory where vector store and registry live.
@@ -189,7 +199,9 @@ impl KnowledgeEngine {
             if manager.status()?.settings != next {
                 match manager.unload_idle() {
                     Err(model_runtime::RuntimeError::WorkerBusy) => {
-                        tracing::info!("Native unload deferred until the active model job finishes");
+                        tracing::info!(
+                            "Native unload deferred until the active model job finishes"
+                        );
                     }
                     result => result?,
                 }
@@ -217,6 +229,104 @@ impl KnowledgeEngine {
             Some(manager) => Ok(manager.status()?.settings),
             None => Ok(crate::ai::runtime_config::configuration(&self.config)?.0),
         }
+    }
+
+    pub fn library_semantic_scheme(&self) -> Option<String> {
+        if self.library_semantic_unavailable_reason().is_some() {
+            return None;
+        }
+        let embedder = self.embedder.as_ref()?;
+        let settings = self.runtime_settings().ok()?;
+        let backend = settings.backend(model_runtime::settings::ModelRole::Embeddings)?;
+        Some(format!(
+            "embedded:{backend:?}:model={}:dim={}:prefix={}",
+            embedder.model_name(),
+            embedder.dimension(),
+            embedder.embedding_scheme_id()
+        ))
+    }
+
+    pub fn library_semantic_unavailable_reason(&self) -> Option<String> {
+        if self.config.mode != AiMode::Local {
+            return Some(
+                "Library semantic search only uses Grafium's built-in on-device embedding model."
+                    .into(),
+            );
+        }
+        let settings = match self.runtime_settings() {
+            Ok(settings) => settings,
+            Err(error) => return Some(format!("Could not read AI runtime settings: {error}")),
+        };
+        if !matches!(
+            settings.backend(model_runtime::settings::ModelRole::Embeddings),
+            Some(model_runtime::settings::BackendSettings::Embedded { .. })
+        ) {
+            return Some(
+                "Library semantic search only uses Grafium's built-in on-device embedding model."
+                    .into(),
+            );
+        }
+        if self.embedder.is_none() {
+            return Some("No built-in on-device embedding model is configured.".into());
+        }
+        None
+    }
+
+    pub fn library_chat_unavailable_reason(&self) -> Option<String> {
+        const MESSAGE: &str = "Library questions need a chat model on this computer, so book and transcript text never leaves it. Choose one in Settings > AI.";
+        let Ok(settings) = self.runtime_settings() else {
+            return Some(MESSAGE.into());
+        };
+        let Some(chat) = settings.backend(model_runtime::settings::ModelRole::Chat) else {
+            return Some(MESSAGE.into());
+        };
+        match chat {
+            model_runtime::settings::BackendSettings::Embedded { .. } => None,
+            model_runtime::settings::BackendSettings::Ollama { base_url, .. }
+            | model_runtime::settings::BackendSettings::OpenAiCompatible { base_url, .. }
+                if self.config.mode == AiMode::Local && is_loopback_url(base_url) =>
+            {
+                None
+            }
+            _ => Some(MESSAGE.into()),
+        }
+    }
+
+    pub async fn embed_library_documents(
+        &self,
+        texts: &[String],
+    ) -> Result<Option<(String, Vec<Vec<f32>>)>> {
+        if self.library_semantic_unavailable_reason().is_some() {
+            return Ok(None);
+        }
+        let Some(embedder) = self.embedder.as_deref() else {
+            return Ok(None);
+        };
+        let vectors = embedder.embed_documents(texts).await?;
+        Ok(Some((
+            self.library_semantic_scheme().unwrap_or_default(),
+            vectors,
+        )))
+    }
+
+    async fn embed_library_query(&self, query: &str) -> Result<Option<(String, Vec<f32>)>> {
+        if self.library_semantic_unavailable_reason().is_some() {
+            return Ok(None);
+        }
+        let Some(embedder) = self.embedder.as_deref() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            self.library_semantic_scheme().unwrap_or_default(),
+            embedder.embed_query(query).await?,
+        )))
+    }
+
+    pub async fn embed_library_query_for_host(
+        &self,
+        query: &str,
+    ) -> Result<Option<(String, Vec<f32>)>> {
+        self.embed_library_query(query).await
     }
 
     /// Request GPU offload without bypassing fitting, admission or crash
@@ -1017,12 +1127,14 @@ impl KnowledgeEngine {
                     sources: build_sources(&request.entries, &answer),
                     trailing_message: None,
                     web_citations: Vec::new(),
+                    library_sources: Vec::new(),
                 })
             }
             crate::ai::reasoning::ThinkStripResult::ReasoningOnly => Ok(AskStreamOutcome {
                 sources: Vec::new(),
                 trailing_message: Some(crate::ai::reasoning::REASONING_ONLY_MESSAGE.to_string()),
                 web_citations: Vec::new(),
+                library_sources: Vec::new(),
             }),
         }
     }
@@ -1086,6 +1198,7 @@ impl KnowledgeEngine {
                 sources: notes_sources,
                 trailing_message: None,
                 web_citations: Vec::new(),
+                library_sources: Vec::new(),
             });
         }
 
@@ -1132,6 +1245,7 @@ impl KnowledgeEngine {
             sources: notes_sources,
             trailing_message: None,
             web_citations,
+            library_sources: Vec::new(),
         })
     }
 
@@ -1298,6 +1412,7 @@ impl KnowledgeEngine {
                 sources: notes_sources,
                 trailing_message: None,
                 web_citations: Vec::new(),
+                library_sources: Vec::new(),
             });
         }
 
@@ -1349,6 +1464,7 @@ impl KnowledgeEngine {
             sources: notes_sources,
             trailing_message: None,
             web_citations,
+            library_sources: Vec::new(),
         })
     }
     /// prompt assembly — kept in one place so the blocking and streaming paths
@@ -1905,6 +2021,8 @@ pub struct AskStreamOutcome {
     /// research flow ran ([`KnowledgeEngine::ask_stream_with_web`]). Empty for
     /// an ordinary graph-only answer, so existing callers are unaffected.
     pub web_citations: Vec<crate::ai::web_research::Citation>,
+    /// Private Library sources cited by a Library-context answer.
+    pub library_sources: Vec<crate::library_index::LibrarySource>,
 }
 
 /// Build the cited-sources list for an answer: only entries whose `[N]` marker
@@ -1924,6 +2042,20 @@ fn build_sources(entries: &[ContextEntry], answer: &str) -> Vec<Source> {
             // note's saved/imported timestamp is never presented as when the
             // event happened (HIGH 4).
             date: e.date_ms.map(retrieval::format_date_ms),
+        })
+        .collect()
+}
+
+fn build_library_sources(
+    entries: &[ContextEntry],
+    answer: &str,
+) -> Vec<crate::library_index::LibrarySource> {
+    let cited = parse_cited_indices(answer);
+    entries
+        .iter()
+        .filter(|e| cited.contains(&e.index))
+        .filter_map(|e| {
+            serde_json::from_str::<crate::library_index::LibrarySource>(&e.block_id).ok()
         })
         .collect()
 }
@@ -2702,7 +2834,10 @@ mod tests {
     #[test]
     fn reconfigure_persistence_failure_retains_live_providers() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let config = AiConfig { enabled: true, ..Default::default() };
+        let config = AiConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let mut engine = KnowledgeEngine::new(dir.path(), config.clone())?;
         let original = engine.model_manager().unwrap();
         let original_settings = original.status()?.settings;
@@ -2713,7 +2848,10 @@ mod tests {
             Err(CoreError::Other("synthetic storage failure".into()))
         });
 
-        assert!(result.unwrap_err().to_string().contains("synthetic storage failure"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("synthetic storage failure"));
         assert!(Arc::ptr_eq(&engine.model_manager().unwrap(), &original));
         assert_eq!(engine.runtime_settings()?, original_settings);
         assert!(engine.llm.is_some());
@@ -2725,7 +2863,10 @@ mod tests {
     fn reconfigure_preparation_failure_never_persists() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let mut engine = KnowledgeEngine::new(dir.path(), AiConfig::default())?;
-        let mut next = AiConfig { enabled: true, ..Default::default() };
+        let mut next = AiConfig {
+            enabled: true,
+            ..Default::default()
+        };
         next.embedding.vector_store_path = Some(dir.path().to_path_buf());
         let result = engine.reconfigure_persisted(next, |_| {
             panic!("A configuration that cannot be prepared must not be saved")
@@ -2766,7 +2907,10 @@ mod tests {
         })?;
         assert!(saved);
         assert_eq!(engine.config.embedding.chunk_max_tokens, 256);
-        assert_eq!(engine.registry().await.get("fixture").unwrap().name, "Live name");
+        assert_eq!(
+            engine.registry().await.get("fixture").unwrap().name,
+            "Live name"
+        );
         Ok(())
     }
 

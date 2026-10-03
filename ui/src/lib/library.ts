@@ -3,9 +3,9 @@ import { studySourceFromLink, webStudyUrl, youtubeVideoId } from "./studySources
 import { writable } from "svelte/store";
 
 export type LibraryProgress = ReaderProgress;
-export const libraryMediaRequest = writable<{ bookId: string; position?: ReaderPosition; nonce: number } | null>(null);
-export function requestLibraryMedia(bookId: string, position?: ReaderPosition) {
-  libraryMediaRequest.set({ bookId, position, nonce: Date.now() });
+export const libraryMediaRequest = writable<{ bookId: string; position?: ReaderPosition; autoplay?: boolean; nonce: number } | null>(null);
+export function requestLibraryMedia(bookId: string, position?: ReaderPosition, autoplay = true) {
+  libraryMediaRequest.set({ bookId, position, autoplay, nonce: Date.now() });
 }
 
 export function libraryBooks(books: ReaderBook[], query = "", favorites = false, kind = "all"): ReaderBook[] {

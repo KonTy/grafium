@@ -10,6 +10,7 @@ pub mod graph;
 pub mod import;
 pub mod ink;
 pub mod knowledge;
+pub mod library_index;
 pub mod log_tap;
 pub mod media;
 pub mod model_library;

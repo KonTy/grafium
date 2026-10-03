@@ -231,6 +231,21 @@ pub struct ReaderSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderIndexFile {
+    pub track_id: Option<String>,
+    pub relative_path: String,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderIndexRecord {
+    pub book: ReaderBook,
+    pub files: Vec<ReaderIndexFile>,
+}
+
 pub(crate) fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

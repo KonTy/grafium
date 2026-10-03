@@ -22,7 +22,8 @@
   import { captureResearchSource } from "../lib/researchSource";
   import { pushUndo, runUndoOperation } from "../lib/undoStack";
   import { flushAllPageEditors, flushPageEditors, reloadPageEditors, withPageEditorsLocked } from "../lib/editorPersistence";
-  import { assistantContextInfo, type AssistantContext, type AssistantContextInfo, type AssistantMode } from "../lib/assistant";
+  import { assistantContextInfo, libraryChatAvailable, type AssistantContext, type AssistantContextInfo, type AssistantMode } from "../lib/assistant";
+  import { libraryIndexStatus, subscribeLibraryIndexUpdated } from "../lib/libraryIndex";
   import {
     assistantConversationChanges, updateAssistantConversation, assistantConversationRunning,
     sendAssistantQuestion, stopAssistantConversation, newAssistantConversation, GRAPH_CONTEXT_LABEL,
@@ -61,6 +62,10 @@
   let footerEl: HTMLDivElement | undefined;
   let diagnostics = $state<{ openMenu: () => void }>();
   let modelNotice = $state<{ text: string; error: boolean } | null>(null);
+  let libraryIndexEnabled = $state<boolean | null>(null);
+  let libraryChatAllowed = $state<boolean | null>(null);
+  let libraryIndexNote = $state("");
+  let libraryChatNote = $state("");
   function updateModelNotice(notice: { text: string; error: boolean } | null) { modelNotice = notice; }
   let followAnswer = $state(true);
   let blockPreview = $state("");
@@ -96,9 +101,23 @@
     (view.context.kind === "selection" && (!view.context.selection.blockIds.length || !view.context.selection.text.trim()))
     || (["block", "section"].includes(view.context.kind) && !("blockId" in view.context && view.context.blockId))
   );
+  const libraryContextActive = $derived(view.context.kind === "library");
+  const libraryContextAvailable = $derived(libraryIndexEnabled !== false && libraryChatAllowed !== false);
   const thinkingTone = $derived<ChatThinkingTone>(status.kind === "stalled" ? "stalled"
     : status.phase === "searching_web" || status.phase === "reading_sources" ? "web"
     : status.phase === "thinking" ? "thinking" : "working");
+
+
+  async function refreshLibraryChatAvailability(): Promise<void> {
+    try {
+      const result = await libraryChatAvailable();
+      libraryChatAllowed = result.available;
+      libraryChatNote = result.available ? "" : (result.reason || "Library questions need a chat model on this computer.");
+    } catch (cause) {
+      libraryChatAllowed = false;
+      libraryChatNote = `Library context unavailable: ${String(cause)}`;
+    }
+  }
 
   $effect(() => {
     workflowIdentity;
@@ -109,6 +128,25 @@
       pendingWorkflow = null;
       workflowProgress = "";
     });
+  });
+
+
+  $effect(() => {
+    if (!active) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const refreshChat = () => { if (!disposed) void refreshLibraryChatAvailability(); };
+    refreshChat();
+    window.addEventListener("ai-configuration-changed", refreshChat);
+    void libraryIndexStatus().then(status => {
+      if (!disposed) { libraryIndexEnabled = status.enabled; libraryIndexNote = status.enabled ? "" : "Library index is off in Settings → Library."; }
+    }).catch(cause => { if (!disposed) { libraryIndexEnabled = false; libraryIndexNote = `Library context unavailable: ${String(cause)}`; } });
+    void subscribeLibraryIndexUpdated(status => {
+      if (!disposed) { libraryIndexEnabled = status.enabled; libraryIndexNote = status.enabled ? "" : "Library index is off in Settings → Library."; }
+    }, message => { if (!disposed) { libraryIndexEnabled = false; libraryIndexNote = `Library context unavailable: ${message}`; } }).then(stop => { unlisten = stop; }).catch(cause => {
+      if (!disposed) { libraryIndexEnabled = false; libraryIndexNote = `Library context unavailable: ${String(cause)}`; }
+    });
+    return () => { disposed = true; unlisten?.(); window.removeEventListener("ai-configuration-changed", refreshChat); };
   });
 
   $effect(() => {
@@ -269,6 +307,7 @@
     const title = info?.pageTitle || thread.sourcePageTitle || "Source";
     if (kind === "none") { context = { kind: "none" }; label = "No notes"; }
     else if (kind === "graph") { context = { kind: "graph" }; label = GRAPH_CONTEXT_LABEL; }
+    else if (kind === "library" && libraryContextAvailable) { context = { kind: "library" }; label = "Library"; thread.mode = "answer"; }
     else if (kind === "page" && pageId) { context = { kind: "page", pageId }; label = `${pageLabel} · ${title}`; }
     else if (kind === "book" && info?.book) { context = { kind: "book", pageId: info.book.pageId }; label = `Whole book · ${info.book.title}`; }
     else if (kind === "book" && info?.isBook && pageId) { context = { kind: "book", pageId }; label = `Whole book · ${title}`; }
@@ -296,6 +335,14 @@
     // another paragraph of prose. Questions skip this entirely so ordinary chat
     // keeps its current latency.
     if (looksLikeEditRequest(request) && (await proposeEdits(request))) return;
+    if (thread.context.kind === "library") {
+      thread.mode = "answer";
+      if (!libraryContextAvailable) {
+        libraryChatNote ||= "Library questions need a chat model on this computer.";
+        updateAssistantConversation();
+        return;
+      }
+    }
     await sendAssistantQuestion(thread, thread.context, thread.contextLabel);
   }
 
@@ -495,6 +542,12 @@
     updateAssistantConversation();
     inputEl?.focus();
   }
+  function openLibrarySource(source: import("../lib/libraryIndex").LibrarySource) {
+    window.dispatchEvent(new CustomEvent("grafium-open-library-source", { detail: {
+      bookId: source.bookId, trackId: source.trackId, startMs: source.startMs, quote: source.quote, chapter: source.chapter,
+    } }));
+  }
+
   async function openWebSource(source: WebSource) {
     try {
       const url = new URL(source.url);
@@ -543,7 +596,7 @@
           animateCursor={status.animate} thinkingLabel={status.announce} {thinkingTone}
           trailed={view.pendingIndex === index && trail.any}
           onOpenSource={(source) => window.dispatchEvent(new CustomEvent("navigate-page", { detail: { pageName: source.page_title, targetBlockId: source.block_id } }))}
-          onOpenWebSource={openWebSource} />
+          onOpenWebSource={openWebSource} onOpenLibrarySource={openLibrarySource} />
       </div>
     {/each}
     {#if view.error}<p class="error-message" role="alert">{view.error}</p>{/if}
@@ -576,6 +629,10 @@
       <p class="connection-notice">Connect a model to send questions. <button class="text-button" onclick={onOpenSettings}>Configure in Settings</button>. Drafts and manual Notes remain available.</p>
     {/if}
     {#if view.selectionError}<p class="error-message" role="alert">{view.selectionError}</p>{/if}
+    {#if view.context.kind === "library"}<p class="status-message">Library chats are kept in memory only and are not saved to your graph.</p>{/if}
+    {#if libraryContextActive && libraryContextAvailable}<p class="status-message">Library answers stay on this device; web search is off for Library questions.</p>{/if}
+    {#if libraryIndexNote}<p class="status-message">{libraryIndexNote}</p>{/if}
+    {#if libraryChatNote}<p class="status-message">{libraryChatNote}</p>{/if}
   </div>
 
   <div class="conversation-controls">
@@ -616,13 +673,14 @@
             <option value="page" disabled={!contextPageId}>{pageLabel}</option>
             <option value="book" disabled={!info?.book && !info?.isBook}>Whole book</option>
             <option value="graph">{GRAPH_CONTEXT_LABEL}</option>
+            <option value="library" disabled={!libraryContextAvailable}>Library</option>
             <option value="none">No notes</option>
           </select>
         </label>
         <label class="mode-choice"><span class="control-label">Answer mode</span>
-          <select aria-label="Mode" value={view.mode} disabled={busy || !!requestedWorkflow} title={assistantModes[view.mode].description}
+          <select aria-label="Mode" value={libraryContextActive ? "answer" : view.mode} disabled={busy || !!requestedWorkflow || libraryContextActive} title={libraryContextActive && libraryContextAvailable ? "Library answers stay on this device; web search is off for Library questions." : assistantModes[view.mode].description}
             onchange={(event) => { thread.mode = event.currentTarget.value as AssistantMode; updateAssistantConversation(); }}>
-            {#each Object.entries(assistantModes) as [mode, choice]}<option value={mode}>{choice.label}</option>{/each}
+            {#each Object.entries(assistantModes) as [mode, choice]}<option value={mode} disabled={libraryContextActive && mode !== "answer"}>{choice.label}</option>{/each}
           </select>
         </label>
         <label class="workflow-choice"><span class="control-label">Prompts and actions</span>

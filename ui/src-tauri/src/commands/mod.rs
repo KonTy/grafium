@@ -11,6 +11,7 @@ pub mod help;
 pub mod jobs;
 pub mod knowledge;
 pub mod layout;
+pub mod library_index;
 pub mod links;
 pub mod media;
 pub mod model_library;

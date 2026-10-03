@@ -1035,10 +1035,14 @@ pub fn ai_model_settings_schema() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn ai_runtime_settings(state: State<'_, KnowledgeState>) -> Result<serde_json::Value, String> {
+pub async fn ai_runtime_settings(
+    state: State<'_, KnowledgeState>,
+) -> Result<serde_json::Value, String> {
     let guard = state.engine.read().await;
     let settings = match guard.as_ref() {
-        Some(engine) => engine.runtime_settings().map_err(|error| error.to_string())?,
+        Some(engine) => engine
+            .runtime_settings()
+            .map_err(|error| error.to_string())?,
         None => grafium_core::model_runtime::settings::RuntimeSettings::default(),
     };
     serde_json::to_value(settings).map_err(|error| error.to_string())
@@ -1192,7 +1196,8 @@ pub async fn ai_set_config(
         let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         let engine = KnowledgeEngine::new_with_models_root(&config_dir, config, &app_data_dir)
             .map_err(|e| e.to_string())?;
-        grafium_core::fsutil::atomic_write(&config_path, json.as_bytes()).map_err(|e| e.to_string())?;
+        grafium_core::fsutil::atomic_write(&config_path, json.as_bytes())
+            .map_err(|e| e.to_string())?;
         *guard = Some(engine);
     }
 
@@ -1286,9 +1291,12 @@ pub async fn ai_allow_gpu_retry(
     {
         let mut guard = state.engine.write().await;
         if let Some(engine) = guard.as_mut() {
-            let chat_key = engine.llm_provider().and_then(|provider| provider.native_model_path())
+            let chat_key = engine
+                .llm_provider()
+                .and_then(|provider| provider.native_model_path())
                 .map(|path| grafium_core::ai::worker::gpu_risk_key("chat", path))
-                .transpose().map_err(|e| e.to_string())?;
+                .transpose()
+                .map_err(|e| e.to_string())?;
             if chat_key.as_deref() == Some(&key) {
                 return engine.retry_llm_on_gpu().map_err(|e| e.to_string());
             }
@@ -1357,7 +1365,10 @@ pub async fn ai_index_all_pages(
     let snapshot = crate::current_graph_snapshot(&app, app_state.graph.as_ref())?;
     let graph_id = snapshot.root_dir.to_string_lossy().to_string();
     let graph = crate::open_graph_snapshot(&snapshot)?;
-    engine.reconcile_deleted_vector_pages(&graph.db, &graph_id).await.map_err(|e| e.to_string())?;
+    engine
+        .reconcile_deleted_vector_pages(&graph.db, &graph_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Recover the hash cache from already-stored vectors so a restart doesn't
     // needlessly re-embed unchanged content.
@@ -1377,7 +1388,10 @@ pub async fn ai_index_all_pages(
             .map_err(|e| e.to_string())
     })? {
         for page in pages {
-            match engine.index_page_from_database(&graph.db, &page.id, &graph_id).await {
+            match engine
+                .index_page_from_database(&graph.db, &page.id, &graph_id)
+                .await
+            {
                 Ok(count) => {
                     indexed_chunks += count;
                     pages_processed += 1;
@@ -2425,6 +2439,66 @@ pub struct AskSourcesPayload {
     /// clickable external links, distinct from the graph `sources` chips.
     #[serde(default)]
     pub web_sources: Vec<WebSourceDto>,
+    #[serde(default)]
+    pub library_sources: Vec<LibrarySourceDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibrarySourceDto {
+    pub index: usize,
+    pub book_id: String,
+    pub title: String,
+    pub kind: String,
+    pub track_id: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub chapter: Option<String>,
+    pub quote: Option<String>,
+}
+
+impl From<grafium_core::library_index::LibrarySource> for LibrarySourceDto {
+    fn from(source: grafium_core::library_index::LibrarySource) -> Self {
+        Self {
+            index: source.index,
+            book_id: source.book_id,
+            title: source.title,
+            kind: serde_json::to_value(source.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "epub".into()),
+            track_id: source.track_id,
+            start_ms: source.start_ms,
+            end_ms: source.end_ms,
+            chapter: source.chapter,
+            quote: source.quote,
+        }
+    }
+}
+
+#[cfg(test)]
+mod library_source_contract_tests {
+    use super::*;
+
+    #[test]
+    fn library_source_dto_uses_snake_case_contract_keys() {
+        let dto = LibrarySourceDto::from(grafium_core::library_index::LibrarySource {
+            index: 1,
+            book_id: "book".into(),
+            title: "Title".into(),
+            kind: grafium_core::library_index::LibraryItemKind::Audio,
+            track_id: Some("track".into()),
+            start_ms: Some(1000),
+            end_ms: Some(2000),
+            chapter: None,
+            quote: None,
+        });
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["book_id"], "book");
+        assert_eq!(value["track_id"], "track");
+        assert_eq!(value["start_ms"], 1000);
+        assert_eq!(value["kind"], "audio");
+        assert!(value.get("bookId").is_none());
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2593,6 +2667,11 @@ pub async fn ai_ask_stream(
                 .web_citations
                 .into_iter()
                 .map(WebSourceDto::from)
+                .collect(),
+            library_sources: outcome
+                .library_sources
+                .into_iter()
+                .map(LibrarySourceDto::from)
                 .collect(),
         },
     )

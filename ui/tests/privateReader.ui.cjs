@@ -1,8 +1,7 @@
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
-const { mkdtempSync, readFileSync, unlinkSync, rmdirSync } = require("node:fs");
-const { tmpdir } = require("node:os");
+const { mkdirSync, readFileSync, rmSync } = require("node:fs");
 const { join } = require("node:path");
 const { openEditor } = require("./keyboardSelection.ui.cjs");
 
@@ -19,15 +18,15 @@ function silentAudio() {
 }
 
 function syntheticVideo() {
-  const directory = mkdtempSync(join(tmpdir(), "grafium-playback-"));
-  const path = join(directory, "fixture.webm");
+  const directory = join(__dirname, ".playwright-artifacts");
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `fixture-${process.pid}.webm`);
   try {
     execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
       "color=c=blue:s=160x90:r=5:d=20", "-threads", "1", "-c:v", "libvpx", path]);
     return readFileSync(path);
   } finally {
-    try { unlinkSync(path); } catch (error) { if (error.code !== "ENOENT") throw error; }
-    rmdirSync(directory);
+    try { rmSync(path, { force: true }); } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
 }
 
@@ -90,6 +89,8 @@ function syntheticVideo() {
             };
             const original = internals.invoke;
             internals.invoke = async (command, args = {}) => {
+              if (command === "library_index_status") return { enabled: true, transcribeMedia: true, running: false, jobId: null, items: { total: 0, indexed: 0, pending: 0, failed: 0, titleOnly: 0 }, chunks: 0, semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null, lastIndexedAt: null, errors: [] };
+              if (command === "library_search") return [];
               if (command.startsWith("reader_")) {
                 fixture.writes.push({ command, args: structuredClone(args) });
                 if ("graphPath" in args) throw new Error("Private reading must not use the active graph.");

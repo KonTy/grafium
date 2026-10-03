@@ -32,7 +32,7 @@ const MAX_RUNNING_JOBS: usize = 2;
 pub const BACKGROUND_INDEX_JOB_KIND: &str = "ai_index_background";
 
 fn counts_against_limit(kind: &str) -> bool {
-    kind != BACKGROUND_INDEX_JOB_KIND
+    kind != BACKGROUND_INDEX_JOB_KIND && kind != "library_index"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

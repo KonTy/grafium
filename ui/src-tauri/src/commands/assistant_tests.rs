@@ -12,13 +12,20 @@ fn assistant_rejects_graph_mismatch_even_for_none_before_reading_sources() {
             page_id: "missing".into(),
         },
     ] {
-        let error = capture_context(&db, root, "/synthetic/other", &context)
+        let error = capture_context(None, &db, root, "/synthetic/other", &context)
             .err()
             .unwrap();
         assert!(error.contains("graph changed"));
     }
     assert!(matches!(
-        capture_context(&db, root, "/synthetic/active", &AssistantContext::None {}).unwrap(),
+        capture_context(
+            None,
+            &db,
+            root,
+            "/synthetic/active",
+            &AssistantContext::None {}
+        )
+        .unwrap(),
         AssistantSource::None
     ));
 }

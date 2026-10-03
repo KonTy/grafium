@@ -52,7 +52,7 @@ describe("Unified conversation components", () => {
     expect(conversation).toContain("blockIds: [...view.selection.blockIds]");
     expect(conversation).toContain("Use selection");
     expect(conversation).toContain('value={view.context.kind} disabled={busy}');
-    expect(conversation).toContain('value={view.mode} disabled={busy || !!requestedWorkflow}');
+    expect(conversation).toContain('value={libraryContextActive ? "answer" : view.mode} disabled={busy || !!requestedWorkflow || libraryContextActive}');
     expect(conversation).toContain('const busy = $derived(running || planning || applyingPlan || !!workflowRun)');
   });
 

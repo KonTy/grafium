@@ -73,7 +73,7 @@ describe("Android private reader bridge", () => {
   });
   it("controls native playback and captures bookmarks in the service, not at a stale UI offset", async () => {
     await playPrivateAudio(book);
-    expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500, playbackRate: 1 });
+    expect(requests.find(request => request.command === "play")?.args).toEqual({ bookId: book.id, trackId: "doc-1", offsetMs: 3500, playbackRate: 1, autoplay: true });
     expect(get(privatePlayback).status).toBe("playing");
     await bookmarkPrivatePlayback();
     expect(requests.find(request => request.command === "bookmark")?.args).toEqual({ bookId: book.id });

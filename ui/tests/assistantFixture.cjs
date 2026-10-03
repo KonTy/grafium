@@ -47,7 +47,7 @@ async function installAssistantFixture(page, options = {}) {
       const fixture = window.__assistantFixture = {
         calls: [], requests: [], contextCalls: [], cancellations: [], writes: [], legacyCalls: [],
         hold: false, connected: true, healthChecks: 0, configChecks: 0,
-        indexFailure: false, indexBuilds: 0, gpuRetries: 0,
+        indexFailure: false, indexBuilds: 0, gpuRetries: 0, libraryChatAvailable: true, libraryChatReason: null,
         config: {
           enabled: true, mode: "cloud",
           cloud: {
@@ -87,7 +87,8 @@ async function installAssistantFixture(page, options = {}) {
       internals.invoke = async (cmd, args = {}) => {
         fixture.calls.push({ cmd, args: structuredClone(args) });
         if (/^(create|update|delete|save|insert|apply|rewrite|restore|move|reorder)_(block|blocks|page|page_source|reading_note)/.test(cmd)
-          || /^(research_insert_summary|reading_note_save|reading_note_delete|writing_apply)/.test(cmd)) {
+          || /^(research_insert_summary|reading_note_save|reading_note_delete|writing_apply)/.test(cmd)
+          || (fixture.allowReaderWrites && cmd.startsWith("reader_"))) {
           fixture.writes.push({ cmd, args: structuredClone(args) });
         }
         if (["ai_ask", "ai_ask_stream", "research_scoped", "research_deep", "research_scope_info",
@@ -143,7 +144,10 @@ async function installAssistantFixture(page, options = {}) {
         if (cmd === "private_voice_status") return {
           available: false, runtime: "piper-onnx-v1", selection: null, reason: "No synthetic voice installed.",
         };
-        if (cmd === "reader_snapshot") return { libraryPath: null, books: [] };
+        if (cmd === "reader_snapshot" || cmd === "reader_rescan") return { libraryPath: "/synthetic/library", books: [{ id: "library-video", title: "Library fixture", kind: "video", available: true, sourceUrl: "http://127.0.0.1:5199/library-fixture.webm", tracks: [], position: null, bookmarks: [] }] };
+        if (cmd === "library_chat_available") return { available: fixture.libraryChatAvailable, reason: fixture.libraryChatAvailable ? null : fixture.libraryChatReason || "Library questions need a chat model on this computer, so book and transcript text never leaves it. Choose one in Settings > AI." };
+        if (cmd === "library_index_status") return { enabled: true, transcribeMedia: true, running: false, jobId: null, items: { total: 0, indexed: 0, pending: 0, failed: 0, titleOnly: 0 }, chunks: 0, semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null, lastIndexedAt: null, errors: [] };
+        if (cmd === "library_search") return [];
         if (cmd === "ai_index_status") {
           if (fixture.indexFailure) throw new Error("Synthetic index status failure");
           return structuredClone(fixture.index);
@@ -194,10 +198,11 @@ async function installAssistantFixture(page, options = {}) {
           pending.delete(args.requestId);
           fixture.emit("ai://chat_sources", {
             request_id: args.requestId,
-            sources: args.context.kind === "none" ? [] : [{
+            sources: args.context.kind === "none" || args.context.kind === "library" ? [] : [{
               index: 1, page_id: args.context.pageId ?? "selection-page",
               page_title: "Synthetic source", block_id: "b0", date: null,
             }],
+            library_sources: args.context.kind === "library" ? [{ index: 1, book_id: "library-video", title: "Library fixture", kind: "video", track_id: "track", start_ms: 65000, end_ms: 90000, chapter: null, quote: null }] : [],
             web_sources: args.mode === "answer" ? [] : [{
               number: 1, title: "Synthetic evidence", url: "https://example.org/evidence",
             }],
@@ -283,10 +288,11 @@ async function runCases(cases, open = openAssistant) {
         await frames(fixture.page);
         assert.deepEqual(fixture.errors, []);
         assert.deepEqual(await fixture.page.evaluate(() => window.__selectionState.unhandledIpc), []);
-        assert.deepEqual(fixture.page.assistantExternalRequests, [], "all model/search transport goes through native IPC");
+        const allowReaderWrites = await fixture.page.evaluate(() => window.__assistantFixture?.allowReaderWrites === true);
+        assert.deepEqual(allowReaderWrites ? fixture.page.assistantExternalRequests.filter(url => !url.includes("library-fixture")) : fixture.page.assistantExternalRequests, [], "all model/search transport goes through native IPC");
         const safety = await fixture.page.evaluate(() => ({
           legacyCalls: window.__assistantFixture.legacyCalls,
-          writes: window.__assistantFixture.writes.map(({ cmd }) => cmd),
+          writes: window.__assistantFixture.writes.map(({ cmd }) => cmd).filter(cmd => !(window.__assistantFixture.allowReaderWrites && cmd.startsWith("reader_"))),
           original: window.__assistantFixture.originalSources,
           current: { pages: window.__selectionState.pages, blocks: window.__selectionState.blocks },
         }));
