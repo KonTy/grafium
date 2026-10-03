@@ -22,7 +22,9 @@ For a little visual shorthand, try the emoji and symbolic icon picker in [[Writi
 
 ## Keep the keyboard close
 
-- **Alt+W** toggles wide layout; **Alt+Z** toggles zen mode.
+- **Alt+W** toggles wide layout for reading views such as journals, pages,
+  Studies, Library, and Tasks; Graph and All Pages always use the full width.
+  **Alt+Z** toggles zen mode.
 - **Page Up / Page Down** scroll the main page, book, journal, or task pane without clicking first, even while editing. **Shift+Page Up / Page Down** still selects text.
 - **Ctrl/Cmd+G** opens the journal calendar. Navigate with arrows and Page Up/Down, choose with Enter, or cancel with Escape. Circled dates have notes.
 - **Ctrl/Cmd+L** opens **Go to link** with search already focused. Type fragments of any page name, browse with arrows or Page Up/Down, and press Enter to open it. Escape returns to where you were. In Journal, the top toolbar has calendar and link icons just before Search on desktop and Android. Zen mode moves them above the journal while the top toolbar is hidden.

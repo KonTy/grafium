@@ -338,6 +338,79 @@ const cases = [
     wide = await geometry();
     assert.equal(Math.round(wide.history.width), 240);
   }],
+  ["Chat composer dropdowns use the standard background and a themed arrow without clipping", { global: true }, async (page) => {
+    const result = await composer(page).evaluate((form) => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg-primary)";
+      document.body.append(probe);
+      const standard = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      const outer = form.getBoundingClientRect();
+      return { standard, selects: [...form.querySelectorAll("select")].map((select) => {
+        const style = getComputedStyle(select);
+        const box = select.getBoundingClientRect();
+        return {
+          name: select.getAttribute("aria-label"), appearance: style.appearance || style.webkitAppearance,
+          background: style.backgroundColor, arrow: style.backgroundImage, paddingRight: parseFloat(style.paddingRight),
+          inside: box.top >= outer.top - 0.5 && box.bottom <= outer.bottom + 0.5,
+          textFits: select.scrollHeight <= select.clientHeight + 1,
+        };
+      }) };
+    });
+    assert.equal(result.selects.length, 3);
+    for (const select of result.selects) {
+      assert.equal(select.appearance, "none", `${select.name} must not use grey native chrome`);
+      assert.equal(select.background, result.standard, `${select.name} uses the standard background`);
+      assert.match(select.arrow, /linear-gradient/, `${select.name} keeps a visible dropdown arrow`);
+      assert.ok(select.paddingRight >= 24, `${select.name} leaves room for its arrow`);
+      assert.equal(select.inside, true, `${select.name} stays inside the composer`);
+      assert.equal(select.textFits, true, `${select.name} text is not clipped`);
+    }
+  }],
+  ["Chat history clearly marks the open conversation and reacts to hover", { global: true }, async (page) => {
+    await send(page, "First conversation");
+    await page.locator("#chat-switcher .new-chat").click();
+    await send(page, "Second conversation");
+    await page.waitForFunction(() => document.querySelectorAll("#chat-switcher li:not(.empty)").length >= 2);
+    await page.evaluate(() => {
+      const root = document.documentElement.style;
+      root.setProperty("--bg-primary", "#000000");
+      root.setProperty("--bg-secondary", "#0b0f0b");
+      root.setProperty("--bg-hover", "#142014");
+      root.setProperty("--accent", "#00e060");
+    });
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(200);
+    const current = page.locator("#chat-switcher li.current");
+    assert.equal(await current.count(), 1);
+    assert.equal(await current.locator('.pick[aria-current="true"]').count(), 1);
+    assert.equal(await page.locator('#chat-switcher .pick[aria-current="true"]').count(), 1);
+    const style = await page.evaluate(() => {
+      const channel = (value) => { value /= 255; return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4; };
+      // Chromium serializes color-mix() results as color(srgb r g b) with 0-1 channels.
+      const luminance = (color) => {
+        const unit = color.startsWith("color(");
+        const [r, g, b] = color.replace(/^color\(srgb/, "").match(/\d*\.?\d+(e-?\d+)?/g).slice(0, 3)
+          .map((value) => Number(value) * (unit ? 255 : 1));
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+      };
+      const switcher = document.querySelector("#chat-switcher");
+      const row = switcher.querySelector("li.current");
+      const other = switcher.querySelector("li:not(.current):not(.empty)");
+      const [a, b] = [luminance(getComputedStyle(row).backgroundColor), luminance(getComputedStyle(switcher).backgroundColor)];
+      return {
+        contrast: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05), shadow: getComputedStyle(row).boxShadow,
+        weight: Number(getComputedStyle(row.querySelector(".pick")).fontWeight), other: getComputedStyle(other).backgroundColor,
+      };
+    });
+    assert.ok(style.contrast >= 1.3, `current row tint is visible on a black theme (${style.contrast.toFixed(2)})`);
+    assert.match(style.shadow, /inset/, "the open conversation has an accent bar");
+    assert.ok(style.weight >= 600);
+    const other = page.locator("#chat-switcher li:not(.current):not(.empty)").first();
+    await other.hover();
+    await page.waitForTimeout(200);
+    assert.notEqual(await other.evaluate((row) => getComputedStyle(row).backgroundColor), style.other, "rows react to hover");
+  }],
   ["Global Chat defaults to Graph and Answer without automatic web from research wording", { global: true }, async (page) => {
     await focused(page);
     assert.equal(await context(page).inputValue(), "graph");

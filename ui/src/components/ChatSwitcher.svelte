@@ -226,7 +226,8 @@
             title="Select for deletion. Shift-click to select a range."
             aria-label={`Select ${label(thread)}`}
           />
-          <button type="button" class="pick" onclick={() => onSelect(thread)} title={label(thread)}>
+          <button type="button" class="pick" onclick={() => onSelect(thread)} title={label(thread)}
+            aria-current={thread.id === currentId ? "true" : undefined}>
             <span class="name">{label(thread)}</span>
             {#if assistantConversationRunning(thread)}
               <span class="running" aria-label="This conversation is working">●</span>
@@ -270,15 +271,25 @@
   .delete-chats:hover:not(:disabled) { color: var(--danger); border-color: var(--border); }
   .delete-chats:disabled { opacity: 0.4; cursor: default; }
   .new-chat { flex-shrink: 0; font-size: 11px; padding: 3px 7px; border: 1px solid var(--border-color, #ddd); border-radius: 4px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary); cursor: pointer; }
+  .new-chat:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--text-secondary); }
+  .new-chat:active:not(:disabled) { background: var(--bg-active); }
   .new-chat:disabled { opacity: 0.5; cursor: default; }
   ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
-  li { display: flex; align-items: center; gap: 2px; border-radius: 4px; }
-  li.current { background: var(--bg-secondary, #eef); }
+  li { display: flex; align-items: center; gap: 2px; border-radius: 4px; transition: background 120ms ease; }
+  li:hover { background: var(--bg-hover); }
+  /* A tint alone vanishes on near-black themes, so the open conversation also
+     gets an accent bar and stronger text. */
+  li.current {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-primary));
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  li.current .pick { font-weight: 600; }
   /* Listed after .current deliberately: a row that is both open and ticked
      should read as ticked, because that is the state about to be acted on. */
   li.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); }
   li.empty { padding: 6px 4px; font-size: 12px; color: var(--text-secondary, #888); }
   .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; text-align: left; background: none; border: 0; padding: 6px 4px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
+  .pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
   .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .running { color: var(--accent-color, #4a90d9); font-size: 10px; }
   .queued { font-size: 10px; color: var(--text-secondary, #888); border: 1px solid currentColor; border-radius: 8px; padding: 0 4px; }

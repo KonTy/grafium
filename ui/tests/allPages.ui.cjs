@@ -145,6 +145,19 @@ const EXPECT = {
   await page.getByRole("button", { name: "All Pages", exact: true }).first().click();
   await page.getByRole("heading", { name: "All Pages", exact: true }).waitFor();
 
+  console.log("\nwidth");
+  const padding = () => page.evaluate(() => getComputedStyle(document.querySelector(".main-content")).paddingLeft);
+  await page.keyboard.press("Alt+w");
+  await page.waitForFunction(() => !document.querySelector(".app-shell").classList.contains("wide-mode"));
+  check("All Pages ignores narrow reading mode", await padding(), "0px");
+  await page.getByRole("button", { name: "Journal", exact: true }).first().click();
+  await page.waitForTimeout(500);
+  check("reading views still honor narrow reading mode", (await padding()) !== "0px", true);
+  await page.keyboard.press("Alt+w");
+  await page.waitForFunction(() => document.querySelector(".app-shell").classList.contains("wide-mode"));
+  await page.getByRole("button", { name: "All Pages", exact: true }).first().click();
+  await page.getByRole("heading", { name: "All Pages", exact: true }).waitFor();
+
   console.log("\nsort");
   for (const mode of ["A–Z", "Recent", "A–Z", "Recent"]) {
     await click(mode);

@@ -59,6 +59,41 @@
   let searchMatchCount = $state(0);
   let scanningSuggestions = $state(false);
   let mobileControlsOpen = $state(false);
+  const CONTROLS_KEY = "grafium.graph.controlsVisible";
+  const panelId = $props.id();
+  let controlsVisible = $state(readControlsVisible());
+  let compact = $state(false);
+  const panelOpen = $derived(compact ? mobileControlsOpen : controlsVisible);
+
+  function readControlsVisible(): boolean {
+    try {
+      return localStorage.getItem(CONTROLS_KEY) !== "false";
+    } catch (error) {
+      console.warn("[graph] Could not read the settings panel preference:", error);
+      return true;
+    }
+  }
+
+  function togglePanel() {
+    if (compact) {
+      mobileControlsOpen = !mobileControlsOpen;
+      return;
+    }
+    controlsVisible = !controlsVisible;
+    try {
+      localStorage.setItem(CONTROLS_KEY, String(controlsVisible));
+    } catch (error) {
+      console.warn("[graph] Could not remember the settings panel preference:", error);
+    }
+  }
+
+  $effect(() => {
+    const query = matchMedia("(max-width: 640px)");
+    const update = () => { compact = query.matches; };
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  });
   let suggestionError = $state<string | null>(null);
 
   // ---- Canvas / camera ----
@@ -823,14 +858,25 @@
 
     <!-- Zoom buttons -->
     <div class="zoom-controls">
-      <button title="Zoom in" onclick={() => zoomBy(1.2)}>+</button>
-      <button title="Zoom out" onclick={() => zoomBy(1 / 1.2)}>−</button>
-      <button title="Reset view" onclick={resetView}>⤢</button>
+      <button title="Zoom in" aria-label="Zoom in" onclick={() => zoomBy(1.2)}>+</button>
+      <button title="Zoom out" aria-label="Zoom out" onclick={() => zoomBy(1 / 1.2)}>−</button>
+      <button title="Reset view" aria-label="Reset view" onclick={resetView}>⤢</button>
+      <button class="panel-toggle" aria-controls={panelId} aria-expanded={panelOpen}
+        title={panelOpen ? "Hide graph settings" : "Show graph settings"}
+        aria-label={panelOpen ? "Hide graph settings" : "Show graph settings"} onclick={togglePanel}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" aria-hidden="true" focusable="false">
+          <path d="M4 6h16M4 12h16M4 18h16" />
+          <circle cx="9" cy="6" r="2" fill="var(--bg-secondary)" />
+          <circle cx="15" cy="12" r="2" fill="var(--bg-secondary)" />
+          <circle cx="7" cy="18" r="2" fill="var(--bg-secondary)" />
+        </svg>
+      </button>
     </div>
   </div>
 
   <!-- Controls panel (Logseq-style). On phones this docks to the bottom. -->
-  <aside class="graph-controls" class:open={mobileControlsOpen}>
+  <aside id={panelId} class="graph-controls" class:open={mobileControlsOpen} class:collapsed={!controlsVisible}>
     <button
       type="button"
       class="graph-controls-handle"
@@ -1101,6 +1147,23 @@
 
   .graph-controls-handle {
     display: none;
+  }
+
+  .zoom-controls .panel-toggle {
+    display: grid;
+    place-items: center;
+    padding: 0;
+  }
+
+  .zoom-controls .panel-toggle[aria-expanded="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  @media (min-width: 641px) {
+    .graph-controls.collapsed {
+      display: none;
+    }
   }
 
   @media (max-width: 640px) {

@@ -33,3 +33,12 @@ describe("GraphView search", () => {
     expect(source).toContain("No graph nodes match");
   });
 });
+
+describe("GraphView settings panel", () => {
+  it("adds a remembered settings toggle to the corner controls", () => {
+    expect(source).toContain('class="panel-toggle" aria-controls={panelId} aria-expanded={panelOpen}');
+    expect(source).toContain('"Hide graph settings" : "Show graph settings"');
+    expect(source).toContain('localStorage.setItem(CONTROLS_KEY, String(controlsVisible))');
+    expect(source).toContain("class:collapsed={!controlsVisible}");
+  });
+});

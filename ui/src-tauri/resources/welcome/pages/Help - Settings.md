@@ -28,6 +28,10 @@ older system icon cannot override it. Close and reopen the menu after an update.
 bar's **Time** button inserts. OpenStreetMap link is the default; plain
 coordinates and a device `geo:` map link are also available.
 
+**Recent pages in sidebar** sets how many recently opened pages the left
+sidebar lists, from 0 to 50 (10 by default). 0 hides the Recent section.
+The change applies immediately and never deletes page history.
+
 ## Theme and colors
 
 Open **Theme** to choose a palette. The color swatches preview its accents on

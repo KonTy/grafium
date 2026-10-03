@@ -178,6 +178,29 @@ async function snapshot(page) {
         }
       }
       if (!mobile && !process.env.GRAPH_FIXTURE) {
+        await page.keyboard.press("Alt+w");
+        await page.waitForFunction(() => !document.querySelector(".app-shell").classList.contains("wide-mode"));
+        const layout = await page.evaluate(() => {
+          const main = document.querySelector(".main-content");
+          const wrapper = document.querySelector(".graph-view-wrapper");
+          return { padding: getComputedStyle(main).paddingLeft, main: main.clientWidth, graph: wrapper.clientWidth };
+        });
+        assert.equal(layout.padding, "0px", "narrow reading mode must not pad the graph");
+        assert.equal(layout.graph, layout.main, "the graph uses the full width in narrow mode");
+        const panel = page.locator("aside.graph-controls");
+        const canvasWidth = () => page.evaluate(() => document.querySelector(".graph-canvas-wrap").clientWidth);
+        const before = await canvasWidth();
+        await page.locator(".zoom-controls").getByRole("button", { name: "Hide graph settings", exact: true }).click();
+        await panel.waitFor({ state: "hidden" });
+        assert.ok(await canvasWidth() > before + 200, "hiding settings gives the canvas the panel's space");
+        assert.equal(await page.evaluate(() => localStorage.getItem("grafium.graph.controlsVisible")), "false");
+        const toggle = page.locator(".zoom-controls").getByRole("button", { name: "Show graph settings", exact: true });
+        assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+        await toggle.click();
+        await panel.waitFor();
+        assert.equal(await page.evaluate(() => localStorage.getItem("grafium.graph.controlsVisible")), "true");
+        await page.keyboard.press("Alt+w");
+        await page.waitForFunction(() => document.querySelector(".app-shell").classList.contains("wide-mode"));
         await page.getByPlaceholder("Filter nodes…").fill("Music");
         await page.waitForFunction(() => window.__graphFrame.nodes.length === 13);
         assert.equal((await snapshot(page)).calls, frame.calls, "search filters without rebuilding the layout");

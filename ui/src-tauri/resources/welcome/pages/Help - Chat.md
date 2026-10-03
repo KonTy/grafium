@@ -35,6 +35,10 @@ Markdown and sources, without the decorative icons.
 - **Answers appear as they are written**, including from the built-in local
   model, so you can start reading before generation finishes. Reasoning-model
   "thinking" text is never shown; only the answer itself streams.
+- **Activity steps** above an answer show an icon for each action, such as
+  searching notes, processing context, thinking, writing, searching the web,
+  or reading sources. The current step is highlighted; finished steps stay
+  listed, and older answers collapse them into **Worked for…**.
 - **Notes context:** choose which notes to include. Main Chat starts with
   **Graph**, which retrieves bounded relevant excerpts from this graph and sends
   them with your question to the configured model. **No notes** excludes note

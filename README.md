@@ -320,7 +320,7 @@ access.
 | Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark, with vivid, contrast-tuned reds, blues, and complementary accents for headings, tags, and callouts. Matrix keeps its green-on-black character with more colorful highlights. |
 | Background transparency | Auto follows recognized smplOS themes and their background opacity on supported Linux desktops, without fading text/icons or changing opacity on focus. Explicit Grafium palettes and unsupported desktops stay opaque; menus, paper/media, and the 3D space scene retain readability backgrounds. |
 | Reading width | Adjust narrow-view padding as a percentage on each side; the default is **15% per side**. |
-| Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. |
+| Wide mode | Switch between full-width and narrow reading layouts; the selected mode is remembered across app launches. Graph and All Pages always use the full width. |
 | Zen mode and panels | Hide distractions or toggle the left and right sidebars independently. The left menu starts open on desktop and remembers your open/closed choice across launches. |
 | Findable settings | Filter labels and help text with literal search terms, and open categorized keyboard-shortcut help. |
 | Maintenance tools | Manually re-index Markdown and every original book copied into the graph, retrying extraction while preserving identities, annotations, favorites, review progress, and handwriting recognition. Rebuild search data and queue vector refresh; inspect asset-cleanup candidates or preview task-completion backfills separately. |

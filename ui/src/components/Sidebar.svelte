@@ -10,6 +10,8 @@
   import { autofocus } from "../lib/autofocus";
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo, getPage } from "../lib/api";
+  import { get } from "svelte/store";
+  import { recentPagesLimit } from "../lib/recentPagesLimit";
   import { isOriginalBookPage } from "../lib/books";
   import type { Page } from "../lib/api";
   import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
@@ -59,11 +61,34 @@
     loadSidebar();
   });
 
+  let recentRequest = 0;
+  function recentFor(limit: number): Promise<Page[]> {
+    return limit > 0 ? listRecentPages(limit) : Promise.resolve([]);
+  }
+  async function refreshRecent(limit: number) {
+    const request = ++recentRequest;
+    try {
+      const pages = await recentFor(limit);
+      if (request === recentRequest) recentPages = pages;
+    } catch (error) {
+      console.warn("[sidebar] Could not load recent pages:", error);
+    }
+  }
+
   // Refresh recent pages whenever currentPage changes
   $effect(() => {
     const pageId = currentPage?.id;
     if (!pageId) return;
-    listRecentPages(10).then((p) => { recentPages = p; }).catch(() => {});
+    void refreshRecent(get(recentPagesLimit));
+  });
+
+  // Apply a changed limit immediately, even where no page is open (Settings).
+  let appliedLimit = get(recentPagesLimit);
+  $effect(() => {
+    const limit = $recentPagesLimit;
+    if (limit === appliedLimit) return;
+    appliedLimit = limit;
+    void refreshRecent(limit);
   });
 
   // Close context menu on any click outside
@@ -83,12 +108,13 @@
     graphPath = await getGraphInfo()
       .then((info) => info.path)
       .catch(() => null);
+    const request = ++recentRequest;
     const [favoriteResult, recentResult] = await Promise.allSettled([
       listFavorites(),
-      listRecentPages(10),
+      recentFor(get(recentPagesLimit)),
     ]);
     favorites = favoriteResult.status === "fulfilled" ? favoriteResult.value : [];
-    recentPages = recentResult.status === "fulfilled" ? recentResult.value : [];
+    if (request === recentRequest) recentPages = recentResult.status === "fulfilled" ? recentResult.value : [];
   }
 
   function favSet(): Set<string> {

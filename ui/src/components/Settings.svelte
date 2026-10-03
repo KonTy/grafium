@@ -5,6 +5,7 @@
   import { getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import AssetCleanup from "./AssetCleanup.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
+  import { RECENT_PAGES_MAX, recentPagesLimit, setRecentPagesLimit } from "../lib/recentPagesLimit";
   import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
@@ -302,6 +303,26 @@
           />
           <span>%</span>
         </label>
+      </div>
+      <div class="setting-row">
+        <label class="setting-label" for="recent-pages-limit">Recent pages in sidebar</label>
+        <span class="setting-range">
+          <input
+            id="recent-pages-limit"
+            type="number"
+            min="0"
+            max={RECENT_PAGES_MAX}
+            step="1"
+            value={$recentPagesLimit}
+            onchange={(e) => {
+              const input = e.currentTarget as HTMLInputElement;
+              input.value = String(setRecentPagesLimit(input.value));
+            }}
+          />
+          <SettingsHelp title="Recent pages in sidebar">
+            <p>How many recently opened pages the left sidebar lists, from 0 to {RECENT_PAGES_MAX}. 0 hides the Recent section. Changing this never deletes page history.</p>
+          </SettingsHelp>
+        </span>
       </div>
       <div class="setting-row">
         <span class="setting-label">Mobile location format</span>

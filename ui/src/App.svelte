@@ -2482,7 +2482,8 @@
       {/if}
     {/if}
 
-    <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode} class:chat-content={chatActive}>
+    <main bind:this={mainContentEl} class="main-content" class:zen-content={zenMode} class:chat-content={chatActive}
+      class:full-width-view={currentView === "graph" || currentView === "all-pages"}>
     {#key graphGeneration}
     {#if studySaveError || activeStudy}
     <div class="study-session-controls">
@@ -3440,7 +3441,7 @@
   .dialog-input {
     width: 100%;
     padding: 10px 12px;
-    background: var(--bg-input);
+    background-color: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text-primary);
@@ -3500,31 +3501,38 @@
     justify-content: flex-end;
   }
 
+  /* Matches the other dialogs: bordered secondary actions, one filled primary. */
   .dialog-btn {
     padding: 8px 16px;
     border-radius: 6px;
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    border: none;
+    border: 1px solid var(--border);
+  }
+
+  .dialog-btn:disabled {
+    cursor: default;
+    opacity: 0.55;
   }
 
   .dialog-btn-cancel {
     background: var(--btn-bg);
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
 
-  .dialog-btn-cancel:hover {
+  .dialog-btn-cancel:hover:not(:disabled) {
     background: var(--btn-bg-hover);
-    color: var(--text-primary);
+    border-color: var(--text-secondary);
   }
 
   .dialog-btn-ok {
     background: var(--btn-primary-bg);
     color: var(--btn-primary-fg);
+    border-color: transparent;
   }
 
-  .dialog-btn-ok:hover {
+  .dialog-btn-ok:hover:not(:disabled) {
     background: var(--btn-primary-hover);
   }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { TrailDisplay } from "../lib/chatStatus";
+  import { STEP_ICONS } from "../lib/chatStepIcons";
 
   interface Props {
     trail: TrailDisplay;
@@ -17,6 +18,14 @@
   let { trail, note = "", notice = "", meta = "", collapsed = false }: Props = $props();
 </script>
 
+{#snippet icon(name: keyof typeof STEP_ICONS)}
+  <svg class="trail-icon" data-step-icon={name} width="14" height="14" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    aria-hidden="true" focusable="false">
+    {#each STEP_ICONS[name] as path}<path d={path} />{/each}
+  </svg>
+{/snippet}
+
 {#if trail.any}
   {#if collapsed && !trail.running}
     <details class="status-trail-collapsed">
@@ -25,7 +34,7 @@
       <ol class="status-trail">
         {#each trail.rows as row (row.key)}
           <li class="trail-row done">
-            <span class="trail-mark" aria-hidden="true"></span>
+            {@render icon(row.phase)}
             <span class="trail-label">{row.label}</span>
             {#if row.meta}<span class="trail-meta">{row.meta}</span>{/if}
           </li>
@@ -39,7 +48,7 @@
     <ol class="status-trail" role="status" aria-live="polite">
       {#each trail.rows as row (row.key)}
         <li class="trail-row {row.state}">
-          <span class="trail-mark" aria-hidden="true"></span>
+          {@render icon(row.phase)}
           <span class="trail-label" class:shimmer={row.shimmer} class:shimmer-endless={row.shimmer}>{row.label}</span>
           {#if row.state !== "done" && note}
             <span class="trail-note">· {note}</span>
@@ -51,7 +60,7 @@
       {/each}
       {#if trail.running}
         <li class="trail-row elapsed">
-          <span class="trail-mark clock" aria-hidden="true"></span>
+          {@render icon("elapsed")}
           <span class="trail-meta" aria-hidden="true">{meta || trail.elapsed}</span>
         </li>
       {/if}
@@ -74,25 +83,23 @@
 
   .trail-row {
     display: flex;
-    align-items: baseline;
+    align-items: flex-start;
     gap: 7px;
     min-width: 0;
     color: var(--text-secondary);
   }
 
-  .trail-mark {
+  .trail-icon {
     flex: none;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--text-secondary);
-    opacity: 0.45;
-    transform: translateY(-1px);
+    width: 14px;
+    height: 14px;
+    margin-top: 2px;
+    opacity: 0.6;
   }
 
-  .trail-row.active .trail-mark { opacity: 1; background: var(--accent); }
-  .trail-row.stalled .trail-mark { opacity: 1; background: var(--warning-color, #c9873a); }
-  .trail-mark.clock { border-radius: 1px; opacity: 0.35; }
+  .trail-row.active .trail-icon { opacity: 1; color: var(--accent); }
+  .trail-row.stalled .trail-icon { opacity: 1; color: var(--warning-color, #c9873a); }
+  .trail-row.elapsed .trail-icon { opacity: 0.45; }
 
   .trail-label { overflow-wrap: anywhere; }
   .trail-row.active .trail-label { color: var(--text-primary); }

@@ -83,7 +83,7 @@
 <section class="private-library" data-help-context="library" aria-label="Library">
   <header><div><p class="eyebrow">ON THIS DEVICE</p><h1>Library</h1></div><div class="actions">
     <SettingsHelp title="Your Library"><p>Books, media, progress, favorites, and bookmarks stay app-private: no graph pages, AI indexing, or graph sync. Actual reading and playback move an item to the top; opening its details does not.</p><p>Use Add to Studies to reference a source without copying its media or progress. A bookmark’s Journal note action opens a draft for your review; only saving that draft writes ordinary graph content.</p><p>Local files stay in the folder chosen in Settings. Add EPUBs, audio, or videos there, then rescan. Network links connect only when played. Video and YouTube stop when you leave their player. Audio and read aloud use the persistent toolbar, except network audio on Android, which stops when you leave its player. Local video currently requires desktop.</p></SettingsHelp>
-    <button onclick={() => adding = !adding}>Add link</button><button onclick={onSettings}>Library settings</button><button disabled={scanning} onclick={refresh}>{scanning ? "Scanning…" : "Rescan"}</button></div></header>
+    <button aria-expanded={adding} onclick={() => adding = !adding}>Add link</button><button onclick={onSettings}>Library settings</button><button disabled={scanning} onclick={refresh}>{scanning ? "Scanning…" : "Rescan"}</button></div></header>
   {#if adding}
     <form class="link-form" onsubmit={event => { event.preventDefault(); void run(async () => {
       const source = libraryLink(link, title, linkKind);
@@ -138,6 +138,7 @@
   small, .empty, .count { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
   button, input, select { font: inherit; color: var(--text-primary); border: 1px solid var(--border); background: var(--bg-primary); border-radius: 6px; padding: 7px 10px; }
   button { cursor: pointer; } button:disabled { opacity: .5; } button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
   .filter { display: flex; flex: 1 1 360px; min-width: 0; gap: 10px; align-items: center; font-size: 12px; margin: 18px 0; } input { min-width: 0; }
   .filter input { flex: 1; width: 100%; min-height: 40px; font-size: 15px; }
   .filters, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }

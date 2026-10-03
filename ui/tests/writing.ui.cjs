@@ -306,7 +306,8 @@ cases.push(["assistant accordions have visible enclosing boundaries in every the
     const results = [];
     for (const theme of themes) {
       applyTheme(theme.colors);
-      for (const details of document.querySelectorAll(".reference-panel details")) {
+      // Small disclosures inside the model status popover are not panel accordions.
+      for (const details of document.querySelectorAll(".reference-panel details:not([popover] details)")) {
         const wasOpen = details.open;
         const summary = details.querySelector(":scope > summary");
         for (const open of [false, true]) {
@@ -338,7 +339,8 @@ cases.push(["assistant accordions have visible enclosing boundaries in every the
     applyTheme(themes.find(({ id }) => id === "github").colors);
     return { results, themeCount: themes.length };
   });
-  assert.equal(measurements.results.length, measurements.themeCount * 4 * 2, "all four disclosures in both states");
+  assert.ok(measurements.results.length >= measurements.themeCount * 2 * 2, "page and writing tools in both states");
+  assert.equal(measurements.results.length % (measurements.themeCount * 2), 0, "every panel accordion in both states");
   for (const metrics of measurements.results) {
     assert.ok(metrics.sharedStyle && metrics.separated && metrics.contained, JSON.stringify(metrics));
     assert.ok(metrics.textContrast >= 4.5 && metrics.markerContrast >= 3

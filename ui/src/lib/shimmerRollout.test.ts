@@ -70,7 +70,17 @@ describe("global shimmer", () => {
   });
 
   it("stays readable with no motion under reduced motion", () => {
-    const reduced = css.slice(css.lastIndexOf("prefers-reduced-motion"));
+    // Other features also have reduced-motion blocks; check the shimmer's own.
+    const blocks: string[] = [];
+    for (let at = css.indexOf("prefers-reduced-motion"); at >= 0; at = css.indexOf("prefers-reduced-motion", at + 1)) {
+      let depth = 0, end = css.indexOf("{", at);
+      for (let i = end; i < css.length; i++) {
+        depth += css[i] === "{" ? 1 : css[i] === "}" ? -1 : 0;
+        if (depth === 0) { end = i; break; }
+      }
+      blocks.push(css.slice(at, end + 1));
+    }
+    const reduced = blocks.find((block) => block.includes(".shimmer")) ?? "";
     expect(reduced).toContain(".shimmer");
     expect(reduced).toContain("background-image: none");
     expect(reduced).toContain("animation: none !important");

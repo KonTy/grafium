@@ -710,7 +710,7 @@
   .composer-options label { display: flex; flex: 1 1 100px; min-width: 0; color: var(--text-secondary); font-size: 12px; }
   .composer-options .mode-choice { flex-basis: 120px; }
   .composer-options .workflow-choice { flex: 0 1 86px; }
-  select { width: 100%; min-width: 0; height: 30px; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border); padding: 4px; border-radius: 5px; }
+  select { width: 100%; min-width: 0; height: 30px; color: var(--text-primary); background-color: var(--bg-primary); border: 1px solid var(--border); padding: 4px; border-radius: 5px; }
   .send-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
   .send-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 50%; padding: 0; color: var(--btn-primary-fg, var(--bg-primary)); background: var(--btn-primary-bg, var(--accent)); }
   .send-button:hover:not(:disabled) { filter: brightness(1.1); }

@@ -7,7 +7,9 @@ See [[Help - Private Reader]]. The import workflow below intentionally makes
 graph copies and retains its existing graph search, annotation, and sync behavior.
 
 Use **Import books** (`Alt+B`) to choose a file or a folder. Folder imports scan
-subfolders. Set **Convert to editable Markdown** before importing:
+subfolders. The dialog keeps its explanations behind the **?** button beside its
+title; choices and errors stay visible. Set **Convert to editable Markdown**
+before importing:
 
 - **Unchecked (default)** copies EPUB, FB2, MOBI, AZW3, or PDF into
   the graph and opens it under **Books**. The copied source stays unchanged.

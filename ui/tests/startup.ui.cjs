@@ -286,8 +286,10 @@ const navigate = (page, title) => page.evaluate((title) => {
       page.on("request", (request) => requests.push(new URL(request.url()).pathname));
       await page.goto(BASE_URL, { waitUntil: "networkidle" });
       await page.locator('[data-block-id="startup-block"]').first().waitFor();
+      // Whole module names only: shared helpers such as SettingsHelp are not the Settings view.
       for (const unused of ["AllPages", "GraphView", "GraphView3D", "3d-force-graph", "Statistics", "FlashcardReview", "ChatView", "Settings", "JobsView", "ReferencePanel"]) {
-        assert.ok(!requests.some((url) => url.includes(unused)), `${unused} must not load on editor startup`);
+        const module = new RegExp(`/${unused}(?:\\.(?:svelte|js|ts)|/|\\?|$)`);
+        assert.ok(!requests.some((url) => module.test(url)), `${unused} must not load on editor startup`);
       }
       let release;
       const gate = new Promise((resolve) => { release = resolve; });
