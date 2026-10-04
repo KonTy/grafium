@@ -2,8 +2,7 @@
   import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
   import { readerFlow, setReaderFlow } from "../lib/readerPreferences";
   import type { ReaderTurn } from "../lib/readerNavigation";
-  import { formatBinding } from "../lib/shortcuts";
-  import { BIONIC_SHORTCUT } from "../lib/readerHotkeys";
+  import { shortcutTitle } from "../lib/shortcuts";
 
   let { ready, reflowable, direction = "ltr", onNavigate }: {
     ready: boolean; reflowable: boolean; direction?: "ltr" | "rtl";
@@ -37,7 +36,7 @@
 {/if}
 <button class="page-turn" aria-label="Bionic reading"
   title={!ready ? "Bionic reading is available after the book opens" : !reflowable
-    ? "Bionic reading is unavailable for PDF or fixed-layout pages" : `Bionic reading (${formatBinding(BIONIC_SHORTCUT)})`}
+    ? "Bionic reading is unavailable for PDF or fixed-layout pages" : shortcutTitle("Bionic reading", "toggle-bionic")}
   aria-pressed={reflowable && $bionicReaderEnabled} disabled={!ready || !reflowable}
   onclick={() => setBionicReaderEnabled(!$bionicReaderEnabled)}>
   <span><strong>B</strong>ionic</span>

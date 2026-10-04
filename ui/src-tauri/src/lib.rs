@@ -1185,12 +1185,19 @@ pub fn run() {
                                     let keyval = event.keyval();
                                     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                                     let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                                    let alt_or_super = state.intersects(
+                                        gdk::ModifierType::MOD1_MASK
+                                            | gdk::ModifierType::SUPER_MASK
+                                            | gdk::ModifierType::META_MASK,
+                                    );
 
                                     tracing::trace!("key_press: keyval={} ctrl={} shift={}", *keyval, ctrl, shift);
 
-                                    // Ctrl+. toggles reference panel
-                                    if ctrl && !shift && *keyval == 46 /* period */ {
-                                        tracing::trace!("=> Ctrl+. detected, toggling reference panel");
+                                    // Ctrl+. alone: hand it back to the page, which runs whatever
+                                    // Settings binds it to. Ctrl+Alt+. and the like reach the page
+                                    // as themselves.
+                                    if ctrl && !shift && !alt_or_super && *keyval == 46 /* period */ {
+                                        tracing::trace!("=> Ctrl+. detected, handing it back to the page");
                                         let _ = eval_window.eval("window.__toggleReferencePanel && window.__toggleReferencePanel()");
                                         return gtk::glib::Propagation::Stop;
                                     }

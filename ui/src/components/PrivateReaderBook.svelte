@@ -9,8 +9,7 @@
   import { showToast } from "../lib/toast.svelte";
   import { requestLibraryMedia } from "../lib/library";
   import { privateLibrary, privateBookJump, privateVisualPositions, readerNative, refreshPrivateLibrary, savePrivateBookmark, bookmarkLabel, bookmarkDate, bookmarkExcerpt, compactBookmarkLabel, privateBookLanguages, setPrivateFavorite, type ReaderBookmark, type ReaderBook, type ReaderProgress } from "../lib/privateReader";
-  import { formatBinding } from "../lib/shortcuts";
-  import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
+  import { shortcutTitle } from "../lib/shortcuts";
   import { playPrivateAudio, cuePrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   import { startPrivateReadAloud } from "../lib/privateReaderVoice";
@@ -177,7 +176,7 @@
       <div class="actions">
         <button disabled={busy} aria-pressed={book.favorite ?? false} onclick={() => run(() => setPrivateFavorite(bookId, !book!.favorite))}>{book.favorite ? "★ Favorite" : "☆ Favorite"}</button>
         {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book!)}>Add to Studies</button>{/if}
-        {#if !reading}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
+        {#if !reading}<button title={shortcutTitle("Bookmark", "bookmark")} disabled={busy || !book.available} onclick={() => run(bookmark, "Bookmark saved on this device.")}>Bookmark</button>{/if}
         {#if !book.sourceUrl}<button disabled={busy} onclick={() => run(relink)}>Relink source…</button>{/if}
         <SettingsHelp title="Library reading and bookmarks"><p>Sources, progress, and bookmarks stay outside graph sync and graph AI unless you explicitly choose the Library context in Chat. Add a private comment to a bookmark here, or choose Journal note to review a draft before saving it to your graph. A Study references this same source and position.</p><p>Audio and read aloud continue outside Library and across graph switches. Videos, YouTube, and Android network audio stop when you leave their player. Local video currently requires desktop.</p></SettingsHelp>
       </div>

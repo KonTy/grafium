@@ -36,7 +36,8 @@
   import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
   import { isOriginalBookPage, isBookAnnotationPage } from "./lib/books";
   import { getPage, createPage, recordPageOpen, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
-  import { keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
+  import { appCommands, keymap_manager, registerDefaultShortcuts } from "./lib/keymap";
+  import { matchesShortcut } from "./lib/shortcutRegistry";
   import { formatLocalIsoDate, isJournalDateTitle, shiftIsoDate } from "./lib/journalDate";
   import {
     dispatchEditPageEnd,
@@ -44,7 +45,7 @@
     timeStampSnippet,
     tryInsertIntoActiveEditor,
   } from "./lib/editorInsert";
-  import { formatBinding, formatBindingList, groupShortcutRows } from "./lib/shortcuts";
+  import { formatBinding, formatBindingList } from "./lib/shortcuts";
   import type { PageNavigationTarget } from "./lib/navigation";
   import { isPageNotFoundError, resolvePageLookup } from "./lib/navigation";
   import { appearance } from "./lib/appearance";
@@ -1222,46 +1223,43 @@
     void navigateToPage("__settings__");
   }
 
+  // Read when the palette opens, so it lists every command with its keys as
+  // they are now, including commands whose keys were all removed.
+  let commandPaletteCommands = $state.raw<Array<{
+    id: string; description: string; bindings: string[]; run: () => unknown;
+  }>>([]);
+
   function toggleCommandPalette() {
     commandPaletteOpen = !commandPaletteOpen;
     commandPaletteQuery = "";
     commandPaletteIndex = 0;
+    if (!commandPaletteOpen) return;
+    commandPaletteCommands = [
+      ...appCommands().map(({ id, label, bindings, run }) => ({ id, description: label, bindings, run })),
+      { id: "ai-writing", description: "Open writing assistance", bindings: [], run: () => openReferencePanelTab("writing") },
+      { id: "reading-notes", description: "Open reading notes", bindings: [], run: () => openReferencePanelTab("notes") },
+    ];
   }
 
-  const commandPaletteRows = $derived(
-    [...groupShortcutRows(keymap_manager.getShortcuts()), {
-      id: "ai-writing", description: "Open writing assistance", category: "Tools",
-      chords: [], modifiers: [],
-    }, {
-      id: "reading-notes", description: "Open reading notes", category: "Reading",
-      chords: [], modifiers: [],
-    }].filter((row) => {
-      const q = commandPaletteQuery.trim().toLowerCase();
-      if (!q) return true;
-      return (
-        row.description.toLowerCase().includes(q) ||
-        row.chords.some((b) => b.toLowerCase().includes(q)) ||
-        row.modifiers.some((b) => formatBinding(b).toLowerCase().includes(q))
-      );
-    }),
-  );
+  const commandPaletteRows = $derived(commandPaletteCommands.filter((row) => {
+    const q = commandPaletteQuery.trim().toLowerCase();
+    if (!q) return true;
+    return row.description.toLowerCase().includes(q)
+      || row.bindings.some((binding) => binding.includes(q) || formatBinding(binding).toLowerCase().includes(q));
+  }));
 
   async function runCommandPaletteRow(index: number) {
     const row = commandPaletteRows[index];
     if (!row) return;
-    const match = keymap_manager.getShortcuts().find((s) => (s.id || s.description) === row.id);
     commandPaletteOpen = false;
     await tick();
-    if (row.id === "ai-writing") {
-      openReferencePanelTab("writing");
-      return;
-    }
-    if (row.id === "reading-notes") {
-      openReferencePanelTab("notes");
-      return;
-    }
-    match?.action();
+    row.run();
   }
+
+  // Made once, not in the markup: the global key handler closes the palette
+  // on Escape before this runs, and a handler built inside the closed block
+  // would no longer exist.
+  const commandPaletteKeydown = dialogKeydown(() => (commandPaletteOpen = false));
 
   registerDefaultShortcuts({
     goJournal: () => navigateToJournal(),
@@ -1288,9 +1286,7 @@
     search: () => {
       openGlobalSearch();
     },
-    focusLocalSearch: () => {
-      focusLocalSearch();
-    },
+    focusLocalSearch: () => focusLocalSearch(),
     toggleSidebar: () => {
       void focusLeftSidebar();
     },
@@ -1311,6 +1307,9 @@
     importBooks: () => void openImportBooksDirectory(),
     insertTimeStamp: () => insertEditorSnippet(timeStampSnippet()),
     insertPersonalDiary: () => insertEditorSnippet(personalDiarySnippet()),
+    zoomIn: () => adjustUiZoom(1),
+    zoomOut: () => adjustUiZoom(-1),
+    zoomReset: () => resetUiZoom(),
   });
 
   async function openContextualHelp(context: HelpContext) {
@@ -1359,6 +1358,8 @@
   // Global keydown handler
   function handleGlobalKeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    // Settings is recording a new shortcut: these keys are its, not the app's.
+    if ((e.target as Element | null)?.closest?.("[data-shortcut-recorder]")) return;
     if (readerShortcut(e)) {
       if (hasKeyboardOverlay(document)) return;
       keymap_manager.handleKeydown(e);
@@ -1368,7 +1369,7 @@
     if (reader && !hasKeyboardOverlay(document)
       && (readerOwnsNavigation(e, reader) || e.key === "F8" || e.key === "F11" || (e.key === "Escape"
         && (reader.classList.contains("expanded") || reader.querySelector('[aria-expanded="true"]'))))) return;
-    if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    if (matchesShortcut(e, "help")) {
       e.preventDefault();
       e.stopPropagation();
       if (!e.repeat) openCurrentContextualHelp(e.target);
@@ -1406,28 +1407,25 @@
     if (["Escape", "PageUp", "PageDown", "Home", "End"].includes(e.key)
       && hasKeyboardOverlay(document)) return;
 
-    if (e.ctrlKey || e.metaKey) {
-      const key = e.key.toLowerCase();
-      if (key === "0") {
-        e.preventDefault();
-        resetUiZoom();
-        return;
-      }
-      if (key === "+" || key === "=" || (key === "-" && e.shiftKey)) {
-        e.preventDefault();
-        adjustUiZoom(1);
-        return;
-      }
-      if (key === "-") {
-        e.preventDefault();
-        adjustUiZoom(-1);
-        return;
-      }
-      // Ctrl-F focuses a visible page filter; otherwise leave browser/editor find.
-      if (!e.shiftKey && !e.altKey && key === "f") {
-        if (focusLocalSearch()) e.preventDefault();
-        return;
-      }
+    if (matchesShortcut(e, "zoom-reset")) {
+      e.preventDefault();
+      resetUiZoom();
+      return;
+    }
+    if (matchesShortcut(e, "zoom-in")) {
+      e.preventDefault();
+      adjustUiZoom(1);
+      return;
+    }
+    if (matchesShortcut(e, "zoom-out")) {
+      e.preventDefault();
+      adjustUiZoom(-1);
+      return;
+    }
+    // Focuses a visible page filter; otherwise leave browser/editor find.
+    if (matchesShortcut(e, "search-local")) {
+      if (focusLocalSearch()) e.preventDefault();
+      return;
     }
 
     if (e.key === "Escape" && referencePanelVisible) {
@@ -2930,7 +2928,7 @@
 
 {#if commandPaletteOpen}
   <div class="command-palette-backdrop" role="presentation" use:dismissOnBackdrop={() => (commandPaletteOpen = false)}>
-    <div class="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" tabindex="-1" onkeydown={dialogKeydown(() => (commandPaletteOpen = false))}>
+    <div class="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" tabindex="-1" onkeydown={commandPaletteKeydown}>
       <input
         class="command-palette-input"
         type="text"
@@ -2948,7 +2946,7 @@
           >
             <span class="command-palette-desc">{row.description}</span>
             <span class="command-palette-keys">
-              {formatBindingList([...(row.chords.length ? row.chords : []), ...(row.modifiers.length ? row.modifiers : [])])}
+              {formatBindingList(row.bindings)}
             </span>
           </button>
         {:else}

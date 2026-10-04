@@ -40,7 +40,10 @@ describe("narrow-screen guards", () => {
     expect(css, "Settings had no width breakpoint").toMatch(widthQuery);
     const narrow = css.slice(css.search(widthQuery));
     expect(ruleIn(narrow, ".settings-page")).toContain("padding: 20px 14px");
-    expect(ruleIn(narrow, ".keymap-row")).toContain("grid-template-columns: 1fr");
+    // The shortcut list lives in its own component with its own breakpoint.
+    const shortcuts = styleOf("ShortcutSettings.svelte");
+    expect(shortcuts).toMatch(widthQuery);
+    expect(ruleIn(shortcuts.slice(shortcuts.search(widthQuery)), ".keymap-row")).toContain("grid-template-columns: 1fr");
     // The slider and number field were 180px of unyielding width in a row
     // whose content box is far smaller than that on a phone.
     expect(ruleIn(css, ".setting-row")).toContain("flex-wrap: wrap");

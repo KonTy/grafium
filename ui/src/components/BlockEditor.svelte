@@ -68,6 +68,9 @@
     wikiLinkReplacement,
     wikiLinkToken,
   } from "../lib/wikiLinkCompletion";
+  import { loadTagSuggestions, tagInsertText, tagSuffixLength, tagToken } from "../lib/tagCompletion";
+  import { followEditorShortcuts, withoutShortcutDefaults } from "../lib/editorShortcuts";
+  import { listTagTitles } from "../lib/pageTree";
   import { toggleWrapText, wrapPageLinkText } from "../lib/editorFormat";
   import { insertAtCursor, timeStampSnippet } from "../lib/editorInsert";
   import {
@@ -172,6 +175,10 @@
   /// Set when the user dismisses the `[[` picker with Escape so the
   /// update listener does not immediately reopen it while the token remains.
   let wikiCompletionDismissed = false;
+  /// Whether a completion menu is on screen: from when its results first
+  /// arrive until it closes, including while it refreshes (greyed out) for
+  /// the next keystroke.
+  let completionMenuShown = false;
   let isCodeBlock = $derived(detectCodeBlock(block.content));
   let isFenceBlock = $derived(isFencedCodeBlock(block.content));
   const readingNoteLabel = $derived(readingNoteBlockLabel(block));
@@ -601,6 +608,12 @@
       detail: "Set priority C (low)",
       apply: "[#C] ",
     },
+    {
+      label: "/time",
+      detail: "Insert the current time (same as Alt+T)",
+      apply: "",
+      action: "time",
+    },
     // Formatting inserters (quote, headings, code) and callout admonitions.
     // Sorted after the task/priority entries so TODO/DONE muscle-memory is
     // unaffected. These are pure text insertions with an explicit cursor
@@ -624,24 +637,44 @@
     return true;
   }
 
+  // Formatting keys come from Settings > Keyboard Shortcuts and update in an
+  // open editor when they change there.
+  const editorShortcuts = followEditorShortcuts({
+    "editor-bold": (view) => applyToggleWrap(view, "**"),
+    "editor-italic": (view) => applyToggleWrap(view, "*"),
+    "editor-strikethrough": (view) => applyToggleWrap(view, "~~"),
+  });
+  let stopEditorShortcuts: (() => void) | null = null;
+
   function slashCompletionSource(context: CompletionContext): CompletionResult | null {
-    // Match a `/` optionally followed by word chars at the current position
-    const match = context.matchBefore(/\/[^\s]*/);
+    const line = context.state.doc.lineAt(context.pos);
+    const beforeCursor = line.text.slice(0, context.pos - line.from);
+    // A `/` inside a [[link]] or #tag is part of a namespaced title, not a
+    // command; and a command starts a word, so URLs and dates never match.
+    if (wikiLinkToken(beforeCursor) || tagToken(beforeCursor)) return null;
+    const match = /(?:^|\s)(\/[^\s]*)$/.exec(beforeCursor);
     if (!match) return null;
-    const typed = match.text.toLowerCase();
+    const typed = match[1].toLowerCase();
     const commands = typed === "/"
       ? SLASH_COMMANDS
       : SLASH_COMMANDS.filter((cmd) => cmd.label.toLowerCase().startsWith(typed));
     if (commands.length === 0) return null;
 
     return {
-      from: match.from,
+      from: context.pos - match[1].length,
       filter: false,
       options: commands.map((cmd) => ({
         label: cmd.label,
         detail: cmd.detail,
         apply: (view: EditorView, _completion: unknown, from: number, to: number) => {
-          if (cmd.action) {
+          if (cmd.action === "time") {
+            // Exactly what Alt+T inserts, read when the command runs.
+            const text = timeStampSnippet();
+            view.dispatch({
+              changes: { from, to, insert: text },
+              selection: EditorSelection.cursor(from + text.length),
+            });
+          } else if (cmd.action) {
             // Remove the slash command text
             view.dispatch({
               changes: { from, to, insert: "" },
@@ -673,6 +706,7 @@
     const head = context.state.selection.main.head;
     const line = context.state.doc.lineAt(head);
     const beforeCursor = line.text.slice(0, head - line.from);
+    if (wikiLinkToken(beforeCursor) || tagToken(beforeCursor)) return null;
     const menu = angleTemplateMenu(beforeCursor);
     if (!menu) return null;
 
@@ -717,6 +751,44 @@
           label: page.title,
           detail: page.is_journal ? "journal" : "page",
           apply: wikiLinkReplacement(page.title, line.text.slice(head - line.from)),
+        })),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // `#` tag picker: existing tags first, then other pages, filtered by what is
+  // typed after the `#`. A chosen title that is not a plain tag is written in
+  // the bracketed form `#[[Two words]]`.
+  async function tagCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
+    const head = context.state.selection.main.head;
+    const line = context.state.doc.lineAt(head);
+    const beforeCursor = line.text.slice(0, head - line.from);
+    const token = tagToken(beforeCursor);
+    if (!token || wikiLinkToken(beforeCursor)) return null;
+    if (editorView && isInsideCodeFence(editorView)) return null;
+
+    try {
+      const suggestions = await loadTagSuggestions(token.query, {
+        listTags: listTagTitles,
+        searchPages: searchPageTitles,
+        listRecent: async (limit) => (await listPages(limit, 0))
+          .map(({ title, is_journal }) => ({ title, is_journal })),
+      });
+      if (suggestions.length === 0) return null;
+      const afterCursor = line.text.slice(head - line.from);
+      const extra = tagSuffixLength(afterCursor);
+      // A trailing space ends the tag, so the picker does not reopen on it.
+      const space = /^\s/.test(afterCursor.slice(extra)) ? "" : " ";
+      return {
+        from: line.from + token.from,
+        to: head + extra,
+        filter: false,
+        options: suggestions.map((suggestion) => ({
+          label: `#${suggestion.title}`,
+          detail: suggestion.kind === "new" ? "new tag" : suggestion.kind,
+          apply: `${tagInsertText(suggestion.title)}${space}`,
         })),
       };
     } catch {
@@ -1182,6 +1254,8 @@
   }
 
   function teardownEditor(view: EditorView, notifyBlur: boolean) {
+    stopEditorShortcuts?.();
+    stopEditorShortcuts = null;
     savedState = view.state;
     if ((window as any).__activeEditorView === view) {
       (window as any).__activeEditorView = undefined;
@@ -1237,12 +1311,18 @@
     }
   }
 
-  // Detect if cursor is inside a code fence (``` ... ```)
+  // Enter, Tab and Escape go to a completion menu that is showing, including
+  // one greyed out while it refreshes for the latest keystroke. Results still
+  // loading with no menu on screen yet are dropped instead, so those keys keep
+  // their block meaning rather than doing nothing until the menu appears.
   function completionOpen(view: EditorView): boolean {
     const status = completionStatus(view.state);
-    return status === "active" || status === "pending";
+    if (status === "active" || (status === "pending" && completionMenuShown)) return true;
+    if (status === "pending") closeCompletion(view);
+    return false;
   }
 
+  // Detect if cursor is inside a code fence (``` ... ```)
   function isInsideCodeFence(view: EditorView): boolean {
     const doc = view.state.doc.toString();
     const pos = view.state.selection.main.head;
@@ -1478,7 +1558,7 @@
           editorWriteLockExtension(pageId),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
-            override: [emojiIconCompletionSource, slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource],
+            override: [emojiIconCompletionSource, slashCompletionSource, angleCompletionSource, wikiLinkCompletionSource, tagCompletionSource],
             activateOnTyping: false,
             closeOnBlur: false,
           }),
@@ -1503,6 +1583,7 @@
               run: (view) => submitBlockEnterOnce(view),
             },
           ])),
+          editorShortcuts.extension,
           keymap.of([
             {
               key: "/",
@@ -1599,23 +1680,8 @@
                 return true;
               },
             },
-            // Selection-formatting shortcuts. Note: Ctrl+B and Ctrl+Shift+B are
-            // deliberately NOT bound here — they belong to window-level sidebar
-            // toggles.
-            {
-              key: "Mod-i",
-              run: (view) => applyToggleWrap(view, "*"),
-            },
-            {
-              key: "Mod-Alt-Shift-b",
-              run: (view) => applyToggleWrap(view, "**"),
-            },
-            {
-              key: "Mod-Shift-k",
-              run: (view) => applyToggleWrap(view, "~~"),
-            },
-            ...defaultKeymap,
-            ...historyKeymap,
+            ...withoutShortcutDefaults(defaultKeymap),
+            ...withoutShortcutDefaults(historyKeymap),
             indentWithTab,
           ]),
           EditorView.lineWrapping,
@@ -1662,6 +1728,8 @@
             },
           }),
           EditorView.updateListener.of((update) => {
+            const menuStatus = completionStatus(update.state);
+            completionMenuShown = menuStatus === "active" || (menuStatus === "pending" && completionMenuShown);
             if (update.view.hasFocus && (update.selectionSet || update.docChanged)) {
               const { from, to } = update.state.selection.main;
               publishSourceReadingSelection(update.view.dom, sourceReadingSelection(pageId, block.id, update.state.doc.toString(), from, to));
@@ -1691,9 +1759,20 @@
             // is never hijacked.
             const angleOpen = angleTemplateMenu(beforeCursor) !== null;
             const wikiOpen = wikiLinkToken(beforeCursor) !== null;
+            // `#` tags query the database like `[[` links, so they share its
+            // re-query handling below. Tags are everywhere in written text,
+            // so their picker only opens while a tag is being typed or
+            // erased: moving the cursor into one, or choosing a suggestion,
+            // leaves it closed.
+            const typing = update.transactions.some((tr) => tr.isUserEvent("input.type") || tr.isUserEvent("delete"));
+            const tagOpen = !wikiOpen && typing && tagToken(beforeCursor) !== null;
+            const pickerOpen = wikiOpen || tagOpen;
             const emojiOpen = emojiIconMenuBeforeCursor(beforeCursor) !== null;
-            if (!slashToken && !angleOpen && !wikiOpen && !emojiOpen) {
+            if (!slashToken && !angleOpen && !pickerOpen && !emojiOpen) {
               wikiCompletionDismissed = false;
+              // Typing has left every menu's token: results still loading
+              // for it would only swallow the next Enter or Escape.
+              if (typing && completionStatus(update.state) === "pending") closeCompletion(update.view);
               return;
             }
 
@@ -1703,13 +1782,13 @@
             // fragment changes. Slash/`<` menus filter locally and only need
             // to open once. Escape dismisses the picker; keep it closed until
             // the user types again inside `[[`.
-            if ((wikiOpen || emojiOpen) && update.docChanged) {
+            if ((pickerOpen || emojiOpen) && update.docChanged) {
               wikiCompletionDismissed = false;
               startCompletion(update.view);
               return;
             }
             if (
-              wikiOpen &&
+              pickerOpen &&
               !update.docChanged &&
               (prevStatus === "active" || prevStatus === "pending") &&
               status === null
@@ -1717,7 +1796,7 @@
               wikiCompletionDismissed = true;
               return;
             }
-            if (wikiOpen && wikiCompletionDismissed) return;
+            if (pickerOpen && wikiCompletionDismissed) return;
             if (status === null) {
               startCompletion(update.view);
             }
@@ -1867,9 +1946,18 @@
                 }
 
                 const completionState = completionStatus(view.state);
+                const inAutocomplete = !!active?.closest(".cm-tooltip-autocomplete");
                 if (completionState === "active" || completionState === "pending") {
-                  view.focus();
-                  return;
+                  // WebKitGTK can blur the editor while a suggestion is being
+                  // clicked; take focus back then. Focus the user moved to
+                  // another block or field stays there, and the menu closes.
+                  const focusMovedAway = !!active && active !== document.body
+                    && !view.dom.contains(active) && !inAutocomplete;
+                  if (!focusMovedAway) {
+                    view.focus();
+                    return;
+                  }
+                  closeCompletion(view);
                 }
 
                 // Only keep THIS editor alive if focus is still within it (e.g.
@@ -1877,7 +1965,6 @@
                 // block's editor (cross-block navigation), tear this one down so
                 // it re-renders as markdown.
                 const stillInThisEditor = !!active && view.dom.contains(active);
-                const inAutocomplete = !!active?.closest(".cm-tooltip-autocomplete");
                 if (stillInThisEditor || inAutocomplete) {
                   return;
                 }
@@ -1923,6 +2010,9 @@
       }
 
       editorView = new EditorView({ state, parent: editorContainer });
+      completionMenuShown = completionStatus(state) === "active";
+      stopEditorShortcuts?.();
+      stopEditorShortcuts = editorShortcuts.attach(editorView);
       (window as any).__activeEditorView = editorView;
       editorView.focus();
 
@@ -2058,6 +2148,8 @@
         window.clearTimeout(blurTeardownTimer);
         blurTeardownTimer = undefined;
       }
+      stopEditorShortcuts?.();
+      stopEditorShortcuts = null;
       if (editorView) {
         editorView.destroy();
       }

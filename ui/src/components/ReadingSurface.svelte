@@ -5,8 +5,7 @@
   import { showToast } from "../lib/toast.svelte";
   import { readerNavigationKey, readerOwnsNavigation, type ReaderTurn } from "../lib/readerNavigation";
   import ReaderMenu from "./ReaderMenu.svelte";
-  import { formatBinding } from "../lib/shortcuts";
-  import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
+  import { shortcutTitle } from "../lib/shortcuts";
 
   let { children, navigation, actions, bookmarks, bookmarkCount = 0, onBack, onBookmark, onNavigate }: {
     children: Snippet; navigation: Snippet; actions?: Snippet; bookmarks?: Snippet;
@@ -122,7 +121,7 @@
   <div id={`${id}-controls`} class="reading-controls" hidden={!controlsOpen}>
     <nav aria-label="Reading controls">
       {@render navigation()}
-      {#if onBookmark}<button title={`Bookmark (${formatBinding(BOOKMARK_SHORTCUT)})`} onclick={onBookmark}>Bookmark</button>{/if}
+      {#if onBookmark}<button title={shortcutTitle("Bookmark", "bookmark")} onclick={onBookmark}>Bookmark</button>{/if}
       {#if bookmarks}<button aria-expanded={bookmarksOpen} aria-controls={`${id}-bookmarks`}
         onclick={() => { if (bookmarksOpen) bookmarksOpen = false; else revealBookmarks(); }}>Bookmarks ({bookmarkCount})</button>{/if}
       <button title="Fullscreen (F11; Escape to leave)" disabled={busy} aria-pressed={expanded} aria-keyshortcuts="F11" onclick={() => { void toggleFullscreen(); }}>

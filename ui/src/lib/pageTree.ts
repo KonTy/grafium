@@ -129,6 +129,18 @@ export async function pagesTagTree(filter: PageKindFilter = "all"): Promise<Tree
   return fromWire<TreeNode[]>(raw);
 }
 
+/** Every page used as a tag, flattened from the tag tree, for the `#` picker. */
+export async function listTagTitles(): Promise<Array<{ title: string; updated_at: number }>> {
+  const tags: Array<{ title: string; updated_at: number }> = [];
+  const pending = [...await pagesTagTree("all")];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.page_id) tags.push({ title: node.key, updated_at: node.updated_at ?? 0 });
+    pending.push(...node.children);
+  }
+  return tags;
+}
+
 export function pageSetCollection(pageId: string, kind: string | null): Promise<void> {
   return invoke("page_set_collection", { pageId, kind });
 }

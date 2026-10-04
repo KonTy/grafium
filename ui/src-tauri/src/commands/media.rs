@@ -1,10 +1,66 @@
-use crate::commands::jobs::{JobLink, JobsState};
+use crate::commands::jobs::{JobHandle, JobLink, JobsState, MEDIA_IMPORT_JOB_KIND};
 use crate::commands::knowledge::KnowledgeState;
 use crate::{current_graph_snapshot, open_graph_snapshot, AppState};
 use grafium_core::media::{fetch_metadata, transcript_to_markdown, MediaConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{Manager, State};
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+// ─── One import at a time ────────────────────────────────────────────────────
+
+/// Media imports run one after another, in the order they were started.
+///
+/// Each import downloads or decodes audio with ffmpeg and transcribes it with
+/// Whisper on the same native model worker Chat uses. Several at once only
+/// made every one of them (and Chat) slower, multiplied memory use, and could
+/// push the model worker over its limits; queued imports wait instead.
+static IMPORT_LANE: Semaphore = Semaphore::const_new(1);
+/// Imports holding the lane, so background Library transcription can wait.
+static IMPORTS_RUNNING: AtomicUsize = AtomicUsize::new(0);
+const WAITING_FOR_IMPORT: &str = "Queued: waiting for the earlier media import to finish";
+
+/// Whether a media import is transcribing right now.
+#[cfg(not(target_os = "android"))]
+pub fn media_import_running() -> bool {
+    IMPORTS_RUNNING.load(Ordering::SeqCst) > 0
+}
+
+/// Held for the whole import; marks the lane busy until dropped.
+struct ImportTurn {
+    _permit: SemaphorePermit<'static>,
+}
+
+impl Drop for ImportTurn {
+    fn drop(&mut self) {
+        IMPORTS_RUNNING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait for this import's turn. `None` when the job was cancelled first; a
+/// cancelled import leaves the queue at once.
+async fn wait_for_import_turn(handle: &JobHandle) -> Option<ImportTurn> {
+    let permit = match IMPORT_LANE.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            handle.progress(0, 0, WAITING_FOR_IMPORT);
+            tokio::select! {
+                // `acquire` is first come, first served.
+                permit = IMPORT_LANE.acquire() => permit.ok()?,
+                () = until_cancelled(handle) => return None,
+            }
+        }
+    };
+    IMPORTS_RUNNING.fetch_add(1, Ordering::SeqCst);
+    Some(ImportTurn { _permit: permit })
+}
+
+async fn until_cancelled(handle: &JobHandle) {
+    while !handle.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
 
 #[cfg(not(target_os = "android"))]
 use grafium_core::media::{Transcript, TranscriptSource};
@@ -197,7 +253,7 @@ pub async fn media_import_video(
 ) -> Result<String, String> {
     let handle = jobs
         .registry
-        .start(app.clone(), "media_import", "Import media", true)?;
+        .start(app.clone(), MEDIA_IMPORT_JOB_KIND, "Import media", true)?;
     let job_id = handle.id().to_string();
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -236,6 +292,10 @@ pub async fn media_import_video(
 
     let engine = knowledge_state.engine.clone();
     tauri::async_runtime::spawn(async move {
+        let Some(_turn) = wait_for_import_turn(&handle).await else {
+            handle.cancelled();
+            return;
+        };
         handle.progress(0, 0, "Fetching media info...");
 
         let progress_handle = handle.clone();

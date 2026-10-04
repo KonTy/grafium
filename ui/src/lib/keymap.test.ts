@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { keymap_manager, registerDefaultShortcuts } from "./keymap";
+import { appCommands, keymap_manager, registerDefaultShortcuts } from "./keymap";
+import { addShortcutBinding, removeShortcutBinding, resetAllShortcuts } from "./shortcutRegistry";
 
 function keyEvent(init: KeyboardEventInit): KeyboardEvent {
   return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
@@ -44,6 +45,7 @@ function stubActions() {
 }
 
 afterEach(() => {
+  resetAllShortcuts();
   keymap_manager.register([]);
   keymap_manager.isEditing = false;
   vi.restoreAllMocks();
@@ -230,5 +232,28 @@ describe("keymap dual-mode matching", () => {
 
     expect(keymap_manager.handleKeydown(keyEvent({ key: "d", code: "KeyD", altKey: true }))).toBe(true);
     expect(actions.insertPersonalDiary).toHaveBeenCalledTimes(1);
+  });
+
+  it("zooms with a key sequence chosen in Settings", () => {
+    const zoomIn = vi.fn();
+    registerDefaultShortcuts({ ...stubActions(), zoomIn });
+    addShortcutBinding("zoom-in", "z i");
+    keymap_manager.handleKeydown(keyEvent({ key: "z", code: "KeyZ" }));
+    keymap_manager.handleKeydown(keyEvent({ key: "i", code: "KeyI" }));
+    expect(zoomIn).toHaveBeenCalledOnce();
+  });
+
+  it("lists every app command for the palette, including commands without keys", () => {
+    const actions = stubActions();
+    registerDefaultShortcuts(actions);
+    removeShortcutBinding("go-tasks", "mod+shift+t");
+    const commands = appCommands();
+    const tasks = commands.find(({ id }) => id === "go-tasks");
+    expect(tasks).toMatchObject({ label: "Go to tasks", bindings: [] });
+    tasks?.run();
+    expect(actions.goTasks).toHaveBeenCalledOnce();
+    expect(commands.find(({ id }) => id === "go-journal")?.bindings).toEqual(["g j", "mod+shift+j"]);
+    // The palette does not list itself, nor actions the app did not provide.
+    expect(commands.some(({ id }) => id === "command-palette" || id === "go-studies")).toBe(false);
   });
 });

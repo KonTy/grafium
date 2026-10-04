@@ -9,9 +9,12 @@
  * Supports chord sequences (e.g. "g j" = two keypresses in sequence).
  */
 
-import { BIONIC_SHORTCUT, BOOKMARK_SHORTCUT, readerShortcut } from "./readerHotkeys";
+import { bindingChords, bindingFromEvent, chordHasCommandModifier, chordKey, isFunctionKey } from "./keyBinding";
+import { readerShortcut, setReaderShortcutBindings } from "./readerHotkeys";
+import { onShortcutsChanged, SHORTCUT_DEFINITIONS, shortcutBindings, type ShortcutSection } from "./shortcutRegistry";
 
-export type ActionFn = () => void;
+/** Return `false` to leave the key alone (for example, nothing to focus). */
+export type ActionFn = () => void | boolean;
 
 export interface Shortcut {
   /** Groups aliases into one help row (e.g. "g j" and "mod+shift+j"). */
@@ -26,61 +29,6 @@ export interface Shortcut {
   description?: string;
   /** Category for grouping */
   category?: string;
-}
-
-// Normalize "mod" to platform-appropriate modifier
-function modKey(): string {
-  return navigator.platform.includes("Mac") ? "Meta" : "Control";
-}
-
-function normalizeKey(key: string): string {
-  return key
-    .replace(/mod/gi, modKey())
-    .replace(/ctrl/gi, "Control")
-    .replace(/alt/gi, "Alt")
-    .replace(/shift/gi, "Shift")
-    .replace(/meta/gi, "Meta");
-}
-
-function eventToKeyString(e: KeyboardEvent): string {
-  const parts: string[] = [];
-  if (e.ctrlKey) parts.push("Control");
-  if (e.altKey) parts.push("Alt");
-  if (e.shiftKey) parts.push("Shift");
-  if (e.metaKey) parts.push("Meta");
-
-  let key = e.key;
-  // Physical keys so Ctrl-Shift-. matches Ctrl-> on US keyboards, and
-  // Ctrl-Shift-C is KeyC even when the webview reports "C" or a translated key.
-  if ((e.ctrlKey || e.metaKey || e.altKey) && /^Key[A-Z]$/.test(e.code)) {
-    key = e.code.slice(3).toLowerCase();
-  } else if (e.code === "Period") key = ".";
-  else if (e.code === "Comma") key = ",";
-  else if (e.code === "BracketLeft") key = "[";
-  else if (e.code === "BracketRight") key = "]";
-  if (key === " ") key = "Space";
-  if (key.length === 1) key = key.toLowerCase();
-
-  if (!["Control", "Alt", "Shift", "Meta"].includes(key)) {
-    parts.push(key);
-  }
-
-  return parts.sort().join("+");
-}
-
-function parseBinding(binding: string): string[][] {
-  // A binding can be a chord sequence: "g j" means press g, then j
-  // Or a combo: "mod+k" means hold mod and press k
-  const chords = binding.split(" ").map((chord) =>
-    chord.split("+").map((k) => normalizeKey(k.trim()))
-  );
-  // Each chord is an array of keys that form a single keypress
-  // Convert each chord to a single normalized string
-  return chords.map((parts) => parts.sort());
-}
-
-function chordToString(parts: string[]): string {
-  return [...parts].sort().join("+");
 }
 
 interface ParsedShortcut {
@@ -116,15 +64,12 @@ class KeymapManager {
 
   register(shortcuts: Shortcut[]) {
     this.registeredShortcuts = shortcuts;
-    this.shortcuts = shortcuts.map((s) => {
-      const chords = parseBinding(s.binding);
-      return {
-        id: s.id,
-        sequence: chords.map((c) => chordToString(c)),
-        action: s.action,
-        navOnly: s.navOnly !== false,
-      };
-    });
+    this.shortcuts = shortcuts.map((s) => ({
+      id: s.id,
+      sequence: bindingChords(s.binding),
+      action: s.action,
+      navOnly: s.navOnly !== false,
+    }));
   }
 
   getShortcuts(): Shortcut[] {
@@ -145,10 +90,8 @@ class KeymapManager {
       !!target?.closest?.("[contenteditable='true'], [role='textbox']");
     const navBlocked = this._editing || inField;
 
-    const keyStr = eventToKeyString(e);
-    if (!keyStr || keyStr === "Shift" || keyStr === "Control" || keyStr === "Alt" || keyStr === "Meta") {
-      return false;
-    }
+    const keyStr = bindingFromEvent(e);
+    if (!keyStr) return false;
 
     const available = navBlocked
       ? this.shortcuts.filter((s) => !s.navOnly)
@@ -174,10 +117,10 @@ class KeymapManager {
     );
 
     if (exactMatch) {
+      this.pendingChord = [];
+      if (exactMatch.action() === false) return false;
       e.preventDefault();
       e.stopPropagation();
-      this.pendingChord = [];
-      exactMatch.action();
       return true;
     }
 
@@ -203,11 +146,7 @@ class KeymapManager {
 // Singleton instance
 export const keymap_manager = new KeymapManager();
 
-/**
- * Register the default outline-style shortcuts.
- * Call this once at app startup, passing action callbacks.
- */
-export function registerDefaultShortcuts(actions: {
+export interface ShortcutActions {
   goJournal: () => void;
   goJournalDate: () => void;
   goLink: () => void;
@@ -226,7 +165,7 @@ export function registerDefaultShortcuts(actions: {
   goForward: () => void;
   goBackward: () => void;
   search: () => void;
-  focusLocalSearch: () => void;
+  focusLocalSearch: () => void | boolean;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
   toggleTheme: () => void;
@@ -245,139 +184,131 @@ export function registerDefaultShortcuts(actions: {
   importBooks: () => void;
   insertTimeStamp: () => void;
   insertPersonalDiary: () => void;
-}) {
-  const pair = (
-    id: string,
-    description: string,
-    category: string,
-    action: ActionFn,
-    bindings: Array<{ binding: string; navOnly?: boolean }>,
-  ): Shortcut[] =>
-    bindings.map((b) => ({
-      id,
-      description,
-      category,
-      action,
-      binding: b.binding,
-      navOnly: b.navOnly ?? !b.binding.includes("+"),
-    }));
+  zoomIn?: () => void;
+  zoomOut?: () => void;
+  zoomReset?: () => void;
+}
 
-  const shortcuts: Shortcut[] = [
-    ...(actions.toggleBionicReader ? pair("toggle-bionic", "Toggle Bionic reading", "toggle", actions.toggleBionicReader, [
-      { binding: BIONIC_SHORTCUT, navOnly: false },
-    ]) : []),
-    ...(actions.bookmark ? pair("bookmark", "Bookmark Library reading or playback", "basics", actions.bookmark, [
-      { binding: BOOKMARK_SHORTCUT, navOnly: false },
-    ]) : []),
-    ...(actions.toggleHelp ? pair("help", "Contextual help", "basics", actions.toggleHelp, [
-      { binding: "F1", navOnly: false },
-    ]) : []),
-    ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournal, [
-      { binding: "g j" },
-    ]),
-    ...pair("go-journal", "Go to today's journal", "navigation", actions.goJournalEdit, [
-      { binding: "mod+shift+j", navOnly: false },
-    ]),
-    ...pair("go-journal-date", "Go to date calendar", "navigation", actions.goJournalDate, [
-      { binding: "mod+g", navOnly: false },
-    ]),
-    ...pair("go-link", "Go to link", "navigation", actions.goLink, [
-      { binding: "mod+l", navOnly: false },
-    ]),
-    ...pair("go-home", "Go to home", "navigation", actions.goHome, [
-      { binding: "g h" },
-      { binding: "mod+shift+h", navOnly: false },
-    ]),
-    ...pair("go-all-pages", "Go to all pages", "navigation", actions.goAllPages, [
-      { binding: "g a" },
-      { binding: "mod+shift+a", navOnly: false },
-    ]),
-    ...pair("go-graph", "Go to graph view", "navigation", actions.goGraph, [
-      { binding: "g g" },
-      { binding: "mod+shift+g", navOnly: false },
-    ]),
-    ...pair("go-flashcards", "Go to flashcards", "navigation", actions.goFlashcards, [
-      { binding: "g f" },
-      { binding: "mod+shift+f", navOnly: false },
-    ]),
-    ...pair("go-tomorrow", "Go to tomorrow's journal page", "navigation", actions.goTomorrow, [
-      { binding: "g t" },
-    ]),
-    ...pair("go-tasks", "Go to tasks", "navigation", actions.goTasks, [
-      { binding: "mod+shift+t", navOnly: false },
-    ]),
-    ...(actions.goStudies ? pair("go-studies", "Go to Studies", "navigation", actions.goStudies, [
-      { binding: "g s" },
-    ]) : []),
-    ...(actions.goLibrary ? pair("go-library", "Go to Library", "navigation", actions.goLibrary, [
-      { binding: "g l" },
-    ]) : []),
-    ...pair("go-next-journal", "Go to next journal", "navigation", actions.goNextJournal, [
-      { binding: "g n" },
-      { binding: "mod+shift+.", navOnly: false },
-    ]),
-    ...pair("go-prev-journal", "Go to previous journal", "navigation", actions.goPrevJournal, [
-      { binding: "g p" },
-      { binding: "mod+shift+,", navOnly: false },
-    ]),
-    ...pair("go-backward", "Go backward", "navigation", actions.goBackward, [
-      { binding: "mod+[", navOnly: false },
-    ]),
-    ...pair("go-forward", "Go forward", "navigation", actions.goForward, [
-      { binding: "mod+]", navOnly: false },
-    ]),
-    ...pair("go-chat", "Go to Chat tab", "navigation", actions.goChat, [
-      { binding: "alt+c", navOnly: false },
-    ]),
+function shortcutHandlers(actions: ShortcutActions): Record<string, ActionFn | undefined> {
+  return {
+    "toggle-bionic": actions.toggleBionicReader,
+    bookmark: actions.bookmark,
+    help: actions.toggleHelp,
+    "go-journal": actions.goJournal,
+    "go-journal-date": actions.goJournalDate,
+    "go-link": actions.goLink,
+    "go-home": actions.goHome,
+    "go-all-pages": actions.goAllPages,
+    "go-graph": actions.goGraph,
+    "go-flashcards": actions.goFlashcards,
+    "go-tomorrow": actions.goTomorrow,
+    "go-tasks": actions.goTasks,
+    "go-studies": actions.goStudies,
+    "go-library": actions.goLibrary,
+    "go-next-journal": actions.goNextJournal,
+    "go-prev-journal": actions.goPrevJournal,
+    "go-backward": actions.goBackward,
+    "go-forward": actions.goForward,
+    "go-chat": actions.goChat,
+    "toggle-left-sidebar": actions.toggleSidebar,
+    "toggle-right-sidebar": actions.toggleRightSidebar,
+    "toggle-theme": actions.toggleTheme,
+    "toggle-wide": actions.toggleWideMode,
+    "toggle-zen": actions.toggleZenMode,
+    "toggle-settings": actions.toggleSettings,
+    "search-global": actions.search,
+    "search-local": actions.focusLocalSearch,
+    "command-palette": actions.commandPalette,
+    "import-media": actions.importMedia,
+    "import-books": actions.importBooks,
+    "insert-time": actions.insertTimeStamp,
+    "insert-personal-diary": actions.insertPersonalDiary,
+    "zoom-in": actions.zoomIn,
+    "zoom-out": actions.zoomOut,
+    "zoom-reset": actions.zoomReset,
+  };
+}
 
-    ...pair("toggle-left-sidebar", "Toggle left sidebar", "toggle", actions.toggleSidebar, [
-      { binding: "t l" },
-      { binding: "mod+b", navOnly: false },
-    ]),
-    ...pair("toggle-right-sidebar", "Toggle right sidebar", "toggle", actions.toggleRightSidebar, [
-      { binding: "t r" },
-      { binding: "mod+shift+b", navOnly: false },
-      { binding: "mod+.", navOnly: false },
-    ]),
-    ...pair("toggle-theme", "Open theme settings", "toggle", actions.toggleTheme, [
-      { binding: "t t" },
-    ]),
-    ...pair("toggle-wide", "Toggle wide mode", "toggle", actions.toggleWideMode, [
-      { binding: "t w" },
-      { binding: "alt+w", navOnly: false },
-    ]),
-    ...pair("toggle-zen", "Toggle zen mode", "toggle", actions.toggleZenMode, [
-      { binding: "t z" },
-      { binding: "alt+z", navOnly: false },
-    ]),
-    ...pair("toggle-settings", "Toggle settings", "toggle", actions.toggleSettings, [
-      { binding: "t s" },
-      { binding: "alt+s", navOnly: false },
-    ]),
+/**
+ * Sequences (`g j`) and lone plain keys only act outside text editing;
+ * anything holding Ctrl, Cmd or Alt, and function keys, act everywhere.
+ */
+function navOnlyBinding(binding: string): boolean {
+  const chords = bindingChords(binding);
+  if (chords.length !== 1) return true;
+  return !chordHasCommandModifier(chords[0]) && !isFunctionKey(chordKey(chords[0]));
+}
 
-    ...pair("search-global", "Global search", "search", actions.search, [
-      { binding: "mod+k", navOnly: false },
-    ]),
-    ...pair("search-local", "Focus current view's filter", "search", actions.focusLocalSearch, [
-      { binding: "mod+f", navOnly: false },
-    ]),
+let registeredActions: ShortcutActions | null = null;
+let stopFollowingSettings: (() => void) | null = null;
 
-    ...pair("command-palette", "Command palette", "basics", actions.commandPalette, [
-      { binding: "mod+shift+p", navOnly: false },
-    ]),
-    ...pair("import-media", "Import media", "basics", actions.importMedia, [
-      { binding: "alt+m", navOnly: false },
-    ]),
-    ...pair("import-books", "Import books", "basics", actions.importBooks, [
-      { binding: "alt+b", navOnly: false },
-    ]),
-    ...pair("insert-time", "Insert current time", "basics", actions.insertTimeStamp, [
-      { binding: "alt+t", navOnly: false },
-    ]),
-    ...pair("insert-personal-diary", "Insert [[personal/diary]]", "basics", actions.insertPersonalDiary, [
-      { binding: "alt+d", navOnly: false },
-    ]),
-  ];
-
+function applyShortcuts(): void {
+  setReaderShortcutBindings({
+    "toggle-bionic": shortcutBindings("toggle-bionic"),
+    bookmark: shortcutBindings("bookmark"),
+  });
+  const actions = registeredActions;
+  if (!actions) return;
+  const handlers = shortcutHandlers(actions);
+  const shortcuts: Shortcut[] = [];
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    if (definition.scope !== "app") continue;
+    const handler = handlers[definition.id];
+    if (!handler) continue;
+    for (const binding of shortcutBindings(definition.id)) {
+      const navOnly = navOnlyBinding(binding);
+      shortcuts.push({
+        id: definition.id,
+        description: definition.label,
+        category: definition.section,
+        binding,
+        // The combo works while editing, so it also starts editing today.
+        action: definition.id === "go-journal" && !navOnly ? actions.goJournalEdit : handler,
+        navOnly,
+      });
+    }
+  }
   keymap_manager.register(shortcuts);
+}
+
+/**
+ * Register the app-wide shortcuts. Call once at startup with the action
+ * callbacks; the bindings come from Settings and update when they change.
+ */
+export function registerDefaultShortcuts(actions: ShortcutActions) {
+  registeredActions = actions;
+  applyShortcuts();
+  stopFollowingSettings ??= onShortcutsChanged(applyShortcuts);
+}
+
+export interface AppCommand {
+  id: string;
+  label: string;
+  section: ShortcutSection;
+  /** Current keys, possibly none. */
+  bindings: string[];
+  run: ActionFn;
+}
+
+/**
+ * Every app-wide action that can run, with its current keys, for the command
+ * palette. Actions without any keys are listed too, so removing a shortcut
+ * never hides the command.
+ */
+export function appCommands(): AppCommand[] {
+  if (!registeredActions) return [];
+  const handlers = shortcutHandlers(registeredActions);
+  const commands: AppCommand[] = [];
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    const run = handlers[definition.id];
+    if (definition.scope !== "app" || !run || definition.id === "command-palette") continue;
+    commands.push({
+      id: definition.id,
+      label: definition.label,
+      section: definition.section,
+      bindings: shortcutBindings(definition.id),
+      run,
+    });
+  }
+  return commands;
 }

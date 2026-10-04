@@ -25,8 +25,20 @@ Press **F1** while editing for quick editor help.
   `- text` a diamond, and `+ text` a square. This always applies to rendered
   lists, including nested lists and books; ordinary blocks keep their dot.
   Other Markdown editors may display all three as the same bullet.
-- Type `/` for commands.
-- Link pages with `[[Page Title]]` and add tags such as `#project`.
+- Type `/` for commands, such as `/TODO` or `/time`, which inserts the current
+  time just like **Alt+T**. Commands open at the start of a word, so a `/`
+  inside a link or a web address never brings them up.
+- Link pages with `[[Page Title]]`: typing `[[` lists pages only, filtered by
+  what you type.
+- Type `#` to add a tag: your existing tags come first, then other pages, and
+  typing filters by any part of the name (`#sky` finds `deep sky`). A tag with
+  spaces is written `#[[deep sky]]` for you. The list opens while you type or
+  erase a tag, not when you click into one. Unless a name matches exactly, what
+  you typed is offered too, as a *new tag*, so Enter never swaps it for a
+  different tag.
+- Bold, italic and strikethrough shortcuts can be changed in **Settings >
+  Keyboard Shortcuts > Editor**. Undo (`Ctrl+Z`) and redo (`Ctrl+Shift+Z` or
+  `Ctrl+Y`) are built in.
 - Headings from `#` through `######` use theme-aware red, blue, purple, cyan,
   orange, and pink. Tags and callouts also use the selected theme's palette;
   change it in **Settings > Theme** without modifying your notes.

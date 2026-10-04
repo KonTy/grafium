@@ -64,6 +64,7 @@
     type SourceBlock,
   } from "../lib/pageSourceMap";
   import { isFencedCodeBlock } from "../lib/codeFence";
+  import { followEditorShortcuts, withoutShortcutDefaults } from "../lib/editorShortcuts";
   import { getHeadingLevel } from "../lib/blockLayout";
 
   interface Props {
@@ -547,7 +548,19 @@
     }
   }
 
+  // History and save keys: undo and redo are built in, the save key comes
+  // from Settings > Keyboard Shortcuts.
+  const editorShortcuts = followEditorShortcuts({
+    "editor-save-source": () => {
+      void saveSource();
+      return true;
+    },
+  });
+  let stopEditorShortcuts: (() => void) | null = null;
+
   function destroyEditor() {
+    stopEditorShortcuts?.();
+    stopEditorShortcuts = null;
     verticalArrowCleanup?.();
     verticalArrowCleanup = undefined;
     if (editorView && (window as any).__activeEditorView === editorView) {
@@ -599,22 +612,16 @@
             preventDefault: true,
           },
         ])),
+        editorShortcuts.extension,
         keymap.of([
           { key: "Mod-z", run: undoEditor },
           { key: "Mod-Shift-z", run: redoEditor },
           { key: "Mod-y", run: redoEditor },
-          {
-            key: "Mod-s",
-            run: () => {
-              void saveSource();
-              return true;
-            },
-          },
           // TODO(continuous-editor): replace native Enter/Backspace with
           // block-aware split/merge only after new `id::` line generation is
           // covered well enough to avoid corrupting source metadata.
-          ...defaultKeymap,
-          ...historyKeymap,
+          ...withoutShortcutDefaults(defaultKeymap),
+          ...withoutShortcutDefaults(historyKeymap),
         ]),
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
@@ -853,6 +860,7 @@
     });
 
     editorView = new EditorView({ state, parent: editorHost });
+    stopEditorShortcuts = editorShortcuts.attach(editorView);
     installVerticalArrowCapture(editorView);
   }
 

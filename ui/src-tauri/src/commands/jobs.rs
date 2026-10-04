@@ -40,8 +40,12 @@ const MAX_RUNNING_JOBS: usize = 2;
 /// never blocks one from starting.
 pub const BACKGROUND_INDEX_JOB_KIND: &str = "ai_index_background";
 
+/// Media imports wait in their own one-at-a-time queue (see
+/// `commands::media`), so a queued import never needs, or blocks, a slot.
+pub const MEDIA_IMPORT_JOB_KIND: &str = "media_import";
+
 fn counts_against_limit(kind: &str) -> bool {
-    kind != BACKGROUND_INDEX_JOB_KIND && kind != "library_index"
+    kind != BACKGROUND_INDEX_JOB_KIND && kind != "library_index" && kind != MEDIA_IMPORT_JOB_KIND
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,6 +646,24 @@ mod tests {
         assert!(registry.remove("noop"));
         assert!(!registry.remove("noop"));
         assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn queued_media_imports_never_take_or_need_a_user_job_slot() {
+        let running = |id: &str, kind: &str| {
+            let mut e = entry(id, JobStatus::Running);
+            e.job.kind = kind.into();
+            e
+        };
+        let full = vec![running("a", "book_import"), running("b", "ai_index_all")];
+        // Another import is accepted and waits in the media queue instead.
+        assert!(admission_error(&running("new", MEDIA_IMPORT_JOB_KIND).job, &full).is_none());
+        let with_imports = vec![
+            running("first", MEDIA_IMPORT_JOB_KIND),
+            running("second", MEDIA_IMPORT_JOB_KIND),
+            running("a", "book_import"),
+        ];
+        assert!(admission_error(&running("new", "ai_concept_edges").job, &with_imports).is_none());
     }
 
     #[test]

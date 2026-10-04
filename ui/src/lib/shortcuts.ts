@@ -1,4 +1,5 @@
 import { keymap_manager, type Shortcut } from "./keymap";
+import { shortcutBindings, shortcutDefinition } from "./shortcutRegistry";
 
 export interface ShortcutRow {
   id: string;
@@ -64,9 +65,25 @@ export function getShortcutsByCategory(): Map<string, Shortcut[]> {
   return map;
 }
 
+const KEY_NAMES: Record<string, string> = {
+  escape: "Esc", enter: "Enter", space: "Space", tab: "Tab", backspace: "Backspace",
+  delete: "Delete", arrowup: "↑", arrowdown: "↓", arrowleft: "←", arrowright: "→",
+  pageup: "PageUp", pagedown: "PageDown", home: "Home", end: "End", plus: "+",
+};
+
+function formatSingleKey(key: string): string {
+  const lower = key.toLowerCase();
+  if (KEY_NAMES[lower]) return KEY_NAMES[lower];
+  if (/^f\d{1,2}$/.test(lower)) return lower.toUpperCase();
+  return key;
+}
+
 /** Renders an internal binding string for display, e.g. "mod+k" -> "Ctrl-K". */
 export function formatBinding(binding: string): string {
-  if (!binding.includes("+")) return binding;
+  const presses = binding.trim().split(/\s+/);
+  // Sequences read as typed: "g j".
+  if (presses.length > 1) return presses.map(formatSingleKey).join(" ");
+  if (!binding.includes("+") || binding.trim() === "+") return formatSingleKey(binding.trim());
   const parts = binding.split("+").map((part) => part.trim().toLowerCase());
   if (parts.includes("shift") && parts.includes(".")) {
     const mods = parts.filter((part) => part !== "shift" && part !== ".");
@@ -75,6 +92,10 @@ export function formatBinding(binding: string): string {
   if (parts.includes("shift") && parts.includes(",")) {
     const mods = parts.filter((part) => part !== "shift" && part !== ",");
     return [...mods.map((part) => formatBindingPart(part)), "<"].join("-");
+  }
+  if (parts.includes("shift") && parts.includes("=")) {
+    const mods = parts.filter((part) => part !== "shift" && part !== "=");
+    return [...mods.map((part) => formatBindingPart(part)), "+"].join("-");
   }
   return binding
     .split("+")
@@ -89,6 +110,8 @@ function formatBindingPart(part: string): string {
   if (lower === "meta") return "Cmd";
   if (lower === "shift") return "Shift";
   if (lower === "alt") return "Alt";
+  if (KEY_NAMES[lower]) return KEY_NAMES[lower];
+  if (/^f\d{1,2}$/.test(lower)) return lower.toUpperCase();
   if (part.length === 1) return part.toUpperCase();
   return part;
 }
@@ -110,8 +133,11 @@ export function shortcutTitle(label: string, actionId: string): string {
 }
 
 function actionBindings(actionId: string): string[] {
-  return [...new Set(keymap_manager.getShortcuts()
+  const registered = [...new Set(keymap_manager.getShortcuts()
     .filter(({ id }) => id === actionId).map(({ binding }) => binding))];
+  if (registered.length) return registered;
+  // Editor and flashcard shortcuts are not app-wide, so ask Settings directly.
+  return shortcutDefinition(actionId) ? shortcutBindings(actionId) : [];
 }
 
 /** ARIA represents simultaneous keys, not navigation chord sequences. */
@@ -121,6 +147,7 @@ export function bindingAria(binding: string): string {
     if (lower === "mod") return isMac() ? "Meta" : "Control";
     if (lower === "ctrl" || lower === "control") return "Control";
     if (lower === "meta") return "Meta";
+    if (lower === "plus") return "Plus";
     return lower === "alt" ? "Alt" : lower === "shift" ? "Shift" : part;
   }).join("+");
 }

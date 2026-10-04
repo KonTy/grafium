@@ -16,9 +16,23 @@ function editorHasDomFocus(view: EditorView): boolean {
   return view.hasFocus || (!!active && view.dom.contains(active));
 }
 
+/**
+ * Settings is recording a new shortcut. Undo and redo, which the native
+ * window takes before the page sees them, go to the recorder instead of
+ * acting.
+ */
+function recordedNatively(binding: string): boolean {
+  return (window as any).__recordNativeShortcut?.(binding) === true;
+}
+
+function isRecorderTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest("[data-shortcut-recorder]");
+}
+
 // === Native undo/redo handlers (called by Rust via eval()) ===
 // These are set as globals so Rust can call them directly
 (window as any).__handleNativeUndo = () => {
+  if (recordedNatively("mod+z")) return;
   const view = activeEditorView();
   const editorFocused = view ? editorHasDomFocus(view) : false;
   console.log("[undo] native handler called, activeView:", !!view, "editorFocused:", editorFocused);
@@ -45,6 +59,7 @@ function editorHasDomFocus(view: EditorView): boolean {
 };
 
 (window as any).__handleNativeRedo = () => {
+  if (recordedNatively("mod+shift+z")) return;
   const view = activeEditorView();
   const editorFocused = view ? editorHasDomFocus(view) : false;
   console.log("[redo] native handler called, activeView:", !!view, "editorFocused:", editorFocused);
@@ -96,6 +111,8 @@ document.addEventListener("beforeinput", (e: Event) => {
 // === Fallback: keydown event ===
 // In case keydown does reach JS (when no contenteditable is focused)
 document.addEventListener("keydown", (e: KeyboardEvent) => {
+  // The Settings recorder reads these keys itself (and refuses them).
+  if (isRecorderTarget(e.target)) return;
   if (e.ctrlKey && !e.shiftKey && e.key === "z") {
     console.log("[undo] keydown caught");
     e.preventDefault();
@@ -111,9 +128,15 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 }, true); // capture phase
 
-// === Toggle reference panel (called by Rust via eval() for Ctrl+.) ===
+// === Ctrl+. on Linux (called by Rust via eval()) ===
+// The window takes Ctrl+. before the page sees it. Hand it back as a key
+// press where the focus is, so whatever Settings binds it to runs: an app
+// action (Toggle right sidebar by default), an editor or flashcard key, or
+// the shortcut recorder.
 (window as any).__toggleReferencePanel = () => {
-  window.dispatchEvent(new CustomEvent("toggle-reference-panel"));
+  (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", {
+    key: ".", code: "Period", ctrlKey: true, bubbles: true, cancelable: true,
+  }));
 };
 
 const app = mount(App, { target: document.getElementById("app")! });

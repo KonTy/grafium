@@ -3,9 +3,8 @@
   import { autofocus } from "../lib/autofocus";
   import { dismissOnBackdrop, dialogKeydown } from "../lib/modal";
   import { handleMenuKeydown } from "../lib/menuKeyboard";
-  import { bindingTitle, bindingAria, shortcutTitle, shortcutAria } from "../lib/shortcuts";
+  import { shortcutTitle, shortcutAria } from "../lib/shortcuts";
   import { bionicReaderEnabled, setBionicReaderEnabled } from "../lib/bionicReader";
-  import { BIONIC_SHORTCUT } from "../lib/readerHotkeys";
 
   interface Props {
     uiZoom?: number;
@@ -98,14 +97,14 @@
       <div class="zoom-section">
         <div class="zoom-label">Zoom {Math.round(uiZoom * 100)}%</div>
         <div class="zoom-controls">
-          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomOut(); }} title={bindingTitle("Zoom out", "mod+-")} aria-label="Zoom out" aria-keyshortcuts={bindingAria("mod+-")}>−</button>
-          <button role="menuitem" class="zoom-reset" onclick={() => { closeMenu(); onZoomReset(); }} title={bindingTitle("Reset zoom", "mod+0")} aria-label="Reset zoom" aria-keyshortcuts={bindingAria("mod+0")}>100%</button>
-          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomIn(); }} title={bindingTitle("Zoom in", "mod+=")} aria-label="Zoom in" aria-keyshortcuts={bindingAria("mod+=")}>+</button>
+          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomOut(); }} title={shortcutTitle("Zoom out", "zoom-out")} aria-label="Zoom out" aria-keyshortcuts={shortcutAria("zoom-out")}>−</button>
+          <button role="menuitem" class="zoom-reset" onclick={() => { closeMenu(); onZoomReset(); }} title={shortcutTitle("Reset zoom", "zoom-reset")} aria-label="Reset zoom" aria-keyshortcuts={shortcutAria("zoom-reset")}>100%</button>
+          <button role="menuitem" class="zoom-btn" onclick={() => { closeMenu(); onZoomIn(); }} title={shortcutTitle("Zoom in", "zoom-in")} aria-label="Zoom in" aria-keyshortcuts={shortcutAria("zoom-in")}>+</button>
         </div>
       </div>
       <div class="menu-separator"></div>
-      <button role="menuitem" class="menu-item" title={bindingTitle("Bionic reading", BIONIC_SHORTCUT)}
-        aria-keyshortcuts={bindingAria(BIONIC_SHORTCUT)}
+      <button role="menuitem" class="menu-item" title={shortcutTitle("Bionic reading", "toggle-bionic")}
+        aria-keyshortcuts={shortcutAria("toggle-bionic")}
         onclick={() => { setBionicReaderEnabled(!$bionicReaderEnabled); closeMenu(); }}>
         <strong aria-hidden="true">B</strong><span>Bionic reading: {$bionicReaderEnabled ? "On" : "Off"}</span>
       </button>

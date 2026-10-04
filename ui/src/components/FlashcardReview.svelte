@@ -11,6 +11,8 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
   import type { StudyProgress } from "../lib/studies";
+  import { matchesShortcut, onShortcutsChanged, shortcutBindings } from "../lib/shortcutRegistry";
+  import { formatBinding } from "../lib/shortcuts";
 
   interface Props {
     onNavigate?: (title: string) => void;
@@ -211,20 +213,30 @@
     }
   }
 
+  // Keys come from Settings > Keyboard Shortcuts > Flashcards.
+  let shortcutsVersion = $state(0);
+  $effect(() => onShortcutsChanged(() => { shortcutsVersion += 1; }));
+  const revealKey = $derived.by(() => {
+    void shortcutsVersion;
+    return shortcutBindings("flashcards-reveal")[0] ?? null;
+  });
+
   function onKeydown(e: KeyboardEvent) {
     if (view !== "review" || loading || !current) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.("input, textarea, select, [contenteditable='true']")) return;
     if (!showBack) {
-      if (e.key === " " || e.key === "Enter") {
+      if (matchesShortcut(e, "flashcards-reveal")) {
         e.preventDefault();
         reveal();
       }
       return;
     }
-    if (e.key === "1") grade(0);
-    else if (e.key === "2") grade(3);
-    else if (e.key === "3") grade(4);
-    else if (e.key === "4") grade(5);
-    else if (e.key === " " || e.key === "Enter") {
+    if (matchesShortcut(e, "flashcards-again")) grade(0);
+    else if (matchesShortcut(e, "flashcards-hard")) grade(3);
+    else if (matchesShortcut(e, "flashcards-good")) grade(4);
+    else if (matchesShortcut(e, "flashcards-easy")) grade(5);
+    else if (matchesShortcut(e, "flashcards-reveal")) {
       e.preventDefault();
       grade(4);
     }
@@ -328,7 +340,7 @@
 
       <div class="actions">
         {#if !showBack}
-          <button class="primary reveal" onclick={reveal}>Show answer <kbd>Space</kbd></button>
+          <button class="primary reveal" onclick={reveal}>Show answer{#if revealKey} <kbd>{formatBinding(revealKey)}</kbd>{/if}</button>
         {:else}
           <div class="grades">
             {#each grades as g}

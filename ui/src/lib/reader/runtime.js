@@ -12,6 +12,7 @@ import { BOOK_RENDERER_VERSION, isBookLocation } from "../bookLocations";
 import { DEFAULT_READER_THEME, isReaderTheme } from "../bookReaderTheme";
 import { applyBookTheme, bookThemeStyles } from "./theme";
 import { installReaderInteractions } from "./interactions";
+import { setReaderShortcutBindings } from "../readerHotkeys";
 import { installBionicCFI, setBookBionic } from "./bionic";
 
 const token = globalThis.GRAFIUM_BOOK_TOKEN;
@@ -52,6 +53,10 @@ window.addEventListener("message", event => {
   if (event.source !== parent || !m || m.channel !== "grafium-book" || m.token !== token) return;
   if (adapter && m.type === "turn" && ["prev", "next", "left", "right"].includes(m.direction)) {
     turn(m.direction);
+    return;
+  }
+  if (m.type === "shortcuts") {
+    setReaderShortcutBindings(m.bindings);
     return;
   }
   commandQueue = commandQueue.then(async () => {

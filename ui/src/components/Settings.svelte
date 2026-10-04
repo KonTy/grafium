@@ -5,8 +5,8 @@
   import { getAppVersion, getGraphInfo, reindexCurrent, backfillTaskCompletions } from "../lib/api";
   import AssetCleanup from "./AssetCleanup.svelte";
   import SettingsHelp from "./SettingsHelp.svelte";
+  import ShortcutSettings from "./ShortcutSettings.svelte";
   import { RECENT_PAGES_MAX, recentPagesLimit, setRecentPagesLimit } from "../lib/recentPagesLimit";
-  import { getShortcutRowsByCategory, formatBinding } from "../lib/shortcuts";
   import { applySettingsSearch } from "../lib/settingsSearch";
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
@@ -567,34 +567,7 @@
       <span class="section-title">Keyboard Shortcuts</span>
     </summary>
     <div class="section-content">
-    <SettingsHelp title="Keyboard shortcuts">
-      <p class="section-desc">Chords such as <kbd>g j</kbd> work after Escape (navigation mode). Modifier shortcuts work while editing.</p>
-    </SettingsHelp>
-
-    <div class="keymap-list">
-      {#each [...getShortcutRowsByCategory()] as [category, rows]}
-        <div class="keymap-category">
-          <h3 class="keymap-category-title">{category}</h3>
-          {#each rows as row}
-            <div class="keymap-row">
-              <span class="keymap-desc">{row.description}</span>
-              <span class="keymap-keys">
-                {#if row.chords.length}
-                  <kbd class="keymap-binding">{row.chords.map(formatBinding).join(" | ")}</kbd>
-                {:else}
-                  <span class="keymap-binding-empty"></span>
-                {/if}
-                {#if row.modifiers.length}
-                  <kbd class="keymap-binding">{row.modifiers.map(formatBinding).join(" | ")}</kbd>
-                {:else}
-                  <span class="keymap-binding-empty"></span>
-                {/if}
-              </span>
-            </div>
-          {/each}
-        </div>
-      {/each}
-    </div>
+    <ShortcutSettings />
     </div>
   </details>
 
@@ -892,15 +865,6 @@
     color: var(--accent);
   }
 
-  .section-desc kbd {
-    font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
-    font-size: 11px;
-    padding: 2px 5px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--text-primary);
-  }
 
   /* Theme grid */
   .theme-grid {
@@ -1209,62 +1173,6 @@
     color: var(--btn-primary-fg);
   }
 
-  /* Keymap */
-  .keymap-list {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .keymap-category-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    margin-bottom: 8px;
-  }
-
-  .keymap-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-    padding: 6px 0;
-  }
-
-  .keymap-row + .keymap-row {
-    border-top: 1px solid var(--border);
-  }
-
-  .keymap-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .keymap-keys {
-    display: grid;
-    grid-template-columns: minmax(4.5rem, auto) minmax(7.5rem, auto);
-    gap: 8px;
-    justify-items: end;
-    align-items: center;
-  }
-
-  .keymap-binding {
-    font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
-    font-size: 11px;
-    padding: 3px 8px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text-primary);
-    white-space: nowrap;
-  }
-
-  .keymap-binding-empty {
-    min-width: 1px;
-    min-height: 1px;
-  }
 
   /* About */
   .about-info {
@@ -1329,21 +1237,6 @@
 
     .section-content {
       padding: 12px;
-    }
-
-    /* Stack the shortcut description above its keys: the two key columns have
-       4.5rem and 7.5rem floors, so side by side they claim 200px and push the
-       description past the edge, where `body { overflow: hidden }` makes it
-       unreachable rather than scrollable. */
-    .keymap-row {
-      grid-template-columns: 1fr;
-      gap: 4px;
-    }
-
-    .keymap-keys {
-      grid-template-columns: auto auto;
-      justify-content: start;
-      justify-items: start;
     }
   }
 </style>

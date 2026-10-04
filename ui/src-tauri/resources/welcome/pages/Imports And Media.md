@@ -43,6 +43,12 @@ Media imported by URL is filed under `ImportedMedia/`, not scattered across the 
 
 Importing into today's journal instead puts the transcript in the journal, as before, and does not use the folder.
 
+Media imports run one at a time. Each one converts audio and transcribes it with
+the same local model Chat uses, so running several at once would slow all of
+them and Chat. Start as many as you like: later ones wait in **Jobs** as
+*Queued*, start in the order you added them, and can be cancelled while they
+wait. Library indexing also pauses its transcription while an import runs.
+
 Audio notes can keep transcripts so spoken material becomes searchable. Transcription requires a Whisper model and suitable local resources; audio/video import may also need external conversion or download tools. Follow the app's setup and dependency messages rather than assuming every format works on a fresh install.
 
 [[Learning/Flashcards]] shows the shipped image card and explains Anki `.apkg` imports. [[Learning/Reading Shelf]] demonstrates organizing the resulting notes as a collection. See [[Your Files]] before moving assets or originals.

@@ -18,6 +18,17 @@ you work in another graph.
 Use the command palette to discover commands for journals, dates, timestamps,
 imports, themes, graphs, and navigation. On macOS, `Cmd` replaces `Ctrl`.
 
+These are the default keys. Every shortcut is listed in **Settings > Keyboard
+Shortcuts**, grouped by where it works (General, Navigation, Layout, Journal,
+Editor, Library & reading, Flashcards, Menus & dialogs). Press **+** beside an
+action and then the keys you want, remove a key with **×**, or reset it.
+Changes are saved on this device for every graph. If the keys already do
+something else, Grafium names every action using them and asks before moving
+them; resetting an action never takes back a key another action uses now. Keys
+that make typing, undo and menus work, such as Enter, Tab, the arrows, Escape,
+`Ctrl+Z` and `Ctrl+Y`, are listed as built in and cannot be changed. The command
+palette lists every command, including ones you removed all keys from.
+
 Collapsing the left sidebar keeps its main navigation available as an icon rail.
 Use its top button or `Ctrl+B` / `Cmd+B` to expand it again. Zen mode is the
 only layout mode that hides the navigation chrome completely.

@@ -55,8 +55,9 @@ it("shows platform-correct zoom and registered settings hints without claiming A
   flushSync();
   const menu = openMenu(host.querySelector<HTMLElement>(".menu-trigger")!);
   const zoom = menu.querySelector('[aria-label="Zoom in"]');
-  expect(zoom?.getAttribute("title")).toBe("Zoom in (Cmd-=)");
-  expect(zoom?.getAttribute("aria-keyshortcuts")).toBe("Meta+=");
+  // Both default keys: Cmd-= and, on layouts where it needs Shift, Cmd-+.
+  expect(zoom?.getAttribute("title")).toBe("Zoom in (Cmd-= | Cmd-+)");
+  expect(zoom?.getAttribute("aria-keyshortcuts")).toBe("Meta+= Meta+Plus");
   const settings = menu.querySelector('[title="Settings (t s | Alt-S)"]');
   expect(settings?.getAttribute("aria-keyshortcuts")).toBe("Alt+s");
   const about = [...menu.querySelectorAll("button")].find(button => button.textContent?.includes("About"));

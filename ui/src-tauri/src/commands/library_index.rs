@@ -711,7 +711,10 @@ async fn transcribe_local_media(
                 wait_for_slice_turn(
                     || handle.is_cancelled(),
                     || index.settings().map_err(|e| e.to_string()),
-                    || app.state::<LibraryIndexState>().ai_busy.load(Ordering::SeqCst) > 0,
+                    // Chat, search and a media import the user started all
+                    // come before background Library transcription.
+                    || app.state::<LibraryIndexState>().ai_busy.load(Ordering::SeqCst) > 0
+                        || crate::commands::media::media_import_running(),
                     &waiting,
                 )
             },

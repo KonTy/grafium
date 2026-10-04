@@ -15,6 +15,7 @@
   import { sha256 } from "@noble/hashes/sha256";
   import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
   import { findQuoteSegment, normalizeLibraryQuote, type QuoteSegment } from "../lib/privateBookQuoteMatch";
+  import { onShortcutsChanged, shortcutBindings } from "../lib/shortcutRegistry";
   let { bookId, onActivity, onProgress, actions, bookmarks, bookmarkCount = 0, status, onBack, onBookmark }: {
     bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void;
     actions?: Snippet; bookmarks?: Snippet; status?: Snippet; onBack?: () => void; onBookmark?: () => void;
@@ -167,6 +168,7 @@
     bootstrap = () => {
       if (!bytes || disposed) return;
       send("bootstrap", { runtime });
+      sendReaderShortcuts();
       frame?.contentWindow?.postMessage({ channel: "grafium-book", token, type: "open",
         bytes, format: "epub", location: book?.position?.locator }, "*", [bytes]);
       bytes = null;
@@ -284,6 +286,14 @@
       stopTheme();
     };
   });
+  // The isolated reader handles its own keys, so give it the current
+  // Bionic and bookmark shortcuts from Settings.
+  function sendReaderShortcuts() {
+    send("shortcuts", {
+      bindings: { "toggle-bionic": shortcutBindings("toggle-bionic"), bookmark: shortcutBindings("bookmark") },
+    });
+  }
+  $effect(() => onShortcutsChanged(sendReaderShortcuts));
   $effect(() => {
     const size = $readerTextSize;
     if (ready && reflowable) untrack(() => send("size", { value: size }));

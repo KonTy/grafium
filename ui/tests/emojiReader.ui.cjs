@@ -81,8 +81,15 @@ async function openFixture(browser, continuous = false, width = 1400, libraryBoo
           case "get_parent_page": return null;
           case "list_pages":
           case "list_page_summaries": return structuredClone(pages);
-          case "search_page_titles": return structuredClone(pages.filter((item) =>
-            item.title.toLowerCase().includes(String(args.query).toLowerCase())));
+          case "search_page_titles":
+            // Tests slow the title search to catch keys pressed while results load.
+            if (window.__searchDelayMs) await new Promise((resolve) => setTimeout(resolve, window.__searchDelayMs));
+            return structuredClone(pages.filter((item) =>
+              item.title.toLowerCase().includes(String(args.query).toLowerCase())));
+          case "pages_tag_tree": return [
+            { key: "astronomy", label: "astronomy", page_id: "tag-astronomy", children: [], descendant_count: 1, updated_at: 5 },
+            { key: "deep sky", label: "deep sky", page_id: "tag-deep-sky", children: [], descendant_count: 1, updated_at: 9 },
+          ];
           case "list_blocks": return structuredClone(state.blocks.filter((block) => block.page_id === args.pageId));
           // The API returns a string, not { content }, and source writes return void.
           case "get_page_source": return state.source;
@@ -102,6 +109,22 @@ async function openFixture(browser, continuous = false, width = 1400, libraryBoo
             block.content = args.content;
             state.source = serialize();
             return;
+          }
+          case "insert_block": {
+            // Mirrors the native insert: number the displayed siblings 0..n.
+            state.writes.push({ cmd, args: structuredClone(args) });
+            const siblings = state.blocks
+              .filter((item) => item.page_id === args.pageId && (item.parent_id ?? null) === (args.parentId ?? null))
+              .sort((a, b) => a.order_index - b.order_index);
+            const at = Math.min(args.position, siblings.length);
+            siblings.forEach((item, index) => { item.order_index = index < at ? index : index + 1; });
+            const block = {
+              ...makeBlock(`created-${++sequence}`, at, args.content),
+              page_id: args.pageId, parent_id: args.parentId ?? null,
+            };
+            state.blocks.push(block);
+            state.source = serialize();
+            return structuredClone(block);
           }
           case "create_block": {
             state.writes.push({ cmd, args: structuredClone(args) });
@@ -499,6 +522,145 @@ async function tablePreservationCase(browser) {
   await finish(fixture, "classic: numeric table sorting preserves rendering and persists both directions");
 }
 
+async function tagAndCommandCase(browser) {
+  const fixture = await openFixture(browser);
+  const { page } = fixture;
+  const labels = () => page.locator(".cm-tooltip-autocomplete .cm-completionLabel").allTextContents();
+  let editor = await editDraft(fixture);
+  // # opens the tag picker straight away: tags first, then other pages.
+  await editor.pressSequentially("Look up #");
+  await page.locator(".cm-tooltip-autocomplete").waitFor();
+  await page.waitForFunction(() => document.querySelectorAll(".cm-tooltip-autocomplete .cm-completionLabel").length >= 3);
+  const all = await labels();
+  assert.deepEqual(all.slice(0, 2), ["#deep sky", "#astronomy"], "existing tags lead, newest first");
+  assert.ok(all.includes("#Space/Orbits"), "other pages follow the tags");
+  // Typing filters by substring, including the middle of a title; what was
+  // typed is offered last, as a new tag.
+  await editor.pressSequentially("sky");
+  await waitForChoices(page, ["#deep sky", "#sky"]);
+  await acceptWithKeyboard(page, "#deep sky");
+  await editor.pressSequentially("and #astro");
+  await waitForChoices(page, ["#astronomy", "#astro"]);
+  await acceptWithKeyboard(page, "#astronomy");
+  // The tag ends with a space, so typing on does not reopen the picker.
+  await editor.pressSequentially("tonight");
+  await saveAndPreview(fixture, "Look up #[[deep sky]] and #astronomy tonight");
+
+  // A namespaced title inside [[...]] never offers / commands.
+  editor = await editDraft(fixture);
+  await editor.pressSequentially("[[Space/");
+  await page.locator(".cm-tooltip-autocomplete .cm-completionLabel").filter({ hasText: "Space/Orbits" }).waitFor();
+  assert.ok((await labels()).every((label) => !label.startsWith("/")), `no commands in the link picker: ${await labels()}`);
+  await editor.press("Escape");
+  await editor.fill("");
+
+  // /time inserts the current time, like Alt+T.
+  await editor.pressSequentially("/tim");
+  await waitForChoices(page, ["/time"]);
+  await acceptWithKeyboard(page, "/time");
+  await page.waitForFunction(() => /^\d{2}:\d{2}$/.test(
+    window.__emojiReader.blocks.find((block) => block.id === "draft")?.content ?? ""));
+  await finish(fixture, "classic: # opens a filtered tag picker, [[ never offers / commands, and /time inserts the time");
+}
+
+async function tagPickerBehaviorCase(browser) {
+  const fixture = await openFixture(browser);
+  const { page } = fixture;
+  const pickerCount = () => page.locator(".cm-tooltip-autocomplete").count();
+  let editor = await editDraft(fixture);
+  // Loose matches never replace a new tag: what was typed comes first.
+  await editor.pressSequentially("Saw #asy");
+  await waitForChoices(page, ["#asy", "#astronomy"]);
+  assert.equal(await page.locator('.cm-tooltip-autocomplete [aria-selected="true"] .cm-completionLabel').innerText(), "#asy");
+  assert.match(await page.locator(".cm-tooltip-autocomplete").innerText(), /new tag/);
+  await acceptWithKeyboard(page, "#asy");
+  await editor.pressSequentially("tonight");
+  await saveAndPreview(fixture, "Saw #asy tonight");
+
+  // Moving into a tag that is already written leaves the picker closed.
+  editor = await editDraft(fixture);
+  await editor.pressSequentially("Tagged #astronomy today");
+  // Escape right after typing past a tag leaves editing, not a menu still loading.
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() =>
+    window.__emojiReader.blocks.find((block) => block.id === "draft")?.content === "Tagged #astronomy today");
+  await page.locator('[data-block-id="draft"] .block-content').first().click();
+  editor = page.locator('[data-block-id="draft"] .cm-content');
+  await editor.waitFor();
+  await page.keyboard.press("End");
+  for (let index = 0; index < " today".length; index++) await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(400);
+  assert.equal(await pickerCount(), 0, "the cursor resting after #astronomy must not open the picker");
+
+  // Clicking another block while the picker shows moves there for good.
+  await page.keyboard.press("End");
+  await editor.pressSequentially(" #ast");
+  await page.locator(".cm-tooltip-autocomplete").waitFor();
+  await page.locator('[data-block-id="prose"] .block-content').first().click();
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest("[data-block-id]")?.getAttribute("data-block-id")),
+    "prose", "the tag picker must not pull focus back to the block it was opened in");
+  await page.keyboard.press("Escape");
+
+  // Enter while suggestions are still loading starts the next block at once.
+  await page.evaluate(() => { window.__searchDelayMs = 600; });
+  editor = await editDraft(fixture);
+  await editor.pressSequentially("Pending #ast");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() =>
+    window.__emojiReader.blocks.find((block) => block.id === "draft")?.content === "Pending #ast");
+  await page.waitForFunction(() => window.__emojiReader.writes.some((write) => write.cmd === "insert_block" || write.cmd === "create_block"));
+  await page.waitForTimeout(900);
+  assert.equal(await pickerCount(), 0, "results that arrive after Enter must not open a picker");
+  assert.notEqual(await page.evaluate(() => document.activeElement?.closest("[data-block-id]")?.getAttribute("data-block-id")),
+    "draft", "focus stays in the new block");
+  await page.evaluate(() => { window.__searchDelayMs = 0; });
+  await finish(fixture, "classic: tag picker keeps typed tags, opens only while typing, never steals focus, and lets Enter through while loading");
+}
+
+async function refreshingMenuEnterCase(browser) {
+  const fixture = await openFixture(browser);
+  const { page } = fixture;
+  await page.evaluate(() => { window.__searchDelayMs = 500; });
+  const editor = await editDraft(fixture);
+  await editor.pressSequentially("[[Orb");
+  await page.locator(".cm-tooltip-autocomplete .cm-completionLabel").filter({ hasText: "Space/Orbits" }).waitFor();
+  // The menu stays on screen, greyed out, while it refreshes for "i": Enter
+  // must not split the block and leave a half-typed link behind.
+  await editor.pressSequentially("i");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(150);
+  const writes = await page.evaluate(() => window.__emojiReader.writes.map((write) => write.cmd));
+  assert.ok(!writes.includes("insert_block") && !writes.includes("create_block"), `no new block: ${writes}`);
+  assert.equal(await editor.innerText(), "[[Orbi");
+  await page.locator(".cm-tooltip-autocomplete:not(.cm-tooltip-autocomplete-disabled) .cm-completionLabel")
+    .filter({ hasText: "Space/Orbits" }).waitFor();
+  await acceptWithKeyboard(page, "Space/Orbits");
+  await page.evaluate(() => { window.__searchDelayMs = 0; });
+  await saveAndPreview(fixture, "[[Space/Orbits]]");
+  await finish(fixture, "classic: Enter waits for a refreshing menu instead of splitting the block");
+}
+
+async function nativePeriodCase(browser) {
+  const fixture = await openFixture(browser);
+  const { page } = fixture;
+  // Settings moved Ctrl+. from the right sidebar to Italic.
+  await page.evaluate(() => localStorage.setItem("grafium.shortcuts.v1", JSON.stringify({
+    version: 1, bindings: { "editor-italic": ["mod+i", "mod+."], "toggle-right-sidebar": ["t r", "mod+shift+b"] },
+  })));
+  await page.reload({ waitUntil: "networkidle" });
+  await page.locator('[data-block-id="draft"]').first().waitFor();
+  const editor = await editDraft(fixture);
+  await editor.pressSequentially("word");
+  await page.keyboard.press("Shift+Home");
+  // On Linux the window takes Ctrl+. first and hands it back through this hook.
+  await page.evaluate(() => window.__toggleReferencePanel());
+  await page.waitForFunction(() => document.querySelector('[data-block-id="draft"] .cm-content')?.textContent === "*word*");
+  assert.equal(await page.locator(".reference-panel").count(), 0, "the right sidebar no longer owns Ctrl+.");
+  await page.evaluate(() => localStorage.removeItem("grafium.shortcuts.v1"));
+  await finish(fixture, "classic: native Ctrl+. reaches the editor action Settings bound it to");
+}
+
 async function wikiPreservationCase(browser) {
   const fixture = await openFixture(browser);
   const { page } = fixture;
@@ -529,7 +691,8 @@ async function wikiPreservationCase(browser) {
         }
       }
     }
-    for (const run of [tablePreservationCase, wikiPreservationCase]) {
+    for (const run of [tablePreservationCase, wikiPreservationCase, tagAndCommandCase, tagPickerBehaviorCase,
+      refreshingMenuEnterCase, nativePeriodCase]) {
       try { await run(browser); }
       catch (error) { failures.push(error); console.error(`FAIL ${run.name}:`, error); }
     }

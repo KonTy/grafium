@@ -3,7 +3,7 @@
   import { PLAYBACK_RATES, mediaPlaybackRate, speechPlaybackRate } from "../lib/readerPlaybackPreferences";
   import { readerTime } from "../lib/privateReader";
   import { formatBinding } from "../lib/shortcuts";
-  import { BOOKMARK_SHORTCUT } from "../lib/readerHotkeys";
+  import { shortcutBindings } from "../lib/shortcutRegistry";
   let { onOpen, bookId }: { onOpen?: (bookId: string) => void; bookId?: string } = $props();
   let busy = $state(false);
   let stopping = $state(false);
@@ -52,7 +52,9 @@
         <button disabled={busy || stopping || !canSeek || $privatePlayback.status === "loading"} aria-label="Back 15 seconds" onclick={() => run(() => skipPrivateAudio(-15000))}>−15s</button>
         <button disabled={busy || stopping || !canSeek || $privatePlayback.status === "loading"} aria-label="Forward 15 seconds" onclick={() => run(() => skipPrivateAudio(15000))}>+15s</button>
       {/if}
-      <button title={`Bookmark playback (${formatBinding(BOOKMARK_SHORTCUT)} when no visual book is open)`} disabled={busy || $privatePlayback.status === "loading"} onclick={() => run(bookmarkPrivatePlayback, "Bookmark saved on this device.")}>Bookmark</button>
+      <button title={shortcutBindings("bookmark").length
+        ? `Bookmark playback (${shortcutBindings("bookmark").map(formatBinding).join(" | ")} when no visual book is open)`
+        : "Bookmark playback"} disabled={busy || $privatePlayback.status === "loading"} onclick={() => run(bookmarkPrivatePlayback, "Bookmark saved on this device.")}>Bookmark</button>
       <button disabled={busy || stopping || $privatePlayback.status === "loading" || $privatePlayback.status === "stopped"} onclick={() => run($privatePlayback.status === "playing" ? pausePrivatePlayback : resumePrivatePlayback)}>{$privatePlayback.status === "playing" ? "Pause" : "Resume"}</button>
       <button class="stop" disabled={stopping} onclick={stop}>{stopping ? "Stopping…" : "Stop"}</button>
     </div>

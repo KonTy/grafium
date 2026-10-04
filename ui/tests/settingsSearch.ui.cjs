@@ -128,6 +128,102 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     await page.locator(".chat-view").waitFor();
     assert.equal(await page.locator(".chat-view textarea").inputValue(), "Keep this conversation draft");
     console.log("PASS Alt+C opens Chat from Settings; old Ctrl combos do not");
+
+    // Shortcuts can be changed in Settings, are saved on this device, and work at once.
+    await page.keyboard.press("Alt+s");
+    await search.waitFor();
+    await search.fill("");
+    const shortcutSection = page.locator(".settings-page > details.settings-section").filter({
+      has: page.locator(".section-title", { hasText: "Keyboard Shortcuts" }),
+    });
+    await shortcutSection.locator("summary").click();
+    const chatRow = shortcutSection.locator('[data-shortcut-id="go-chat"]');
+    await chatRow.getByRole("button", { name: "Add a shortcut for Go to Chat tab" }).click();
+    await page.keyboard.press("Control+Alt+h");
+    await chatRow.locator(".keymap-binding", { hasText: "Ctrl-Alt-H" }).waitFor();
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grafium.shortcuts.v1"))),
+      { version: 1, bindings: { "go-chat": ["alt+c", "mod+alt+h"] } });
+    await page.locator("body").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("Control+Alt+h");
+    await page.locator(".chat-view").waitFor();
+    console.log("PASS a recorded shortcut is saved on this device and works straight away");
+
+    await page.keyboard.press("Alt+s");
+    await search.waitFor();
+    if (!(await shortcutSection.evaluate((el) => el.open))) await shortcutSection.locator("summary").click();
+    await chatRow.getByRole("button", { name: "Remove Alt-C from Go to Chat tab" }).click();
+    await search.focus();
+    await page.keyboard.press("Alt+c");
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator(".chat-view").isVisible(), false, "a removed shortcut stops working");
+    await chatRow.getByRole("button", { name: "Add a shortcut for Go to Chat tab" }).click();
+    await page.keyboard.press("Control+k");
+    const conflict = chatRow.locator(".keymap-conflict");
+    await conflict.waitFor();
+    assert.match(await conflict.innerText(), /Ctrl-K is used by Global search/);
+    await conflict.getByRole("button", { name: "Use here", exact: true }).click();
+    await chatRow.locator(".keymap-binding", { hasText: "Ctrl-K" }).waitFor();
+    assert.match(await shortcutSection.locator('[data-shortcut-id="search-global"]').innerText(), /None/);
+    await chatRow.getByRole("button", { name: "Add a shortcut for Go to Chat tab" }).click();
+    await page.keyboard.press("Enter");
+    await chatRow.locator(".keymap-notice").waitFor();
+    assert.match(await chatRow.locator(".keymap-notice").innerText(), /can't be changed/);
+    const graphRow = shortcutSection.locator('[data-shortcut-id="go-graph"]');
+    await graphRow.getByRole("button", { name: "Add a shortcut for Go to graph view" }).click();
+    await page.keyboard.press("x");
+    await page.keyboard.press("y");
+    await graphRow.locator(".keymap-binding", { hasText: "x y" }).waitFor();
+    console.log("PASS removing, moving a key in use, refusing typing keys and recording sequences");
+
+    // Getting a default back never takes it from the action that has it now.
+    const globalRow = shortcutSection.locator('[data-shortcut-id="search-global"]');
+    await globalRow.getByRole("button", { name: "Reset Global search to its default" }).click();
+    assert.match(await globalRow.locator(".keymap-notice").innerText(), /Ctrl-K stays with Go to Chat tab/);
+    assert.match(await globalRow.innerText(), /None/);
+
+    // The window takes Ctrl-Z and Ctrl-. before the page on Linux: while
+    // recording, they go to the recorder instead of undoing or toggling.
+    await page.evaluate(() => {
+      window.__appUndoCount = 0;
+      window.addEventListener("app-undo", () => { window.__appUndoCount += 1; });
+    });
+    await graphRow.getByRole("button", { name: "Add a shortcut for Go to graph view" }).click();
+    await page.evaluate(() => window.__handleNativeUndo());
+    assert.match(await graphRow.locator(".keymap-notice").innerText(), /undoes, so it can't be changed/);
+    await graphRow.getByRole("button", { name: "Add a shortcut for Go to graph view" }).click();
+    await page.keyboard.press("Control+z");
+    assert.match(await graphRow.locator(".keymap-notice").innerText(), /undoes, so it can't be changed/);
+    assert.equal(await page.evaluate(() => window.__appUndoCount), 0, "recording a shortcut must not undo anything");
+    await chatRow.getByRole("button", { name: "Add a shortcut for Go to Chat tab" }).click();
+    await page.evaluate(() => window.__toggleReferencePanel());
+    assert.match(await chatRow.locator(".keymap-conflict").innerText(), /Ctrl-\. is used by Toggle right sidebar/);
+    await chatRow.locator(".keymap-conflict").getByRole("button", { name: "Use here", exact: true }).click();
+    await chatRow.locator(".keymap-binding", { hasText: "Ctrl-." }).waitFor();
+    // Outside the recorder, Ctrl-. runs whatever it is bound to now.
+    await search.focus();
+    await page.evaluate(() => window.__toggleReferencePanel());
+    await page.locator(".chat-view").waitFor();
+    console.log("PASS native Ctrl-Z/Ctrl-. reach the recorder, follow Settings, and resets keep moved keys");
+
+    // Commands without keys stay in the command palette.
+    await page.keyboard.press("Control+Shift+p");
+    await page.getByPlaceholder("Run a command…").fill("Global search");
+    const paletteRow = page.locator(".command-palette-item", { hasText: "Global search" });
+    await paletteRow.waitFor();
+    assert.equal((await paletteRow.locator(".command-palette-keys").innerText()).trim(), "");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Alt+s");
+    await search.waitFor();
+    if (!(await shortcutSection.evaluate((el) => el.open))) await shortcutSection.locator("summary").click();
+    console.log("PASS the command palette lists actions whose keys were removed");
+
+    await shortcutSection.getByRole("button", { name: "Reset all shortcuts", exact: true }).click();
+    await shortcutSection.getByRole("button", { name: "Reset all", exact: true }).click();
+    await chatRow.locator(".keymap-binding", { hasText: "Alt-C" }).waitFor();
+    assert.equal(await chatRow.locator(".keymap-binding").count(), 1);
+    assert.equal(await graphRow.locator(".keymap-binding", { hasText: "x y" }).count(), 0);
+    assert.equal(await shortcutSection.locator(".keymap-category-title", { hasText: "Journal" }).count(), 1);
+    console.log("PASS reset all restores the defaults; journal shortcuts have their own section");
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();
