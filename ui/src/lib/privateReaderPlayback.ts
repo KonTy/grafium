@@ -4,6 +4,7 @@ import { androidReaderRequest, isAndroidReader, normalizeAndroidReaderPosition, 
 import { refreshPrivateLibrary } from "./privateReader";
 import { saveLibraryCheckpoint, type LibraryProgress } from "./library";
 import { webStudyUrl } from "./studySources";
+import { unavailableSourceMessage } from "./libraryLocations";
 import { applyReaderPlaybackRate, mediaPlaybackRate, speechPlaybackRate, setMediaPlaybackRate, setSpeechPlaybackRate, validateReaderPlaybackRate } from "./readerPlaybackPreferences";
 
 export interface ReaderPlaybackState {
@@ -113,7 +114,7 @@ export function validatePrivateMediaURL(value: string): string {
 }
 
 async function openPrivateAudio(book: ReaderBook, saved = book.position, autoplay = true): Promise<void> {
-  if (!book.available) throw new Error("This source is unavailable. Relink it before playing.");
+  if (!book.available) throw new Error(unavailableSourceMessage(book, "play"));
   if (book.kind !== "audio") throw new Error("This book is not an audiobook.");
   const remote = book.sourceUrl ? webStudyUrl(book.sourceUrl).href : null;
   if (remote && isAndroidReader()) throw new Error("Open this network audio in Library. Android network media uses the foreground player, not the offline audio service.");

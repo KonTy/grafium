@@ -6,6 +6,7 @@ import { claimPrivateNarration, updatePrivateNarration } from "./privateReaderPl
 import { androidReaderRequest, isAndroidReader } from "./privateReaderAndroid";
 import { canonicalNarrationBatches, collectPrivateSegments, startAndroidPrivateNarration, type CanonicalNarrationSegment } from "./privateReaderSegments";
 import { saveLibraryCheckpoint } from "./library";
+import { unavailableSourceMessage } from "./libraryLocations";
 import { applyReaderPlaybackRate, speechPlaybackRate } from "./readerPlaybackPreferences";
 
 export interface PrivateVoiceManifest {
@@ -58,6 +59,7 @@ export async function startPrivateReadAloud(bookId: string, locator?: BookLocati
   if (isAndroidReader()) return startAndroidPrivateNarration(bookId, locator === true,
     typeof locator === "object" ? locator : undefined);
   const book = get(privateLibrary).books.find(item => item.id === bookId);
+  if (book?.disconnected) throw new Error(unavailableSourceMessage(book, "read aloud"));
   if (!book?.available || book.kind !== "epub") throw new Error("Choose an available private EPUB first.");
   const request = ++generation;
   const audio = new Audio();

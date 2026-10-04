@@ -44,25 +44,61 @@ impl ReaderState {
     }
 
     pub fn rescan(&self, directory: PathBuf) -> ReaderResult<ReaderSnapshot> {
-        // Slow external storage traversal must not hold the checkpoint mutex.
-        let job = self.with_store(directory.clone(), |store| store.prepare_scan());
-        let result = job.and_then(store::ScanJob::run);
-        self.with_store(directory, |store| store.finish_scan(result))
+        self.scan_with(directory, |store| store.prepare_scan(), store::ScanJob::run)
     }
 
-    pub fn set_library(&self, directory: PathBuf, path: String) -> ReaderResult<ReaderSnapshot> {
-        self.set_library_with_scan(directory, path, store::ScanJob::run)
+    pub fn add_location(&self, directory: PathBuf, path: String) -> ReaderResult<ReaderSnapshot> {
+        self.add_location_with_scan(directory, path, store::ScanJob::run)
     }
 
-    fn set_library_with_scan(
+    fn add_location_with_scan(
         &self,
         directory: PathBuf,
         path: String,
-        scan: impl FnOnce(store::ScanJob) -> ReaderResult<store::ScanResult>,
+        scan: impl Fn(store::ScanJob) -> ReaderResult<store::ScanResult>,
     ) -> ReaderResult<ReaderSnapshot> {
-        let generation = self.with_store(directory.clone(), |store| Ok(store.generation()))?;
-        let result = scan(store::ScanJob::library(path, generation)?)?;
-        self.with_store(directory, |store| store.finish_set_library(result))
+        self.scan_with(
+            directory,
+            |store| store.prepare_add_location(path.clone()),
+            scan,
+        )
+    }
+
+    pub fn move_location(
+        &self,
+        directory: PathBuf,
+        from: String,
+        to: String,
+    ) -> ReaderResult<ReaderSnapshot> {
+        self.scan_with(
+            directory,
+            |store| store.prepare_move_location(&from, to.clone()),
+            store::ScanJob::run,
+        )
+    }
+
+    pub fn remove_location(&self, directory: PathBuf, path: &str) -> ReaderResult<ReaderSnapshot> {
+        self.with_store(directory, |store| store.remove_location(path))
+    }
+
+    /// Slow external storage traversal must not hold the checkpoint mutex. A
+    /// scan overtaken by another registration change is planned again.
+    fn scan_with(
+        &self,
+        directory: PathBuf,
+        prepare: impl Fn(&store::ReaderStore) -> ReaderResult<store::ScanJob>,
+        scan: impl Fn(store::ScanJob) -> ReaderResult<store::ScanResult>,
+    ) -> ReaderResult<ReaderSnapshot> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let job = self.with_store(directory.clone(), |store| prepare(store))?;
+            let result = scan(job);
+            match self.with_store(directory.clone(), |store| store.finish_scan(result)) {
+                Err(error) if error == store::RETRY_SCAN && attempt < 3 => continue,
+                finished => return finished,
+            }
+        }
     }
 
     pub fn relink(
@@ -71,12 +107,14 @@ impl ReaderState {
         book_id: &str,
         relative_path: String,
         confirm_replacement: bool,
+        location: Option<String>,
     ) -> ReaderResult<ReaderSnapshot> {
         self.relink_with_scan(
             directory,
             book_id,
             relative_path,
             confirm_replacement,
+            location,
             store::ScanJob::run,
         )
     }
@@ -87,10 +125,13 @@ impl ReaderState {
         book_id: &str,
         relative_path: String,
         confirm_replacement: bool,
+        location: Option<String>,
         scan: impl FnOnce(store::ScanJob) -> ReaderResult<store::ScanResult>,
     ) -> ReaderResult<ReaderSnapshot> {
         source::relative(&relative_path)?;
-        let job = self.with_store(directory.clone(), |store| store.prepare_scan())?;
+        let job = self.with_store(directory.clone(), |store| {
+            store.prepare_relink(book_id, location)
+        })?;
         let result = scan(job)?;
         self.with_store(directory, |store| {
             store.finish_relink(result, book_id, relative_path, confirm_replacement)
@@ -98,8 +139,8 @@ impl ReaderState {
     }
 
     pub fn read_epub(&self, directory: PathBuf, book_id: &str) -> ReaderResult<Vec<u8>> {
-        let file = self.with_store(directory, |store| store.open_media(book_id, None))?;
-        store::ReaderStore::read_epub_file(file)
+        let source = self.with_store(directory, |store| store.media_source(book_id, None))?;
+        store::ReaderStore::read_epub_file(source.open()?)
     }
 
     pub fn media_url(
@@ -108,9 +149,10 @@ impl ReaderState {
         book_id: &str,
         track_id: &str,
     ) -> ReaderResult<String> {
-        self.with_store(directory, |store| {
-            store.open_media(book_id, Some(track_id)).map(|_| ())
+        let source = self.with_store(directory, |store| {
+            store.media_source(book_id, Some(track_id))
         })?;
+        source.open()?;
         let mut runtime = self
             .runtime
             .lock()

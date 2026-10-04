@@ -25,11 +25,36 @@ corner button reveals the reading bar, including bookmarks and **Fullscreen**
 Grafium theme; illustrations retain their original colors. See
 [[Help - Private Reader]] for text sizing, gestures, and read-aloud options.
 
-Choose a local folder in **Settings > Library location** for EPUBs, audiobooks,
-downloaded podcast audio, and supported videos. Files stay in that folder:
+Add folders in **Settings > Library > Library locations** for EPUBs,
+audiobooks, downloaded podcast audio, and supported videos. A Library can use
+several locations at once: a folder on this computer, an external drive, an SD
+card, or a file-server share mounted as a folder. Files stay where they are:
 Library does not import them into the graph or modify the originals.
 Use **Rescan** after adding files. Missing or replaced sources retain their
 history and require reconnecting or explicitly relinking.
+
+## Drives that are not plugged in
+
+When a location's drive is unplugged, its SD card is out, or its share is not
+mounted, its items stay in Library marked **Disconnected**. Their progress,
+bookmarks, and search index are kept, and **Inside your Library** still finds
+their indexed text. A notice at the top of Library names the location.
+Opening such an item first checks the location again. If it is still missing,
+Grafium asks you to plug in the drive or connect to the file server; open the
+item's page to see its history and use **Check again** once it is connected.
+Indexing skips disconnected items and counts them as waiting instead of
+failed; it continues when the location is back.
+
+Plugging a drive back in needs no relinking, even when the system gives it a
+new device name. Items are matched again by their path, size, and modification
+time. If the drive is now mounted at a different path, use **Change folder…**
+for that location: its items keep their history. An empty folder where a drive
+used to be mounted is treated as disconnected, not as a Library whose files
+were all deleted.
+
+**Remove…** forgets a location together with its items' progress, bookmarks,
+and search index, after you confirm. It never touches the files in the folder.
+To keep that history, leave the location in the list while it is disconnected.
 
 You can also add supported YouTube links and direct HTTP(S) audio/video links.
 These are bookmarks to online media, not downloads. Playback contacts the

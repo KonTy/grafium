@@ -6,8 +6,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_LOCATIONS: usize = 32;
+pub(super) const RETRY_SCAN: &str = "Library registrations changed during scan; retry the scan";
+const MISSING_SOURCE: &str =
+    "Source missing, inaccessible, or replaced. History is retained; relink explicitly.";
+const RESTORED_SOURCE: &str =
+    "Restored from a backup. History is retained; relink it to confirm its source.";
+const REMOVED_LOCATION: &str =
+    "Not in any current Library location. History is retained; relink it to a file in one of your locations.";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -16,34 +24,99 @@ struct Binding {
     identity: source::RootIdentity,
 }
 
+/// A location as registered when its scan was planned.
+struct Planned {
+    path: String,
+    /// Files registered from it, checked one by one when there is no full
+    /// discovery. They also tell an emptied mount point from a new folder.
+    registered: Vec<String>,
+    discover: bool,
+}
+
+enum Change {
+    Add(String),
+    Move { from: String, to: String },
+}
+
 pub struct ScanJob {
-    root: Binding,
-    directory: cap_std::fs::Dir,
+    planned: Vec<Planned>,
+    change: Option<Change>,
     generation: u64,
 }
 
+enum Observation {
+    Disconnected(String),
+    Connected {
+        identity: source::RootIdentity,
+        stable_ids: bool,
+        files: HashMap<String, source::Fingerprint>,
+        found: Option<Vec<source::Discovered>>,
+        error: Option<String>,
+    },
+}
+
 pub struct ScanResult {
-    root: Binding,
-    found: Vec<source::Discovered>,
+    observed: Vec<(String, Observation)>,
+    change: Option<Change>,
     generation: u64,
 }
 
 impl ScanJob {
-    pub fn library(path: String, generation: u64) -> ReaderResult<Self> {
-        let (directory, identity) = source::root(&path)?;
-        Ok(Self {
-            root: Binding { path, identity },
-            directory,
-            generation,
-        })
-    }
-
+    /// Runs without the store lock: external drives and shares can be slow.
     pub fn run(self) -> ReaderResult<ScanResult> {
         Ok(ScanResult {
-            found: source::discover(&self.directory)?,
-            root: self.root,
+            observed: self
+                .planned
+                .iter()
+                .map(|planned| (planned.path.clone(), observe(planned)))
+                .collect(),
+            change: self.change,
             generation: self.generation,
         })
+    }
+}
+
+fn observe(planned: &Planned) -> Observation {
+    let (dir, identity) = match source::probe(&planned.path, source::PROBE_TIMEOUT) {
+        Ok(root) => root,
+        Err(reason) => return Observation::Disconnected(reason),
+    };
+    // A drive or share that is not mounted often leaves its empty mount
+    // point behind; that is not a Library whose every item was deleted.
+    if !planned.registered.is_empty() && source::is_empty(&dir) {
+        return Observation::Disconnected(source::EMPTY_LOCATION.into());
+    }
+    let stable_ids = source::stable_file_ids(&dir);
+    let (found, error) = if planned.discover {
+        match source::discover(&dir) {
+            Ok(found) => (Some(found), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
+    let files = match &found {
+        Some(found) => found
+            .iter()
+            .flat_map(|book| book.files.iter().cloned())
+            .collect(),
+        None => planned
+            .registered
+            .iter()
+            .filter_map(|path| {
+                source::open(&dir, path)
+                    .and_then(|file| source::Fingerprint::of(&file))
+                    .ok()
+                    .map(|fingerprint| (path.clone(), fingerprint))
+            })
+            .collect(),
+    };
+    Observation::Connected {
+        identity,
+        stable_ids,
+        files,
+        found,
+        error,
     }
 }
 
@@ -71,12 +144,72 @@ fn authorized_by_default() -> bool {
     true
 }
 
+/// A local item belongs to the location whose folder it was found in.
+fn belongs(stored: &StoredBook, path: &str) -> bool {
+    stored.book.source_url.is_none() && stored.root.as_ref().is_some_and(|root| root.path == path)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Document {
     version: u32,
+    /// The single Library folder of version 2 and earlier; read only to
+    /// become the first location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     library: Option<Binding>,
+    #[serde(default)]
+    locations: Vec<Binding>,
     books: Vec<StoredBook>,
+}
+
+impl Document {
+    fn migrate(&mut self) {
+        if let Some(library) = self.library.take() {
+            if !self.locations.iter().any(|l| l.path == library.path) {
+                self.locations.insert(0, library);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Reach {
+    /// Reachable; a scan may still have failed part-way.
+    Connected(Option<String>),
+    Disconnected(String),
+}
+
+/// A registered file resolved under the store lock and opened after it is
+/// released, so a slow location cannot block other Library requests.
+pub struct MediaSource {
+    location: Binding,
+    registered_under: Option<source::RootIdentity>,
+    path: String,
+    fingerprint: source::Fingerprint,
+}
+
+impl MediaSource {
+    pub fn open(&self) -> ReaderResult<File> {
+        let (dir, identity) = source::probe(&self.location.path, source::PROBE_TIMEOUT)
+            .map_err(|reason| unreachable_location(&self.location.path, &reason))?;
+        let strict = identity == self.location.identity
+            && self.registered_under.as_ref() == Some(&identity)
+            && source::stable_file_ids(&dir);
+        let opened = source::open(&dir, &self.path)?;
+        if !self
+            .fingerprint
+            .matches(&source::Fingerprint::of(&opened)?, strict)
+        {
+            return Err("Source changed; explicit replacement confirmation is required".into());
+        }
+        Ok(opened)
+    }
+}
+
+fn unreachable_location(path: &str, reason: &str) -> String {
+    format!(
+        "The Library location {path} is not available ({reason}). Plug in the drive or connect to the share, then try again."
+    )
 }
 
 /// This database lives only in application data; it has no graph dependency.
@@ -85,6 +218,7 @@ pub struct ReaderStore {
     document: Document,
     error: Option<String>,
     generation: u64,
+    reach: HashMap<String, Reach>,
 }
 
 impl ReaderStore {
@@ -109,15 +243,18 @@ impl ReaderStore {
                 if bytes.len() as u64 > MAX_STATE_BYTES {
                     return Err("Private reader database exceeds the size limit".into());
                 }
-                let document: Document = serde_json::from_slice(&bytes).map_err(|e| {
+                let mut document: Document = serde_json::from_slice(&bytes).map_err(|e| {
                     format!("Private reader database is damaged; it has not been reset: {e}")
                 })?;
+                // In memory only: the file is rewritten by the next change.
+                document.migrate();
                 validate(&document)?;
                 document
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Document {
                 version: VERSION,
                 library: None,
+                locations: Vec::new(),
                 books: Vec::new(),
             },
             Err(e) => return Err(e.to_string()),
@@ -127,6 +264,7 @@ impl ReaderStore {
             document,
             error: None,
             generation: 0,
+            reach: HashMap::new(),
         };
         // Availability is always rechecked; persisted success is never authority.
         store.refresh_availability();
@@ -134,35 +272,109 @@ impl ReaderStore {
     }
 
     pub fn snapshot(&self) -> ReaderSnapshot {
+        let books = self
+            .document
+            .books
+            .iter()
+            .map(|stored| {
+                let mut book = stored.book.clone();
+                let location = stored
+                    .root
+                    .as_ref()
+                    .filter(|_| stored.book.source_url.is_none())
+                    .and_then(|root| self.location(&root.path));
+                book.location = location.map(|l| l.path.clone());
+                book.disconnected = location.is_some_and(|l| self.is_disconnected(&l.path));
+                book
+            })
+            .collect();
         ReaderSnapshot {
-            library_path: self.document.library.as_ref().map(|r| r.path.clone()),
-            books: self.document.books.iter().map(|b| b.book.clone()).collect(),
+            library_path: self.document.locations.first().map(|l| l.path.clone()),
+            locations: self
+                .document
+                .locations
+                .iter()
+                .map(|location| {
+                    let reach = self.reach.get(&location.path);
+                    ReaderLocation {
+                        path: location.path.clone(),
+                        connected: matches!(reach, Some(Reach::Connected(_))),
+                        reason: match reach {
+                            Some(Reach::Connected(error)) => error.clone(),
+                            Some(Reach::Disconnected(reason)) => Some(reason.clone()),
+                            None => Some("Not checked yet".into()),
+                        },
+                        items: self
+                            .document
+                            .books
+                            .iter()
+                            .filter(|b| belongs(b, &location.path))
+                            .count(),
+                    }
+                })
+                .collect(),
+            books,
             error: self.error.clone(),
         }
     }
 
-    pub fn index_records(&self) -> ReaderResult<(Option<String>, Vec<ReaderIndexRecord>)> {
+    fn location(&self, path: &str) -> Option<&Binding> {
+        self.document.locations.iter().find(|l| l.path == path)
+    }
+
+    fn is_disconnected(&self, path: &str) -> bool {
+        matches!(self.reach.get(path), Some(Reach::Disconnected(_)))
+    }
+
+    /// Items on disconnected locations, which keep their index entries.
+    pub fn disconnected_ids(&self) -> HashSet<String> {
+        self.document
+            .books
+            .iter()
+            .filter(|stored| {
+                stored
+                    .root
+                    .as_ref()
+                    .is_some_and(|root| belongs(stored, &root.path) && self.is_disconnected(&root.path))
+            })
+            .map(|stored| stored.book.id.clone())
+            .collect()
+    }
+
+    /// Whether any location is configured, and every item with the folder
+    /// its files are relative to.
+    pub fn index_records(&self) -> ReaderResult<(bool, Vec<ReaderIndexRecord>)> {
         Ok((
-            self.document.library.as_ref().map(|b| b.path.clone()),
+            !self.document.locations.is_empty(),
             self.document
                 .books
                 .iter()
-                .map(|stored| ReaderIndexRecord {
-                    book: stored.book.clone(),
-                    files: stored
-                        .files
-                        .iter()
-                        .map(|file| ReaderIndexFile {
-                            track_id: (stored.book.kind != ReaderKind::Epub)
-                                .then(|| file.id.clone()),
-                            relative_path: file.path.clone(),
-                            available: stored.book.source_url.is_none()
-                                && stored.book.tracks.iter().find(|t| t.id == file.id).map_or(
-                                    stored.book.kind == ReaderKind::Epub && stored.book.available,
-                                    |t| t.available,
-                                ),
-                        })
-                        .collect(),
+                .map(|stored| {
+                    let root = stored
+                        .root
+                        .as_ref()
+                        .filter(|root| belongs(stored, &root.path) && self.location(&root.path).is_some())
+                        .map(|root| root.path.clone());
+                    ReaderIndexRecord {
+                        disconnected: root.as_ref().is_some_and(|path| self.is_disconnected(path)),
+                        root,
+                        book: stored.book.clone(),
+                        files: stored
+                            .files
+                            .iter()
+                            .map(|file| ReaderIndexFile {
+                                track_id: (stored.book.kind != ReaderKind::Epub)
+                                    .then(|| file.id.clone()),
+                                relative_path: file.path.clone(),
+                                available: stored.book.source_url.is_none()
+                                    && stored.book.tracks.iter().find(|t| t.id == file.id).map_or(
+                                        stored.book.kind == ReaderKind::Epub
+                                            && stored.book.available,
+                                        |t| t.available,
+                                    ),
+                            })
+                            .collect(),
+                    }
                 })
                 .collect(),
         ))
@@ -180,254 +392,244 @@ impl ReaderStore {
         Ok(())
     }
 
-    pub fn set_library(&mut self, path: String) -> ReaderResult<ReaderSnapshot> {
-        let scan = ScanJob::library(path, self.generation)?.run()?;
-        self.finish_set_library(scan)
-    }
-
+    #[cfg(test)]
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub fn finish_set_library(&mut self, scan: ScanResult) -> ReaderResult<ReaderSnapshot> {
-        self.finish_scan_inner(Ok(scan), true)
+    fn registered_files(&self, path: &str) -> Vec<String> {
+        self.document
+            .books
+            .iter()
+            .filter(|stored| belongs(stored, path))
+            .flat_map(|stored| stored.files.iter().map(|file| file.path.clone()))
+            .collect()
     }
 
-    fn active_root(&self) -> ReaderResult<(cap_std::fs::Dir, &Binding)> {
-        let binding = self
-            .document
-            .library
-            .as_ref()
-            .ok_or("Choose a library folder in Settings")?;
-        let (dir, identity) = source::root(&binding.path)?;
-        if identity != binding.identity {
-            return Err("The library folder was replaced; select it again and explicitly relink affected books".into());
+    fn plan(&self, path: &str, discover: bool) -> Planned {
+        Planned {
+            path: path.to_owned(),
+            registered: self.registered_files(path),
+            discover,
         }
-        Ok((dir, binding))
     }
 
+    /// Recheck every location's registered files without discovering new
+    /// ones. Changes are kept in memory until the next write.
     fn refresh_availability(&mut self) {
-        let root = self
-            .active_root()
-            .map(|(dir, binding)| (dir, binding.clone()));
-        match root {
-            Ok((dir, binding)) => {
-                self.error = None;
-                for book in &mut self.document.books {
-                    if book.book.source_url.is_some() {
-                        book.book.available = true;
-                        book.book.error = None;
-                        continue;
-                    }
-                    let same_root = book.authorized && book.root.as_ref() == Some(&binding);
-                    let mut all = same_root;
-                    for file in &book.files {
-                        let available = same_root
-                            && source::open(&dir, &file.path)
-                                .and_then(|f| source::Fingerprint::of(&f))
-                                .is_ok_and(|f| f == file.fingerprint);
-                        all &= available;
-                        if let Some(track) = book.book.tracks.iter_mut().find(|t| t.id == file.id) {
-                            track.available = available;
-                        }
-                    }
-                    book.book.available = all && !book.files.is_empty();
-                    book.book.error = (!book.book.available).then(|| "Source missing, inaccessible, or replaced. History is retained; relink explicitly.".into());
-                }
-            }
-            Err(error) => {
-                self.error = self.document.library.as_ref().map(|_| error);
-                for book in &mut self.document.books {
-                    if book.book.source_url.is_some() {
-                        book.book.available = true;
-                        book.book.error = None;
-                        continue;
-                    }
-                    book.book.available = false;
-                    book.book.error = Some("Library unavailable; history is retained".into());
-                    for track in &mut book.book.tracks {
-                        track.available = false;
-                    }
-                }
-            }
-        }
+        let observed = self
+            .document
+            .locations
+            .iter()
+            .map(|location| {
+                let planned = self.plan(&location.path, false);
+                (planned.path.clone(), observe(&planned))
+            })
+            .collect();
+        let mut document = self.document.clone();
+        let reach = apply(&mut document, observed).1;
+        settle_unlocated(&mut document);
+        self.document = document;
+        self.reach = reach.into_iter().collect();
+        self.error = None;
     }
 
+    #[cfg(test)]
     pub fn rescan(&mut self) -> ReaderResult<ReaderSnapshot> {
         let result = self.prepare_scan().and_then(ScanJob::run);
         self.finish_scan(result)
     }
 
     pub fn prepare_scan(&self) -> ReaderResult<ScanJob> {
-        let (directory, root) = self.active_root()?;
         Ok(ScanJob {
-            directory,
-            root: root.clone(),
+            planned: self
+                .document
+                .locations
+                .iter()
+                .map(|location| self.plan(&location.path, true))
+                .collect(),
+            change: None,
             generation: self.generation,
         })
+    }
+
+    #[cfg(test)]
+    pub fn add_location(&mut self, path: String) -> ReaderResult<ReaderSnapshot> {
+        let result = self.prepare_add_location(path)?.run();
+        self.finish_scan(result)
+    }
+
+    /// Only the new folder is scanned; items registered there before, while
+    /// it was not a location, are attached to it again.
+    pub fn prepare_add_location(&self, path: String) -> ReaderResult<ScanJob> {
+        let path = location_path(&path)?;
+        if self.document.locations.len() >= MAX_LOCATIONS {
+            return Err(format!("A Library can have at most {MAX_LOCATIONS} locations"));
+        }
+        self.check_overlap(&path, None)?;
+        Ok(ScanJob {
+            planned: vec![self.plan(&path, true)],
+            change: Some(Change::Add(path)),
+            generation: self.generation,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn move_location(&mut self, from: &str, to: String) -> ReaderResult<ReaderSnapshot> {
+        let result = self.prepare_move_location(from, to)?.run();
+        self.finish_scan(result)
+    }
+
+    /// Point a location at another folder, for example where a drive is now
+    /// mounted. Its items keep their history and are matched by relative
+    /// path, size and modification time.
+    pub fn prepare_move_location(&self, from: &str, to: String) -> ReaderResult<ScanJob> {
+        let to = location_path(&to)?;
+        if self.location(from).is_none() {
+            return Err("Unknown Library location".into());
+        }
+        if to == from {
+            return Err("That folder is already this location".into());
+        }
+        self.check_overlap(&to, Some(from))?;
+        let mut planned = self.plan(from, true);
+        planned.path = to.clone();
+        Ok(ScanJob {
+            planned: vec![planned],
+            change: Some(Change::Move {
+                from: from.to_owned(),
+                to,
+            }),
+            generation: self.generation,
+        })
+    }
+
+    fn check_overlap(&self, path: &str, except: Option<&str>) -> ReaderResult<()> {
+        for location in &self.document.locations {
+            if Some(location.path.as_str()) == except {
+                continue;
+            }
+            if location.path == path {
+                return Err("That folder is already a Library location".into());
+            }
+            if Path::new(path).starts_with(&location.path) || Path::new(&location.path).starts_with(path) {
+                return Err(format!(
+                    "That folder overlaps the Library location {}. Choose a folder that neither contains it nor is inside it.",
+                    location.path
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget a location and every item found in it, with its reading
+    /// history. Nothing in the folder itself is touched.
+    pub fn remove_location(&mut self, path: &str) -> ReaderResult<ReaderSnapshot> {
+        if self.location(path).is_none() {
+            return Err("Unknown Library location".into());
+        }
+        let mut document = self.document.clone();
+        document.locations.retain(|location| location.path != path);
+        document.books.retain(|stored| !belongs(stored, path));
+        self.commit(document)?;
+        self.reach.remove(path);
+        self.generation = self.generation.wrapping_add(1);
+        Ok(self.snapshot())
     }
 
     pub fn finish_scan(
         &mut self,
         result: ReaderResult<ScanResult>,
     ) -> ReaderResult<ReaderSnapshot> {
-        self.finish_scan_inner(result, false)
-    }
-
-    fn finish_scan_inner(
-        &mut self,
-        result: ReaderResult<ScanResult>,
-        select_library: bool,
-    ) -> ReaderResult<ReaderSnapshot> {
         let ScanResult {
-            found,
-            root,
+            observed,
+            change,
             generation,
         } = match result {
             Ok(result) => result,
             Err(error) => {
-                self.refresh_availability();
                 self.error = Some(error);
                 return Ok(self.snapshot());
             }
         };
-        if generation != self.generation
-            || (!select_library && self.document.library.as_ref() != Some(&root))
-            || !source::root(&root.path).is_ok_and(|(_, identity)| identity == root.identity)
-        {
-            return Err("Library registrations changed during scan; retry the scan".into());
+        if generation != self.generation {
+            return Err(RETRY_SCAN.into());
         }
-        let availability: HashMap<_, _> = found
-            .iter()
-            .flat_map(|book| book.files.iter().cloned())
-            .collect();
+        // Each folder that was scanned must still be the folder now there.
+        for (path, observation) in &observed {
+            if let Observation::Connected { identity, .. } = observation {
+                if !source::probe(path, source::PROBE_TIMEOUT)
+                    .is_ok_and(|(_, current)| &current == identity)
+                {
+                    return Err(RETRY_SCAN.into());
+                }
+            }
+        }
         let mut document = self.document.clone();
-        // Concurrent verification scans may refresh availability while reading
-        // checkpoints are saved. Only changed registrations invalidate a scan;
-        // an explicit library selection still invalidates older work.
-        let mut registrations_changed = select_library;
-        if select_library {
-            document.library = Some(root.clone());
-        }
-        let existing_books: HashMap<_, _> = document
-            .books
-            .iter()
-            .enumerate()
-            .filter(|(_, book)| {
-                book.authorized && book.root.as_ref().is_some_and(|b| b.path == root.path)
-            })
-            .map(|(index, book)| (book.key.clone(), index))
-            .collect();
-        for discovered in found {
-            if let Some(index) = existing_books.get(&discovered.key) {
-                let existing = &mut document.books[*index];
-                // Do not adopt replacement roots/files, even when the path matches.
-                if existing.root.as_ref() != Some(&root) {
-                    continue;
-                }
-                let existing_paths: HashSet<_> =
-                    existing.files.iter().map(|f| f.path.clone()).collect();
-                for (path, fingerprint) in discovered.files {
-                    if existing_paths.contains(&path) {
-                        continue;
-                    }
-                    let file = RegisteredFile {
-                        id: id(),
-                        path,
-                        fingerprint,
-                    };
-                    if existing.book.kind == ReaderKind::Audio {
-                        existing.book.tracks.push(track(&file));
-                    }
-                    existing.files.push(file);
-                    registrations_changed = true;
-                }
-                if !existing.manual_order {
-                    existing
-                        .book
-                        .tracks
-                        .sort_by(|a, b| source::natural_cmp(&a.relative_path, &b.relative_path));
-                }
-            } else {
-                let files: Vec<_> = discovered
-                    .files
-                    .into_iter()
-                    .map(|(path, fingerprint)| RegisteredFile {
-                        id: id(),
-                        path,
-                        fingerprint,
-                    })
-                    .collect();
-                let book = ReaderBook {
-                    id: id(),
-                    title: discovered.title,
-                    kind: discovered.kind,
-                    available: true,
-                    tracks: if discovered.epub {
-                        Vec::new()
-                    } else {
-                        files.iter().map(track).collect()
-                    },
-                    position: None,
-                    bookmarks: Vec::new(),
-                    favorite: false,
-                    last_used_at: 0,
-                    source_url: None,
-                    progress: None,
-                    error: None,
-                };
-                document.books.push(StoredBook {
-                    book,
-                    root: Some(root.clone()),
-                    key: discovered.key,
-                    files,
-                    manual_order: false,
-                    authorized: true,
+        let mut changed = false;
+        let mut forget = None;
+        match &change {
+            None => {}
+            Some(Change::Add(path)) => {
+                let identity = connected_identity(&observed, path)?;
+                document.locations.push(Binding {
+                    path: path.clone(),
+                    identity,
                 });
-                registrations_changed = true;
+                changed = true;
+            }
+            Some(Change::Move { from, to }) => {
+                connected_identity(&observed, to)?;
+                let location = document
+                    .locations
+                    .iter_mut()
+                    .find(|location| &location.path == from)
+                    .ok_or(RETRY_SCAN)?;
+                // The previous identity stays until the files are compared,
+                // so they are matched as on a remounted drive.
+                location.path = to.clone();
+                for stored in document.books.iter_mut().filter(|b| belongs(b, from)) {
+                    if let Some(root) = stored.root.as_mut() {
+                        root.path = to.clone();
+                    }
+                }
+                changed = true;
+                forget = Some(from.clone());
             }
         }
-        for stored in &mut document.books {
-            if stored.book.source_url.is_some() {
-                continue;
-            }
-            let same_root = stored.authorized && stored.root.as_ref() == Some(&root);
-            let statuses: HashMap<_, _> = stored
-                .files
-                .iter()
-                .map(|file| {
-                    (
-                        &file.id,
-                        same_root && availability.get(&file.path) == Some(&file.fingerprint),
-                    )
-                })
-                .collect();
-            stored.book.available = !statuses.is_empty() && statuses.values().all(|value| *value);
-            for track in &mut stored.book.tracks {
-                track.available = statuses.get(&track.id).copied().unwrap_or(false);
-            }
-            stored.book.error = (!stored.book.available).then(|| "Source missing, inaccessible, or replaced. History is retained; relink explicitly.".into());
-        }
+        let (registered, reach) = apply(&mut document, observed);
+        settle_unlocated(&mut document);
         self.commit(document)?;
-        if registrations_changed {
+        if let Some(from) = forget {
+            self.reach.remove(&from);
+        }
+        let errors: Vec<String> = reach
+            .iter()
+            .filter_map(|(path, reach)| match reach {
+                Reach::Connected(Some(error)) => Some(format!("{path}: {error}")),
+                _ => None,
+            })
+            .collect();
+        self.reach.extend(reach);
+        if changed || registered {
             self.generation = self.generation.wrapping_add(1);
         }
-        self.error = None;
+        self.error = (!errors.is_empty()).then(|| errors.join("; "));
         Ok(self.snapshot())
     }
 
-    pub fn open_media(&self, book_id: &str, track_id: Option<&str>) -> ReaderResult<File> {
-        let (dir, active) = self.active_root()?;
+    pub fn media_source(&self, book_id: &str, track_id: Option<&str>) -> ReaderResult<MediaSource> {
         let book = self
             .document
             .books
             .iter()
             .find(|b| b.book.id == book_id)
             .ok_or("Unknown private book")?;
-        if !book.authorized || book.book.source_url.is_some() || book.root.as_ref() != Some(active)
-        {
+        if !book.authorized || book.book.source_url.is_some() {
             return Err("Book belongs to an unavailable library source".into());
         }
+        let root = book.root.as_ref().ok_or("Book has no Library location")?;
+        let location = self.location(&root.path).ok_or(REMOVED_LOCATION)?;
         let file = match (book.book.kind, track_id) {
             (ReaderKind::Audio | ReaderKind::Video, Some(id)) => {
                 book.files.iter().find(|f| f.id == id)
@@ -436,11 +638,17 @@ impl ReaderStore {
             _ => None,
         }
         .ok_or("Unknown source for this book")?;
-        let opened = source::open(&dir, &file.path)?;
-        if source::Fingerprint::of(&opened)? != file.fingerprint {
-            return Err("Source changed; explicit replacement confirmation is required".into());
-        }
-        Ok(opened)
+        Ok(MediaSource {
+            location: location.clone(),
+            registered_under: Some(root.identity.clone()),
+            path: file.path.clone(),
+            fingerprint: file.fingerprint.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn open_media(&self, book_id: &str, track_id: Option<&str>) -> ReaderResult<File> {
+        self.media_source(book_id, track_id)?.open()
     }
 
     pub fn media_mime(&self, book_id: &str, track_id: &str) -> ReaderResult<&'static str> {
@@ -517,6 +725,8 @@ impl ReaderStore {
                 source_url: Some(url),
                 progress: None,
                 error: None,
+                location: None,
+                disconnected: false,
             },
             root: None,
             key: book_id,
@@ -528,6 +738,7 @@ impl ReaderStore {
         Ok(self.snapshot())
     }
 
+    #[cfg(test)]
     pub fn read_epub(&self, book_id: &str) -> ReaderResult<Vec<u8>> {
         let file = self.open_media(book_id, None)?;
         Self::read_epub_file(file)
@@ -649,14 +860,43 @@ impl ReaderStore {
         Ok(self.snapshot())
     }
 
+    #[cfg(test)]
     pub fn relink(
         &mut self,
         book_id: &str,
         relative_path: String,
         confirm_replacement: bool,
+        location: Option<String>,
     ) -> ReaderResult<ReaderSnapshot> {
-        let scan = self.prepare_scan()?.run()?;
+        let scan = self.prepare_relink(book_id, location)?.run()?;
         self.finish_relink(scan, book_id, relative_path, confirm_replacement)
+    }
+
+    /// Scan only the location holding the replacement: by default the
+    /// item's own location.
+    pub fn prepare_relink(&self, book_id: &str, location: Option<String>) -> ReaderResult<ScanJob> {
+        let book = self
+            .document
+            .books
+            .iter()
+            .find(|b| b.book.id == book_id)
+            .ok_or("Unknown private book")?;
+        let path = match location {
+            Some(path) => location_path(&path)?,
+            None => book
+                .root
+                .as_ref()
+                .map(|root| root.path.clone())
+                .ok_or("Choose the Library location that holds the replacement")?,
+        };
+        if self.location(&path).is_none() {
+            return Err("Choose a replacement inside one of your Library locations".into());
+        }
+        Ok(ScanJob {
+            planned: vec![self.plan(&path, true)],
+            change: None,
+            generation: self.generation,
+        })
     }
 
     pub fn finish_relink(
@@ -668,38 +908,58 @@ impl ReaderStore {
     ) -> ReaderResult<ReaderSnapshot> {
         source::relative(&relative_path)?;
         let ScanResult {
-            root,
-            found,
+            observed,
             generation,
+            ..
         } = scan;
-        if generation != self.generation
-            || self.document.library.as_ref() != Some(&root)
-            || !source::root(&root.path).is_ok_and(|(_, identity)| identity == root.identity)
+        let retry = || "Library registrations changed during relink; retry".to_string();
+        if generation != self.generation || observed.len() != 1 {
+            return Err(retry());
+        }
+        let (path, observation) = observed.into_iter().next().ok_or_else(retry)?;
+        let previous = self.location(&path).cloned().ok_or_else(retry)?;
+        let (identity, stable_ids, found) = match observation {
+            Observation::Connected {
+                identity,
+                stable_ids,
+                found: Some(found),
+                ..
+            } => (identity, stable_ids, found),
+            Observation::Connected { error, .. } => {
+                return Err(format!(
+                    "{path} could not be scanned: {}",
+                    error.unwrap_or_default()
+                ))
+            }
+            Observation::Disconnected(reason) => return Err(unreachable_location(&path, &reason)),
+        };
+        if !source::probe(&path, source::PROBE_TIMEOUT)
+            .is_ok_and(|(_, current)| current == identity)
         {
-            return Err("Library registrations changed during relink; retry".into());
+            return Err(retry());
         }
         let candidate = found
             .into_iter()
             .find(|b| b.key == relative_path)
             .ok_or("No discovered book at that relative path")?;
+        let root = Binding {
+            path: path.clone(),
+            identity: identity.clone(),
+        };
         let mut document = self.document.clone();
         if book_mut(&mut document, book_id)?.book.source_url.is_some() {
             return Err("External Library links cannot be relinked to local files".into());
         }
-        if document.books.iter().any(|b| {
-            b.book.id != book_id
-                && b.root.as_ref().is_some_and(|r| r.path == root.path)
-                && b.key == candidate.key
-        }) {
+        if document
+            .books
+            .iter()
+            .any(|b| b.book.id != book_id && belongs(b, &path) && b.key == candidate.key)
+        {
             // A freshly discovered entry may be merged only if it has no user history.
             let duplicate = document
                 .books
                 .iter()
-                .find(|b| {
-                    b.book.id != book_id
-                        && b.root.as_ref().is_some_and(|r| r.path == root.path)
-                        && b.key == candidate.key
-                })
+                .find(|b| b.book.id != book_id && belongs(b, &path) && b.key == candidate.key)
                 .unwrap();
             if duplicate.book.position.is_some()
                 || !duplicate.book.bookmarks.is_empty()
@@ -709,16 +969,21 @@ impl ReaderStore {
             {
                 return Err("Relink destination already has reader history".into());
             }
-            document.books.retain(|b| {
-                b.book.id == book_id
-                    || !b.root.as_ref().is_some_and(|r| r.path == root.path)
-                    || b.key != candidate.key
-            });
+            document
+                .books
+                .retain(|b| b.book.id == book_id || !belongs(b, &path) || b.key != candidate.key);
+        }
+        if let Some(location) = document.locations.iter_mut().find(|l| l.path == path) {
+            location.identity = identity.clone();
         }
         let book = book_mut(&mut document, book_id)?;
         if candidate.kind != book.book.kind {
             return Err("Relink must keep the book format".into());
         }
+        let same_location = book.root.as_ref().is_some_and(|r| r.path == path);
+        let strict = stable_ids
+            && previous.identity == identity
+            && book.root.as_ref().is_some_and(|r| r.identity == identity);
         let mut replacements = Vec::new();
         let mut used = HashSet::new();
         for old in &book.files {
@@ -741,7 +1006,7 @@ impl ReaderStore {
             if !used.insert(path.clone()) {
                 return Err("Relink track mapping is ambiguous".into());
             }
-            if (&old.fingerprint != fingerprint || book.root.as_ref() != Some(&root))
+            if (!old.fingerprint.matches(fingerprint, strict) || !same_location)
                 && !confirm_replacement
             {
                 return Err(
@@ -786,6 +1051,7 @@ impl ReaderStore {
         book.book.available = true;
         book.book.error = None;
         self.commit(document)?;
+        self.reach.insert(path, Reach::Connected(None));
         self.generation = self.generation.wrapping_add(1);
         Ok(self.snapshot())
     }
@@ -794,8 +1060,8 @@ impl ReaderStore {
         serde_json::to_string(&self.document).map_err(|e| e.to_string())
     }
 
-    /// Backup data is not filesystem authority. Only the currently user-selected
-    /// root remains active; imported roots must subsequently be selected/relinked.
+    /// Backup data is not filesystem authority. Neither its locations nor
+    /// its items' folders become active; restored items must be relinked.
     pub fn restore(&mut self, backup: &str) -> ReaderResult<ReaderSnapshot> {
         if backup.len() as u64 > MAX_STATE_BYTES {
             return Err("Reader backup exceeds 64 MiB".into());
@@ -847,6 +1113,211 @@ impl ReaderStore {
     }
 }
 
+fn connected_identity(
+    observed: &[(String, Observation)],
+    path: &str,
+) -> ReaderResult<source::RootIdentity> {
+    match observed.iter().find(|(observed, _)| observed == path) {
+        Some((_, Observation::Connected { identity, .. })) => Ok(identity.clone()),
+        Some((_, Observation::Disconnected(reason))) => Err(format!("Cannot use {path}: {reason}")),
+        None => Err(RETRY_SCAN.into()),
+    }
+}
+
+/// The normalized form a location is stored and compared under.
+fn location_path(path: &str) -> ReaderResult<String> {
+    let normalized: PathBuf = Path::new(path).components().collect();
+    if !normalized.is_absolute() {
+        return Err("Choose an absolute local library folder".into());
+    }
+    normalized
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Library folder paths must be valid Unicode".into())
+}
+
+/// Bring each observed location's items up to date. Returns whether any
+/// registration changed, and how each location could be reached.
+fn apply(document: &mut Document, observed: Vec<(String, Observation)>) -> (bool, Vec<(String, Reach)>) {
+    let mut changed = false;
+    let mut reach = Vec::new();
+    for (path, observation) in observed {
+        let Some(index) = document.locations.iter().position(|l| l.path == path) else {
+            continue;
+        };
+        match observation {
+            Observation::Disconnected(reason) => {
+                for stored in document.books.iter_mut().filter(|b| belongs(b, &path)) {
+                    stored.book.available = false;
+                    stored.book.error = None;
+                    for track in &mut stored.book.tracks {
+                        track.available = false;
+                    }
+                }
+                reach.push((path, Reach::Disconnected(reason)));
+            }
+            Observation::Connected {
+                identity,
+                stable_ids,
+                files,
+                found,
+                error,
+            } => {
+                // While a filesystem stays mounted its file IDs are compared
+                // too. A remounted drive or share gives the same files new
+                // IDs, so then only size and modification time can be.
+                let same_mount = stable_ids && document.locations[index].identity == identity;
+                if document.locations[index].identity != identity {
+                    document.locations[index].identity = identity.clone();
+                    changed = true;
+                }
+                let binding = document.locations[index].clone();
+                if let Some(found) = found {
+                    changed |= register(document, &binding, found);
+                }
+                for stored in document.books.iter_mut().filter(|b| belongs(b, &path)) {
+                    let strict =
+                        same_mount && stored.root.as_ref().is_some_and(|r| r.identity == identity);
+                    verify(stored, &files, strict);
+                    if stored.root.as_ref() != Some(&binding) {
+                        stored.root = Some(binding.clone());
+                        changed = true;
+                    }
+                }
+                reach.push((path, Reach::Connected(error)));
+            }
+        }
+    }
+    (changed, reach)
+}
+
+/// Register newly found items, and new files of existing items. Existing
+/// items keep their IDs and history.
+fn register(document: &mut Document, binding: &Binding, found: Vec<source::Discovered>) -> bool {
+    let mut changed = false;
+    let existing: HashMap<_, _> = document
+        .books
+        .iter()
+        .enumerate()
+        .filter(|(_, book)| book.authorized && belongs(book, &binding.path))
+        .map(|(index, book)| (book.key.clone(), index))
+        .collect();
+    for discovered in found {
+        if let Some(index) = existing.get(&discovered.key) {
+            let existing = &mut document.books[*index];
+            let existing_paths: HashSet<_> =
+                existing.files.iter().map(|f| f.path.clone()).collect();
+            for (path, fingerprint) in discovered.files {
+                if existing_paths.contains(&path) {
+                    continue;
+                }
+                let file = RegisteredFile {
+                    id: id(),
+                    path,
+                    fingerprint,
+                };
+                if existing.book.kind == ReaderKind::Audio {
+                    existing.book.tracks.push(track(&file));
+                }
+                existing.files.push(file);
+                changed = true;
+            }
+            if !existing.manual_order {
+                existing
+                    .book
+                    .tracks
+                    .sort_by(|a, b| source::natural_cmp(&a.relative_path, &b.relative_path));
+            }
+        } else {
+            let files: Vec<_> = discovered
+                .files
+                .into_iter()
+                .map(|(path, fingerprint)| RegisteredFile {
+                    id: id(),
+                    path,
+                    fingerprint,
+                })
+                .collect();
+            let book = ReaderBook {
+                id: id(),
+                title: discovered.title,
+                kind: discovered.kind,
+                available: true,
+                tracks: if discovered.epub {
+                    Vec::new()
+                } else {
+                    files.iter().map(track).collect()
+                },
+                position: None,
+                bookmarks: Vec::new(),
+                favorite: false,
+                last_used_at: 0,
+                source_url: None,
+                progress: None,
+                error: None,
+                location: None,
+                disconnected: false,
+            };
+            document.books.push(StoredBook {
+                book,
+                root: Some(binding.clone()),
+                key: discovered.key,
+                files,
+                manual_order: false,
+                authorized: true,
+            });
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn verify(stored: &mut StoredBook, files: &HashMap<String, source::Fingerprint>, strict: bool) {
+    let authorized = stored.authorized;
+    let mut all = authorized && !stored.files.is_empty();
+    for file in &mut stored.files {
+        let found = files
+            .get(&file.path)
+            .filter(|found| authorized && file.fingerprint.matches(found, strict));
+        if let Some(found) = found {
+            // The same file on a remounted drive: remember its new IDs.
+            if file.fingerprint != *found {
+                file.fingerprint = found.clone();
+            }
+        }
+        all &= found.is_some();
+        if let Some(track) = stored.book.tracks.iter_mut().find(|t| t.id == file.id) {
+            track.available = found.is_some();
+        }
+    }
+    stored.book.available = all;
+    stored.book.error = if all {
+        None
+    } else if !authorized {
+        Some(RESTORED_SOURCE.into())
+    } else {
+        Some(MISSING_SOURCE.into())
+    };
+}
+
+/// Network links are always reachable. Local items outside every current
+/// location keep their history until relinked.
+fn settle_unlocated(document: &mut Document) {
+    let paths: HashSet<_> = document.locations.iter().map(|l| l.path.clone()).collect();
+    for stored in &mut document.books {
+        if stored.book.source_url.is_some() {
+            stored.book.available = true;
+            stored.book.error = None;
+        } else if !stored.root.as_ref().is_some_and(|root| paths.contains(&root.path)) {
+            stored.book.available = false;
+            stored.book.error = Some(REMOVED_LOCATION.into());
+            for track in &mut stored.book.tracks {
+                track.available = false;
+            }
+        }
+    }
+}
+
 fn book_mut<'a>(document: &'a mut Document, id: &str) -> ReaderResult<&'a mut StoredBook> {
     document
         .books
@@ -871,6 +1342,20 @@ fn track(file: &RegisteredFile) -> ReaderTrack {
 fn validate(document: &Document) -> ReaderResult<()> {
     if !(1..=VERSION).contains(&document.version) {
         return Err("Unsupported private reader database version".into());
+    }
+    if document.locations.len() > MAX_LOCATIONS {
+        return Err("Too many Library locations".into());
+    }
+    for (index, location) in document.locations.iter().enumerate() {
+        if location_path(&location.path)? != location.path {
+            return Err("Invalid Library location".into());
+        }
+        if document.locations[..index].iter().any(|other| {
+            Path::new(&other.path).starts_with(&location.path)
+                || Path::new(&location.path).starts_with(&other.path)
+        }) {
+            return Err("Library locations must not overlap".into());
+        }
     }
     let mut ids = HashSet::new();
     let mut bookmark_ids = HashSet::new();

@@ -11,7 +11,8 @@ export interface LibraryIndexStatus {
   transcribeMedia: boolean;
   running: boolean;
   jobId: string | null;
-  items: { total: number; indexed: number; pending: number; failed: number; titleOnly: number };
+  /** `waiting`: not fully indexed and on a disconnected Library location. */
+  items: { total: number; indexed: number; pending: number; failed: number; titleOnly: number; waiting: number };
   chunks: number;
   semantic: LibraryIndexSemantic;
   semanticReason: string | null;
@@ -65,7 +66,7 @@ export const FALLBACK_LIBRARY_INDEX_STATUS: LibraryIndexStatus = {
   transcribeMedia: true,
   running: false,
   jobId: null,
-  items: { total: 0, indexed: 0, pending: 0, failed: 0, titleOnly: 0 },
+  items: { total: 0, indexed: 0, pending: 0, failed: 0, titleOnly: 0, waiting: 0 },
   chunks: 0,
   semantic: "unavailable",
   semanticReason: "Library index status is unavailable.",
@@ -114,7 +115,8 @@ export function acceptLibraryIndexStatus(value: unknown): LibraryIndexStatus {
     || !(value.lastIndexedAt === null || finiteInteger(value.lastIndexedAt, 0, 4_102_444_800_000))
     || !finiteInteger(items.total, 0, 10_000_000) || !finiteInteger(items.indexed, 0, 10_000_000)
     || !finiteInteger(items.pending, 0, 10_000_000) || !finiteInteger(items.failed, 0, 10_000_000)
-    || !finiteInteger(items.titleOnly, 0, 10_000_000)) {
+    || !finiteInteger(items.titleOnly, 0, 10_000_000)
+    || !(items.waiting === undefined || finiteInteger(items.waiting, 0, 10_000_000))) {
     throw new Error("Invalid Library index status.");
   }
   const rawErrors = Array.isArray(value.errors) ? value.errors.slice(0, 20) : [];
@@ -123,7 +125,8 @@ export function acceptLibraryIndexStatus(value: unknown): LibraryIndexStatus {
     transcribeMedia: value.transcribeMedia,
     running: value.running,
     jobId: value.jobId,
-    items: { total: items.total, indexed: items.indexed, pending: items.pending, failed: items.failed, titleOnly: items.titleOnly },
+    items: { total: items.total, indexed: items.indexed, pending: items.pending, failed: items.failed, titleOnly: items.titleOnly,
+      waiting: (items.waiting as number | undefined) ?? 0 },
     chunks: value.chunks,
     semantic: value.semantic as LibraryIndexSemantic,
     semanticReason: optionalString(value.semanticReason, 500),
@@ -138,7 +141,7 @@ export function acceptLibraryIndexStatus(value: unknown): LibraryIndexStatus {
       return bookId && title && message ? [{ bookId, title, message }] : [];
     }),
   };
-  if (status.items.indexed + status.items.pending + status.items.failed + status.items.titleOnly > Math.max(status.items.total * 2, status.items.total + 100)) {
+  if (status.items.indexed + status.items.pending + status.items.failed + status.items.titleOnly + status.items.waiting > Math.max(status.items.total * 2, status.items.total + 100)) {
     throw new Error("Invalid Library index status.");
   }
   return status;

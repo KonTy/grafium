@@ -220,12 +220,34 @@ pub struct ReaderBook {
     pub progress: Option<ReaderProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The Library location (folder) holding this local item. Reported in
+    /// snapshots only; the stored registration remains the authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Its location is configured but not reachable right now, for example
+    /// an unplugged drive or an unmounted share. History and the search index
+    /// are kept until it returns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disconnected: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderLocation {
+    pub path: String,
+    pub connected: bool,
+    /// Why a disconnected location cannot be reached, or why a connected one
+    /// could only be partly scanned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub items: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReaderSnapshot {
     pub library_path: Option<String>,
+    pub locations: Vec<ReaderLocation>,
     pub books: Vec<ReaderBook>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -244,6 +266,9 @@ pub struct ReaderIndexFile {
 pub struct ReaderIndexRecord {
     pub book: ReaderBook,
     pub files: Vec<ReaderIndexFile>,
+    /// The location folder its files are relative to, for local items.
+    pub root: Option<String>,
+    pub disconnected: bool,
 }
 
 pub(crate) fn id() -> String {
@@ -292,6 +317,8 @@ mod tests {
             source_url: None,
             progress: None,
             error: None,
+            location: None,
+            disconnected: false,
         };
         position.validate(&book).unwrap();
         for invalid in ["", "../voice", "voice\n", "voice.id", &"a".repeat(97)] {

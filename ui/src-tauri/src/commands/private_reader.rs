@@ -84,7 +84,39 @@ pub async fn reader_add_link(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn reader_set_library(
+pub async fn reader_add_location(
+    app: AppHandle,
+    _state: State<'_, ReaderState>,
+    path: String,
+) -> ReaderResult<ReaderSnapshot> {
+    let app_for_schedule = app.clone();
+    let snapshot = blocking(app, move |state, directory| {
+        state.add_location(directory, path)
+    })
+    .await?;
+    super::library_index::schedule_delta_run(&app_for_schedule);
+    Ok(snapshot)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reader_move_location(
+    app: AppHandle,
+    _state: State<'_, ReaderState>,
+    from: String,
+    to: String,
+) -> ReaderResult<ReaderSnapshot> {
+    let app_for_schedule = app.clone();
+    let snapshot = blocking(app, move |state, directory| {
+        state.revoke_media()?;
+        state.move_location(directory, from, to)
+    })
+    .await?;
+    super::library_index::schedule_delta_run(&app_for_schedule);
+    Ok(snapshot)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reader_remove_location(
     app: AppHandle,
     _state: State<'_, ReaderState>,
     path: String,
@@ -92,9 +124,10 @@ pub async fn reader_set_library(
     let app_for_schedule = app.clone();
     let snapshot = blocking(app, move |state, directory| {
         state.revoke_media()?;
-        state.set_library(directory, path)
+        state.remove_location(directory, &path)
     })
     .await?;
+    // The next run drops the removed items from the search index.
     super::library_index::schedule_delta_run(&app_for_schedule);
     Ok(snapshot)
 }
@@ -216,10 +249,17 @@ pub async fn reader_relink(
     book_id: String,
     relative_path: String,
     confirm_replacement: bool,
+    location: Option<String>,
 ) -> ReaderResult<ReaderSnapshot> {
     blocking(app, move |state, directory| {
         state.revoke_media()?;
-        state.relink(directory, &book_id, relative_path, confirm_replacement)
+        state.relink(
+            directory,
+            &book_id,
+            relative_path,
+            confirm_replacement,
+            location,
+        )
     })
     .await
 }

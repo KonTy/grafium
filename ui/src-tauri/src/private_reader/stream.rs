@@ -311,15 +311,18 @@ fn serve(
     let Some((book, track)) = target else {
         return response(socket, 404, 0, "", write_timeout);
     };
+    // The file is opened after the store lock is released, so a slow or
+    // stalled Library location cannot hold up every other Library request.
     let opened = store
         .lock()
         .map_err(|_| "Reader lock failed".to_string())
         .and_then(|store| {
             Ok((
-                store.open_media(&book, Some(&track))?,
+                store.media_source(&book, Some(&track))?,
                 store.media_mime(&book, &track)?,
             ))
-        });
+        })
+        .and_then(|(source, mime)| Ok((source.open()?, mime)));
     let Ok((mut file, mime)) = opened else {
         return response(socket, 410, 0, "", write_timeout);
     };

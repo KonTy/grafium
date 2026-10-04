@@ -107,6 +107,16 @@ mod tests {
     }
 
     #[test]
+    fn library_help_explains_disconnected_locations() {
+        let page = super::help_get_page("library".into()).unwrap();
+        assert!(page.contains("Library locations"));
+        assert!(page.contains("**Disconnected**"));
+        assert!(page.contains("needs no relinking"));
+        assert!(page.contains("**Change folder…**"));
+        assert!(page.contains("never touches the files"));
+    }
+
+    #[test]
     fn general_help_explains_the_jobs_bell() {
         let page = super::help_get_page("general".into()).unwrap();
         assert!(page.contains("Click the bell in the title bar"));

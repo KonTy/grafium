@@ -40,7 +40,7 @@ export function studyCatalog(pages: PageSummary[], topics: FlashcardTopic[], ass
 export function libraryStudyCatalog(books: ReaderBook[]): StudyCandidate[] {
   return books.map(book => ({
     key: `library:${book.id}`, title: book.title, source: book.id, kind: "library",
-    detail: book.available ? `Library · ${book.kind.toUpperCase()}` : "Library · Source unavailable",
+    detail: book.available ? `Library · ${book.kind.toUpperCase()}` : book.disconnected ? "Library · Disconnected" : "Library · Source unavailable",
   }));
 }
 

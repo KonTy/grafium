@@ -1,9 +1,10 @@
 # Library reading and listening
 
 The private library is separate from your graph's imported Books and study
-history. Choose **Library location** in Settings, then open the private library
-in the top-level **Library**. Audio and EPUB originals are linked from that location and are
+history. Add folders under **Library locations** in Settings, then open the private library
+in the top-level **Library**. Audio and EPUB originals are linked from those locations and are
 not copied into your graph. Nothing is automatically added to your journal.
+On Android, Library uses one location chosen with **Choose local folder…**.
 
 Library also organizes supported video and online-media entries. Its active
 pile, favorites, shared progress, journal links, and reference-only Study plans
@@ -11,7 +12,7 @@ are described in [[Help - Library]].
 
 ## Library layout and missing sources
 
-Each folder immediately inside the library represents an audiobook; its chapter
+Each folder immediately inside a Library location represents an audiobook; its chapter
 files may be inside nested folders such as Disc 1 and Disc 2. Chapters use natural
 numeric order: 1, 2, 10 rather than 1, 10, 2. Each loose MP3 directly in the library
 is a separate book. EPUB files are discovered recursively as individual books.
@@ -23,9 +24,11 @@ Use **Rescan** to discover files added while the library remains open.
 Keep source files in place while listening.
 An unavailable disk, revoked Android folder permission, or changed source is
 not an empty book: progress and bookmarks must be retained until access is
-restored. Re-select the library or use the available relink controls rather than
-deleting your history. Removing a library entry is not permission to delete its
-external files.
+restored. Items on an unplugged drive or unmounted share are shown as
+**Disconnected**; reconnect it and use **Check again**, or **Change folder…**
+if it is now mounted elsewhere. Use the relink controls for a source that was
+moved or replaced; a relinked file can come from any of your locations.
+Removing a library entry is not permission to delete its external files.
 
 On Android choose a local device or removable-storage folder. Folder access
 uses a persisted read grant; permission can still be revoked by Android or the
