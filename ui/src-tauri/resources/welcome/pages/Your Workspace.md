@@ -31,7 +31,8 @@ For a little visual shorthand, try the emoji and symbolic icon picker in [[Writi
 - **Alt+S** opens Settings.
 - **Ctrl/Cmd+Shift+P** opens the command palette.
 - **Ctrl/Cmd+Shift+G**, **Ctrl/Cmd+Shift+F**, and **Ctrl/Cmd+Shift+T** open Graph, Flashcards, and Tasks.
-- **Alt+C** opens Chat.
+- **Alt+C** opens Chat. There, **Alt+N** and **Alt+A** cycle the notes context
+  and answer mode; Shift goes back.
 - **Alt+M** opens media import; **Alt+B** opens book import.
 
 These are desktop keyboard shortcuts. See [[Writing/Find It Again]] for search and [[Journal And Calendar]] for journal navigation.

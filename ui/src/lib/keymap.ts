@@ -10,6 +10,7 @@
  */
 
 import { BIONIC_SHORTCUT, BOOKMARK_SHORTCUT, readerShortcut } from "./readerHotkeys";
+import { chatComposerShortcuts } from "./chatShortcuts";
 
 export type ActionFn = () => void;
 
@@ -26,6 +27,8 @@ export interface Shortcut {
   description?: string;
   /** Category for grouping */
   category?: string;
+  /** Claims its keys only while this returns true (default: always). */
+  when?: () => boolean;
 }
 
 // Normalize "mod" to platform-appropriate modifier
@@ -89,6 +92,7 @@ interface ParsedShortcut {
   sequence: string[];
   action: ActionFn;
   navOnly: boolean;
+  when?: () => boolean;
 }
 
 class KeymapManager {
@@ -123,6 +127,7 @@ class KeymapManager {
         sequence: chords.map((c) => chordToString(c)),
         action: s.action,
         navOnly: s.navOnly !== false,
+        when: s.when,
       };
     });
   }
@@ -167,10 +172,12 @@ class KeymapManager {
     }
 
     const pending = [...this.pendingChord];
+    // Conditions run only for matching keys, not on every keystroke.
     const exactMatch = active.find(
       (s) =>
         s.sequence.length === pending.length &&
-        s.sequence.every((chord, i) => chord === pending[i])
+        s.sequence.every((chord, i) => chord === pending[i]) &&
+        (!s.when || s.when())
     );
 
     if (exactMatch) {
@@ -184,7 +191,8 @@ class KeymapManager {
     const prefixMatch = active.some(
       (s) =>
         s.sequence.length > pending.length &&
-        pending.every((chord, i) => chord === s.sequence[i])
+        pending.every((chord, i) => chord === s.sequence[i]) &&
+        (!s.when || s.when())
     );
 
     if (prefixMatch) {
@@ -377,6 +385,7 @@ export function registerDefaultShortcuts(actions: {
     ...pair("insert-personal-diary", "Insert [[personal/diary]]", "basics", actions.insertPersonalDiary, [
       { binding: "alt+d", navOnly: false },
     ]),
+    ...chatComposerShortcuts(),
   ];
 
   keymap_manager.register(shortcuts);

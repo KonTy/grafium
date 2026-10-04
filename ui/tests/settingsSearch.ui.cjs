@@ -58,11 +58,14 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
       .filter((el) => !el.hidden).length === 5);
     assert.deepEqual(await titles(), ["Library", "AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts", "Asset Cleanup"]);
     const shortcuts = page.locator(".keymap-row:visible");
-    assert.equal(await shortcuts.count(), 1);
-    assert.match(await shortcuts.innerText(), /Go to Chat tab/);
-    assert.match(await shortcuts.innerText(), /Alt-C/);
-    assert.doesNotMatch(await shortcuts.innerText(), /Ctrl-Alt-C|Ctrl-Shift-C/);
-    assert.equal(await page.locator(".keymap-category:visible").count(), 1);
+    const rows = (await shortcuts.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    assert.deepEqual(rows, [
+      "Go to Chat tab Alt-C",
+      "Next notes context in Chat (Shift for previous) Alt-N | Alt-Shift-N",
+      "Next answer mode in Chat (Shift for previous) Alt-A | Alt-Shift-A",
+    ]);
+    assert.doesNotMatch(rows.join("\n"), /Ctrl-Alt-C|Ctrl-Shift-C/);
+    assert.equal(await page.locator(".keymap-category:visible").count(), 2);
     assert.equal(await page.locator(".research-settings .engine-item:visible").count(), 0);
     assert.equal(await page.locator(".research-settings .field-group:visible").count(), 0);
     assert.equal(await page.locator(".settings-page [hidden]:visible").count(), 0, "flex/grid styles must not override hidden");

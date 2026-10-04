@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { keymap_manager, registerDefaultShortcuts } from "./keymap";
+import { registerChatComposer } from "./chatShortcuts";
+import { groupShortcutRows, shortcutAria } from "./shortcuts";
 
 function keyEvent(init: KeyboardEventInit): KeyboardEvent {
   return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
@@ -230,5 +232,58 @@ describe("keymap dual-mode matching", () => {
 
     expect(keymap_manager.handleKeydown(keyEvent({ key: "d", code: "KeyD", altKey: true }))).toBe(true);
     expect(actions.insertPersonalDiary).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Chat composer shortcuts", () => {
+  let dispose = () => {};
+
+  afterEach(() => {
+    dispose();
+    document.body.replaceChildren();
+  });
+
+  it("claims Alt-N and Alt-A only while a chat can receive them, including while typing", () => {
+    registerDefaultShortcuts(stubActions());
+    keymap_manager.isEditing = true;
+    const idle = keyEvent({ key: "n", code: "KeyN", altKey: true });
+    expect(keymap_manager.handleKeydown(idle)).toBe(false);
+    expect(idle.defaultPrevented).toBe(false);
+
+    const root = document.createElement("section");
+    const message = document.createElement("textarea");
+    root.append(message);
+    document.body.append(root);
+    message.focus();
+    const chat = { root: () => root, compact: false, cycleContext: vi.fn(), cycleMode: vi.fn() };
+    dispose = registerChatComposer(chat);
+    const presses = [
+      [{ key: "n", code: "KeyN" }, chat.cycleContext, 1],
+      [{ key: "N", code: "KeyN", shiftKey: true }, chat.cycleContext, -1],
+      [{ key: "a", code: "KeyA" }, chat.cycleMode, 1],
+      [{ key: "A", code: "KeyA", shiftKey: true }, chat.cycleMode, -1],
+    ] as const;
+    for (const [init, handler, step] of presses) {
+      const event = keyEvent({ ...init, altKey: true });
+      expect(keymap_manager.handleKeydown(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(handler).toHaveBeenLastCalledWith(step);
+    }
+    expect(chat.cycleContext).toHaveBeenCalledTimes(2);
+    expect(chat.cycleMode).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists both directions on one help row per menu without reusing any key", () => {
+    registerDefaultShortcuts(stubActions());
+    const shortcuts = keymap_manager.getShortcuts();
+    const rows = groupShortcutRows(shortcuts).filter((row) => row.category === "chat");
+    expect(rows.map(({ id, modifiers }) => [id, modifiers])).toEqual([
+      ["chat-context", ["alt+n", "alt+shift+n"]],
+      ["chat-mode", ["alt+a", "alt+shift+a"]],
+    ]);
+    for (const binding of ["alt+n", "alt+shift+n", "alt+a", "alt+shift+a"]) {
+      expect(shortcuts.filter((shortcut) => shortcut.binding === binding)).toHaveLength(1);
+    }
+    expect(shortcutAria("chat-context")).toBe("Alt+n Alt+Shift+n");
   });
 });

@@ -105,4 +105,12 @@ mod tests {
         assert!(page.contains("Try faster mode"));
         assert!(page.contains("cgroup"));
     }
+
+    #[test]
+    fn chat_help_lists_the_composer_shortcuts() {
+        let page = super::help_get_page("chat".into()).unwrap();
+        assert!(page.contains("**Alt+N** selects the next available notes context"));
+        assert!(page.contains("**Alt+A**"));
+        assert!(page.contains("add Shift to go back"));
+    }
 }

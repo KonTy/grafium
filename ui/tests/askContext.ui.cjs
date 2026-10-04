@@ -64,5 +64,18 @@ cases.push(["Chat video page context stays on the focused journal day", { journa
   const call = await send(page, "What did I note on this day?");
   assert.deepEqual(call.args.context, { kind: "page", pageId: "day-1" });
 }]);
+cases.push(["Side-panel Chat shortcuts act only while its conversation has focus", {}, async (page) => {
+  await input(page).click();
+  assert.equal(await context(page).inputValue(), "page");
+  await page.keyboard.press("Alt+n");
+  assert.equal(await context(page).inputValue(), "graph", "unavailable Whole book is skipped");
+  await page.keyboard.press("Alt+a");
+  assert.equal(await mode(page).inputValue(), "web");
+  await focus(page, "b0");
+  await page.keyboard.press("Alt+n");
+  await page.keyboard.press("Alt+a");
+  assert.equal(await context(page).inputValue(), "graph", "an unfocused side-panel chat ignores the shortcuts");
+  assert.equal(await mode(page).inputValue(), "web");
+}]);
 
 if (require.main === module) runCases(cases).catch((error) => { console.error(error); process.exitCode = 1; });

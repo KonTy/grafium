@@ -45,6 +45,10 @@ Markdown and sources, without the decorative icons.
   retrieval; **This page**, **Selection**, and the other choices set explicit scope.
   **Library** searches your private Library index for that request only and is available only with a chat model running on this computer. Web search is off for Library questions; cited chips open the source in Library at the timestamp or EPUB passage.
 - **Answer mode:** choose **Answer — no web**, **Web search**, or **Deep web research**.
+- **Keyboard:** **Alt+N** selects the next available notes context and **Alt+A**
+  the next answer mode; add Shift to go back. Both work while you type, only in
+  Chat; in the side panel, only while its chat has focus. Hover either menu to
+  see its keys.
 - **Actions:** choose a Summary, Explain, or Compare prompt, or a reviewable
   note action. Prompt shortcuts fill the draft without sending it.
 - **Model & index status icon**, beside Send: inspect the configured model,

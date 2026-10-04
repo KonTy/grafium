@@ -1228,8 +1228,13 @@
     commandPaletteIndex = 0;
   }
 
+  // Re-checked whenever the palette opens, so screen-specific shortcuts (such
+  // as Chat's) are only offered where they work.
+  const paletteShortcuts = $derived(commandPaletteOpen
+    ? keymap_manager.getShortcuts().filter((shortcut) => !shortcut.when || shortcut.when())
+    : []);
   const commandPaletteRows = $derived(
-    [...groupShortcutRows(keymap_manager.getShortcuts()), {
+    [...groupShortcutRows(paletteShortcuts), {
       id: "ai-writing", description: "Open writing assistance", category: "Tools",
       chords: [], modifiers: [],
     }, {

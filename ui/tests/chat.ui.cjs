@@ -474,6 +474,46 @@ const cases = [
     call = await send(page, "A fresh graph session");
     assert.deepEqual(call.args.history, []);
   }],
+  ["Chat cycles notes context and answer mode from the keyboard while typing", { global: true }, async (page) => {
+    await focused(page);
+    await input(page).fill("Keep this draft");
+    const contexts = await context(page).locator("option:not([disabled])")
+      .evaluateAll((options) => options.map(({ value }) => value));
+    const start = contexts.indexOf("graph");
+    assert.ok(start >= 0 && contexts.length >= 2, JSON.stringify(contexts));
+    assert.equal(await context(page).inputValue(), "graph");
+    for (let step = 1; step <= contexts.length; step++) {
+      await page.keyboard.press("Alt+n");
+      assert.equal(await context(page).inputValue(), contexts[(start + step) % contexts.length]);
+    }
+    await page.keyboard.press("Alt+Shift+n");
+    assert.equal(await context(page).inputValue(), contexts[(start - 1 + contexts.length) % contexts.length]);
+    await page.keyboard.press("Alt+n");
+    assert.equal(await context(page).inputValue(), "graph");
+    for (const expected of ["web", "deep", "answer", "web"]) {
+      await page.keyboard.press("Alt+a");
+      assert.equal(await mode(page).inputValue(), expected);
+    }
+    for (const expected of ["answer", "deep"]) {
+      await page.keyboard.press("Alt+Shift+a");
+      assert.equal(await mode(page).inputValue(), expected);
+    }
+    await focused(page);
+    assert.equal(await input(page).inputValue(), "Keep this draft", "shortcuts never type into the draft");
+    assert.match(await context(page).getAttribute("title"), /\(Alt-N next, Alt-Shift-N previous\)$/);
+    assert.match(await mode(page).getAttribute("title"), /\(Alt-A next, Alt-Shift-A previous\)$/);
+    assert.equal(await context(page).getAttribute("aria-keyshortcuts"), "Alt+n Alt+Shift+n");
+    const call = await send(page, "Which context and mode did the keyboard choose?");
+    assert.deepEqual(call.args.context, { kind: "graph" });
+    assert.equal(call.args.mode, "deep");
+    const filter = await leaveChat(page);
+    await page.keyboard.press("Alt+n");
+    await page.keyboard.press("Alt+a");
+    assert.equal(await filter.inputValue(), "Focus stays outside Chat");
+    await returnToChat(page);
+    assert.equal(await context(page).inputValue(), "graph", "Chat shortcuts do nothing on other screens");
+    assert.equal(await mode(page).inputValue(), "deep");
+  }],
   ["Spark API endpoint offers all three Grafium modes without vendor tools or exposed keys", { global: true }, async (page) => {
     await modelStatus(page).click();
     await modelMenu(page).getByText(/Model server \/ API endpoint/).waitFor();
