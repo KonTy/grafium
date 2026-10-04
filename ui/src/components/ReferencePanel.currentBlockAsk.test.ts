@@ -21,9 +21,12 @@ describe("Unified conversation components", () => {
   it("offers exactly one explicit context and web-mode picker without implicit web routing", () => {
     expect(conversation.match(/aria-label="Mode"/g)).toHaveLength(1);
     expect(conversation.match(/aria-label="Context"/g)).toHaveLength(1);
-    for (const kind of ["selection", "block", "section", "page", "book", "graph", "none"]) {
-      expect(conversation).toContain(`<option value="${kind}"`);
+    for (const kind of ["selection", "block", "section", "page", "book", "graph", "library", "none"]) {
+      expect(conversation).toContain(`{ value: "${kind}", label:`);
     }
+    // The keyboard cycle and the menu share this list, so they cannot disagree.
+    expect(conversation).toContain(
+      "{#each contextChoices as choice (choice.value)}<option value={choice.value} disabled={!choice.enabled}>");
     expect(conversation).not.toContain('type="checkbox"');
     expect(conversation).not.toContain("searchedBlockAnchorFromQuestion");
     expect(conversation).not.toContain("visibleBlockAnchorFromQuestion");

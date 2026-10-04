@@ -3,7 +3,7 @@ members = ["crates/model-runtime", "core", "ui/src-tauri", "tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.177"
+version = "0.0.178"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -17,3 +17,12 @@ tracing = "0.1"
 rusqlite = { version = "0.31", features = ["bundled", "vtab", "backup", "functions"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
+
+# Full debug info made each test binary ~600 MB, about 80% of it DWARF. Line
+# tables keep file:line backtraces for Grafium's own crates; dependencies are
+# built without debug info.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

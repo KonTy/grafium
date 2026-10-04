@@ -27,6 +27,7 @@ export type ShortcutSection =
   | "layout"
   | "journal"
   | "editor"
+  | "chat"
   | "reading"
   | "flashcards"
   | "dialogs";
@@ -37,6 +38,7 @@ export const SHORTCUT_SECTIONS: ReadonlyArray<{ id: ShortcutSection; title: stri
   { id: "layout", title: "Layout" },
   { id: "journal", title: "Journal" },
   { id: "editor", title: "Editor" },
+  { id: "chat", title: "Chat" },
   { id: "reading", title: "Library & reading" },
   { id: "flashcards", title: "Flashcards" },
   { id: "dialogs", title: "Menus & dialogs" },
@@ -118,6 +120,12 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   editor("editor-italic", "Italic", ["mod+i"]),
   editor("editor-strikethrough", "Strikethrough", ["mod+shift+k"]),
   editor("editor-save-source", "Save the page (continuous editor)", ["mod+s"]),
+
+  // While a chat can receive them: the Chat screen, or a side-panel chat with focus.
+  app("chat-context-next", "chat", "Next notes context in Chat", ["alt+n"]),
+  app("chat-context-previous", "chat", "Previous notes context in Chat", ["alt+shift+n"]),
+  app("chat-mode-next", "chat", "Next answer mode in Chat", ["alt+a"]),
+  app("chat-mode-previous", "chat", "Previous answer mode in Chat", ["alt+shift+a"]),
 
   { ...app("toggle-bionic", "reading", "Toggle Bionic reading", ["mod+alt+b"]), singlePress: true },
   { ...app("bookmark", "reading", "Bookmark Library reading or playback", ["mod+alt+m"]), singlePress: true },

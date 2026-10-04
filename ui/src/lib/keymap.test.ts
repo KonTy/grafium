@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { appCommands, keymap_manager, registerDefaultShortcuts } from "./keymap";
 import { addShortcutBinding, removeShortcutBinding, resetAllShortcuts } from "./shortcutRegistry";
+import { registerChatComposer } from "./chatShortcuts";
+import { groupShortcutRows, shortcutAria } from "./shortcuts";
 
 function keyEvent(init: KeyboardEventInit): KeyboardEvent {
   return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
@@ -255,5 +257,79 @@ describe("keymap dual-mode matching", () => {
     expect(commands.find(({ id }) => id === "go-journal")?.bindings).toEqual(["g j", "mod+shift+j"]);
     // The palette does not list itself, nor actions the app did not provide.
     expect(commands.some(({ id }) => id === "command-palette" || id === "go-studies")).toBe(false);
+  });
+});
+
+describe("Chat composer shortcuts", () => {
+  let dispose = () => {};
+
+  afterEach(() => {
+    dispose();
+    document.body.replaceChildren();
+  });
+
+  it("claims Alt-N and Alt-A only while a chat can receive them, including while typing", () => {
+    registerDefaultShortcuts(stubActions());
+    keymap_manager.isEditing = true;
+    const idle = keyEvent({ key: "n", code: "KeyN", altKey: true });
+    expect(keymap_manager.handleKeydown(idle)).toBe(false);
+    expect(idle.defaultPrevented).toBe(false);
+
+    const root = document.createElement("section");
+    const message = document.createElement("textarea");
+    root.append(message);
+    document.body.append(root);
+    message.focus();
+    const chat = { root: () => root, compact: false, cycleContext: vi.fn(), cycleMode: vi.fn() };
+    dispose = registerChatComposer(chat);
+    const presses = [
+      [{ key: "n", code: "KeyN" }, chat.cycleContext, 1],
+      [{ key: "N", code: "KeyN", shiftKey: true }, chat.cycleContext, -1],
+      [{ key: "a", code: "KeyA" }, chat.cycleMode, 1],
+      [{ key: "A", code: "KeyA", shiftKey: true }, chat.cycleMode, -1],
+    ] as const;
+    for (const [init, handler, step] of presses) {
+      const event = keyEvent({ ...init, altKey: true });
+      expect(keymap_manager.handleKeydown(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(handler).toHaveBeenLastCalledWith(step);
+    }
+    expect(chat.cycleContext).toHaveBeenCalledTimes(2);
+    expect(chat.cycleMode).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists each direction as its own Chat action without reusing any key", () => {
+    registerDefaultShortcuts(stubActions());
+    const shortcuts = keymap_manager.getShortcuts();
+    const rows = groupShortcutRows(shortcuts).filter((row) => row.category === "chat");
+    expect(rows.map(({ id, modifiers }) => [id, modifiers])).toEqual([
+      ["chat-context-next", ["alt+n"]],
+      ["chat-context-previous", ["alt+shift+n"]],
+      ["chat-mode-next", ["alt+a"]],
+      ["chat-mode-previous", ["alt+shift+a"]],
+    ]);
+    for (const binding of ["alt+n", "alt+shift+n", "alt+a", "alt+shift+a"]) {
+      expect(shortcuts.filter((shortcut) => shortcut.binding === binding)).toHaveLength(1);
+    }
+    expect(shortcutAria("chat-context-next")).toBe("Alt+n");
+    expect(shortcutAria("chat-context-previous")).toBe("Alt+Shift+n");
+  });
+
+  it("moves a Chat key in Settings and offers Chat commands only where a chat can take them", () => {
+    registerDefaultShortcuts(stubActions());
+    expect(appCommands().some(({ id }) => id.startsWith("chat-"))).toBe(false);
+    const root = document.createElement("section");
+    document.body.append(root);
+    const chat = { root: () => root, compact: false, cycleContext: vi.fn(), cycleMode: vi.fn() };
+    dispose = registerChatComposer(chat);
+    expect(appCommands().filter(({ id }) => id.startsWith("chat-")).map(({ id }) => id))
+      .toEqual(["chat-context-next", "chat-context-previous", "chat-mode-next", "chat-mode-previous"]);
+    addShortcutBinding("chat-mode-next", "mod+alt+j");
+    keymap_manager.handleKeydown(keyEvent({ key: "j", code: "KeyJ", ctrlKey: true, altKey: true }));
+    expect(chat.cycleMode).toHaveBeenLastCalledWith(1);
+    removeShortcutBinding("chat-mode-next", "alt+a");
+    const old = keyEvent({ key: "a", code: "KeyA", altKey: true });
+    expect(keymap_manager.handleKeydown(old)).toBe(false);
+    expect(chat.cycleMode).toHaveBeenCalledTimes(1);
   });
 });

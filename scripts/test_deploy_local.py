@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,11 @@ class DeploymentTest(unittest.TestCase):
         ], check=True, capture_output=True)
         (build / "libggml.so").symlink_to("libggml.so.0")
         (build / "main.c").write_text(
-            '#include <stdio.h>\nextern int deployment_fixture(void);\n'
-            f'int main(void) {{ puts("Grafium {name} (commit {self.sha})"); return deployment_fixture(); }}\n'
+            '#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n'
+            'extern int deployment_fixture(void);\n'
+            'int main(int argc, char **argv) {\n'
+            '  if (argc > 1 && strcmp(argv[1], "--hold") == 0) { sleep(60); return 0; }\n'
+            f'  puts("Grafium {name} (commit {self.sha})"); return deployment_fixture();\n}}\n'
         )
         subprocess.run([
             "cc", str(build / "main.c"), "-L", str(build), "-lggml",
@@ -55,6 +59,57 @@ class DeploymentTest(unittest.TestCase):
     def installed(self):
         return subprocess.check_output([str(self.home / ".local/bin/grafium"), "--version"],
                                        env=self.env, text=True).strip()
+
+    def builds(self):
+        return sorted((self.home / ".local/lib/grafium").glob("build.*"))
+
+    def build_name(self, build):
+        return subprocess.check_output([str(build / "grafium-bin"), "--version"],
+                                       env={**self.env, "LD_LIBRARY_PATH": str(build)},
+                                       text=True).split()[1]
+
+    def test_only_the_newest_builds_and_backups_that_restore_them_are_kept(self):
+        self.env["GRAFIUM_KEEP_BUILDS"] = "2"
+        for name in ("first", "second", "third", "fourth"):
+            result = self.deploy(self.build(name))
+        self.assertIn("fourth", self.installed())
+        self.assertIn("removed 1 older build(s); keeping the newest 2", result.stdout)
+        self.assertEqual({self.build_name(build) for build in self.builds()}, {"third", "fourth"})
+        launchers = [path.read_text() for path in
+                     (self.home / ".local/lib/grafium").glob("backup.*/grafium")]
+        self.assertEqual(len(launchers), 1)
+        self.assertIn(str(next(b for b in self.builds() if self.build_name(b) == "third")),
+                      launchers[0])
+
+    def test_a_build_that_is_still_running_is_never_removed(self):
+        self.env["GRAFIUM_KEEP_BUILDS"] = "1"
+        self.deploy(self.build("running"))
+        [running_build] = self.builds()
+        process = subprocess.Popen([str(self.home / ".local/bin/grafium"), "--hold"], env=self.env)
+        try:
+            for _ in range(200):
+                if os.readlink(f"/proc/{process.pid}/exe").startswith(str(running_build)):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the launcher never started the installed build")
+            self.deploy(self.build("next"))
+            self.deploy(self.build("latest"))
+            self.assertEqual({self.build_name(build) for build in self.builds()},
+                             {"running", "latest"})
+        finally:
+            process.kill()
+            process.wait()
+        self.deploy(self.build("after-exit"))
+        self.assertEqual([self.build_name(build) for build in self.builds()], ["after-exit"])
+
+    def test_an_invalid_keep_count_keeps_three_builds(self):
+        self.env["GRAFIUM_KEEP_BUILDS"] = "none"
+        for name in ("one", "two", "three", "four"):
+            result = self.deploy(self.build(name))
+        self.assertIn("GRAFIUM_KEEP_BUILDS must be a positive integer", result.stderr)
+        self.assertEqual({self.build_name(build) for build in self.builds()},
+                         {"two", "three", "four"})
 
     def test_generations_remain_immutable_and_backups_are_verified(self):
         legacy = self.home / ".local/lib/libggml.so.0"

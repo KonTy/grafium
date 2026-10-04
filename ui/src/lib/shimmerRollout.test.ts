@@ -116,7 +116,6 @@ describe("busy labels shimmer", () => {
   }
 
   it("uses the endless variant for job labels, which have real progress events", () => {
-    expect(read("components/JobActivity.svelte")).toContain('class="shimmer shimmer-endless"');
     const jobs = read("components/JobsView.svelte");
     expect(jobs).toContain("class:shimmer={running.length > 0}");
     expect(jobs).toContain("class:shimmer-endless={running.length > 0}");

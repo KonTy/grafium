@@ -105,4 +105,20 @@ mod tests {
         assert!(page.contains("Try faster mode"));
         assert!(page.contains("cgroup"));
     }
+
+    #[test]
+    fn general_help_explains_the_jobs_bell() {
+        let page = super::help_get_page("general".into()).unwrap();
+        assert!(page.contains("Click the bell in the title bar"));
+        assert!(page.contains("completed or failed since you last opened Jobs"));
+        assert!(page.contains("**New**"));
+    }
+
+    #[test]
+    fn chat_help_lists_the_composer_shortcuts() {
+        let page = super::help_get_page("chat".into()).unwrap();
+        assert!(page.contains("**Alt+N** selects the next available notes context"));
+        assert!(page.contains("**Alt+A**"));
+        assert!(page.contains("add Shift to go back"));
+    }
 }

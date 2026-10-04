@@ -46,6 +46,91 @@ export function runningJobs(): Job[] {
   return jobs.filter((j) => j.status === "running");
 }
 
+const SEEN_KEY = "grafium.jobs.seenUntil";
+
+function loadSeenUntil(): number {
+  try {
+    const value = Number(localStorage.getItem(SEEN_KEY));
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Finish time of the newest job the Jobs page has shown. Results that finish
+ * after it are what the title-bar bell announces. Kept on this device, like
+ * the job history itself.
+ */
+export const jobsSeen = $state({ until: loadSeenUntil() });
+
+/** Completions and failures the Jobs page has not shown yet. */
+export function unseenResults(list: readonly Job[], seenUntil: number): Job[] {
+  return list.filter(
+    (job) => (job.status === "succeeded" || job.status === "failed") && (job.finished_at ?? 0) > seenUntil
+  );
+}
+
+/** The newest finish time in `list`, or 0 when nothing has finished. */
+export function latestFinish(list: readonly Job[]): number {
+  return list.reduce((latest, job) => Math.max(latest, job.finished_at ?? 0), 0);
+}
+
+/** Record that the Jobs page has shown every job finished up to `finishedAt`. */
+export function markJobsSeen(finishedAt: number): void {
+  if (!(finishedAt > jobsSeen.until)) return;
+  jobsSeen.until = finishedAt;
+  try {
+    localStorage.setItem(SEEN_KEY, String(finishedAt));
+  } catch {
+    // Without storage the bell still clears until Grafium restarts.
+  }
+}
+
+export interface JobIndicator {
+  /** The number on the bell; 0 shows no badge. */
+  count: number;
+  /** What the bell is reporting, e.g. "2 running" or "1 new result". */
+  summary: string;
+  running: boolean;
+}
+
+/**
+ * What the title-bar bell shows: jobs in flight first, otherwise results the
+ * Jobs page has not shown yet. History the user has already seen adds nothing.
+ */
+export function jobIndicator(list: readonly Job[], seenUntil: number): JobIndicator {
+  const running = list.filter((job) => job.status === "running").length;
+  const unseen = unseenResults(list, seenUntil);
+  const failed = unseen.filter((job) => job.status === "failed").length;
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (unseen.length > 0) parts.push(`${unseen.length} new ${unseen.length === 1 ? "result" : "results"}`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return { count: running > 0 ? running : unseen.length, summary: parts.join(", "), running: running > 0 };
+}
+
+export interface JobGroups {
+  running: Job[];
+  failed: Job[];
+  completed: Job[];
+  cancelled: Job[];
+}
+
+/** Jobs by state for the Jobs page, each newest first. */
+export function groupJobs(list: readonly Job[]): JobGroups {
+  const recency = (job: Job) => job.finished_at ?? job.started_at;
+  // Reversed first so that, between equal times, the later-added job leads.
+  const newestFirst = [...list].reverse().sort((a, b) => recency(b) - recency(a));
+  const withStatus = (status: JobStatus) => newestFirst.filter((job) => job.status === status);
+  return {
+    running: withStatus("running"),
+    failed: withStatus("failed"),
+    completed: withStatus("succeeded"),
+    cancelled: withStatus("cancelled"),
+  };
+}
+
 /**
  * Apply an update from the backend.
  *

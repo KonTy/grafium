@@ -13,6 +13,9 @@
   import ChatStatusTrail from "./ChatStatusTrail.svelte";
   import { isNearBottom, scrollToBottom } from "../lib/scrollToBottom";
   import { assistantModes, assistantProvider } from "./assistantPresentation";
+  import { cycleChoice, registerChatComposer, type CycleStep } from "../lib/chatShortcuts";
+  import { bindingAria, formatBinding } from "../lib/shortcuts";
+  import { onShortcutsChanged, shortcutBindings } from "../lib/shortcutRegistry";
   import { getPage, listBlocks } from "../lib/api";
   import { isOriginalBookPage } from "../lib/books";
   import { aiHealthCheck, aiGetConfig, type AiConfig, type WebSource } from "../lib/knowledge";
@@ -103,6 +106,18 @@
   );
   const libraryContextActive = $derived(view.context.kind === "library");
   const libraryContextAvailable = $derived(libraryIndexEnabled !== false && libraryChatAllowed !== false);
+  // One list drives both the menu and its keyboard cycle; `enabled` mirrors chooseContext.
+  const contextChoices = $derived([
+    { value: "selection", label: "Selection", enabled: !!view.selection && !view.selectionError },
+    { value: "block", label: "Block including children", enabled: !!focusedBlockId && !!contextPageId },
+    { value: "section", label: "Section / Chapter", enabled: !!info?.section && !!contextPageId },
+    { value: "page", label: pageLabel, enabled: !!contextPageId },
+    { value: "book", label: "Whole book", enabled: !!info?.book || (!!info?.isBook && !!contextPageId) },
+    { value: "graph", label: GRAPH_CONTEXT_LABEL, enabled: true },
+    { value: "library", label: "Library", enabled: libraryContextAvailable },
+    { value: "none", label: "No notes", enabled: true },
+  ]);
+  let shortcutAnnouncement = $state("");
   const thinkingTone = $derived<ChatThinkingTone>(status.kind === "stalled" ? "stalled"
     : status.phase === "searching_web" || status.phase === "reading_sources" ? "web"
     : status.phase === "thinking" ? "thinking" : "working");
@@ -323,6 +338,49 @@
     thread.contextLabel = label;
     updateAssistantConversation();
   }
+
+  // The menus' keys as set in Settings > Keyboard Shortcuts > Chat.
+  let shortcutVersion = $state(0);
+  $effect(() => onShortcutsChanged(() => { shortcutVersion += 1; }));
+  const cycleKeys = $derived.by(() => {
+    void shortcutVersion;
+    return {
+      context: { next: shortcutBindings("chat-context-next"), previous: shortcutBindings("chat-context-previous") },
+      mode: { next: shortcutBindings("chat-mode-next"), previous: shortcutBindings("chat-mode-previous") },
+    };
+  });
+  function cycleTitle(label: string, keys: { next: string[]; previous: string[] }): string {
+    const parts = [
+      keys.next.length ? `${keys.next.map(formatBinding).join(" or ")} next` : "",
+      keys.previous.length ? `${keys.previous.map(formatBinding).join(" or ")} previous` : "",
+    ].filter(Boolean);
+    return parts.length ? `${label} (${parts.join(", ")})` : label;
+  }
+  /** Sequences such as `c n` have no ARIA form, so only combinations are listed. */
+  function cycleAria(keys: { next: string[]; previous: string[] }): string | undefined {
+    return [...keys.next, ...keys.previous].filter((binding) => !binding.includes(" ")).map(bindingAria).join(" ")
+      || undefined;
+  }
+  function cycleContext(step: CycleStep) {
+    if (busy) return;
+    const next = cycleChoice(contextChoices, view.context.kind, step);
+    if (!next) return;
+    chooseContext(next);
+    shortcutAnnouncement = `Notes context: ${thread.contextLabel}`;
+  }
+  function cycleMode(step: CycleStep) {
+    if (busy || requestedWorkflow || libraryContextActive) return;
+    const modes = (Object.keys(assistantModes) as AssistantMode[]).map((value) => ({ value, enabled: true }));
+    const next = cycleChoice(modes, view.mode, step);
+    if (!next) return;
+    thread.mode = next;
+    updateAssistantConversation();
+    shortcutAnnouncement = `Answer mode: ${assistantModes[next].label}`;
+  }
+  $effect(() => {
+    if (!active) return;
+    return registerChatComposer({ root: () => paneEl, compact, cycleContext, cycleMode });
+  });
 
   async function send() {
     if (busy || checking || !connected || !thread.draft.trim()) return;
@@ -666,23 +724,20 @@
         }}></textarea>
       <div class="composer-options" bind:this={footerEl}>
         <label class="context-choice"><span class="control-label">Notes context</span>
-          <select aria-label="Context" title={`Notes to include: ${view.contextLabel}`} value={view.context.kind} disabled={busy} onchange={(event) => chooseContext(event.currentTarget.value)}>
-            <option value="selection" disabled={!view.selection || !!view.selectionError}>Selection</option>
-            <option value="block" disabled={!focusedBlockId}>Block including children</option>
-            <option value="section" disabled={!info?.section}>Section / Chapter</option>
-            <option value="page" disabled={!contextPageId}>{pageLabel}</option>
-            <option value="book" disabled={!info?.book && !info?.isBook}>Whole book</option>
-            <option value="graph">{GRAPH_CONTEXT_LABEL}</option>
-            <option value="library" disabled={!libraryContextAvailable}>Library</option>
-            <option value="none">No notes</option>
+          <select aria-label="Context" title={cycleTitle(`Notes to include: ${view.contextLabel}`, cycleKeys.context)}
+            aria-keyshortcuts={cycleAria(cycleKeys.context)}
+            value={view.context.kind} disabled={busy} onchange={(event) => chooseContext(event.currentTarget.value)}>
+            {#each contextChoices as choice (choice.value)}<option value={choice.value} disabled={!choice.enabled}>{choice.label}</option>{/each}
           </select>
         </label>
         <label class="mode-choice"><span class="control-label">Answer mode</span>
-          <select aria-label="Mode" value={libraryContextActive ? "answer" : view.mode} disabled={busy || !!requestedWorkflow || libraryContextActive} title={libraryContextActive && libraryContextAvailable ? "Library answers stay on this device; web search is off for Library questions." : assistantModes[view.mode].description}
+          <select aria-label="Mode" value={libraryContextActive ? "answer" : view.mode} disabled={busy || !!requestedWorkflow || libraryContextActive} title={libraryContextActive && libraryContextAvailable ? "Library answers stay on this device; web search is off for Library questions." : cycleTitle(assistantModes[view.mode].description, cycleKeys.mode)}
+            aria-keyshortcuts={cycleAria(cycleKeys.mode)}
             onchange={(event) => { thread.mode = event.currentTarget.value as AssistantMode; updateAssistantConversation(); }}>
             {#each Object.entries(assistantModes) as [mode, choice]}<option value={mode} disabled={libraryContextActive && mode !== "answer"}>{choice.label}</option>{/each}
           </select>
         </label>
+        <span class="control-label" aria-live="polite">{shortcutAnnouncement}</span>
         <label class="workflow-choice"><span class="control-label">Prompts and actions</span>
           <select aria-label="ASK action" title="Choose a prompt or a reviewable note action" value={workflowChoice} disabled={busy}
             onchange={event => {

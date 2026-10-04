@@ -12,6 +12,7 @@
 import { bindingChords, bindingFromEvent, chordHasCommandModifier, chordKey, isFunctionKey } from "./keyBinding";
 import { readerShortcut, setReaderShortcutBindings } from "./readerHotkeys";
 import { onShortcutsChanged, SHORTCUT_DEFINITIONS, shortcutBindings, type ShortcutSection } from "./shortcutRegistry";
+import { CHAT_SHORTCUT_ACTIONS } from "./chatShortcuts";
 
 /** Return `false` to leave the key alone (for example, nothing to focus). */
 export type ActionFn = () => void | boolean;
@@ -29,6 +30,8 @@ export interface Shortcut {
   description?: string;
   /** Category for grouping */
   category?: string;
+  /** Claims its keys only while this returns true (default: always). */
+  when?: () => boolean;
 }
 
 interface ParsedShortcut {
@@ -37,6 +40,7 @@ interface ParsedShortcut {
   sequence: string[];
   action: ActionFn;
   navOnly: boolean;
+  when?: () => boolean;
 }
 
 class KeymapManager {
@@ -69,6 +73,7 @@ class KeymapManager {
       sequence: bindingChords(s.binding),
       action: s.action,
       navOnly: s.navOnly !== false,
+      when: s.when,
     }));
   }
 
@@ -110,10 +115,12 @@ class KeymapManager {
     }
 
     const pending = [...this.pendingChord];
+    // Conditions run only for matching keys, not on every keystroke.
     const exactMatch = active.find(
       (s) =>
         s.sequence.length === pending.length &&
-        s.sequence.every((chord, i) => chord === pending[i])
+        s.sequence.every((chord, i) => chord === pending[i]) &&
+        (!s.when || s.when())
     );
 
     if (exactMatch) {
@@ -127,7 +134,8 @@ class KeymapManager {
     const prefixMatch = active.some(
       (s) =>
         s.sequence.length > pending.length &&
-        pending.every((chord, i) => chord === s.sequence[i])
+        pending.every((chord, i) => chord === s.sequence[i]) &&
+        (!s.when || s.when())
     );
 
     if (prefixMatch) {
@@ -226,7 +234,13 @@ function shortcutHandlers(actions: ShortcutActions): Record<string, ActionFn | u
     "zoom-in": actions.zoomIn,
     "zoom-out": actions.zoomOut,
     "zoom-reset": actions.zoomReset,
+    ...Object.fromEntries(Object.entries(CHAT_SHORTCUT_ACTIONS).map(([id, { run }]) => [id, run])),
   };
+}
+
+/** When an action can run; it leaves its keys alone otherwise. */
+function shortcutCondition(id: string): (() => boolean) | undefined {
+  return CHAT_SHORTCUT_ACTIONS[id]?.when;
 }
 
 /**
@@ -265,6 +279,7 @@ function applyShortcuts(): void {
         // The combo works while editing, so it also starts editing today.
         action: definition.id === "go-journal" && !navOnly ? actions.goJournalEdit : handler,
         navOnly,
+        when: shortcutCondition(definition.id),
       });
     }
   }
@@ -291,9 +306,10 @@ export interface AppCommand {
 }
 
 /**
- * Every app-wide action that can run, with its current keys, for the command
- * palette. Actions without any keys are listed too, so removing a shortcut
- * never hides the command.
+ * Every app-wide action that can run now, with its current keys, for the
+ * command palette. Actions without any keys are listed too, so removing a
+ * shortcut never hides the command; screen-specific ones (such as Chat's)
+ * only where they work.
  */
 export function appCommands(): AppCommand[] {
   if (!registeredActions) return [];
@@ -302,6 +318,7 @@ export function appCommands(): AppCommand[] {
   for (const definition of SHORTCUT_DEFINITIONS) {
     const run = handlers[definition.id];
     if (definition.scope !== "app" || !run || definition.id === "command-palette") continue;
+    if (shortcutCondition(definition.id)?.() === false) continue;
     commands.push({
       id: definition.id,
       label: definition.label,
