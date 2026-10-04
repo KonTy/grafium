@@ -196,7 +196,7 @@ guessed into a different block.
 | Distraction-free reading | Read with hidden controls; tap, press F8, or use the corner button to reveal them. F11 enters fullscreen, Escape exits, and horizontal swipes turn pages. Reflowable text follows Grafium's theme with real font scaling; image and fixed-layout artwork retain their colors. |
 | Scanned PDF OCR | Extract text locally with Poppler and Tesseract; optional ImageMagick helps extract figure regions. |
 | Audio/video processing | Turn supported media sources into notes with transcripts; local transcription needs its model and supporting tools. |
-| Background jobs | Follow longer-running imports, Library indexing/transcription, and processing; cancel supported running jobs and clear finished entries without blocking the editor. |
+| Background jobs | Follow longer-running imports, Library indexing/transcription, and processing on the Jobs page, grouped as running, failed, completed, and cancelled. The title-bar bell opens it and counts running jobs, or results you have not seen yet. Cancel supported running jobs and clear finished entries without blocking the editor. |
 
 Original-format books, metadata, and adjacent `.jsonld` notes live under `books/`.
 Legacy standalone Markdown notes under `pages/Reading Notes/Books/` remain

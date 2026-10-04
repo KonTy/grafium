@@ -79,13 +79,20 @@ graph.
 
 ## Background jobs
 
-The **Jobs** page shows imports, indexing, progress, errors, and completed jobs.
+Click the bell in the title bar, or **Jobs** in the sidebar, to open the
+**Jobs** page. It shows imports, indexing, progress, and errors, grouped as
+running, failed, completed, and cancelled jobs, newest first, with when each
+one started and finished. While jobs run, the bell counts them; otherwise its
+number counts jobs that completed or failed since you last opened Jobs. The
+page marks those results **New** and clears the number. Cancelled jobs are
+listed but never counted. What you have seen is remembered on this device.
+
 The last 100 finished jobs stay there across restarts. The history is kept in
 Grafium's app data on this device; it is not part of any graph and is not
 synced. A job that was still running when Grafium closed is listed as
 **Cancelled**, "Stopped when Grafium closed". Automatic Library indexing that
 found nothing new leaves no entry. **Clear history** removes every finished job
-at once; running jobs stay. Its **Running** label shimmers only while at least
+at once; running jobs stay. The **Running** count shimmers only while at least
 one job is running, and stops when the last job finishes, fails, or is
 cancelled. With reduced motion enabled, the count updates without animation.
 

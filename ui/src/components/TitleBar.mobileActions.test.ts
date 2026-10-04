@@ -49,4 +49,9 @@ describe("compact title bar actions", () => {
     expect(jobs).toContain("top: 1px;");
     expect(jobs).toContain("right: 1px;");
   });
+
+  it("opens the Jobs page from the title-bar bell", () => {
+    expect(titleBar).toContain("<JobActivity toolbar onOpen={onOpenJobs} />");
+    expect(app).toContain('onOpenJobs={() => handleNavigate("__jobs__")}');
+  });
 });

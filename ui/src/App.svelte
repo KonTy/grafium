@@ -2464,6 +2464,7 @@
       onGoToDate={openJournalCalendar}
       onGoToLink={openGoToLink}
       onOpenSearch={openGlobalSearch}
+      onOpenJobs={() => handleNavigate("__jobs__")}
       onOpenSettings={() => navigateToPage("__settings__")}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}

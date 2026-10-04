@@ -17,6 +17,7 @@
     onGoToDate?: () => void;
     onGoToLink?: () => void;
     onOpenSearch?: () => void;
+    onOpenJobs?: () => void;
     onOpenSettings?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
@@ -36,6 +37,7 @@
     onGoToDate = () => {},
     onGoToLink = () => {},
     onOpenSearch = () => {},
+    onOpenJobs = () => {},
     onOpenSettings = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
@@ -122,7 +124,7 @@
         <path d="m21 21-4.35-4.35"></path>
       </svg>
     </button>
-    <JobActivity toolbar />
+    <JobActivity toolbar onOpen={onOpenJobs} />
     <button class="titlebar-btn" data-tauri-drag-region="false" onclick={onToggleReferencePanel} title={shortcutTitle("Knowledge Panel", "toggle-right-sidebar")} aria-label="Knowledge Panel" aria-keyshortcuts={shortcutAria("toggle-right-sidebar")}>
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
