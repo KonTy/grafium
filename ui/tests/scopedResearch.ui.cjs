@@ -15,7 +15,7 @@ const cases = [
     assert.equal(await panel(page).getByRole("checkbox", { name: /Internet|Research/ }).count(), 0);
     assert.equal(await panel(page).getByRole("combobox", { name: "Mode", exact: true }).count(), 1);
     assert.deepEqual(await context(page).locator("option").evaluateAll((options) => options.map(({ value }) => value).sort()),
-      ["block", "book", "graph", "none", "page", "section", "selection"]);
+      ["block", "book", "graph", "library", "none", "page", "section", "selection"]);
     assert.equal(await context(page).inputValue(), "page");
     assert.equal(await mode(page).inputValue(), "answer");
     await input(page).fill("Keep this Chat draft while taking manual notes");

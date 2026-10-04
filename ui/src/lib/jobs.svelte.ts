@@ -73,6 +73,15 @@ export function applyJobUpdate(update: Job): { isNewlyFinished: boolean } {
   };
 }
 
+/**
+ * Drop a job the backend discarded: an automatic run that found nothing to
+ * do, which is not kept as history. Exported for tests.
+ */
+export function removeJob(id: string): void {
+  const index = jobs.findIndex((j) => j.id === id);
+  if (index !== -1) jobs.splice(index, 1);
+}
+
 /** The toast text for a job that has just finished. */
 export function describeFinishedJob(job: Job): string | null {
   switch (job.status) {
@@ -93,6 +102,7 @@ export async function cancelJob(jobId: string): Promise<boolean> {
   return invoke("jobs_cancel", { jobId });
 }
 
+/** Clear the job history, also on disk. Running jobs stay. */
 export async function clearFinishedJobs(): Promise<void> {
   await invoke("jobs_clear_finished");
   for (let i = jobs.length - 1; i >= 0; i--) {
@@ -101,7 +111,8 @@ export async function clearFinishedJobs(): Promise<void> {
 }
 
 /**
- * Subscribe to job events and rehydrate anything already running.
+ * Subscribe to job events and rehydrate the running jobs and the history kept
+ * from earlier runs. Loading history raises no toasts.
  *
  * Listening is set up *before* the initial list is fetched, so a job that
  * finishes during startup can't slip through the gap between the two.
@@ -109,10 +120,15 @@ export async function clearFinishedJobs(): Promise<void> {
 export async function initJobs(
   onFinished?: (job: Job) => void
 ): Promise<UnlistenFn> {
-  const unlisten = await listen<Job>("job://update", (event) => {
+  const stopUpdates = await listen<Job>("job://update", (event) => {
     const { isNewlyFinished } = applyJobUpdate(event.payload);
     if (isNewlyFinished) onFinished?.(event.payload);
   });
+  const stopRemovals = await listen<string>("job://removed", (event) => removeJob(event.payload));
+  const unlisten: UnlistenFn = () => {
+    stopUpdates();
+    stopRemovals();
+  };
 
   try {
     const existing = await invoke<Job[]>("jobs_list");

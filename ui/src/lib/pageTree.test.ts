@@ -128,6 +128,39 @@ describe("page tree commands", () => {
     }]);
   });
 
+  it("keeps journal days in their own id space and opens them by their date", () => {
+    const journals: TreeNode = {
+      key: "",
+      label: "Journals",
+      page_id: null,
+      children: [{
+        key: "2026",
+        label: "2026",
+        page_id: null,
+        children: [{
+          key: "2026-10-03",
+          label: "2026-10-03 · Sat",
+          page_id: "j1",
+          children: [],
+          descendant_count: 1,
+          updated_at: 5,
+        }],
+        descendant_count: 1,
+        updated_at: 5,
+      }],
+      descendant_count: 1,
+      updated_at: 5,
+    };
+    const [folder] = toPageTreeView([journals], "journals");
+    expect(folder.id).toBe("journals:");
+    expect(folder.page_title).toBeNull();
+    // A page titled "2026" lives at `namespace:2026`, never on this year row.
+    expect(folder.children[0].id).toBe("journals:2026");
+    const day = folder.children[0].children[0];
+    expect(day.id).toBe("journals:2026-10-03");
+    expect(day.page_title).toBe("2026-10-03");
+  });
+
   it("normalizes deeply nested payloads without recursion", () => {
     const root: TreeNode = {
       key: "0",

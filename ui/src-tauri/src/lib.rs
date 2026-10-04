@@ -1125,6 +1125,10 @@ pub fn run() {
 
             app.manage(state);
             app.manage(commands::jobs::JobsState::new());
+            // Job history from earlier runs; app-local, never synced.
+            app.state::<commands::jobs::JobsState>()
+                .registry
+                .restore_history(app_dir.join("jobs-history.json"));
             app.manage(commands::library_index::LibraryIndexState::default());
 
             // Initialize Knowledge Engine
@@ -1360,6 +1364,7 @@ pub fn run() {
             commands::pages::get_child_pages,
             commands::pages::search_page_titles,
             commands::trees::pages_namespace_tree,
+            commands::trees::pages_journal_tree,
             commands::trees::pages_tag_tree,
             commands::trees::page_set_collection,
             commands::trees::pages_list_collections,

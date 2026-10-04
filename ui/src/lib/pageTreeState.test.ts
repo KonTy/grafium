@@ -405,6 +405,48 @@ describe("sortTree", () => {
     },
   );
 
+  it.each(["name", "recent"] as const)(
+    "pins the Journals folder first and keeps its calendar order when sorting by %s",
+    (mode) => {
+      const day = (title: string, updated_at: number): PageTreeViewNode => ({
+        id: `journals:${title}`,
+        label: title,
+        page_id: `j-${title}`,
+        page_title: title,
+        count: 1,
+        updated_at,
+        children: [],
+      });
+      const month = (key: string, label: string, days: PageTreeViewNode[]): PageTreeViewNode => ({
+        id: `journals:${key}`,
+        label,
+        page_id: null,
+        page_title: null,
+        count: days.length,
+        updated_at: Math.max(...days.map((d) => d.updated_at)),
+        children: days,
+      });
+      // Newest first, as the backend builds it. A–Z would put April before
+      // March; recency would follow edits, not dates.
+      const journals: PageTreeViewNode = {
+        id: "journals:",
+        label: "Journals",
+        page_id: null,
+        page_title: null,
+        count: 3,
+        updated_at: 50,
+        children: [
+          month("2026-04", "April", [day("2026-04-02", 10), day("2026-04-01", 50)]),
+          month("2026-03", "March", [day("2026-03-31", 20)]),
+        ],
+      };
+      const sorted = sortTree([folder("Books", 900), folder("Aardvark", 1_000), journals], mode, true);
+      expect(labels(sorted)).toEqual(["Journals", "Books", "Aardvark"]);
+      expect(labels(sorted[0].children)).toEqual(["April", "March"]);
+      expect(labels(sorted[0].children[0].children)).toEqual(["2026-04-02", "2026-04-01"]);
+    },
+  );
+
   it("pins a special namespace root that also has its own page", () => {
     const booksWithPage = node("Books", 100, [node("Books/chapter", 100)]);
     const sorted = sortTree([folder("Recent", 900), booksWithPage], "recent", true);

@@ -79,8 +79,9 @@
               <span>{jobs.length} recent</span>
             {/if}
           </div>
-          <button class="job-clear" onclick={clearFinishedJobs} disabled={!jobs.some((j) => isTerminal(j.status))}>
-            Clear finished
+          <button class="job-clear" onclick={clearFinishedJobs} disabled={!jobs.some((j) => isTerminal(j.status))}
+            title="Remove every finished job from the history. Running jobs stay.">
+            Clear history
           </button>
         </div>
         {#each recent as job (job.id)}

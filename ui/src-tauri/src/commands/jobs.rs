@@ -11,19 +11,28 @@
 //! next, and progress arrives as `job://update` events. The registry keeps the
 //! latest snapshot of every job so a freshly-mounted UI can rehydrate rather
 //! than guess.
+//!
+//! Finished jobs are also kept as history in the app data folder, so the Jobs
+//! page still shows them after a restart. That file is local to this device;
+//! it is not part of any graph and is never synced.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{Emitter, State};
 
 /// Event channel the frontend subscribes to for all job activity.
 pub const JOB_EVENT: &str = "job://update";
+/// A job that was dropped from the list without being kept as history.
+pub const JOB_REMOVED_EVENT: &str = "job://removed";
 
-/// How many finished jobs we keep for history before evicting the oldest.
-/// Bounded on purpose — an unbounded registry in a long-lived desktop session
-/// is a slow memory leak.
-const MAX_RETAINED_JOBS: usize = 50;
+/// How many jobs we keep, as history across restarts, before evicting the
+/// oldest finished ones. Bounded so the list and its file stay small.
+const MAX_RETAINED_JOBS: usize = 100;
+/// Longest message, error or details text kept in the saved history.
+const MAX_SAVED_TEXT: usize = 4_000;
+const STOPPED_BY_CLOSE: &str = "Stopped when Grafium closed";
 const MAX_RUNNING_JOBS: usize = 2;
 
 /// Automatic AI search indexing after imports, syncs and rebuilds. It is owned
@@ -96,6 +105,13 @@ struct JobEntry {
 pub struct JobRegistry {
     /// Insertion-ordered so eviction can drop the oldest finished job.
     entries: Mutex<Vec<JobEntry>>,
+    /// Where history is saved; set once the app data folder is known. Saving
+    /// holds this lock, so the last write always reflects the latest list.
+    history: Mutex<Option<PathBuf>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl JobRegistry {
@@ -150,6 +166,9 @@ impl JobRegistry {
             });
             evict_old_finished(&mut entries);
         }
+        // Saved while running too, so a job cut short by closing the app is
+        // still listed afterwards, as stopped.
+        self.save_history();
 
         let _ = app.emit(JOB_EVENT, &job);
 
@@ -185,12 +204,70 @@ impl JobRegistry {
         }
     }
 
-    /// Drop finished jobs from the activity list.
+    /// Clear the history: drop every finished job, here and on disk.
+    /// Running jobs stay.
     pub fn clear_finished(&self) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|e| !e.job.status.is_terminal());
+        locked(&self.entries).retain(|e| !e.job.status.is_terminal());
+        self.save_history();
+    }
+
+    /// Bring back the history saved by earlier runs and keep saving it at
+    /// `path`. A job that was still running when Grafium closed comes back as
+    /// stopped; nothing will finish it now.
+    pub fn restore_history(&self, path: PathBuf) {
+        let saved: Vec<Job> = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        {
+            let mut entries = locked(&self.entries);
+            let mut restored: Vec<JobEntry> = saved
+                .into_iter()
+                .filter(|job| !entries.iter().any(|entry| entry.job.id == job.id))
+                .map(|mut job| {
+                    if job.status == JobStatus::Running {
+                        job.status = JobStatus::Cancelled;
+                        job.message = Some(STOPPED_BY_CLOSE.to_string());
+                        job.progress = None;
+                        job.cancellable = false;
+                    }
+                    JobEntry {
+                        job,
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    }
+                })
+                .collect();
+            restored.append(&mut entries);
+            *entries = restored;
+            evict_old_finished(&mut entries);
+        }
+        *locked(&self.history) = Some(path);
+        self.save_history();
+    }
+
+    fn save_history(&self) {
+        let path = locked(&self.history);
+        let Some(path) = path.as_ref() else {
+            return;
+        };
+        let jobs: Vec<Job> = locked(&self.entries).iter().map(|e| saved_copy(&e.job)).collect();
+        if let Err(error) = write_history(path, &jobs) {
+            tracing::warn!("Could not save the job history: {error}");
+        }
+    }
+
+    /// Remove a job without keeping it as history.
+    fn remove(&self, id: &str) -> bool {
+        let removed = {
+            let mut entries = locked(&self.entries);
+            let before = entries.len();
+            entries.retain(|e| e.job.id != id);
+            entries.len() != before
+        };
+        if removed {
+            self.save_history();
+        }
+        removed
     }
 
     fn mutate(&self, id: &str, f: impl FnOnce(&mut Job)) -> Option<Job> {
@@ -253,6 +330,31 @@ fn is_duplicate_concept_edge_job(job: &Job, entries: &[JobEntry]) -> bool {
                 && entry.job.kind == "ai_concept_edges"
                 && entry.job.link.as_ref().map(|link| link.page_id.as_str()) == page_id
         })
+}
+
+/// A copy small enough to keep: long texts (tool output, stack traces) are cut.
+fn saved_copy(job: &Job) -> Job {
+    let cut = |text: &Option<String>| {
+        text.as_ref().map(|text| match text.char_indices().nth(MAX_SAVED_TEXT) {
+            Some((end, _)) => format!("{}…", &text[..end]),
+            None => text.clone(),
+        })
+    };
+    Job {
+        message: cut(&job.message),
+        error: cut(&job.error),
+        details: cut(&job.details),
+        ..job.clone()
+    }
+}
+
+fn write_history(path: &Path, jobs: &[Job]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(jobs)?)?;
+    std::fs::rename(&temporary, path)
 }
 
 fn evict_old_finished(entries: &mut Vec<JobEntry>) {
@@ -354,8 +456,19 @@ impl JobHandle {
         });
     }
 
+    /// Finish without leaving an entry: for automatic runs that turned out to
+    /// have nothing to do, which would otherwise crowd out real history.
+    pub fn discard(self) {
+        if self.registry.remove(&self.id) {
+            let _ = self.app.emit(JOB_REMOVED_EVENT, &self.id);
+        }
+    }
+
     fn emit(&self, f: impl FnOnce(&mut Job)) {
         if let Some(updated) = self.registry.mutate(&self.id, f) {
+            if updated.status.is_terminal() {
+                self.registry.save_history();
+            }
             let _ = self.app.emit(JOB_EVENT, &updated);
         }
     }
@@ -442,6 +555,93 @@ mod tests {
         ];
         assert!(admission_error(&user, &with_background).is_none());
         assert!(admission_error(&background, &with_background).is_some());
+    }
+
+    fn registry_with(entries: Vec<JobEntry>) -> JobRegistry {
+        JobRegistry {
+            entries: Mutex::new(entries),
+            history: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn history_survives_a_restart_and_unfinished_jobs_come_back_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs-history.json");
+        let first = registry_with(Vec::new());
+        first.restore_history(path.clone());
+        {
+            let mut entries = first.entries.lock().unwrap();
+            entries.push(entry("done", JobStatus::Succeeded));
+            entries.push(entry("broken", JobStatus::Failed));
+            let mut long = entry("long", JobStatus::Failed);
+            long.job.details = Some("x".repeat(MAX_SAVED_TEXT + 500));
+            entries.push(long);
+            entries.push(entry("cut-short", JobStatus::Running));
+        }
+        first.save_history();
+
+        // A new app run: the jobs are listed again, in their original order.
+        let second = registry_with(vec![entry("new", JobStatus::Running)]);
+        second.restore_history(path.clone());
+        let jobs = second.list();
+        let ids: Vec<_> = jobs.iter().map(|job| job.id.as_str()).collect();
+        assert_eq!(ids, ["done", "broken", "long", "cut-short", "new"]);
+        let stopped = &jobs[3];
+        assert_eq!(stopped.status, JobStatus::Cancelled);
+        assert_eq!(stopped.message.as_deref(), Some(STOPPED_BY_CLOSE));
+        assert!(!stopped.cancellable);
+        let details = jobs[2].details.as_deref().unwrap();
+        assert_eq!(details.chars().count(), MAX_SAVED_TEXT + 1, "long output is cut");
+        assert_eq!(jobs[4].status, JobStatus::Running, "this run's jobs are untouched");
+    }
+
+    #[test]
+    fn clearing_history_keeps_running_jobs_and_empties_the_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs-history.json");
+        let registry = registry_with(vec![
+            entry("done", JobStatus::Succeeded),
+            entry("running", JobStatus::Running),
+            entry("stopped", JobStatus::Cancelled),
+        ]);
+        registry.restore_history(path.clone());
+
+        registry.clear_finished();
+
+        let ids: Vec<_> = registry.list().into_iter().map(|job| job.id).collect();
+        assert_eq!(ids, ["running"]);
+        let saved: Vec<Job> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, "running");
+    }
+
+    #[test]
+    fn history_keeps_the_newest_hundred_finished_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs-history.json");
+        let old: Vec<Job> = (0..MAX_RETAINED_JOBS + 20)
+            .map(|i| entry(&format!("old-{i}"), JobStatus::Succeeded).job)
+            .collect();
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let registry = registry_with(Vec::new());
+        registry.restore_history(path.clone());
+        let jobs = registry.list();
+        assert_eq!(jobs.len(), MAX_RETAINED_JOBS);
+        assert_eq!(jobs[0].id, "old-20", "the oldest are dropped first");
+        // A missing or unreadable file is an empty history, not an error.
+        let fresh = registry_with(Vec::new());
+        std::fs::write(&path, b"not json").unwrap();
+        fresh.restore_history(path);
+        assert!(fresh.list().is_empty());
+    }
+
+    #[test]
+    fn a_discarded_job_leaves_no_history() {
+        let registry = registry_with(vec![entry("keep", JobStatus::Succeeded), entry("noop", JobStatus::Running)]);
+        assert!(registry.remove("noop"));
+        assert!(!registry.remove("noop"));
+        assert_eq!(registry.list().len(), 1);
     }
 
     #[test]

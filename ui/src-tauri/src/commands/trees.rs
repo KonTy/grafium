@@ -17,8 +17,8 @@
 use crate::AppState;
 use grafium_core::db::PageKindFilter;
 use grafium_core::knowledge::{
-    build_namespace_tree, build_tag_tree, clear_collection, collection_of, mark_collection,
-    TreeNode,
+    build_journal_tree, build_namespace_tree, build_tag_tree, clear_collection, collection_of,
+    mark_collection, TreeNode,
 };
 use serde::Serialize;
 use tauri::State;
@@ -53,6 +53,25 @@ pub fn pages_namespace_tree(
         .filter(|page| filter.matches(page))
         .collect();
     Ok(build_namespace_tree(&pages))
+}
+
+/// The Journals folder All Pages pins above the namespace tree: journal pages
+/// by year, month and day, newest first. Empty when no journal matches.
+#[tauri::command]
+pub fn pages_journal_tree(
+    state: State<AppState>,
+    filter: Option<PageKindFilter>,
+) -> Result<Vec<TreeNode>, String> {
+    let filter = filter.unwrap_or_default();
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let journals: Vec<_> = graph
+        .db
+        .list_journal_pages(-1, 0)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|page| filter.matches(page))
+        .collect();
+    Ok(build_journal_tree(&journals).into_iter().collect())
 }
 
 /// The tag tree: the pages used as tags, nested by their tag path.

@@ -193,6 +193,17 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
             }
             return roots;
           }
+          // This fixture's namespace tree above already lists journal days as
+          // roots, so the separate Journals folder stays empty.
+          case "pages_journal_tree": return [];
+          // The Chat panel asks whether Library questions are possible.
+          case "library_chat_available":
+            return { available: false, reason: "Library questions need a chat model on this computer, so book and transcript text never leaves it. Choose one in Settings > AI." };
+          case "library_index_status":
+            return { enabled: true, transcribeMedia: true, running: false, jobId: null,
+              items: { total: 0, indexed: 0, pending: 0, failed: 0, titleOnly: 0 }, chunks: 0,
+              semantic: "ready", semanticReason: null, transcription: "ready", transcriptionReason: null,
+              lastIndexedAt: null, errors: [] };
           case "list_journal_note_dates":
             return days.filter((note) => note.title.startsWith(`${args.year}-${String(args.month).padStart(2, "0")}-`))
               .filter((note) => state.blocks.some((block) => block.page_id === note.id && block.content.trim()))

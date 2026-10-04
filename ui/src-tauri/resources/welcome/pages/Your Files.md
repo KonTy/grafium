@@ -35,7 +35,7 @@ This is why a page can appear in **All Pages** and in the namespace tree, yet be
 
 The filter applies to list and tree view alike, and is remembered per graph. Note that **Placeholders** empties the namespace tree of most of its structure, and **Files** empties the tag tree almost entirely — tag pages are usually the placeholders.
 
-The namespace tree keeps Grafium's **Books**, **ImportedMedia**, and **Reading Notes** folders at the top in a fixed order. Their distinct book, media, and note icons make those app-managed locations recognizable. This does not affect the tag tree or same-named folders nested elsewhere.
+The namespace tree keeps Grafium's **Journals**, **Books**, **ImportedMedia**, and **Reading Notes** folders at the top in a fixed order. Their distinct calendar, book, media, and note icons make those app-managed locations recognizable. **Journals** lists the files in the graph's `journals` folder by year, month and day, newest first. This does not affect the tag tree or same-named folders nested elsewhere.
 
 The file watcher notices external source changes, removals, and folder moves.
 Opening a graph reconciles changes made while it was closed, even when the

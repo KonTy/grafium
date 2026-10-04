@@ -115,6 +115,15 @@ export async function pagesNamespaceTree(filter: PageKindFilter = "all"): Promis
   return fromWire<TreeNode[]>(raw);
 }
 
+/**
+ * The Journals folder All Pages pins above the namespace tree: journal pages
+ * by year, month and day, newest first. Empty when no journal matches.
+ */
+export async function pagesJournalTree(filter: PageKindFilter = "all"): Promise<TreeNode[]> {
+  const raw = await invoke("pages_journal_tree", { filter });
+  return fromWire<TreeNode[]>(raw);
+}
+
 export async function pagesTagTree(filter: PageKindFilter = "all"): Promise<TreeNode[]> {
   const raw = await invoke("pages_tag_tree", { filter });
   return fromWire<TreeNode[]>(raw);
@@ -198,9 +207,13 @@ function collectTreeReferences(content: string): Set<string> {
   return references;
 }
 
+/**
+ * `journals` nodes get their own id space (`journals:2026-10`), so a page that
+ * happens to be titled like a year or a date can never share an id with them.
+ */
 export function toPageTreeView(
   nodes: readonly TreeNode[],
-  source: PageTreeSource,
+  source: PageTreeSource | "journals",
 ): PageTreeViewNode[] {
   const output: PageTreeViewNode[] = [];
   const pending: Array<{

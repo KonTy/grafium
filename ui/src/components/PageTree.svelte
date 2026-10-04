@@ -422,7 +422,13 @@
           <span class="disclosure-spacer" aria-hidden="true"></span>
         {/if}
         <span class="node-icon" aria-hidden="true">
-          {#if specialFolder?.icon === "book"}
+          {#if specialFolder?.icon === "calendar"}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.75" stroke="currentColor" stroke-width="1.25" />
+              <path d="M1.75 6.25h12.5M5 1.5v2.5M11 1.5v2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" />
+              <path d="M4.75 8.75h1.5M7.25 8.75h1.5M9.75 8.75h1.5M4.75 11.25h1.5M7.25 11.25h1.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" />
+            </svg>
+          {:else if specialFolder?.icon === "book"}
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <path d="M2.25 2.25h3.5A2.25 2.25 0 0 1 8 4.5v9.25A2.25 2.25 0 0 0 5.75 11.5h-3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
               <path d="M13.75 2.25h-3.5A2.25 2.25 0 0 0 8 4.5v9.25a2.25 2.25 0 0 1 2.25-2.25h3.5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
@@ -708,6 +714,11 @@
   }
 
   .tree-item.active .node-icon {
+    color: var(--accent);
+  }
+
+  /* The pinned Journals folder stands out from ordinary folders. */
+  .tree-row[data-special-folder="calendar"] .node-icon {
     color: var(--accent);
   }
 

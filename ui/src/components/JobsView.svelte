@@ -49,14 +49,15 @@
   <div class="jobs-header">
     <div>
       <h1>Jobs</h1>
-      <p>Background imports, indexing work, progress, failures, and job history from this app session.</p>
+      <p>Background imports, indexing work, progress, and failures. The last 100 finished jobs stay here across restarts, on this device only.</p>
     </div>
     <button
       class="clear-btn"
       onclick={clearFinishedJobs}
       disabled={!jobs.some((job) => isTerminal(job.status))}
+      title="Remove every finished job from the history. Running jobs stay."
     >
-      Clear finished
+      Clear history
     </button>
   </div>
 

@@ -108,6 +108,15 @@ index. Semantic Library search uses only Grafium's on-device embedding model.
 If a cloud embedding provider is configured, Library semantic search explains
 why it is unavailable while keyword search still works.
 
+Indexing runs as one **Indexing Library** job, one item at a time. It starts
+shortly after Grafium opens, when you open Library or **Rescan** it, and from
+**Index changes now** in **Settings > Library**. Open **Jobs** to follow it:
+the job names the item being worked on and its place in the run, such as
+"3 of 12", how many minutes of a recording have been transcribed, and how
+many items are done and left. Transcription waits while Chat or search is
+using the model, and an item that was stopped part way continues where it
+left off the next time.
+
 Chat receives Library excerpts only when you choose the **Library** context for
 that question and the chat model runs on this computer. Citation chips open the cited source back in Library at the
 chapter or timestamp.

@@ -67,6 +67,8 @@ export const ALL_PAGES_KIND_STORAGE_KEY = "grafium.pageTree.allPages.kind";
  * in core/src/graph/reading_notes.rs.
  */
 export const SPECIAL_FOLDERS = [
+  // The Journals folder (`pages_journal_tree`), pinned above everything.
+  { id: "journals:", icon: "calendar" },
   { id: "namespace:Books", icon: "book" },
   { id: "namespace:ImportedMedia", icon: "media" },
   { id: "namespace:Reading Notes", icon: "note" },
@@ -80,6 +82,11 @@ const SPECIAL_FOLDER_BY_ID = new Map<string, SpecialFolder>(
 
 export function getSpecialFolder(id: string): SpecialFolder | undefined {
   return SPECIAL_FOLDER_BY_ID.get(id);
+}
+
+/** The Journals folder and everything in it: years, months and days. */
+export function isJournalTreeNode(id: string): boolean {
+  return id.startsWith("journals:");
 }
 
 /**
@@ -560,7 +567,9 @@ export function sortTree(
     const { level, root } = stack.pop()!;
     level.sort(root && pinSpecialFolders ? compareRoot : compare);
     for (const node of level) {
-      if (node.children.length === 0) continue;
+      // Journals keep their calendar order (newest first) in every sort mode;
+      // A–Z would otherwise put April before March.
+      if (node.children.length === 0 || isJournalTreeNode(node.id)) continue;
       node.children = node.children.map((child) => ({
         ...child,
         children: [...child.children],
