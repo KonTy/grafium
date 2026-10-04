@@ -6,7 +6,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::{File, Metadata};
 use std::path::{Component, Path};
-use std::time::UNIX_EPOCH;
+use std::sync::{mpsc, Arc, LazyLock, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
 pub const MAX_EPUB_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
@@ -111,6 +112,18 @@ fn file_identity(file: &File, metadata: &Metadata) -> ReaderResult<FileIdentity>
 }
 
 impl Fingerprint {
+    /// Whether `found` is this registered file. Size and modification time
+    /// must always agree. `strict` also requires the same on-disk identity
+    /// (device, file ID and change time), which catches a file replaced with
+    /// its size and modification time preserved. That identity only means
+    /// something while the filesystem stays mounted and keeps file IDs
+    /// stable, so remounted drives and shares are compared without it.
+    pub fn matches(&self, found: &Fingerprint, strict: bool) -> bool {
+        self.size == found.size
+            && self.modified_ns == found.modified_ns
+            && (!strict || self.identity == found.identity)
+    }
+
     pub fn of(file: &File) -> ReaderResult<Self> {
         let metadata = file.metadata().map_err(|e| e.to_string())?;
         if !metadata.is_file() {
@@ -192,10 +205,36 @@ pub fn relative(path: &str) -> ReaderResult<()> {
 }
 
 /// Walk every component with no-follow semantics, including the selected root.
+#[cfg(test)]
 pub fn root(path: &str) -> ReaderResult<(Dir, RootIdentity)> {
+    open_root(path).map_err(|failure| failure.message)
+}
+
+struct RootFailure {
+    missing: bool,
+    message: String,
+}
+
+impl RootFailure {
+    fn io(error: std::io::Error) -> Self {
+        Self {
+            missing: error.kind() == std::io::ErrorKind::NotFound,
+            message: error.to_string(),
+        }
+    }
+
+    fn invalid(message: &str) -> Self {
+        Self {
+            missing: false,
+            message: message.into(),
+        }
+    }
+}
+
+fn open_root(path: &str) -> Result<(Dir, RootIdentity), RootFailure> {
     let path = Path::new(path);
     if !path.is_absolute() {
-        return Err("Choose an absolute local library folder".into());
+        return Err(RootFailure::invalid("Choose an absolute local library folder"));
     }
     let mut components = path.components();
     let mut base = std::path::PathBuf::new();
@@ -204,27 +243,149 @@ pub fn root(path: &str) -> ReaderResult<(Dir, RootIdentity)> {
             Component::Prefix(_) | Component::RootDir => base.push(component),
             Component::Normal(name) => {
                 let mut dir = Dir::open_ambient_dir(&base, cap_std::ambient_authority())
-                    .map_err(|e| e.to_string())?;
-                dir = dir.open_dir_nofollow(name).map_err(|e| e.to_string())?;
+                    .map_err(RootFailure::io)?;
+                dir = dir.open_dir_nofollow(name).map_err(RootFailure::io)?;
                 for component in components {
                     match component {
                         Component::Normal(name) => {
-                            dir = dir.open_dir_nofollow(name).map_err(|e| e.to_string())?
+                            dir = dir.open_dir_nofollow(name).map_err(RootFailure::io)?
                         }
                         _ => {
-                            return Err(
-                                "Library folder must not contain traversal components".into()
-                            )
+                            return Err(RootFailure::invalid(
+                                "Library folder must not contain traversal components",
+                            ))
                         }
                     }
                 }
-                let file = dir.try_clone().map_err(|e| e.to_string())?.into_std_file();
-                return Ok((dir, RootIdentity::of(&file)?));
+                let file = dir
+                    .try_clone()
+                    .map_err(RootFailure::io)?
+                    .into_std_file();
+                let identity = RootIdentity::of(&file).map_err(|message| RootFailure {
+                    missing: false,
+                    message,
+                })?;
+                return Ok((dir, identity));
             }
-            _ => return Err("Library folder must not contain traversal components".into()),
+            _ => {
+                return Err(RootFailure::invalid(
+                    "Library folder must not contain traversal components",
+                ))
+            }
         }
     }
-    Err("Choose a library folder, not a filesystem root".into())
+    Err(RootFailure::invalid(
+        "Choose a library folder, not a filesystem root",
+    ))
+}
+
+/// Long enough for a sleeping USB disk to spin up; short enough that a
+/// stalled network share cannot hold the Library indefinitely.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub const NOT_CONNECTED: &str = "Not connected";
+pub const NOT_RESPONDING: &str = "Not responding";
+pub const EMPTY_LOCATION: &str = "Empty; the drive or share may not be mounted";
+
+/// Open a Library location, reporting why it is unreachable instead of
+/// waiting forever on a share that stopped answering. While one probe of a
+/// location is still stuck in the operating system, further probes of it
+/// fail at once rather than piling up more stuck threads.
+pub fn probe(path: &str, timeout: Duration) -> Result<(Dir, RootIdentity), String> {
+    enum Slot {
+        Waiting,
+        Done(Result<(Dir, RootIdentity), RootFailure>),
+        Abandoned,
+    }
+    if STALLED
+        .lock()
+        .map_err(|_| "Library location lock failed")?
+        .contains_key(path)
+    {
+        return Err(NOT_RESPONDING.into());
+    }
+    let slot = Arc::new(Mutex::new(Slot::Waiting));
+    let (sender, receiver) = mpsc::channel();
+    let (owned, worker) = (path.to_owned(), slot.clone());
+    std::thread::Builder::new()
+        .name("library-location-probe".into())
+        .spawn(move || {
+            let result = open_root(&owned);
+            let Ok(mut slot) = worker.lock() else { return };
+            if matches!(*slot, Slot::Abandoned) {
+                drop(slot);
+                count_stalled(&owned, -1);
+            } else {
+                *slot = Slot::Done(result);
+                drop(slot);
+                let _ = sender.send(());
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    let waited = receiver.recv_timeout(timeout);
+    let mut slot = slot.lock().map_err(|_| "Library location lock failed")?;
+    match std::mem::replace(&mut *slot, Slot::Abandoned) {
+        Slot::Done(Ok(root)) => Ok(root),
+        Slot::Done(Err(failure)) if failure.missing => Err(NOT_CONNECTED.into()),
+        Slot::Done(Err(failure)) => Err(failure.message),
+        Slot::Waiting | Slot::Abandoned
+            if waited == Err(mpsc::RecvTimeoutError::Disconnected) =>
+        {
+            Err("Library location check failed".into())
+        }
+        Slot::Waiting | Slot::Abandoned => {
+            // Counted while the slot is still locked, so the worker cannot
+            // finish and uncount it first.
+            count_stalled(path, 1);
+            Err(NOT_RESPONDING.into())
+        }
+    }
+}
+
+static STALLED: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+fn count_stalled(path: &str, change: isize) {
+    if let Ok(mut stalled) = STALLED.lock() {
+        let count = stalled.entry(path.to_owned()).or_default();
+        *count = count.saturating_add_signed(change);
+        if *count == 0 {
+            stalled.remove(path);
+        }
+    }
+}
+
+pub fn is_empty(dir: &Dir) -> bool {
+    dir.entries().is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// Whether file IDs on this filesystem identify the same file across
+/// lookups. FAT and exFAT number files as they are read, and FUSE and SMB
+/// mounts may do the same, so only size and time can be compared there.
+pub fn stable_file_ids(dir: &Dir) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::unix::io::AsRawFd;
+        let Ok(file) = dir.try_clone().map(|dir| dir.into_std_file()) else {
+            return false;
+        };
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: the descriptor stays open for the call, and the buffer has
+        // the layout fstatfs fills in; it is read only after success.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        #[allow(clippy::unnecessary_cast)]
+        let kind = unsafe { stats.assume_init() }.f_type as u64 as u32;
+        !matches!(
+            kind,
+            0x4d44 | 0x2011_bab0 | 0x6573_5546 | 0xff53_4d42 | 0xfe53_4d42 | 0x517b
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = dir;
+        true
+    }
 }
 
 pub fn open(dir: &Dir, path: &str) -> ReaderResult<File> {

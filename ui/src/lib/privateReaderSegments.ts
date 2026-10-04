@@ -5,6 +5,7 @@ import { applyAndroidState, registerPrivatePreparation, stopPrivatePlayback, upd
 import { privateLibrary, savePrivatePosition } from "./privateReader";
 import { get } from "svelte/store";
 import { speechPlaybackRate } from "./readerPlaybackPreferences";
+import { unavailableSourceMessage } from "./libraryLocations";
 
 type SegmentSource = () => Promise<ReaderTextSegment[]>;
 const sources = new Map<string, { collect: SegmentSource; sourceHash: () => string }>();
@@ -49,6 +50,7 @@ export function canonicalNarrationBatches(segments: ReaderTextSegment[]): Canoni
 /** Upload completely before native Start: the service never depends on a live WebView queue. */
 export async function startAndroidPrivateNarration(bookId: string, fromBeginning = false, locator?: BookLocation): Promise<void> {
   const book = get(privateLibrary).books.find(item => item.id === bookId);
+  if (book?.disconnected) throw new Error(unavailableSourceMessage(book, "read aloud"));
   if (!book?.available || book.kind !== "epub") throw new Error("Open an available private EPUB before starting native narration.");
   const status = await androidReaderRequest<{ available: boolean; reason?: string; selection: unknown }>("voiceStatus");
   if (!status.available) throw new Error(status.reason || "The native offline speech engine is unavailable.");

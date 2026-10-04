@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { privateLibrary, privateLibraryError, readerNative, refreshPrivateLibrary } from "../lib/privateReader";
+  import { addPrivateLibraryLocation, movePrivateLibraryLocation, privateLibrary, privateLibraryError, readerNative, refreshPrivateLibrary, removePrivateLibraryLocation, type ReaderLocation } from "../lib/privateReader";
+  import { libraryLocationName, libraryLocations } from "../lib/libraryLocations";
   import { androidReaderRequest, isAndroidReader, type ReaderVolumeCapabilities } from "../lib/privateReaderAndroid";
   import PrivateReaderVoices from "./PrivateReaderVoices.svelte";
   import { FALLBACK_LIBRARY_INDEX_STATUS, formatLibraryLastRun, libraryIndexSettingsSet, libraryIndexStart, libraryIndexStatus, subscribeLibraryIndexUpdated, type LibraryIndexStatus } from "../lib/libraryIndex";
@@ -40,16 +41,33 @@
     finally { busy = false; }
   }
   async function choose() {
-    if (android) {
-      await androidReaderRequest("pickLocation");
-      await refreshPrivateLibrary();
-      return;
-    }
-    const path = await open({ directory: true, multiple: false, title: "Choose a local private library folder" });
+    await androidReaderRequest("pickLocation");
+    await refreshPrivateLibrary();
+  }
+  const locations = $derived(libraryLocations($privateLibrary));
+  let removing = $state("");
+  async function addLocation() {
+    const path = await open({ directory: true, multiple: false, title: "Add a Library location" });
     if (typeof path !== "string") return;
-    await readerNative("set_library", { path });
-    await refreshPrivateLibrary(true);
-    message = "Library location saved. Originals have not been copied into your graph.";
+    await addPrivateLibraryLocation(path);
+    message = `Added ${libraryLocationName(path)}. Originals stay in that folder; nothing is copied into your graph.`;
+  }
+  async function changeFolder(location: ReaderLocation) {
+    const path = await open({ directory: true, multiple: false, defaultPath: location.path,
+      title: `Choose where ${libraryLocationName(location.path)} is now` });
+    if (typeof path !== "string") return;
+    await movePrivateLibraryLocation(location.path, path);
+    message = `${libraryLocationName(path)} now uses ${path}. Its items kept their progress and bookmarks.`;
+  }
+  async function confirmRemove(location: ReaderLocation, index: number) {
+    removing = location.path;
+    await tick();
+    document.getElementById(`location-cancel-${index}`)?.focus();
+  }
+  async function removeLocation(location: ReaderLocation) {
+    await removePrivateLibraryLocation(location.path);
+    removing = "";
+    message = `Removed ${libraryLocationName(location.path)} from Library. The files in it were not touched.`;
   }
   async function exportBackup() {
     if (android) {
@@ -78,6 +96,7 @@
 </script>
 
 <section data-help-context="reader" class="private-settings">
+  {#if android}
   <div class="help-row">
     <h3>Library location</h3>
     <SettingsHelp title="Library location">
@@ -89,6 +108,45 @@
   </div>
   <p class="path">{$privateLibrary.libraryPath || "No library selected"}</p>
   <div class="actions"><button disabled={busy} onclick={() => run(choose)}>Choose local folder…</button><button disabled={busy || !$privateLibrary.libraryPath} onclick={() => run(() => refreshPrivateLibrary(true))}>Rescan library</button></div>
+  {:else}
+  <div class="help-row">
+    <h3>Library locations</h3>
+    <SettingsHelp title="Library locations">
+      <p>Add folders on this computer, external drives, SD cards, or file-server shares mounted as folders. Grafium finds EPUBs, audiobooks, and videos in each. An audiobook folder may contain nested disc folders; each loose audio file is a separate item.</p>
+      <p>When a drive is unplugged or a share is not mounted, its items stay in Library, marked Disconnected, with their progress, bookmarks, and search index. Reconnect it and choose Rescan to open them again. If the drive is now mounted at a different path, use Change folder; its items keep their history.</p>
+      <p>Device-local books, listening progress, and automatic bookmarks never enter graph sync or AI.
+        Intentionally written journal [[Book title]] notes are ordinary shared graph content.
+        Do not choose a cloud-backed folder if you need originals to remain only on this device; external backup and whole-device policies are outside Grafium’s control.</p>
+    </SettingsHelp>
+  </div>
+  {#if locations.length}
+    <ul class="locations" aria-label="Library locations">
+      {#each locations as location, index (location.path)}
+        <li>
+          <div class="location-head">
+            <strong>{libraryLocationName(location.path)}</strong>
+            <span class="location-state" class:offline={!location.connected}>{location.connected ? "Connected" : "Disconnected"}</span>
+          </div>
+          <span class="location-detail">{location.path} · {location.items} {location.items === 1 ? "item" : "items"}{!location.connected && location.reason ? ` · ${location.reason}` : ""}</span>
+          {#if location.connected && location.reason}<span class="error">{location.reason}</span>{/if}
+          {#if removing === location.path}
+            <div class="remove-location" role="group" aria-label={`Confirm removing ${libraryLocationName(location.path)}`}>
+              <p class="warning">Remove “{libraryLocationName(location.path)}” from Library?{location.items ? ` Its ${location.items} ${location.items === 1 ? "item leaves Library with its" : "items leave Library with their"} reading progress, bookmarks, and search index.` : ""} The files in the folder are not touched.</p>
+              <div class="actions"><button id={`location-cancel-${index}`} disabled={busy} onclick={() => removing = ""}>Cancel</button>
+                <button disabled={busy} onclick={() => run(() => removeLocation(location))}>Remove location</button></div>
+            </div>
+          {:else}
+            <div class="actions"><button disabled={busy} onclick={() => run(() => changeFolder(location))}>Change folder…</button>
+              <button disabled={busy} onclick={() => confirmRemove(location, index)}>Remove…</button></div>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {:else}
+    <p class="path">No Library locations yet</p>
+  {/if}
+  <div class="actions"><button disabled={busy} onclick={() => run(addLocation)}>Add location…</button><button disabled={busy || !locations.length} onclick={() => run(() => refreshPrivateLibrary(true))}>Rescan library</button></div>
+  {/if}
   {#if android}
     <section class="volume">
       <div class="help-row">
@@ -123,7 +181,7 @@
     {#if indexStatus}
       <label class="checkbox"><input type="checkbox" checked={indexStatus.enabled} disabled={indexBusy} onchange={event => runIndex(() => setIndex(event.currentTarget.checked, indexStatus!.transcribeMedia))} />Search inside books and media</label>
       <label class="checkbox"><input type="checkbox" checked={indexStatus.transcribeMedia} disabled={indexBusy || !indexStatus.enabled} onchange={event => runIndex(() => setIndex(indexStatus!.enabled, event.currentTarget.checked))} />Transcribe audio and video</label>
-      <p class="path">Indexed {indexStatus.items.indexed} of {indexStatus.items.total} items · {indexStatus.chunks} chunks · {indexStatus.running ? "running" : "idle"}{indexStatus.jobId ? ` · job ${indexStatus.jobId}` : ""}</p>
+      <p class="path">Indexed {indexStatus.items.indexed} of {indexStatus.items.total} items · {indexStatus.chunks} chunks · {indexStatus.running ? "running" : "idle"}{indexStatus.jobId ? ` · job ${indexStatus.jobId}` : ""}{indexStatus.items.waiting ? ` · ${indexStatus.items.waiting} waiting for a disconnected location` : ""}</p>
       <p>Semantic: {indexStatus.semantic}{indexStatus.semanticReason ? ` · ${indexStatus.semanticReason}` : ""}</p>
       <p>Transcription: {indexStatus.transcription}{indexStatus.transcriptionReason ? ` · ${indexStatus.transcriptionReason}` : ""}</p>
       <p>Last run: {formatLibraryLastRun(indexStatus.lastIndexedAt)}</p>
@@ -186,4 +244,12 @@
   details { margin-top: 20px; } summary { cursor: pointer; } label { display: flex; flex-direction: column; gap: 7px; margin: 15px 0; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
   .volume, .indexing { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 20px; } .warning { color: var(--danger, #c44); font-weight: 600; } ul { margin-top: 6px; padding-left: 18px; } li { margin: 4px 0; } .badge { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; margin-left: 8px; }
   .checkbox { flex-direction: row; align-items: center; } select { color: var(--text-primary); background: var(--bg-primary); padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+  .locations { list-style: none; padding: 0; margin: 12px 0; display: flex; flex-direction: column; gap: 10px; }
+  .locations li { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .location-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .location-head strong { overflow-wrap: anywhere; }
+  .location-state { flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--accent); }
+  .location-state.offline { color: var(--task-todo-fg, var(--text-secondary)); }
+  .location-detail { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+  .remove-location p { margin: 0 0 8px; }
 </style>

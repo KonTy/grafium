@@ -13,6 +13,7 @@
   import { playPrivateAudio, cuePrivateAudio, privatePlayback, bookmarkPrivatePlayback } from "../lib/privateReaderPlayback";
   import { isAndroidReader } from "../lib/privateReaderAndroid";
   import { startPrivateReadAloud } from "../lib/privateReaderVoice";
+  import { libraryLocationName, libraryLocations, locationForPath, unavailableSourceMessage } from "../lib/libraryLocations";
   type InitialOpenTarget = { nonce: number; bookId: string; trackId?: string | null; startMs?: number | null; quote?: string | null; chapter?: string | null };
   let { bookId, onBack, onVoiceSettings, onAddToStudies, onJournalNote, initialBookmarkId, initialOpenTarget = null, onPlayback, onActivity, onProgress }: {
     bookId: string; onBack: () => void; onVoiceSettings?: () => void;
@@ -35,7 +36,9 @@
   let relinking = $state(false);
   let replacementBookId = $state("");
   let replacementPath = $state("");
+  let replacementLocation = $state("");
   let audioRelinkChoice = $state(false);
+  let checking = $state(false);
   let consumedBookmark = "";
   let consumedOpenTarget = $state(0);
   let ignoredBookmark = $state<string | null>(null);
@@ -107,9 +110,10 @@
     const path = await open({ directory: directory === true, multiple: false,
       title: directory ? "Choose the top-level audiobook folder" : "Choose the replacement EPUB, video, or loose audio file" });
     if (typeof path !== "string") return;
-    const library = $privateLibrary.libraryPath?.replace(/\/+$/, "");
-    if (!library || !path.startsWith(`${library}/`)) throw new Error("Choose a replacement inside your current private library folder.");
-    replacementPath = path.slice(library.length + 1);
+    const inside = locationForPath(libraryLocations($privateLibrary), path);
+    if (!inside) throw new Error("Choose a replacement inside one of your Library locations.");
+    replacementPath = inside.relativePath;
+    replacementLocation = inside.location.path;
     audioRelinkChoice = false;
     relinking = true;
   }
@@ -265,11 +269,12 @@
     {/if}
     {#if relinking}
       <form class="relink" onsubmit={event => { event.preventDefault(); void run(async () => {
-        await readerNative("relink", android ? { bookId, replacementBookId } : { bookId, relativePath: replacementPath, confirmReplacement: true });
+        await readerNative("relink", android ? { bookId, replacementBookId }
+          : { bookId, relativePath: replacementPath, confirmReplacement: true, location: replacementLocation });
         await refreshPrivateLibrary(); relinking = false;
       }, "Source relinked; private history retained."); }}>
         {#if android}<label>Discovered replacement source<select bind:value={replacementBookId}><option value="" disabled>Choose a source…</option>{#each $privateLibrary.books.filter(item => item.id !== bookId && item.available && item.kind === book!.kind) as replacement}<option value={replacement.id}>{replacement.title}</option>{/each}</select></label>
-        {:else}<p>Replacement: <strong>{replacementPath}</strong></p>{/if}
+        {:else}<p>Replacement: <strong>{replacementPath}</strong> in {libraryLocationName(replacementLocation)}</p>{/if}
         <p class="hint">Confirm this is the intended source for “{book.title}”. Relinking retains history, but a changed source may invalidate older passages or chapter positions. Source files are never modified.</p>
         <div class="actions"><button disabled={busy || (android ? !replacementBookId : !replacementPath)}>Confirm relink</button><button type="button" onclick={() => relinking = false}>Cancel</button></div>
       </form>
@@ -285,7 +290,12 @@
       {@render bookActions()}
     </header>
     {/if}
-    {#if !book.available}<p class="unavailable">Source unavailable. Progress and bookmarks have been retained. Reconnect the library or relink this book; a different chapter will never be chosen silently.</p>{/if}
+    {#if book.disconnected}
+      <div class="unavailable" role="status">
+        <p>{unavailableSourceMessage(book)} Progress and bookmarks are kept.</p>
+        <button disabled={checking} onclick={() => { checking = true; void run(() => refreshPrivateLibrary(true)).finally(() => checking = false); }}>{checking ? "Checking…" : "Check again"}</button>
+      </div>
+    {:else if !book.available}<p class="unavailable">Source unavailable. Progress and bookmarks have been retained. Reconnect the library or relink this book; a different chapter will never be chosen silently.</p>{/if}
     {#if book.error}<p class="error" role="alert">{book.error}</p>{/if}
     {#if !reading}{@render readingStatus()}{/if}
     {#if missingInitialBookmark}
@@ -336,5 +346,5 @@
   label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; } textarea { resize: vertical; }
   .delete-bookmark { padding: 8px; background: var(--bg-secondary); font-size: 13px; }
   @media (pointer: coarse) { .bookmark-jump { min-height: 44px; } }
-  .unavailable { padding: 12px; border: 1px solid var(--border); border-radius: 8px; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
+  .unavailable { padding: 12px; border: 1px solid var(--border); border-radius: 8px; } .unavailable p { margin: 0 0 8px; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; }
 </style>

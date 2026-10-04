@@ -277,7 +277,7 @@ describe("private reader components", () => {
   it("keeps restored unavailable history visible before a new library location is selected", async () => {
     invoke.mockResolvedValue({ libraryPath: null, books: [{ ...book, available: false }] });
     component = mount(PrivateReaderLibrary, { target: document.body, props: { onOpen: vi.fn(), onSettings: vi.fn() } });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Choose an external local folder"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Add a folder, drive, SD card, or mounted share"));
     expect(document.body.textContent).toContain(book.title);
     expect(document.body.textContent).toContain("History / relink");
   });
@@ -344,7 +344,7 @@ describe("private reader components", () => {
     await vi.waitFor(() => expect(button("Confirm relink").disabled).toBe(false));
     button("Confirm relink").click();
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reader_relink", {
-      bookId: book.id, relativePath: "New folder", confirmReplacement: true,
+      bookId: book.id, relativePath: "New folder", confirmReplacement: true, location: "/outside-graph",
     }));
   });
 });

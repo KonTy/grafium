@@ -131,6 +131,10 @@ pub struct LibraryItemCounts {
     pub pending: usize,
     pub failed: usize,
     pub title_only: usize,
+    /// Not fully indexed, and on a Library location that is disconnected.
+    /// Indexing resumes when it is connected again.
+    #[serde(default)]
+    pub waiting: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +374,7 @@ impl LibraryIndexStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn status(
         &self,
         running: bool,
@@ -378,6 +383,7 @@ impl LibraryIndexStore {
         semantic_reason: Option<String>,
         transcription: LibraryTranscriptionState,
         transcription_reason: Option<String>,
+        disconnected: &HashSet<String>,
     ) -> Result<LibraryIndexStatus> {
         let conn = self.conn()?;
         let settings = self.settings()?;
@@ -387,19 +393,27 @@ impl LibraryIndexStore {
             pending: 0,
             failed: 0,
             title_only: 0,
+            waiting: 0,
         };
-        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM items GROUP BY status")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))? {
-            let (status, count) = row?;
-            counts.total += count;
+        let mut known = HashSet::new();
+        let mut stmt = conn.prepare("SELECT book_id, status FROM items")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (book_id, status) = row?;
+            counts.total += 1;
             match status.as_str() {
-                "indexed" => counts.indexed = count,
-                "pending" => counts.pending = count,
-                "failed" => counts.failed = count,
-                "title_only" => counts.title_only = count,
+                "indexed" => counts.indexed += 1,
+                "title_only" => counts.title_only += 1,
+                // Kept, not failed: it resumes when its location is connected.
+                _ if disconnected.contains(&book_id) => counts.waiting += 1,
+                "pending" => counts.pending += 1,
+                "failed" => counts.failed += 1,
                 _ => {}
             }
+            known.insert(book_id);
         }
+        let never_indexed = disconnected.iter().filter(|id| !known.contains(*id)).count();
+        counts.total += never_indexed;
+        counts.waiting += never_indexed;
         let chunks = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         let last_indexed_at = conn
             .query_row(
@@ -412,7 +426,7 @@ impl LibraryIndexStore {
         let mut errors = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT book_id, title, COALESCE(status_message, '') FROM items \
-             WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 20",
+             WHERE status = 'failed' ORDER BY updated_at DESC",
         )?;
         for row in stmt.query_map([], |r| {
             Ok(LibraryIndexError {
@@ -421,7 +435,13 @@ impl LibraryIndexStore {
                 message: cap_reason(&r.get::<_, String>(2)?),
             })
         })? {
-            errors.push(row?);
+            let error = row?;
+            if !disconnected.contains(&error.book_id) {
+                errors.push(error);
+                if errors.len() == 20 {
+                    break;
+                }
+            }
         }
         Ok(LibraryIndexStatus {
             enabled: settings.enabled,
@@ -2135,6 +2155,7 @@ mod tests {
                 pending: 0,
                 failed: 0,
                 title_only: 0,
+                waiting: 0,
             },
             chunks: 1,
             semantic: LibrarySemanticState::Ready,
@@ -2269,11 +2290,57 @@ mod tests {
                 None,
                 LibraryTranscriptionState::Ready,
                 None,
+                &HashSet::new(),
             )
             .unwrap();
         assert_eq!(status.errors.len(), 1);
         assert!(status.errors[0].message.ends_with("..."));
         assert!(status.errors[0].message.chars().count() <= 500);
+    }
+
+    #[test]
+    fn disconnected_items_wait_instead_of_failing_and_keep_their_text() {
+        let store = LibraryIndexStore::open(scratch("waiting").join("index.sqlite")).unwrap();
+        let indexed = item("indexed", "Indexed on a drive");
+        let chunk = ChunkRecord {
+            book_id: "indexed".into(),
+            title: "Indexed on a drive".into(),
+            kind: LibraryItemKind::Epub,
+            ordinal: 0,
+            text: "retained passage".into(),
+            track_id: None,
+            start_ms: None,
+            end_ms: None,
+            chapter: None,
+            quote: None,
+        };
+        store.index_chunks(&indexed, &[chunk], None, None).unwrap();
+        store.index_failed(&item("failed", "Earlier failure"), "Source missing").unwrap();
+        store.index_failed(&item("broken", "Broken here"), "Unreadable EPUB").unwrap();
+        let disconnected: HashSet<String> = ["indexed", "failed", "never-seen"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let status = store
+            .status(
+                false,
+                None,
+                LibrarySemanticState::Ready,
+                None,
+                LibraryTranscriptionState::Ready,
+                None,
+                &disconnected,
+            )
+            .unwrap();
+        assert_eq!(status.items.total, 4);
+        assert_eq!(status.items.indexed, 1, "indexed text stays counted and searchable");
+        assert_eq!(status.items.waiting, 2);
+        assert_eq!(status.items.failed, 1);
+        assert_eq!(
+            status.errors.iter().map(|e| e.book_id.as_str()).collect::<Vec<_>>(),
+            ["broken"]
+        );
+        assert_eq!(store.search("retained passage", 10, None).unwrap().len(), 1);
     }
 
     #[test]

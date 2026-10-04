@@ -15,6 +15,6 @@ export function studyDisplayProgress(item: StudyItem, books: ReaderBook[]): Stud
   if (book.progress) return book.progress;
   return {
     position: book.position ? book.position.offsetMs / 1000 : 0, total: 0, anchor: "",
-    label: book.position ? bookmarkLabel(book, book.position) : book.available ? "" : "Source unavailable",
+    label: book.position ? bookmarkLabel(book, book.position) : book.available ? "" : book.disconnected ? "Disconnected" : "Source unavailable",
   };
 }

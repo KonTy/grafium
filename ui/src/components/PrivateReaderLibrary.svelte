@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { get } from "svelte/store";
   import { privateLibrary, privateLibraryError, refreshPrivateLibrary, setPrivateFavorite, addPrivateLibraryLink, type ReaderBook } from "../lib/privateReader";
+  import { disconnectedLocations, libraryLocations, libraryLocationName, libraryLocationVolume, unavailableSourceMessage } from "../lib/libraryLocations";
   import { libraryBooks, libraryLink, libraryPercent, libraryPositionLabel, requestLibraryMedia } from "../lib/library";
   import { FALLBACK_LIBRARY_INDEX_STATUS, createStaleLibrarySearchGuard, formatLibrarySourcePosition, isLibraryIndexOffError, libraryIndexStatus, librarySearch, subscribeLibraryIndexUpdated, type LibraryIndexStatus, type LibrarySearchHit } from "../lib/libraryIndex";
   import { playPrivateAudio, privatePlayback, resumePrivatePlayback } from "../lib/privateReaderPlayback";
@@ -34,15 +36,30 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let stopIndex: (() => void) | undefined;
   const books = $derived(libraryBooks($privateLibrary.books, query, favorites, kind));
+  const configured = $derived(libraryLocations($privateLibrary).length > 0);
+  const offline = $derived(disconnectedLocations($privateLibrary));
+  const offlineNotice = $derived.by(() => {
+    if (!offline.length) return "";
+    const items = offline.reduce((sum, location) => sum + location.items, 0);
+    const kept = `${items} ${items === 1 ? "item is" : "items are"} kept here`;
+    return offline.length === 1
+      ? `${libraryLocationName(offline[0].path)} isn't connected. Its ${kept} until you reconnect it.`
+      : `${offline.length} locations aren't connected (${offline.map(location => libraryLocationName(location.path)).join(", ")}). Their ${kept} until you reconnect them.`;
+  });
+  const bookById = $derived(new Map($privateLibrary.books.map(book => [book.id, book])));
+  function placeOf(book: ReaderBook): string {
+    return book.location ? libraryLocationVolume(book.location) ?? libraryLocationName(book.location) : "its location";
+  }
 
   const indexLine = $derived.by(() => {
     const status = indexStatus;
-    if (!status || !($privateLibrary.libraryPath || $privateLibrary.books.length)) return "";
+    if (!status || !(configured || $privateLibrary.books.length)) return "";
     const parts: string[] = [];
-    if (status.running || status.items.pending || status.items.failed || status.items.titleOnly || status.semantic !== "ready" || status.transcription !== "ready") {
+    if (status.running || status.items.pending || status.items.failed || status.items.titleOnly || status.items.waiting || status.semantic !== "ready" || status.transcription !== "ready") {
       parts.push(`Indexed ${status.items.indexed} of ${status.items.total} items`);
       if (status.running) parts.push("indexing now");
       if (status.items.pending) parts.push(`${status.items.pending} pending`);
+      if (status.items.waiting) parts.push(`${status.items.waiting} waiting for a disconnected location`);
       if (status.items.failed) parts.push(`${status.items.failed} failed`);
       if (status.items.titleOnly) parts.push(`${status.items.titleOnly} title-only`);
       if (status.semantic !== "ready") parts.push(status.semanticReason || `semantic ${status.semantic}`);
@@ -120,6 +137,15 @@
       await resumePrivatePlayback();
     else await playPrivateAudio(book);
   }
+  // A drive may have been plugged in since the last scan: check again first.
+  async function openWhenConnected(book: ReaderBook) {
+    scanning = true;
+    try { await refreshPrivateLibrary(true); } catch { /* The shared store exposes the native failure. */ }
+    finally { scanning = false; }
+    const current = get(privateLibrary).books.find(item => item.id === book.id) ?? book;
+    if (current.available) await resume(current);
+    else showToast(unavailableSourceMessage(current), "info");
+  }
   async function refresh() {
     scanning = true;
     try { await refreshPrivateLibrary(true); } catch { /* The shared store exposes the native failure. */ }
@@ -157,9 +183,10 @@
   {#if $privateLibraryError}<p class="error" role="alert">{$privateLibraryError}</p>{/if}
   {#if indexError}<p class="error compact" role="alert">Library index status unavailable: {indexError}</p>{/if}
   {#if indexLine}<p class="index-status" role="status">{indexLine}</p>{/if}
-  {#if !$privateLibrary.libraryPath}<p>Choose an external local folder in <button class="text-button" onclick={onSettings}>Settings → Library location</button>. Originals stay in that folder.</p>
+  {#if offlineNotice}<p class="offline-notice" role="status">{offlineNotice} <button class="text-button" disabled={scanning} onclick={refresh}>{scanning ? "Checking…" : "Check again"}</button></p>{/if}
+  {#if !configured}<p>Add a folder, drive, SD card, or mounted share in <button class="text-button" onclick={onSettings}>Settings → Library</button>. Originals stay where they are.</p>
   {/if}
-  {#if $privateLibrary.libraryPath || $privateLibrary.books.length}
+  {#if configured || $privateLibrary.books.length}
     <div class="filters"><label class="filter">Search Library<input type="search" bind:this={searchInput} bind:value={query}
       data-local-search placeholder="Search titles…" title={shortcutTitle("Search Library", "search-local")}
       aria-keyshortcuts={shortcutAria("search-local")} /></label>
@@ -177,7 +204,7 @@
           <ul class="hit-list">{#each contentHits as hit, index (hit.chunkId ?? `${index}:${hit.bookId}:${hit.trackId ?? ""}:${hit.startMs ?? ""}:${hit.quote ?? hit.snippet}`)}
             <li>
               <button class="hit" onclick={() => openHit(hit)}>
-                <span><strong>{hit.title}</strong> <small>{hit.kind.toUpperCase()} · {formatLibrarySourcePosition(hit)}</small></span>
+                <span><strong>{hit.title}</strong> <small>{hit.kind.toUpperCase()} · {formatLibrarySourcePosition(hit)}{bookById.get(hit.bookId)?.disconnected ? " · Disconnected" : ""}</small></span>
                 <span class="snippet">{hit.snippet}</span>
               </button>
             </li>
@@ -193,13 +220,15 @@
           <div class="book-main"><span class="kind">{book.kind.toUpperCase()}</span><button class="book-title" onclick={() => onOpen(book.id)}>{book.title}</button>
             <small>{libraryPositionLabel(book)}{libraryPercent(book) !== null ? ` · ${libraryPercent(book)}%` : ""}</small>
             {#if libraryPercent(book) !== null}<progress max="100" value={libraryPercent(book) ?? 0} aria-label={`${book.title} progress`}></progress>{/if}
-            {#if !book.available}<small>Source unavailable · history retained</small>{/if}
+            {#if book.disconnected}<small class="offline">Disconnected · {placeOf(book)}</small>
+            {:else if !book.available}<small>Source unavailable · history retained</small>{/if}
           </div>
           <span class="count">{book.bookmarks.length} bookmarks</span>
           <div class="actions row-actions">
             <button disabled={busy} aria-label={`${book.favorite ? "Unfavorite" : "Favorite"} ${book.title}`} aria-pressed={book.favorite ?? false} onclick={() => run(() => setPrivateFavorite(book.id, !book.favorite))}>{book.favorite ? "★" : "☆"}</button>
             {#if onAddToStudies}<button onclick={() => onAddToStudies?.(book)}>Add to Studies</button>{/if}
             {#if book.available}<button disabled={busy} onclick={() => run(() => resume(book))}>{book.kind === "epub" ? "Read" : book.position ? "Resume" : "Play"}</button>
+            {:else if book.disconnected}<button disabled={busy || scanning} title={`On ${placeOf(book)}, which isn't connected`} onclick={() => run(() => openWhenConnected(book))}>{book.kind === "epub" ? "Read" : book.position ? "Resume" : "Play"}</button>
             {:else}<button onclick={() => onOpen(book.id)}>History / relink</button>{/if}
           </div>
         </li>
@@ -227,7 +256,9 @@
   .kind { font-size: 9px; letter-spacing: .1em; color: var(--accent); }
   .book-title, .text-button { padding: 0; border: 0; background: none; text-align: left; color: var(--accent); }
   .book-title { font-weight: 600; overflow-wrap: anywhere; } .error { color: var(--danger, #c44); overflow-wrap: anywhere; } .compact { font-size: 12px; }
-  .index-status { margin: 10px 0; color: var(--text-muted); font-size: 12px; } .inside-results { margin: 12px 0 18px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
+  .index-status { margin: 10px 0; color: var(--text-muted); font-size: 12px; }
+  .offline-notice { margin: 12px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+  .offline { color: var(--task-todo-fg, var(--text-secondary)); } .inside-results { margin: 12px 0 18px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
   .inside-results h2 { margin: 0 0 8px; font-size: 15px; } .hit-list li { border-top: 1px solid var(--border); padding: 8px 0; } .hit-list li:first-child { border-top: 0; }
   .hit { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; border: 0; background: none; text-align: left; } .snippet { color: var(--text-primary); font-size: 13px; }
   @media (max-width: 500px) { .private-library { padding: 14px; } .count { display: none; } .filter { flex-basis: 100%; align-items: stretch; flex-direction: column; margin-bottom: 0; } li { flex-wrap: wrap; } .book-main { flex-basis: 100%; } }

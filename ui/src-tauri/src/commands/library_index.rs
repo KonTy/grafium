@@ -161,9 +161,9 @@ pub async fn library_index_settings_set(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn library_index_start(app: AppHandle, rebuild: bool) -> Result<String, String> {
-    let (has_location, _) = library_inputs(&app).await?;
-    if !has_location {
-        return Err("Choose a Library folder before indexing".into());
+    let inputs = library_inputs(&app).await?;
+    if !inputs.has_location && inputs.items.is_empty() {
+        return Err("Add a Library location before indexing".into());
     }
     start_indexing(app, rebuild, false)
 }
@@ -219,10 +219,10 @@ pub fn schedule_startup_delta(app: &AppHandle) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            let Ok((has_location, _)) = library_inputs(&app).await else {
+            let Ok(inputs) = library_inputs(&app).await else {
                 return;
             };
-            if !has_location {
+            if !inputs.has_location && inputs.items.is_empty() {
                 return;
             }
             let _ = start_indexing(app, false, true);
@@ -372,16 +372,20 @@ fn transcribed_minutes(start_ms: i64, duration_hint_ms: i64) -> String {
 /// Returns how much work was done: items indexed plus excerpts embedded.
 async fn run_indexing(app: AppHandle, handle: JobHandle, rebuild: bool) -> Result<usize, String> {
     let store = store(&app)?;
-    let (has_location, inputs) = library_inputs(&app).await?;
-    if !has_location {
-        return Err("Choose a Library folder before indexing".into());
-    }
+    let LibraryInputs {
+        items: inputs,
+        disconnected,
+        ..
+    } = library_inputs(&app).await?;
+    // Items forgotten with a removed location leave the index. Items on a
+    // disconnected location stay, searchable, until it is back.
     let active: HashSet<String> = inputs.iter().map(|i| i.book_id.clone()).collect();
     store.remove_absent(&active).map_err(|e| e.to_string())?;
     let actions = store.delta_actions(&inputs).map_err(|e| e.to_string())?;
     let statuses = store.item_statuses().map_err(|e| e.to_string())?;
     let settings = store.settings().map_err(|e| e.to_string())?;
-    let changed = selected_item_ids(actions, &statuses, &settings, &inputs, rebuild);
+    let mut changed = selected_item_ids(actions, &statuses, &settings, &inputs, rebuild);
+    changed.retain(|id| !disconnected.contains(id));
     let total = changed.len().max(1);
     let mut work = 0usize;
     let items = inputs.iter().filter(|i| changed.contains(&i.book_id));
@@ -997,33 +1001,47 @@ async fn embed_pending(
     }
 }
 
-async fn library_inputs(app: &AppHandle) -> Result<(bool, Vec<LibraryItemInput>), String> {
+struct LibraryInputs {
+    has_location: bool,
+    items: Vec<LibraryItemInput>,
+    /// Items on disconnected locations: kept in the index, not indexed now.
+    disconnected: HashSet<String>,
+}
+
+async fn library_inputs(app: &AppHandle) -> Result<LibraryInputs, String> {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let reader = app.state::<ReaderState>();
         let directory = super::private_reader::directory(&app)?;
-        let (root, records) = reader.with_store(directory, |store| store.index_records())?;
-        let Some(root) = root else {
-            return Ok((false, Vec::new()));
-        };
-        let root = PathBuf::from(root);
-        let mut inputs = Vec::new();
+        let (has_location, records) =
+            reader.with_store(directory, |store| store.index_records())?;
+        let mut items = Vec::new();
+        let mut disconnected = HashSet::new();
         for record in records {
+            if record.disconnected {
+                disconnected.insert(record.book.id.clone());
+            }
+            // A disconnected location is not touched: a stalled share would
+            // hold this run until the operating system gives up on it.
+            let root = record
+                .root
+                .filter(|_| !record.disconnected)
+                .map(PathBuf::from);
             let mut files = Vec::new();
             for file in record.files {
-                let absolute_path = match safe_join(&root, &file.relative_path) {
-                    Ok(path) => path,
-                    Err(_) => {
-                        files.push(LibraryFileInput {
-                            track_id: file.track_id,
-                            relative_path: file.relative_path,
-                            absolute_path: root.clone(),
-                            size: 0,
-                            mtime_ms: 0,
-                            available: false,
-                        });
-                        continue;
-                    }
+                let Some(absolute_path) = root
+                    .as_ref()
+                    .and_then(|root| safe_join(root, &file.relative_path).ok())
+                else {
+                    files.push(LibraryFileInput {
+                        track_id: file.track_id,
+                        relative_path: file.relative_path,
+                        absolute_path: root.clone().unwrap_or_default(),
+                        size: 0,
+                        mtime_ms: 0,
+                        available: false,
+                    });
+                    continue;
                 };
                 let (size, mtime_ms, available) = match std::fs::metadata(&absolute_path) {
                     Ok(meta) => (
@@ -1046,7 +1064,7 @@ async fn library_inputs(app: &AppHandle) -> Result<(bool, Vec<LibraryItemInput>)
                     available,
                 });
             }
-            inputs.push(LibraryItemInput {
+            items.push(LibraryItemInput {
                 book_id: record.book.id,
                 title: record.book.title,
                 kind: match record.book.kind {
@@ -1060,10 +1078,29 @@ async fn library_inputs(app: &AppHandle) -> Result<(bool, Vec<LibraryItemInput>)
                 files,
             });
         }
-        Ok((true, inputs))
+        Ok(LibraryInputs {
+            has_location,
+            items,
+            disconnected,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Items whose Library location is disconnected right now.
+async fn disconnected_items(app: &AppHandle) -> HashSet<String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = super::private_reader::directory(&app).ok()?;
+        app.state::<ReaderState>()
+            .with_store(directory, |store| Ok(store.disconnected_ids()))
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -1168,6 +1205,7 @@ async fn status_for(
             }
         }
     };
+    let disconnected = disconnected_items(app).await;
     store
         .status(
             running,
@@ -1176,6 +1214,7 @@ async fn status_for(
             semantic_reason,
             transcription,
             transcription_reason,
+            &disconnected,
         )
         .map_err(|e| e.to_string())
 }

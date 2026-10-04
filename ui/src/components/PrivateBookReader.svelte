@@ -16,6 +16,7 @@
   import { saveLibraryCheckpoint, type LibraryProgress } from "../lib/library";
   import { findQuoteSegment, normalizeLibraryQuote, type QuoteSegment } from "../lib/privateBookQuoteMatch";
   import { onShortcutsChanged, shortcutBindings } from "../lib/shortcutRegistry";
+  import { unavailableSourceMessage } from "../lib/libraryLocations";
   let { bookId, onActivity, onProgress, actions, bookmarks, bookmarkCount = 0, status, onBack, onBookmark }: {
     bookId: string; onActivity?: () => void; onProgress?: (progress: LibraryProgress) => void;
     actions?: Snippet; bookmarks?: Snippet; status?: Snippet; onBack?: () => void; onBookmark?: () => void;
@@ -252,15 +253,19 @@
     const checkSource = () => {
       void refreshPrivateLibrary(true).then(() => {
         if (disposed) return;
-        if (!get(privateLibrary).books.find(item => item.id === id)?.available) {
+        const current = get(privateLibrary).books.find(item => item.id === id);
+        if (!current?.available) {
           sourceAvailable = false; pending = null; ready = false;
-          error = "This source is no longer available. The displayed EPUB is a read-only snapshot; relink or restore the source, then reload.";
+          error = current?.disconnected
+            ? `${unavailableSourceMessage(current)} The displayed EPUB is a read-only snapshot until then.`
+            : "This source is no longer available. The displayed EPUB is a read-only snapshot; relink or restore the source, then reload.";
         }
       }).catch(cause => { if (!disposed) error = `Could not verify the private EPUB source: ${String(cause)}`; });
     };
     window.addEventListener("focus", checkSource);
     void (async () => {
       try {
+        if (book?.disconnected) throw new Error(unavailableSourceMessage(book, "read"));
         if (!book?.available) throw new Error("This private book source is unavailable. Relink it before reading.");
         const [data, response] = await Promise.all([readerNative<ArrayBuffer>("read_epub", { bookId: id }), fetch("/book-reader/runtime.js")]);
         if (!response.ok) throw new Error("The bundled offline EPUB runtime is unavailable.");

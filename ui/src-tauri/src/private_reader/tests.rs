@@ -36,7 +36,7 @@ impl Fixture {
     fn store(&self) -> ReaderStore {
         let mut store = ReaderStore::load(self.state.clone()).unwrap();
         store
-            .set_library(self.root.to_str().unwrap().to_owned())
+            .add_location(self.root.to_str().unwrap().to_owned())
             .unwrap();
         store
     }
@@ -107,12 +107,15 @@ fn library_metadata_and_links_survive_scans_restarts_restore_and_source_changes(
         .unwrap();
     assert!(store.open_media(&external.id, Some("any")).is_err());
     assert!(store
-        .relink(&external.id, "local.mp3".into(), true)
+        .relink(&external.id, "local.mp3".into(), true, None)
         .is_err());
     store.rescan().unwrap();
     let changed = f._directory.path().join("different-library");
     fs::create_dir(&changed).unwrap();
-    store.set_library(changed.to_str().unwrap().into()).unwrap();
+    fs::write(changed.join("unrelated.txt"), b"not media").unwrap();
+    store
+        .move_location(f.root.to_str().unwrap(), changed.to_str().unwrap().into())
+        .unwrap();
     let reopened = ReaderStore::load(f.state.clone()).unwrap();
     let saved = reopened
         .snapshot()
@@ -188,7 +191,7 @@ fn legacy_library_metadata_defaults_and_invalid_new_fields_refuse_changes() {
     assert_eq!(reopened.export().unwrap(), before);
     reopened.set_favorite(&book.id, true).unwrap();
     let persisted: serde_json::Value = serde_json::from_str(&reopened.export().unwrap()).unwrap();
-    assert_eq!(persisted["version"], 2);
+    assert_eq!(persisted["version"], 3);
 }
 
 #[test]
@@ -450,12 +453,12 @@ fn missing_and_replaced_media_never_reset_or_silently_resume() {
     assert!(store
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
-    store.relink(&book.id, "moved.mp3".into(), true).unwrap();
+    store.relink(&book.id, "moved.mp3".into(), true, None).unwrap();
     assert_eq!(store.snapshot().books.len(), 1);
     f.put("moved.mp3", b"different replacement");
     assert!(!store.rescan().unwrap().books[0].available);
-    assert!(store.relink(&book.id, "moved.mp3".into(), false).is_err());
-    store.relink(&book.id, "moved.mp3".into(), true).unwrap();
+    assert!(store.relink(&book.id, "moved.mp3".into(), false, None).is_err());
+    store.relink(&book.id, "moved.mp3".into(), true, None).unwrap();
     assert_eq!(store.snapshot().books[0].position, Some(saved));
     assert!(store.open_media(&book.id, Some(&book.tracks[0].id)).is_ok());
 }
@@ -467,7 +470,7 @@ fn folder_rename_keeps_track_identity_and_replaced_root_needs_confirmation() {
     let mut store = f.store();
     let book = store.snapshot().books.remove(0);
     fs::rename(f.root.join("old"), f.root.join("new")).unwrap();
-    store.relink(&book.id, "new".into(), false).unwrap();
+    store.relink(&book.id, "new".into(), false, None).unwrap();
     assert_eq!(store.snapshot().books[0].tracks[0].id, book.tracks[0].id);
     fs::rename(&f.root, f.root.with_file_name("original-library")).unwrap();
     fs::create_dir(&f.root).unwrap();
@@ -476,10 +479,10 @@ fn folder_rename_keeps_track_identity_and_replaced_root_needs_confirmation() {
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
     assert!(!store.rescan().unwrap().books[0].available);
-    store.set_library(f.root.to_str().unwrap().into()).unwrap();
+    store.rescan().unwrap();
     assert!(!store.snapshot().books[0].available);
-    assert!(store.relink(&book.id, "new".into(), false).is_err());
-    store.relink(&book.id, "new".into(), true).unwrap();
+    assert!(store.relink(&book.id, "new".into(), false, None).is_err());
+    store.relink(&book.id, "new".into(), true, None).unwrap();
     assert!(store.snapshot().books[0].available);
 }
 
@@ -559,7 +562,7 @@ fn epub_size_bound_and_positions_are_independent_from_audio() {
         .unwrap()
         .set_len(source::MAX_EPUB_BYTES + 1)
         .unwrap();
-    store.relink(&epub.id, "book.epub".into(), true).unwrap();
+    store.relink(&epub.id, "book.epub".into(), true, None).unwrap();
     assert!(store.read_epub(&epub.id).unwrap_err().contains("128 MiB"));
     assert_eq!(
         store
@@ -593,9 +596,9 @@ fn backup_merges_history_without_granting_filesystem_access() {
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
     restored
-        .set_library(f.root.to_str().unwrap().into())
+        .add_location(f.root.to_str().unwrap().into())
         .unwrap();
-    restored.relink(&book.id, "one.mp3".into(), false).unwrap();
+    restored.relink(&book.id, "one.mp3".into(), false, None).unwrap();
     assert_eq!(restored.snapshot().books.len(), 1);
     assert_eq!(restored.snapshot().books[0].position, Some(saved));
     assert_eq!(restored.snapshot().books[0].bookmarks.len(), 1);
@@ -643,7 +646,7 @@ fn checkpoints_saved_during_scan_survive_and_old_library_scan_is_rejected() {
     let stale = store.prepare_scan().unwrap().run().unwrap();
     let other = f._directory.path().join("other-library");
     fs::create_dir(&other).unwrap();
-    store.set_library(other.to_str().unwrap().into()).unwrap();
+    store.add_location(other.to_str().unwrap().into()).unwrap();
     assert!(store.finish_scan(Ok(stale)).is_err());
 }
 
@@ -1022,8 +1025,8 @@ fn equal_size_preserved_mtime_replacement_and_in_place_edits_need_confirmation()
     assert!(store
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
-    assert!(store.relink(&book.id, "one.mp3".into(), false).is_err());
-    store.relink(&book.id, "one.mp3".into(), true).unwrap();
+    assert!(store.relink(&book.id, "one.mp3".into(), false, None).is_err());
+    store.relink(&book.id, "one.mp3".into(), true, None).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     f.put("one.mp3", b"modified");
     fs::OpenOptions::new()
@@ -1035,8 +1038,8 @@ fn equal_size_preserved_mtime_replacement_and_in_place_edits_need_confirmation()
     assert!(store
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
-    assert!(store.relink(&book.id, "one.mp3".into(), false).is_err());
-    store.relink(&book.id, "one.mp3".into(), true).unwrap();
+    assert!(store.relink(&book.id, "one.mp3".into(), false, None).is_err());
+    store.relink(&book.id, "one.mp3".into(), true, None).unwrap();
 }
 
 #[test]
@@ -1047,7 +1050,7 @@ fn stale_scan_cannot_resurrect_pre_relink_registration() {
     let book = store.snapshot().books.remove(0);
     let stale = store.prepare_scan().unwrap().run().unwrap();
     fs::rename(f.root.join("old"), f.root.join("new")).unwrap();
-    store.relink(&book.id, "new".into(), true).unwrap();
+    store.relink(&book.id, "new".into(), true, None).unwrap();
     assert!(store.finish_scan(Ok(stale)).is_err());
     let snapshot = store.snapshot();
     assert_eq!(snapshot.books.len(), 1);
@@ -1081,12 +1084,12 @@ fn repeated_and_newer_backups_merge_offline_without_source_authority() {
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
     restored
-        .set_library(f.root.to_str().unwrap().into())
+        .add_location(f.root.to_str().unwrap().into())
         .unwrap();
     assert!(restored
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_err());
-    restored.relink(&book.id, "one.mp3".into(), false).unwrap();
+    restored.relink(&book.id, "one.mp3".into(), false, None).unwrap();
     assert!(restored
         .open_media(&book.id, Some(&book.tracks[0].id))
         .is_ok());
@@ -1101,10 +1104,12 @@ fn library_selection_and_relink_scans_allow_concurrent_durable_checkpoints() {
     f.put("old/1.mp3", b"one");
     let state = Arc::new(ReaderState::default());
     let book = state
-        .set_library(f.state.clone(), f.root.to_str().unwrap().into())
+        .add_location(f.state.clone(), f.root.to_str().unwrap().into())
         .unwrap()
         .books
         .remove(0);
+    let second = f._directory.path().join("second-library");
+    fs::create_dir(&second).unwrap();
     for relink in [false, true] {
         if relink {
             fs::rename(f.root.join("old"), f.root.join("new")).unwrap();
@@ -1114,7 +1119,7 @@ fn library_selection_and_relink_scans_allow_concurrent_durable_checkpoints() {
         let (worker, worker_dir, root, id, worker_entered, worker_release) = (
             state.clone(),
             f.state.clone(),
-            f.root.to_str().unwrap().to_owned(),
+            second.to_str().unwrap().to_owned(),
             book.id.clone(),
             entered.clone(),
             release.clone(),
@@ -1126,9 +1131,9 @@ fn library_selection_and_relink_scans_allow_concurrent_durable_checkpoints() {
                 job.run()
             };
             if relink {
-                worker.relink_with_scan(worker_dir, &id, "new".into(), true, scan)
+                worker.relink_with_scan(worker_dir, &id, "new".into(), true, None, scan)
             } else {
-                worker.set_library_with_scan(worker_dir, root, scan)
+                worker.add_location_with_scan(worker_dir, root, scan)
             }
         });
         entered.wait();
@@ -1254,4 +1259,349 @@ fn stalled_authorized_responses_release_all_workers_on_write_deadline() {
     wait_for_connections(&server, 0);
     assert!(http(&url, "GET", "Range: bytes=0-3\r\n", None, None).starts_with(b"HTTP/1.1 206"));
     drop(clients);
+}
+
+/// Copy a folder as a drive remounted elsewhere presents it: the same names,
+/// sizes and modification times under new file IDs.
+fn copy_preserving_times(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_preserving_times(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+            let modified = entry.metadata().unwrap().modified().unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+    }
+}
+
+fn location<'a>(snapshot: &'a ReaderSnapshot, path: &Path) -> &'a ReaderLocation {
+    snapshot
+        .locations
+        .iter()
+        .find(|l| l.path == path.to_str().unwrap())
+        .unwrap()
+}
+
+#[test]
+fn version_two_library_becomes_the_first_location_without_a_rewrite_on_load() {
+    let f = Fixture::new();
+    f.put("one.mp3", b"one");
+    let mut store = f.store();
+    let book = store.snapshot().books.remove(0);
+    store
+        .save_position(&book.id, position(&book.tracks[0].id, 700))
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&store.export().unwrap()).unwrap();
+    let only = legacy["locations"].as_array_mut().unwrap().remove(0);
+    let legacy = {
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("locations");
+        object.insert("library".into(), only);
+        object.insert("version".into(), 2.into());
+        serde_json::Value::Object(object.clone())
+    };
+    drop(store);
+    fs::write(f.state.join("reader.json"), legacy.to_string()).unwrap();
+    let mut reopened = ReaderStore::load(f.state.clone()).unwrap();
+    let snapshot = reopened.snapshot();
+    assert_eq!(snapshot.locations.len(), 1);
+    assert!(location(&snapshot, &f.root).connected);
+    assert_eq!(snapshot.library_path.as_deref(), f.root.to_str());
+    assert!(snapshot.books[0].available);
+    assert_eq!(snapshot.books[0].location.as_deref(), f.root.to_str());
+    assert_eq!(
+        fs::read_to_string(f.state.join("reader.json")).unwrap(),
+        legacy.to_string()
+    );
+    reopened.set_favorite(&book.id, true).unwrap();
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(f.state.join("reader.json")).unwrap()).unwrap();
+    assert_eq!(persisted["version"], 3);
+    assert!(persisted.get("library").is_none());
+    assert_eq!(persisted["locations"][0]["path"], f.root.to_str().unwrap());
+    assert_eq!(reopened.snapshot().books[0].position.as_ref().unwrap().offset_ms, 700);
+}
+
+#[test]
+fn unplugged_location_keeps_items_history_and_index_and_reports_disconnected() {
+    let f = Fixture::new();
+    f.put("Novel/1.mp3", b"one");
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let books = store.snapshot().books;
+    let novel = books.iter().find(|b| b.kind == ReaderKind::Audio).unwrap().clone();
+    store
+        .add_bookmark(&novel.id, position(&novel.tracks[0].id, 900), "Kept".into())
+        .unwrap();
+    let unplugged = f._directory.path().join("unplugged");
+    fs::rename(&f.root, &unplugged).unwrap();
+
+    let snapshot = store.rescan().unwrap();
+    assert!(snapshot.error.is_none(), "a disconnected location is not a scan error");
+    let drive = location(&snapshot, &f.root);
+    assert!(!drive.connected);
+    assert_eq!(drive.reason.as_deref(), Some(source::NOT_CONNECTED));
+    assert_eq!(drive.items, 2);
+    assert_eq!(snapshot.books.len(), 2);
+    for book in &snapshot.books {
+        assert!(book.disconnected && !book.available && book.error.is_none());
+        assert_eq!(book.location.as_deref(), f.root.to_str());
+    }
+    let kept = snapshot.books.iter().find(|b| b.id == novel.id).unwrap();
+    assert_eq!(kept.bookmarks[0].note, "Kept");
+    assert_eq!(kept.position.as_ref().unwrap().offset_ms, 900);
+    let error = store
+        .open_media(&novel.id, Some(&novel.tracks[0].id))
+        .unwrap_err();
+    assert!(error.contains("not available") && error.contains("Plug in"), "{error}");
+    let (has_location, records) = store.index_records().unwrap();
+    assert!(has_location);
+    assert!(records.iter().all(|r| r.disconnected && r.root.as_deref() == f.root.to_str()));
+    assert_eq!(store.disconnected_ids().len(), 2);
+
+    // A restart while unplugged still shows the items, as disconnected.
+    drop(store);
+    let mut store = ReaderStore::load(f.state.clone()).unwrap();
+    assert!(store.snapshot().books.iter().all(|b| b.disconnected));
+
+    fs::rename(&unplugged, &f.root).unwrap();
+    let snapshot = store.rescan().unwrap();
+    assert!(location(&snapshot, &f.root).connected);
+    assert!(snapshot.books.iter().all(|b| b.available && !b.disconnected));
+    assert!(store.disconnected_ids().is_empty());
+    assert!(store.open_media(&novel.id, Some(&novel.tracks[0].id)).is_ok());
+}
+
+#[test]
+fn remounted_drive_with_new_file_ids_needs_no_relink() {
+    let f = Fixture::new();
+    f.put("Novel/Disc 1/1.mp3", b"one");
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let books = store.snapshot().books;
+    let novel = books.iter().find(|b| b.kind == ReaderKind::Audio).unwrap().clone();
+    let saved = position(&novel.tracks[0].id, 4_200);
+    store.save_position(&novel.id, saved.clone()).unwrap();
+    let generation = store.generation();
+
+    // Unplug, then plug in again: same names, sizes and times; new IDs.
+    let remounted = f._directory.path().join("remounted");
+    copy_preserving_times(&f.root, &remounted);
+    fs::rename(&f.root, f._directory.path().join("unplugged")).unwrap();
+    fs::rename(&remounted, &f.root).unwrap();
+
+    assert!(store.open_media(&novel.id, Some(&novel.tracks[0].id)).is_ok());
+    let snapshot = store.rescan().unwrap();
+    assert!(snapshot.error.is_none());
+    assert!(snapshot.books.iter().all(|b| b.available && !b.disconnected));
+    assert_eq!(snapshot.books.len(), 2);
+    assert_ne!(store.generation(), generation, "the new identity is a registration change");
+    let reopened = ReaderStore::load(f.state.clone()).unwrap();
+    let reloaded = reopened.snapshot();
+    assert!(reloaded.books.iter().all(|b| b.available));
+    let book = reloaded.books.iter().find(|b| b.id == novel.id).unwrap();
+    assert_eq!(book.position, Some(saved));
+
+    // Back on one mount, a same-size replacement with its time preserved
+    // still needs explicit confirmation.
+    let original_time = fs::metadata(f.root.join("book.epub")).unwrap().modified().unwrap();
+    f.put("replacement.epub", b"XY");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(f.root.join("replacement.epub"))
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(original_time))
+        .unwrap();
+    fs::rename(f.root.join("replacement.epub"), f.root.join("book.epub")).unwrap();
+    let epub = reloaded.books.iter().find(|b| b.kind == ReaderKind::Epub).unwrap();
+    assert!(store.read_epub(&epub.id).is_err());
+    assert!(store.relink(&epub.id, "book.epub".into(), false, None).is_err());
+}
+
+#[test]
+fn empty_mount_point_is_disconnected_not_an_emptied_library() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let book = store.snapshot().books.remove(0);
+    store.set_favorite(&book.id, true).unwrap();
+    let unplugged = f._directory.path().join("unplugged");
+    fs::rename(&f.root, &unplugged).unwrap();
+    fs::create_dir(&f.root).unwrap();
+
+    let snapshot = store.rescan().unwrap();
+    let drive = location(&snapshot, &f.root);
+    assert!(!drive.connected);
+    assert_eq!(drive.reason.as_deref(), Some(source::EMPTY_LOCATION));
+    assert_eq!(snapshot.books.len(), 1);
+    assert!(snapshot.books[0].disconnected && snapshot.books[0].favorite);
+
+    fs::remove_dir(&f.root).unwrap();
+    fs::rename(&unplugged, &f.root).unwrap();
+    assert!(store.rescan().unwrap().books[0].available);
+}
+
+#[test]
+fn several_locations_are_scanned_and_reported_independently() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let card = f._directory.path().join("sd-card");
+    fs::create_dir(&card).unwrap();
+    fs::write(card.join("talk.mp3"), b"talk").unwrap();
+    let mut store = f.store();
+    let snapshot = store.add_location(card.to_str().unwrap().into()).unwrap();
+    assert_eq!(snapshot.locations.len(), 2);
+    assert_eq!(snapshot.books.len(), 2);
+    let talk = snapshot.books.iter().find(|b| b.kind == ReaderKind::Audio).unwrap().clone();
+    assert_eq!(talk.location.as_deref(), card.to_str());
+    assert!(store.open_media(&talk.id, Some(&talk.tracks[0].id)).is_ok());
+
+    fs::rename(&card, f._directory.path().join("card-removed")).unwrap();
+    let snapshot = store.rescan().unwrap();
+    assert!(location(&snapshot, &f.root).connected);
+    assert!(!location(&snapshot, &card).connected);
+    assert_eq!(location(&snapshot, &card).items, 1);
+    let epub = snapshot.books.iter().find(|b| b.kind == ReaderKind::Epub).unwrap();
+    assert!(epub.available && !epub.disconnected);
+    let talk = snapshot.books.iter().find(|b| b.id == talk.id).unwrap();
+    assert!(talk.disconnected && !talk.available);
+    assert!(store.read_epub(&epub.id).is_ok());
+    assert_eq!(store.disconnected_ids(), [talk.id.clone()].into_iter().collect());
+}
+
+#[test]
+fn locations_cannot_repeat_or_nest() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let mut store = f.store();
+    let before = store.export().unwrap();
+    let inside = f.root.join("inner");
+    fs::create_dir(&inside).unwrap();
+    let root = f.root.to_str().unwrap();
+    for path in [
+        root.to_owned(),
+        format!("{root}/"),
+        inside.to_str().unwrap().to_owned(),
+        f._directory.path().to_str().unwrap().to_owned(),
+        "relative/books".to_owned(),
+    ] {
+        assert!(store.add_location(path.clone()).is_err(), "{path}");
+    }
+    assert_eq!(store.export().unwrap(), before);
+    let sibling = f._directory.path().join("library-two");
+    fs::create_dir(&sibling).unwrap();
+    store.add_location(sibling.to_str().unwrap().into()).unwrap();
+    assert_eq!(store.snapshot().locations.len(), 2);
+    let missing = f._directory.path().join("not-plugged-in");
+    let error = store.add_location(missing.to_str().unwrap().into()).unwrap_err();
+    assert!(error.contains(source::NOT_CONNECTED), "{error}");
+}
+
+#[test]
+fn removing_a_location_forgets_only_its_items() {
+    let f = Fixture::new();
+    f.put("book.epub", b"PK");
+    let card = f._directory.path().join("sd-card");
+    fs::create_dir(&card).unwrap();
+    fs::write(card.join("talk.mp3"), b"talk").unwrap();
+    let mut store = f.store();
+    store.add_location(card.to_str().unwrap().into()).unwrap();
+    store
+        .add_link("Talk".into(), ReaderKind::Youtube, "https://youtu.be/abcdefghijk".into())
+        .unwrap();
+    let generation = store.generation();
+    let snapshot = store.remove_location(card.to_str().unwrap()).unwrap();
+    assert_ne!(store.generation(), generation);
+    assert_eq!(snapshot.locations.len(), 1);
+    assert_eq!(snapshot.books.len(), 2);
+    assert!(snapshot.books.iter().all(|b| b.kind != ReaderKind::Audio));
+    assert!(card.join("talk.mp3").exists(), "files in the folder are never touched");
+    assert!(store.remove_location(card.to_str().unwrap()).is_err());
+    let reopened = ReaderStore::load(f.state.clone()).unwrap().snapshot();
+    assert_eq!(reopened.books.len(), 2);
+    assert_eq!(reopened.locations.len(), 1);
+}
+
+#[test]
+fn moving_a_location_to_a_new_mount_path_keeps_items_and_history() {
+    let f = Fixture::new();
+    f.put("Novel/1.mp3", b"one");
+    let mut store = f.store();
+    let book = store.snapshot().books.remove(0);
+    let saved = position(&book.tracks[0].id, 1_234);
+    store
+        .add_bookmark(&book.id, saved.clone(), "Remember".into())
+        .unwrap();
+    let mounted = f._directory.path().join("mounted-elsewhere");
+    copy_preserving_times(&f.root, &mounted);
+    fs::rename(&f.root, f._directory.path().join("old-mount")).unwrap();
+    assert!(store.rescan().unwrap().books[0].disconnected);
+
+    let snapshot = store
+        .move_location(f.root.to_str().unwrap(), mounted.to_str().unwrap().into())
+        .unwrap();
+    assert_eq!(snapshot.locations.len(), 1);
+    assert!(location(&snapshot, &mounted).connected);
+    assert_eq!(snapshot.books.len(), 1);
+    let moved = &snapshot.books[0];
+    assert_eq!(moved.id, book.id);
+    assert!(moved.available && !moved.disconnected);
+    assert_eq!(moved.location.as_deref(), mounted.to_str());
+    assert_eq!(moved.position, Some(saved));
+    assert_eq!(moved.bookmarks[0].note, "Remember");
+    assert!(store.open_media(&book.id, Some(&book.tracks[0].id)).is_ok());
+    let empty = f._directory.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let error = store
+        .move_location(mounted.to_str().unwrap(), empty.to_str().unwrap().into())
+        .unwrap_err();
+    assert!(error.contains(source::EMPTY_LOCATION), "{error}");
+}
+
+#[test]
+fn relink_can_choose_a_file_in_another_location_with_confirmation() {
+    let f = Fixture::new();
+    f.put("one.mp3", b"one");
+    f.put("stays.epub", b"PK");
+    let card = f._directory.path().join("sd-card");
+    fs::create_dir(&card).unwrap();
+    let mut store = f.store();
+    let book = store
+        .snapshot()
+        .books
+        .into_iter()
+        .find(|b| b.kind == ReaderKind::Audio)
+        .unwrap();
+    store.add_location(card.to_str().unwrap().into()).unwrap();
+    store
+        .save_position(&book.id, position(&book.tracks[0].id, 50))
+        .unwrap();
+    fs::rename(f.root.join("one.mp3"), card.join("one.mp3")).unwrap();
+    let snapshot = store.rescan().unwrap();
+    let current = snapshot.books.iter().find(|b| b.id == book.id).unwrap();
+    assert!(!current.available && !current.disconnected, "missing, not disconnected");
+    let card_path = Some(card.to_str().unwrap().to_owned());
+    assert!(store
+        .relink(&book.id, "one.mp3".into(), false, card_path.clone())
+        .is_err());
+    let snapshot = store
+        .relink(&book.id, "one.mp3".into(), true, card_path)
+        .unwrap();
+    assert_eq!(snapshot.books.len(), 2, "the discovered duplicate had no history");
+    let relinked = snapshot.books.iter().find(|b| b.id == book.id).unwrap();
+    assert_eq!(relinked.location.as_deref(), card.to_str());
+    assert!(relinked.available);
+    assert_eq!(relinked.position.as_ref().unwrap().offset_ms, 50);
+    assert!(store
+        .relink(&book.id, "one.mp3".into(), true, Some("/not/a/location".into()))
+        .is_err());
 }

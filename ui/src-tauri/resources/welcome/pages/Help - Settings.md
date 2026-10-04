@@ -91,9 +91,12 @@ existing tutorial graphs, and installing a build does not restart a running app.
 
 ## Private library
 
-The **Library** section contains **Library location**, which selects an external
-audiobook/EPUB folder, and **Library search index**, which controls inside-book
-and transcript search. Turning **Search inside books and media** off leaves title
+The **Library** section contains **Library locations**, the folders, drives, SD
+cards, and mounted shares Library reads books and media from, each shown as
+connected or disconnected with **Add location…**, **Change folder…**, and a
+confirmed **Remove…** (which forgets that location's items and their history, but
+never touches its files). Android keeps a single **Library location**.
+**Library search index** controls inside-book and transcript search. Turning **Search inside books and media** off leaves title
 filtering available, but disables inside-Library results and the Chat Library context. This is an app-level setting, independent of the active graph.
 Under **Get offline voices**, open **?** for platform-specific download links,
 Linux Piper setup, a copyable offline package-preparation command, and exact import

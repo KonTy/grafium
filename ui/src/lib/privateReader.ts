@@ -14,8 +14,13 @@ export interface ReaderBook {
   tracks: ReaderTrack[]; position: ReaderPosition | null; bookmarks: ReaderBookmark[];
   error?: string;
   favorite?: boolean; lastUsedAt?: number; sourceUrl?: string; progress?: ReaderProgress;
+  /** The Library location folder holding a local item. */
+  location?: string;
+  /** Its location is configured but not connected right now. */
+  disconnected?: boolean;
 }
-export interface ReaderSnapshot { libraryPath: string | null; books: ReaderBook[]; error?: string }
+export interface ReaderLocation { path: string; connected: boolean; reason?: string; items: number }
+export interface ReaderSnapshot { libraryPath: string | null; locations?: ReaderLocation[]; books: ReaderBook[]; error?: string }
 export const privateLibrary = writable<ReaderSnapshot>({ libraryPath: null, books: [] });
 export const privateLibraryError = writable("");
 export const privateBookJump = writable<{ bookId: string; locator: BookLocation; select?: boolean } | null>(null);
@@ -88,6 +93,10 @@ function validPosition(value: unknown): boolean {
 
 function acceptSnapshot(value: ReaderSnapshot): ReaderSnapshot {
   if (!value || (value.libraryPath !== null && typeof value.libraryPath !== "string") || !Array.isArray(value.books)
+    || (value.locations !== undefined && (!Array.isArray(value.locations) || value.locations.some(location => !location
+      || typeof location.path !== "string" || !location.path || typeof location.connected !== "boolean"
+      || (location.reason !== undefined && typeof location.reason !== "string")
+      || !Number.isSafeInteger(location.items) || location.items < 0)))
     || value.books.some(book => !book || typeof book.id !== "string" || !book.id || typeof book.title !== "string"
       || !["audio", "epub", "video", "youtube"].includes(book.kind) || typeof book.available !== "boolean"
       || !Array.isArray(book.tracks) || !Array.isArray(book.bookmarks)
@@ -99,6 +108,8 @@ function acceptSnapshot(value: ReaderSnapshot): ReaderSnapshot {
       || (book.favorite !== undefined && typeof book.favorite !== "boolean")
       || (book.lastUsedAt !== undefined && (!Number.isSafeInteger(book.lastUsedAt) || book.lastUsedAt < 0))
       || (book.progress !== undefined && !isReaderProgress(book.progress))
+      || (book.location !== undefined && (typeof book.location !== "string" || !book.location))
+      || (book.disconnected !== undefined && typeof book.disconnected !== "boolean")
       || (book.sourceUrl !== undefined && (typeof book.sourceUrl !== "string" || book.kind === "epub"))
       || (book.kind === "youtube" && !book.sourceUrl))) throw new Error("Invalid native Library snapshot; current Library retained.");
   for (const book of value.books) {
@@ -165,6 +176,22 @@ export async function addPrivateLibraryLink(title: string, kind: "youtube" | "au
 }
 
 let refreshGeneration = 0;
+
+/** Desktop Library locations: folders on this computer, drives, SD cards or mounted shares. */
+export function addPrivateLibraryLocation(path: string): Promise<ReaderSnapshot> {
+  return libraryMutation("add_location", { path });
+}
+
+/** Point a location at the folder where its drive or share is now mounted. */
+export function movePrivateLibraryLocation(from: string, to: string): Promise<ReaderSnapshot> {
+  return libraryMutation("move_location", { from, to });
+}
+
+/** Forget a location and its items' history; files in the folder are untouched. */
+export function removePrivateLibraryLocation(path: string): Promise<ReaderSnapshot> {
+  return libraryMutation("remove_location", { path });
+}
+
 export async function refreshPrivateLibrary(rescan = false): Promise<void> {
   const generation = ++refreshGeneration;
   try {
