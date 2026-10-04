@@ -501,6 +501,30 @@ libraries: distribute the package, not just a bare executable copied elsewhere.
 Keep `custom-protocol` as a crate feature rather than enabling it directly on the
 `tauri` dependency, so development loads Vite and releases embed the built frontend.
 
+### Keeping build caches small
+
+Cargo never deletes anything from `target/`: every version bump, dependency
+update, or toolchain upgrade leaves the previous copies behind, and a busy
+checkout can grow past 80 GB. Prune it with:
+
+```bash
+scripts/prune-build-cache.py                  # this checkout
+scripts/prune-build-cache.py --all-worktrees  # every worktree of the repository
+scripts/prune-build-cache.py --dry-run -v     # list what would be removed
+```
+
+It keeps the newest build of every target, test harness, and feature set you
+have built, plus everything those builds reuse, so the next build stays
+incremental. Superseded copies and their incremental caches go at once, other
+variants of a target after two days unused, dependency builds that nothing uses
+after a day, and everything untouched for a week. A checkout with a build in
+progress is skipped. `scripts/deploy-local.sh` prunes the checkout it deploys
+from.
+
+Development builds keep only line tables for Grafium's own crates and no debug
+info for dependencies. Test binaries are about three times smaller, and
+backtraces still show files and line numbers.
+
 ### Knowing which build you are running
 
 The release number in `Cargo.toml` is hand-bumped, so it stays the same across
@@ -537,9 +561,12 @@ reads as "my change did nothing" and sends you hunting a bug that is not there.
 Local deployment now stages the executable and dereferenced native libraries in
 one immutable build directory. It verifies the staged loader dependencies and
 build identity, saves and verifies the previous entry points, and then switches
-launchers atomically. It does not overwrite libraries mapped by a running app,
-delete old builds, stop Grafium, or change graphs/settings. Restart Grafium after
-deployment to use the new build.
+launchers atomically. It keeps the three newest builds (set
+`GRAFIUM_KEEP_BUILDS` to change that) and any build a running Grafium still
+uses, removing older builds together with the entry-point backups that could
+only restore them, and then prunes the checkout's build cache. It does not
+overwrite libraries mapped by a running app, stop Grafium, or change
+graphs/settings. Restart Grafium after deployment to use the new build.
 The deployment also refreshes the Linux desktop entry and all installed icon
 sizes. The window's `grafium` application ID matches its launcher, so Wayland
 panels can resolve the application icon independently of the executable name.
