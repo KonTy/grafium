@@ -20,6 +20,7 @@
   } from "../lib/api";
   import {
     getPageTree,
+    pagesJournalTree,
     toPageTreeView,
     withMissingCommandFallback,
     type PageTreeSource,
@@ -32,6 +33,7 @@
     graphScopedKey,
     filterTreeByQuery,
     countTreePages,
+    isJournalTreeNode,
     sortTree,
     type PageTreeViewNode,
     type PageKindFilter,
@@ -84,6 +86,15 @@
   let pageTree: PageTreeViewNode[] = $state([]);
   let pageTreeAvailable: boolean | null = $state(null);
   let pageTreeLoading = $state(false);
+  /// Journal pages in the loaded tree. They are not counted in `total` (the
+  /// page list never shows them), but a graph with only journals still has
+  /// a tree to show: the Journals folder.
+  let journalCount = $derived(
+    pageTree.filter((node) => isJournalTreeNode(node.id)).reduce((sum, node) => sum + node.count, 0),
+  );
+  let nothingToShow = $derived(
+    total === 0 && (viewMode !== "tree" || (!pageTreeLoading && journalCount === 0)),
+  );
   let pageTreeError = $state("");
   let pageTreeRequest = 0;
 
@@ -333,13 +344,23 @@
     pageTreeError = "";
     pageTree = [];
     try {
-      const result = await withMissingCommandFallback(
-        () => getPageTree(source, filter),
-        [],
-      );
+      // Journals are not namespaces: they come as one pinned Journals folder,
+      // loaded alongside the namespace tree.
+      const [result, journals] = await Promise.all([
+        withMissingCommandFallback(() => getPageTree(source, filter), []),
+        source === "namespace"
+          ? pagesJournalTree(filter).catch((error) => {
+            // The pages still matter more than the extra folder.
+            console.warn("[page-tree] Could not load the Journals folder:", error);
+            return [];
+          })
+          : Promise.resolve([]),
+      ]);
       if (request !== pageTreeRequest || source !== treeSource) return;
       pageTreeAvailable = result.available;
-      pageTree = result.available ? toPageTreeView(result.value, source) : [];
+      pageTree = result.available
+        ? [...toPageTreeView(journals, "journals"), ...toPageTreeView(result.value, source)]
+        : [];
       if (!result.available) viewMode = "list";
     } catch (error) {
       if (request !== pageTreeRequest || source !== treeSource) return;
@@ -958,7 +979,7 @@
     </div>
   </div>
 
-  {#if total === 0}
+  {#if nothingToShow}
     <div class="empty-state">
       {#if kindFilter === "filed"}
         <p>No pages with a file on disk. Every page here is still a placeholder.</p>
@@ -987,7 +1008,7 @@
     </div>
   {/if}
 
-  {#if total === 0}
+  {#if nothingToShow}
     <!-- handled above -->
   {:else if viewMode === "tree"}
     <div class="tree-browser" aria-busy={pageTreeLoading}>
@@ -1006,7 +1027,8 @@
           revealToken={filterQuery.trim()}
           {onNavigate}
           onPageContextMenu={handleTreeNodeMenu}
-          hasPageMenu={(node) => treeSource === "namespace" || node.page_id !== null}
+          hasPageMenu={(node) => !isJournalTreeNode(node.id)
+            && (treeSource === "namespace" || node.page_id !== null)}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
           ariaLabel={treeSource === "namespace" ? "Pages by namespace" : "Pages by tag"}
           emptyText={treeSource === "namespace"

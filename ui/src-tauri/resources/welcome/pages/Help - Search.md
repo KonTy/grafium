@@ -29,4 +29,6 @@ a placeholder if another document still links to it. Shared tags and other
 documents' references are preserved. See [[Your Files]] for deletion, index
 cleanup, and the difference between removing a source and erasing saved quotations.
 
-In the namespace tree, Grafium keeps **Books**, **ImportedMedia**, and **Reading Notes** at the top in that order, whether you sort by name or recent activity. Their book, media, and note icons distinguish these app-managed folders from ordinary folders. The tag tree still follows the selected sort normally.
+In the namespace tree, Grafium keeps **Journals**, **Books**, **ImportedMedia**, and **Reading Notes** at the top in that order, whether you sort by name or recent activity. Their calendar, book, media, and note icons distinguish these app-managed folders from ordinary folders. The tag tree still follows the selected sort normally.
+
+**Journals** holds your journal days, the files in the graph's `journals` folder, grouped by year and month with the newest first. It keeps that calendar order in both sorts. Click a day to open it as a page, or use **Journal** in the sidebar for the scrolling feed. The **All / Files / Placeholders** filter applies to it too. The list view and its page count leave journals out.

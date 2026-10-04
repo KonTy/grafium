@@ -115,6 +115,77 @@ pub fn build_tag_tree(tag_pages: &[Page]) -> Vec<TreeNode> {
     )
 }
 
+/// Build the Journals folder: journal pages by year, then month, then day,
+/// newest first. The order is chronological and final, not by name.
+///
+/// Journals stay out of the namespace tree (see [`build_namespace_tree`]); All
+/// Pages shows this separate folder instead, so a date never lands among the
+/// namespace roots. Keys are the year (`2026`), the month (`2026-10`) and the
+/// day page's own title (`2026-10-03`), which the UI keeps in its own id space
+/// so they cannot collide with page titles of the same text. A journal whose
+/// title is not a date is listed last, directly in the folder.
+///
+/// Returns `None` when there are no journal pages at all.
+pub fn build_journal_tree(pages: &[Page]) -> Option<TreeNode> {
+    use chrono::{Datelike, NaiveDate};
+    use std::collections::BTreeMap;
+
+    let mut by_month: BTreeMap<(i32, u32), Vec<(NaiveDate, &Page)>> = BTreeMap::new();
+    let mut undated: Vec<&Page> = Vec::new();
+    for page in pages.iter().filter(|page| page.is_journal) {
+        match NaiveDate::parse_from_str(&page.title, "%Y-%m-%d") {
+            Ok(date) => by_month.entry((date.year(), date.month())).or_default().push((date, page)),
+            Err(_) => undated.push(page),
+        }
+    }
+    if by_month.is_empty() && undated.is_empty() {
+        return None;
+    }
+
+    let leaf = |page: &Page, label: String| TreeNode {
+        key: page.title.clone(),
+        label,
+        page_id: Some(page.id.clone()),
+        children: Vec::new(),
+        descendant_count: 1,
+        updated_at: page.updated_at,
+    };
+    let folder = |key: String, label: String, children: Vec<TreeNode>| TreeNode {
+        descendant_count: children.iter().map(|child| child.descendant_count).sum(),
+        updated_at: children.iter().map(|child| child.updated_at).max().unwrap_or(0),
+        key,
+        label,
+        page_id: None,
+        children,
+    };
+
+    let mut years: Vec<TreeNode> = Vec::new();
+    let mut current: Option<(i32, Vec<TreeNode>)> = None;
+    for ((year, month), mut days) in by_month.into_iter().rev() {
+        days.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        let label = days[0].0.format("%B").to_string();
+        let days = days
+            .into_iter()
+            .map(|(date, page)| leaf(page, format!("{} · {}", page.title, date.format("%a"))))
+            .collect();
+        let month = folder(format!("{year:04}-{month:02}"), label, days);
+        match &mut current {
+            Some((current_year, months)) if *current_year == year => months.push(month),
+            _ => {
+                if let Some((done, months)) = current.replace((year, vec![month])) {
+                    years.push(folder(format!("{done:04}"), format!("{done}"), months));
+                }
+            }
+        }
+    }
+    if let Some((year, months)) = current {
+        years.push(folder(format!("{year:04}"), format!("{year}"), months));
+    }
+    undated.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+    years.extend(undated.into_iter().map(|page| leaf(page, page.title.clone())));
+    Some(folder(String::new(), "Journals".to_string(), years))
+}
+
 /// Scratch node used while assembling the tree in an arena.
 ///
 /// Children are held as arena indices rather than owned `TreeNode`s so that a
@@ -651,6 +722,67 @@ mod tests {
             find(&tree, "tech/linux").unwrap().page_id.as_deref(),
             Some("child")
         );
+    }
+
+    #[test]
+    fn journals_folder_groups_days_by_year_and_month_newest_first() {
+        let dated = |id: &str, title: &str, updated_at: i64| Page {
+            updated_at,
+            ..journal(id, title)
+        };
+        let folder = build_journal_tree(&[
+            dated("a", "2025-12-31", 10),
+            dated("b", "2026-10-03", 40),
+            page("not-a-journal", "2026-10-02"),
+            dated("c", "2026-09-29", 30),
+            dated("d", "2026-10-01", 20),
+            journal("odd", "Trip notes"),
+        ])
+        .expect("there are journals");
+
+        assert_eq!(folder.key, "");
+        assert_eq!(folder.label, "Journals");
+        assert_eq!(folder.page_id, None);
+        assert_eq!(folder.descendant_count, 5);
+        assert_eq!(folder.updated_at, 40);
+        let shape: Vec<(String, Vec<(String, Vec<String>)>)> = folder
+            .children
+            .iter()
+            .map(|year| {
+                (
+                    year.label.clone(),
+                    year.children
+                        .iter()
+                        .map(|month| {
+                            (
+                                month.label.clone(),
+                                month.children.iter().map(|day| day.label.clone()).collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (
+                    "2026".to_string(),
+                    vec![
+                        ("October".to_string(), vec!["2026-10-03 · Sat".to_string(), "2026-10-01 · Thu".to_string()]),
+                        ("September".to_string(), vec!["2026-09-29 · Tue".to_string()]),
+                    ],
+                ),
+                ("2025".to_string(), vec![("December".to_string(), vec!["2025-12-31 · Wed".to_string()])]),
+                ("Trip notes".to_string(), vec![]),
+            ]
+        );
+        let october = &folder.children[0].children[0];
+        assert_eq!(october.key, "2026-10");
+        assert_eq!(october.descendant_count, 2);
+        let day = &october.children[0];
+        assert_eq!((day.key.as_str(), day.page_id.as_deref()), ("2026-10-03", Some("b")));
+        assert_eq!(build_journal_tree(&[page("p", "Plain page")]), None);
     }
 
     #[test]

@@ -21,5 +21,5 @@ pub use engine::{HealthStatus, KnowledgeEngine};
 pub use registry::{GraphRegistry, GraphType, RegisteredGraph};
 pub use research_intent::{detect_research_intent, ResearchIntent};
 pub use schemas::{FieldType, Schema, SchemaField, SchemaManager};
-pub use tree::{build_namespace_tree, build_tag_tree, TreeKind, TreeNode};
+pub use tree::{build_journal_tree, build_namespace_tree, build_tag_tree, TreeKind, TreeNode};
 pub use vector_store::SqliteVectorStore;

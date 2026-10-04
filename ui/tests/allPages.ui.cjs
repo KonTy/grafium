@@ -80,7 +80,8 @@ const EXPECT = {
           window.__pageCommands.push({ cmd, args });
           switch (cmd) {
             case "get_page": {
-              const found = pages.find((p) => p.id === args.id || p.title === args.title);
+              const found = [...pages, ...(window.__journalPages ?? [])]
+                .find((p) => p.id === args.id || p.title === args.title);
               if (!found) throw { code: "page_not_found", message: "Page not found" };
               return { ...found, properties: {} };
             }
@@ -96,6 +97,7 @@ const EXPECT = {
               return sorted.slice(args.offset, args.offset + args.limit);
             }
             case "pages_namespace_tree": return window.__namespaceTree;
+            case "pages_journal_tree": return window.__journalTree ?? [];
             case "pages_tag_tree": return tagTree;
             case "get_graph_info": return { path: "/tmp/test-graph", name: "Test" };
             case "get_app_theme": return "dark";
@@ -302,6 +304,58 @@ const EXPECT = {
     }).length);
     check(`buttons remain visible inside rows at ${width}px`, clipped, 0);
   }
+
+  console.log("\njournals folder");
+  await page.evaluate((now) => {
+    const day = (title, id, updatedAt) => ({
+      key: title, label: `${title} · Sat`, page_id: id, children: [], descendant_count: 1, updated_at: updatedAt,
+    });
+    const group = (key, label, children) => ({
+      key, label, page_id: null, children,
+      descendant_count: children.reduce((sum, child) => sum + child.descendant_count, 0),
+      updated_at: Math.max(...children.map((child) => child.updated_at)),
+    });
+    // Newest first as built natively. April was edited more recently than May,
+    // and A–Z would put April first: the folder must keep calendar order.
+    window.__journalTree = [group("", "Journals", [group("2026", "2026", [
+      group("2026-05", "May", [day("2026-05-02", "j-0502", now - 500_000)]),
+      group("2026-04", "April", [day("2026-04-25", "j-0425", now)]),
+    ])])];
+    window.__journalPages = [
+      { id: "j-0502", title: "2026-05-02", updated_at: now - 500_000, is_journal: true, file_path: "journals/2026-05-02.md" },
+    ];
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+  }, now);
+  const journalsRow = page.locator('[data-tree-node="journals:"]');
+  await journalsRow.waitFor();
+  for (const mode of ["A–Z", "Recent"]) {
+    await click(mode);
+    check(`Journals is pinned first (${mode})`, (await rootLabels())[0], "Journals");
+  }
+  check("Journals has the calendar icon", await journalsRow.getAttribute("data-special-folder"), "calendar");
+  await journalsRow.locator(".tree-item").click();
+  await page.locator('[data-tree-node="journals:2026"] .tree-item').click();
+  await page.locator('[data-tree-node="journals:2026-05"]').waitFor();
+  await click("A–Z");
+  check("months keep calendar order in A–Z", await page.locator('[data-tree-node^="journals:2026-0"] .node-label')
+    .allTextContents(), ["May", "April"]);
+  check("journal rows offer no rename or delete menu",
+    await page.locator('[data-tree-node^="journals:"] .tree-action').count(), 0);
+  await page.locator('[data-tree-node="journals:2026-05"] .tree-item').click();
+  await page.locator('[data-tree-node="journals:2026-05-02"] .tree-item').click();
+  await page.waitForFunction(() => window.__pageCommands.some(({ cmd, args }) =>
+    cmd === "get_page" && (args?.title === "2026-05-02" || args?.id === "j-0502")));
+  check("clicking a day opens that journal page", true, true);
+  await page.evaluate(() => {
+    window.__journalTree = [];
+    window.__journalPages = [];
+  });
+  await page.getByRole("button", { name: "All Pages", exact: true }).first().click();
+  await page.getByRole("heading", { name: "All Pages", exact: true }).waitFor();
+  await page.waitForTimeout(500);
+  // Later checks expect the default newest-first order.
+  await click("Recent");
+  check("without journals the namespace roots are unchanged", (await rootLabels())[0] !== "Journals", true);
 
   console.log("\nlarge tree virtualization");
   await page.setViewportSize({ width: 2400, height: 900 });

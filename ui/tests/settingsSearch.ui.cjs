@@ -52,10 +52,11 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
     const titles = () => page.locator(".settings-page > details.settings-section:visible > summary .section-title").allTextContents();
     const totalSections = await sections.count();
     await search.fill("chat");
-    // Hidden ? help is searchable too: Asset Cleanup's help mentions chat history.
+    // Hidden ? help is searchable too: Asset Cleanup's help mentions chat history,
+    // and Library explains when Chat may use Library excerpts.
     await page.waitForFunction(() => [...document.querySelectorAll(".settings-page > details.settings-section")]
-      .filter((el) => !el.hidden).length === 4);
-    assert.deepEqual(await titles(), ["AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts", "Asset Cleanup"]);
+      .filter((el) => !el.hidden).length === 5);
+    assert.deepEqual(await titles(), ["Library", "AI / Knowledge Engine (optional)", "AI Research & Web Search", "Keyboard Shortcuts", "Asset Cleanup"]);
     const shortcuts = page.locator(".keymap-row:visible");
     assert.equal(await shortcuts.count(), 1);
     assert.match(await shortcuts.innerText(), /Go to Chat tab/);

@@ -1364,6 +1364,7 @@ pub fn run() {
             commands::pages::get_child_pages,
             commands::pages::search_page_titles,
             commands::trees::pages_namespace_tree,
+            commands::trees::pages_journal_tree,
             commands::trees::pages_tag_tree,
             commands::trees::page_set_collection,
             commands::trees::pages_list_collections,
