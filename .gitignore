@@ -1,5 +1,7 @@
 # Rust
 target/
+/target
+__pycache__/
 # Cargo.lock is deliberately tracked: this workspace ships applications
 # (grafium, grafium-tui), so the lockfile is what makes a build reproducible.
 # Leaving it untracked let a fresh checkout resolve a different llama-cpp-2

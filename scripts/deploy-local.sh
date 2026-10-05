@@ -10,7 +10,13 @@
 #
 # Usage:  scripts/deploy-local.sh [build-dir]
 #   build-dir defaults to the repo's own target/release.
-#   GRAFIUM_KEEP_BUILDS sets how many installed builds are kept (default 3).
+#
+# Nothing is kept that we can rebuild: once the new build is installed, older
+# installed builds and their launcher backups are deleted, and so is the
+# checkout's Cargo build cache.
+#   GRAFIUM_KEEP_BUILDS=N        keep the newest N installed builds (default 1)
+#   GRAFIUM_KEEP_BUILD_CACHE=1   keep the build cache (superseded artifacts are
+#                                still pruned), e.g. before another build
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -138,9 +144,9 @@ if [[ -n "$version_line" && "$staged_version" != "$version_line" ]]; then
   exit 1
 fi
 
-# Preserve and verify the old launchers/binary before switching either entry
-# point. Legacy flat libraries remain untouched; older build dirs are pruned
-# only after the switch.
+# Preserve and verify the old launchers/binary until both entry points have
+# switched. Legacy flat libraries remain untouched; older build dirs and this
+# backup are removed only after the switch.
 backup="$(mktemp -d "$app_lib_dir/backup.XXXXXXXX")"
 for name in grafium grafium-bin; do
   if [[ -e "$bin_dir/$name" || -L "$bin_dir/$name" ]]; then
@@ -177,16 +183,15 @@ mv -fT "$launcher" "$bin_dir/grafium"
 sync -f "$bin_dir"
 
 echo "installed: $stage ($copied native libraries)"
-echo "verified previous entry points: $backup"
 echo "ok: run 'grafium' (or use the desktop entry); running instances were not interrupted"
 
-# Keep the newest few installations for rollback and remove older ones, with
-# the entry-point backups that could only restore those. A build that a
-# running Grafium still executes or maps is never removed.
-keep_builds="${GRAFIUM_KEEP_BUILDS:-3}"
+# Remove older installations, with the entry-point backups that could only
+# restore those: we can always rebuild. A build that a running Grafium still
+# executes or maps is kept until a later deploy.
+keep_builds="${GRAFIUM_KEEP_BUILDS:-1}"
 if [[ ! "$keep_builds" =~ ^[1-9][0-9]*$ ]]; then
-  echo "warning: GRAFIUM_KEEP_BUILDS must be a positive integer; keeping 3 builds" >&2
-  keep_builds=3
+  echo "warning: GRAFIUM_KEEP_BUILDS must be a positive integer; keeping 1 build" >&2
+  keep_builds=1
 fi
 build_in_use() {
   # A process's maps list its executable as well as its shared libraries.
@@ -214,12 +219,20 @@ done
 if (( removed_builds > 0 )); then
   echo "removed $removed_builds older build(s); keeping the newest $keep_builds"
 fi
+if [[ -d "$backup" ]]; then
+  echo "kept previous entry points (their build is still in use): $backup"
+fi
 
-# Retire Cargo artifacts that newer builds superseded in the checkout this
-# build came from; everything its builds still reuse is kept.
-if [[ "$(cd "$build_dir" && pwd -P)/" == "$(cd "$repo_root" && pwd -P)/target/"* ]]; then
-  if ! python3 "$repo_root/scripts/prune-build-cache.py" "$repo_root"; then
-    echo "warning: build cache pruning failed; the installation itself succeeded" >&2
+# The checkout's build cache goes too, once its build is installed. The
+# target directory may be a symlink to another drive, so compare real paths.
+if [[ -d "$repo_root/target" ]] &&
+   [[ "$(cd "$build_dir" && pwd -P)/" == "$(cd "$repo_root/target" && pwd -P)/"* ]]; then
+  if [[ "${GRAFIUM_KEEP_BUILD_CACHE:-}" == "1" ]]; then
+    if ! python3 "$repo_root/scripts/prune-build-cache.py" "$repo_root"; then
+      echo "warning: build cache pruning failed; the installation itself succeeded" >&2
+    fi
+  elif ! bash "$repo_root/scripts/clear-build-cache.sh" "$repo_root/target"; then
+    echo "warning: clearing the build cache failed; the installation itself succeeded" >&2
   fi
 fi
 

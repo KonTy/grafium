@@ -518,8 +518,13 @@ have built, plus everything those builds reuse, so the next build stays
 incremental. Superseded copies and their incremental caches go at once, other
 variants of a target after two days unused, dependency builds that nothing uses
 after a day, and everything untouched for a week. A checkout with a build in
-progress is skipped. `scripts/deploy-local.sh` prunes the checkout it deploys
-from.
+progress is skipped.
+
+Once a build is deployed, `scripts/deploy-local.sh` goes further and empties the
+checkout's build cache with `scripts/clear-build-cache.sh`. We can always
+rebuild, and leftover build outputs are what kept filling the disk. The next
+build starts from scratch. Set `GRAFIUM_KEEP_BUILD_CACHE=1` to keep the cache,
+pruned as above, when you are about to build again.
 
 Development builds keep only line tables for Grafium's own crates and no debug
 info for dependencies. Test binaries are about three times smaller, and
@@ -561,12 +566,26 @@ reads as "my change did nothing" and sends you hunting a bug that is not there.
 Local deployment now stages the executable and dereferenced native libraries in
 one immutable build directory. It verifies the staged loader dependencies and
 build identity, saves and verifies the previous entry points, and then switches
-launchers atomically. It keeps the three newest builds (set
-`GRAFIUM_KEEP_BUILDS` to change that) and any build a running Grafium still
-uses, removing older builds together with the entry-point backups that could
-only restore them, and then prunes the checkout's build cache. It does not
+launchers atomically. After that it keeps only the build it installed (set
+`GRAFIUM_KEEP_BUILDS` to keep more) and any build a running Grafium still
+uses. Older builds go, together with the entry-point backups that could only
+restore them, and then the checkout's build cache is cleared. It does not
 overwrite libraries mapped by a running app, stop Grafium, or change
 graphs/settings. Restart Grafium after deployment to use the new build.
+
+To install the same build system-wide (`/usr/bin/grafium`):
+
+```bash
+build="$(sed -n 's/^exec \(.*\)\/grafium-bin.*/\1/p' ~/.local/bin/grafium)"
+pkexec python3 scripts/install-system.py "$build" \
+  "$(sha256sum "$build/grafium-bin" | cut -d' ' -f1)" 0.0.180
+```
+
+It copies the build into `/opt/grafium`, verifies every file and the
+executable's digest, and switches `/usr/bin/grafium` in one step. Then it
+deletes older `/opt/grafium` builds and the previous launcher's backup in
+`/var/backups/grafium`, except a build a running Grafium still uses.
+`pkexec python3 scripts/install-system.py --prune` removes those later.
 The deployment also refreshes the Linux desktop entry and all installed icon
 sizes. The window's `grafium` application ID matches its launcher, so Wayland
 panels can resolve the application icon independently of the executable name.

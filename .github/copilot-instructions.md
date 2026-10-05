@@ -46,7 +46,18 @@ the user explicitly asks not to deploy.
 
 Build the frontend before the native release, then use
 `./scripts/deploy-local.sh` and verify the installed `grafium --version`.
-Preserve the existing installation through the script's verified backups.
+For the system-wide copy, run
+`pkexec python3 scripts/install-system.py <build-dir> <sha256> <version>`
+with the build `~/.local/bin/grafium` now runs and its `grafium-bin` digest.
 Do not interrupt running instances or modify personal graphs for smoke tests;
 tell the user to fully quit and reopen Grafium. Local deployment does not
 authorize a remote push or release publication.
+
+Keep nothing we can rebuild: disk space has repeatedly run out because of old
+binaries and backups. Both scripts keep their verified backup only until the
+switch succeeds, then delete older installed builds and those backups. A build
+a running Grafium still uses survives until the next deploy, or until
+`install-system.py --prune`. `deploy-local.sh` then clears the checkout's Cargo
+build cache, so the next build starts fresh. Do not keep release binaries,
+installers or build caches after a deploy unless the user asks
+(`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the cache).

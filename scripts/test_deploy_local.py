@@ -103,15 +103,24 @@ class DeploymentTest(unittest.TestCase):
         self.deploy(self.build("after-exit"))
         self.assertEqual([self.build_name(build) for build in self.builds()], ["after-exit"])
 
-    def test_an_invalid_keep_count_keeps_three_builds(self):
+    def test_by_default_only_the_installed_build_is_kept(self):
+        for name in ("one", "two", "three"):
+            result = self.deploy(self.build(name))
+        self.assertIn("three", self.installed())
+        self.assertIn("removed 1 older build(s); keeping the newest 1", result.stdout)
+        self.assertEqual([self.build_name(build) for build in self.builds()], ["three"])
+        # The launcher backups could only restore deleted builds, so they go too.
+        self.assertEqual(list((self.home / ".local/lib/grafium").glob("backup.*/grafium")), [])
+
+    def test_an_invalid_keep_count_keeps_one_build(self):
         self.env["GRAFIUM_KEEP_BUILDS"] = "none"
-        for name in ("one", "two", "three", "four"):
+        for name in ("one", "two", "three"):
             result = self.deploy(self.build(name))
         self.assertIn("GRAFIUM_KEEP_BUILDS must be a positive integer", result.stderr)
-        self.assertEqual({self.build_name(build) for build in self.builds()},
-                         {"two", "three", "four"})
+        self.assertEqual([self.build_name(build) for build in self.builds()], ["three"])
 
     def test_generations_remain_immutable_and_backups_are_verified(self):
+        self.env["GRAFIUM_KEEP_BUILDS"] = "2"
         legacy = self.home / ".local/lib/libggml.so.0"
         legacy.parent.mkdir(parents=True)
         legacy.write_bytes(b"legacy library must remain untouched")
