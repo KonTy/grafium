@@ -38,7 +38,23 @@ class ClearBuildCacheTest(unittest.TestCase):
         self.assertIn("cleared build cache", result.stdout)
         self.assertTrue(link.is_symlink())
         self.assertTrue(real.is_dir())
-        self.assertEqual(list(real.iterdir()), [])
+        # Only Cargo's tag remains: Cargo does not write it into a directory
+        # that already exists, and the next clear needs it.
+        self.assertEqual([path.name for path in real.iterdir()], ["CACHEDIR.TAG"])
+        self.assertTrue((real / "CACHEDIR.TAG").read_text().startswith(
+            "Signature: 8a477f597d28d172789f06886806bc55"))
+        (real / "release").mkdir()
+        (real / "release/grafium").write_bytes(b"rebuilt")
+        self.assertIn("cleared build cache", self.clear(link).stdout)
+        self.assertFalse((real / "release").exists())
+
+    def test_recognizes_a_cache_that_cargo_left_untagged(self):
+        cache = self.root / "target"
+        (cache / "release").mkdir(parents=True)
+        (cache / ".rustc_info.json").write_text("{}")
+        (cache / "release/grafium").write_bytes(b"binary")
+        self.assertIn("cleared build cache", self.clear(cache).stdout)
+        self.assertEqual([path.name for path in cache.iterdir()], ["CACHEDIR.TAG"])
 
     def test_leaves_a_directory_that_is_not_a_cargo_cache(self):
         plain = self.root / "notes"
