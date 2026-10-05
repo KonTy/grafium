@@ -20,6 +20,16 @@ class ReaderPolicyTest {
     assertTrue(first.matches(Regex("[a-f0-9]+")))
   }
 
+  @Test fun bridgeOriginsAreOnesAndroidWebViewAccepts() {
+    val accepted = Regex("https?://[A-Za-z0-9.-]+(:[0-9]+)?")
+    for (debug in listOf(false, true)) {
+      val origins = ReaderPolicy.bridgeOrigins(debug)
+      assertTrue(origins.containsAll(listOf("https://tauri.localhost", "http://tauri.localhost")))
+      assertTrue(origins.toString(), origins.all { accepted.matches(it) })
+    }
+    assertFalse(ReaderPolicy.bridgeOrigins(false).any { it.contains("5173") })
+  }
+
   @Test fun onlyExpectedLocalFormatsAreAudio() {
     assertTrue("m4b" in ReaderPolicy.audioExtensions)
     assertFalse("url" in ReaderPolicy.audioExtensions)

@@ -32,9 +32,7 @@ internal class PrivateReaderBridge(
   private val main = Handler(Looper.getMainLooper())
   private var controller: MediaController? = null
   private var voicePickerId: String? = null
-  private val origins = mutableSetOf("https://tauri.localhost", "http://tauri.localhost", "tauri://localhost").apply {
-    if (BuildConfig.DEBUG) { add("http://localhost:5173"); add("http://127.0.0.1:5173") }
-  }
+  private val origins = ReaderPolicy.bridgeOrigins(BuildConfig.DEBUG)
 
   init {
     live = WeakReference(this)

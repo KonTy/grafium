@@ -13,6 +13,14 @@ import java.util.UUID
 /** Only the platform external-storage provider is permitted: no cloud-provider fallback. */
 internal object ReaderPolicy {
   const val LOCAL_AUTHORITY = "com.android.externalstorage.documents"
+  /** Pages that may reach the native bridge. Android's WebView accepts only
+   *  http(s) origins here and throws on anything else; Tauri serves Android
+   *  pages from http(s)://tauri.localhost, never the desktop tauri://localhost. */
+  fun bridgeOrigins(debug: Boolean): Set<String> {
+    val origins = linkedSetOf("https://tauri.localhost", "http://tauri.localhost")
+    if (debug) origins += listOf("http://localhost:5173", "http://127.0.0.1:5173")
+    return origins
+  }
   fun playbackRate(value: Any?): Float {
     require(value is Number && value.toDouble().isFinite() && value.toDouble() in 0.5..4.0) {
       "INVALID_PLAYBACK_RATE: expected a finite number from 0.5 to 4"
