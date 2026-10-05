@@ -60,4 +60,20 @@ a running Grafium still uses survives until the next deploy, or until
 `install-system.py --prune`. `deploy-local.sh` then clears the checkout's Cargo
 build cache, so the next build starts fresh. Do not keep release binaries,
 installers or build caches after a deploy unless the user asks
-(`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the cache).
+(`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the cache). There are no binary backups to
+roll back to: if a deployed build is broken, fix the bug and redeploy.
+
+## Never lose user data
+
+Data is the opposite of binaries: never lose any of it. That covers graph
+folders (pages, journals, assets), graph databases and indexes, private
+Library data (`reader.json` locations, progress and bookmarks, and the Library
+index), app settings such as layout and keyboard shortcuts, and job history.
+
+- Change stored formats only through in-place migrations that keep existing
+  files readable. Write the new format only after reading the old one
+  successfully.
+- Never delete, reset or recreate user data to get past a bug.
+- Smoke tests run against a throwaway `HOME` or graph, never the user's.
+- Before anything that could change or remove the user's own data outside
+  normal app use, keep a verified copy and confirm with the user.
