@@ -56,9 +56,10 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-
+    // Before `super.onCreate`, which creates the webview: `onWebViewCreate`
+    // runs inside that call and needs the colour to already be known.
     applyStartupChrome()
+    super.onCreate(savedInstanceState)
 
     readerLocationLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
       val id = readerLocationRequest
