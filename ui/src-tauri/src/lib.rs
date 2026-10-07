@@ -998,7 +998,11 @@ pub fn run() {
                     "Native AI supervision could not start; native inference is unavailable: {error}"
                 ));
             }
-            commands::startup::mark("native AI supervision configured");
+            // Everything before this point is Tauri and webview construction,
+            // which is most of the pre-graph time on a phone. Android skips the
+            // supervision work above, so naming this phase after it was
+            // misleading in the one place the timings get read.
+            commands::startup::mark("runtime ready");
             let config_path = app_dir.join("graphs.json");
             let config = GraphConfig::load(&config_path)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -1344,6 +1348,7 @@ pub fn run() {
             commands::private_voice::private_voice_cancel,
             commands::private_voice::private_voice_audio,
             commands::startup::reveal_startup_window,
+            commands::startup::startup_content_ready,
             commands::layout::get_sidebar_visibility,
             commands::layout::set_sidebar_visibility,
             commands::layout::get_layout_preferences,

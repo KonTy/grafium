@@ -11,7 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getPage, listBlocks, type Block } from "./api";
 import { flushAllPageEditors } from "./editorPersistence";
-import { assetBaseDirFor } from "./markdown";
+import { assetBaseDirFor, preloadMath } from "./markdown";
 import { buildPrintDocument } from "./printDocument";
 import {
   chapterIdForBlock,
@@ -264,6 +264,9 @@ export async function sendToPrinter(
   if (jobInFlight) throw new Error("A print job is already running");
   jobInFlight = true;
   try {
+    // Paper has no second chance: a formula still waiting for KaTeX would
+    // print as its own source, so wait for math and images before sending.
+    await preloadMath().catch(() => undefined);
     await imagesReady(printRoot());
     const bridge = androidPrintBridge();
     if (bridge) return await printViaAndroid(bridge, jobName);

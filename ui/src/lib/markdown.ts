@@ -1,10 +1,53 @@
 import DOMPurify from "dompurify";
 import { marked, type TokenizerThis } from "marked";
-import katex from "katex";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
+
+/**
+ * KaTeX is the single largest library in the boot bundle, and most pages have
+ * no math on them at all. Load it the first time an expression is actually
+ * rendered rather than on the way to the first paint.
+ *
+ * Rendering stays synchronous, so a block rendered before KaTeX arrives emits
+ * its source in a placeholder and is upgraded in place once the module lands.
+ */
+type KatexModule = { renderToString: (tex: string, options: Record<string, unknown>) => string };
+
+let katex: KatexModule | null = null;
+let katexLoading: Promise<void> | null = null;
+
+/** Wait for math to be renderable, for callers that cannot show a placeholder. */
+export function preloadMath(): Promise<void> {
+  if (katex) return Promise.resolve();
+  katexLoading ??= Promise.all([import("katex"), import("katex/dist/katex.min.css")])
+    .then(([module]) => {
+      katex = (module.default ?? module) as unknown as KatexModule;
+      upgradePendingMath();
+    })
+    .catch((error) => {
+      katexLoading = null;
+      throw error;
+    });
+  return katexLoading;
+}
+
+function renderMath(expression: string, displayMode: boolean): string {
+  return katex!.renderToString(expression.trim(), { throwOnError: false, displayMode });
+}
+
+/** Replace placeholders left by renders that ran before KaTeX finished loading. */
+function upgradePendingMath(): void {
+  if (!katex || typeof document === "undefined") return;
+  for (const node of document.querySelectorAll<HTMLElement>(".math-pending")) {
+    const expression = node.dataset.math;
+    if (expression === undefined) continue;
+    // The upgrade writes into a live document, so it goes through the same
+    // sanitizer the original render would have applied.
+    node.outerHTML = sanitizeAssistantHtml(renderMath(expression, node.dataset.mathDisplay === "true"));
+  }
+}
 
 const renderer = new marked.Renderer();
 const LIST_MARKERS = {
@@ -878,9 +921,10 @@ const mathExtension = {
     };
   },
   renderer(token: { raw: string; expression: string; displayMode: boolean; plain?: boolean }) {
-    return token.plain
-      ? escapeHtml(token.raw)
-      : katex.renderToString(token.expression.trim(), { throwOnError: false, displayMode: token.displayMode });
+    if (token.plain) return escapeHtml(token.raw);
+    if (katex) return renderMath(token.expression, token.displayMode);
+    void preloadMath();
+    return `<span class="math-pending" data-math="${escapeHtml(token.expression)}" data-math-display="${token.displayMode}">${escapeHtml(token.raw)}</span>`;
   },
 };
 
@@ -1090,6 +1134,8 @@ function sanitizeAssistantHtml(html: string): string {
       // Data attributes the click delegation in ChatView reads.
       "data-page-link", "data-tag", "data-block-ref", "data-src", "data-loaded-once",
       "data-image-index", "data-image-width", "data-image-height", "data-markdown-src",
+      // Carry an unrendered formula until KaTeX finishes loading.
+      "data-math", "data-math-display",
       // KaTeX/MathML presentation attributes.
       "xmlns", "display", "encoding", "mathvariant", "stretchy", "viewBox",
       "width", "height", "d", "x1", "x2", "y1", "y2", "fill", "stroke",

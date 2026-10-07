@@ -18,6 +18,7 @@
     </style>
     <script id="grafium-bootstrap">
       // This runs before the application module graph or native IPC is ready.
+      window.__grafiumBoot = [{ name: "html parsed", ms: performance.now() }];
       try {
         var cachedTheme = localStorage.getItem("grafium.startupTheme");
         if (cachedTheme) {

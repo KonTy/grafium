@@ -1,11 +1,13 @@
 import "./styles/global.css";
 import "./styles/print.css";
-import "katex/dist/katex.min.css";
 import App from "./App.svelte";
 import { mount } from "svelte";
 import { EditorView } from "@codemirror/view";
 import { redoEditor as redo, undoEditor as undo } from "./lib/editorUndo";
 import { canRedo, canUndo } from "./lib/undoStack";
+import { markBoot } from "./lib/bootMarks";
+
+markBoot("bundle evaluated");
 
 function activeEditorView(): EditorView | null {
   const view = (window as any).__activeEditorView;
@@ -141,6 +143,7 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 };
 
 const app = mount(App, { target: document.getElementById("app")! });
+markBoot("app mounted");
 window.dispatchEvent(new Event("grafium-ready"));
 
 // === TEMP DIAGNOSTIC: key-event visibility on WebKitGTK ===

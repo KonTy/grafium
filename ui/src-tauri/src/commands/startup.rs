@@ -200,6 +200,49 @@ pub async fn reveal_startup_window(
     })
 }
 
+/// The frontend painted its first page.
+///
+/// `reveal_startup_window` fires as soon as the theme and layout are restored,
+/// which is before the editor has anything in it, so on its own it reports a
+/// startup that looks shorter than the one somebody is sitting through. This
+/// is the measurement that matches the wait.
+fn format_boot_phases(phases: &[BootPhase]) -> String {
+    let mut previous = 0.0;
+    let mut parts = Vec::with_capacity(phases.len());
+    for phase in phases {
+        parts.push(format!(
+            "{} +{:.0}ms (at {:.0}ms)",
+            phase.name,
+            (phase.ms - previous).max(0.0),
+            phase.ms
+        ));
+        previous = phase.ms;
+    }
+    parts.join("; ")
+}
+
+#[derive(serde::Deserialize)]
+pub struct BootPhase {
+    name: String,
+    ms: f64,
+}
+
+#[tauri::command]
+pub fn startup_content_ready(app: tauri::AppHandle, phases: Vec<BootPhase>) {
+    static REPORTED: OnceLock<()> = OnceLock::new();
+    if REPORTED.set(()).is_err() {
+        return;
+    }
+    // The webview clock starts at navigation, not at process start, so these
+    // are reported on their own line rather than interleaved with the native
+    // phases they cannot be compared against directly.
+    if !phases.is_empty() {
+        tracing::info!("Frontend boot: {}", format_boot_phases(&phases));
+    }
+    mark("first content");
+    report_startup(app.path().app_data_dir().ok().as_deref(), "content");
+}
+
 #[cfg(desktop)]
 pub fn install_fallback(app: &tauri::AppHandle) {
     let app = app.clone();

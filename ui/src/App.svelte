@@ -14,7 +14,7 @@
     dismissOverlayForAndroidBack,
   } from "./lib/androidBack";
   import { hasPersistentStorageAccess, requestPersistentStorageAccess } from "./lib/androidStorageAccess";
-  import { revealStartupWindow } from "./lib/startupWindow";
+  import { revealStartupWindow, reportStartupContent } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import { readerOwnsNavigation } from "./lib/readerNavigation";
@@ -30,10 +30,6 @@
   import { libraryBookmarkJournalSnippet, routeLibraryLink } from "./lib/libraryLinks";
   import { studyClockItem } from "./lib/studyLibrary";
   import { attachPrivatePlayback, privatePlayback, bookmarkPrivatePlayback } from "./lib/privateReaderPlayback";
-  import HelpOverlay from "./components/HelpOverlay.svelte";
-  import FolderBrowser from "./components/FolderBrowser.svelte";
-  import BookImportDialog from "./components/BookImportDialog.svelte";
-  import PrintDialog from "./components/PrintDialog.svelte";
   import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
   import { isOriginalBookPage, isBookAnnotationPage } from "./lib/books";
   import { getPage, createPage, recordPageOpen, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
@@ -84,6 +80,10 @@
   const loadJobsView = lazyComponent(() => import("./components/JobsView.svelte"));
   const loadReferencePanel = lazyComponent(() => import("./components/ReferencePanel.svelte"));
   const loadGlobalSearchDialog = lazyComponent(() => import("./components/GlobalSearchDialog.svelte"));
+  const loadHelpOverlay = lazyComponent(() => import("./components/HelpOverlay.svelte"));
+  const loadFolderBrowser = lazyComponent(() => import("./components/FolderBrowser.svelte"));
+  const loadBookImportDialog = lazyComponent(() => import("./components/BookImportDialog.svelte"));
+  const loadPrintDialog = lazyComponent(() => import("./components/PrintDialog.svelte"));
   const loadOriginalBookPage = lazyComponent(() => import("./components/OriginalBookPage.svelte"));
   const loadBookAnnotationPage = lazyComponent(() => import("./components/BookAnnotationPage.svelte"));
 
@@ -1661,6 +1661,8 @@
         logNav("startup failed", { error: message });
         error = message;
         loading = false;
+      }).finally(() => {
+        void reportStartupContent().catch(() => undefined);
       });
       // Restore the theme and menu before mapping the native window.
       void Promise.all([appearance.start(), restoreLayoutPreferences()]).then(revealStartupWindow).then(() => {
@@ -2976,12 +2978,16 @@
 {/if}
 
 {#if helpVisible}
-  <HelpOverlay
-    title={helpTitle}
-    content={helpContent}
-    loading={helpLoading}
-    onClose={() => (helpVisible = false)}
-  />
+  <LazyView load={loadHelpOverlay} name="help">
+    {#snippet children(HelpComponent)}
+      <HelpComponent
+        title={helpTitle}
+        content={helpContent}
+        loading={helpLoading}
+        onClose={() => (helpVisible = false)}
+      />
+    {/snippet}
+  </LazyView>
 {/if}
 
 <Toaster />
@@ -3025,19 +3031,28 @@
 {/if}
 
 {#if printPageId}
-  <PrintDialog pageId={printPageId} onClose={() => (printPageId = null)} />
+  {@const printId = printPageId}
+  <LazyView load={loadPrintDialog} name="print">
+    {#snippet children(PrintComponent)}
+      <PrintComponent pageId={printId} onClose={() => (printPageId = null)} />
+    {/snippet}
+  </LazyView>
 {/if}
 
 {#if showImportBooksDialog}
-  <BookImportDialog
-    onChooseFile={chooseBookFile}
-    onChooseFolder={chooseBookFolder}
-    onClose={() => (showImportBooksDialog = false)}
-    onQueued={() => {
-      showImportBooksDialog = false;
-      showToast("Book import job added", "info");
-    }}
-  />
+  <LazyView load={loadBookImportDialog} name="book import">
+    {#snippet children(BookImportComponent)}
+      <BookImportComponent
+        onChooseFile={chooseBookFile}
+        onChooseFolder={chooseBookFolder}
+        onClose={() => (showImportBooksDialog = false)}
+        onQueued={() => {
+          showImportBooksDialog = false;
+          showToast("Book import job added", "info");
+        }}
+      />
+    {/snippet}
+  </LazyView>
 {/if}
 
 {#if showImportMediaDialog}
@@ -3097,11 +3112,15 @@
 {/if}
 
 {#if showFolderBrowser}
-  <FolderBrowser
-    title={folderBrowserTitle}
-    onSelect={(path) => finishFolderBrowser(path)}
-    onCancel={() => finishFolderBrowser(null)}
-  />
+  <LazyView load={loadFolderBrowser} name="folders">
+    {#snippet children(FoldersComponent)}
+      <FoldersComponent
+        title={folderBrowserTitle}
+        onSelect={(path) => finishFolderBrowser(path)}
+        onCancel={() => finishFolderBrowser(null)}
+      />
+    {/snippet}
+  </LazyView>
 {/if}
 
 {#if showCreateGraphDialog}

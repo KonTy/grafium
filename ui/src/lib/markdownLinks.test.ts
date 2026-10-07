@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { formatConceptLink, formatConceptTag } from "./conceptLinks";
-import { renderAssistantMarkdown, renderBlock } from "./markdown";
+import { preloadMath, renderAssistantMarkdown, renderBlock } from "./markdown";
 
 function rendered(source: string): HTMLDivElement {
   const node = document.createElement("div");
@@ -98,7 +98,10 @@ describe("Unicode tags and protected syntax", () => {
     expect(node.querySelector(".katex, [data-tag]")).toBeNull();
   });
 
-  it("keeps multiline display math opaque across blank lines", () => {
+  it("keeps multiline display math opaque across blank lines", async () => {
+    // KaTeX is fetched on first use, so a render before it lands is a
+    // placeholder rather than a formula.
+    await preloadMath();
     const node = rendered("$$\nx + #tag\n\n+ [[Page|#display]]\n$$");
     expect(node.querySelector("[data-page], [data-tag]")).toBeNull();
     expect(node.querySelector(".katex, .katex-error")).not.toBeNull();
@@ -119,5 +122,38 @@ describe("host-owned concept formatting", () => {
 
   it.each(["", "!!!", "Bad|alias", "Bad]]", "Bad\nTitle", "https://example.com/paper", "((abc-123))"])("rejects unsafe generated targets: %s", (title) => {
     expect(formatConceptLink(title)).toBeNull();
+  });
+});
+
+describe("math loads on demand", () => {
+  it("keeps the formula readable while KaTeX is still loading", () => {
+    // Rendered before any preload, so this exercises the placeholder path.
+    const node = document.createElement("div");
+    node.innerHTML = renderBlock("$x^2$");
+    const pending = node.querySelector<HTMLElement>(".math-pending");
+    if (pending) {
+      expect(pending.dataset.math).toBe("x^2");
+      expect(pending.textContent).toContain("x^2");
+    } else {
+      expect(node.querySelector(".katex")).not.toBeNull();
+    }
+  });
+
+  it("renders real math once KaTeX has loaded, and upgrades what is on screen", async () => {
+    const host = document.createElement("div");
+    host.innerHTML = renderBlock("$y^2$");
+    document.body.append(host);
+    try {
+      await preloadMath();
+      expect(host.querySelector(".math-pending")).toBeNull();
+      expect(host.querySelector(".katex, .katex-error")).not.toBeNull();
+      // Subsequent renders no longer need a placeholder at all.
+      const later = document.createElement("div");
+      later.innerHTML = renderBlock("$z^2$");
+      expect(later.querySelector(".math-pending")).toBeNull();
+      expect(later.querySelector(".katex, .katex-error")).not.toBeNull();
+    } finally {
+      host.remove();
+    }
   });
 });
