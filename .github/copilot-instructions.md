@@ -70,11 +70,22 @@ Keep nothing we can rebuild: disk space has repeatedly run out because of old
 binaries and backups. `deploy-local.sh` keeps its verified backup only until
 the switch succeeds, then deletes older installed builds and those backups. A
 build a running Grafium still uses survives until the next deploy.
-`deploy-local.sh` then clears the checkout's Cargo
-build cache, so the next build starts fresh. Do not keep release binaries,
-installers or build caches after a deploy unless the user asks
-(`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the cache). There are no binary backups to
-roll back to: if a deployed build is broken, fix the bug and redeploy.
+`deploy-local.sh` then clears the checkout's Cargo build cache, so the next
+build starts fresh. Do not keep release binaries, installers or build caches
+after a deploy unless the user asks (`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the
+cache). There are no binary backups to roll back to: if a deployed build is
+broken, fix the bug and redeploy.
+
+A cold build can leave `target/release/bundled-libs/` with only part of the
+llama.cpp/GGML libraries, because `ui/src-tauri/build.rs` may run while that
+CMake build is still emitting `.so`s. The binary then fails to start with a
+missing `libggml.so.0`, and `deploy-local.sh` stops with `cp: cannot stat
+.../libggml.so`. This is self-correcting: run the same `cargo build --release`
+again and the build script re-runs and finishes the copy. Do not delete
+`target/` to work around it — a fresh build just loses the cache and hits the
+same race. Commit before building, too: the version string embeds the commit
+and is marked `dirty` for an uncommitted tree, so a build made first reports
+the wrong revision.
 
 ## Never lose user data
 
