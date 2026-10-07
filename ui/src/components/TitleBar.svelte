@@ -19,6 +19,7 @@
     onOpenSearch?: () => void;
     onOpenJobs?: () => void;
     onOpenSettings?: () => void;
+    onPrint?: () => void;
     onZoomIn?: () => void;
     onZoomOut?: () => void;
     onZoomReset?: () => void;
@@ -39,6 +40,7 @@
     onOpenSearch = () => {},
     onOpenJobs = () => {},
     onOpenSettings = () => {},
+    onPrint = () => {},
     onZoomIn = () => {},
     onZoomOut = () => {},
     onZoomReset = () => {},
@@ -75,7 +77,7 @@
   ></div>
 
   <div class="titlebar-right" data-tauri-drag-region>
-    <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} onOpenSettings={onOpenSettings} />
+    <AppMenu {uiZoom} onZoomIn={onZoomIn} onZoomOut={onZoomOut} onZoomReset={onZoomReset} onOpenSettings={onOpenSettings} onPrint={onPrint} />
     <div class="nav-controls" data-tauri-drag-region="false">
       <button class="titlebar-btn nav-btn" data-tauri-drag-region="false" onclick={onGoBack} title={shortcutTitle("Back", "go-backward")} aria-label="Back" aria-keyshortcuts={shortcutAria("go-backward")} disabled={!canGoBack}>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">

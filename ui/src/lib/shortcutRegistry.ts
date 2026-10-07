@@ -86,6 +86,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   app("toggle-settings", "general", "Toggle settings", ["t s", "alt+s"]),
   app("import-media", "general", "Import media", ["alt+m"]),
   app("import-books", "general", "Import books", ["alt+b"]),
+  app("print", "general", "Print", ["mod+p"]),
   app("zoom-in", "general", "Zoom in", ["mod+=", "mod+plus"]),
   app("zoom-out", "general", "Zoom out", ["mod+-"]),
   app("zoom-reset", "general", "Reset zoom", ["mod+0"]),

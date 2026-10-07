@@ -17,6 +17,8 @@ import settingsHelp from "../../src-tauri/resources/welcome/pages/Help - Setting
 import syncHelp from "../../src-tauri/resources/welcome/pages/Help - Sync.md?raw";
 import syncResolution from "../components/SyncConflictResolution.svelte?raw";
 import helpIndex from "../../src-tauri/resources/welcome/pages/Grafium Help.md?raw";
+import printingHelp from "../../src-tauri/resources/welcome/pages/Help - Printing.md?raw";
+import printDialogSource from "../components/PrintDialog.svelte?raw";
 import importDialog from "../components/BookImportDialog.svelte?raw";
 import appSource from "../App.svelte?raw";
 import recoverySource from "../components/RuntimeRecovery.svelte?raw";
@@ -203,6 +205,24 @@ describe("contextual help", () => {
     expect(chatHelp).toContain("Change model");
     expect(chatHelp).not.toContain("GPU safety or approval");
   });
+  it("documents printing, including what is printed and the white-paper rule", () => {
+    for (const phrase of [
+      "Ctrl+P",
+      "One chapter",
+      "selected blocks",
+      "Save as PDF",
+      "Black and white",
+      "white with dark text",
+      "Folded sections",
+    ]) {
+      expect(printingHelp).toContain(phrase);
+    }
+  });
+  it("reaches the printing help page from the index and from F1 in the print dialog", () => {
+    expect(helpIndex).toContain("[[Help - Printing]]");
+    expect(helpIndex).toContain("| Print | `Ctrl+P` / `Cmd+P` |");
+    expect(printDialogSource).toContain('data-help-context="printing"');
+  });
   it("maps every supported context to a seeded help page", () => {
     const contexts: HelpContext[] = [
       "general",
@@ -219,6 +239,8 @@ describe("contextual help", () => {
       "search",
       "books",
       "reader",
+      "library",
+      "printing",
     ];
 
     for (const context of contexts) {

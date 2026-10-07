@@ -190,6 +190,7 @@ export interface ShortcutActions {
   commandPalette: () => void;
   importMedia: () => void;
   importBooks: () => void;
+  print?: () => void;
   insertTimeStamp: () => void;
   insertPersonalDiary: () => void;
   zoomIn?: () => void;
@@ -229,6 +230,7 @@ function shortcutHandlers(actions: ShortcutActions): Record<string, ActionFn | u
     "command-palette": actions.commandPalette,
     "import-media": actions.importMedia,
     "import-books": actions.importBooks,
+    print: actions.print,
     "insert-time": actions.insertTimeStamp,
     "insert-personal-diary": actions.insertPersonalDiary,
     "zoom-in": actions.zoomIn,

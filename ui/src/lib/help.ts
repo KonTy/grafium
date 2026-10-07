@@ -13,7 +13,8 @@ export type HelpContext =
   | "books"
   | "reader"
   | "library"
-  | "search";
+  | "search"
+  | "printing";
 
 const HELP_PAGES: Record<HelpContext, string> = {
   general: "Help - Grafium Guide",
@@ -31,6 +32,7 @@ const HELP_PAGES: Record<HelpContext, string> = {
   reader: "Help - Private Reader",
   library: "Help - Library",
   search: "Help - Search",
+  printing: "Help - Printing",
 };
 
 export function isHelpContext(value: string | null): value is HelpContext {

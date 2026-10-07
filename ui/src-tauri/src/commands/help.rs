@@ -48,6 +48,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         include_str!("../../resources/welcome/pages/Help - Search.md"),
     ),
     (
+        "printing",
+        include_str!("../../resources/welcome/pages/Help - Printing.md"),
+    ),
+    (
         "books",
         include_str!("../../resources/welcome/pages/Help - Books.md"),
     ),

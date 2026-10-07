@@ -1,0 +1,352 @@
+/* ============================================================
+   Printing.
+
+   Grafium is normally a dark app in a single non-scrolling window, and both
+   of those are wrong for paper. This layer is what turns the running app into
+   a printable document, and it is loaded after global.css so it wins.
+
+   Three things have to happen, and missing any one of them produces a bad
+   printout:
+
+   1. Paper is white, whatever the theme. Browsers already drop background
+      *fills* when printing, but text colour always prints, so a dark theme's
+      pale grey body text would come out nearly invisible. Theme colours are
+      written as inline custom properties on <html> by applyTheme(), and an
+      inline style can only be beaten by `!important` in a stylesheet, so the
+      whole palette is redefined here with `!important`. Doing it at the
+      variable level means callouts, code, tags and links all follow without
+      having to be listed one by one.
+
+   2. The window stops being a window. `html`/`body`/`.app-shell` are a fixed
+      100vh box with `overflow: hidden`; left alone, the printout would be
+      clipped to a single page.
+
+   3. Only the document prints. App chrome is hidden and the print document,
+      which lives outside .app-shell, is revealed.
+   ============================================================ */
+
+/* The print document is built into this container and is only ever visible to
+   the printer, never on screen. */
+#print-root {
+  display: none;
+}
+
+@media print {
+  /* ---- 1. Paper is always white ---------------------------------------- */
+  :root {
+    --bg-primary: #ffffff !important;
+    --bg-secondary: #ffffff !important;
+    --bg-sidebar: #ffffff !important;
+    --bg-hover: transparent !important;
+    --bg-active: transparent !important;
+    --bg-input: #ffffff !important;
+    --bg-code: #f4f4f4 !important;
+    --bg-alt: #ffffff !important;
+    --bg-tertiary: #ffffff !important;
+    --surface-raised: #ffffff !important;
+    --surface-overlay: #ffffff !important;
+    --window-bg-primary: #ffffff !important;
+    --window-bg-secondary: #ffffff !important;
+    --window-bg-sidebar: #ffffff !important;
+
+    --text-primary: #111111 !important;
+    --text-secondary: #333333 !important;
+    --text-muted: #555555 !important;
+    --border: #cccccc !important;
+
+    /* Kept distinguishable on white without being pale. */
+    --accent: #1a4f9c !important;
+    --accent-secondary: #6a1b9a !important;
+    --accent-blue: #1a4f9c !important;
+    --accent-cyan: #00626e !important;
+    --accent-green: #1b5e20 !important;
+    --accent-yellow: #7a5c00 !important;
+    --accent-orange: #8a3d00 !important;
+    --accent-red: #9b1c1c !important;
+    --accent-magenta: #9c186f !important;
+    --accent-purple: #512da8 !important;
+    --danger: #9b1c1c !important;
+    --danger-bg: #ffffff !important;
+
+    --text-link: #1a4f9c !important;
+    --text-link-hover: #1a4f9c !important;
+    --text-link-visited: #512da8 !important;
+
+    --btn-bg: #ffffff !important;
+    --btn-bg-hover: #ffffff !important;
+    --btn-primary-bg: #ffffff !important;
+    --btn-primary-fg: #111111 !important;
+    --btn-primary-hover: #ffffff !important;
+
+    --task-todo-bg: transparent !important;
+    --task-todo-fg: #111111 !important;
+    --task-doing-bg: transparent !important;
+    --task-doing-fg: #111111 !important;
+
+    color-scheme: light !important;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111111 !important;
+  }
+
+  /* Theme visual-effects layers paint a fixed full-viewport overlay, which on
+     paper becomes a grey wash over every page. */
+  .theme-fx-syphi body::before,
+  .theme-fx-syphi body::after,
+  .theme-fx-terminal body::before,
+  .theme-fx-terminal body::after {
+    display: none !important;
+  }
+
+  /* ---- 2. Stop behaving like a fixed window ---------------------------- */
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* ---- 3. Print the document, not the app ------------------------------
+     The app, every dialog and every toast live inside #app, and the print
+     document is appended to <body> beside it. Hiding every top-level element
+     except the print document means a dialog that happens to be open — the
+     print dialog itself, for one — cannot end up on the paper. */
+  body > *:not(#print-root) {
+    display: none !important;
+  }
+
+  #print-root {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    background: #ffffff !important;
+    color: #111111 !important;
+    /* Serif reads better on paper and is what most printed documents use. */
+    font-family: "Georgia", "Times New Roman", serif;
+    font-size: 11pt;
+    line-height: 1.5;
+  }
+
+  /* Decorative theme styling is set on <html>, so it reaches into the print
+     document too. Left alone, the Syphi theme prints headings as glowing
+     uppercase Orbitron and tints the body monospace — screen effects that
+     cost ink and hurt legibility on paper. The print document opts out of all
+     of it and keeps only the typography set above. */
+  #print-root,
+  #print-root * {
+    text-shadow: none !important;
+    box-shadow: none !important;
+    text-transform: none !important;
+    letter-spacing: normal !important;
+    animation: none !important;
+    filter: none;
+    opacity: 1 !important;
+  }
+
+  #print-root :is(h1, h2, h3, h4, h5, h6) {
+    font-family: inherit !important;
+    color: #111111 !important;
+    font-weight: 700;
+  }
+
+  @page {
+    margin: 18mm 16mm;
+  }
+
+  /* ---- The printed document -------------------------------------------- */
+  .print-header {
+    margin-bottom: 10mm;
+    padding-bottom: 3mm;
+    border-bottom: 1px solid #cccccc;
+  }
+
+  .print-title {
+    font-size: 20pt;
+    line-height: 1.2;
+    font-weight: 700;
+  }
+
+  .print-subtitle {
+    margin-top: 2mm;
+    font-size: 9pt;
+    color: #555555;
+  }
+
+  .print-empty {
+    font-style: italic;
+    color: #555555;
+  }
+
+  .print-block {
+    padding-left: calc(var(--print-depth, 0) * 7mm);
+    /* Keep a block whole on one page where it fits. */
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-block + .print-block {
+    margin-top: 2.5mm;
+  }
+
+  /* Outline bullets, so nesting still reads as nesting on paper. */
+  .print-block-bulleted > .print-block-content {
+    position: relative;
+    padding-left: 5mm;
+  }
+
+  .print-block-bulleted > .print-block-content::before {
+    content: "•";
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+
+  /* A heading alone at the foot of a page is the classic bad printout. */
+  .print-block-heading {
+    break-after: avoid;
+    page-break-after: avoid;
+    break-inside: avoid;
+  }
+
+  .print-block-heading + .print-block {
+    margin-top: 1.5mm;
+  }
+
+  .print-h1 {
+    margin-top: 8mm;
+    break-before: auto;
+  }
+
+  .print-h2 {
+    margin-top: 6mm;
+  }
+
+  .print-h3,
+  .print-h4,
+  .print-h5,
+  .print-h6 {
+    margin-top: 4mm;
+  }
+
+  /* The first heading should not push the body down a page on its own. */
+  .print-body > .print-block:first-child {
+    margin-top: 0;
+  }
+
+  .print-block-content h1 {
+    font-size: 17pt;
+  }
+
+  .print-block-content h2 {
+    font-size: 14pt;
+  }
+
+  .print-block-content h3 {
+    font-size: 12.5pt;
+  }
+
+  .print-block-content h4,
+  .print-block-content h5,
+  .print-block-content h6 {
+    font-size: 11pt;
+  }
+
+  .print-media-note {
+    font-style: italic;
+    color: #555555;
+  }
+
+  /* ---- Content that needs help fitting a page -------------------------- */
+  #print-root img,
+  #print-root svg,
+  #print-root video {
+    max-width: 100% !important;
+    height: auto !important;
+    break-inside: avoid;
+  }
+
+  #print-root pre,
+  #print-root code {
+    font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+    font-size: 9.5pt;
+    /* Long lines must wrap rather than run off the edge of the sheet. */
+    white-space: pre-wrap !important;
+    word-break: break-word;
+    overflow: visible !important;
+  }
+
+  #print-root pre {
+    border: 1px solid #cccccc;
+    padding: 2mm;
+    break-inside: avoid;
+  }
+
+  #print-root table {
+    width: 100%;
+    border-collapse: collapse;
+    break-inside: auto;
+  }
+
+  #print-root th,
+  #print-root td {
+    border: 1px solid #cccccc;
+    padding: 1.5mm 2mm;
+    text-align: left;
+  }
+
+  #print-root thead {
+    display: table-header-group;
+  }
+
+  #print-root tr {
+    break-inside: avoid;
+  }
+
+  #print-root blockquote {
+    border-left: 2px solid #cccccc;
+    padding-left: 3mm;
+    color: #333333;
+  }
+
+  /* Paper has no hover, no scrolling and no clicking. */
+  #print-root a {
+    color: #1a4f9c;
+    text-decoration: none;
+  }
+
+  #print-root .print-block-content > *:first-child {
+    margin-top: 0;
+  }
+
+  /* Interactive leftovers have no meaning in a printout. */
+  #print-root button,
+  #print-root .collapse-arrow,
+  #print-root .block-handle {
+    display: none !important;
+  }
+
+  /* ---- Black and white -------------------------------------------------
+     Chosen in the print dialog to save coloured ink. Text, rules and
+     backgrounds go flat black-on-white; pictures are desaturated rather than
+     dropped, so they still carry their detail. */
+  #print-root.print-mono,
+  #print-root.print-mono * {
+    color: #000000 !important;
+    border-color: #000000 !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+
+  #print-root.print-mono a {
+    text-decoration: underline;
+  }
+
+  #print-root.print-mono img,
+  #print-root.print-mono svg {
+    filter: grayscale(100%) !important;
+  }
+}

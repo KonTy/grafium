@@ -12,6 +12,7 @@
     onZoomOut?: () => void;
     onZoomReset?: () => void;
     onOpenSettings?: () => void;
+    onPrint?: () => void;
   }
 
   let {
@@ -20,6 +21,7 @@
     onZoomOut = () => {},
     onZoomReset = () => {},
     onOpenSettings = () => {},
+    onPrint = () => {},
   }: Props = $props();
 
   let menuOpen = $state(false);
@@ -107,6 +109,15 @@
         aria-keyshortcuts={shortcutAria("toggle-bionic")}
         onclick={() => { setBionicReaderEnabled(!$bionicReaderEnabled); closeMenu(); }}>
         <strong aria-hidden="true">B</strong><span>Bionic reading: {$bionicReaderEnabled ? "On" : "Off"}</span>
+      </button>
+      <div class="menu-separator"></div>
+      <button role="menuitem" class="menu-item" onclick={() => { closeMenu(); onPrint(); }} title={shortcutTitle("Print", "print")} aria-keyshortcuts={shortcutAria("print")}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M6 9V2h12v7"></path>
+          <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+          <path d="M6 14h12v8H6z"></path>
+        </svg>
+        <span>Print…</span>
       </button>
       <button role="menuitem" class="menu-item" onclick={openSettings} title={shortcutTitle("Settings", "toggle-settings")} aria-keyshortcuts={shortcutAria("toggle-settings")}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

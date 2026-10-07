@@ -33,6 +33,7 @@
   import HelpOverlay from "./components/HelpOverlay.svelte";
   import FolderBrowser from "./components/FolderBrowser.svelte";
   import BookImportDialog from "./components/BookImportDialog.svelte";
+  import PrintDialog from "./components/PrintDialog.svelte";
   import { ORIGINAL_BOOK_EXTENSIONS, CONVERTIBLE_BOOK_EXTENSIONS, type BookImportMode } from "./lib/bookImport";
   import { isOriginalBookPage, isBookAnnotationPage } from "./lib/books";
   import { getPage, createPage, recordPageOpen, getGraphInfo, openGraph, validateGraph, createGraph, reindexCurrent, listGraphs, getTutorialGraphPath, mediaImportVideo, type GraphInfo } from "./lib/api";
@@ -358,6 +359,10 @@
   let journalActivePage: Page | null = $state(null);
   const assistantSourcePage = $derived.by((): Page | null => currentView === "page" ? currentPage
     : currentView === "journal" ? journalActivePage : null);
+  /** What Print acts on: the open page, or whichever journal day is in view. */
+  const printablePage = $derived.by((): Page | null => currentView === "page" ? currentPage
+    : currentView === "journal" ? journalActivePage : null);
+  let printPageId: string | null = $state(null);
   let journalEditTodayRequestId = $state(0);
   let journalCalendarRequested = $state(false);
   let goToLinkOpen = $state(false);
@@ -1303,6 +1308,7 @@
       zenMode = !zenMode;
     },
     commandPalette: () => toggleCommandPalette(),
+    print: () => openPrintDialog(),
     importMedia: () => openImportMediaDialog(),
     importBooks: () => void openImportBooksDirectory(),
     insertTimeStamp: () => insertEditorSnippet(timeStampSnippet()),
@@ -1311,6 +1317,16 @@
     zoomOut: () => adjustUiZoom(-1),
     zoomReset: () => resetUiZoom(),
   });
+
+  /** Print needs a page; the other views have nothing page-shaped to print. */
+  function openPrintDialog() {
+    const page = printablePage;
+    if (!page) {
+      showToast("Open a page or a journal day to print", "info");
+      return;
+    }
+    printPageId = page.id;
+  }
 
   async function openContextualHelp(context: HelpContext) {
     helpTitle = helpPageTitle(context);
@@ -2459,6 +2475,7 @@
       onOpenSearch={openGlobalSearch}
       onOpenJobs={() => handleNavigate("__jobs__")}
       onOpenSettings={() => navigateToPage("__settings__")}
+      onPrint={openPrintDialog}
       onZoomIn={() => adjustUiZoom(1)}
       onZoomOut={() => adjustUiZoom(-1)}
       onZoomReset={resetUiZoom}
@@ -3005,6 +3022,10 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if printPageId}
+  <PrintDialog pageId={printPageId} onClose={() => (printPageId = null)} />
 {/if}
 
 {#if showImportBooksDialog}

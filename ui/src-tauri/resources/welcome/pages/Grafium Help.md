@@ -20,6 +20,7 @@ separate graph.
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery
 - [[Help - Sync]]
 - [[Help - Search]]
+- [[Help - Printing]] - print a page, chapter, or selection, or save it as a PDF
 - [[Help - Books]] - read original books, annotate, or convert to editable Markdown
 - [[Help - Private Reader]] - external audiobook/EPUB library, listening, and private bookmarks
 - [[Help - Grafium Guide]]
@@ -31,6 +32,7 @@ separate graph.
 | --- | --- |
 | Contextual help | `F1` |
 | Command palette | `Ctrl+Shift+P` / `Cmd+Shift+P` |
+| Print | `Ctrl+P` / `Cmd+P` |
 | Search | `Ctrl+K` / `Cmd+K` |
 | Current page links | `Ctrl+L` / `Cmd+L` |
 | Right reference panel | `Ctrl+Shift+B` / `Cmd+Shift+B` |
