@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   revealStartupWindow,
+  revealStartupWindowWhenRestored,
   reportStartupContent,
   resetStartupContentReportForTests,
 } from "./startupWindow";
@@ -33,6 +34,40 @@ describe("startup window readiness", () => {
     document.documentElement.style.setProperty("--bg-primary", "#000000");
     vi.mocked(invoke).mockRejectedValueOnce(new Error("Window unavailable"));
     await expect(revealStartupWindow()).rejects.toThrow("Window unavailable");
+  });
+});
+
+describe("revealing without waiting out a stalled restore", () => {
+  beforeEach(() => {
+    document.documentElement.style.setProperty("--bg-primary", "#000000");
+  });
+
+  it("waits for the restore so a normal launch shows the themed window", async () => {
+    let settle: () => void = () => {};
+    const restored = new Promise<void>((resolve) => { settle = resolve; });
+    const reveal = revealStartupWindowWhenRestored(restored, 10_000);
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+    settle();
+    await reveal;
+    expect(invoke).toHaveBeenCalledWith("reveal_startup_window", { background: [0, 0, 0] });
+  });
+
+  it("reveals the window anyway once the grace period expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const reveal = revealStartupWindowWhenRestored(new Promise(() => {}), 1_500);
+      await vi.advanceTimersByTimeAsync(1_500);
+      await reveal;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(invoke).toHaveBeenCalledWith("reveal_startup_window", { background: [0, 0, 0] });
+  });
+
+  it("still reveals the window when restoring the theme fails", async () => {
+    await revealStartupWindowWhenRestored(Promise.reject(new Error("no preferences")), 10_000);
+    expect(invoke).toHaveBeenCalledWith("reveal_startup_window", { background: [0, 0, 0] });
   });
 });
 

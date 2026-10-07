@@ -12,6 +12,33 @@ export async function revealStartupWindow(): Promise<void> {
   await invoke("reveal_startup_window", { background: [r, g, b] });
 }
 
+/// The window starts hidden so its first frame carries the restored theme rather
+/// than flashing a default palette. Restoring reads the saved preference and the
+/// system appearance, and both have been observed to stall for seconds on a busy
+/// machine — leaving no window at all, so the app looks like it failed to start.
+/// Reveal once the restore settles or after this grace period, whichever comes
+/// first. A healthy restore takes tens of milliseconds, so normal launches are
+/// unaffected and still show a fully themed window.
+export const REVEAL_GRACE_MS = 1_500;
+
+export async function revealStartupWindowWhenRestored(
+  restored: Promise<unknown>,
+  graceMs: number = REVEAL_GRACE_MS,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, graceMs);
+  });
+  try {
+    // Restore failures are reported by the restore itself; they must not also
+    // suppress the window.
+    await Promise.race([restored.catch(() => undefined), grace]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  await revealStartupWindow();
+}
+
 let contentReported = false;
 
 /// Reveal happens as soon as the theme and layout are restored, which is before

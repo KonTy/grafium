@@ -34,8 +34,11 @@ class DeploymentTest(unittest.TestCase):
         (build / "library.c").write_text("int deployment_fixture(void) { return 0; }\n")
         subprocess.run([
             "cc", "-shared", "-fPIC", "-Wl,-soname,libggml.so.0",
-            str(build / "library.c"), "-o", str(build / "libggml.so.0"),
+            str(build / "library.c"), "-o", str(build / "libggml.so.0.19.0"),
         ], check=True, capture_output=True)
+        # Mirror the real build's soname chain so deployment is exercised against
+        # three names for one file, not a single standalone library.
+        (build / "libggml.so.0").symlink_to("libggml.so.0.19.0")
         (build / "libggml.so").symlink_to("libggml.so.0")
         (build / "main.c").write_text(
             '#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n'
@@ -134,7 +137,12 @@ class DeploymentTest(unittest.TestCase):
         self.assertFalse((self.home / ".local/bin/grafium-bin").exists())
         for path, content in old_files.items():
             self.assertEqual(path.read_bytes(), content)
-            self.assertFalse(path.is_symlink())
+            # Links may name another file in the same build (one soname chain),
+            # but nothing may point outside it or the install would stop working
+            # as soon as the source worktree is removed.
+            if path.is_symlink():
+                self.assertFalse(path.readlink().is_absolute())
+                self.assertEqual(path.resolve().parent, path.parent.resolve())
         backups = list((self.home / ".local/lib/grafium").glob("backup.*/grafium"))
         self.assertTrue(any(path.read_bytes() == old_launcher for path in backups))
         for manifest in (self.home / ".local/lib/grafium").glob("backup.*/SHA256SUMS"):
@@ -144,9 +152,23 @@ class DeploymentTest(unittest.TestCase):
     def test_missing_libraries_leave_current_installation_unchanged(self):
         self.deploy(self.build("first"))
         broken = self.build("broken")
-        (broken / "libggml.so").unlink()
-        (broken / "libggml.so.0").unlink()
+        # The build-script race leaves the soname links pointing at a file that
+        # was never emitted; installing that would ship an unloadable build.
+        (broken / "libggml.so.0.19.0").unlink()
         self.deploy(broken, succeeds=False)
+        self.assertIn("first", self.installed())
+
+    def test_a_soname_chain_is_installed_once_instead_of_copied_per_name(self):
+        self.deploy(self.build("first"))
+        build, = self.builds()
+        real = build / "libggml.so.0.19.0"
+        self.assertTrue(real.is_file() and not real.is_symlink())
+        for name in ("libggml.so", "libggml.so.0"):
+            link = build / name
+            self.assertTrue(link.is_symlink(), f"{name} should be a link, not a copy")
+            self.assertEqual(link.readlink().name, link.readlink().as_posix(),
+                             f"{name} must link within the build, not out of it")
+            self.assertEqual(link.resolve(), real.resolve())
         self.assertIn("first", self.installed())
 
     def test_desktop_identity_and_all_icon_sizes_are_installed_consistently(self):

@@ -110,14 +110,36 @@ stage="$(mktemp -d "$app_lib_dir/build.XXXXXXXX")"
 cp "$binary" "$stage/grafium"
 chmod +x "$stage/grafium"
 shopt -s nullglob
+libs=("$build_dir"/lib{ggml,ggml-base,ggml-cpu,ggml-vulkan,ggml-cuda,llama,llama-common}.so*)
+shopt -u nullglob
+# A soname chain is one file wearing three names (libggml-vulkan.so ->
+# libggml-vulkan.so.0 -> libggml-vulkan.so.0.19.0). Dereferencing every name
+# would install three 53MB copies of the same library, so copy the real file
+# once and recreate the other names as links relative to the staged directory.
+# The copy still dereferences the build cache: an installed build must survive
+# removal of the source worktree or its target directory.
+declare -A staged_name=()
 copied=0
-for so in "$build_dir"/lib{ggml,ggml-base,ggml-cpu,ggml-vulkan,ggml-cuda,llama,llama-common}.so*; do
-  # Dereference build-cache links: an installed build must survive removal of
-  # the source worktree or its target directory.
-  cp -L "$so" "$stage/"
+for so in "${libs[@]}"; do
+  real="$(readlink -f "$so")"
+  if [[ ! -f "$real" ]]; then
+    echo "error: $so does not resolve to a file; existing installation is unchanged" >&2
+    echo "       re-run the release build — a partial bundled-libs copy caused by the" >&2
+    echo "       build-script race self-corrects on the next build" >&2
+    exit 1
+  fi
+  if [[ -z "${staged_name[$real]:-}" ]]; then
+    staged_name[$real]="$(basename "$real")"
+    cp "$real" "$stage/${staged_name[$real]}"
+  fi
   copied=$((copied + 1))
 done
-shopt -u nullglob
+for so in "${libs[@]}"; do
+  real="$(readlink -f "$so")"
+  name="$(basename "$so")"
+  [[ "$name" == "${staged_name[$real]}" ]] && continue
+  ln -sfn "${staged_name[$real]}" "$stage/$name"
+done
 if [[ $copied -eq 0 ]]; then
   echo "error: no native libraries found; existing installation is unchanged" >&2
   exit 1

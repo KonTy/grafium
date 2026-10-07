@@ -14,7 +14,7 @@
     dismissOverlayForAndroidBack,
   } from "./lib/androidBack";
   import { hasPersistentStorageAccess, requestPersistentStorageAccess } from "./lib/androidStorageAccess";
-  import { revealStartupWindow, reportStartupContent } from "./lib/startupWindow";
+  import { revealStartupWindowWhenRestored, reportStartupContent } from "./lib/startupWindow";
   import { getLayoutPreferences, saveLayoutPreferences, type LayoutPreferences } from "./lib/api";
   import { handleMainPanePageKey, hasKeyboardOverlay } from "./lib/mainPaneScroll";
   import { readerOwnsNavigation } from "./lib/readerNavigation";
@@ -1664,8 +1664,11 @@
       }).finally(() => {
         void reportStartupContent().catch(() => undefined);
       });
-      // Restore the theme and menu before mapping the native window.
-      void Promise.all([appearance.start(), restoreLayoutPreferences()]).then(revealStartupWindow).then(() => {
+      // Restore the theme and menu before mapping the native window, but never
+      // let a slow restore leave the user without a window at all.
+      void revealStartupWindowWhenRestored(
+        Promise.all([appearance.start(), restoreLayoutPreferences()]),
+      ).then(() => {
         requestAnimationFrame(() => {
           const sidebar = document.querySelector(".sidebar-container");
           uiLog(`[layout] ${JSON.stringify({
