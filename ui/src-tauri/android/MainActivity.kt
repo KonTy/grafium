@@ -90,6 +90,7 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     webViewRef = webView
     webView.addJavascriptInterface(FolderPickerBridge(), "FolderPickerBridge")
+    webView.addJavascriptInterface(PrintBridge(this, webView), "GrafiumPrintBridge")
     readerBridge = PrivateReaderBridge(this, webView, { id ->
       check(readerLocationRequest == null) { "PICKER_ALREADY_OPEN" }
       readerLocationRequest = id

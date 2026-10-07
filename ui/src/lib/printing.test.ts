@@ -9,7 +9,9 @@ import {
   printHeadings,
   requestedBlocks,
   selectedBlockIds,
+  printingAvailable,
   sendToPrinter,
+  systemDialogSavesPdf,
   unmountPrintDocument,
   type PrintSource,
 } from "./printing";
@@ -293,5 +295,70 @@ describe("loadPrintSource", () => {
   it("starts the chapter picker at the chapter being edited", async () => {
     document.body.innerHTML = '<div class="block-item editing" data-block-id="a"></div>';
     expect((await loadPrintSource("p")).suggestedChapterId).toBe("h");
+  });
+});
+
+type Bridged = typeof window & {
+  GrafiumPrintBridge?: { print: (job: string) => void; isAvailable: () => boolean };
+  __GRAFIUM_PRINT_RESOLVE?: (started: boolean, message: string) => void;
+};
+
+describe("printing on Android", () => {
+  const w = window as Bridged;
+
+  afterEach(() => {
+    delete w.GrafiumPrintBridge;
+    delete w.__GRAFIUM_PRINT_RESOLVE;
+  });
+
+  function installBridge(onPrint: (job: string) => void, available = true) {
+    w.GrafiumPrintBridge = { print: onPrint, isAvailable: () => available };
+  }
+
+  it("uses the platform print service instead of the unimplemented window.print()", async () => {
+    vi.mocked(invoke).mockReset();
+    const jobs: string[] = [];
+    installBridge((job) => {
+      jobs.push(job);
+      w.__GRAFIUM_PRINT_RESOLVE?.(true, "");
+    });
+    await expect(sendToPrinter("printer", undefined, "Field notes")).resolves.toBe("printed");
+    expect(jobs).toEqual(["Field notes"]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("sends a PDF request to the same dialog, which offers Save as PDF itself", async () => {
+    installBridge(() => w.__GRAFIUM_PRINT_RESOLVE?.(true, ""));
+    await expect(sendToPrinter("pdf", undefined, "Notes")).resolves.toBe("printed");
+  });
+
+  it("surfaces a refusal from the platform rather than claiming it printed", async () => {
+    installBridge(() => w.__GRAFIUM_PRINT_RESOLVE?.(false, "Printing is unavailable on this device"));
+    await expect(sendToPrinter("printer")).rejects.toThrow("unavailable on this device");
+  });
+
+  it("frees the next job after the platform refuses", async () => {
+    installBridge(() => w.__GRAFIUM_PRINT_RESOLVE?.(false, "nope"));
+    await expect(sendToPrinter("printer")).rejects.toThrow();
+    installBridge(() => w.__GRAFIUM_PRINT_RESOLVE?.(true, ""));
+    await expect(sendToPrinter("printer")).resolves.toBe("printed");
+  });
+
+  it("stops listening once a job is answered, so a later job is not resolved twice", async () => {
+    installBridge(() => w.__GRAFIUM_PRINT_RESOLVE?.(true, ""));
+    await sendToPrinter("printer");
+    expect(w.__GRAFIUM_PRINT_RESOLVE).toBeUndefined();
+  });
+
+  it("hides the separate PDF button only where the system dialog already saves one", () => {
+    expect(systemDialogSavesPdf()).toBe(false);
+    installBridge(() => {});
+    expect(systemDialogSavesPdf()).toBe(true);
+  });
+
+  it("reports a device with no print service as unable to print", () => {
+    expect(printingAvailable()).toBe(true);
+    installBridge(() => {}, false);
+    expect(printingAvailable()).toBe(false);
   });
 });

@@ -47,6 +47,9 @@ the same rendering the printer would produce, so the preview applies to it too.
 You can also reach a PDF through **Print** by picking your system's
 *Print to File* destination, if you prefer the system print window.
 
+On Android the print window already lists **Save as PDF** beside the real
+printers, so printing and saving a PDF are the same button there.
+
 ## How the printed page is laid out
 
 - App chrome - sidebars, toolbars, buttons and the navigation bar - is left

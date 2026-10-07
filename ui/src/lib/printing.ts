@@ -157,6 +157,72 @@ export type PrintOutcome = "printed" | "cancelled" | "unsupported";
 
 let jobInFlight = false;
 
+interface AndroidPrintBridge {
+  print: (jobName: string) => void;
+  isAvailable: () => boolean;
+}
+
+function androidPrintBridge(): AndroidPrintBridge | undefined {
+  return (window as typeof window & { GrafiumPrintBridge?: AndroidPrintBridge })
+    .GrafiumPrintBridge;
+}
+
+/** Whether this build can print at all, so the dialog can say so up front. */
+export function printingAvailable(): boolean {
+  const bridge = androidPrintBridge();
+  if (bridge) {
+    try {
+      return bridge.isAvailable();
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether the system's own print dialog already offers saving to PDF.
+ *
+ * Android's does, so a separate "Save as PDF" button there would be a second
+ * route to the same place. The desktop needs its own, because the GTK dialog
+ * hides printing to a file behind a destination the user has to know to pick.
+ */
+export function systemDialogSavesPdf(): boolean {
+  return androidPrintBridge() !== undefined;
+}
+
+/**
+ * Print through Android's print framework.
+ *
+ * Android's WebView does not implement `window.print()`, so the platform
+ * print service has to be reached from Kotlin. Its dialog includes "Save as
+ * PDF" among the destinations, which covers both actions the print dialog
+ * offers. Handing the job to that dialog is the last this code hears of it,
+ * so a started job is reported as printed.
+ */
+function printViaAndroid(bridge: AndroidPrintBridge, jobName: string): Promise<PrintOutcome> {
+  return new Promise((resolve, reject) => {
+    const target = window as typeof window & {
+      __GRAFIUM_PRINT_RESOLVE?: (started: boolean, message: string) => void;
+    };
+    const finish = (outcome: PrintOutcome | null, message: string) => {
+      delete target.__GRAFIUM_PRINT_RESOLVE;
+      clearTimeout(timer);
+      if (outcome) resolve(outcome);
+      else reject(new Error(message || "Could not start printing"));
+    };
+    // Android never reports back if the activity is torn down mid-handover.
+    const timer = setTimeout(() => finish(null, "The printer did not respond"), 30000);
+    target.__GRAFIUM_PRINT_RESOLVE = (started, message) =>
+      finish(started ? "printed" : null, message);
+    try {
+      bridge.print(jobName);
+    } catch (cause) {
+      finish(null, String(cause));
+    }
+  });
+}
+
 /**
  * Wait for images to finish decoding.
  *
@@ -188,13 +254,19 @@ async function imagesReady(root: HTMLElement, timeoutMs = 5000): Promise<void> {
  * desktop target, so the native operation is used wherever it exists and the
  * browser call is only a fallback for platforms without one.
  */
-export async function sendToPrinter(action: PrintAction, pdfPath?: string): Promise<PrintOutcome> {
+export async function sendToPrinter(
+  action: PrintAction,
+  pdfPath?: string,
+  jobName = "Grafium",
+): Promise<PrintOutcome> {
   // One job at a time: both share `#print-root`, so a second job starting
   // while the first is still rendering would print the wrong document.
   if (jobInFlight) throw new Error("A print job is already running");
   jobInFlight = true;
   try {
     await imagesReady(printRoot());
+    const bridge = androidPrintBridge();
+    if (bridge) return await printViaAndroid(bridge, jobName);
     const target =
       action === "pdf" && pdfPath ? { kind: "pdf", path: pdfPath } : { kind: "dialog" };
     const outcome = await invoke<PrintOutcome>("print_document", { target });

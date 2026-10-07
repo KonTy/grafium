@@ -9,6 +9,7 @@
     printHeadings,
     requestedBlocks,
     sendToPrinter,
+    systemDialogSavesPdf,
     unmountPrintDocument,
     type PrintColour,
     type PrintSource,
@@ -47,6 +48,9 @@
   const documentHtml = $derived(source ? buildRequestedDocument(source, request) : "");
   const headings = $derived(source ? printHeadings(source, request) : null);
   const hasContent = $derived(source ? requestedBlocks(source, request).length > 0 : false);
+  // Android's own print dialog lists "Save as PDF" among the destinations, so
+  // offering a separate button there would be a second door to one room.
+  const systemPdf = systemDialogSavesPdf();
 
   // Closing stays available while a job runs: the printer owns the job from
   // here, and a job that never reports back must not trap the user in a modal.
@@ -66,7 +70,7 @@
     error = "";
     try {
       let pdfPath: string | undefined;
-      if (action === "pdf") {
+      if (action === "pdf" && !systemPdf) {
         const chosen = await save({
           defaultPath: pdfFileName(headings?.title ?? source.pageTitle),
           filters: [{ name: "PDF", extensions: ["pdf"] }],
@@ -75,7 +79,7 @@
         pdfPath = chosen;
       }
       mountPrintDocument(documentHtml, colour);
-      const outcome = await sendToPrinter(action, pdfPath);
+      const outcome = await sendToPrinter(action, pdfPath, headings?.title ?? source.pageTitle);
       if (outcome !== "cancelled") onClose();
     } catch (cause) {
       error = `Could not print: ${String(cause)}`;
@@ -166,6 +170,9 @@
           <span>Black and white</span>
         </label>
         <p class="note">Paper is always white with dark text, whichever you pick.</p>
+        {#if systemPdf}
+          <p class="note">Choose <strong>Save as PDF</strong> in the print window to make a file.</p>
+        {/if}
       </fieldset>
 
       <div class="preview-wrap">
@@ -178,9 +185,11 @@
 
     <div class="actions">
       <button type="button" onclick={close}>Cancel</button>
-      <button type="button" onclick={() => void run("pdf")} disabled={busy || !hasContent}>
-        Save as PDF…
-      </button>
+      {#if !systemPdf}
+        <button type="button" onclick={() => void run("pdf")} disabled={busy || !hasContent}>
+          Save as PDF…
+        </button>
+      {/if}
       <button
         type="button"
         class="primary"
