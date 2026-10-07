@@ -34,11 +34,13 @@ class DeploymentTest(unittest.TestCase):
         (build / "library.c").write_text("int deployment_fixture(void) { return 0; }\n")
         subprocess.run([
             "cc", "-shared", "-fPIC", "-Wl,-soname,libggml.so.0",
-            str(build / "library.c"), "-o", str(build / "libggml.so.0.19.0"),
+            str(build / "library.c"), "-o", str(build / "libggml.so.0"),
         ], check=True, capture_output=True)
         # Mirror the real build's soname chain so deployment is exercised against
-        # three names for one file, not a single standalone library.
-        (build / "libggml.so.0").symlink_to("libggml.so.0.19.0")
+        # three names for one file. The build emits the fully versioned name as a
+        # separate identical file rather than a link, so copy it the same way.
+        (build / "libggml.so.0.19.0").write_bytes((build / "libggml.so.0").read_bytes())
+        (build / "libggml.so.0.19.0").chmod(0o755)
         (build / "libggml.so").symlink_to("libggml.so.0")
         (build / "main.c").write_text(
             '#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n'
@@ -154,21 +156,20 @@ class DeploymentTest(unittest.TestCase):
         broken = self.build("broken")
         # The build-script race leaves the soname links pointing at a file that
         # was never emitted; installing that would ship an unloadable build.
-        (broken / "libggml.so.0.19.0").unlink()
+        (broken / "libggml.so.0").unlink()
         self.deploy(broken, succeeds=False)
         self.assertIn("first", self.installed())
 
-    def test_a_soname_chain_is_installed_once_instead_of_copied_per_name(self):
+    def test_one_library_is_installed_once_however_many_names_it_has(self):
         self.deploy(self.build("first"))
         build, = self.builds()
-        real = build / "libggml.so.0.19.0"
+        real = build / "libggml.so.0"
         self.assertTrue(real.is_file() and not real.is_symlink())
-        for name in ("libggml.so", "libggml.so.0"):
+        for name in ("libggml.so", "libggml.so.0.19.0"):
             link = build / name
             self.assertTrue(link.is_symlink(), f"{name} should be a link, not a copy")
-            self.assertEqual(link.readlink().name, link.readlink().as_posix(),
+            self.assertEqual(link.readlink().as_posix(), real.name,
                              f"{name} must link within the build, not out of it")
-            self.assertEqual(link.resolve(), real.resolve())
         self.assertIn("first", self.installed())
 
     def test_desktop_identity_and_all_icon_sizes_are_installed_consistently(self):

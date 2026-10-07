@@ -112,13 +112,14 @@ chmod +x "$stage/grafium"
 shopt -s nullglob
 libs=("$build_dir"/lib{ggml,ggml-base,ggml-cpu,ggml-vulkan,ggml-cuda,llama,llama-common}.so*)
 shopt -u nullglob
-# A soname chain is one file wearing three names (libggml-vulkan.so ->
-# libggml-vulkan.so.0 -> libggml-vulkan.so.0.19.0). Dereferencing every name
-# would install three 53MB copies of the same library, so copy the real file
-# once and recreate the other names as links relative to the staged directory.
-# The copy still dereferences the build cache: an installed build must survive
-# removal of the source worktree or its target directory.
+# A soname chain is normally one file wearing three names (libggml-vulkan.so ->
+# libggml-vulkan.so.0 -> libggml-vulkan.so.0.19.0), and the build sometimes emits
+# the versioned names as separate identical files instead of links. Copying every
+# name wrote three 53MB copies of one library, 295MB per deploy. Install one copy
+# of each distinct library and give it its other names as links relative to the
+# staged directory, so the build stays self-contained without the duplication.
 declare -A staged_name=()
+declare -A hash_of=()
 copied=0
 for so in "${libs[@]}"; do
   real="$(readlink -f "$so")"
@@ -128,17 +129,20 @@ for so in "${libs[@]}"; do
     echo "       build-script race self-corrects on the next build" >&2
     exit 1
   fi
-  if [[ -z "${staged_name[$real]:-}" ]]; then
-    staged_name[$real]="$(basename "$real")"
-    cp "$real" "$stage/${staged_name[$real]}"
+  hash_of[$so]="$(sha256sum "$real" | cut -d' ' -f1)"
+  if [[ -z "${staged_name[${hash_of[$so]}]:-}" ]]; then
+    staged_name[${hash_of[$so]}]="$(basename "$real")"
+    # Dereference the build cache: an installed build must survive removal of
+    # the source worktree or its target directory.
+    cp "$real" "$stage/${staged_name[${hash_of[$so]}]}"
   fi
   copied=$((copied + 1))
 done
 for so in "${libs[@]}"; do
-  real="$(readlink -f "$so")"
   name="$(basename "$so")"
-  [[ "$name" == "${staged_name[$real]}" ]] && continue
-  ln -sfn "${staged_name[$real]}" "$stage/$name"
+  canonical="${staged_name[${hash_of[$so]}]}"
+  [[ "$name" == "$canonical" ]] && continue
+  ln -sfn "$canonical" "$stage/$name"
 done
 if [[ $copied -eq 0 ]]; then
   echo "error: no native libraries found; existing installation is unchanged" >&2
