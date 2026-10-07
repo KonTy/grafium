@@ -40,6 +40,18 @@ install_owned() {
   mv -fT "$staged" "$destination"
 }
 
+# Back a file up, then drop it. Used to retire identities an older install
+# created, so the menu keeps exactly one Grafium.
+remove_owned() {
+  local relative="$1" destination="$data_home/$1"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    mkdir -p "$(dirname "$backup/$relative")"
+    cp -L "$destination" "$backup/$relative"
+    cmp -s "$destination" "$backup/$relative"
+    rm -f "$destination"
+  fi
+}
+
 # Refresh legacy icon aliases too: existing pinned desktop entries may still
 # use grafium-local or grafium-bin, and stale rasters take precedence over SVG.
 for name in grafium grafium-local grafium-bin "$icon_name"; do
@@ -60,25 +72,29 @@ executable="${executable//\"/\\\"}"
 executable="${executable//\$/\\\$}"
 executable="${executable//\`/\\\`}"
 executable="${executable//%/%%}"
-for identity in grafium grafium-bin; do
-  desktop="$(mktemp --suffix=.desktop "$backup/.desktop.XXXXXXXX")"
-  {
-    printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Grafium\n'
-    printf 'Comment=A local-first knowledge graph and note-taking workspace.\n'
-    # Some custom menus search system icons before user icons. A distinct local
-    # raster name cannot collide with an obsolete packaged grafium.png.
-    printf 'Exec="%s"\nIcon=%s\nStartupWMClass=%s\n' "$executable" "$icon_name" "$identity"
-    printf 'Terminal=false\nCategories=Office;Utility;\nStartupNotify=true\n'
-    # Older, already-running builds still advertise this executable basename.
-    [[ "$identity" == grafium-bin ]] && printf 'NoDisplay=true\n'
-    true
-  } >"$desktop"
-  if command -v desktop-file-validate >/dev/null 2>&1; then
-    desktop-file-validate "$desktop"
-  fi
-  install_owned "$desktop" "applications/$identity.desktop"
-  rm -- "$desktop"
-done
+# Grafium has exactly one desktop identity. The executable, its WM class and
+# this entry all use the `grafium` name, so the menu cannot show a second,
+# near-identical launcher pointing at the same app.
+desktop="$(mktemp --suffix=.desktop "$backup/.desktop.XXXXXXXX")"
+{
+  printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Grafium\n'
+  printf 'Comment=A local-first knowledge graph and note-taking workspace.\n'
+  # Some custom menus search system icons before user icons. A distinct local
+  # raster name cannot collide with an obsolete packaged grafium.png.
+  printf 'Exec="%s"\nIcon=%s\nStartupWMClass=grafium\n' "$executable" "$icon_name"
+  # A single main category: listing both Office and Utility makes some menus
+  # show Grafium once per section.
+  printf 'Terminal=false\nCategories=Office;\nStartupNotify=true\n'
+} >"$desktop"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  desktop-file-validate "$desktop"
+fi
+install_owned "$desktop" "applications/grafium.desktop"
+rm -- "$desktop"
+
+# Retire the hidden compat entry an older install created for the previous
+# `grafium-bin` executable name.
+remove_owned "applications/grafium-bin.desktop"
 
 # Preserve pinned legacy desktop IDs and custom fields, but give a legacy
 # launcher targeting this same executable the corrected icon as well.

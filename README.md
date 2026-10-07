@@ -573,25 +573,19 @@ restore them, and then the checkout's build cache is cleared. It does not
 overwrite libraries mapped by a running app, stop Grafium, or change
 graphs/settings. Restart Grafium after deployment to use the new build.
 
-To install the same build system-wide (`/usr/bin/grafium`):
+Grafium installs exactly one copy, for your user, at `~/.local/bin/grafium`.
+There is deliberately no second system-wide install: two copies on one machine
+means two entries in the application menu and no way to tell which build you
+just launched. `scripts/install-system.py` is retained only for building
+distribution packages — do not use it to install a local build.
 
-```bash
-build="$(sed -n 's/^exec \(.*\)\/grafium-bin.*/\1/p' ~/.local/bin/grafium)"
-pkexec python3 scripts/install-system.py "$build" \
-  "$(sha256sum "$build/grafium-bin" | cut -d' ' -f1)" 0.0.180
-```
-
-It copies the build into `/opt/grafium`, verifies every file and the
-executable's digest, and switches `/usr/bin/grafium` in one step. Then it
-deletes older `/opt/grafium` builds and the previous launcher's backup in
-`/var/backups/grafium`, except a build a running Grafium still uses.
-`pkexec python3 scripts/install-system.py --prune` removes those later.
 The deployment also refreshes the Linux desktop entry and all installed icon
-sizes. The window's `grafium` application ID matches its launcher, so Wayland
-panels can resolve the application icon independently of the executable name.
-Local launcher entries use a distinct raster icon name to avoid stale system
-icons in custom menus that search system directories first. When smplOS's
-`rebuild-app-cache` is available, deployment refreshes its application index too.
+sizes. One desktop entry is installed, and the executable, its `grafium`
+window class and that entry all share the same name, so Wayland panels resolve
+the application icon and the menu lists Grafium once. Local launcher entries
+use a distinct raster icon name to avoid stale system icons in custom menus
+that search system directories first. When smplOS's `rebuild-app-cache` is
+available, deployment refreshes its application index too.
 
 <details>
 <summary>Optional import tools and other interfaces</summary>

@@ -55,12 +55,15 @@ which, and the system path additionally overwrote files owned by the
 a release for other machines; it is not part of deploying for local testing,
 and it must not be run here.
 
-The start menu entry is `~/.local/share/applications/grafium.desktop`, written
-by `install-desktop.sh`. Its sibling `grafium-bin.desktop` is deliberately
-`NoDisplay=true`: it exists only so a running window matches its icon. Do not
-add a third entry — the menu indexer de-duplicates by name, so extra entries do
-not show up as a visible mistake, they silently decide which install the menu
-launches.
+Grafium has exactly one identity, end to end: the installed executable, the
+window class it reports, the `~/.local/bin/grafium` launcher and the single
+`~/.local/share/applications/grafium.desktop` entry are all named `grafium`.
+`install-desktop.sh` writes that one entry and removes the obsolete
+`grafium-bin.desktop`. Do not add a second entry or a second executable name.
+The menu indexer de-duplicates by name, so a duplicate does not show up as a
+visible mistake — it silently decides which build the menu launches. Keep
+`Categories=` to a single main category too, or some menus list Grafium once
+per category.
 
 Do not interrupt running instances or modify personal graphs for smoke tests;
 tell the user to fully quit and reopen Grafium. Local deployment does not

@@ -64,7 +64,7 @@ class DeploymentTest(unittest.TestCase):
         return sorted((self.home / ".local/lib/grafium").glob("build.*"))
 
     def build_name(self, build):
-        return subprocess.check_output([str(build / "grafium-bin"), "--version"],
+        return subprocess.check_output([str(build / "grafium"), "--version"],
                                        env={**self.env, "LD_LIBRARY_PATH": str(build)},
                                        text=True).split()[1]
 
@@ -131,8 +131,7 @@ class DeploymentTest(unittest.TestCase):
         self.deploy(self.build("second"))
         self.assertIn("second", self.installed())
         self.assertEqual(legacy.read_bytes(), b"legacy library must remain untouched")
-        self.assertIn("second", subprocess.check_output(
-            [str(self.home / ".local/bin/grafium-bin"), "--version"], env=self.env, text=True))
+        self.assertFalse((self.home / ".local/bin/grafium-bin").exists())
         for path, content in old_files.items():
             self.assertEqual(path.read_bytes(), content)
             self.assertFalse(path.is_symlink())
@@ -159,14 +158,19 @@ class DeploymentTest(unittest.TestCase):
         apps.mkdir(parents=True)
         old_desktop = b"[Desktop Entry]\nName=Grafium\nIcon=old-icon\nType=Application\n"
         (apps / "grafium.desktop").write_bytes(old_desktop)
+        # An older install left a second, hidden entry for the previous
+        # executable name; deployment must retire it.
+        (apps / "grafium-bin.desktop").write_bytes(old_desktop)
         self.deploy(self.build("icons"))
         canonical = (apps / "grafium.desktop").read_text()
         self.assertIn("Icon=grafium-local-icon\n", canonical)
         self.assertIn("StartupWMClass=grafium\n", canonical)
         self.assertIn(f'Exec="{self.home}/.local/bin/grafium"\n', canonical)
-        compatibility = (apps / "grafium-bin.desktop").read_text()
-        self.assertIn("StartupWMClass=grafium-bin\n", compatibility)
-        self.assertIn("NoDisplay=true\n", compatibility)
+        self.assertIn("Categories=Office;\n", canonical)
+        # Exactly one entry, so the menu cannot list Grafium twice or launch a
+        # different build than the one `grafium` runs.
+        self.assertEqual(sorted(path.name for path in apps.glob("*.desktop")),
+                         ["grafium.desktop"])
         for name in ("grafium", "grafium-local", "grafium-bin", "grafium-local-icon"):
             for size in (32, 48, 64, 128, 256):
                 source = "128x128@2x.png" if size == 256 else f"{size}x{size}.png"

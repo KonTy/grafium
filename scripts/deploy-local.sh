@@ -104,9 +104,11 @@ fi
 
 # Each build is immutable. Never overwrite mapped native libraries beneath a
 # running process, or pair its old executable with a new library generation.
+# The executable keeps the `grafium` name so the window's WM class, the
+# launcher and the single desktop entry all agree on one identity.
 stage="$(mktemp -d "$app_lib_dir/build.XXXXXXXX")"
-cp "$binary" "$stage/grafium-bin"
-chmod +x "$stage/grafium-bin"
+cp "$binary" "$stage/grafium"
+chmod +x "$stage/grafium"
 shopt -s nullglob
 copied=0
 for so in "$build_dir"/lib{ggml,ggml-base,ggml-cpu,ggml-vulkan,ggml-cuda,llama,llama-common}.so*; do
@@ -122,7 +124,7 @@ if [[ $copied -eq 0 ]]; then
 fi
 
 if command -v ldd >/dev/null 2>&1; then
-  dependencies="$(LD_LIBRARY_PATH="$stage" ldd "$stage/grafium-bin")"
+  dependencies="$(LD_LIBRARY_PATH="$stage" ldd "$stage/grafium")"
   if missing="$(grep "not found" <<<"$dependencies")"; then
     echo "error: unresolved staged libraries; existing installation is unchanged:" >&2
     echo "$missing" >&2
@@ -138,7 +140,7 @@ if command -v ldd >/dev/null 2>&1; then
   done <<<"$dependencies"
 fi
 
-staged_version="$(timeout 20s env LD_LIBRARY_PATH="$stage" "$stage/grafium-bin" --version </dev/null)"
+staged_version="$(timeout 20s env LD_LIBRARY_PATH="$stage" "$stage/grafium" --version </dev/null)"
 if [[ -n "$version_line" && "$staged_version" != "$version_line" ]]; then
   echo "error: staged binary identity differs; existing installation is unchanged" >&2
   exit 1
@@ -170,16 +172,16 @@ launcher="$(mktemp "$bin_dir/.grafium-launcher.XXXXXXXX")"
 {
   echo '#!/bin/bash'
   printf 'export LD_LIBRARY_PATH=%q\n' "$stage"
-  printf 'exec %q "$@"\n' "$stage/grafium-bin"
+  printf 'exec %q "$@"\n' "$stage/grafium"
 } >"$launcher"
 chmod +x "$launcher"
-compat_launcher="$(mktemp "$bin_dir/.grafium-bin-launcher.XXXXXXXX")"
-cp "$launcher" "$compat_launcher"
-chmod +x "$compat_launcher"
 sync -f "$stage"
 sync -f "$backup"
-mv -fT "$compat_launcher" "$bin_dir/grafium-bin"
 mv -fT "$launcher" "$bin_dir/grafium"
+# Grafium installs exactly one entry point. An older deploy also wrote a
+# `grafium-bin` launcher; it is backed up above, so drop it rather than leave
+# a second command that silently runs a different build.
+rm -f "$bin_dir/grafium-bin"
 sync -f "$bin_dir"
 
 echo "installed: $stage ($copied native libraries)"
