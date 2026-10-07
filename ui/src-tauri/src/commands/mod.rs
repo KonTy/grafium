@@ -35,6 +35,32 @@ pub mod trees;
 pub mod writing;
 pub mod writing_edits;
 
+/// Directory holding Grafium's own preference files (layout, theme, chat).
+///
+/// Android has no XDG config directory, so `dirs::config_dir()` returns `None`
+/// there: every preference read failed with a user-visible error and every
+/// write silently went to a `/tmp` path the app cannot keep. The desktop
+/// location is deliberately unchanged so preferences saved by earlier builds
+/// keep loading.
+pub fn app_config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager as _;
+        app.path()
+            .app_data_dir()
+            .map(|dir| dir.join("config"))
+            .map_err(|err| format!("Could not locate the app configuration directory: {err}"))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        dirs::config_dir()
+            .map(|dir| dir.join("grafium"))
+            .ok_or_else(|| "Could not locate the app configuration directory.".to_string())
+    }
+}
+
 /// Bridges frontend diagnostics into the process log, so a WebKitGTK build's
 /// `console.log` (which never reaches stdout) can still be captured when
 /// debugging UI behaviour from a terminal or log file.

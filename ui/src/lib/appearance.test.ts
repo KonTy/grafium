@@ -21,6 +21,7 @@ function setup(preference = "auto", system = glass()) {
     savePreference: vi.fn(async (_id: string) => {}),
     readSystem: vi.fn(async () => system),
     listen: vi.fn(async (callback: () => void): Promise<() => void> => { notify = callback; return stop; }),
+    syncNativeChrome: vi.fn(async (_background: string) => {}),
   };
   const controller = createAppearanceController(deps);
   return { controller, deps, notify: () => notify(), stop };
@@ -261,5 +262,34 @@ describe("background appearance", () => {
     await start;
     expect(stop).toHaveBeenCalledOnce();
     expect(document.documentElement.hasAttribute("data-window-transparency")).toBe(false);
+  });
+});
+
+describe("native launch background", () => {
+  it("records the resolved background and skips unchanged repeats", async () => {
+    const { controller, deps } = setup("github");
+    await controller.start();
+    expect(deps.syncNativeChrome).toHaveBeenLastCalledWith("#ffffff");
+    const callsAfterStart = deps.syncNativeChrome.mock.calls.length;
+
+    // `start()` applies more than once (preference restore, then the system
+    // snapshot), so an unchanged colour must not keep re-writing the file.
+    await controller.refresh();
+    expect(deps.syncNativeChrome).toHaveBeenCalledTimes(callsAfterStart);
+
+    await controller.select("oled");
+    expect(deps.syncNativeChrome).toHaveBeenLastCalledWith(getThemeById("oled")!.colors.bgPrimary);
+    controller.stop();
+  });
+
+  it("keeps the theme applied when the background cannot be recorded", async () => {
+    const { controller, deps } = setup("github");
+    deps.syncNativeChrome.mockRejectedValue(new Error("no config directory"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await controller.start();
+    expect(document.documentElement.style.getPropertyValue("--bg-primary")).toBe("#ffffff");
+    expect(get(controller).error).toBe("");
+    expect(warn).toHaveBeenCalled();
+    controller.stop();
   });
 });

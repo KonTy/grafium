@@ -27,10 +27,8 @@ pub struct LayoutPreferencePatch {
     wide_mode: Option<bool>,
 }
 
-fn config_dir() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|dir| dir.join("grafium"))
-        .ok_or_else(|| "Could not locate the app configuration directory.".to_string())
+fn config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    super::app_config_dir(app)
 }
 
 fn read_preferences(dir: &Path) -> Result<LayoutPreferences, String> {
@@ -79,8 +77,8 @@ fn write_preferences(dir: &Path, patch: LayoutPreferencePatch) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn get_layout_preferences() -> Result<LayoutPreferences, String> {
-    let preferences = read_preferences(&config_dir()?)?;
+pub fn get_layout_preferences(app: tauri::AppHandle) -> Result<LayoutPreferences, String> {
+    let preferences = read_preferences(&config_dir(&app)?)?;
     tracing::info!(
         sidebar_visible = preferences.sidebar_visible,
         wide_mode = preferences.wide_mode,
@@ -90,19 +88,22 @@ pub fn get_layout_preferences() -> Result<LayoutPreferences, String> {
 }
 
 #[tauri::command]
-pub fn set_layout_preferences(preferences: LayoutPreferencePatch) -> Result<(), String> {
-    write_preferences(&config_dir()?, preferences)
+pub fn set_layout_preferences(
+    app: tauri::AppHandle,
+    preferences: LayoutPreferencePatch,
+) -> Result<(), String> {
+    write_preferences(&config_dir(&app)?, preferences)
 }
 
 #[tauri::command]
-pub fn get_sidebar_visibility() -> Result<bool, String> {
-    Ok(read_preferences(&config_dir()?)?.sidebar_visible)
+pub fn get_sidebar_visibility(app: tauri::AppHandle) -> Result<bool, String> {
+    Ok(read_preferences(&config_dir(&app)?)?.sidebar_visible)
 }
 
 #[tauri::command]
-pub fn set_sidebar_visibility(visible: bool) -> Result<(), String> {
+pub fn set_sidebar_visibility(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     write_preferences(
-        &config_dir()?,
+        &config_dir(&app)?,
         LayoutPreferencePatch {
             sidebar_visible: Some(visible),
             ..Default::default()

@@ -1480,6 +1480,7 @@ pub fn run() {
             commands::theme::get_system_appearance,
             commands::theme::get_app_theme,
             commands::theme::set_app_theme,
+            commands::theme::set_startup_chrome,
             commands::assets::download_asset,
             commands::assets::save_clipboard_image,
             commands::assets::save_system_clipboard_image,

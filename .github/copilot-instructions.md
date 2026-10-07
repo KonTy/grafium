@@ -44,20 +44,33 @@ After completing and validating user-facing changes, deploy them locally by
 default so the user can test without a separate deployment request, unless
 the user explicitly asks not to deploy.
 
-Build the frontend before the native release, then use
-`./scripts/deploy-local.sh` and verify the installed `grafium --version`.
-For the system-wide copy, run
-`pkexec python3 scripts/install-system.py <build-dir> <sha256> <version>`
-with the build `~/.local/bin/grafium` now runs and its `grafium-bin` digest.
+There is exactly one desktop install, and it is the per-user one. Build the
+frontend before the native release, then use `./scripts/deploy-local.sh` and
+verify the installed `grafium --version`.
+
+Do not also install a system-wide copy. Two installs meant `grafium` could
+resolve to either one and neither the version string nor the start menu said
+which, and the system path additionally overwrote files owned by the
+`grafium-bin` package. `scripts/install-system.py` is kept only for packaging
+a release for other machines; it is not part of deploying for local testing,
+and it must not be run here.
+
+The start menu entry is `~/.local/share/applications/grafium.desktop`, written
+by `install-desktop.sh`. Its sibling `grafium-bin.desktop` is deliberately
+`NoDisplay=true`: it exists only so a running window matches its icon. Do not
+add a third entry — the menu indexer de-duplicates by name, so extra entries do
+not show up as a visible mistake, they silently decide which install the menu
+launches.
+
 Do not interrupt running instances or modify personal graphs for smoke tests;
 tell the user to fully quit and reopen Grafium. Local deployment does not
 authorize a remote push or release publication.
 
 Keep nothing we can rebuild: disk space has repeatedly run out because of old
-binaries and backups. Both scripts keep their verified backup only until the
-switch succeeds, then delete older installed builds and those backups. A build
-a running Grafium still uses survives until the next deploy, or until
-`install-system.py --prune`. `deploy-local.sh` then clears the checkout's Cargo
+binaries and backups. `deploy-local.sh` keeps its verified backup only until
+the switch succeeds, then deletes older installed builds and those backups. A
+build a running Grafium still uses survives until the next deploy.
+`deploy-local.sh` then clears the checkout's Cargo
 build cache, so the next build starts fresh. Do not keep release binaries,
 installers or build caches after a deploy unless the user asks
 (`GRAFIUM_KEEP_BUILD_CACHE=1` keeps the cache). There are no binary backups to

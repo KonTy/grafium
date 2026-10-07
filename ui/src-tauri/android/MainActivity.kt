@@ -1,6 +1,8 @@
 package com.grafium.app
 
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,8 +16,14 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import java.io.File
 
 class MainActivity : TauriActivity() {
+  companion object {
+    // Must match `commands::theme::STARTUP_CHROME_FILE`.
+    private const val STARTUP_CHROME_FILE = "startup-chrome.txt"
+  }
+
   private lateinit var folderPickerLauncher: ActivityResultLauncher<Uri?>
   private var webViewRef: WebView? = null
   private lateinit var readerLocationLauncher: ActivityResultLauncher<Intent>
@@ -25,9 +33,32 @@ class MainActivity : TauriActivity() {
   private var readerExportRequest: String? = null
   private var readerRestoreRequest: String? = null
   private var readerBridge: PrivateReaderBridge? = null
+  private var startupBackground: Int? = null
+
+  /**
+   * Repaints the window with the background Grafium last resolved, written by
+   * the `set_startup_chrome` command into the app's data directory.
+   *
+   * The XML theme can only approximate the colour because it is chosen by the
+   * system's light/dark setting, which need not agree with the user's Grafium
+   * theme. Reading the real value here removes the remaining mismatch, and a
+   * missing or malformed file simply leaves the XML colour in place.
+   */
+  private fun applyStartupChrome() {
+    val color = try {
+      val file = File(dataDir, "config/" + STARTUP_CHROME_FILE)
+      if (file.isFile) Color.parseColor(file.readText().trim()) else null
+    } catch (_: Exception) {
+      null
+    } ?: return
+    startupBackground = color
+    window.setBackgroundDrawable(ColorDrawable(color))
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+
+    applyStartupChrome()
 
     readerLocationLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
       val id = readerLocationRequest
@@ -89,6 +120,10 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     webViewRef = webView
+    // The webview paints white until the first frame of the page. Matching it
+    // to the saved background keeps launching a single colour instead of a
+    // white flash on top of a dark theme.
+    startupBackground?.let { webView.setBackgroundColor(it) }
     webView.addJavascriptInterface(FolderPickerBridge(), "FolderPickerBridge")
     webView.addJavascriptInterface(PrintBridge(this, webView), "GrafiumPrintBridge")
     readerBridge = PrivateReaderBridge(this, webView, { id ->

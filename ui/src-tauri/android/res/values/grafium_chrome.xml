@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launch-window colour used only until MainActivity reads the user's saved
+  background. Kept in its own file so the Tauri-generated `colors.xml` is left
+  untouched.
+-->
+<resources>
+    <color name="grafium_window_background">#FFFFFFFF</color>
+</resources>

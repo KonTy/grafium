@@ -348,10 +348,8 @@ pub fn get_smplos_theme_colors() -> Result<HashMap<String, String>, String> {
 
 /// Get/set the user's preferred theme for Grafium (stored in app config)
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_app_theme() -> Result<String, String> {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("grafium");
+pub fn get_app_theme(app: tauri::AppHandle) -> Result<String, String> {
+    let config_dir = crate::commands::app_config_dir(&app)?;
 
     let path = config_dir.join("theme.txt");
     if path.exists() {
@@ -372,15 +370,38 @@ pub fn get_app_theme() -> Result<String, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_app_theme(theme_id: String) -> Result<(), String> {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("grafium");
+pub fn set_app_theme(app: tauri::AppHandle, theme_id: String) -> Result<(), String> {
+    let config_dir = crate::commands::app_config_dir(&app)?;
 
     fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let path = config_dir.join("theme.txt");
     fs::write(&path, &theme_id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Name of the file holding the last resolved window background.
+pub const STARTUP_CHROME_FILE: &str = "startup-chrome.txt";
+
+fn parse_hex_color(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_prefix('#')?;
+    (digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(trimmed)
+}
+
+/// Records the resolved window background so the native shell can paint the
+/// same colour before any web content exists.
+///
+/// Android draws the activity window from the XML theme during launch, which
+/// is Material's default grey. Persisting the real colour lets `MainActivity`
+/// repaint the window and the webview to match the user's theme, so launching
+/// no longer flashes grey and then black before the first frame.
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_startup_chrome(app: tauri::AppHandle, background: String) -> Result<(), String> {
+    let color = parse_hex_color(&background)
+        .ok_or_else(|| format!("Invalid startup background colour: {background}"))?;
+    let dir = crate::commands::app_config_dir(&app)?;
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    fs::write(dir.join(STARTUP_CHROME_FILE), color).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -669,5 +690,33 @@ mod tests {
             );
         }
         assert_eq!(windows, base["app"]["windows"]);
+    }
+
+    #[test]
+    fn startup_chrome_only_accepts_six_digit_hex_colours() {
+        assert_eq!(parse_hex_color("#0A1b2C"), Some("#0A1b2C"));
+        assert_eq!(parse_hex_color("  #000000\n"), Some("#000000"));
+        for rejected in [
+            "#fff",
+            "#1234567",
+            "000000",
+            "#12345g",
+            "",
+            "red",
+            "#000000; drop",
+        ] {
+            assert_eq!(parse_hex_color(rejected), None, "accepted {rejected:?}");
+        }
+    }
+
+    #[test]
+    fn android_launch_colour_file_name_matches_the_native_activity() {
+        // `MainActivity.applyStartupChrome` reads this name from the app's data
+        // directory; renaming only one side silently restores the grey flash.
+        let activity = include_str!("../../android/MainActivity.kt");
+        assert!(
+            activity.contains(&format!("\"{STARTUP_CHROME_FILE}\"")),
+            "MainActivity.kt does not read {STARTUP_CHROME_FILE}"
+        );
     }
 }

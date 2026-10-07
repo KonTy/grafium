@@ -1,6 +1,6 @@
 import { writable } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
-import { getAppTheme, getSystemAppearance, setAppTheme, type SystemAppearance } from "./api";
+import { getAppTheme, getSystemAppearance, setAppTheme, setStartupChrome, type SystemAppearance } from "./api";
 import { applyTheme, getThemeById, systemThemeColors } from "./themes";
 
 interface AppearanceDependencies {
@@ -8,6 +8,8 @@ interface AppearanceDependencies {
   savePreference: (id: string) => Promise<void>;
   readSystem: () => Promise<SystemAppearance>;
   listen: (refresh: () => void) => Promise<() => void>;
+  /** Optional: records the background the native window should launch with. */
+  syncNativeChrome?: (background: string) => Promise<void>;
 }
 
 const opaqueSystem: SystemAppearance = {
@@ -41,7 +43,19 @@ export function createAppearanceController(deps: AppearanceDependencies, fallbac
   let saves: Promise<void> = Promise.resolve();
   let watchError = "";
   let preferenceError = "";
+  let nativeChrome = "";
   const state = writable({ preference, system, autoColors: getThemeById(fallbackId)!.colors, error: "" });
+
+  // Android paints its launch window from a file written here, so the colour
+  // only has to survive until the next start. Failing to record it costs a
+  // brief mismatched flash, never the theme itself, so it stays non-fatal.
+  function syncNativeChrome(background: string) {
+    if (background === nativeChrome || !deps.syncNativeChrome) return;
+    nativeChrome = background;
+    deps.syncNativeChrome(background).catch((error) => {
+      console.warn("[theme] Could not record the native window background:", error);
+    });
+  }
 
   function apply(error = "") {
     const auto = resolveAutoTheme(system, fallbackId);
@@ -56,6 +70,7 @@ export function createAppearanceController(deps: AppearanceDependencies, fallbac
       && system.backgroundOpacity < 1 && !system.nativeTransparency
       ? system.transparencyUnavailableReason : "";
     applyTheme(colors, opacity);
+    syncNativeChrome(colors.bgPrimary);
     state.set({ preference, system, autoColors: auto.colors,
       error: [watchError, preferenceError, error, paletteError, transparencyError].filter(Boolean).join(" ") });
   }
@@ -136,4 +151,5 @@ export const appearance = createAppearanceController({
   savePreference: setAppTheme,
   readSystem: getSystemAppearance,
   listen: (refresh) => listen("smplos-theme-changed", refresh),
+  syncNativeChrome: setStartupChrome,
 }, typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent) ? "oled" : "github");

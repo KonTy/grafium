@@ -654,6 +654,10 @@ export function setAppTheme(themeId: string): Promise<void> {
   return invoke("set_app_theme", { themeId });
 }
 
+export function setStartupChrome(background: string): Promise<void> {
+  return invoke("set_startup_chrome", { background });
+}
+
 export interface LayoutPreferences {
   sidebarVisible: boolean;
   wideMode: boolean;

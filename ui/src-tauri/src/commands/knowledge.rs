@@ -2525,15 +2525,13 @@ pub struct ChatPreferences {
     research: bool,
 }
 
-fn chat_preferences_path() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|dir| dir.join("grafium").join("chat.json"))
-        .ok_or_else(|| "Could not locate the app configuration directory.".to_string())
+fn chat_preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    super::app_config_dir(app).map(|dir| dir.join("chat.json"))
 }
 
 #[tauri::command]
-pub fn get_chat_preferences() -> Result<Option<ChatPreferences>, String> {
-    match std::fs::read(chat_preferences_path()?) {
+pub fn get_chat_preferences(app: tauri::AppHandle) -> Result<Option<ChatPreferences>, String> {
+    match std::fs::read(chat_preferences_path(&app)?) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|err| format!("Could not read Chat preferences: {err}")),
@@ -2543,9 +2541,12 @@ pub fn get_chat_preferences() -> Result<Option<ChatPreferences>, String> {
 }
 
 #[tauri::command]
-pub fn set_chat_preferences(preferences: ChatPreferences) -> Result<(), String> {
+pub fn set_chat_preferences(
+    app: tauri::AppHandle,
+    preferences: ChatPreferences,
+) -> Result<(), String> {
     let bytes = serde_json::to_vec(&preferences).map_err(|err| err.to_string())?;
-    grafium_core::fsutil::atomic_write(&chat_preferences_path()?, &bytes)
+    grafium_core::fsutil::atomic_write(&chat_preferences_path(&app)?, &bytes)
         .map_err(|err| format!("Could not save Chat preferences: {err}"))
 }
 

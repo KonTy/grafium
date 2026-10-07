@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Overrides the Tauri-generated stub, which left `android:windowBackground`
+  unset. Android then drew the launch window in Material's default grey, so
+  starting Grafium flashed grey before the webview painted the real theme.
+  MainActivity repaints the window with the user's exact background as soon as
+  it runs; these values only have to cover the moments before any code does.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.grafium" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/grafium_window_background</item>
+    </style>
+</resources>
