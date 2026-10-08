@@ -246,10 +246,14 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TARGET_DIR: C:/t
-      # MSBuild races the Vulkan shader generator's configure/install steps.
-      # cmake-rs passes Cargo's NUM_JOBS explicitly; nested CMake reads its env.
-      CARGO_BUILD_JOBS: "1"
-      CMAKE_BUILD_PARALLEL_LEVEL: "1"
+      # Build llama.cpp/whisper.cpp with Ninja rather than the Visual Studio
+      # generator. MSBuild ran the Vulkan shader generator's ExternalProject
+      # steps out of order — the install step fired before configure and build,
+      # so it failed on a tool that did not exist yet ("Not a file: ...
+      # vulkan-shaders-gen-prefix/src/..."). Forcing one job did not help,
+      # because the ordering, not the job count, was wrong. Ninja expresses
+      # those steps as real dependency edges and runs them in sequence.
+      CMAKE_GENERATOR: Ninja
     steps:
       - uses: actions/checkout@v4
         with:
@@ -281,6 +285,21 @@ jobs:
         with:
           version: 1.3.296.0
           cache: true
+
+      # Ninja has none of the Visual Studio generator's built-in toolchain
+      # discovery, so put cl.exe and the Windows SDK on PATH first. This has to
+      # precede every CMake step, because CMake reads CMAKE_GENERATOR from the
+      # environment for the SPIRV-Headers build too, not just the Rust build.
+      - name: Set up the MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ninja --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Fetch matching SPIRV-Headers CMake package
         uses: actions/checkout@v4
