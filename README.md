@@ -107,7 +107,7 @@ destructive-action confirmation warnings remain visible.
 | Formatting | Headings, emphasis, strikethrough, quotes, lists, inline code, and fenced code blocks. |
 | Math | Write inline and display mathematics with KaTeX. |
 | Sortable Markdown tables | Click a rendered column heading to sort ascending or descending, with numeric-aware ordering. The new order is saved back to Markdown. |
-| Rich paste | Convert pasted HTML to Markdown and preserve supported structure and media. |
+| Rich paste | Convert pasted HTML to Markdown and preserve supported structure and media. Inside a code fence, paste literal text with indentation, blank lines, and trailing spaces intact; complete fenced snippets stay together. |
 | Images, audio, and video | Keep graph assets alongside notes and render supported media inline, including on flashcards. |
 | Commands and templates | Use the editor's command menus rather than memorizing every Markdown pattern. |
 | Emoji and icon picker | Type `/emoji` for emoji, `/icon` for built-in symbolic icons, or `/em` for both; add search words and choose from the completions in either editor. |

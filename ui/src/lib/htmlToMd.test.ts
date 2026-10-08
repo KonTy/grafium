@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clipboardImageFile,
   clipboardImageMarkdown,
+  clipboardMarkdown,
   htmlContainsTable,
   htmlToMarkdown,
   localizeImages,
@@ -194,5 +195,58 @@ describe("HTML to markdown clipboard conversion", () => {
       { content: "TODO Stocks", depth: 1 },
       { content: "DONE Logseq\nCLOSED: [2026-09-09 Wed 11:10]", depth: 1 },
     ]);
+  });
+
+  it("uses literal clipboard text inside fences, including whitespace-only content and CRLF", () => {
+    const data = (values: Record<string, string>) => ({ getData: (type: string) => values[type] ?? "" }) as DataTransfer;
+    expect(clipboardMarkdown(data({
+      "text/plain": "\n\t  <tag>  \r\n\r\n",
+      "text/html": "<p><strong>different</strong></p>",
+    }), true)?.markdown).toBe("\n\t  <tag>  \n\n");
+    expect(clipboardMarkdown(data({ "text/plain": " \n\t " }), true)?.markdown).toBe(" \n\t ");
+    expect(clipboardMarkdown(data({ "text/html": "<pre><code>  &lt;tag&gt;\n\n\t- item  </code></pre>" }), true)?.markdown)
+      .toBe("  <tag>\n\n\t- item  ");
+    expect(clipboardMarkdown(data({
+      "text/plain": "```\n  code  \n```",
+      "text/html": "<pre>```<br>  code  <br>```</pre>",
+    }))?.markdown).toBe("```\n  code  \n```");
+  });
+
+  it("keeps matching fenced snippets intact while ordinary paragraphs and lists still split", () => {
+    for (const fence of ["~~~", "````"]) {
+      const content = `${fence}md\n  # literal  \n\n- list\nid:: literal\n\`\`\`\n${fence} info\n${fence}`;
+      expect(splitMarkdownIntoBlocks(`Before\n\n${content}\n\n- After`)).toEqual([
+        { content: "Before", depth: 0 },
+        { content, depth: 0 },
+        { content: "After", depth: 0 },
+      ]);
+    }
+  });
+
+  it("keeps fenced outline items at their original depth and strips only structural indentation", () => {
+    expect(splitMarkdownIntoBlocks("- Parent\n  - ```\n      indented  \n    - literal\n    ```\n- Next"))
+      .toEqual([
+        { content: "Parent", depth: 0 },
+        { content: "```\n  indented  \n- literal\n```", depth: 1 },
+        { content: "Next", depth: 0 },
+      ]);
+  });
+
+  it("chooses a rich-code fence long enough for literal backticks and does not add a blank line", () => {
+    expect(htmlToMarkdown('<pre><code class="language-md">  start\n```\n\n- literal  \n</code></pre>'))
+      .toBe("````md\n  start\n```\n\n- literal  \n````");
+  });
+
+  it("does not download or rewrite image examples inside pasted fences", async () => {
+    const image = "![Example](https://example.com/image.png)";
+    const content = `~~~~md\n${image}\n~~~~\n\n${image}`;
+    const download = vi.fn().mockResolvedValue("assets/copied.png");
+    expect(await localizeImages(content, download)).toBe(`~~~~md\n${image}\n~~~~\n\n![Example](assets/copied.png)`);
+    expect(download).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains line breaks when copying Grafium's rendered code HTML", () => {
+    const html = '<pre><code><span class="code-line">  first  </span><span class="code-line"></span><span class="code-line">- last</span></code></pre>';
+    expect(htmlToMarkdown(html)).toBe("```\n  first  \n\n- last\n```");
   });
 });

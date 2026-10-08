@@ -132,87 +132,41 @@ fn parse_outline_page(content: &str, filename: &str) -> ParsedPage {
     ParsedPage {
         title: page_title,
         properties: serde_json::Value::Object(page_properties),
-        blocks: normalize_fenced_code_sequences(blocks),
+        blocks,
         is_journal,
     }
-}
-
-fn normalize_fenced_code_sequences(blocks: Vec<ParsedBlock>) -> Vec<ParsedBlock> {
-    let mut out: Vec<ParsedBlock> = Vec::new();
-    let mut i = 0usize;
-
-    while i < blocks.len() {
-        if is_fence_open_marker(&blocks[i].content) {
-            let mut close_idx: Option<usize> = None;
-            let mut j = i + 1;
-            while j < blocks.len() {
-                if is_fence_close_marker(&blocks[j].content) {
-                    close_idx = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-
-            if let Some(end) = close_idx {
-                if end > i + 1 {
-                    let mut merged = blocks[i].clone();
-                    let mut content = String::new();
-                    content.push_str(first_line_trimmed(&blocks[i].content));
-
-                    for mid in (i + 1)..end {
-                        content.push('\n');
-                        content.push_str(&blocks[mid].content);
-                    }
-
-                    content.push('\n');
-                    content.push_str(first_line_trimmed(&blocks[end].content));
-
-                    merged.content = content;
-                    merged.source_line_range =
-                        blocks[i].source_line_range.start..blocks[end].source_line_range.end;
-                    merged.children = Vec::new();
-                    out.push(merged);
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-
-        let mut block = blocks[i].clone();
-        if !block.children.is_empty() {
-            block.children = normalize_fenced_code_sequences(block.children);
-        }
-        out.push(block);
-        i += 1;
-    }
-
-    out
-}
-
-fn is_fence_open_marker(content: &str) -> bool {
-    let mut lines = content.lines();
-    let first = lines.next().unwrap_or("").trim();
-    if !first.starts_with("```") {
-        return false;
-    }
-    lines.all(is_property_line)
-}
-
-fn is_fence_close_marker(content: &str) -> bool {
-    let mut lines = content.lines();
-    let first = lines.next().unwrap_or("").trim();
-    if first != "```" {
-        return false;
-    }
-    lines.all(is_property_line)
 }
 
 fn is_property_line(line: &str) -> bool {
     PROPERTY_RE.is_match(line.trim())
 }
 
-fn first_line_trimmed(content: &str) -> &str {
-    content.lines().next().unwrap_or("").trim()
+#[derive(Clone, Copy)]
+struct CodeFence {
+    marker: u8,
+    length: usize,
+}
+
+fn opening_code_fence(line: &str) -> Option<CodeFence> {
+    let line = line.trim_start();
+    let marker = *line.as_bytes().first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    if length < 3 || (marker == b'`' && line[length..].contains('`')) {
+        return None;
+    }
+    Some(CodeFence { marker, length })
+}
+
+fn closes_code_fence(line: &str, fence: CodeFence) -> bool {
+    let line = line.trim_start();
+    let length = line
+        .bytes()
+        .take_while(|byte| *byte == fence.marker)
+        .count();
+    length >= fence.length && line[length..].trim().is_empty()
 }
 
 fn is_pipe_table_row(line: &str) -> bool {
@@ -230,12 +184,13 @@ fn is_pipe_table_row(line: &str) -> bool {
 fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
     let line = lines[start];
     let indent_level = count_indent(line);
+    let outline_block = line.trim_start().starts_with("- ");
     let raw_content = strip_bullet(line.trim_start());
 
     let mut properties = serde_json::Map::new();
     let mut block_id: Option<String> = None;
     let mut consumed = 1;
-    let mut inside_code_fence = raw_content.trim_start().starts_with("```");
+    let mut code_fence = opening_code_fence(raw_content);
     // A Logseq-style admonition (`#+BEGIN_TIP` … `#+END_TIP`) is kept as a
     // single block: consume the body up to and including the matching
     // `#+END_<same kind>`, without splitting on inner blank lines. We capture
@@ -260,44 +215,38 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
         let next_indent = count_indent(next_line);
         let next_trimmed = next_line.trim_start();
 
-        // While inside fenced code, keep consuming lines regardless of indentation.
-        if inside_code_fence {
+        if let Some(fence) = code_fence {
+            // A stored sibling is never code belonging to another block.
+            if outline_block && next_indent <= indent_level && next_trimmed.starts_with("- ") {
+                break;
+            }
             let continuation_raw = if next_indent > indent_level {
                 strip_continuation(next_line, indent_level + 1)
             } else {
                 next_line
             };
 
-            // Legacy corrupted fence shape sometimes stores each code line as a sibling bullet
-            // at the same indentation level. In that case, drop the synthetic bullet marker.
-            let continuation = if next_indent <= indent_level {
-                let t = continuation_raw.trim_start();
-                if t.starts_with("- ") {
-                    &t[2..]
-                } else {
-                    continuation_raw
-                }
-            } else {
-                continuation_raw
-            };
-
-            // Ignore synthetic metadata/property lines that came from split sibling blocks.
-            if next_indent > indent_level && is_property_line(continuation.trim()) {
-                consumed += 1;
-                continue;
-            }
-
-            // Ignore synthetic empty bullets from prior corruption, but keep
-            // literal blank code lines: reviewed Markdown must round-trip them.
-            if continuation.trim() == "-" {
-                consumed += 1;
+            // The serializer appends an id even to an unfinished fence. Only
+            // the final id before a structural boundary is metadata.
+            let terminal_id = next_indent > indent_level
+                && PROPERTY_RE
+                    .captures(continuation_raw.trim_start())
+                    .is_some_and(|cap| &cap[1] == "id")
+                && lines[start + consumed + 1..]
+                    .iter()
+                    .find(|line| !line.trim().is_empty())
+                    .is_none_or(|line| {
+                        count_indent(line) <= indent_level && line.trim_start().starts_with("- ")
+                    });
+            if terminal_id {
+                code_fence = None;
                 continue;
             }
 
             full_content.push('\n');
-            full_content.push_str(continuation);
-            if continuation.trim_start().starts_with("```") {
-                inside_code_fence = false;
+            full_content.push_str(continuation_raw);
+            if closes_code_fence(continuation_raw, fence) {
+                code_fence = None;
             }
             consumed += 1;
             continue;
@@ -362,10 +311,9 @@ fn parse_block_at(lines: &[&str], start: usize) -> (ParsedBlock, usize) {
             }
             // Continuation of content
             full_content.push('\n');
-            full_content.push_str(next_trimmed);
-            if next_trimmed.starts_with("```") {
-                inside_code_fence = !inside_code_fence;
-            }
+            let continuation = strip_continuation(next_line, indent_level + 1);
+            full_content.push_str(continuation);
+            code_fence = opening_code_fence(continuation);
             consumed += 1;
         } else {
             break;
@@ -639,30 +587,30 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_split_fence_sibling_blocks() {
+    fn test_separate_fence_sibling_blocks_are_not_merged() {
         let content =
             "- ```\n- this is some code block test\n- 2nd line more of it\n- 3rd line\n- ```";
         let parsed = parse_page(content, "test.md");
 
-        assert_eq!(parsed.blocks.len(), 1);
-        assert_eq!(
-            parsed.blocks[0].content,
-            "```\nthis is some code block test\n2nd line more of it\n3rd line\n```"
-        );
+        assert_eq!(parsed.blocks.len(), 5);
+        assert_eq!(parsed.blocks[0].content, "```");
+        assert_eq!(parsed.blocks[1].content, "this is some code block test");
+        assert_eq!(parsed.blocks[4].content, "```");
     }
 
     #[test]
-    fn test_normalize_split_fence_with_ids_and_empty_children() {
+    fn test_separate_fence_siblings_retain_ids_and_children() {
         let content = "- ```\n  id:: open\n- this is some code block test\n  id:: mid\n  - \n    id:: c1\n  - \n    id:: c2\n- 2nd line more of it\n  id:: line2\n- 3rd line\n  id:: line3\n- ```\n  id:: close";
 
         let parsed = parse_page(content, "test.md");
 
-        assert_eq!(parsed.blocks.len(), 1);
-        assert_eq!(parsed.blocks[0].children.len(), 0);
-        assert_eq!(
-            parsed.blocks[0].content,
-            "```\nthis is some code block test\n2nd line more of it\n3rd line\n```"
-        );
+        assert_eq!(parsed.blocks.len(), 5);
+        assert_eq!(parsed.blocks[0].id.as_deref(), Some("open"));
+        assert_eq!(parsed.blocks[1].id.as_deref(), Some("mid"));
+        assert_eq!(parsed.blocks[1].children.len(), 2);
+        assert_eq!(parsed.blocks[1].children[0].id.as_deref(), Some("c1"));
+        assert_eq!(parsed.blocks[1].children[1].id.as_deref(), Some("c2"));
+        assert_eq!(parsed.blocks[4].id.as_deref(), Some("close"));
     }
 
     #[test]

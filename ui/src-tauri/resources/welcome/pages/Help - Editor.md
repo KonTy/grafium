@@ -6,6 +6,14 @@ Press **F1** while editing for quick editor help.
   of a block that shows its children, Enter starts its first child; at the very
   start of a block, it adds an empty block above. The new block is saved where
   you see it, so it stays there after a restart.
+- Inside a fenced code block, **Enter** adds a code line and paste keeps all
+  text in that block, including indentation, blank lines, and trailing spaces.
+  Type three backticks at the start of a line to insert an opening and closing
+  fence, then paste between them. You can also paste a complete fenced snippet;
+  matching backtick or tilde fences stay together. Code is literal text, even
+  when the clipboard also contains rich formatting. Outside code, normal paste
+  still creates outline blocks from paragraphs and lists; **Ctrl/Cmd+Shift+V**
+  keeps the pasted content in the current block.
 - **Tab** indents; **Shift+Tab** outdents. An outdented block moves below its
   old parent's remaining children, and the guide lines follow it immediately.
 - Deleting a block removes only that block: **Backspace** or **Delete** in an

@@ -46,8 +46,7 @@
   import {
     clipboardImageFile,
     clipboardImageMarkdown,
-    htmlContainsTable,
-    htmlToMarkdown,
+    clipboardMarkdown,
     splitMarkdownIntoBlocks,
     localizeImages,
   } from "../lib/htmlToMd";
@@ -91,7 +90,7 @@
     scaledImageDimensions,
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitImeEnterContent } from "../lib/taskSyntax";
-  import { isFencedCodeBlock } from "../lib/codeFence";
+  import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
   import DatePicker from "./DatePicker.svelte";
@@ -179,7 +178,6 @@
   /// arrive until it closes, including while it refreshes (greyed out) for
   /// the next keystroke.
   let completionMenuShown = false;
-  let isCodeBlock = $derived(detectCodeBlock(block.content));
   let isFenceBlock = $derived(isFencedCodeBlock(block.content));
   const readingNoteLabel = $derived(readingNoteBlockLabel(block));
   let renderedHtml = $derived(readingNoteLabel
@@ -796,22 +794,6 @@
     }
   }
 
-  // Detect if the block is entirely a code fence
-  function detectCodeBlock(content: string): { lang: string; code: string } | null {
-    const trimmed = content.trim();
-    if (!trimmed.startsWith("```") || !trimmed.endsWith("```")) return null;
-    const firstNewline = trimmed.indexOf("\n");
-    if (firstNewline === -1) return null;
-    const lastNewline = trimmed.lastIndexOf("\n");
-    const lang = trimmed.slice(3, firstNewline).trim();
-    if (firstNewline === lastNewline) {
-      // ```lang\n``` — empty code block
-      return { lang, code: "" };
-    }
-    const code = trimmed.slice(firstNewline + 1, lastNewline);
-    return { lang, code };
-  }
-
   function isVisuallyEmptyBlock(content: string): boolean {
     const normalized = content.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
     return normalized === "" || /^[-*+]$/.test(normalized);
@@ -1322,28 +1304,8 @@
     return false;
   }
 
-  // Detect if cursor is inside a code fence (``` ... ```)
   function isInsideCodeFence(view: EditorView): boolean {
-    const doc = view.state.doc.toString();
-    const pos = view.state.selection.main.head;
-    const lines = doc.split("\n");
-    let charCount = 0;
-    let insideFence = false;
-
-    for (const line of lines) {
-      if (line.trimStart().startsWith("```")) {
-        if (insideFence) {
-          // Closing fence — check if cursor is before it
-          if (pos <= charCount + line.length) return insideFence;
-          insideFence = false;
-        } else {
-          // Opening fence — check if cursor is after it
-          insideFence = pos > charCount + line.length;
-        }
-      }
-      charCount += line.length + 1; // +1 for newline
-    }
-    return insideFence;
+    return isInsideCodeFenceAt(view.state.doc.toString(), view.state.selection.main.head);
   }
 
   // Imperative caret target for cross-block Arrow Up/Down navigation. Set by
@@ -1490,23 +1452,6 @@
       };
       tryInit(0);
     });
-  }
-
-  function clipboardMarkdown(data: DataTransfer | null): { markdown: string; containsHtmlTable: boolean } | null {
-    if (!data) return null;
-    const markdown = data.getData("text/markdown").trim();
-    if (markdown) return { markdown, containsHtmlTable: false };
-
-    const html = data.getData("text/html");
-    if (html.trim()) {
-      return {
-        markdown: htmlToMarkdown(html),
-        containsHtmlTable: htmlContainsTable(html),
-      };
-    }
-
-    const text = data.getData("text/plain").trim();
-    return text ? { markdown: text, containsHtmlTable: false } : null;
   }
 
   async function pasteClipboardImage(file: File, view: EditorView) {
@@ -1831,20 +1776,33 @@
               return true;
             },
             paste: (event, view) => {
+              const { from, to } = view.state.selection.main;
+              const literal = isInsideCodeFenceAt(view.state.doc.toString(), from)
+                || isInsideCodeFenceAt(view.state.doc.toString(), to);
               const image = clipboardImageFile(event.clipboardData);
-              if (image) {
+              if (image && !literal) {
                 event.preventDefault();
                 void pasteClipboardImage(image, view);
                 return true;
               }
-              const clipboard = clipboardMarkdown(event.clipboardData);
+              const clipboard = clipboardMarkdown(event.clipboardData, literal);
               if (!clipboard) {
+                if (literal) return false;
                 event.preventDefault();
                 void pasteSystemClipboardImage(view);
                 return true;
               }
               const { markdown: md, containsHtmlTable } = clipboard;
               event.preventDefault();
+
+              if (literal) {
+                view.dispatch({
+                  changes: { from, to, insert: md },
+                  selection: EditorSelection.cursor(from + md.length),
+                  annotations: Transaction.userEvent.of("input.paste"),
+                });
+                return true;
+              }
 
               if (shiftHeld || !onPasteBlocks) {
                 // Ctrl+Shift+V: paste everything into this one block
@@ -1977,7 +1935,7 @@
           }),
           // Auto-close ``` into a code fence
           EditorView.inputHandler.of((view, from, to, text) => {
-            if (text === "`") {
+            if (text === "`" && !isInsideCodeFence(view)) {
               const doc = view.state.doc.toString();
               const before = doc.slice(0, from);
               // Check if this completes "```" at the start of a line
@@ -2619,7 +2577,7 @@
   class:bookMode
   class:editing={isEditing}
   class:selected
-  class:code-block={isFenceBlock || isCodeBlock !== null}
+  class:code-block={isFenceBlock}
   class:image-menu-open={imageSizeMenu !== null}
   class:h1={editorStyleClass === "h1"}
   class:h2={editorStyleClass === "h2"}

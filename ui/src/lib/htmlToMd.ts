@@ -1,4 +1,5 @@
 import TurndownService from "turndown";
+import { closesCodeFence, isInsideCodeFenceAt, openingCodeFence, type CodeFence } from "./codeFence";
 
 type TagName = keyof HTMLElementTagNameMap;
 
@@ -94,6 +95,11 @@ turndown.addRule("grafiumTaskMarker", {
 });
 
 // Preserve code blocks with language
+function preformattedText(node: Element): string {
+  const lines = node.querySelectorAll(".code-line");
+  return lines.length ? Array.from(lines, (line) => line.textContent ?? "").join("\n") : node.textContent ?? "";
+}
+
 turndown.addRule("fencedCodeBlock", {
   filter: (node) => {
     return node.nodeName === "PRE" && !!node.querySelector("code");
@@ -102,8 +108,10 @@ turndown.addRule("fencedCodeBlock", {
     const code = (node as HTMLElement).querySelector("code");
     if (!code) return _content;
     const lang = safeCodeLanguage((code.className.match(/language-(\S+)/) || [])[1] || "");
-    const text = code.textContent || "";
-    return `\n\`\`\`${lang}\n${text}\n\`\`\`\n`;
+    const text = preformattedText(code);
+    const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    return `\n\n${fence}${lang}\n${text}${text.endsWith("\n") ? "" : "\n"}${fence}\n\n`;
   },
 });
 
@@ -175,6 +183,35 @@ export function htmlContainsTable(html: string): boolean {
   return document.querySelector('table, [role="table"], [role="grid"]') !== null;
 }
 
+export function clipboardMarkdown(
+  data: DataTransfer | null,
+  literal = false,
+): { markdown: string; containsHtmlTable: boolean } | null {
+  if (!data) return null;
+  const text = data.getData("text/plain").replace(/\r\n?/g, "\n");
+  const markdown = data.getData("text/markdown").replace(/\r\n?/g, "\n");
+  const html = data.getData("text/html");
+  if (literal) {
+    if (text) return { markdown: text, containsHtmlTable: false };
+    if (markdown) return { markdown, containsHtmlTable: false };
+    if (!html) return null;
+    const document = new DOMParser().parseFromString(html, "text/html");
+    const pre = document.querySelector("pre");
+    if (pre) return { markdown: preformattedText(pre), containsHtmlTable: false };
+    const body = document.body;
+    body.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+    body.querySelectorAll("p, div, li").forEach((node) => node.append("\n"));
+    return { markdown: body.textContent ?? "", containsHtmlTable: false };
+  }
+  if (markdown.trim()) return { markdown, containsHtmlTable: false };
+  // Source editors often provide HTML as well. Do not escape or reformat their fences.
+  if (text.split("\n").some((line) => openingCodeFence(line))) {
+    return { markdown: text, containsHtmlTable: false };
+  }
+  if (html.trim()) return { markdown: htmlToMarkdown(html), containsHtmlTable: htmlContainsTable(html) };
+  return text ? { markdown: text, containsHtmlTable: false } : null;
+}
+
 export function clipboardImageFile(data: DataTransfer | null): File | null {
   if (!data) return null;
   for (const item of Array.from(data.items)) {
@@ -196,17 +233,21 @@ export function clipboardImageMarkdown(path: string, fileName: string): string {
  */
 export async function localizeImages(md: string, downloadFn: (url: string) => Promise<string>): Promise<string> {
   const imageRe = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
-  const matches = [...md.matchAll(imageRe)];
+  const matches = [...md.matchAll(imageRe)].filter((match) => !isInsideCodeFenceAt(md, match.index));
   if (matches.length === 0) return md;
 
   let result = md;
+  let offset = 0;
   for (const match of matches) {
     const fullMatch = match[0];
     const alt = match[1];
     const url = match[2];
     try {
       const localPath = await downloadFn(url);
-      result = result.replace(fullMatch, `![${alt}](${localPath})`);
+      const replacement = `![${alt}](${localPath})`;
+      const from = match.index + offset;
+      result = result.slice(0, from) + replacement + result.slice(from + fullMatch.length);
+      offset += replacement.length - fullMatch.length;
     } catch (e) {
       // If download fails, keep the original URL
       console.warn(`[assets] Failed to download ${url}:`, e);
@@ -232,15 +273,18 @@ export function splitMarkdownIntoBlocks(md: string): PasteBlock[] {
   const blocks: PasteBlock[] = [];
   let current: string[] = [];
   let currentDepth = 0;
-  let inCodeFence = false;
+  let codeFence: CodeFence | null = null;
+  let currentIsCode = false;
+  let codeContinuationIndent = "";
   let baseIndent = -1;
   let lastWasParagraph = false; // track if last flushed block was a plain paragraph
   let listBaseDepth = 0; // depth offset for list items following a paragraph
 
   function flush() {
-    const text = current.join("\n").trim();
+    const text = currentIsCode ? current.join("\n") : current.join("\n").trim();
     if (text) blocks.push({ content: text, depth: currentDepth });
     current = [];
+    currentIsCode = false;
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -249,23 +293,26 @@ export function splitMarkdownIntoBlocks(md: string): PasteBlock[] {
     const indent = line.length - line.trimStart().length;
 
     // Track code fences — keep them as one block
-    if (trimmed.startsWith("```")) {
-      if (!inCodeFence) {
-        flush();
-        inCodeFence = true;
-        currentDepth = 0;
-        current.push(line);
-        lastWasParagraph = false;
-      } else {
-        current.push(line);
-        inCodeFence = false;
+    if (codeFence) {
+      const codeLine = codeContinuationIndent && line.startsWith(codeContinuationIndent)
+        ? line.slice(codeContinuationIndent.length) : line;
+      current.push(codeLine);
+      if (closesCodeFence(codeLine, codeFence)) {
+        codeFence = null;
         flush();
         lastWasParagraph = false;
       }
       continue;
     }
-    if (inCodeFence) {
+    const opening = openingCodeFence(line);
+    if (opening) {
+      flush();
+      codeFence = opening;
+      currentIsCode = true;
+      codeContinuationIndent = "";
+      currentDepth = 0;
       current.push(line);
+      lastWasParagraph = false;
       continue;
     }
 
@@ -302,6 +349,11 @@ export function splitMarkdownIntoBlocks(md: string): PasteBlock[] {
       const indentDepth = relIndent >= 4 ? Math.round(relIndent / 4) : (relIndent >= 2 ? 1 : 0);
       currentDepth = listBaseDepth + indentDepth;
       current.push(listMatch[1]);
+      codeFence = openingCodeFence(listMatch[1]);
+      if (codeFence) {
+        currentIsCode = true;
+        codeContinuationIndent = line.slice(0, indent) + " ".repeat(trimmed.length - listMatch[1].length);
+      }
       lastWasParagraph = false;
       continue;
     }

@@ -1,6 +1,7 @@
 // Real editor/clipboard events with synthetic notes and controllable persistence.
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
+const { openEditor: openContinuousEditor, focusContinuous } = require("./keyboardSelection.ui.cjs");
 const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
 const PASTE = [
   "list of motorcycles", "**Honda CRF300L**", "✅", "✅✅✅", "❌", "$5,599",
@@ -132,9 +133,128 @@ async function finishCase({ page, errors }, message) {
   console.log(`PASS ${message}`);
 }
 
+async function renderedCode(page) {
+  return page.locator(".code-block-wrapper .code-line").evaluateAll((lines) =>
+    lines.map((line) => line.textContent).join("\n"));
+}
+
+async function expectSavedCode(fixture, content, code) {
+  const { page } = fixture;
+  assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), content);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction((content) => window.__pasteState.blocks.some((block) => block.content === content), content);
+  assert.deepEqual(await page.evaluate(() => window.__pasteState.blocks
+    .filter((block) => block.parent_id === "anchor").map((block) => block.content)), [content]);
+  await page.locator(".code-block-wrapper").waitFor();
+  assert.equal(await renderedCode(page), code);
+  assert.equal(await page.evaluate(() => window.__pasteState.calls.some((call) => call.cmd === "create_blocks")), false);
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("page-content-reload-blocks", { detail: { pageId: "paste-page" } })));
+  await page.locator(".code-block-wrapper").waitFor();
+  assert.equal(await renderedCode(page), code);
+}
+
 (async () => {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   try {
+    {
+      const fixture = await openEditor(browser);
+      const { page, child } = fixture;
+      await child.fill("Figuring out comfyui for exercise videos examples");
+      await page.keyboard.press("Shift+Enter");
+      await child.pressSequentially("```");
+      const code = "  can we create examples folder in workflows,\n\n\t- keep this literal  \nid:: literal code";
+      await pasteInto(child, code.split("\n"));
+      assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()),
+        `Figuring out comfyui for exercise videos examples\n\`\`\`\n${code}\n\`\`\``);
+      await page.keyboard.press("Enter");
+      await page.evaluate(() => {
+        const view = window.__activeEditorView;
+        const anchor = view.state.doc.toString().lastIndexOf("```");
+        view.dispatch({ selection: { anchor, head: anchor + 3 } });
+      });
+      await child.pressSequentially("```");
+      await expectSavedCode(fixture,
+        `Figuring out comfyui for exercise videos examples\n\`\`\`\n${code}\n\n\`\`\``, `${code}\n`);
+      await finishCase(fixture, "typed fence retains pasted code and whitespace in one saved/rendered block");
+    }
+
+    for (const kind of ["plain", "rich", "markdown", "html-only"]) {
+      const fixture = await openEditor(browser);
+      const { page, child } = fixture;
+      const code = "\n  first <tag>  \n\n\t- literal\nTODO not a task\nid:: not metadata\n ";
+      await pasteInto(child, ["~~~text", "", "~~~"], false);
+      await page.evaluate(() => window.__activeEditorView.dispatch({ selection: { anchor: 8 } }));
+      await child.evaluate((element, { kind, code }) => {
+        const data = new DataTransfer();
+        if (kind === "markdown") data.setData("text/markdown", code);
+        else if (kind !== "html-only") data.setData("text/plain", code.replace(/\n/g, "\r\n"));
+        if (kind === "rich" || kind === "html-only") {
+          data.setData("text/html", `<pre><code>${code.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code></pre>`);
+        }
+        element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      }, { kind, code });
+      await expectSavedCode(fixture, `~~~text\n${code}\n~~~`, code);
+      await finishCase(fixture, `${kind} paste in a tilde fence keeps literal whitespace, Markdown and properties`);
+    }
+
+    for (const html of [false, true]) {
+      const fixture = await openEditor(browser);
+      const code = "  first  \n\n```\n- literal\nid:: literal\n~~~~ not a closer\n![Example](https://example.com/image.png)\nlast";
+      const snippet = `\`\`\`\`md\n${code}\n\`\`\`\``;
+      await pasteInto(fixture.child, snippet.split("\n"), html);
+      await expectSavedCode(fixture, snippet, code);
+      await finishCase(fixture, `whole fenced source paste with ${html ? "rich" : "plain"} clipboard keeps one code block`);
+    }
+
+    {
+      const fixture = await openEditor(browser);
+      await fixture.child.evaluate((element) => {
+        const data = new DataTransfer();
+        data.setData("text/html", '<pre><code class="language-md"><span class="code-line">  first  </span><span class="code-line">```</span><span class="code-line"></span><span class="code-line">- literal</span></code></pre>');
+        element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      });
+      await expectSavedCode(fixture, "````md\n  first  \n```\n\n- literal\n````", "  first  \n```\n\n- literal");
+      await finishCase(fixture, "HTML-only rendered code paste retains lines and literal fence markers");
+    }
+
+    {
+      const fixture = await openEditor(browser);
+      await pasteInto(fixture.child, ["- ```", "    indented  ", "  - literal", "  ```", "- After"], false);
+      await fixture.page.locator('[data-block-id^="pasted-"] .cm-content').filter({ hasText: "After" }).waitFor();
+      await fixture.page.keyboard.press("Escape");
+      assert.deepEqual(await fixture.page.evaluate(() => window.__pasteState.blocks
+        .filter((block) => block.parent_id === "anchor").sort((a, b) => a.order_index - b.order_index)
+        .map((block) => block.content)), ["```\n  indented  \n- literal\n```", "After"]);
+      await fixture.page.locator(".code-block-wrapper").waitFor();
+      assert.equal(await renderedCode(fixture.page), "  indented  \n- literal");
+      await finishCase(fixture, "fenced outline paste keeps code together and the following outline block separate");
+    }
+
+    for (const html of [false, true]) {
+      const fixture = await openContinuousEditor(browser, {
+        unifiedPage: true, componentHarness: true, blockContents: ["Heading\n```\n\n```", "Unrelated block"],
+      });
+      const { page } = fixture;
+      await focusContinuous(page, "selection-page", "b0");
+      await page.evaluate(async () => {
+        const view = window.__activeEditorView;
+        const { parsePageSourceMap } = await import("/src/lib/pageSourceMap.ts");
+        const block = parsePageSourceMap(view.state.doc.toString()).blocks[0];
+        view.dispatch({ selection: { anchor: block.contentSegments[2].from } });
+      });
+      const code = "  source code  \n\n- literal bullet\nid:: literal property\n\tlast";
+      await pasteInto(page.locator(".unified-page-editor .cm-content"), code.split("\n"), html);
+      await page.getByRole("button", { name: "Save source", exact: true }).click();
+      await page.waitForFunction((content) => window.__selectionState.blocks.some((block) => block.content === content),
+        `Heading\n\`\`\`\n${code}\n\`\`\``);
+      assert.deepEqual(await page.evaluate(() => window.__selectionState.blocks
+        .filter((block) => block.page_id === "selection-page").map((block) => [block.id, block.parent_id, block.content])),
+        [["b0", null, `Heading\n\`\`\`\n${code}\n\`\`\``], ["b1", null, "Unrelated block"]]);
+      await page.locator(".code-block-wrapper").waitFor();
+      assert.equal(await renderedCode(page), code);
+      await finishCase(fixture, `retained continuous editor preserves stored code and siblings on ${html ? "rich" : "plain"} paste`);
+    }
+
     for (const failReorder of [false, true]) {
       const fixture = await openEditor(browser);
       const { page, child } = fixture;

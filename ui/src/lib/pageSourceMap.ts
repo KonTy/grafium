@@ -1,3 +1,5 @@
+import { nextCodeFence, type CodeFence } from "./codeFence";
+
 export interface SourceLine {
   number: number;
   index: number;
@@ -162,8 +164,10 @@ function matchProperty(line: string): { key: string; value: string } | null {
   };
 }
 
-function isFenceMarker(text: string): boolean {
-  return text.trimStart().startsWith("```");
+function isTerminalBlockId(lines: SourceLine[], index: number, depth: number): boolean {
+  if (countSourceIndent(lines[index].text) <= depth || matchProperty(lines[index].text)?.key !== "id") return false;
+  const next = lines.slice(index + 1).find((line) => line.text.trim());
+  return !next || (countSourceIndent(next.text) <= depth && matchSourceBlockStart(next.text) !== null);
 }
 
 function rangeIntersects(a: SourceRange, b: SourceRange): boolean {
@@ -198,6 +202,8 @@ export function parsePageSourceMap(source: string): PageSourceMap {
   const notes = managedReadingNoteRanges(source);
   const starts: BlockStart[] = [];
   let managedIndex = 0;
+  let activeFence: CodeFence | null = null;
+  let blockDepth = 0;
 
   for (const line of lines) {
     while (notes[managedIndex] && notes[managedIndex].lastLine < line.index) managedIndex++;
@@ -210,11 +216,22 @@ export function parsePageSourceMap(source: string): PageSourceMap {
       continue;
     }
     const start = matchSourceBlockStart(line.text);
+    const depth = countSourceIndent(line.text);
+    if (activeFence && (!start || depth > blockDepth)) {
+      activeFence = isTerminalBlockId(lines, line.index, blockDepth)
+        ? null : nextCodeFence(stripContinuation(line.text, blockDepth + 1).text, activeFence);
+      continue;
+    }
+    if (!start && starts.length) {
+      activeFence = nextCodeFence(stripContinuation(line.text, blockDepth + 1).text, activeFence);
+    }
     if (!start) continue;
+    blockDepth = countSourceIndent(start.indent);
+    activeFence = nextCodeFence(start.content, null);
     starts.push({
       ...start,
       lineIndex: line.index,
-      depth: countSourceIndent(start.indent),
+      depth: blockDepth,
     });
   }
 
@@ -265,11 +282,14 @@ export function parsePageSourceMap(source: string): PageSourceMap {
     const nextPeerStart = starts[nextPeerStartIndexes[startIndex] ?? -1];
 
     let ownEndLineIndex = start.lineIndex;
+    let ownFence = nextCodeFence(start.content, null);
     for (let lineIndex = start.lineIndex + 1; lineIndex < nextStartLineIndex; lineIndex += 1) {
       const candidate = lines[lineIndex];
       const candidateDepth = countSourceIndent(candidate.text);
-      if (candidateDepth <= start.depth) break;
+      if (!ownFence && candidateDepth <= start.depth) break;
       ownEndLineIndex = lineIndex;
+      ownFence = isTerminalBlockId(lines, lineIndex, start.depth)
+        ? null : nextCodeFence(stripContinuation(candidate.text, start.depth + 1).text, ownFence);
     }
 
     let subtreeEndLineIndex = (nextPeerStart?.lineIndex ?? lines.length) - 1;
@@ -285,7 +305,7 @@ export function parsePageSourceMap(source: string): PageSourceMap {
     let idLine: SourcePropertyLine | null = null;
     let id: string | null = null;
     let content = "";
-    let insideCodeFence = false;
+    let codeFence = nextCodeFence(start.content, null);
 
     const appendContentSegment = (segmentLine: SourceLine, sourceFrom: number, sourceTo: number, text: string) => {
       if (contentSegments.length > 0) content += "\n";
@@ -302,12 +322,11 @@ export function parsePageSourceMap(source: string): PageSourceMap {
     };
 
     appendContentSegment(line, line.from + start.contentColumn, line.to, start.content);
-    if (isFenceMarker(start.content)) insideCodeFence = !insideCodeFence;
-
     for (let lineIndex = start.lineIndex + 1; lineIndex <= ownEndLineIndex; lineIndex += 1) {
       const current = lines[lineIndex];
       const continuation = stripContinuation(current.text, start.depth + 1);
-      const property = !insideCodeFence ? matchProperty(continuation.text) : null;
+      if (codeFence && isTerminalBlockId(lines, lineIndex, start.depth)) codeFence = null;
+      const property = !codeFence ? matchProperty(continuation.text) : null;
 
       if (property) {
         const propertyLine: SourcePropertyLine = {
@@ -327,7 +346,7 @@ export function parsePageSourceMap(source: string): PageSourceMap {
       }
 
       appendContentSegment(current, current.from + continuation.column, current.to, continuation.text);
-      if (isFenceMarker(continuation.text)) insideCodeFence = !insideCodeFence;
+      codeFence = nextCodeFence(continuation.text, codeFence);
     }
 
     const lastContentSegment = contentSegments[contentSegments.length - 1];

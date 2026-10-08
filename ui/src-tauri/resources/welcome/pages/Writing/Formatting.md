@@ -13,6 +13,11 @@ print(observation_summary(45, 60))
 
 This is a code sample, not a command Grafium executes.
 
+To add your own sample, type three backticks at the start of a line and paste
+between the inserted fences. Enter adds a line inside the code; pasted
+indentation, blank lines, and trailing spaces are kept. A complete fenced
+snippet also stays together instead of becoming separate outline blocks.
+
 ## Math in the note
 
 For an ideal circular orbit, $v = \sqrt{GM/r}$. Increasing the radius reduces the required circular speed when the central mass stays fixed.

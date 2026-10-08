@@ -28,6 +28,15 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("documents literal fenced paste in the existing editor F1 context", async () => {
+    expect(helpPageTitle("editor")).toBe("Help - Editor");
+    expect(helpIndex).toContain("[[Help - Editor]]");
+    for (const phrase of ["fenced code block", "blank lines", "trailing spaces", "complete fenced snippet", "Outside code"]) {
+      expect(editorHelp).toContain(phrase);
+    }
+    await loadHelpPage("editor");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "editor" });
+  });
   it("explains the compact composer, status menu and cancellable send control", () => {
     for (const phrase of ["Up arrow / Send", "Stop", "Notes context", "Actions", "Model & index status icon", "Try faster mode", "Saving an already approved change"]) {
       expect(chatHelp).toContain(phrase);

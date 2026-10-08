@@ -125,4 +125,22 @@ describe("page source block map", () => {
 
     expect(replacement.insert).toBe("\t- alpha\n\t\tbeta");
   });
+
+  it("keeps code bullets, properties, blanks and shorter fences inside the stored block", () => {
+    for (const fence of ["~~~~", "````"]) {
+      const content = `Heading\n${fence}md\n  code  \n\n- literal\nid:: literal\n\`\`\`\n${fence} not a closer\n${fence}`;
+      const source = `- ${content.replace(/\n/g, "\n  ")}\n  id:: code-id\n- After\n  id:: after-id\n`;
+      const map = parsePageSourceMap(source);
+      expect(map.blocks.map(({ id, content }) => [id, content])).toEqual([
+        ["code-id", content], ["after-id", "After"],
+      ]);
+    }
+  });
+
+  it("does not merge separate stored outline blocks around an unfinished fence", () => {
+    const map = parsePageSourceMap("- ```\n  id:: open\n- Unrelated\n  id:: unrelated\n- ```\n  id:: close\n");
+    expect(map.blocks.map(({ id, content }) => [id, content])).toEqual([
+      ["open", "```"], ["unrelated", "Unrelated"], ["close", "```"],
+    ]);
+  });
 });

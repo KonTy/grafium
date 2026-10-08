@@ -4,6 +4,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
+import { closesCodeFence, nextCodeFence, openingCodeFence, type CodeFence } from "./codeFence";
 
 /**
  * KaTeX is the single largest library in the boot bundle, and most pages have
@@ -248,10 +249,7 @@ function transformMarkdownOutsideCode(content: string, transform: (segment: stri
   return out;
 }
 
-type ActiveFence = {
-  char: "`" | "~";
-  length: number;
-};
+type ActiveFence = CodeFence;
 
 function normalizeIndentedFenceDelimiters(content: string): string {
   const lines = content.split("\n");
@@ -261,21 +259,14 @@ function normalizeIndentedFenceDelimiters(content: string): string {
     .map((line) => {
       const cr = line.endsWith("\r") ? "\r" : "";
       const body = cr ? line.slice(0, -1) : line;
-      const match = /^([ \t]*)(`{3,}|~{3,})(.*)$/.exec(body);
-      if (!match) return line;
-
-      const marker = match[2];
-      const rest = match[3];
-      const char = marker[0] as "`" | "~";
-
       if (!active) {
-        active = { char, length: marker.length };
-        return `${marker}${rest}${cr}`;
+        active = openingCodeFence(body);
+        return active ? `${body.trimStart()}${cr}` : line;
       }
 
-      if (char === active.char && marker.length >= active.length && rest.trim() === "") {
+      if (closesCodeFence(body, active)) {
         active = null;
-        return `${marker}${cr}`;
+        return `${body.trimStart()}${cr}`;
       }
 
       return line;
@@ -328,18 +319,8 @@ function isLoosePipeTableRow(line: string): boolean {
   return !!cells && cells.length >= 2 && cells.some((cell) => cell.length > 0);
 }
 
-function fenceMarker(line: string): ActiveFence | null {
-  const match = /^\s*(`{3,}|~{3,})/.exec(line);
-  if (!match) return null;
-  const marker = match[1];
-  return { char: marker[0] as "`" | "~", length: marker.length };
-}
-
 function toggleFenceState(line: string, active: ActiveFence | null): ActiveFence | null {
-  const marker = fenceMarker(line);
-  if (!marker) return active;
-  if (!active) return marker;
-  return marker.char === active.char && marker.length >= active.length ? null : active;
+  return nextCodeFence(line, active);
 }
 
 function formatPipeTableDelimiterRow(originalLine: string, cells: readonly string[], columnCount: number): string {

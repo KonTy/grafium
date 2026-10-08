@@ -60,10 +60,12 @@
   import { applyWritingEditorChanges, EDITOR_UNDO_MIN_DEPTH, markStructuralUndoBoundary, undoEditor, redoEditor } from "../lib/editorUndo";
   import {
     parsePageSourceMap,
+    findSourceBlockAtPosition,
     sourceBlockContentReplacement,
     type SourceBlock,
   } from "../lib/pageSourceMap";
-  import { isFencedCodeBlock } from "../lib/codeFence";
+  import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
+  import { clipboardMarkdown } from "../lib/htmlToMd";
   import { followEditorShortcuts, withoutShortcutDefaults } from "../lib/editorShortcuts";
   import { getHeadingLevel } from "../lib/blockLayout";
 
@@ -639,6 +641,25 @@
           }
         }),
         EditorView.domEventHandlers({
+          paste: (event, view) => {
+            const source = view.state.doc.toString();
+            const { from, to } = view.state.selection.main;
+            const block = findSourceBlockAtPosition(parsePageSourceMap(source), from);
+            if (!block || to > block.ownTo) return false;
+            const segment = block.contentSegments.find((part) => from >= part.from && from <= part.to);
+            if (!segment || !isInsideCodeFenceAt(block.content, segment.contentFrom + from - segment.from)) return false;
+            const clipboard = clipboardMarkdown(event.clipboardData, true);
+            if (!clipboard) return false;
+            const prefix = `${block.indent}${block.indent.includes("\t") ? "\t" : "  "}`;
+            const insert = clipboard.markdown.replace(/\n/g, `\n${prefix}`);
+            event.preventDefault();
+            view.dispatch({
+              changes: { from, to, insert },
+              selection: EditorSelection.cursor(from + insert.length),
+              annotations: Transaction.userEvent.of("input.paste"),
+            });
+            return true;
+          },
           focus: (_event, view) => {
             activateEditor(view);
           },
