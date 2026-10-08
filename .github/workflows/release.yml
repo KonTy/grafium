@@ -420,7 +420,15 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install Android NDK
-        run: sdkmanager "ndk;27.0.12077973"
+        run: |
+          set -euo pipefail
+          # A stale or partial NDK ZIP occasionally leaves the SDK cache unusable in
+          # GitHub Actions. Clean the intermediate downloads, accept the SDK licenses,
+          # then reinstall the exact package we need.
+          rm -rf "$ANDROID_HOME/.downloadIntermediates"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager --uninstall "ndk;27.0.12077973" || true
+          sdkmanager --channel=0 --install "ndk;27.0.12077973"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
