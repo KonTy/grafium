@@ -3,7 +3,7 @@ import {
   bulletToTodoContent,
   isTaskContent,
   normalizeTaskPrefix,
-  splitImeEnterContent,
+  splitBlockEnterContent,
   taskToBulletContent,
 } from "./taskSyntax";
 
@@ -51,18 +51,49 @@ describe("task syntax helpers", () => {
     expect(normalizeTaskPrefix("today is sunny")).toBe("today is sunny");
   });
 
-  it("splits an IME newline so the leftover line becomes a new block", () => {
-    expect(splitImeEnterContent("TODO buy milk")).toEqual({
+  it("splits Enter at the caret, not the first pre-existing newline", () => {
+    expect(splitBlockEnterContent("TODO buy milk", 13)).toEqual({
       head: "TODO buy milk",
       remainder: "",
     });
-    expect(splitImeEnterContent("TODO first\nTODO hide AI")).toEqual({
-      head: "TODO first",
-      remainder: "TODO hide AI",
+    expect(splitBlockEnterContent("First line\nSecond line", 22)).toEqual({
+      head: "First line\nSecond line",
+      remainder: "",
     });
-    expect(splitImeEnterContent("todo\n")).toEqual({
+    expect(splitBlockEnterContent("First line\nSecond line", 17)).toEqual({
+      head: "First line\nSecond",
+      remainder: " line",
+    });
+    expect(splitBlockEnterContent("todo\n", 5)).toEqual({
       head: "TODO",
       remainder: "",
+    });
+  });
+
+  it("preserves complete fenced code when Enter creates the following block", () => {
+    const code = "```\n  first  \n\n\t- literal\nid:: literal\n \n```";
+    expect(splitBlockEnterContent(`${code}\n`, code.length + 1)).toEqual({
+      head: code,
+      remainder: "",
+    });
+    const content = `${code}\nFollow-up`;
+    expect(splitBlockEnterContent(content, code.length + 1)).toEqual({
+      head: code,
+      remainder: "Follow-up",
+    });
+  });
+
+  it("keeps the current multiline block when Enter inserts an empty block above", () => {
+    expect(splitBlockEnterContent("First line\nSecond line", 0)).toEqual({
+      head: "First line\nSecond line",
+      remainder: "",
+    });
+  });
+
+  it("replaces the selected text when splitting without trimming significant spaces", () => {
+    expect(splitBlockEnterContent("  before  selected  after  ", 10, 18)).toEqual({
+      head: "  before  ",
+      remainder: "  after  ",
     });
   });
 });

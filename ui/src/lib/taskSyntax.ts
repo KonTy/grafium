@@ -19,18 +19,19 @@ export function normalizeTaskPrefix(content: string): string {
   );
 }
 
-/**
- * Android IMEs often insert a newline instead of firing Enter.
- * Keep the first line in the current block and return the rest for a new block.
- */
-export function splitImeEnterContent(content: string): { head: string; remainder: string } {
-  const match = /\r?\n/.exec(content);
-  if (!match || match.index === undefined) {
+export function splitBlockEnterContent(
+  content: string,
+  from: number,
+  to = from,
+): { head: string; remainder: string } {
+  if (from === 0 && to === 0) {
     return { head: normalizeTaskPrefix(content), remainder: "" };
   }
   return {
-    head: normalizeTaskPrefix(content.slice(0, match.index)),
-    remainder: content.slice(match.index + match[0].length),
+    // The newline before an empty exit line becomes the outline separator,
+    // not part of the saved block. Earlier code-body newlines remain literal.
+    head: normalizeTaskPrefix(content.slice(0, from).replace(/\r?\n$/, "")),
+    remainder: content.slice(to),
   };
 }
 

@@ -156,6 +156,86 @@ async function expectSavedCode(fixture, content, code) {
 (async () => {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   try {
+    for (const { code, escapeFirst, ime } of [
+      { code: "can we crate examples foder in workflows,", escapeFirst: false, ime: false },
+      { code: "can we crate examples foder in workflows,", escapeFirst: true, ime: false },
+      { code: "  first  \n\n\t- literal bullet\nid:: literal property\n ", escapeFirst: false, ime: false },
+      { code: "  first  \n\n\t- literal bullet\nid:: literal property\n ", escapeFirst: true, ime: true },
+    ]) {
+      const fixture = await openContinuousEditor(browser, { journal: true, flatJournal: true });
+      const { page } = fixture;
+      const editor = page.locator(".cm-content:focus");
+      await page.locator('[data-block-id="day-0-b0"] .block-content').click();
+      await editor.fill("11:53");
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => window.__activeEditorView?.hasFocus
+        && window.__activeEditorView.state.doc.length === 0);
+      const heading = "Figuring out comfyui for exercise videos exmples";
+      await editor.fill(heading);
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => window.__activeEditorView?.hasFocus
+        && window.__activeEditorView.state.doc.length === 0);
+      await page.keyboard.press("Tab");
+      await page.waitForFunction(() => window.__activeEditorView?.hasFocus
+        && window.__selectionState.blocks.find((block) => block.id ===
+          document.activeElement.closest("[data-block-id]").dataset.blockId)?.parent_id !== "day-0-b0");
+      const codeId = await editor.evaluate((element) => element.closest("[data-block-id]").dataset.blockId);
+      await editor.pressSequentially("```");
+      await pasteInto(editor, code.split("\n"), false);
+      const fenced = `\`\`\`\n${code}\n\`\`\``;
+      assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), fenced);
+      if (escapeFirst) {
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(({ codeId, fenced }) => window.__selectionState.blocks
+          .find((block) => block.id === codeId)?.content === fenced, { codeId, fenced });
+        await page.locator(`[data-block-id="${codeId}"] .code-block-wrapper`).waitFor();
+        assert.equal(await renderedCode(page), code, "code renders correctly before creating a following block");
+        await page.locator(`[data-block-id="${codeId}"] .block-content`).click();
+      }
+      await page.evaluate(() => {
+        const view = window.__activeEditorView;
+        view.dispatch({ selection: { anchor: view.state.doc.length }, scrollIntoView: true });
+      });
+      await page.keyboard.press("Enter");
+      assert.equal(await page.evaluate(() => window.__activeEditorView.state.doc.toString()), `${fenced}\n`);
+      if (ime) {
+        await editor.evaluate((element) => element.dispatchEvent(new InputEvent("beforeinput", {
+          inputType: "insertParagraph", bubbles: true, cancelable: true,
+        })));
+      } else {
+        await page.keyboard.press("Enter");
+      }
+      await page.waitForFunction((codeId) => window.__activeEditorView?.hasFocus
+        && document.activeElement.closest("[data-block-id]")?.dataset.blockId !== codeId, codeId);
+      assert.equal(await page.evaluate((codeId) => window.__selectionState.blocks
+        .find((block) => block.id === codeId).content, codeId), fenced,
+      "creating a following block must not split the code at its first newline");
+      await page.locator(`[data-block-id="${codeId}"] .code-block-wrapper`).waitFor();
+      assert.equal(await renderedCode(page), code);
+      await editor.fill("Continue writing below the code");
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => window.__selectionState.blocks
+        .some((block) => block.content === "Continue writing below the code"));
+      const structure = await page.evaluate(({ codeId, heading }) => {
+        const blocks = window.__selectionState.blocks;
+        const codeBlock = blocks.find((block) => block.id === codeId);
+        return {
+          parent: blocks.find((block) => block.id === codeBlock.parent_id)?.content,
+          siblings: blocks.filter((block) => block.parent_id === codeBlock.parent_id)
+            .sort((a, b) => a.order_index - b.order_index).map((block) => block.content),
+          headingCount: blocks.filter((block) => block.content === heading).length,
+        };
+      }, { codeId, heading });
+      assert.deepEqual(structure, {
+        parent: heading, siblings: [fenced, "Continue writing below the code"], headingCount: 1,
+      });
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent("page-content-reload-blocks",
+        { detail: { pageId: "day-0" } })));
+      await page.locator(".code-block-wrapper").waitFor();
+      assert.equal(await renderedCode(page), code, "saved/reloaded code keeps all literal newlines and spaces");
+      await finishCase(fixture, `closing-fence Enter twice preserves nested journal code${escapeFirst ? " after Escape" : ""}${ime ? " via native beforeinput" : ""}`);
+    }
+
     {
       const fixture = await openEditor(browser);
       const { page, child } = fixture;

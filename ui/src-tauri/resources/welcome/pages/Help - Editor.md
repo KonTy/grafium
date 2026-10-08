@@ -9,7 +9,11 @@ Press **F1** while editing for quick editor help.
 - Inside a fenced code block, **Enter** adds a code line and paste keeps all
   text in that block, including indentation, blank lines, and trailing spaces.
   Type three backticks at the start of a line to insert an opening and closing
-  fence, then paste between them. You can also paste a complete fenced snippet;
+  fence, then paste between them. To continue writing below the code, move
+  after the closing fence and press **Enter twice**: the first adds an exit
+  line and the second creates the next outline block without splitting the
+  code. **Escape** renders the code without creating a following block.
+  You can also paste a complete fenced snippet;
   matching backtick or tilde fences stay together. Code is literal text, even
   when the clipboard also contains rich formatting. Outside code, normal paste
   still creates outline blocks from paragraphs and lists; **Ctrl/Cmd+Shift+V**

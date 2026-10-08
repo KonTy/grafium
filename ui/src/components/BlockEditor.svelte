@@ -89,7 +89,7 @@
     renderedImageBaseSize,
     scaledImageDimensions,
   } from "../lib/imageSizing";
-  import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitImeEnterContent } from "../lib/taskSyntax";
+  import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitBlockEnterContent } from "../lib/taskSyntax";
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
@@ -819,7 +819,7 @@
     }
     const sel = view.state.selection.main;
     const atStart = sel.from === 0 && sel.to === 0;
-    const { head, remainder } = splitImeEnterContent(view.state.doc.toString());
+    const { head, remainder } = splitBlockEnterContent(view.state.doc.toString(), sel.from, sel.to);
     if (head !== view.state.doc.toString()) {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: head },

@@ -17,6 +17,9 @@ To add your own sample, type three backticks at the start of a line and paste
 between the inserted fences. Enter adds a line inside the code; pasted
 indentation, blank lines, and trailing spaces are kept. A complete fenced
 snippet also stays together instead of becoming separate outline blocks.
+To write below the sample, move after its closing fence and press **Enter
+twice**. The code stays intact and the next outline block opens for your text.
+**Escape** renders the sample without adding a new block.
 
 ## Math in the note
 
