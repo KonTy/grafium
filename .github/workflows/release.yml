@@ -426,7 +426,12 @@ jobs:
           # GitHub Actions. Clean the intermediate downloads, accept the SDK licenses,
           # then reinstall the exact package we need.
           rm -rf "$ANDROID_HOME/.downloadIntermediates"
+          # `yes` can terminate with SIGPIPE when sdkmanager exits after accepting the
+          # last prompt. Ignore that signal so the license step is still treated as a
+          # success, then continue with the explicit NDK reinstall.
+          set +e
           yes | sdkmanager --licenses >/dev/null
+          set -e
           sdkmanager --uninstall "ndk;27.0.12077973" || true
           sdkmanager --channel=0 --install "ndk;27.0.12077973"
 
