@@ -503,7 +503,10 @@
   }
 
   async function deleteJournalPage(pageToDelete: Page) {
-    const confirmed = window.confirm(`Delete journal page '${pageToDelete.title}'? This will delete the .md file from disk.`);
+    const confirmed = window.confirm(
+      `Delete journal page '${pageToDelete.title}'? This removes the note and .md file from disk. ` +
+      `If you change your mind, recreate the same date page manually or use the journal date picker to restore it.`
+    );
     if (!confirmed) return;
 
     try {
@@ -515,6 +518,16 @@
       // Ask App.svelte to refresh the sidebar's Favorites + Recent Pages
       // so the just-deleted journal entry doesn't linger there.
       onPageDeleted?.();
+      showToast(
+        `Deleted journal page '${pageToDelete.title}'.`,
+        "success",
+        {
+          label: "Restore date page",
+          run: () => {
+            void goToJournalDate(pageToDelete.title);
+          },
+        },
+      );
     } catch (e) {
       console.error("Failed to delete journal page:", e);
       alert("Failed to delete journal page.");

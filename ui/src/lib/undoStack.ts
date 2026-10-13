@@ -1,8 +1,10 @@
-import type { Block, CreateBlockBatchItem } from "./api";
+import type { Block, CreateBlockBatchItem, Page } from "./api";
 import {
   acceptLinkCandidate,
   createBlocks,
+  createPage,
   deleteBlocks,
+  deletePage,
   getGraphInfo,
   listBlocks,
   restructureBlocks,
@@ -99,6 +101,13 @@ export type UndoAction =
       type: "accept_link_candidates";
       pageId: string;
       candidateIds: string[];
+    }
+  | {
+      type: "delete_page";
+      pageId: string;
+      pageTitle: string;
+      deletedPage: Page | null;
+      parentTitle: string | null;
     };
 
 // Store on window to guarantee single instance across all module imports

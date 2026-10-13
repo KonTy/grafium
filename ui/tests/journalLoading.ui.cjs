@@ -647,6 +647,10 @@ async function expectFocusedBlock(page, id) {
       await page.waitForFunction(() => window.__journalState.calls.some(
         (call) => call.cmd === "delete_page" && call.args.id === "day-1"));
       await entry(page, 1).waitFor({ state: "detached" });
+      await page.getByRole("button", { name: "Restore date page", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Restore date page", exact: true }).click();
+      await page.locator('.journal-entry[data-page-title="2026-09-12"] .block-item').first().waitFor();
+      await loaded(page, 1);
       await loaded(page, 0);
       const button = entry(page, 0).getByRole("button", { name: "Delete journal page", exact: true });
       await entry(page, 0).locator(".page-title").first().hover();
