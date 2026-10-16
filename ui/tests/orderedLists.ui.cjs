@@ -9,6 +9,12 @@ async function entered(page, previous) {
   await page.waitForFunction((previous) => window.__activeEditorView?.hasFocus
     && document.activeElement.closest("[data-block-id]")?.dataset.blockId !== previous, previous);
 }
+async function escapeAndSettle(page) {
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelectorAll(".block-item .cm-content").length === 0);
+  await page.evaluate(() => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
 async function sourceBlocks(page) {
   return page.evaluate(() => window.__selectionState.blocks
     .filter((block) => block.page_id === "selection-page")
@@ -40,7 +46,7 @@ async function sourceBlocks(page) {
         assert.equal(await activeId(page), empty, "empty item exits in place without an extra block");
         assert.equal(await doc(page), "");
         await active(page).pressSequentially("Ordinary writing");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.locator(`[data-block-id="${empty}"] .rendered-content`).waitFor();
         const expected = [
           { id: "b0", content: `7${delimiter} First`, parent_id: null },
@@ -73,7 +79,7 @@ async function sourceBlocks(page) {
         await entered(page, "b0");
         const id = await activeId(page);
         assert.equal(await doc(page), `2${delimiter} `);
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.waitForFunction((id) => !document.querySelector(`[data-block-id="${id}"] .cm-content`), id);
         assert.deepEqual(await sourceBlocks(page), [
           { id: "b0", content: `1${delimiter} Step`, parent_id: null },
@@ -81,7 +87,7 @@ async function sourceBlocks(page) {
         ]);
         await focus(page, id);
         await active(page).pressSequentially("Plain after Escape");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.waitForFunction((id) => window.__selectionState.blocks
           .find((block) => block.id === id)?.content === "Plain after Escape", id);
         assert.deepEqual(errors, []);
@@ -106,7 +112,7 @@ async function sourceBlocks(page) {
         assert.equal(await page.evaluate(() => window.__activeEditorView.state.selection.main.head), 3);
         await active(page).pressSequentially("Inserted");
         const id = await activeId(page);
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.waitForFunction((id) => window.__selectionState.blocks
           .find((block) => block.id === id)?.content === "5. Inserted Omega", id);
         const blocks = await sourceBlocks(page);
@@ -144,7 +150,7 @@ async function sourceBlocks(page) {
         await page.keyboard.press("Enter");
         assert.equal(await activeId(page), id);
         assert.equal(await doc(page), "");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.waitForFunction((id) => window.__selectionState.blocks.find((block) => block.id === id)?.content === "", id);
         assert.deepEqual(errors, []);
         console.log(`PASS ${input} continues numbering and exits empty item without extra blocks`);
@@ -158,7 +164,7 @@ async function sourceBlocks(page) {
         await page.keyboard.press("Enter");
         assert.equal(await activeId(page), "b0");
         assert.equal(await doc(page), "");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.waitForFunction(() => window.__selectionState.blocks.find((block) => block.id === "b0").content === "");
         assert.equal((await sourceBlocks(page)).length, 1);
         assert.deepEqual(errors, []);
@@ -173,24 +179,24 @@ async function sourceBlocks(page) {
         await page.keyboard.press("Shift+Enter");
         assert.equal(await doc(page), "1. Keep\n");
         assert.equal((await sourceBlocks(page)).length, 3, "Shift+Enter must not create an outline item");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await focus(page, "b2", 14);
         await page.keyboard.press("Enter");
         assert.equal(await doc(page), "```\n1. Literal\n\n```", "numbered text in code stays literal");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await focus(page, "b1");
         await active(page).fill("1. [[");
         await page.locator(".cm-tooltip-autocomplete").waitFor();
         await page.keyboard.press("Escape");
         await page.locator(".cm-tooltip-autocomplete").waitFor({ state: "detached" });
         assert.equal(await doc(page), "1. [[", "first Escape dismisses completion without losing text");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         await page.locator('[data-block-id="b1"] ol').waitFor();
         assert.equal(await page.locator('[data-block-id="b1"] .bullet').count(), 0);
         await focus(page, "b1");
         await active(page).fill("Plain again");
         await page.locator('[data-block-id="b1"] .bullet').waitFor();
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         assert.deepEqual(errors, []);
         console.log("PASS Shift+Enter, fenced-code exclusion, completion Escape and live marker removal");
       } finally { await page.close(); }
@@ -206,13 +212,13 @@ async function sourceBlocks(page) {
           await page.keyboard.press("Enter");
           await entered(page, id);
           assert.equal(await doc(page), "", "non-list numeric text must not continue numbers");
-          await page.keyboard.press("Escape");
+          await escapeAndSettle(page);
         }
         await focus(page, "b3", "Intro\n5. Alpha".length);
         await page.keyboard.press("Enter");
         await entered(page, "b3");
         assert.equal(await doc(page), "6. Beta", "continuation follows the caret's line, not the block's first line");
-        await page.keyboard.press("Escape");
+        await escapeAndSettle(page);
         assert.deepEqual(errors, []);
         console.log("PASS numeric prose exclusions and current-line continuation in a multiline block");
       } finally { await page.close(); }
