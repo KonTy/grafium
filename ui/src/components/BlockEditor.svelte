@@ -2606,6 +2606,7 @@
   use:readingSelectionCapture
   class:bookMode
   class:editing={isEditing}
+  class:markerless-thread-end={!showBlockMarker && !threadStem}
   class:selected
   class:code-block={isFenceBlock}
   class:image-menu-open={imageSizeMenu !== null}
@@ -2973,6 +2974,11 @@
     border-left: 2px solid var(--accent);
     border-bottom: 2px solid var(--accent);
     border-bottom-left-radius: 8px;
+  }
+
+  /* Without a bullet gutter, text starts at the indent itself. */
+  .markerless-thread-end .indent-guide-elbow {
+    width: 11px;
   }
 
   .bullet {

@@ -14,6 +14,8 @@ Press **F1** while editing for quick editor help.
   edit mode; it never discards a nonempty item. **Shift+Enter** adds a line
   without continuing the number. Numbered items show their number, not an
   extra outline dot. Code fences never continue numbered lists.
+  Relationship guides stop before the number or text rather than crossing it;
+  parent items keep their collapse control.
 - Inside a fenced code block, **Enter** adds a code line and paste keeps all
   text in that block, including indentation, blank lines, and trailing spaces.
   Type three backticks at the start of a line to insert an opening and closing
