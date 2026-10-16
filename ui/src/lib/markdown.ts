@@ -1,10 +1,11 @@
 import DOMPurify from "dompurify";
-import { marked, type TokenizerThis } from "marked";
+import { marked, type Token, type RendererThis, type TokenizerThis } from "marked";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { CALLOUT_KINDS, CALLOUT_META, type CalloutKind } from "./callouts";
 import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
 import { closesCodeFence, nextCodeFence, openingCodeFence, type CodeFence } from "./codeFence";
+import { parseOrderedListMarker } from "./orderedList";
 
 /**
  * KaTeX is the single largest library in the boot bundle, and most pages have
@@ -926,7 +927,27 @@ const displayMathExtension = {
   renderer: mathExtension.renderer,
 };
 
-marked.use({ extensions: [pageLinkExtension, escapedPageLinkExtension, priorityExtension, tagExtension, iconShortcodeExtension, blockRefExtension, readingNoteReferenceExtension, escapedReadingNoteExtension, mathExtension, displayMathExtension] });
+const hierarchicalListExtension = {
+  name: "hierarchicalList",
+  level: "block" as const,
+  tokenizer(this: TokenizerThis, src: string) {
+    const end = src.indexOf("\n");
+    const line = end < 0 ? src : src.slice(0, end);
+    const marker = parseOrderedListMarker(line);
+    if (!marker || marker.numbers.length < 2) return undefined;
+    return {
+      type: "hierarchicalList",
+      raw: end < 0 ? line : `${line}\n`,
+      label: `${marker.numbers.join(".")}${marker.delimiter}`,
+      tokens: this.lexer.inlineTokens(line.slice(marker.prefix.length)),
+    };
+  },
+  renderer(this: RendererThis, token: { label: string; tokens: Token[] }) {
+    return `<ol class="grafium-hierarchical-list"><li><span class="ordered-list-label">${token.label}</span> ${this.parser.parseInline(token.tokens)}</li></ol>\n`;
+  },
+};
+
+marked.use({ extensions: [pageLinkExtension, escapedPageLinkExtension, priorityExtension, tagExtension, iconShortcodeExtension, blockRefExtension, readingNoteReferenceExtension, escapedReadingNoteExtension, mathExtension, displayMathExtension, hierarchicalListExtension] });
 
 /** Read navigation targets with the same opaque aliases and Markdown rules as rendering. */
 export function extractMarkdownReferences(content: string): { pages: string[]; tags: string[] } {

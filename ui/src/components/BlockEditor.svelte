@@ -90,7 +90,7 @@
     scaledImageDimensions,
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitBlockEnterContent } from "../lib/taskSyntax";
-  import { orderedListMarker } from "../lib/orderedList";
+  import { orderedListMarker, ORDERED_MARKER_LOOKAHEAD } from "../lib/orderedList";
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
@@ -173,8 +173,6 @@
   let shiftHeld = false;
   let isEditing = $state(false);
   let editingOrderedList = $state(false);
-  // Three spaces, nine digits, a delimiter and one character of lookahead.
-  const ORDERED_MARKER_LOOKAHEAD = 14;
   /// Set when the user dismisses the `[[` picker with Escape so the
   /// update listener does not immediately reopen it while the token remains.
   let wikiCompletionDismissed = false;
@@ -457,9 +455,10 @@
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
   let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
   let isVisuallyEmpty = $derived(isVisuallyEmptyBlock(block.content));
+  let isOrderedItem = $derived(isEditing ? editingOrderedList : listMarker.shape === "ordered");
   let suppressBullet = $derived(
     getHeadingLevel(block.content) > 0 || isTaskContent(block.content) || isTableBlock || isFenceBlock
-      || (isEditing ? editingOrderedList : listMarker.shape === "ordered")
+      || isOrderedItem
   );
   let showBlockMarker = $derived(
     !bookMode &&
@@ -467,7 +466,7 @@
       !queryExpression &&
       !isVisuallyEmpty &&
       !isQuoteBlock &&
-      (hasChildren || !suppressBullet)
+      (hasChildren || isOrderedItem || !suppressBullet)
   );
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1372,6 +1371,15 @@
     pendingTextSelection = selection;
     if (isEditing && editorView) placeTextSelection(editorView);
     else startEditing();
+  }
+
+  export function replaceOrderedListPrefix(prefix: string): string | null {
+    const view = editorView;
+    if (!view) return null;
+    const marker = orderedListMarker(view.state.doc.line(1).text);
+    if (!marker) return null;
+    view.dispatch({ changes: { from: 0, to: marker.prefix.length, insert: prefix } });
+    return view.state.doc.toString();
   }
 
   export function focusAfterDelete(edge: "start" | "end") {

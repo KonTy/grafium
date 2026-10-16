@@ -16,6 +16,18 @@ Press **F1** while editing for quick editor help.
   extra outline dot. Code fences never continue numbered lists.
   Relationship guides stop before the number or text rather than crossing it;
   parent items keep their collapse control.
+- On a numbered item, **Tab** moves only that item and its children beneath
+  the previous sibling. For example, indent `3. ` beneath `2. Step` to get
+  `2.1. `; **Enter** then continues `2.2. `, `2.3. `, and so on.
+  Further indentation adds another level, such as `2.2.1. `.
+  The `)` style works too: `2.1) `, `2.2) `. The final `.` or `)` distinguishes
+  a numbered prefix from ordinary decimal text such as `1.5 metres`.
+  **Shift+Tab** moves the item and its children back out and uses the next
+  number after its former parent. Existing numbered children of a moved item
+  keep their final counts under its new prefix; other siblings are not
+  renumbered. Numbered rows reserve the same compact control gutter before
+  and after nesting, so the parent does not jump sideways when it gains a child.
+  Explicit selections of several blocks still move as a group.
 - Inside a fenced code block, **Enter** adds a code line and paste keeps all
   text in that block, including indentation, blank lines, and trailing spaces.
   Type three backticks at the start of a line to insert an opening and closing

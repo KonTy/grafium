@@ -33,4 +33,21 @@ describe("distinct Markdown list markers", () => {
     expect(html).not.toContain("grafium-list-");
     expect(outlineListMarker(html)).toEqual({ shape: "ordered", symbol: "" });
   });
+
+  it.each(["2.1.", "12.10.3)"])("renders hierarchical %s exactly once with inline formatting", (marker) => {
+    const root = document.createElement("div");
+    root.innerHTML = renderBlock(`${marker} **Step** [[Guide]]`);
+    expect(root.querySelector(".ordered-list-label")?.textContent).toBe(marker);
+    expect(root.querySelectorAll("ol > li")).toHaveLength(1);
+    expect(root.querySelector("strong")?.textContent).toBe("Step");
+    expect(root.querySelector(".page-link")?.textContent).toBe("Guide");
+    expect(outlineListMarker(root.innerHTML).shape).toBe("ordered");
+    expect(renderAssistantMarkdown(`${marker} Step`)).toContain("ordered-list-label");
+  });
+
+  it.each(["1.5 metres", "`2.1. Literal`", "```\n2.1. Literal\n```", "    2.1. Code"])(
+    "does not render prose or code %s as a hierarchical list", (source) => {
+      expect(renderBlock(source)).not.toContain("ordered-list-label");
+    },
+  );
 });

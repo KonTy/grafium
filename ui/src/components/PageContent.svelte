@@ -37,6 +37,7 @@
     type LinkCandidate,
   } from "../lib/api";
   import { planIndentSelection } from "../lib/blockIndent";
+  import { movedOrderedListChanges, orderedListMarker } from "../lib/orderedList";
   import {
     blocksInTreeOrder,
     insertAtPosition,
@@ -192,6 +193,7 @@
     insertText: (text: string) => void;
     prepareBlockSelection: (isCurrent: () => boolean) => Promise<boolean>;
     restoreTextSelection: (selection: BlockTextSelection) => void;
+    replaceOrderedListPrefix: (prefix: string) => string | null;
   };
   let blockRefs: Record<string, BlockEditorHandle> = {};
   let unifiedEditor = $state<UnifiedPageEditor | undefined>();
@@ -2189,12 +2191,18 @@
 
     // Persist latest editor text before structural move. This avoids
     // move/write operations serializing stale empty content from DB.
-    if (typeof currentContent === "string" && currentContent !== block.content) {
-      await applyCurrentPageContentChanges([{
-        blockId: block.id,
-        beforeContent: block.content,
-        afterContent: currentContent,
-      }]);
+    try {
+      if (typeof currentContent === "string" && currentContent !== block.content) {
+        await applyCurrentPageContentChanges([{
+          blockId: block.id,
+          beforeContent: block.content,
+          afterContent: currentContent,
+        }]);
+      }
+    } catch (e) {
+      console.error("Failed to save block before indent/outdent:", e);
+      showToast(`Could not save the block before moving it: ${e instanceof Error ? e.message : String(e)}`, "error");
+      return;
     }
 
     const plan = planIndentSelection(blocks, new Set([blockId]), direction);
@@ -2219,6 +2227,18 @@
       collapsedIds = expanded;
     }
     blocks = withPlannedStructure(blocks, plan.blocks);
+    const numberingChanges = movedOrderedListChanges(blockRenderState, blockId, block.parent_id, direction);
+    for (const change of numberingChanges) {
+      const prefix = orderedListMarker(change.afterContent)!.prefix;
+      const liveContent = blockRefs[change.blockId]?.replaceOrderedListPrefix(prefix);
+      if (liveContent != null) change.afterContent = liveContent;
+    }
+    try {
+      await applyCurrentPageContentChanges(numberingChanges);
+    } catch (e) {
+      console.error("Failed to update moved list numbers:", e);
+      showToast(`Could not save the moved list numbers: ${e instanceof Error ? e.message : String(e)}`, "error");
+    }
     refreshCollectionAfterMutation();
     // An outdent moves the row below its old siblings, and moving a focused
     // editor blurs it: put the caret back only when that happened. On long,
@@ -2226,7 +2246,10 @@
     if (caret) {
       await tick();
       if (!focusedEditorSelection(blockId) && await revealBlock(blockId)) {
-        blockRefs[blockId]?.restoreTextSelection(caret);
+        const beforePrefix = orderedListMarker(currentContent ?? block.content)?.prefix.length ?? 0;
+        const afterPrefix = orderedListMarker(numberingChanges.find((change) => change.blockId === blockId)?.afterContent ?? "")?.prefix.length ?? beforePrefix;
+        const adjust = (position: number) => position < beforePrefix ? afterPrefix : position + afterPrefix - beforePrefix;
+        blockRefs[blockId]?.restoreTextSelection({ anchor: adjust(caret.anchor), head: adjust(caret.head) });
       }
     }
   }

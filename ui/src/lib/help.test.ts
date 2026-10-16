@@ -28,6 +28,15 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes nested numbering and its exit rules through editor F1", async () => {
+    expect(helpPageTitle("editor")).toBe("Help - Editor");
+    for (const phrase of ["**Tab** moves only that item", "`2.1. `", "`2.2. `", "`2.2.1. `",
+      "**Shift+Tab**", "ordinary decimal text", "Explicit selections", "empty\n  numbered item"]) {
+      expect(editorHelp).toContain(phrase);
+    }
+    await loadHelpPage("editor");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "editor" });
+  });
   it("documents literal fenced paste in the existing editor F1 context", async () => {
     expect(helpPageTitle("editor")).toBe("Help - Editor");
     expect(helpIndex).toContain("[[Help - Editor]]");

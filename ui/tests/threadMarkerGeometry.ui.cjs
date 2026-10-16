@@ -38,8 +38,8 @@ function assertClear(value, label) {
   assert.ok(value.gap >= 3, `${label}: guide crosses the number/text boundary: ${JSON.stringify(value)}`);
   assert.ok(value.width >= 8 && value.radius > 0, `${label}: rounded elbow remains visible`);
   assert.equal(value.bullets, 0, `${label}: no duplicate outline bullet`);
-  assert.equal(value.hasGutter, false, `${label}: no new gutter or shifted text`);
-  assert.ok(Math.abs(value.contentInset - value.depth * 24) < 0.1, `${label}: original indentation is unchanged`);
+  assert.equal(value.hasGutter, true, `${label}: numbered items reserve their collapse/select gutter`);
+  assert.ok(Math.abs(value.contentInset - value.depth * 24 - 20) < 0.1, `${label}: numbered gutter stays constant`);
 }
 
 (async () => {
@@ -89,7 +89,7 @@ function assertClear(value, label) {
         console.log(`PASS ${delimiter} marker/guide separation, multi-digit nesting, focus/render, zoom and collapse hit targets`);
       } finally { await page.close(); }
     }
-    const { page, errors } = await openEditor(browser, { book: true, blockContents: ["1. First", "10) Tenth"] });
+    const { page, errors } = await openEditor(browser, { book: true, blockContents: ["1. First", "10.2) Nested"] });
     try {
       assert.equal(await page.locator(".indent-guides, .bullet-container").count(), 0, "book surfaces remain guide-free");
       assert.equal(await page.locator(".block-item ol > li").count(), 2);

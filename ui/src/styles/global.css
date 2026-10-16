@@ -294,6 +294,10 @@ ul.grafium-list-dot > li {
   list-style-type: none;
 }
 
+ol.grafium-hierarchical-list > li {
+  list-style-type: none;
+}
+
 .bionic-reader-enabled .rendered-content,
 .bionic-reader-enabled .backlink-content,
 .bionic-reader-enabled .unified-rendered-content {
