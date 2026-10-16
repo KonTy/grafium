@@ -90,6 +90,7 @@
     scaledImageDimensions,
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitBlockEnterContent } from "../lib/taskSyntax";
+  import { orderedListMarker } from "../lib/orderedList";
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
@@ -119,7 +120,7 @@
     collapsed?: boolean;
     onFocus?: (blockId: string) => void;
     onBlur?: (blockId: string) => void;
-    onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean, remainder?: string) => void;
+    onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean, remainder?: string, nextListPrefix?: string) => void;
     onDelete?: (blockId: string) => void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
@@ -171,6 +172,9 @@
   let blurTeardownTimer: number | undefined;
   let shiftHeld = false;
   let isEditing = $state(false);
+  let editingOrderedList = $state(false);
+  // Three spaces, nine digits, a delimiter and one character of lookahead.
+  const ORDERED_MARKER_LOOKAHEAD = 14;
   /// Set when the user dismisses the `[[` picker with Escape so the
   /// update listener does not immediately reopen it while the token remains.
   let wikiCompletionDismissed = false;
@@ -455,6 +459,7 @@
   let isVisuallyEmpty = $derived(isVisuallyEmptyBlock(block.content));
   let suppressBullet = $derived(
     getHeadingLevel(block.content) > 0 || isTaskContent(block.content) || isTableBlock || isFenceBlock
+      || (isEditing ? editingOrderedList : listMarker.shape === "ordered")
   );
   let showBlockMarker = $derived(
     !bookMode &&
@@ -807,6 +812,19 @@
 
   let enterHandling = false;
 
+  function clearEmptyOrderedItem(view: EditorView): boolean {
+    const { from, to } = view.state.selection.main;
+    const line = view.state.doc.lineAt(from);
+    const marker = orderedListMarker(line.text);
+    if (!marker || to > line.to || line.text.slice(marker.prefix.length).trim() !== "") return false;
+    view.dispatch({
+      changes: { from: line.from, to: line.to, insert: "" },
+      selection: EditorSelection.cursor(line.from),
+      annotations: Transaction.userEvent.of("input"),
+    });
+    return true;
+  }
+
   function submitBlockEnter(view: EditorView): boolean {
     if (completionOpen(view)) return false;
     if (isInsideCodeFence(view)) {
@@ -817,7 +835,12 @@
       });
       return true;
     }
+    if (clearEmptyOrderedItem(view)) return true;
     const sel = view.state.selection.main;
+    const line = view.state.doc.lineAt(sel.from);
+    const marker = orderedListMarker(line.text);
+    const nextListPrefix = marker && sel.from >= line.from + marker.prefix.length
+      ? marker.nextPrefix ?? undefined : undefined;
     const atStart = sel.from === 0 && sel.to === 0;
     const { head, remainder } = splitBlockEnterContent(view.state.doc.toString(), sel.from, sel.to);
     if (head !== view.state.doc.toString()) {
@@ -825,7 +848,7 @@
         changes: { from: 0, to: view.state.doc.length, insert: head },
       });
     }
-    onEnter?.(block.id, head, block.order_index, atStart && remainder === "", remainder);
+    onEnter?.(block.id, head, block.order_index, atStart && remainder === "", remainder, nextListPrefix);
     return true;
   }
 
@@ -1519,6 +1542,7 @@
                   closeCompletion(view);
                   return true;
                 }
+                if (!isInsideCodeFence(view)) clearEmptyOrderedItem(view);
                 void stopEditing();
                 return true;
               },
@@ -1673,6 +1697,10 @@
             },
           }),
           EditorView.updateListener.of((update) => {
+            if (update.docChanged && update.changes.touchesRange(0, Math.min(ORDERED_MARKER_LOOKAHEAD, update.startState.doc.line(1).to))) {
+              const prefix = update.state.doc.sliceString(0, Math.min(ORDERED_MARKER_LOOKAHEAD, update.state.doc.line(1).to));
+              editingOrderedList = orderedListMarker(prefix) !== null;
+            }
             const menuStatus = completionStatus(update.state);
             completionMenuShown = menuStatus === "active" || (menuStatus === "pending" && completionMenuShown);
             if (update.view.hasFocus && (update.selectionSet || update.docChanged)) {
@@ -2058,6 +2086,8 @@
         view.contentDOM.addEventListener("keydown", onEnterKey, true);
       }
 
+      const prefix = editorView.state.doc.sliceString(0, Math.min(ORDERED_MARKER_LOOKAHEAD, editorView.state.doc.line(1).to));
+      editingOrderedList = orderedListMarker(prefix) !== null;
       // Column-preserving vertical navigation: when this block was reached by
       // pressing Arrow Up/Down in an adjacent block, drop the caret at the same
       // viewport x on the appropriate (top/bottom) visual line — like MS Word.

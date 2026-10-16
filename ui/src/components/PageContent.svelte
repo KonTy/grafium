@@ -1878,7 +1878,7 @@
     }
   }
 
-  async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean, remainder = "") {
+  async function handleEnter(blockId: string, content: string, _orderIndex: number, atStart: boolean, remainder = "", nextListPrefix?: string) {
     try {
       const block = blocks.find((b) => b.id === blockId);
       if (!block) return;
@@ -1907,6 +1907,9 @@
         // Enter at the very start of a block inserts an empty sibling above it.
         parentId = block.parent_id;
         position = index;
+      } else if (nextListPrefix !== undefined) {
+        parentId = block.parent_id;
+        position = index + 1;
       } else if (children.length > 0 && !collapsedIds.has(blockId)) {
         // Below a block showing its children, the new block is its first child.
         parentId = blockId;
@@ -1920,7 +1923,8 @@
         position = index + 1;
       }
 
-      const newBlock = await insertBlock(page.id, parentId, position, atStart ? "" : remainder);
+      const insertedContent = atStart ? "" : `${nextListPrefix ?? ""}${remainder}`;
+      const newBlock = await insertBlock(page.id, parentId, position, insertedContent);
       blocks = insertAtPosition(blocks, newBlock, position);
       refreshCollectionAfterMutation();
 
@@ -1930,7 +1934,12 @@
         const el = document.querySelector(`[data-block-id="${newBlock.id}"] .block-content`);
         if (el) {
           el.scrollIntoView({ block: "nearest" });
-          (el as HTMLElement).click();
+          if (nextListPrefix !== undefined) {
+            const caret = nextListPrefix.length;
+            blockRefs[newBlock.id]?.restoreTextSelection({ anchor: caret, head: caret });
+          } else {
+            (el as HTMLElement).click();
+          }
         }
       });
     } catch (e) {

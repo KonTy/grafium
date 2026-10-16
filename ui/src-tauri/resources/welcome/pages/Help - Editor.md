@@ -6,6 +6,14 @@ Press **F1** while editing for quick editor help.
   of a block that shows its children, Enter starts its first child; at the very
   start of a block, it adds an empty block above. The new block is saved where
   you see it, so it stays there after a restart.
+- Start a numbered item with `1. ` or `1) ` (or another number).
+  **Enter** continues with the next number at the same outline level, keeping
+  any text after the caret in the new item. Press **Enter** on an empty
+  numbered item to remove its number and continue as ordinary text, without
+  adding another blank block. **Escape** removes an empty number and leaves
+  edit mode; it never discards a nonempty item. **Shift+Enter** adds a line
+  without continuing the number. Numbered items show their number, not an
+  extra outline dot. Code fences never continue numbered lists.
 - Inside a fenced code block, **Enter** adds a code line and paste keeps all
   text in that block, including indentation, blank lines, and trailing spaces.
   Type three backticks at the start of a line to insert an opening and closing

@@ -68,6 +68,7 @@ renderer.list = function (token) {
 
 /** Use the parsed leading list, not source punctuation that could be code or emphasis. */
 export function outlineListMarker(html: string) {
+  if (/^<ol(?:\s|>)/.test(html)) return { shape: "ordered", symbol: "" } as const;
   if (html.startsWith('<ul class="grafium-list-diamond">')) return LIST_MARKERS["-"];
   if (html.startsWith('<ul class="grafium-list-square">')) return LIST_MARKERS["+"];
   return LIST_MARKERS["*"];

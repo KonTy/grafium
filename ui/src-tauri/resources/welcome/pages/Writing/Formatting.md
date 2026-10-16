@@ -2,6 +2,15 @@ Use **bold** for an important distinction, *italics* for emphasis, and `inline c
 
 > A useful explanation names its assumptions before showing its result.
 
+## Numbered steps
+
+Type `1. First step` or `1) First step`, then press **Enter** for the next
+number at the same outline level. Any starting number works. Press **Enter**
+again while the new numbered item is empty to stop numbering and write normal
+text there. **Escape** clears an empty number and renders the list without
+losing completed steps. **Shift+Enter** adds a line within the current item.
+The number replaces the outline dot; Grafium does not renumber other notes.
+
 ## Code you can edit
 
 ```python

@@ -116,6 +116,19 @@ describe("undoStack — insert_summary flow", () => {
     vi.mocked(applyWritingChanges).mockReset();
   });
 
+  it("labels the page deletion action used by page restoration", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      pushUndo({
+        type: "delete_page", pageId: "journal-page", pageTitle: "2026-10-16",
+        deletedPage: null, parentTitle: null,
+      });
+      expect(log).toHaveBeenCalledWith("[undoStack] PUSH:", "delete_page page: journal-page", "stack now:", 1);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("undoes and redoes a natural rewrite through one guarded native operation", async () => {
     const changes = [
       { blockId: "one", beforeContent: "Original one", afterContent: "Natural one" },

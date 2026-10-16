@@ -151,6 +151,8 @@ function actionSummary(action: UndoAction): string {
       return `delete_block_selection pages: ${action.groups.length}`;
     case "delete_blocks":
       return `delete_blocks blocks: ${action.blocks.length}`;
+    case "delete_page":
+      return `delete_page page: ${action.pageId}`;
     case "insert_summary":
       return `insert_summary block: ${action.insertedBlockId} wraps: ${action.wrapChanges.length}`;
     case "update_block":

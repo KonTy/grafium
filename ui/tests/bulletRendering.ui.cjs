@@ -49,6 +49,8 @@ async function checkRendering(page, { unifiedPage, book }) {
     assert.match(await block(10).innerText(), /- Code, not a list/);
   }
   assert.equal(await marker(block(7).locator("li")), "decimal", "ordered list numbering is unchanged");
+  assert.equal(await block(7).locator(".bullet, .bullet-default, .unified-rendered-bullet").count(), 0,
+    "ordered items must not have an outline dot in front of the number");
   assert.match(await block(8).innerText(), /_ asdfasdfa/);
   assert.match(await block(8).innerText(), /_ asome text/);
   assert.match(await block(9).innerText(), /- Literal dash/);

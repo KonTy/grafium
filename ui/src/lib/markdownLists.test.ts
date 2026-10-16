@@ -23,7 +23,7 @@ describe("distinct Markdown list markers", () => {
 
   it.each(["Plain", "\\- Literal", "---", "***", "**Bold**", "_ text", "`- Code`",
     "```\n- Code\n```", "    - Indented code", "Paragraph\n\n- Later list",
-    "> - Quoted list", "- [ ] Task", "3. Numbered"])("does not mistake %s for a leading bullet", (source) => {
+    "> - Quoted list", "- [ ] Task"])("does not mistake %s for a leading bullet", (source) => {
     expect(outlineListMarker(renderBlock(source)).shape).toBe("dot");
   });
 
@@ -31,5 +31,6 @@ describe("distinct Markdown list markers", () => {
     const html = renderBlock("3. Third\n4. Fourth");
     expect(html).toContain('<ol start="3">');
     expect(html).not.toContain("grafium-list-");
+    expect(outlineListMarker(html)).toEqual({ shape: "ordered", symbol: "" });
   });
 });

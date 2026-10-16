@@ -180,7 +180,8 @@
         content.appendChild(document.createTextNode("\u00a0"));
       }
 
-      if (this.noteLabel || isFencedCodeBlock(this.content)) {
+      const marker = outlineListMarker(content.innerHTML);
+      if (this.noteLabel || isFencedCodeBlock(this.content) || marker.shape === "ordered") {
         row.classList.add("code-block");
         row.style.gridTemplateColumns = "minmax(0, 1fr)";
         row.append(content);
@@ -188,7 +189,7 @@
         content.classList.add("outline-rendered-content");
         const bullet = document.createElement("span");
         bullet.className = "unified-rendered-bullet";
-        bullet.textContent = outlineListMarker(content.innerHTML).symbol;
+        bullet.textContent = marker.symbol;
         row.append(bullet, content);
       }
       row.addEventListener("click", (event) => {
