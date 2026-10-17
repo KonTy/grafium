@@ -4,10 +4,16 @@ import type { Block } from "./api";
 export const ORDERED_MARKER_LOOKAHEAD = 128;
 
 export function parseOrderedListMarker(line: string) {
-  const match = /^( {0,3})(\d{1,9}(?:\.\d{1,9}){0,11})([.)])([ \t]+|$)/.exec(line);
+  const match = /^( {0,3})(\d{1,9}(?:\.\d{1,9}){0,11})([.)])([^\S\r\n]+|$)/.exec(line);
   if (!match) return null;
   const [, indent, digits, delimiter, spacing] = match;
   return { prefix: match[0], numbers: digits.split(".").map(Number), indent, delimiter, spacing };
+}
+
+export function isEmptyOrderedListItem(line: string): boolean {
+  const normalized = line.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  const marker = orderedListMarker(normalized);
+  return marker !== null && normalized.slice(marker.prefix.length).trim() === "";
 }
 
 function prefixFor(marker: NonNullable<ReturnType<typeof parseOrderedListMarker>>, numbers: number[]) {

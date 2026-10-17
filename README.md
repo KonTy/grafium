@@ -103,6 +103,7 @@ destructive-action confirmation warnings remain visible.
 | In-place Markdown | Edit a focused block as source and read it as rendered Markdown when you leave it. |
 | Nested outlines | Indent, outdent, reorder, fold, and expand blocks and their children. |
 | Numbered lists | Start with `1. ` or `1) ` and press Enter to continue at the same outline level. Tab nests just the current item beneath its previous sibling, using `2.1. `, `2.2. ` (or `2.1) `, `2.2) `); Shift+Tab moves it back out. Enter on an empty numbered item stops numbering; Escape clears an empty marker and exits editing. Numbers display without an extra outline dot. |
+| Backspace | An empty row, lone bullet, or number-only item is removed and editing continues at the previous visible block's end. Repeated Backspace removes preceding empty rows or text normally. Children are preserved; the final empty row remains writable. |
 | Bullet threading | Follow the active outline branch with connected guides and elbows. |
 | Editing tools | Split and merge blocks, insert a newline within a block, undo/redo edits, and copy or paste outlines. |
 | Formatting | Headings, emphasis, strikethrough, quotes, lists, inline code, and fenced code blocks. |

@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { movedOrderedListChanges as movedChanges, orderedListMarker, parseOrderedListMarker } from "./orderedList";
+import { isEmptyOrderedListItem, movedOrderedListChanges as movedChanges, orderedListMarker, parseOrderedListMarker } from "./orderedList";
 import type { Block } from "./api";
 import { buildBlockRenderState } from "./pageContentVirtualization";
 
 describe("ordered list markers", () => {
+  it.each(["2.", "2)", "2. \t", "2.\u00a0", "2.1.", "2.1) ", "  2.1.\t\u200b", "2.\u200b", "2. \ufeff"])(
+    "recognizes visually empty %s without continuing numbers", (line) => {
+      expect(isEmptyOrderedListItem(line)).toBe(true);
+    },
+  );
+  it.each(["2. Content", "2.1) Text", "2.1", "1.5 metres", "    2. Code", "```\n2. \n```"])(
+    "preserves written content %s", (line) => expect(isEmptyOrderedListItem(line)).toBe(false),
+  );
   it.each([
     ["1. First", "1. ", "2. "],
     ["3) Third", "3) ", "4) "],

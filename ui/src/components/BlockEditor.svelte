@@ -90,7 +90,8 @@
     scaledImageDimensions,
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitBlockEnterContent } from "../lib/taskSyntax";
-  import { orderedListMarker, ORDERED_MARKER_LOOKAHEAD } from "../lib/orderedList";
+  import { isEmptyOrderedListItem, orderedListMarker, ORDERED_MARKER_LOOKAHEAD } from "../lib/orderedList";
+  import { isEmptyEditorBlock } from "../lib/editorEmpty";
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
@@ -121,7 +122,7 @@
     onFocus?: (blockId: string) => void;
     onBlur?: (blockId: string) => void;
     onEnter?: (blockId: string, content: string, orderIndex: number, atStart: boolean, remainder?: string, nextListPrefix?: string) => void;
-    onDelete?: (blockId: string) => void;
+    onDelete?: (blockId: string, currentContent: string) => Promise<void> | void;
     onIndent?: (blockId: string, direction: "in" | "out", currentContent?: string) => void;
     onNavigate?: (blockId: string, direction: "up" | "down", caretX?: number) => void;
     onSelectBoundary?: (blockId: string, direction: "up" | "down", selection: BlockTextSelection, caretX: number) => void;
@@ -814,12 +815,36 @@
   function clearEmptyOrderedItem(view: EditorView): boolean {
     const { from, to } = view.state.selection.main;
     const line = view.state.doc.lineAt(from);
-    const marker = orderedListMarker(line.text);
-    if (!marker || to > line.to || line.text.slice(marker.prefix.length).trim() !== "") return false;
+    if (to > line.to || !isEmptyOrderedListItem(line.text)) return false;
     view.dispatch({
       changes: { from: line.from, to: line.to, insert: "" },
       selection: EditorSelection.cursor(line.from),
       annotations: Transaction.userEvent.of("input"),
+    });
+    return true;
+  }
+
+  let deletingEmptyBlock = false;
+
+  function submitBlockBackspace(view: EditorView, backward = true): boolean {
+    if (deletingEmptyBlock) return true;
+    if (!view.state.selection.main.empty || isInsideCodeFence(view)) return false;
+    const content = view.state.doc.toString();
+    const empty = isEmptyEditorBlock(content);
+    if (!empty && (!backward || view.state.selection.main.from !== 0)) return false;
+    if (!onDelete) return false;
+    if (empty && content !== "") {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: "" },
+        selection: EditorSelection.cursor(0),
+        userEvent: "delete.backward",
+      });
+    }
+    deletingEmptyBlock = true;
+    void Promise.resolve(onDelete(block.id, empty ? "" : content)).catch((error) => {
+      showToast(`Could not move back through the outline: ${describeError(error)}`, "error");
+    }).finally(() => {
+      deletingEmptyBlock = false;
     });
     return true;
   }
@@ -1610,23 +1635,11 @@
             },
             {
               key: "Backspace",
-              run: (view) => {
-                if (view.state.doc.length === 0) {
-                  onDelete?.(block.id);
-                  return true;
-                }
-                return false;
-              },
+              run: (view) => submitBlockBackspace(view),
             },
             {
               key: "Delete",
-              run: (view) => {
-                if (view.state.doc.length === 0) {
-                  onDelete?.(block.id);
-                  return true;
-                }
-                return false;
-              },
+              run: (view) => submitBlockBackspace(view, false),
             },
             {
               key: "Tab",
@@ -1783,7 +1796,8 @@
             }
           }),
           EditorView.domEventHandlers({
-            focus: () => {
+            focus: (_event, view) => {
+              (window as any).__activeEditorView = view;
               if (blurTeardownTimer !== undefined) {
                 window.clearTimeout(blurTeardownTimer);
                 blurTeardownTimer = undefined;
@@ -1791,6 +1805,10 @@
             },
             beforeinput: (event, view) => {
               const inputType = (event as InputEvent).inputType;
+              if (inputType === "deleteContentBackward" && submitBlockBackspace(view)) {
+                event.preventDefault();
+                return true;
+              }
               if (inputType !== "insertLineBreak" && inputType !== "insertParagraph") {
                 return false;
               }
@@ -2092,6 +2110,14 @@
           submitBlockEnterOnce(view);
         };
         view.contentDOM.addEventListener("keydown", onEnterKey, true);
+        const onBackspaceKey = (event: KeyboardEvent) => {
+          if (event.key !== "Backspace" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+          if (event.isComposing || event.keyCode === 229 || editorView !== view) return;
+          if (!submitBlockBackspace(view)) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        };
+        view.contentDOM.addEventListener("keydown", onBackspaceKey, true);
       }
 
       const prefix = editorView.state.doc.sliceString(0, Math.min(ORDERED_MARKER_LOOKAHEAD, editorView.state.doc.line(1).to));

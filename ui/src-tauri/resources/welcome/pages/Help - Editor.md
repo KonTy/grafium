@@ -10,7 +10,8 @@ Press **F1** while editing for quick editor help.
   **Enter** continues with the next number at the same outline level, keeping
   any text after the caret in the new item. Press **Enter** on an empty
   numbered item to remove its number and continue as ordinary text, without
-  adding another blank block. **Escape** removes an empty number and leaves
+  adding another blank block. A number alone, including `2.`, `2)`, or
+  `2.1. ` with only spaces after it, is empty. **Escape** removes an empty number and leaves
   edit mode; it never discards a nonempty item. **Shift+Enter** adds a line
   without continuing the number. Numbered items show their number, not an
   extra outline dot. Code fences never continue numbered lists.
@@ -47,6 +48,13 @@ Press **F1** while editing for quick editor help.
   place with their own children, even when they were folded. **Undo** puts the
   block and its children back. **Cut** still moves the whole branch, including
   folded children, because that is what it copies.
+- **Backspace** in an empty block also handles a lone bullet or number:
+  it removes that row and puts the caret at the **end of the previous visible
+  block**. Further Backspace removes previous empty rows or erases text from
+  that end. At the start of a nonempty block, Backspace moves to the previous
+  block's end without merging or discarding either block's text.
+  With no previous block, an empty row moves editing to the next block's start.
+  The last empty block stays available for writing.
 - **Ctrl/Cmd+Alt+Shift+B** formats selected text as bold Markdown.
   **Ctrl/Cmd+Alt+B** instead toggles Bionic reading without editing the source.
 - Click the compact triangle beside a heading to collapse or expand its

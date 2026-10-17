@@ -366,6 +366,7 @@ async function performUndoAction(): Promise<boolean> {
       );
     } catch (e) {
       console.error("[undoStack] delete_blocks undo failed:", e);
+      showToast(`Could not restore the deleted block: ${describeError(e)}`, "error");
       stack.push(action);
       return false;
     }

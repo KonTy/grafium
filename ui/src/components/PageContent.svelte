@@ -38,6 +38,7 @@
   } from "../lib/api";
   import { planIndentSelection } from "../lib/blockIndent";
   import { movedOrderedListChanges, orderedListMarker } from "../lib/orderedList";
+  import { isEmptyEditorBlock } from "../lib/editorEmpty";
   import {
     blocksInTreeOrder,
     insertAtPosition,
@@ -2116,35 +2117,73 @@
    * stay: they move up into its place under its parent, keeping their own
    * subtrees, and Undo puts the block and its children back.
    */
-  async function handleDelete(blockId: string) {
+  async function handleDelete(blockId: string, currentContent: string) {
     // Holding Backspace repeats while the first delete is still being saved.
     if (deletingBlockIds.has(blockId) || !blocks.some((b) => b.id === blockId)) return;
-    const plan = planDeleteKeepingChildren(blocks, new Set([blockId]));
-    // The last block of a page stays so the page remains editable.
-    if (plan.blocks.length === 0) return;
+    const request = currentPageLoad();
+    const source = document.activeElement;
+    let lockClearedFocus = false;
+    const mayFocus = () => !destroyed && isCurrentPageLoad(pageLoadState, request)
+      && (document.activeElement === source
+        || (document.activeElement === document.body && (!source?.isConnected || lockClearedFocus)));
     const visibleIds = visibleBlocks.map((b) => b.id);
     const visibleIndex = visibleIds.indexOf(blockId);
-    const undoBlocks = undoSnapshotsForBlocks(plan.deleted);
+    // At a nonempty block boundary, keep both blocks and continue deleting
+    // from the preceding text instead of swallowing Backspace or merging IDs.
+    if (!isEmptyEditorBlock(currentContent)) {
+      const previous = visibleIds[visibleIndex - 1];
+      if (previous && await revealBlock(previous) && mayFocus()) {
+        focusedBlockId = previous;
+        threadBlockId = previous;
+        blockRefs[previous]?.focusAtEnd();
+      }
+      return;
+    }
     deletingBlockIds.add(blockId);
     try {
-      await restructureBlocks(page.id, plan.moves, plan.deleted.map((block) => block.id));
+      const block = blockRenderState.blockById.get(blockId)!;
+      if (block.content !== currentContent) {
+        await applyCurrentPageContentChanges([{
+          blockId, beforeContent: block.content, afterContent: currentContent,
+        }]);
+      }
+      if (destroyed || !isCurrentPageLoad(pageLoadState, request)) return;
+      const content = document.querySelector(`.block-item[data-block-id="${CSS.escape(blockId)}"] .cm-content`);
+      const view = content instanceof HTMLElement ? EditorView.findFromDOM(content) : null;
+      if (view && !isEmptyEditorBlock(view.state.doc.toString())) return;
+      const plan = planDeleteKeepingChildren(blocks, new Set([blockId]));
+      // The last block stays as a usable, unnumbered editor.
+      if (plan.blocks.length === 0) return;
+      const undoBlocks = undoSnapshotsForBlocks(plan.deleted);
+      await withPageEditorsLocked(request.pageId, async () => {
+        lockClearedFocus = document.activeElement === document.body && !!source?.isConnected;
+        await restructureBlocks(request.pageId, plan.moves, plan.deleted.map((block) => block.id));
+        pushUndo({ type: "delete_blocks", blocks: undoBlocks, pageId: request.pageId, restoreMoves: plan.restoreMoves });
+        if (destroyed || !isCurrentPageLoad(pageLoadState, request)) return;
+        for (const snapshot of undoBlocks) {
+          preEditSnapshots.delete(snapshot.id);
+        }
+        blocks = withPlannedStructure(blocks, plan.blocks, new Set([blockId]));
+        refreshCollectionAfterMutation();
+        if (plan.deleted.some((item) => pageTreeReferencesChanged(item.content, ""))) refreshPageTrees();
+        await tick();
+      });
+      const previous = visibleIds[visibleIndex - 1];
+      const focusTarget = previous ?? visibleBlocks[0]?.id;
+      if (!focusTarget || !mayFocus()) return;
+      if (await revealBlock(focusTarget) && mayFocus()) {
+        focusedBlockId = focusTarget;
+        threadBlockId = focusTarget;
+        blockRefs[focusTarget]?.focusAfterDelete(previous ? "end" : "start");
+        await tick();
+      }
     } catch (e) {
       console.error("Failed to delete block:", e);
       showToast(`Could not delete the block: ${e instanceof Error ? e.message : String(e)}`, "error");
-      return;
+      if (mayFocus()) blockRefs[blockId]?.restoreTextSelection({ anchor: 0, head: 0 });
     } finally {
       deletingBlockIds.delete(blockId);
     }
-    pushUndo({ type: "delete_blocks", blocks: undoBlocks, pageId: page.id, restoreMoves: plan.restoreMoves });
-    for (const snapshot of undoBlocks) {
-      preEditSnapshots.delete(snapshot.id);
-    }
-    blocks = withPlannedStructure(blocks, plan.blocks, new Set([blockId]));
-    refreshCollectionAfterMutation();
-    if (plan.deleted.some((item) => pageTreeReferencesChanged(item.content, ""))) refreshPageTrees();
-    // Continue at the end of the block above, or at the top of the page.
-    const focusTarget = visibleIndex > 0 ? visibleIds[visibleIndex - 1] : blocks[0]?.id;
-    if (focusTarget) focusBlockForEditing(focusTarget);
   }
 
   function focusBlockForEditing(blockId: string) {

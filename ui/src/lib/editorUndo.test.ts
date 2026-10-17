@@ -63,6 +63,15 @@ afterEach(() => {
 });
 
 describe("structural editor undo boundary", () => {
+  it("prioritizes a single empty-block deletion over cached edits in the preceding editor", () => {
+    const view = editor("Previous");
+    type(view, " cached");
+    topUndo = { type: "delete_blocks", pageId: "day", blocks: [] };
+    markStructuralUndoBoundary(view);
+    expect(editorUndo(view)).toBe(true);
+    expect(appUndo).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("Previous cached");
+  });
   it("restores older native history and newer redo across an arbitrary full rewrite", () => {
     const view = editor("Original");
     type(view, " earlier");

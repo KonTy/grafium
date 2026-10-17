@@ -1,12 +1,12 @@
 import { isolateHistory, redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { Transaction, type ChangeSpec, type EditorState, type Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
-import { isUndoOperationInProgress, peekRedoAction, peekUndoAction, type DeleteBlockSelectionAction, type WritingRewriteAction } from "./undoStack";
+import { isUndoOperationInProgress, peekRedoAction, peekUndoAction, type DeleteBlockSelectionAction, type UndoAction, type WritingRewriteAction } from "./undoStack";
 
 export const EDITOR_UNDO_MIN_DEPTH = 50;
 
 interface StructuralUndoBoundary {
-  action: DeleteBlockSelectionAction | WritingRewriteAction;
+  action: DeleteBlockSelectionAction | Extract<UndoAction, { type: "delete_blocks" }> | WritingRewriteAction;
   doc: Text;
   undoDepth: number;
   redoBoundary?: { undoDepth: number; redoDepth: number };
@@ -18,7 +18,7 @@ const recordedBoundaries = new WeakMap<EditorView, WeakMap<StructuralUndoBoundar
 const writingStates = new WeakMap<EditorView, WeakMap<WritingRewriteAction, { before: EditorState; after: EditorState }>>();
 
 function boundaryFor(view: EditorView, action: ReturnType<typeof peekUndoAction>) {
-  return (action?.type === "rewrite_writing" || action?.type === "delete_block_selection"
+  return (action?.type === "rewrite_writing" || action?.type === "delete_block_selection" || action?.type === "delete_blocks"
     ? recordedBoundaries.get(view)?.get(action) : undefined) ?? boundaries.get(view);
 }
 
@@ -52,10 +52,10 @@ export function applyWritingEditorChanges(
   }
 }
 
-/** Call after focusing the surviving editor following a grouped deletion. */
+/** Call after focusing the surviving editor following a structural deletion. */
 export function markStructuralUndoBoundary(view: EditorView): void {
   const action = peekUndoAction();
-  if (action?.type !== "delete_block_selection" && action?.type !== "rewrite_writing") {
+  if (action?.type !== "delete_block_selection" && action?.type !== "delete_blocks" && action?.type !== "rewrite_writing") {
     boundaries.delete(view);
     recordedBoundaries.delete(view);
     return;

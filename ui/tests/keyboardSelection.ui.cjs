@@ -64,7 +64,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
       holdBlocks: options.holdBlocks ?? null, holdListOffset: options.holdListOffset ?? null,
       clipboard: [], clipboardRequests: [], clipboardWaiters: [], holdClipboard: false, failClipboard: false,
       fallbackClipboard: null, clipboardFallbacks: [], deleteFocus: [],
-      holdDelete: false, deleteWaiters: [], holdReload: false, reloadReads: [],
+      holdDelete: false, failDelete: false, deleteWaiters: [], holdReload: false, reloadReads: [],
       emit(event, payload = {}) {
         for (const [id, entry] of listeners) {
           if (entry.event === event) callbacks.get(entry.handler)?.({ event, id, payload });
@@ -112,6 +112,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "discover_link_candidates": case "list_link_candidates":
             return [];
           case "ui_log": case "record_page_open": case "reveal_startup_window":
+          case "set_startup_chrome": case "startup_content_ready":
             return;
           case "plugin:event|unlisten": listeners.delete(args.eventId); return;
           case "ai_get_config": return options.aiConfig ?? { enabled: false, mode: "local" };
@@ -302,6 +303,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
             // and a batch that would strand a child under a deleted parent fails.
             const deleting = args.deleteIds.length > 0;
             if (deleting) {
+              if (state.failDelete) throw new Error("Simulated block deletion failure");
               state.deleteFocus.push({
                 tag: document.activeElement?.tagName,
                 restored: document.activeElement === window.__expectedClipboardFocus,

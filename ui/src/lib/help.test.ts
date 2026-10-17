@@ -28,6 +28,16 @@ const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }))
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 
 describe("contextual help", () => {
+  it("routes empty-number exit and previous-end Backspace guidance through editor F1", async () => {
+    for (const phrase of ["A number alone", "`2)`", "`2.1. `", "end of the previous visible",
+      "previous empty rows", "without merging or discarding", "last empty block"]) {
+      expect(editorHelp).toContain(phrase);
+    }
+    expect(helpPageTitle("editor")).toBe("Help - Editor");
+    expect(helpIndex).toContain("[[Help - Editor]]");
+    await loadHelpPage("editor");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "editor" });
+  });
   it("routes nested numbering and its exit rules through editor F1", async () => {
     expect(helpPageTitle("editor")).toBe("Help - Editor");
     for (const phrase of ["**Tab** moves only that item", "`2.1. `", "`2.2. `", "`2.2.1. `",
