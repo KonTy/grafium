@@ -516,36 +516,38 @@
           <!-- Heatmap -->
           <div class="heatmap-container">
           <div class="activity-heatmaps">
-            <div class="activity-heatmap-panel" bind:this={taskHeatmapEl}>
+            <div class="activity-heatmap-panel" role="group" aria-labelledby="task-heatmap-title">
               <div class="heatmap-title-row">
-                <h2>Task completions</h2>
+                <h2 id="task-heatmap-title">Task completions</h2>
                 <span>{totalCompleted} done</span>
               </div>
-              <div class="month-labels" style={heatmapColumnsStyle}>
-                {#each monthLabels as ml}
-                  <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
-                {/each}
-              </div>
-              <div class="heatmap-grid-area">
-                <div class="day-labels">
-                  {#each dayLabels as label}
-                    <span class="day-label">{label}</span>
+              <div class="heatmap-scroll" bind:this={taskHeatmapEl}>
+                <div class="month-labels" style={heatmapColumnsStyle}>
+                  {#each monthLabels as ml}
+                    <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
                   {/each}
                 </div>
-                <div class="heatmap-grid" style={heatmapColumnsStyle}>
-                  {#each taskGrid as cell}
-                    <button
-                      type="button"
-                      class="heatmap-cell"
-                      class:selected={isSelectedCell("task", cell.date)}
-                      style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getColor(cell.count)};"
-                      aria-label={heatmapCellLabel("task", cell.date, cell.count)}
-                      title={heatmapCellLabel("task", cell.date, cell.count)}
-                      onclick={() => void selectHeatmapDay("task", cell.date, cell.count)}
-                      onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "task")}
-                      onmouseleave={handleCellLeave}
-                    ></button>
-                  {/each}
+                <div class="heatmap-grid-area">
+                  <div class="day-labels">
+                    {#each dayLabels as label}
+                      <span class="day-label">{label}</span>
+                    {/each}
+                  </div>
+                  <div class="heatmap-grid" style={heatmapColumnsStyle}>
+                    {#each taskGrid as cell}
+                      <button
+                        type="button"
+                        class="heatmap-cell"
+                        class:selected={isSelectedCell("task", cell.date)}
+                        style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getColor(cell.count)};"
+                        aria-label={heatmapCellLabel("task", cell.date, cell.count)}
+                        title={heatmapCellLabel("task", cell.date, cell.count)}
+                        onclick={() => void selectHeatmapDay("task", cell.date, cell.count)}
+                        onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "task")}
+                        onmouseleave={handleCellLeave}
+                      ></button>
+                    {/each}
+                  </div>
                 </div>
               </div>
               <div class="heatmap-legend">
@@ -559,36 +561,38 @@
               </div>
             </div>
 
-            <div class="activity-heatmap-panel note-edit-heatmap" bind:this={noteHeatmapEl}>
+            <div class="activity-heatmap-panel note-edit-heatmap" role="group" aria-labelledby="note-heatmap-title">
               <div class="heatmap-title-row">
-                <h2>Note edits</h2>
+                <h2 id="note-heatmap-title">Note edits</h2>
                 <span>{totalEditedNotes} note-day{totalEditedNotes === 1 ? "" : "s"}</span>
               </div>
-              <div class="month-labels" style={heatmapColumnsStyle}>
-                {#each monthLabels as ml}
-                  <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
-                {/each}
-              </div>
-              <div class="heatmap-grid-area">
-                <div class="day-labels">
-                  {#each dayLabels as label}
-                    <span class="day-label">{label}</span>
+              <div class="heatmap-scroll" bind:this={noteHeatmapEl}>
+                <div class="month-labels" style={heatmapColumnsStyle}>
+                  {#each monthLabels as ml}
+                    <span class="month-label" style="grid-column: {ml.col + 1};">{ml.label}</span>
                   {/each}
                 </div>
-                <div class="heatmap-grid" style={heatmapColumnsStyle}>
-                  {#each noteEditGrid as cell}
-                    <button
-                      type="button"
-                      class="heatmap-cell"
-                      class:selected={isSelectedCell("note", cell.date)}
-                      style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getNoteEditColor(cell.count)};"
-                      aria-label={heatmapCellLabel("note", cell.date, cell.count)}
-                      title={heatmapCellLabel("note", cell.date, cell.count)}
-                      onclick={() => void selectHeatmapDay("note", cell.date, cell.count)}
-                      onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "note")}
-                      onmouseleave={handleCellLeave}
-                    ></button>
-                  {/each}
+                <div class="heatmap-grid-area">
+                  <div class="day-labels">
+                    {#each dayLabels as label}
+                      <span class="day-label">{label}</span>
+                    {/each}
+                  </div>
+                  <div class="heatmap-grid" style={heatmapColumnsStyle}>
+                    {#each noteEditGrid as cell}
+                      <button
+                        type="button"
+                        class="heatmap-cell"
+                        class:selected={isSelectedCell("note", cell.date)}
+                        style="grid-column: {cell.col + 1}; grid-row: {cell.row + 1}; background: {getNoteEditColor(cell.count)};"
+                        aria-label={heatmapCellLabel("note", cell.date, cell.count)}
+                        title={heatmapCellLabel("note", cell.date, cell.count)}
+                        onclick={() => void selectHeatmapDay("note", cell.date, cell.count)}
+                        onmouseenter={(e) => handleCellHover(e, cell.date, cell.count, "note")}
+                        onmouseleave={handleCellLeave}
+                      ></button>
+                    {/each}
+                  </div>
                 </div>
               </div>
               <div class="heatmap-legend">
@@ -1106,21 +1110,27 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
+  }
+
+  /* Only the grid scrolls. The grid opens on the latest week, so a title or key
+     inside the scroller would be pushed off the left edge on any long history,
+     leaving two same-shaped grids that differ only by colour. */
+  .heatmap-scroll {
     overflow-x: auto;
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
 
-  .activity-heatmap-panel::-webkit-scrollbar {
+  .heatmap-scroll::-webkit-scrollbar {
     width: 2px;
     height: 2px;
   }
 
-  .activity-heatmap-panel::-webkit-scrollbar-track {
+  .heatmap-scroll::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  .activity-heatmap-panel::-webkit-scrollbar-thumb {
+  .heatmap-scroll::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 1px;
   }
@@ -1576,8 +1586,12 @@
 
   /* ─── Mobile / narrow screen ─── */
   @media (max-width: 900px) {
+    /* Stacked, the row's `flex-start` would size the heatmap to its full
+       multi-year width instead of the screen, so the whole page scrolled
+       sideways and opened on the oldest weeks. */
     .heatmap-row {
       flex-direction: column;
+      align-items: stretch;
     }
 
     .activity-heatmaps {

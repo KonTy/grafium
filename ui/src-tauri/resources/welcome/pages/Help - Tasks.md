@@ -8,6 +8,17 @@ The open-task list loads first. Activity heatmaps, completion history, and flow
 metrics stay collapsed—and are not queried—until you choose **Show activity**,
 so a long history does not delay current work.
 
+## Read the activity heatmaps
+
+**Show activity** opens two calendars. Each has its own title, a count, and a
+Less–More colour key:
+
+- **Task completions** (green) shows how many tasks you finished each day.
+- **Note edits** (blue) shows how many notes you edited each day.
+
+Each calendar opens on the latest week and scrolls sideways for earlier ones;
+its title and key stay in view. Select a day to see what it contains.
+
 ## Review similar tasks with ASK
 
 In Chat, choose **Ask / act > Group open tasks**, or ask "Group my TODOs by

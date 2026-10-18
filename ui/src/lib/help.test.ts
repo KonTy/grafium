@@ -84,6 +84,12 @@ describe("contextual help", () => {
     expect(tasksHelp).toContain("[[Help - Chat]]");
     expect(chatHelp).toContain("not copied");
   });
+  it("names the two activity heatmaps by title and colour in the Tasks context", () => {
+    expect(helpPageTitle("tasks")).toBe("Help - Tasks");
+    for (const phrase of ["**Task completions** (green)", "**Note edits** (blue)", "title and key stay in view"]) {
+      expect(tasksHelp).toContain(phrase);
+    }
+  });
   it("documents the quiet reader's controls, fullscreen, theme and real text sizing", () => {
     for (const page of [readerHelp, booksHelp]) {
       expect(page).toContain("F8");
