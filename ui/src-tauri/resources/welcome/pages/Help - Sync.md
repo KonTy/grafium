@@ -107,3 +107,25 @@ transcript can quote notes the other end has no business receiving, and a
 half-finished thread is not something you want merged on a shared drive. If an
 answer is worth keeping, ask Chat to save it into a page and that page syncs
 like any other note.
+
+## Recovery copies are cleaned up
+
+Copies in `sync-recovery/` are a safety net, not an archive. Grafium trims them
+after every sync that finishes without errors, so they cannot pile up:
+
+- A copy is kept for **30 days**. If the copies together grow past about
+  **256 MB**, the oldest go first.
+- A copy is **never removed while its note still has an open conflict or marker
+  lines**, however old it is. A copy made in the last hour is never removed
+  either.
+- Resolving a note starts a new 30 days for its copies, so there is time to
+  change your mind.
+- The saved starting versions Grafium uses to merge notes are deleted once
+  nothing can use them, for example after you delete the note.
+- Removing a sync target forgets its sync records right away. Its recovery
+  copies, including any for conflicts you never resolved, are then trimmed by
+  the same rules after the next sync.
+
+Only files in the graph's metadata folder are deleted. Your notes, assets and
+books are never touched. To keep a copy longer, move it out of `sync-recovery/`
+before it expires.

@@ -142,13 +142,14 @@ pub fn sync_remove_target(
     target_id: String,
 ) -> Result<(), String> {
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let config_path = graph
-        .root_dir
-        .join(metadata_dir_name(&app))
-        .join("sync-config.json");
+    let metadata_dir = metadata_dir_name(&app);
+    let config_path = graph.root_dir.join(&metadata_dir).join("sync-config.json");
     let mut configs = SyncConfigs::load(&config_path);
     configs.targets.retain(|t| t.id != target_id);
     configs.save(&config_path).map_err(|e| e.to_string())?;
+    // Nothing will sync against this target again: drop its state and caches
+    // and let its recovery copies expire like everyone else's.
+    SyncEngine::forget_target(graph.root_dir.clone(), &metadata_dir, &target_id);
     Ok(())
 }
 

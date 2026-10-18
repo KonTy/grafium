@@ -79,7 +79,9 @@ bytes.
 The dialog shows missing files as **deleted**; choosing a deleted side confirms
 deletion on the other side. If either version changes while you decide, reload
 and choose again. Available versions are retained in the graph metadata folder's
-`sync-recovery/` directory, outside the normal index and sync inventory.
+`sync-recovery/` directory, outside the normal index and sync inventory. Copies
+are removed after 30 days, or sooner if they outgrow a size limit, but never
+while their note is unresolved; see [[Help - Sync]].
 
 Do not treat an empty or unmounted target as a valid source. Verify the target
 path and sync summary before accepting deletion changes.

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod housekeeping;
 mod text_merge;
 
 // Serialize state-file transactions, not graph editing. Never use this mutex
@@ -540,6 +541,7 @@ impl SyncEngine {
         self.refresh_pending_merges(&mut state);
         state.last_sync = Some(Utc::now().timestamp());
         state.save(&self.state_path)?;
+        self.tidy_metadata(&state);
 
         Ok(result)
     }
@@ -1022,10 +1024,7 @@ impl SyncEngine {
         // Recovery is deliberately outside pages/assets/books. A reader or
         // index rebuild must never mistake a preserved version for a source.
         let recovery = self
-            .state_path
-            .parent()
-            .unwrap()
-            .join("sync-recovery")
+            .recovery_dir()
             .join(make_conflict_path(rel_path, &compute_hash(content)));
         let backup = recovery
             .strip_prefix(&self.local_root)
@@ -1039,6 +1038,8 @@ impl SyncEngine {
                     "Recovery copy changed: {backup}"
                 )));
             }
+            // The copy is needed again, so its retention starts over.
+            housekeeping::touch(&path);
         } else {
             crate::fsutil::atomic_write(&path, content)?;
         }

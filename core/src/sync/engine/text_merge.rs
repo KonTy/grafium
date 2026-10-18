@@ -128,14 +128,17 @@ impl SyncEngine {
     }
 
     /// Drop pending entries whose markers were edited out (or whose note is
-    /// gone) and refresh the spot count of the rest.
+    /// gone) and refresh the spot count of the rest. A settled note starts a
+    /// new retention period for its recovery copies.
     pub(super) fn refresh_pending_merges(&self, state: &mut SyncState) {
         let paths: Vec<String> = state.pending_merges.keys().cloned().collect();
         for rel_path in paths {
             match self.scan_note(&rel_path) {
                 Ok(Some(scan)) => state.record_pending_merge(&rel_path, &scan.token, scan.hunks),
                 Ok(None) => {
-                    state.clear_pending_merge(&rel_path);
+                    if state.clear_pending_merge(&rel_path) {
+                        self.refresh_recovery_copies(&rel_path);
+                    }
                 }
                 Err(_) => {}
             }

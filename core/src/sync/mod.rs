@@ -13,6 +13,11 @@
 //! versus edited files) keeps the whole-file flow: preserve both byte-exact
 //! versions under the target's metadata `sync-recovery/` folder, then require
 //! an explicit revision-checked local/remote choice.
+//!
+//! Those copies are a safety net, not an archive: each successful sync trims
+//! them by age and size, and removes the merge bases nothing will read again.
+//! The policy and the protection of unresolved notes live in
+//! `engine::housekeeping`.
 
 pub mod backend;
 mod diff;

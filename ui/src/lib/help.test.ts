@@ -197,6 +197,19 @@ describe("contextual help", () => {
     expect(editorHelp).toContain("[[Help - Sync]]");
     expect(syncPrivacyHelp).toContain("marker lines into the note on this device only");
   });
+  it("explains how long sync recovery copies are kept and what protects them", () => {
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    const help = flat(syncHelp);
+    expect(syncHelp).toContain("## Recovery copies are cleaned up");
+    expect(help).toContain("A copy is kept for **30 days**");
+    expect(help).toContain("about **256 MB**");
+    expect(help).toContain("**never removed while its note still has an open conflict or marker lines**");
+    expect(help).toContain("Resolving a note starts a new 30 days");
+    expect(help).toContain("Removing a sync target forgets its sync records right away.");
+    expect(help).toContain("Your notes, assets and books are never touched.");
+    expect(flat(syncPrivacyHelp)).toContain("removed after 30 days");
+    expect(flat(syncPrivacyHelp)).toContain("never while their note is unresolved");
+  });
   it("routes original books and the import chooser to source-preservation guidance", async () => {
     expect(isHelpContext("books")).toBe(true);
     expect(helpPageTitle("books")).toBe("Help - Books");
