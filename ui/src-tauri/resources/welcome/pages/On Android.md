@@ -4,6 +4,13 @@ Choose a graph location the app can access and keep a verified backup before mov
 
 Use the controls available in your installed Android build. Optional desktop import, OCR, transcription, and model workflows can have different availability or requirements.
 
+The bar along the bottom shows Journal, Tasks, Library, Studies and Pages, in
+the same order as the desktop sidebar. Tap **⋯ More**, the last button, for the
+rest of that list — Graph View, Flashcards, Chat, Jobs and Settings — plus New
+Page, Knowledge Panel, Import Media, Import Books, Open Graph, New Graph and
+Re-index Graph (Manual). The ⋯ button stays highlighted while one of those
+screens is open.
+
 In Journal, the calendar and link icons are in the top toolbar immediately
 before Search, leaving more vertical space for notes. In Zen mode they remain
 available above the journal while the top toolbar is hidden.

@@ -5,9 +5,9 @@
   import JournalView from "./components/JournalView.svelte";
   import GoToLink from "./components/GoToLink.svelte";
   import LazyView from "./components/LazyView.svelte";
+  import MobileNav from "./components/MobileNav.svelte";
   import { lazyComponent } from "./lib/lazy";
   import { autofocus } from "./lib/autofocus";
-  import { handleMenuKeydown } from "./lib/menuKeyboard";
   import { dismissOnBackdrop, dialogKeydown } from "./lib/modal";
   import {
     ANDROID_BACK_EVENT,
@@ -2263,14 +2263,6 @@
     return pickFolder("Select Folder Containing Book Files", await defaultExternalBookImportFolder());
   }
 
-  function toggleMoreMenu() {
-    showMoreMenu = !showMoreMenu;
-  }
-
-  function closeMoreMenu() {
-    showMoreMenu = false;
-  }
-
   async function runReindex(showSuccessAlert = false) {
     try {
       await reindexCurrent();
@@ -2285,12 +2277,10 @@
   }
 
   async function handleMobileReindex() {
-    closeMoreMenu();
     await runReindex(true);
   }
 
   async function handleMobileOpenGraph() {
-    closeMoreMenu();
     console.log("[graph] opening folder picker for Open Graph");
     const selected = await pickFolder();
     console.log("[graph] pickFolder returned:", selected);
@@ -2321,7 +2311,6 @@
   }
 
   function handleMobileCreateGraph() {
-    closeMoreMenu();
     newGraphName = "";
     showCreateGraphDialog = true;
   }
@@ -2785,146 +2774,16 @@
       </LazyView>
     {/if}
 
-    <!-- Bottom nav for narrow screens -->
-    <nav class="bottom-nav">
-      <button class="bottom-nav-item" class:active={currentView === "library"} onclick={() => handleNavigate("__library__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 3h4v18H3zM10 3h4v18h-4zM17 3l4 1v17l-4-1z" /></svg>
-        <span>Library</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "studies"} onclick={() => handleNavigate("__studies__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 4h7l3 3 3-3h7v16h-7l-3 2-3-2H2zM12 7v15" /></svg>
-        <span>Studies</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "journal"} onclick={() => handleNavigate("__journal__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-          <line x1="16" y1="2" x2="16" y2="6"></line>
-          <line x1="8" y1="2" x2="8" y2="6"></line>
-          <line x1="3" y1="10" x2="21" y2="10"></line>
-        </svg>
-        <span>Journal</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "statistics"} onclick={() => handleNavigate("__statistics__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18 20V10"></path>
-          <path d="M12 20V4"></path>
-          <path d="M6 20v-6"></path>
-        </svg>
-        <span>Tasks</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "all-pages"} onclick={() => handleNavigate("__all_pages__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-        </svg>
-        <span>Pages</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "graph"} onclick={() => handleNavigate("__graph__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="5" cy="6" r="2"></circle>
-          <circle cx="19" cy="6" r="2"></circle>
-          <circle cx="12" cy="18" r="2"></circle>
-          <line x1="6.7" y1="7" x2="10.5" y2="16.3"></line>
-          <line x1="17.3" y1="7" x2="13.5" y2="16.3"></line>
-          <line x1="7" y1="6" x2="17" y2="6"></line>
-        </svg>
-        <span>Graph</span>
-      </button>
-      <button class="bottom-nav-item" class:active={currentView === "chat"} onclick={() => handleNavigate("__chat__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-        </svg>
-        <span>Chat</span>
-      </button>
-      <button class="bottom-nav-item" onclick={() => handleNavigate("__new_page__")}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"></line>
-          <line x1="5" y1="12" x2="19" y2="12"></line>
-        </svg>
-        <span>New</span>
-      </button>
-      <button class="bottom-nav-item" class:active={referencePanelVisible} onclick={() => (referencePanelVisible = !referencePanelVisible)}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
-          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
-        </svg>
-        <span>AI</span>
-      </button>
-      <button class="bottom-nav-item" class:active={showMoreMenu || currentView === "settings" || currentView === "jobs"} onclick={toggleMoreMenu}>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="5" r="1"></circle>
-          <circle cx="12" cy="12" r="1"></circle>
-          <circle cx="12" cy="19" r="1"></circle>
-        </svg>
-        <span>More</span>
-      </button>
-    </nav>
-
-    <!-- More menu popup -->
-    {#if showMoreMenu}
-      <div class="more-menu-backdrop" role="presentation" onclick={closeMoreMenu}></div>
-      <div
-        class="more-menu"
-        role="menu"
-        tabindex="-1"
-        use:autofocus
-        onkeydown={(event) => handleMenuKeydown(event, closeMoreMenu)}
-      >
-        <button role="menuitem" class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__settings__"); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
-          <span>Settings</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__chat__"); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-          </svg>
-          <span>Chat</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__jobs__"); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"></path>
-            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-          </svg>
-          <span>Jobs</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={handleMobileOpenGraph}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-          </svg>
-          <span>Open Graph</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__import_media__"); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="23 7 16 12 23 17 23 7"></polygon>
-            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-          </svg>
-          <span>Import Media</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={() => { closeMoreMenu(); handleNavigate("__import_books__"); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-            <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"></path>
-          </svg>
-          <span>Import Books</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={handleMobileCreateGraph}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          <span>New Graph</span>
-        </button>
-        <button role="menuitem" class="more-menu-item" onclick={handleMobileReindex}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="23 4 23 10 17 10"></polyline>
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-          </svg>
-          <span>Re-index Graph (Manual)</span>
-        </button>
-      </div>
+    {#if !zenMode}
+      <MobileNav
+        {currentView}
+        bind:menuOpen={showMoreMenu}
+        onNavigate={handleNavigate}
+        onToggleKnowledgePanel={() => (referencePanelVisible = !referencePanelVisible)}
+        onOpenGraph={handleMobileOpenGraph}
+        onCreateGraph={handleMobileCreateGraph}
+        onReindex={handleMobileReindex}
+      />
     {/if}
   </div>
 </div>
@@ -3306,10 +3165,6 @@
     background: var(--bg-primary);
   }
 
-  .app-shell.zen .bottom-nav {
-    display: none;
-  }
-
   .main-content.zen-content {
     padding: 0;
   }
@@ -3594,101 +3449,10 @@
     background: var(--btn-primary-hover);
   }
 
-  /* Bottom nav - hidden by default, shown on narrow screens */
-  .bottom-nav {
-    display: none;
-  }
-
   @media (max-width: 640px) {
     .sidebar-resizer,
     .reference-panel-resizer {
       display: none !important;
-    }
-
-    .bottom-nav {
-      display: flex;
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      background: var(--bg-sidebar);
-      border-top: 1px solid var(--border);
-      padding: 4px 0;
-      padding-bottom: env(safe-area-inset-bottom, 4px);
-      z-index: 100;
-      justify-content: flex-start;
-      align-items: center;
-      overflow-x: auto;
-    }
-
-    .bottom-nav-item {
-      display: flex;
-      flex: 1 0 auto;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      cursor: pointer;
-      padding: 6px 12px;
-      border-radius: 8px;
-      font-size: 0.6rem;
-      transition: color 0.15s;
-    }
-
-    .bottom-nav-item.active {
-      color: var(--accent);
-    }
-
-    .bottom-nav-item:hover {
-      color: var(--text-primary);
-    }
-
-    /* More menu popup */
-    .more-menu-backdrop {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 199;
-    }
-
-    .more-menu {
-      position: fixed;
-      bottom: calc(56px + env(safe-area-inset-bottom, 0px));
-      right: 8px;
-      left: auto;
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
-      z-index: 200;
-      padding: 6px;
-      min-width: min(180px, calc(100vw - 16px));
-      max-width: calc(100vw - 16px);
-      max-height: min(70dvh, calc(100dvh - 72px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)));
-      overflow-y: auto;
-    }
-
-    .more-menu-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      padding: 12px 14px;
-      background: none;
-      border: none;
-      color: var(--text-primary);
-      font-size: 14px;
-      cursor: pointer;
-      border-radius: 8px;
-      transition: background 0.1s;
-    }
-
-    .more-menu-item:hover, .more-menu-item:active {
-      background: var(--bg-hover);
     }
 
     /* Hide the whole sidebar column, not just its contents — otherwise a 260px

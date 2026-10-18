@@ -11,7 +11,7 @@ describe("collapsed sidebar icon rail", () => {
     expect(app).toContain("{#if !zenMode}");
     expect(app).toContain("collapsed={!sidebarVisible}");
     expect(app).toContain("SIDEBAR_RAIL_WIDTH = 52");
-    expect(app).toContain(".app-shell.zen .bottom-nav");
+    expect(app).toMatch(/\{#if !zenMode\}\s*<MobileNav/);
   });
 
   it("keeps primary navigation available as labelled icons", () => {

@@ -1,6 +1,6 @@
 {
   "productName": "Grafium",
-  "version": "0.0.195",
+  "version": "0.0.196",
   "identifier": "com.grafium.app",
   "build": {
     "frontendDist": "../dist",
