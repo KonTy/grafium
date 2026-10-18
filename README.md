@@ -321,6 +321,7 @@ access.
 | Filesystem and WebDAV sync | Configure USB drives, mounted network folders, or a WebDAV server such as Nextcloud; run **Sync Now** from Settings. |
 | Target availability | Configured auto-sync targets synchronize when the native monitor detects that they have become available. |
 | Sync reporting | See pushed/pulled files, deletions, conflicts, and errors. File sync is not simultaneous collaborative editing; review conflicts and keep backups. |
+| Note conflict markers | A page or journal edited on two devices is merged block by block. Edits in different places combine; a clash in the same place becomes `YOURS` / `THEIRS` marker lines in this device's copy for you to resolve by hand. The note is not uploaded until the markers are gone, and both originals stay in `.grafium/sync-recovery/`. |
 | Theme choice | Use built-in light, dark, and OLED themes, including GitHub Light and GitHub Dark, with vivid, contrast-tuned reds, blues, and complementary accents for headings, tags, and callouts. Matrix keeps its green-on-black character with more colorful highlights. |
 | Background transparency | Auto follows recognized smplOS themes and their background opacity on supported Linux desktops, without fading text/icons or changing opacity on focus. Explicit Grafium palettes and unsupported desktops stay opaque; menus, paper/media, and the 3D space scene retain readability backgrounds. |
 | Reading width | Adjust narrow-view padding as a percentage on each side; the default is **15% per side**. |
