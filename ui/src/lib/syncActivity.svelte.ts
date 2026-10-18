@@ -13,7 +13,7 @@
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { listSyncConflicts } from "./sync";
+import { loadSyncAttention } from "./sync";
 
 /**
  * How long the Conflicts tab stays reachable after a sync finishes.
@@ -26,7 +26,10 @@ export const RECENT_SYNC_WINDOW_MS = 5 * 60 * 1000;
 export const syncActivity = $state({
   /** Sync runs currently in flight. A counter, because targets sync independently. */
   running: 0,
-  /** File-level conflicts only. Annotation candidates are reviewed in Book notes. */
+  /**
+   * Whole-file conflicts plus notes holding merge markers. Annotation
+   * candidates are reviewed in Book notes and are not counted here.
+   */
   conflictCount: 0,
   /** Epoch ms of the most recent sync completion, or null if none observed yet. */
   lastCompletedAt: null as number | null,
@@ -65,15 +68,15 @@ export function markSyncCompleted(now: number = Date.now()): void {
 }
 
 /**
- * Re-read the unresolved conflict count from the backend.
+ * Re-read how many things sync is waiting on a person for.
  *
  * A failed probe deliberately leaves the previous count alone: making
  * outstanding conflicts silently invisible is far worse than a stale number.
  */
 export async function refreshConflictCount(): Promise<number> {
   try {
-    const conflicts = await listSyncConflicts();
-    syncActivity.conflictCount = conflicts.length;
+    const { conflicts, pendingMerges } = await loadSyncAttention();
+    syncActivity.conflictCount = conflicts.length + pendingMerges.length;
   } catch (error) {
     console.error("Failed to read sync conflicts:", error);
   }

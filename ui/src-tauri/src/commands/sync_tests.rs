@@ -1,5 +1,24 @@
 use super::*;
-use grafium_core::graph::Graph;
+use grafium_core::graph::{Graph, DEFAULT_METADATA_DIR_NAME};
+
+/// A result with nothing to report; `SyncResult` is only built by the engine.
+fn no_activity() -> SyncResult {
+    let mut result = SyncResult::failed("placeholder");
+    result.errors.clear();
+    result
+}
+
+fn filesystem_target(id: &str, path: &Path) -> SyncConfig {
+    SyncConfig {
+        id: id.into(),
+        name: id.into(),
+        backend_type: BackendType::Filesystem,
+        config: BackendConfig::Filesystem {
+            path: path.to_path_buf(),
+        },
+        auto_sync: false,
+    }
+}
 
 #[test]
 fn sync_reconciliation_preserves_unrelated_favorites_and_reviews() {
@@ -44,10 +63,102 @@ fn completion_payload_never_hides_errors_or_deletions() {
         .annotation_conflicts
         .push("books/book/original.jsonld".into());
     result.merged.push("books/book/original.jsonld".into());
+    result.merge_conflicts.push("pages/todo.md".into());
     let payload = completion_payload("synthetic", &result);
     assert_eq!(payload["errors"], 1);
     assert_eq!(payload["deleted_local"], 1);
     assert_eq!(payload["deleted_remote"], 1);
     assert_eq!(payload["annotation_conflicts"], 1);
     assert_eq!(payload["merged"], 1);
+    assert_eq!(payload["merge_conflicts"], 1);
+}
+
+#[test]
+fn a_note_that_just_received_merge_markers_changed_local_sources() {
+    let mut result = no_activity();
+    assert!(!changes_local_sources(&result));
+    result.merge_conflicts.push("pages/todo.md".into());
+    assert!(changes_local_sources(&result));
+}
+
+#[test]
+fn aggregate_payload_sums_runs_and_counts_a_shared_note_once() {
+    let mut first = no_activity();
+    first.pushed = vec!["pages/a.md".into(), "pages/b.md".into()];
+    first.merge_conflicts.push("pages/todo.md".into());
+    first
+        .annotation_conflicts
+        .push("books/book/original.jsonld".into());
+    let mut second = SyncResult::failed("offline");
+    second.pushed.push("pages/c.md".into());
+    second.conflicts.push("pages/x.md".into());
+    second.merge_conflicts.push("pages/todo.md".into());
+    second
+        .annotation_conflicts
+        .push("books/book/original.jsonld".into());
+
+    let payload = aggregate_completion_payload(&[first, second]);
+    assert_eq!(payload["target_name"], "all targets");
+    assert_eq!(payload["pushed"], 3);
+    assert_eq!(payload["conflicts"], 1);
+    assert_eq!(payload["errors"], 1);
+    assert_eq!(payload["merge_conflicts"], 1);
+    assert_eq!(payload["annotation_conflicts"], 1);
+}
+
+#[test]
+fn a_held_note_is_listed_once_across_targets_until_its_markers_are_gone() {
+    const NOTE: &str = "pages/todo.md";
+    let write = |root: &Path, text: &str| std::fs::write(root.join(NOTE), text).unwrap();
+    let (a, b) = (
+        tempfile::tempdir_in(".").unwrap(),
+        tempfile::tempdir_in(".").unwrap(),
+    );
+    let (usb, cloud) = (
+        tempfile::tempdir_in(".").unwrap(),
+        tempfile::tempdir_in(".").unwrap(),
+    );
+    for root in [a.path(), b.path()] {
+        std::fs::create_dir_all(root.join("pages")).unwrap();
+    }
+    let usb_backend = FilesystemBackend::new(usb.path().to_path_buf(), "usb".into());
+    let device_a = SyncEngine::new_with_target(a.path().to_path_buf(), "usb");
+    let device_b = SyncEngine::new_with_target(b.path().to_path_buf(), "usb");
+
+    write(a.path(), "- Buy milk\n- Walk the dog\n- Pay rent\n");
+    device_a.sync(&usb_backend).unwrap();
+    device_b.sync(&usb_backend).unwrap();
+    write(a.path(), "- Buy oat milk\n- Walk the dog\n- Pay rent\n");
+    write(b.path(), "- Buy soy milk\n- Walk the dog\n- Pay rent\n");
+    device_a.sync(&usb_backend).unwrap();
+    let held = device_b.sync(&usb_backend).unwrap();
+    assert_eq!(held.merge_conflicts, [NOTE]);
+
+    // A second target that has never seen the note learns that it is held back.
+    let cloud_backend = FilesystemBackend::new(cloud.path().to_path_buf(), "cloud".into());
+    let second_target = SyncEngine::new_with_target(b.path().to_path_buf(), "cloud");
+    assert!(second_target
+        .sync(&cloud_backend)
+        .unwrap()
+        .pushed
+        .is_empty());
+    assert_eq!(device_b.pending_merges().len(), 1);
+    assert_eq!(second_target.pending_merges().len(), 1);
+
+    let targets = [
+        filesystem_target("usb", usb.path()),
+        filesystem_target("cloud", cloud.path()),
+    ];
+    assert_eq!(
+        pending_merge_notes(b.path(), DEFAULT_METADATA_DIR_NAME, &targets),
+        [PendingMergeNote {
+            rel_path: NOTE.into(),
+            conflicts: 1
+        }]
+    );
+    assert!(pending_merge_notes(a.path(), DEFAULT_METADATA_DIR_NAME, &targets).is_empty());
+
+    // The list empties as soon as the markers are edited out; no sync needed.
+    write(b.path(), "- Buy oat milk\n- Walk the dog\n- Pay rent\n");
+    assert!(pending_merge_notes(b.path(), DEFAULT_METADATA_DIR_NAME, &targets).is_empty());
 }

@@ -3,13 +3,14 @@
   import ReadingNotesPanel from "./ReadingNotesPanel.svelte";
   import BookNotesPanel from "./BookNotesPanel.svelte";
   import SyncConflictResolution from "./SyncConflictResolution.svelte";
+  import PendingMergeList from "./PendingMergeList.svelte";
   import { getGraphInfo, getPage } from "../lib/api";
   import { isOriginalBookPage, isBookAnnotationPage, bookAnnotationTarget } from "../lib/books";
   import { assistantContextInfo } from "../lib/assistant";
   import { getSourceConversation, getAssistantConversation, type AssistantThread } from "../lib/assistantConversations";
   import { getLatestCurrentBlockAnchor, type CurrentBlockAnchor } from "../lib/currentBlockAnchor";
   import type { PageNavigationTarget } from "../lib/navigation";
-  import { listSyncConflicts, type SyncConflict } from "../lib/sync";
+  import { loadSyncAttention, type PendingMergeNote, type SyncConflict } from "../lib/sync";
   import { syncConflictTarget } from "../lib/syncConflictTarget";
   import { refreshConflictCount, setConflictCount, shouldShowConflicts, syncActivity } from "../lib/syncActivity.svelte";
 
@@ -30,6 +31,8 @@
 
   let activeTab = $state<"chat" | "notes" | "conflicts">("chat");
   let conflicts = $state<SyncConflict[]>([]);
+  // Notes holding merge markers: resolved by editing the note, not by choosing a side.
+  let pendingMerges = $state<PendingMergeNote[]>([]);
   let conflictsLoading = $state(false);
   let conflictError = $state("");
   let resolvingConflict = $state<SyncConflict | null>(null);
@@ -60,8 +63,10 @@
     conflictsLoading = true;
     conflictError = "";
     try {
-      conflicts = await listSyncConflicts();
-      setConflictCount(conflicts.length);
+      const attention = await loadSyncAttention();
+      conflicts = attention.conflicts;
+      pendingMerges = attention.pendingMerges;
+      setConflictCount(conflicts.length + pendingMerges.length);
     } catch (error) {
       conflictError = `Could not load sync conflicts: ${String(error)}`;
       console.error("Failed to load sync conflicts:", error);
@@ -69,17 +74,20 @@
       conflictsLoading = false;
     }
   }
-  async function openConflict(conflict: SyncConflict) {
-    const target = syncConflictTarget(conflict.rel_path);
+  async function openSyncedNote(relPath: string, unavailable: string) {
+    const target = syncConflictTarget(relPath);
     if (!target) return;
     conflictError = "";
     try {
       const page = await getPage(target);
       onNavigate({ id: page.id });
     } catch (cause) {
-      conflictError = `This conflict's source is unavailable. Compare the preserved files in the graph folder. ${String(cause)}`;
+      conflictError = `${unavailable} ${String(cause)}`;
     }
   }
+  const openConflict = (conflict: SyncConflict) => openSyncedNote(conflict.rel_path,
+    "This conflict's source is unavailable. Compare the preserved files in the graph folder.");
+  const openPendingMerge = (note: PendingMergeNote) => openSyncedNote(note.rel_path, "This note is unavailable.");
   function selectTab(tab: "chat" | "notes" | "conflicts") {
     activeTab = tab;
     if (tab === "conflicts") void loadConflicts();
@@ -149,7 +157,8 @@
 </script>
 
 {#if visible}
-  <aside class="reference-panel" style:width="{width}px" aria-label="Reading panel">
+  <aside class="reference-panel" style:width="{width}px" aria-label="Reading panel"
+    data-help-context={activeTab === "conflicts" ? "sync" : undefined}>
     <header class="panel-header">
       <div class="panel-tabs" role="tablist" aria-label="Reading panel tabs">
         <button role="tab" aria-selected={activeTab === "chat"} class:active={activeTab === "chat"} onclick={() => selectTab("chat")}>Chat (AI)</button>
@@ -181,13 +190,18 @@
       {/if}
       {#if activeTab === "conflicts"}
         <div class="conflicts-panel">
-          <p>Compare the files, then choose Resolve to explicitly keep the current local or remote version, including a deletion. Editing a note alone does not resolve its conflict.</p>
+          {#if conflicts.length > 0}
+            <p>Compare the files, then choose Resolve to explicitly keep the current local or remote version, including a deletion. Editing a note alone does not resolve its conflict.</p>
+          {/if}
           {#if conflictError}<p class="error" role="alert">{conflictError}</p>{/if}
           {#if conflictsLoading}
             <p class="shimmer" role="status">Loading conflicts…</p>
-          {:else if conflicts.length === 0}
+          {:else if conflicts.length === 0 && pendingMerges.length === 0}
             <p role="status">{syncActivity.running > 0 ? "Sync in progress…" : "No unresolved sync conflicts."}</p>
           {:else}
+            {#if pendingMerges.length > 0}
+              <PendingMergeList notes={pendingMerges} onOpen={openPendingMerge} />
+            {/if}
             {#each conflicts as conflict}
               <div class="conflict-entry">
                 <button

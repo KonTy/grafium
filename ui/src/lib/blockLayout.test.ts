@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { getBulletMinHeight, getHeadingLevel } from "./blockLayout";
+import { getBulletMinHeight, getHeadingLevel, isQuoteBlockContent } from "./blockLayout";
+
+describe("block quote layout", () => {
+  it("treats a block that starts with > as a quotation", () => {
+    expect(isQuoteBlockContent("> wise words")).toBe(true);
+    expect(isQuoteBlockContent("  > indented")).toBe(true);
+    expect(isQuoteBlockContent("plain text")).toBe(false);
+  });
+
+  it("does not mistake the closing line of a sync conflict for a quotation", () => {
+    expect(isQuoteBlockContent(">>>>>>> THEIRS (merge 3fa9c2d1)")).toBe(false);
+    // Without the signature it is just text starting with `>`.
+    expect(isQuoteBlockContent(">>>>>>> THEIRS")).toBe(true);
+  });
+});
 
 describe("block heading layout", () => {
   it("recognizes Markdown headings without treating hashtags as headings", () => {

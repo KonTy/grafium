@@ -15,6 +15,7 @@ import editorHelp from "../../src-tauri/resources/welcome/pages/Help - Editor.md
 import readingNotesPanel from "../components/ReadingNotesPanel.svelte?raw";
 import settingsHelp from "../../src-tauri/resources/welcome/pages/Help - Settings.md?raw";
 import syncHelp from "../../src-tauri/resources/welcome/pages/Help - Sync.md?raw";
+import syncPrivacyHelp from "../../src-tauri/resources/welcome/pages/Sync And Privacy.md?raw";
 import syncResolution from "../components/SyncConflictResolution.svelte?raw";
 import helpIndex from "../../src-tauri/resources/welcome/pages/Grafium Help.md?raw";
 import printingHelp from "../../src-tauri/resources/welcome/pages/Help - Printing.md?raw";
@@ -184,6 +185,17 @@ describe("contextual help", () => {
     expect(syncHelp).toContain("sync-recovery/");
     expect(syncHelp).toContain("strong server ETag");
     expect(syncHelp).not.toContain("into the version you want, and save.");
+  });
+  it("explains the marker lines sync writes into a note edited on two devices", () => {
+    expect(syncHelp).toContain("## Notes edited on two devices");
+    expect(syncHelp).toContain("<<<<<<< YOURS (merge ········)");
+    expect(syncHelp).toContain(">>>>>>> THEIRS (merge ········)");
+    expect(syncHelp).toContain("**notes need merging; open Conflicts**");
+    expect(syncHelp).toContain("Markers never travel.");
+    expect(syncHelp).toContain("again to upload the finished note.");
+    expect(editorHelp).toContain("## Sync conflict markers");
+    expect(editorHelp).toContain("[[Help - Sync]]");
+    expect(syncPrivacyHelp).toContain("marker lines into the note on this device only");
   });
   it("routes original books and the import chooser to source-preservation guidance", async () => {
     expect(isHelpContext("books")).toBe(true);

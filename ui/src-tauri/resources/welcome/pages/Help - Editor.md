@@ -136,6 +136,14 @@ to compare their batch paths, sizes, and SHA-256 fingerprints. Restore only the
 intended copy, then retry Undo. Your explicit version choice is recorded;
 the other copies stay in trash rather than being guessed or deleted.
 
+## Sync conflict markers
+
+If two devices changed the same place in a note, sync writes marker lines such
+as `<<<<<<< YOURS` and `>>>>>>> THEIRS` into the note on this device. Each marker
+is a coloured block of its own. Keep the text you want, then delete the unwanted
+text and the marker lines; the note stays out of sync until they are gone. See
+[[Help - Sync]].
+
 ## Reading notes and selected passages
 
 Open the right panel's **Notes** tab to annotate a page, converted book, or

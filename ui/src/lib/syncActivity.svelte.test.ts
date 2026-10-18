@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
@@ -9,6 +10,7 @@ import {
   beginSyncRun,
   endSyncRun,
   markSyncCompleted,
+  refreshConflictCount,
   resetSyncActivity,
   setConflictCount,
   shouldShowConflicts,
@@ -96,5 +98,42 @@ describe("sync activity store", () => {
     vi.advanceTimersByTime(RECENT_SYNC_WINDOW_MS);
     expect(shouldShowConflicts()).toBe(false);
     unlisten();
+  });
+
+  describe("probing the backend", () => {
+    const conflict = { target_id: "t", target_name: "USB", rel_path: "assets/a.png", backup_path: "b", recorded_at: 1 };
+    const held = { rel_path: "pages/todo.md", conflicts: 2 };
+
+    function backend(answers: Record<string, unknown>) {
+      vi.mocked(invoke).mockImplementation(async (command: string) => {
+        const answer = answers[command];
+        if (answer instanceof Error) throw answer;
+        return answer ?? [];
+      });
+    }
+
+    afterEach(() => {
+      vi.mocked(invoke).mockImplementation(async () => []);
+    });
+
+    it("counts notes holding merge markers next to whole-file conflicts", async () => {
+      backend({ sync_list_conflicts: [conflict], sync_list_pending_merges: [held, { ...held, rel_path: "pages/b.md" }] });
+      expect(await refreshConflictCount()).toBe(3);
+      expect(shouldShowConflicts()).toBe(true);
+    });
+
+    it("keeps a held note visible when there are no whole-file conflicts", async () => {
+      backend({ sync_list_pending_merges: [held] });
+      await refreshConflictCount();
+      expect(syncActivity.conflictCount).toBe(1);
+    });
+
+    it("keeps the previous count when either probe fails", async () => {
+      const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+      setConflictCount(3);
+      backend({ sync_list_conflicts: [], sync_list_pending_merges: new Error("unavailable") });
+      expect(await refreshConflictCount()).toBe(3);
+      quiet.mockRestore();
+    });
   });
 });

@@ -270,8 +270,10 @@ fn test_both_edited_same_content_no_conflict() {
 
 #[test]
 fn test_conflict_preserves_local_and_records_backup() {
+    // `knowledge/` is never text-merged, so it exercises the whole-file
+    // conflict flow (a note under `pages/` gets inline markers instead).
     let local = setup_local_graph();
-    write_local(local.path(), "pages/doc.md", "line1\noriginal\nline3\n");
+    write_local(local.path(), "knowledge/doc.md", "line1\noriginal\nline3\n");
 
     let backend = MockBackend::new("test");
     let engine = SyncEngine::new(local.path().to_path_buf());
@@ -280,26 +282,31 @@ fn test_conflict_preserves_local_and_records_backup() {
     engine.sync(&backend).unwrap();
 
     // Both sides change differently
-    write_local(local.path(), "pages/doc.md", "line1\nlocal edit\nline3\n");
-    backend.set_file("pages/doc.md", b"line1\nremote edit\nline3\n");
+    write_local(
+        local.path(),
+        "knowledge/doc.md",
+        "line1\nlocal edit\nline3\n",
+    );
+    backend.set_file("knowledge/doc.md", b"line1\nremote edit\nline3\n");
 
     let r = engine.sync(&backend).unwrap();
 
     // Should be a conflict
     assert_eq!(r.conflicts.len(), 1);
-    assert_eq!(r.conflicts[0], "pages/doc.md");
+    assert_eq!(r.conflicts[0], "knowledge/doc.md");
 
     assert_eq!(
-        read_local(local.path(), "pages/doc.md"),
+        read_local(local.path(), "knowledge/doc.md"),
         "line1\nlocal edit\nline3\n"
     );
 
     // A .conflict backup file should exist
-    let conflict_files: Vec<_> = fs::read_dir(local.path().join(".grafium/sync-recovery/pages"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".conflict"))
-        .collect();
+    let conflict_files: Vec<_> =
+        fs::read_dir(local.path().join(".grafium/sync-recovery/knowledge"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".conflict"))
+            .collect();
     assert_eq!(
         conflict_files.len(),
         2,
@@ -312,7 +319,7 @@ fn test_conflict_preserves_local_and_records_backup() {
         .any(|file| fs::read_to_string(file.path()).unwrap() == "line1\nremote edit\nline3\n"));
 
     assert_eq!(
-        backend.get_file("pages/doc.md").unwrap(),
+        backend.get_file("knowledge/doc.md").unwrap(),
         b"line1\nremote edit\nline3\n"
     );
 
@@ -322,26 +329,26 @@ fn test_conflict_preserves_local_and_records_backup() {
 
     write_local(
         local.path(),
-        "pages/doc.md",
+        "knowledge/doc.md",
         "line1\nchosen locally\nline3\n",
     );
-    let view = engine.conflict_state(&backend, "pages/doc.md").unwrap();
+    let view = engine.conflict_state(&backend, "knowledge/doc.md").unwrap();
     let resolved = engine
         .resolve_conflict(
             &backend,
-            "pages/doc.md",
+            "knowledge/doc.md",
             view.local_hash.as_deref(),
             view.remote_hash.as_deref(),
             grafium_core::sync::engine::ConflictSide::Local,
         )
         .unwrap();
-    assert_eq!(resolved.pushed, vec!["pages/doc.md"]);
+    assert_eq!(resolved.pushed, vec!["knowledge/doc.md"]);
     assert_eq!(
-        backend.get_file("pages/doc.md").unwrap(),
+        backend.get_file("knowledge/doc.md").unwrap(),
         b"line1\nchosen locally\nline3\n"
     );
     assert_eq!(
-        fs::read_dir(local.path().join(".grafium/sync-recovery/pages"))
+        fs::read_dir(local.path().join(".grafium/sync-recovery/knowledge"))
             .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_name().to_string_lossy().contains(".conflict_"))
@@ -351,7 +358,7 @@ fn test_conflict_preserves_local_and_records_backup() {
 }
 
 #[test]
-fn test_non_overlapping_changes_are_manual_conflicts() {
+fn test_non_overlapping_changes_merge_cleanly_and_keep_both_originals() {
     let local = setup_local_graph();
     let base = "header\n\nparagraph 1\n\nparagraph 2\n\nfooter\n";
     write_local(local.path(), "pages/doc.md", base);
@@ -370,8 +377,23 @@ fn test_non_overlapping_changes_are_manual_conflicts() {
 
     let r = engine.sync(&backend).unwrap();
 
-    assert_eq!(r.conflicts, vec!["pages/doc.md"]);
-    assert_eq!(read_local(local.path(), "pages/doc.md"), local_ver);
+    let merged = "header\n\nlocal paragraph 1\n\nremote paragraph 2\n\nfooter\n";
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.merged, vec!["pages/doc.md"]);
+    assert!(r.conflicts.is_empty() && r.merge_conflicts.is_empty());
+    assert_eq!(read_local(local.path(), "pages/doc.md"), merged);
+    assert_eq!(backend.get_file("pages/doc.md").unwrap(), merged.as_bytes());
+
+    // Neither original is lost: both stay recoverable.
+    let kept: Vec<String> = fs::read_dir(local.path().join(".grafium/sync-recovery/pages"))
+        .unwrap()
+        .filter_map(|entry| fs::read_to_string(entry.ok()?.path()).ok())
+        .collect();
+    assert!(kept.iter().any(|text| text == local_ver));
+    assert!(kept.iter().any(|text| text == remote_ver));
+
+    // And it settles: nothing left to do on the next sync.
+    assert!(engine.sync(&backend).unwrap().is_clean());
 }
 
 #[test]
@@ -626,13 +648,13 @@ tags:: #review, #planning
   - Book room for standup
 ";
 
-    let r = three_way_merge(base, local, remote);
+    let r = three_way_merge(base, local, remote).expect("a small note is always mergeable");
 
     // Local changed tags and added a line to review section
     // Remote added a line to plan section
     // These are non-overlapping → should auto-merge
     assert!(
-        !r.has_conflicts,
+        !r.has_conflicts(),
         "Expected clean merge but got conflicts:\n{}",
         r.content
     );
@@ -650,20 +672,34 @@ tags:: #review, #planning
 }
 
 #[test]
-fn test_merge_preserves_properties() {
+fn test_merge_properties() {
+    // Two edits on neighbouring lines have no unchanged line between them, so
+    // they are one conflict: nothing is lost and a person picks.
     let base = "title:: My Page\nauthor:: Alice\nstatus:: draft\n\n- content here\n";
     let local = "title:: My Page\nauthor:: Alice\nstatus:: in-review\n\n- content here\n";
     let remote = "title:: My Page\nauthor:: Bob\nstatus:: draft\n\n- content here\n";
 
-    let r = three_way_merge(base, local, remote);
+    let r = three_way_merge(base, local, remote).unwrap();
+    assert_eq!(r.conflict_count, 1);
+    for kept in [
+        "status:: in-review",
+        "author:: Bob",
+        "status:: draft",
+        "author:: Alice",
+    ] {
+        assert!(r.content.contains(kept), "lost {kept:?}:\n{}", r.content);
+    }
 
-    // status changed by local, author changed by remote → both non-overlapping
-    assert!(!r.has_conflicts, "Expected clean merge:\n{}", r.content);
-    assert!(
-        r.content.contains("status:: in-review"),
-        "Missing local status"
+    // With an unchanged line between them, the same two edits merge.
+    let base = "author:: Alice\ntitle:: My Page\nstatus:: draft\n";
+    let local = "author:: Alice\ntitle:: My Page\nstatus:: in-review\n";
+    let remote = "author:: Bob\ntitle:: My Page\nstatus:: draft\n";
+    let r = three_way_merge(base, local, remote).unwrap();
+    assert!(!r.has_conflicts(), "Expected clean merge:\n{}", r.content);
+    assert_eq!(
+        r.content,
+        "author:: Bob\ntitle:: My Page\nstatus:: in-review\n"
     );
-    assert!(r.content.contains("author:: Bob"), "Missing remote author");
 }
 
 #[test]
@@ -672,30 +708,32 @@ fn test_merge_conflict_markers_format() {
     let local = "line1\nlocal change\n";
     let remote = "line1\nremote change\n";
 
-    let r = three_way_merge(base, local, remote);
-    assert!(r.has_conflicts);
+    let r = three_way_merge(base, local, remote).unwrap();
+    assert_eq!(r.conflict_count, 1);
 
-    // Verify marker format
+    // The scanner recognises exactly what the merge wrote.
+    let scan = grafium_core::sync::scan_markers(&r.content).expect("markers are live");
+    assert_eq!(scan.hunks, 1);
+
+    let yours = format!("<<<<<<< YOURS (merge {})", scan.token);
+    let sep = format!("======= (merge {})", scan.token);
+    let theirs = format!(">>>>>>> THEIRS (merge {})", scan.token);
     let lines: Vec<&str> = r.content.lines().collect();
-    assert!(lines.contains(&"<<<<<<< local"));
-    assert!(lines.contains(&"======="));
-    assert!(lines.contains(&">>>>>>> remote"));
+    let start = lines.iter().position(|l| *l == yours).expect("YOURS line");
+    let mid = lines
+        .iter()
+        .position(|l| *l == sep)
+        .expect("separator line");
+    let end = lines
+        .iter()
+        .position(|l| *l == theirs)
+        .expect("THEIRS line");
+    assert!(start < mid && mid < end);
 
-    // local content should be between <<<<<<< and =======
-    let local_start = lines.iter().position(|l| *l == "<<<<<<< local").unwrap();
-    let sep = lines.iter().position(|l| *l == "=======").unwrap();
-    let remote_end = lines.iter().position(|l| *l == ">>>>>>> remote").unwrap();
-
-    assert!(local_start < sep);
-    assert!(sep < remote_end);
-
-    // Check local content is between markers
-    let local_content: Vec<&&str> = lines[local_start + 1..sep].iter().collect();
-    assert!(local_content.iter().any(|l| l.contains("local change")));
-
-    // Check remote content is between markers
-    let remote_content: Vec<&&str> = lines[sep + 1..remote_end].iter().collect();
-    assert!(remote_content.iter().any(|l| l.contains("remote change")));
+    // The detecting device's text sits under YOURS, the remote's under THEIRS.
+    assert_eq!(lines[start + 1..mid], ["local change"]);
+    assert_eq!(lines[mid + 1..end], ["remote change"]);
+    assert_eq!(lines[0], "line1");
 }
 
 #[test]
@@ -703,11 +741,11 @@ fn test_two_way_merge_no_base() {
     let local = "local only line 1\nshared line\nlocal only line 2\n";
     let remote = "remote only line 1\nshared line\nremote only line 2\n";
 
-    let r = two_way_merge(local, remote);
-    // With no base, differing sections should be conflicts
-    assert!(r.has_conflicts);
-    // But the shared line should appear
-    assert!(r.content.contains("shared line"));
+    let r = two_way_merge(local, remote).unwrap();
+    // With no base, every differing stretch is a conflict...
+    assert_eq!(r.conflict_count, 2);
+    // ...but the shared line is written once, outside the markers.
+    assert_eq!(r.content.matches("shared line").count(), 1);
 }
 
 // ===========================================================================
@@ -1004,8 +1042,8 @@ fn merge_preserves_crlf_and_absent_trailing_newline() {
     let local = "alpha EDITED\r\nbeta\r\ngamma\r\n";
     let remote = "alpha\r\nbeta\r\ngamma EDITED\r\n";
 
-    let merged = three_way_merge(base, local, remote);
-    assert!(!merged.has_conflicts);
+    let merged = three_way_merge(base, local, remote).unwrap();
+    assert!(!merged.has_conflicts());
     assert!(
         merged.content.contains("\r\n"),
         "CRLF line endings were rewritten to LF: {:?}",
@@ -1021,7 +1059,7 @@ fn merge_preserves_crlf_and_absent_trailing_newline() {
     let base = "alpha\nbeta\ngamma";
     let local = "alpha EDITED\nbeta\ngamma";
     let remote = "alpha\nbeta\ngamma EDITED";
-    let merged = three_way_merge(base, local, remote);
+    let merged = three_way_merge(base, local, remote).unwrap();
     assert!(
         !merged.content.ends_with('\n'),
         "merge added a trailing newline that was not there: {:?}",
@@ -1029,6 +1067,6 @@ fn merge_preserves_crlf_and_absent_trailing_newline() {
     );
 
     // And one that had a trailing newline keeps it.
-    let merged = three_way_merge("a\nb\nc\n", "a EDITED\nb\nc\n", "a\nb\nc EDITED\n");
+    let merged = three_way_merge("a\nb\nc\n", "a EDITED\nb\nc\n", "a\nb\nc EDITED\n").unwrap();
     assert!(merged.content.ends_with('\n'));
 }

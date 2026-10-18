@@ -1472,6 +1472,7 @@ pub fn run() {
             commands::sync::sync_check_status,
             commands::sync::sync_list_conflicts,
             commands::sync::sync_get_conflict_state,
+            commands::sync::sync_list_pending_merges,
             commands::sync::sync_resolve_conflict,
             commands::sync::sync_run,
             commands::sync::sync_run_all,

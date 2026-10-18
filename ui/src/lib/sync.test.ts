@@ -3,7 +3,7 @@ const ipc = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), toast: vi.fn()
 vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: ipc.listen }));
 vi.mock("./toast.svelte", () => ({ showToast: ipc.toast }));
-import { summarizeSyncResult, getSyncConflictState, resolveSyncConflict, initSyncMonitor, type SyncResult } from "./sync";
+import { summarizeSyncResult, getSyncConflictState, resolveSyncConflict, initSyncMonitor, loadSyncAttention, type SyncResult } from "./sync";
 import settings from "../components/Settings.svelte?raw";
 import app from "../App.svelte?raw";
 
@@ -65,10 +65,35 @@ describe("summarizeSyncResult", () => {
       } });
       expect(ipc.toast).toHaveBeenCalledWith(
         expect.stringContaining("2 books have notes to merge; open Book notes"), "info");
-      expect(ipc.toast.mock.calls[0][0]).toContain("3 annotation files merged");
+      expect(ipc.toast.mock.calls[0][0]).toContain("3 merged");
       expect(ipc.toast.mock.calls[0][0]).not.toContain("2 conflicts");
       expect(ipc.invoke).not.toHaveBeenCalled();
       unlisten();
+    });
+    it("tells a person which notes still hold merge markers, without calling it an error", async () => {
+      const handlers = new Map<string, (event: unknown) => void>();
+      ipc.listen.mockImplementation(async (name, handler) => { handlers.set(name, handler); return vi.fn(); });
+      const unlisten = await initSyncMonitor();
+      handlers.get("sync-completed")!({ payload: {
+        target_name: "USB", pushed: 1, pulled: 0, conflicts: 0, merge_conflicts: 2, merged: 1,
+      } });
+      expect(ipc.toast).toHaveBeenCalledWith(expect.stringContaining("2 notes need merging; open Conflicts"), "info");
+      expect(ipc.toast.mock.calls[0][0]).toContain("1 merged");
+      expect(ipc.toast.mock.calls[0][0]).not.toContain("⚡");
+      handlers.get("sync-completed")!({ payload: {
+        target_name: "USB", pushed: 0, pulled: 0, conflicts: 1, merge_conflicts: 1,
+      } });
+      expect(ipc.toast).toHaveBeenLastCalledWith(expect.stringContaining("1 note needs merging"), "error");
+      unlisten();
+    });
+    it("asks the backend for both kinds of outstanding work together", async () => {
+      ipc.invoke.mockImplementation(async (command: string) =>
+        command === "sync_list_pending_merges" ? [{ rel_path: "pages/todo.md", conflicts: 2 }] : []);
+      const attention = await loadSyncAttention();
+      expect(attention.conflicts).toEqual([]);
+      expect(attention.pendingMerges).toEqual([{ rel_path: "pages/todo.md", conflicts: 2 }]);
+      expect(ipc.invoke).toHaveBeenCalledWith("sync_list_conflicts");
+      expect(ipc.invoke).toHaveBeenCalledWith("sync_list_pending_merges");
     });
     it("cleans up partial monitor subscriptions when registration fails", async () => {
       const stop = vi.fn();
@@ -94,8 +119,16 @@ describe("summarizeSyncResult", () => {
     expect(summarizeSyncResult(result({ annotation_conflicts: ["books/1.jsonld"] })))
       .toBe("1 book has notes to merge; open Book notes");
   });
-  it("reports compatible annotation merges even without file copies", () => {
-    expect(summarizeSyncResult(result({ merged: ["books/1.jsonld"] }))).toContain("1 annotation files merged");
+  it("reports compatible merges even without file copies", () => {
+    expect(summarizeSyncResult(result({ merged: ["books/1.jsonld"] }))).toContain("1 merged");
+    expect(summarizeSyncResult(result({ merged: ["pages/todo.md"] }))).toBe("↔ 1 merged");
+  });
+  it("never reports a sync with notes waiting on a person as clean", () => {
+    const summary = summarizeSyncResult(result({ merge_conflicts: ["pages/todo.md"] }));
+    expect(summary).toBe("1 note needs merging; open Conflicts");
+    expect(summary).not.toContain("Everything in sync");
+    expect(summarizeSyncResult(result({ merge_conflicts: ["pages/a.md", "pages/b.md"] })))
+      .toBe("2 notes need merging; open Conflicts");
   });
   it("shares the full result summary in Settings and wires completion notifications in App", () => {
     expect(settings).toContain("syncMessage = summarizeSyncResult(result)");
@@ -123,6 +156,7 @@ describe("summarizeSyncResult", () => {
         pulled: ["b"],
         conflicts: ["c"],
         annotation_conflicts: ["books/1.jsonld"],
+        merge_conflicts: ["pages/todo.md"],
         merged: ["books/1.jsonld"],
         deleted_remote: ["d"],
         deleted_local: ["e"],
@@ -134,7 +168,8 @@ describe("summarizeSyncResult", () => {
       "1 pulled",
       "1 conflicts",
       "1 book has notes to merge",
-      "1 annotation files merged",
+      "1 note needs merging",
+      "1 merged",
       "1 deleted remote",
       "1 deleted local",
       "1 errors",

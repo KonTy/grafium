@@ -60,13 +60,21 @@ because the only other option would be deleting one side.
 
 ## Conflicts and deletion safety
 
-Grafium does not silently choose a winner. Conflicting edits remain available
-for manual review in the right-panel **Conflicts** tab, which appears while a
-sync runs and stays available — with a count — for as long as anything is
-unresolved. Compare the normal local file and preserved versions, then click
-**Resolve**. Choose the current **Local** or **Remote** version and confirm.
-You can edit a Markdown note before choosing it, but editing alone does not
-authorize an overwrite. Binary books and images keep their exact selected bytes.
+A page or journal edited on two devices is merged block by block. Edits in
+different places combine on their own. When both devices changed the same
+place, Grafium writes marker lines into the note on this device only, never
+uploads that note until they are gone, and lists it in the **Conflicts** tab.
+Keep the text you want, delete the unwanted side and the marker lines, then sync
+again. See [[Help - Sync]] for the details.
+
+Grafium does not silently choose a winner. Conflicting edits to other files
+remain available for manual review in the right-panel **Conflicts** tab, which
+appears while a sync runs and stays available — with a count — for as long as
+anything is unresolved. Compare the normal local file and preserved versions,
+then click **Resolve**. Choose the current **Local** or **Remote** version and
+confirm. You can edit a Markdown note before choosing it, but editing alone does
+not authorize an overwrite. Binary books and images keep their exact selected
+bytes.
 
 The dialog shows missing files as **deleted**; choosing a deleted side confirms
 deletion on the other side. If either version changes while you decide, reload

@@ -10,9 +10,10 @@ targets. A filesystem target can be a USB drive or network folder.
 
 A first sync merges both sides: remote-only files come down, local-only files
 go up, and a file that exists on both sides with different contents becomes a
-conflict rather than an overwrite. Nothing is replaced silently. If you want a
-USB graph on its own rather than merged into the graph you already have here,
-create an empty graph first and sync into that.
+conflict rather than an overwrite. For a page or journal that means marker
+lines in the note; see **Notes edited on two devices**. Nothing is replaced
+silently. If you want a USB graph on its own rather than merged into the graph
+you already have here, create an empty graph first and sync into that.
 
 A target belongs to the graph it was first synced with. Point a graph at a
 location holding a different graph and Grafium stops with an explanation
@@ -31,11 +32,51 @@ Sync's status reports **books have notes to merge; open Book notes** separately
 from ordinary file conflicts. This is not a request to choose one entire
 JSON-LD file over the other: both sets of note candidates are already retained.
 
-Other file conflicts are not resolved automatically. When a sync is running — and for
+## Notes edited on two devices
+
+When the same page or journal changed on both devices, sync compares the two
+versions block by block instead of choosing one:
+
+- **Different places combine on their own.** The merged note is saved here and
+  uploaded. Differences that do not change the text, such as trailing spaces or
+  the hidden block ids Grafium adds, never count as a conflict.
+- **The same place is never guessed.** Grafium writes marker lines into the note
+  on **this device only** and lists the note in the **Conflicts** tab. Sync's
+  status reports **notes need merging; open Conflicts**.
+
+The marker lines look like this, where the dots stand for a short code Grafium
+adds:
+
+```text
+<<<<<<< YOURS (merge ········)
+what this device has
+======= (merge ········)
+what the other device has
+>>>>>>> THEIRS (merge ········)
+```
+
+To resolve a note, open it from the **Conflicts** tab. Each marker line is its
+own block, shown in colour. Keep the text you want, delete the rest, and delete
+all three marker lines. Repeat for every marked spot, then run **Sync Now**
+again to upload the finished note.
+
+Markers never travel. A note that still has a marker line is neither uploaded
+nor replaced, so the other device never receives half-finished text and the two
+devices cannot end up chasing each other's fixes. Your finished note arrives
+there as an ordinary edit. Both original versions are kept under
+`sync-recovery/` in this graph's metadata folder.
+
+Reading notes, `knowledge/` files, assets, books, notes over 2 MiB and files
+that are not UTF-8 text are not merged this way; they use the choice below.
+
+## Other file conflicts
+
+Other conflicts are not resolved automatically. When a sync is running — and for
 a few minutes afterwards — a **Conflicts** tab appears in the right panel. It
-also comes back on its own, with a count, whenever conflicts are still
-unresolved, including after a restart. Once everything is resolved the tab goes
-away again, so it does not take up space on a graph that has never conflicted.
+also comes back on its own, with a count, whenever a note has marker lines or a
+conflict is unresolved, including after a restart. Once everything is resolved
+the tab goes away again, so it does not take up space on a graph that has never
+conflicted.
 
 To resolve one, open the **Conflicts** tab and compare the versions. You may edit
 the normal Markdown note first, but editing or opening a file does not by itself

@@ -39,6 +39,18 @@ pub struct UnresolvedConflict {
     pub recorded_at: i64,
 }
 
+/// A note whose diverged edits were merged into the local file with conflict
+/// markers. The markers stay on this device; only the resolved note syncs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMerge {
+    pub rel_path: String,
+    /// Short id printed in every marker line of this merge.
+    pub token: String,
+    /// Marked spots when the merge was written or last seen.
+    pub conflicts: usize,
+    pub recorded_at: i64,
+}
+
 /// Persistent sync state — stored in the local graph folder.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SyncState {
@@ -54,6 +66,9 @@ pub struct SyncState {
     /// Conflicts awaiting an explicit revision-checked side selection.
     #[serde(default)]
     pub unresolved_conflicts: HashMap<String, UnresolvedConflict>,
+    /// Notes that hold merge markers until the user edits them clean.
+    #[serde(default)]
+    pub pending_merges: HashMap<String, PendingMerge>,
 }
 
 impl SyncState {
@@ -194,6 +209,30 @@ impl SyncState {
     pub fn resolve_unresolved_conflict(&mut self, rel_path: &str) {
         self.unresolved_conflicts.remove(rel_path);
     }
+
+    pub fn pending_merge(&self, rel_path: &str) -> Option<&PendingMerge> {
+        self.pending_merges.get(rel_path)
+    }
+
+    pub fn list_pending_merges(&self) -> Vec<&PendingMerge> {
+        self.pending_merges.values().collect()
+    }
+
+    pub fn record_pending_merge(&mut self, rel_path: &str, token: &str, conflicts: usize) {
+        self.pending_merges.insert(
+            rel_path.to_string(),
+            PendingMerge {
+                rel_path: rel_path.to_string(),
+                token: token.to_string(),
+                conflicts,
+                recorded_at: chrono::Utc::now().timestamp(),
+            },
+        );
+    }
+
+    pub fn clear_pending_merge(&mut self, rel_path: &str) -> bool {
+        self.pending_merges.remove(rel_path).is_some()
+    }
 }
 
 /// Configuration for a sync target.
@@ -251,5 +290,59 @@ impl SyncConfigs {
         }
         let json = serde_json::to_string_pretty(self)?;
         crate::fsutil::atomic_write(path, json.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_written_before_pending_merges_existed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync-state.json");
+        fs::write(
+            &path,
+            r#"{
+                "files": {
+                    "pages/a.md": {
+                        "rel_path": "pages/a.md",
+                        "hash_at_sync": "abc",
+                        "synced_at": 7
+                    }
+                },
+                "last_sync": 9,
+                "remote_id": "remote-1",
+                "unresolved_conflicts": {}
+            }"#,
+        )
+        .unwrap();
+
+        let state = SyncState::load(&path);
+        assert_eq!(state.files["pages/a.md"].hash_at_sync, "abc");
+        assert_eq!(state.remote_id.as_deref(), Some("remote-1"));
+        assert!(state.pending_merges.is_empty());
+        assert!(
+            !path.with_extension("json.corrupt").exists(),
+            "an old state file must not be set aside as corrupt"
+        );
+    }
+
+    #[test]
+    fn pending_merges_survive_a_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync-state.json");
+        let mut state = SyncState::default();
+        state.record_pending_merge("pages/a.md", "3fa9c2d1", 2);
+        state.save(&path).unwrap();
+
+        let mut loaded = SyncState::load(&path);
+        let entry = loaded.pending_merge("pages/a.md").unwrap();
+        assert_eq!((entry.token.as_str(), entry.conflicts), ("3fa9c2d1", 2));
+        assert_eq!(loaded.list_pending_merges().len(), 1);
+
+        assert!(loaded.clear_pending_merge("pages/a.md"));
+        assert!(!loaded.clear_pending_merge("pages/a.md"));
+        assert!(loaded.pending_merge("pages/a.md").is_none());
     }
 }

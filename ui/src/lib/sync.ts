@@ -14,10 +14,15 @@ export interface SyncResult {
   pushed: string[];
   pulled: string[];
   conflicts: string[];
-  /** Adjacent annotation files combined without selecting a conflicting note head. */
+  /** Files combined without a choice: annotation files and notes whose edits did not overlap. */
   merged?: string[];
   /** Books with unresolved annotation heads, not file-level local/remote conflicts. */
   annotation_conflicts?: string[];
+  /**
+   * Notes edited in the same place on two devices. This device's copy now holds
+   * merge markers and is not uploaded until they are edited out.
+   */
+  merge_conflicts?: string[];
   deleted_remote: string[];
   deleted_local: string[];
   errors: string[];
@@ -29,6 +34,7 @@ export interface SyncCompleted {
   conflicts: number;
   merged?: number;
   annotation_conflicts?: number;
+  merge_conflicts?: number;
   deleted_local?: number;
   deleted_remote?: number;
   errors?: number;
@@ -37,12 +43,22 @@ export interface SyncCompleted {
 const annotationMergeNotice = (count: number) =>
   `${count} ${count === 1 ? "book has" : "books have"} notes to merge; open Book notes`;
 
+const noteMergeNotice = (count: number) =>
+  `${count} ${count === 1 ? "note needs" : "notes need"} merging; open Conflicts`;
+
 export interface SyncConflict {
   target_id: string;
   target_name: string;
   rel_path: string;
   backup_path: string;
   recorded_at: number;
+}
+
+/** A note that holds merge markers on this device until a person edits them out. */
+export interface PendingMergeNote {
+  rel_path: string;
+  /** Marked spots still in the note. */
+  conflicts: number;
 }
 
 export interface SyncConflictState {
@@ -99,6 +115,19 @@ export function listSyncConflicts(): Promise<SyncConflict[]> {
   return invoke("sync_list_conflicts");
 }
 
+export function listPendingMerges(): Promise<PendingMergeNote[]> {
+  return invoke("sync_list_pending_merges");
+}
+
+/**
+ * Everything sync is waiting on a person for: files that need a local-or-remote
+ * choice, and notes holding merge markers to edit out.
+ */
+export async function loadSyncAttention(): Promise<{ conflicts: SyncConflict[]; pendingMerges: PendingMergeNote[] }> {
+  const [conflicts, pendingMerges] = await Promise.all([listSyncConflicts(), listPendingMerges()]);
+  return { conflicts, pendingMerges };
+}
+
 /**
  * Renders a sync result as a short status line.
  *
@@ -110,8 +139,9 @@ export function summarizeSyncResult(result: SyncResult): string {
   const parts: string[] = [];
   if (result.pushed.length) parts.push(`↑ ${result.pushed.length} pushed`);
   if (result.pulled.length) parts.push(`↓ ${result.pulled.length} pulled`);
-  if (result.merged?.length) parts.push(`↔ ${result.merged.length} annotation files merged`);
+  if (result.merged?.length) parts.push(`↔ ${result.merged.length} merged`);
   if (result.conflicts.length) parts.push(`⚡ ${result.conflicts.length} conflicts`);
+  if (result.merge_conflicts?.length) parts.push(noteMergeNotice(new Set(result.merge_conflicts).size));
   if (result.annotation_conflicts?.length) parts.push(annotationMergeNotice(new Set(result.annotation_conflicts).size));
   if (result.deleted_remote.length) parts.push(`🗑 ${result.deleted_remote.length} deleted remote`);
   if (result.deleted_local.length) parts.push(`🗑 ${result.deleted_local.length} deleted local`);
@@ -131,13 +161,14 @@ export async function initSyncMonitor(): Promise<UnlistenFn> {
     ));
 
     unlisteners.push(await listen<SyncCompleted>("sync-completed", (event) => {
-      const { target_name, pushed, pulled, conflicts, merged = 0, annotation_conflicts = 0,
+      const { target_name, pushed, pulled, conflicts, merged = 0, annotation_conflicts = 0, merge_conflicts = 0,
         deleted_local = 0, deleted_remote = 0, errors = 0 } = event.payload;
       const parts: string[] = [];
       if (pushed) parts.push(`↑ ${pushed} pushed`);
       if (pulled) parts.push(`↓ ${pulled} pulled`);
-      if (merged) parts.push(`↔ ${merged} annotation files merged`);
+      if (merged) parts.push(`↔ ${merged} merged`);
       if (conflicts) parts.push(`⚡ ${conflicts} conflicts`);
+      if (merge_conflicts) parts.push(noteMergeNotice(merge_conflicts));
       if (annotation_conflicts) parts.push(annotationMergeNotice(annotation_conflicts));
       if (deleted_local) parts.push(`🗑 ${deleted_local} deleted local`);
       if (deleted_remote) parts.push(`🗑 ${deleted_remote} deleted remote`);
@@ -146,7 +177,7 @@ export async function initSyncMonitor(): Promise<UnlistenFn> {
 
       showToast(
         `Sync complete (${target_name}): ${summary}`,
-        conflicts > 0 || errors > 0 ? "error" : annotation_conflicts > 0 ? "info" : "success"
+        conflicts > 0 || errors > 0 ? "error" : annotation_conflicts > 0 || merge_conflicts > 0 ? "info" : "success"
       );
     }));
 

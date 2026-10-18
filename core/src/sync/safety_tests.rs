@@ -191,7 +191,7 @@ fn unchanged_binary_and_marker_containing_bytes_can_choose_either_side() {
 
 #[test]
 fn editing_conflict_is_not_permission_to_overwrite_remote() {
-    let path = "pages/doc.md";
+    let path = "knowledge/doc.md";
     let (root, backend, engine) = setup_conflict(path, b"local", b"remote");
     write(root.path(), path, b"local resolution");
     backend.set(path, b"newer remote");
@@ -204,7 +204,7 @@ fn editing_conflict_is_not_permission_to_overwrite_remote() {
 
 #[test]
 fn stale_resolution_reopens_and_preserves_new_remote_revision() {
-    let path = "pages/doc.md";
+    let path = "knowledge/doc.md";
     for during_publication in [false, true] {
         let (root, backend, engine) = setup_conflict(path, b"local", b"remote");
         let view = engine.conflict_state(&backend, path).unwrap();
@@ -236,7 +236,7 @@ fn stale_resolution_reopens_and_preserves_new_remote_revision() {
 fn missing_side_resolution_can_confirm_deletion_or_restore_explicitly() {
     for deleted_side in [ConflictSide::Local, ConflictSide::Remote] {
         for chosen in [ConflictSide::Local, ConflictSide::Remote] {
-            let path = "pages/doc.md";
+            let path = "knowledge/doc.md";
             let (root, backend, engine) = setup_conflict(path, b"local", b"remote");
             match deleted_side {
                 ConflictSide::Local => fs::remove_file(root.path().join(path)).unwrap(),
@@ -275,7 +275,7 @@ fn missing_side_resolution_can_confirm_deletion_or_restore_explicitly() {
 
 #[test]
 fn both_missing_conflict_can_be_cleared_without_resurrection() {
-    let path = "pages/doc.md";
+    let path = "knowledge/doc.md";
     let (root, backend, engine) = setup_conflict(path, b"local", b"remote");
     fs::remove_file(root.path().join(path)).unwrap();
     backend.delete(path);
@@ -478,7 +478,13 @@ fn same_bytes_and_book_directory_aba_reject_pull_but_sibling_edits_do_not() {
 #[test]
 fn explicit_resolution_does_not_restore_an_aba_deleted_source() {
     let path = "pages/Ephemeral.md";
-    let (root, backend, engine) = setup_conflict(path, b"- local\n", b"- remote\n");
+    // Reading-note data is never text-merged, so this page still conflicts
+    // as a whole file.
+    let (root, backend, engine) = setup_conflict(
+        path,
+        b"- local\nreading-note:: local\n",
+        b"- remote\nreading-note:: remote\n",
+    );
     fs::remove_file(root.path().join(path)).unwrap();
     let view = engine.conflict_state(&backend, path).unwrap();
     assert_eq!(view.local_hash, None);

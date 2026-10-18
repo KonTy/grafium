@@ -6,7 +6,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
-const SEED_VERSION: u8 = 86;
+const SEED_VERSION: u8 = 87;
 
 struct Resource {
     path: &'static str,
@@ -277,6 +277,19 @@ mod tests {
         let before = snapshot(temp.path());
         assert_eq!(seed(temp.path()), Ok(false));
         assert_eq!(snapshot(temp.path()), before);
+    }
+
+    #[test]
+    fn no_tutorial_page_contains_a_live_sync_merge_marker() {
+        // A signed marker line in a seeded note would hold that note out of
+        // sync forever, so help pages may only show the placeholder token.
+        for resource in RESOURCES {
+            assert!(
+                grafium_core::sync::scan_markers(resource.content).is_none(),
+                "{} contains a live sync merge marker",
+                resource.path
+            );
+        }
     }
 
     #[test]

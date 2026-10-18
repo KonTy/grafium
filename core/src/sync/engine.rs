@@ -1,4 +1,5 @@
 use super::backend::{compute_hash, revision_changed, FileMetadata, FileSnapshot, SyncBackend};
+use super::merge::scan_marker_bytes;
 use super::state::{SyncState, UnresolvedConflict};
 use crate::error::Result;
 use crate::fsutil::SourceMutationFence;
@@ -6,6 +7,8 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod text_merge;
 
 // Serialize state-file transactions, not graph editing. Never use this mutex
 // in Graph mutators; network I/O must not hold the source-publication lock.
@@ -37,10 +40,15 @@ pub struct SyncResult {
     pub pulled: Vec<String>,
     /// Files where conflicts were detected (both sides changed)
     pub conflicts: Vec<String>,
-    /// Files merged without discarding either side's annotation history.
+    /// Files whose two sides were combined automatically: annotation sidecars
+    /// (history from both sides kept) and notes whose edits did not overlap.
     pub merged: Vec<String>,
     /// Annotation sidecars whose concurrent note revisions need a user merge.
     pub annotation_conflicts: Vec<String>,
+    /// Notes edited on both devices in the same place. The local note now
+    /// carries conflict markers and stays on this device until they are edited
+    /// out; reported once, when the markers are written.
+    pub merge_conflicts: Vec<String>,
     /// Files deleted from remote (local deletion propagated)
     pub deleted_remote: Vec<String>,
     /// Files deleted locally (remote deletion propagated)
@@ -57,6 +65,7 @@ impl SyncResult {
             conflicts: Vec::new(),
             merged: Vec::new(),
             annotation_conflicts: Vec::new(),
+            merge_conflicts: Vec::new(),
             deleted_remote: Vec::new(),
             deleted_local: Vec::new(),
             errors: Vec::new(),
@@ -76,6 +85,7 @@ impl SyncResult {
             && self.conflicts.is_empty()
             && self.merged.is_empty()
             && self.annotation_conflicts.is_empty()
+            && self.merge_conflicts.is_empty()
             && self.deleted_remote.is_empty()
             && self.deleted_local.is_empty()
             && self.errors.is_empty()
@@ -83,11 +93,12 @@ impl SyncResult {
 
     pub fn summary(&self) -> String {
         format!(
-            "↑{} ↓{} 🔀{} ⚡{} notes:{} 🗑{}+{} ❌{}",
+            "↑{} ↓{} 🔀{} ⚡{} ✎{} notes:{} 🗑{}+{} ❌{}",
             self.pushed.len(),
             self.pulled.len(),
             self.merged.len(),
             self.conflicts.len(),
+            self.merge_conflicts.len(),
             self.annotation_conflicts.len(),
             self.deleted_remote.len(),
             self.deleted_local.len(),
@@ -170,8 +181,13 @@ impl SyncEngine {
         self.bases_dir.join(rel_path)
     }
 
-    /// Save a copy of file content as the merge base for future syncs.
+    /// Save a copy of file content as the merge base for future syncs. Only
+    /// notes are merged, so only notes keep a base. A base that is missing or
+    /// torn is harmless: it is checked against the recorded hash before use.
     fn save_base(&self, rel_path: &str, content: &[u8]) {
+        if !text_merge::keeps_base(rel_path, content.len()) {
+            return;
+        }
         let path = self.base_path(rel_path);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -460,6 +476,7 @@ impl SyncEngine {
                     self.sync_both_new(
                         backend,
                         &rel_path,
+                        &fence,
                         &mut local_files,
                         &mut remote_files,
                         &mut state,
@@ -520,6 +537,7 @@ impl SyncEngine {
         }
 
         // Save updated state
+        self.refresh_pending_merges(&mut state);
         state.last_sync = Some(Utc::now().timestamp());
         state.save(&self.state_path)?;
 
@@ -719,7 +737,7 @@ impl SyncEngine {
                     if let Some(ref hash) = local_hash {
                         state.record_sync(rel_path, hash, Some(&local_meta), Some(&remote_meta));
                     }
-                } else {
+                } else if !self.merge_diverged_note(backend, rel_path, fence, state, result) {
                     self.handle_conflict(
                         backend,
                         rel_path,
@@ -769,6 +787,7 @@ impl SyncEngine {
         &self,
         backend: &dyn SyncBackend,
         rel_path: &str,
+        fence: &SourceMutationFence,
         local_files: &mut HashMap<String, FileMetadata>,
         remote_files: &mut HashMap<String, FileMetadata>,
         state: &mut SyncState,
@@ -808,8 +827,8 @@ impl SyncEngine {
                 self.save_base(rel_path, &content);
             }
             state.record_sync(rel_path, &local_hash, Some(&local_meta), Some(&remote_meta));
-        } else {
-            // Different content — conflict
+        } else if !self.merge_diverged_note(backend, rel_path, fence, state, result) {
+            // Different content that cannot be merged line by line — conflict
             self.handle_conflict(backend, rel_path, Some(remote_meta.clone()), state, result);
         }
     }
@@ -832,6 +851,10 @@ impl SyncEngine {
             let Some(content) = local.content.as_deref() else {
                 return Err(revision_changed(rel_path));
             };
+            // A note with unresolved merge markers never leaves this device.
+            if self.hold_if_marked(rel_path, content, state) {
+                return Ok(());
+            }
             let annotation_conflicts = if crate::graph::books::is_annotation_sidecar(rel_path) {
                 crate::graph::books::validate_annotation_sidecar(rel_path, content)?;
                 crate::graph::books::annotation_conflict_count(content)?
@@ -1163,7 +1186,8 @@ impl SyncEngine {
     }
 
     /// Resolve exactly the versions presented to the user. None selects a
-    /// deletion; bytes are never decoded, merged, or inspected for markers.
+    /// deletion; bytes are never decoded or merged. The one inspection is a
+    /// refusal to publish a note that still carries merge markers.
     pub fn resolve_conflict(
         &self,
         backend: &dyn SyncBackend,
@@ -1196,6 +1220,18 @@ impl SyncEngine {
                 {
                     self.record_conflict(rel_path, &local, &remote, &mut state, &mut result)?;
                     return Err(revision_changed(rel_path));
+                }
+                if matches!(chosen, ConflictSide::Local)
+                    && text_merge::is_mergeable_path(rel_path)
+                    && local
+                        .content
+                        .as_deref()
+                        .and_then(scan_marker_bytes)
+                        .is_some()
+                {
+                    return Err(crate::error::CoreError::Other(format!(
+                        "{rel_path} still contains merge markers; edit them out before keeping this version"
+                    )));
                 }
                 self.preserve_copy(rel_path, &local)?;
                 self.preserve_copy(rel_path, &remote)?;

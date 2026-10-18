@@ -6,6 +6,7 @@ import { iconHtmlForName } from "./emojiIconPicker";
 import { tagColorVar } from "./tagColor";
 import { closesCodeFence, nextCodeFence, openingCodeFence, type CodeFence } from "./codeFence";
 import { parseOrderedListMarker } from "./orderedList";
+import { renderMergeMarkerBlock } from "./mergeMarkers";
 
 /**
  * KaTeX is the single largest library in the boot bundle, and most pages have
@@ -1024,7 +1025,7 @@ export function renderBlock(content: string, baseDir = ""): string {
     // styled callout wrapping the (recursively rendered) body.
     const callout = renderCalloutBlock(content);
     const videoEmbed = callout === null ? renderVideoEmbedBlock(content) : null;
-    html = callout !== null ? callout : videoEmbed !== null ? videoEmbed : renderMarkdownContent(content);
+    html = callout ?? videoEmbed ?? renderMergeMarkerBlock(content) ?? renderMarkdownContent(content);
   } finally {
     assetBaseDir = previousBaseDir;
     imageRenderIndex = previousImageRenderIndex;

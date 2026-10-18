@@ -643,6 +643,29 @@ ol.grafium-hierarchical-list > li {
   --callout-accent: var(--accent-yellow);
 }
 
+/* ── Sync conflict markers ──────────────────────────────────────────────── */
+/* Rendered from the marker lines sync writes into a note when two devices
+   changed the same spot. Same AA-safe recipe as callouts: a tint of the accent
+   over the page background, with the normal text colour. */
+.merge-marker {
+  --marker-accent: var(--accent-orange);
+  border-left: 4px solid var(--marker-accent);
+  background: color-mix(in srgb, var(--marker-accent) 10%, var(--bg-primary));
+  color: var(--text-primary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+.merge-marker-yours {
+  --marker-accent: var(--accent-blue);
+}
+
+.merge-marker-theirs {
+  --marker-accent: var(--accent-green);
+}
+
 /* External-link affordance: a persistent outbound-arrow marker (emitted by the
    markdown renderer next to http(s) links). This is a *non-colour* cue, so an
    external link is identifiable without relying on its accent-cyan colour —

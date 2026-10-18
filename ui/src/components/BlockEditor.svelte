@@ -93,7 +93,7 @@
   import { isEmptyOrderedListItem, orderedListMarker, ORDERED_MARKER_LOOKAHEAD } from "../lib/orderedList";
   import { isEmptyEditorBlock } from "../lib/editorEmpty";
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
-  import { getBulletMinHeight, getHeadingLevel } from "../lib/blockLayout";
+  import { getBulletMinHeight, getHeadingLevel, isQuoteBlockContent } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
   import DatePicker from "./DatePicker.svelte";
   import MobileEditorBar from "./MobileEditorBar.svelte";
@@ -454,7 +454,7 @@
   });
   let bulletMinHeight = $derived(getBulletMinHeight(block.content));
   let editorStyleClass = $derived(getEditorStyleClass(block.content));
-  let isQuoteBlock = $derived(block.content.trimStart().startsWith(">"));
+  let isQuoteBlock = $derived(isQuoteBlockContent(block.content));
   let isVisuallyEmpty = $derived(isVisuallyEmptyBlock(block.content));
   let isOrderedItem = $derived(isEditing ? editingOrderedList : listMarker.shape === "ordered");
   let suppressBullet = $derived(

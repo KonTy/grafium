@@ -7,7 +7,8 @@ use grafium_core::sync::{
     SyncBackend, SyncEngine, UnresolvedConflict,
 };
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Serialize)]
@@ -306,7 +307,11 @@ pub fn sync_resolve_conflict(
 }
 
 fn changes_local_sources(result: &SyncResult) -> bool {
-    !result.pulled.is_empty() || !result.deleted_local.is_empty() || !result.merged.is_empty()
+    // A note that just received merge markers was rewritten locally too.
+    !result.pulled.is_empty()
+        || !result.deleted_local.is_empty()
+        || !result.merged.is_empty()
+        || !result.merge_conflicts.is_empty()
 }
 
 fn reconcile_after_sync(graph: &grafium_core::graph::Graph) -> Result<(), String> {
@@ -358,7 +363,88 @@ pub(crate) fn completion_payload(target_name: &str, result: &SyncResult) -> serd
         "conflicts": result.conflicts.len(), "deleted_local": result.deleted_local.len(),
         "deleted_remote": result.deleted_remote.len(), "errors": result.errors.len(),
         "annotation_conflicts": result.annotation_conflicts.len(),
+        "merge_conflicts": result.merge_conflicts.len(),
     })
+}
+
+/// One `sync-completed` payload for a run over several targets. A note that
+/// more than one target reports is counted once.
+pub(crate) fn aggregate_completion_payload(results: &[SyncResult]) -> serde_json::Value {
+    let total = |count: fn(&SyncResult) -> usize| results.iter().map(count).sum::<usize>();
+    let distinct = |paths: fn(&SyncResult) -> &Vec<String>| {
+        results
+            .iter()
+            .flat_map(paths)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
+    serde_json::json!({
+        "target_name": "all targets",
+        "pushed": total(|r| r.pushed.len()),
+        "pulled": total(|r| r.pulled.len()),
+        "merged": total(|r| r.merged.len()),
+        "conflicts": total(|r| r.conflicts.len()),
+        "annotation_conflicts": distinct(|r| &r.annotation_conflicts),
+        "merge_conflicts": distinct(|r| &r.merge_conflicts),
+        "deleted_local": total(|r| r.deleted_local.len()),
+        "deleted_remote": total(|r| r.deleted_remote.len()),
+        "errors": total(|r| r.errors.len()),
+    })
+}
+
+/// A note holding merge markers on this device until a person edits them out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingMergeNote {
+    pub rel_path: String,
+    /// Marked spots still in the note.
+    pub conflicts: usize,
+}
+
+/// Notes holding merge markers across every target. Each target remembers the
+/// notes it holds back, so a note may be known to several; it is listed once.
+pub(crate) fn pending_merge_notes(
+    root_dir: &Path,
+    metadata_dir_name: &str,
+    targets: &[SyncConfig],
+) -> Vec<PendingMergeNote> {
+    let mut notes = BTreeMap::new();
+    for target in targets {
+        let engine = SyncEngine::new_with_metadata_dir_and_target(
+            root_dir.to_path_buf(),
+            metadata_dir_name,
+            &target.id,
+        );
+        for pending in engine.pending_merges() {
+            notes.insert(pending.rel_path, pending.conflicts);
+        }
+    }
+    notes
+        .into_iter()
+        .map(|(rel_path, conflicts)| PendingMergeNote {
+            rel_path,
+            conflicts,
+        })
+        .collect()
+}
+
+/// List the notes that hold merge markers and wait to be resolved by hand.
+#[tauri::command]
+pub fn sync_list_pending_merges(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PendingMergeNote>, String> {
+    let snapshot = crate::current_graph_snapshot(&app, state.graph.as_ref())?;
+    let configs = SyncConfigs::load(
+        &snapshot
+            .root_dir
+            .join(&snapshot.metadata_dir_name)
+            .join("sync-config.json"),
+    );
+    Ok(pending_merge_notes(
+        &snapshot.root_dir,
+        &snapshot.metadata_dir_name,
+        &configs.targets,
+    ))
 }
 
 /// Run sync against a specific target. Returns a summary of what happened.
@@ -460,33 +546,7 @@ pub fn sync_run_all(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Sy
         );
     }
 
-    let conflicts = results
-        .iter()
-        .map(|result| result.conflicts.len())
-        .sum::<usize>();
-    let pushed = results
-        .iter()
-        .map(|result| result.pushed.len())
-        .sum::<usize>();
-    let pulled = results
-        .iter()
-        .map(|result| result.pulled.len())
-        .sum::<usize>();
-    let _ = app.emit(
-        "sync-completed",
-        serde_json::json!({
-            "target_name": "all targets",
-            "pushed": pushed,
-            "pulled": pulled,
-            "merged": results.iter().map(|r| r.merged.len()).sum::<usize>(),
-            "conflicts": conflicts,
-            "annotation_conflicts": results.iter().flat_map(|r| &r.annotation_conflicts)
-                .collect::<std::collections::HashSet<_>>().len(),
-            "deleted_local": results.iter().map(|r| r.deleted_local.len()).sum::<usize>(),
-            "deleted_remote": results.iter().map(|r| r.deleted_remote.len()).sum::<usize>(),
-            "errors": results.iter().map(|r| r.errors.len()).sum::<usize>(),
-        }),
-    );
+    let _ = app.emit("sync-completed", aggregate_completion_payload(&results));
 
     Ok(results)
 }
