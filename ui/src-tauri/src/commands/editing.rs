@@ -18,7 +18,9 @@ pub enum NativePasteOutcome {
     /// WebKit was asked to paste into the focused element.
     Requested,
     /// This platform has no native paste path; the caller falls back to the
-    /// web clipboard API.
+    /// web clipboard API. Only the non-Linux build returns it, but the
+    /// frontend reads it as part of the contract.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Unsupported,
 }
 
