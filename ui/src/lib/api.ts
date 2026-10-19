@@ -671,6 +671,63 @@ export function saveLayoutPreferences(preferences: Partial<LayoutPreferences>): 
   return invoke("set_layout_preferences", { preferences });
 }
 
+export type SpellScript = "latin" | "cyrillic" | "devanagari" | "arabic";
+
+export interface SpellLanguage {
+  code: string;
+  name: string;
+  nativeName: string;
+  script: SpellScript;
+  /** Approximate memory in MB once the dictionary has been loaded. */
+  memoryMb: number;
+}
+
+export interface SpellcheckPreferences {
+  enabled: boolean;
+  languages: string[];
+}
+
+/** The dictionaries bundled with the app; no network is involved. */
+export function listSpellLanguages(): Promise<SpellLanguage[]> {
+  return invoke("spell_languages", {});
+}
+
+/** Pass the UI locale so the first run picks a matching language. */
+export function getSpellcheckPreferences(locale?: string): Promise<SpellcheckPreferences> {
+  return invoke("get_spellcheck_preferences", { locale });
+}
+
+/** Saves only the fields given and returns the resulting preferences. */
+export function saveSpellcheckPreferences(
+  preferences: Partial<SpellcheckPreferences>,
+  locale?: string,
+): Promise<SpellcheckPreferences> {
+  return invoke("set_spellcheck_preferences", { preferences, locale });
+}
+
+/** For each word, whether it is misspelled. */
+export function checkSpelling(words: string[], languages: string[]): Promise<boolean[]> {
+  return invoke("spell_check_words", { words, languages });
+}
+
+export function suggestSpelling(word: string, languages: string[], limit?: number): Promise<string[]> {
+  return invoke("spell_suggest", { word, languages, limit });
+}
+
+export function listPersonalWords(): Promise<string[]> {
+  return invoke("spell_personal_words", {});
+}
+
+/** Returns the updated personal dictionary. */
+export function addPersonalWord(word: string): Promise<string[]> {
+  return invoke("spell_add_personal_word", { word });
+}
+
+/** Returns the updated personal dictionary. */
+export function removePersonalWord(word: string): Promise<string[]> {
+  return invoke("spell_remove_personal_word", { word });
+}
+
 // Asset management
 export function downloadAsset(url: string, pageId?: string): Promise<string> {
   return invoke("download_asset", { url, pageId });

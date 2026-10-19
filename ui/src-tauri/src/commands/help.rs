@@ -135,4 +135,31 @@ mod tests {
         assert!(page.contains("**Alt+A**"));
         assert!(page.contains("add Shift to go back"));
     }
+
+    #[test]
+    fn settings_help_covers_every_bundled_spell_check_language() {
+        let page = super::help_get_page("settings".into()).unwrap();
+        let languages = grafium_core::spell::languages();
+        for language in languages {
+            assert!(
+                page.contains(language.name),
+                "Help - Settings does not mention {}",
+                language.name
+            );
+        }
+        let memory = languages.iter().map(|language| language.memory_mb);
+        let (least, most) = (memory.clone().min().unwrap(), memory.max().unwrap());
+        assert!(page.contains(&format!("about {least} MB")));
+        assert!(page.contains(&format!("about {most} MB")));
+        assert!(page.contains("personal-dictionary.txt"));
+    }
+
+    #[test]
+    fn editor_help_explains_the_spelling_menu_offline() {
+        let page = super::help_get_page("editor".into()).unwrap();
+        assert!(page.contains("## Spell check"));
+        assert!(page.contains("works offline"));
+        assert!(page.contains("**Add to dictionary**"));
+        assert!(page.contains("**Ignore for now**"));
+    }
 }

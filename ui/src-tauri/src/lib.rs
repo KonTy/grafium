@@ -981,6 +981,7 @@ pub fn run() {
         .manage(commands::startup::StartupWindow::default())
         .manage(private_voice::VoiceState::default())
         .manage(private_reader::ReaderState::default())
+        .manage(commands::spellcheck::SpellState::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("grafium-asset", |ctx, request| {
@@ -1353,6 +1354,14 @@ pub fn run() {
             commands::layout::set_sidebar_visibility,
             commands::layout::get_layout_preferences,
             commands::layout::set_layout_preferences,
+            commands::spellcheck::spell_languages,
+            commands::spellcheck::get_spellcheck_preferences,
+            commands::spellcheck::set_spellcheck_preferences,
+            commands::spellcheck::spell_check_words,
+            commands::spellcheck::spell_suggest,
+            commands::spellcheck::spell_personal_words,
+            commands::spellcheck::spell_add_personal_word,
+            commands::spellcheck::spell_remove_personal_word,
             commands::pages::list_pages,
             commands::pages::list_page_summaries,
             commands::pages::count_pages,

@@ -108,6 +108,36 @@ also opening the editor. A plain web link still opens the block for editing
 after it follows the link. Query result rows that carry a block reference are
 reachable with **Tab** and open with **Enter**.
 
+## Spell check
+
+Misspelled words get a wavy underline while you write. Checking runs on this
+device with dictionaries built into Grafium, so it works offline and sends
+nothing anywhere. It checks spelling only, not grammar.
+
+- Underlines appear in the block you are editing, the one showing its Markdown
+  source; rendered blocks are not marked. The word at the caret is left alone
+  until you move away from it, so a half-typed word is never flagged.
+- **Right-click** an underlined word to see up to five corrections. Choosing
+  one replaces the word and keeps its capital letters. **Add to dictionary**
+  keeps the word in your personal dictionary for every graph. **Ignore for now**
+  stops underlining it until Grafium restarts. **Escape** closes the menu and
+  changes nothing.
+- Code, links, web addresses, `[[page links]]`, `#tags`, page properties, HTML,
+  math and other markup are never checked. Neither are acronyms in capitals,
+  names with a capital inside such as `camelCase`, words with digits, or words
+  that mix alphabets.
+- Each word is checked against the selected languages written in its own
+  alphabet, and passes if any of them knows it. With English and Spanish
+  selected, either spelling passes. With English and Russian selected, Latin
+  words are checked as English and Cyrillic words as Russian. A word in an
+  alphabet none of the selected languages uses is not checked.
+- Adding a word in lower case accepts it in any capitalisation. Adding a
+  capitalised word, such as a name, accepts that capitalisation and ALL CAPS,
+  but not the lower-case form.
+
+Choose languages, turn spell check off, or review your dictionary in
+**Settings > Spell check**; see [[Help - Settings]].
+
 ## Deleted attachments and Undo
 
 Deleting text or blocks moves newly unreferenced attachments into persistent

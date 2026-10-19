@@ -25,6 +25,9 @@ large text field. Try these operations:
 - Drag or use the block controls to reorder, fold, and expand outlines.
 - Shift-select blocks, then copy, cut, delete, or undo the whole selection.
 - Leave a block to see its Markdown rendered; click it again to edit the source.
+- Misspelled words are underlined while you write, with no network needed.
+  Right-click one for corrections; choose languages in **Settings > Spell
+  check**. See [[Help - Editor]].
 
 When deleting text or blocks removes an attachment's last reference, its file
 moves to persistent graph-local trash. Undo restores the references and files

@@ -987,7 +987,7 @@ function setCache(key: string, val: string): void {
   cache.set(key, val);
 }
 
-function shouldRenderInlineMath(expr: string): boolean {
+export function shouldRenderInlineMath(expr: string): boolean {
   const trimmed = expr.trim();
   if (!trimmed) return false;
   if (/^\d/.test(trimmed) && /[A-Za-z]/.test(trimmed)) return false;

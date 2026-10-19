@@ -107,6 +107,7 @@ destructive-action confirmation warnings remain visible.
 | Bullet threading | Follow the active outline branch with connected guides and elbows. |
 | Editing tools | Split and merge blocks, insert a newline within a block, undo/redo edits, and copy or paste outlines. |
 | Formatting | Headings, emphasis, strikethrough, quotes, lists, inline code, and fenced code blocks. |
+| Offline spell check | Misspelled words get a wavy underline; right-click one for up to five suggestions, **Add to dictionary**, or **Ignore for now**. English (US and UK), Spanish, French, Russian, Hindi, and Arabic are bundled, so nothing is downloaded or sent anywhere. Choose languages and manage your word list in **Settings > Spell check**. Links, tags, code, URLs, and acronyms are skipped. It checks spelling only, not grammar. |
 | Math | Write inline and display mathematics with KaTeX. |
 | Sortable Markdown tables | Click a rendered column heading to sort ascending or descending, with numeric-aware ordering. The new order is saved back to Markdown. |
 | Rich paste | Convert pasted HTML to Markdown and preserve supported structure and media. Inside a code fence, paste literal text with indentation, blank lines, and trailing spaces intact; complete fenced snippets stay together. |
@@ -704,3 +705,5 @@ Grafium is licensed under the
 [GNU Affero General Public License v3.0](LICENSE). Modified versions offered
 over a network must make their corresponding source available to their users.
 Bundled galaxy photography has its own [credits and usage information](ui/public/space/ATTRIBUTION.txt).
+The bundled spell-check dictionaries are unmodified upstream Hunspell files; their
+sources and licences are listed in [core/dictionaries/README.md](core/dictionaries/README.md).

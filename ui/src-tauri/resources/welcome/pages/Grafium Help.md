@@ -8,7 +8,7 @@ separate graph.
 
 ## Help topics
 
-- [[Help - Editor]]
+- [[Help - Editor]] - blocks, links, tags, and offline spell check
 - [[Help - Journal]]
 - [[Help - Graph]]
 - [[Help - Flashcards]]
@@ -16,7 +16,7 @@ separate graph.
 - [[Help - Library]] - private media, recent pile, favorites, resume, and bookmarks
 - [[Help - Studies]] - learning plans linking Library, graph notes, and flashcards
 - [[Help - Chat]]
-- [[Help - Settings]]
+- [[Help - Settings]] - appearance, spell check languages and dictionary, library, AI, and sync
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery
 - [[Help - Sync]]
 - [[Help - Search]]

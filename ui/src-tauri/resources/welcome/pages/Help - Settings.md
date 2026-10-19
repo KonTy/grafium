@@ -1,7 +1,7 @@
 # Help - Settings
 
-Settings controls Grafium's appearance, graph behavior, indexing, AI features,
-and synchronization.
+Settings controls Grafium's appearance, graph behavior, spell checking, indexing,
+AI features, and synchronization.
 
 Settings keeps controls and current results visible, with explanations behind
 small **?** buttons. Click or keyboard-activate a **?** to open that topic's help.
@@ -88,6 +88,35 @@ also fades text and icons.
 Enabling native transparency requires a rebuilt Grafium and one normal quit and
 reopen. Later theme opacity changes are live. This does not migrate or refresh
 existing tutorial graphs, and installing a build does not restart a running app.
+
+## Spell check
+
+**Spell check** controls the offline spelling checker described in
+[[Help - Editor]]. It is on by default and applies to every graph.
+
+- **Underline misspelled words while writing** turns checking on or off.
+  Your languages and words are kept while it is off.
+- **Languages** lists the built-in dictionaries: English (US), English (UK),
+  Spanish, French, Russian, Hindi and Arabic. Tick every language you write in.
+  Until you choose, Grafium uses your system language, or English (US) when
+  that language has no dictionary; it saves a choice only once you make one.
+  With no language ticked, nothing is checked and Settings says so.
+- The figure beside each language is roughly the memory it uses while selected,
+  from about 3 MB for English to about 45 MB for Arabic. An unselected language
+  uses none. Dictionaries are built into the app, so nothing is downloaded and
+  no network is used. The Hindi and Arabic dictionaries are community-made and
+  less complete than the others, so expect more false underlines there.
+- **My dictionary** lists the words you added with **Add to dictionary**, lets
+  you type another, and **Remove** one. A word is letters of a built-in alphabet,
+  with an apostrophe or hyphen only between letters. Case matters: a lower-case
+  word is accepted in any capitalisation, a capitalised word only as written
+  (and in ALL CAPS).
+- The words are stored in `personal-dictionary.txt` in Grafium's settings folder,
+  one per line. They are not part of any graph and are not synced between
+  devices; every graph on this device shares them.
+- If the settings file cannot be read, spell check stays off and Settings says
+  why, with **Try again**. If the word list cannot be read, adding or removing a
+  word reports why. Grafium never overwrites a file it could not read.
 
 ## Private library
 

@@ -24,6 +24,12 @@ import importDialog from "../components/BookImportDialog.svelte?raw";
 import appSource from "../App.svelte?raw";
 import recoverySource from "../components/RuntimeRecovery.svelte?raw";
 import searchSource from "../components/GlobalSearchDialog.svelte?raw";
+import journalGuideHelp from "../../src-tauri/resources/welcome/pages/Help - Journal Guide.md?raw";
+import journalHelp from "../../src-tauri/resources/welcome/pages/Help - Journal.md?raw";
+import settingsSource from "../components/Settings.svelte?raw";
+import spellMenuSource from "../components/SpellcheckMenu.svelte?raw";
+import spellSettingsSource from "../components/SpellcheckSettings.svelte?raw";
+import { SUGGESTION_LIMIT } from "./spellcheck";
 
 const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
@@ -281,6 +287,50 @@ describe("contextual help", () => {
     expect(helpIndex).toContain("[[Help - Printing]]");
     expect(helpIndex).toContain("| Print | `Ctrl+P` / `Cmd+P` |");
     expect(printDialogSource).toContain('data-help-context="printing"');
+  });
+  it("explains the spelling menu with the labels the menu really shows", () => {
+    const labels = ["Add to dictionary", "Ignore for now"];
+    for (const label of labels) {
+      expect(spellMenuSource).toContain(label);
+      expect(editorHelp).toContain(`**${label}**`);
+    }
+    // The help says "up to five corrections".
+    expect(SUGGESTION_LIMIT).toBe(5);
+    for (const phrase of ["## Spell check", "works offline", "up to five corrections", "not grammar",
+      "**Settings > Spell check**", "`[[page links]]`", "ALL CAPS", "alphabet"]) {
+      expect(editorHelp).toContain(phrase);
+    }
+    expect(helpIndex).toContain("[[Help - Editor]] - blocks, links, tags, and offline spell check");
+  });
+  it("describes the Spell check section with the labels Settings really shows", () => {
+    for (const label of ["Underline misspelled words while writing", "Languages", "My dictionary", "Try again"]) {
+      expect(spellSettingsSource).toContain(label);
+      expect(settingsHelp).toContain(`**${label}**`);
+    }
+    for (const phrase of ["## Spell check", "English (US)", "English (UK)", "Spanish", "French", "Russian",
+      "Hindi", "Arabic", "community-made", "personal-dictionary.txt", "not synced between", "about 3 MB",
+      "about 45 MB"]) {
+      expect(settingsHelp).toContain(phrase);
+    }
+    expect(helpIndex).toContain("spell check languages and dictionary");
+  });
+  it("opens the Settings help from F1 inside the Spell check section", () => {
+    const section = settingsSource.match(
+      /<details[^>]*data-settings-section="spellcheck"[^>]*>[\s\S]*?<\/details>/,
+    )?.[0];
+    expect(section).toBeDefined();
+    expect(section).toContain('data-help-context="settings"');
+    expect(section).toContain("<SpellcheckSettings />");
+    expect(section).toContain(">Spell check</span>");
+    expect(isHelpContext("settings")).toBe(true);
+    expect(helpPageTitle("settings")).toBe("Help - Settings");
+  });
+  it("points Journal F1 at the spelling help", () => {
+    for (const page of [journalGuideHelp, journalHelp]) {
+      expect(page).toContain("Misspelled words are underlined");
+      expect(page).toContain("[[Help - Editor]]");
+      expect(page).toContain("Settings > Spell");
+    }
   });
   it("maps every supported context to a seeded help page", () => {
     const contexts: HelpContext[] = [

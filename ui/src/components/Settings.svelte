@@ -11,6 +11,7 @@
   import AISettings from "./AISettings.svelte";
   import ResearchSettings from "./ResearchSettings.svelte";
   import PrivateReaderSettings from "./PrivateReaderSettings.svelte";
+  import SpellcheckSettings from "./SpellcheckSettings.svelte";
   import { beginSyncRun, endSyncRun } from "../lib/syncActivity.svelte";
   import { runSyncTarget, summarizeSyncResult } from "../lib/sync";
   import {
@@ -338,6 +339,16 @@
         </select>
       </div>
     </div>
+  </details>
+
+  <details class="settings-section" data-help-context="settings" data-settings-section="spellcheck">
+    <summary class="section-header">
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 18l6-6-6-6"></path>
+      </svg>
+      <span class="section-title">Spell check</span>
+    </summary>
+    <div class="section-content"><SpellcheckSettings /></div>
   </details>
 
   <details class="settings-section" data-help-context="reader" data-settings-section="library" bind:this={librarySectionEl}>

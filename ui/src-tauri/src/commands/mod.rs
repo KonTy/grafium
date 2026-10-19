@@ -22,6 +22,7 @@ pub mod print;
 pub mod query;
 pub mod reading_notes;
 pub mod research;
+pub mod spellcheck;
 pub mod startup;
 pub mod studies;
 pub mod study_link;

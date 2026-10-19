@@ -19,6 +19,7 @@ pub mod parser;
 pub mod research;
 pub mod scraping;
 pub mod source_events;
+pub mod spell;
 pub mod study_link;
 pub mod sync;
 

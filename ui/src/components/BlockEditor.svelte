@@ -95,8 +95,10 @@
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel, isQuoteBlockContent } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
+  import { spellcheckExtension, type SpellcheckRequest } from "../lib/spellcheckExtension";
   import DatePicker from "./DatePicker.svelte";
   import MobileEditorBar from "./MobileEditorBar.svelte";
+  import SpellcheckMenu from "./SpellcheckMenu.svelte";
 
   interface Props {
     block: Block;
@@ -235,6 +237,8 @@
   const EDITOR_MAKE_LINK_CACHE_MS = 30_000;
   let imageSizeMenu: ImageSizeMenu | null = $state(null);
   let makeLinkMenu: MakeLinkMenu | null = $state(null);
+  // Raw, because the request holds the live editor view.
+  let spellMenu = $state.raw<SpellcheckRequest | null>(null);
   let lastEditorPageLinkRange: (TextLinkRange & { capturedAt: number }) | null = null;
   let blockContentEl = $state<HTMLElement | null>(null);
 
@@ -1295,6 +1299,7 @@
     }
     isEditing = false;
     makeLinkMenu = null;
+    spellMenu = null;
     keymap_manager.isEditing = false;
     if (notifyBlur) {
       onBlur?.(block.id);
@@ -1483,6 +1488,7 @@
     if (isEditing) return;
     imageSizeMenu = null;
     makeLinkMenu = null;
+    spellMenu = null;
     isEditing = true;
     keymap_manager.isEditing = true;
     onFocus?.(block.id);
@@ -1556,6 +1562,13 @@
         doc: block.content,
         extensions: [
           markdown(),
+          spellcheckExtension({
+            onContextMenu: (request) => {
+              imageSizeMenu = null;
+              makeLinkMenu = null;
+              spellMenu = request;
+            },
+          }),
           editorWriteLockExtension(pageId),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
@@ -2868,6 +2881,9 @@
           Make link
         </button>
       </div>
+  {/if}
+  {#if spellMenu}
+    <SpellcheckMenu request={spellMenu} onClose={() => (spellMenu = null)} />
   {/if}
 </div>
 

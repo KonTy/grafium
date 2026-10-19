@@ -68,6 +68,8 @@
   import { clipboardMarkdown } from "../lib/htmlToMd";
   import { followEditorShortcuts, withoutShortcutDefaults } from "../lib/editorShortcuts";
   import { getHeadingLevel } from "../lib/blockLayout";
+  import { spellcheckExtension, type SpellcheckRequest } from "../lib/spellcheckExtension";
+  import SpellcheckMenu from "./SpellcheckMenu.svelte";
 
   interface Props {
     page: Page;
@@ -111,6 +113,8 @@
   };
 
   let imageSizeMenu: ImageSizeMenu | null = $state(null);
+  // Raw, because the request holds the live editor view.
+  let spellMenu = $state.raw<SpellcheckRequest | null>(null);
 
   function sourceBlockKey(block: SourceBlock): string {
     return block.id ?? `pos:${block.previewFrom}`;
@@ -574,6 +578,7 @@
     }
     editorView?.destroy();
     editorView = undefined;
+    spellMenu = null;
   }
 
   function resetEditor(content: string) {
@@ -584,6 +589,12 @@
       doc: content,
       extensions: [
         markdown(),
+        spellcheckExtension({
+          onContextMenu: (request) => {
+            imageSizeMenu = null;
+            spellMenu = request;
+          },
+        }),
         editorWriteLockExtension(page.id),
         history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
         EditorState.transactionFilter.of((transaction) => {
@@ -1211,6 +1222,10 @@
         </button>
       {/each}
     </div>
+  {/if}
+
+  {#if spellMenu}
+    <SpellcheckMenu request={spellMenu} onClose={() => (spellMenu = null)} />
   {/if}
 
   {#if loading}

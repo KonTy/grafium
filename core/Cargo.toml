@@ -31,6 +31,15 @@ scraper = "0.27"
 pdf-extract = "0.12"
 url = "2"
 sysinfo = "0.33"
+# Offline spell checking (`spell`): a pure-Rust Hunspell, so it builds for
+# Android without a C toolchain. The dictionaries are deflated by build.rs and
+# inflated on first use.
+spellbook = "0.4"
+flate2 = "1"
+unicode-normalization = "0.1"
+
+[build-dependencies]
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

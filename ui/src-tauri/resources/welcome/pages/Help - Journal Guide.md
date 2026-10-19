@@ -23,6 +23,10 @@ TODO Turn this idea into a page
 Blocks keep their identity, so outlines can be reordered, folded, copied, and
 selected without flattening the journal into one large text field.
 
+Misspelled words are underlined while you write, with no network needed.
+Right-click one for corrections, and choose your languages in
+**Settings > Spell check**. See [[Help - Editor]].
+
 ## Links and connections
 
 Write `[[Dinner ideas]]` to connect to a page. Following a missing link can
