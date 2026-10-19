@@ -5,9 +5,10 @@
     getCollectionKind,
     withMissingCommandFallback,
   } from "../lib/pageTree";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
-  import { handleMenuKeydown } from "../lib/menuKeyboard";
-  import { autofocus } from "../lib/autofocus";
+  import { closeContextMenu, contextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuSection } from "../lib/contextMenuSections";
+  import { buildPageMenuSections, type PageCollectionState } from "../lib/sidebarMenu";
+  import { describeError } from "../lib/toast.svelte";
   import GraphMenu from "./GraphMenu.svelte";
   import { listFavorites, listRecentPages, addFavorite, removeFavorite, getGraphInfo, getPage } from "../lib/api";
   import { get } from "svelte/store";
@@ -47,15 +48,7 @@
   /// something inside the graph it came from.
   let graphPath: string | null = $state(null);
 
-  // Context menu state
-  interface ContextMenu {
-    x: number;
-    y: number;
-    page: Pick<Page, "id" | "title">;
-    isFav: boolean;
-    collectionStatus: "page" | "collection" | "original" | "loading" | "unavailable" | "error";
-  }
-  let contextMenu: ContextMenu | null = $state(null);
+  type PageRef = Pick<Page, "id" | "title">;
 
   $effect(() => {
     loadSidebar();
@@ -91,18 +84,6 @@
     void refreshRecent(limit);
   });
 
-  // Close context menu on any click outside
-  $effect(() => {
-    function closeMenu() { contextMenu = null; }
-    window.addEventListener("click", closeMenu);
-    window.addEventListener("contextmenu", closeMenu);
-    return () => {
-      window.removeEventListener("click", closeMenu);
-      window.removeEventListener("contextmenu", closeMenu);
-    };
-  });
-
-
   async function loadSidebar() {
     // Resolve which graph we're in before anything keyed to it is written.
     graphPath = await getGraphInfo()
@@ -121,76 +102,47 @@
     return new Set(favorites.map((f) => f.id));
   }
 
-  function handlePageRightClick(e: MouseEvent, page: Pick<Page, "id" | "title">) {
-    e.preventDefault();
-    e.stopPropagation();
-    const position = contextMenuPositionFromEvent(e, { width: 230, height: 100 });
-    contextMenu = {
-      x: position.x,
-      y: position.y,
-      page,
-      isFav: favSet().has(page.id),
-      collectionStatus: "loading",
-    };
-    void loadContextCollectionStatus(page.id);
+  /**
+   * What a right-click on a Favorites or Recent row offers. The menu acts on
+   * the row's page, however the lists change while it is open.
+   */
+  function pageMenuSections(page: PageRef): ContextMenuSection[] {
+    const isFavorite = favSet().has(page.id);
+    return buildPageMenuSections({
+      isFavorite,
+      toggleFavorite: () => toggleFavorite(page, isFavorite),
+      loadCollectionState: () => collectionState(page),
+      setCollection: (collection) => setCollection(page, collection),
+    });
   }
 
-  async function loadContextCollectionStatus(pageId: string) {
+  async function collectionState(page: PageRef): Promise<PageCollectionState> {
     try {
-      const page = await getPage({ id: pageId });
-      if (contextMenu?.page.id !== pageId) return;
-      if (isOriginalBookPage(page)) {
-        contextMenu.collectionStatus = "original";
-        return;
-      }
-      const result = await withMissingCommandFallback(
-        () => pagesListCollections(),
-        [],
-      );
-      if (contextMenu?.page.id !== pageId) return;
-      const collection = result.value.find((entry) => entry.id === pageId);
-      contextMenu.collectionStatus = result.available
-        ? collection ? "collection" : "page"
-        : "unavailable";
+      if (isOriginalBookPage(await getPage({ id: page.id }))) return "original";
+      const result = await withMissingCommandFallback(() => pagesListCollections(), []);
+      if (!result.available) return "unavailable";
+      return result.value.some((entry) => entry.id === page.id) ? "collection" : "page";
     } catch (error) {
-      if (contextMenu?.page.id !== pageId) return;
-      contextMenu.collectionStatus = "error";
       console.warn("[collection] Failed to load page kind:", error);
+      throw error;
     }
   }
 
-  async function handleToggleCollection() {
-    if (!contextMenu) return;
-    const { page, collectionStatus } = contextMenu;
-    if (
-      collectionStatus === "loading"
-      || collectionStatus === "original"
-      || collectionStatus === "unavailable"
-      || collectionStatus === "error"
-    ) return;
-
-    contextMenu.collectionStatus = "loading";
+  async function setCollection(page: PageRef, collection: boolean) {
     try {
-      await pageSetCollection(
-        page.id,
-        collectionStatus === "collection" ? null : "book",
-      );
-      contextMenu = null;
-      window.dispatchEvent(new CustomEvent("page-tree-refresh"));
-      window.dispatchEvent(new CustomEvent("page-collection-refresh", {
-        detail: { pageId: page.id },
-      }));
+      await pageSetCollection(page.id, collection ? "book" : null);
     } catch (error) {
-      if (contextMenu?.page.id === page.id) contextMenu.collectionStatus = "error";
       console.warn("[collection] Failed to update page kind:", error);
+      throw new Error(`Could not update the page kind: ${describeError(error)}`);
     }
+    window.dispatchEvent(new CustomEvent("page-tree-refresh"));
+    window.dispatchEvent(new CustomEvent("page-collection-refresh", {
+      detail: { pageId: page.id },
+    }));
   }
 
-  async function handleToggleFavorite() {
-    if (!contextMenu) return;
-    const { page, isFav } = contextMenu;
-    contextMenu = null;
-    if (isFav) {
+  async function toggleFavorite(page: PageRef, wasFavorite: boolean) {
+    if (wasFavorite) {
       await removeFavorite(page.id).catch(() => {});
     } else {
       await addFavorite(page.id).catch(() => {});
@@ -241,7 +193,7 @@
   function invalidateGraphBoundState() {
     favorites = [];
     recentPages = [];
-    contextMenu = null;
+    closeContextMenu();
   }
 
   function navigateToJournal() {
@@ -352,7 +304,7 @@
           class="nav-item page-item"
           class:active={currentPage?.id === fav.id}
           onclick={() => onNavigate(fav.title)}
-          oncontextmenu={(e) => handlePageRightClick(e, fav)}
+          use:contextMenu={() => pageMenuSections(fav)}
         >
           <svg class="fav-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
@@ -371,7 +323,7 @@
           class="nav-item page-item"
           class:active={currentPage?.id === recent.id}
           onclick={() => onNavigate(recent.title)}
-          oncontextmenu={(e) => handlePageRightClick(e, recent)}
+          use:contextMenu={() => pageMenuSections(recent)}
         >
           {recent.title}
         </button>
@@ -408,58 +360,6 @@
       {/if}
     </button>
   </div>
-
-  {#if contextMenu}
-    <!-- The menu takes focus while it is open so Escape and the arrow keys
-         work; focus returns to the opener when it closes. -->
-    <div
-      class="context-menu app-context-menu"
-      role="menu"
-      tabindex="-1"
-      use:autofocus
-      style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => handleMenuKeydown(e, () => { contextMenu = null; })}
-    >
-      <button class="context-menu-item" role="menuitem" onclick={handleToggleFavorite}>
-        {#if contextMenu.isFav}
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
-          </svg>
-          Remove from Favorites
-        {:else}
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
-          </svg>
-          Add to Favorites
-        {/if}
-      </button>
-      <button
-        class="context-menu-item"
-        role="menuitem"
-        disabled={contextMenu.collectionStatus === "loading" || contextMenu.collectionStatus === "original" || contextMenu.collectionStatus === "unavailable" || contextMenu.collectionStatus === "error"}
-        onclick={handleToggleCollection}
-      >
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M2.25 3.25h4l1.25 1.5h6.25v8H2.25z" stroke-linejoin="round" />
-          <path d="M5 8h6M5 10.5h4" stroke-linecap="round" />
-        </svg>
-        {#if contextMenu.collectionStatus === "original"}
-          Original book (read-only)
-        {:else if contextMenu.collectionStatus === "collection"}
-          Convert to Regular Page
-        {:else if contextMenu.collectionStatus === "loading"}
-          Loading Collection Status…
-        {:else if contextMenu.collectionStatus === "unavailable"}
-          Collections Unavailable
-        {:else if contextMenu.collectionStatus === "error"}
-          Collection Status Unavailable
-        {:else}
-          Mark as Book Collection
-        {/if}
-      </button>
-    </div>
-  {/if}
 </aside>
 
 <style>
@@ -662,38 +562,5 @@
     color: var(--accent);
     flex-shrink: 0;
     opacity: 0.8;
-  }
-
-  .context-menu {
-    position: fixed;
-    z-index: 2147483000;
-    border-radius: 6px;
-    padding: 4px;
-    min-width: 170px;
-  }
-
-  .context-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 10px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-secondary);
-    font-size: 13px;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .context-menu-item:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .context-menu-item:disabled {
-    color: var(--text-muted);
-    cursor: default;
   }
 </style>

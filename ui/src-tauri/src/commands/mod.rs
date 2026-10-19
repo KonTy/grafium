@@ -4,6 +4,7 @@ pub mod assistant_workflows;
 pub mod blocks;
 pub mod books;
 pub mod chat;
+pub mod editing;
 pub mod favorites;
 pub mod flashcards;
 pub mod graph;

@@ -54,11 +54,18 @@ describe("BlockEditor rendered links and tables", () => {
 describe("BlockEditor Make link context menu", () => {
   it("adds a right-click action for selected editor text", () => {
     expect(source).toContain("wrapPageLinkText");
-    expect(source).toContain("contextmenu: (event, view) =>");
+    expect(source).toContain("use:contextMenu={editorMenuSections}");
     expect(source).toContain("function rememberEditorPageLinkRange(view: EditorView)");
     expect(source).toContain("function cachedEditorPageLinkRange(view: EditorView)");
-    expect(source).toContain("function selectedRenderedPageLinkRange()");
-    expect(source).toContain("Make link");
+    expect(source).toContain('label: "Make link"');
+  });
+
+  it("adds the image actions and sizes to a right-click on a rendered image", () => {
+    expect(source).toContain("use:contextMenu={renderedMenuSections}");
+    for (const label of ["Copy Image", "Copy Image Address", "Copy Markdown Image", "Open Image", "Save Image As..."]) {
+      expect(source).toContain(`label: "${label}"`);
+    }
+    expect(source).toContain("buildImageSizeSection(");
   });
 
   it("reports direct block text mutations for app-level undo", () => {

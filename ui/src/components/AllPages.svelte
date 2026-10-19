@@ -40,15 +40,13 @@
   } from "../lib/pageTreeState";
   import type { BulkRenameResult, Page } from "../lib/api";
   import { isOriginalBookPage } from "../lib/books";
-
-  interface PageActionMenu {
-    x: number;
-    y: number;
-    pageId: string | null;
-    title: string;
-    bookTitle: string | null;
-    folder: boolean;
-  }
+  import { contextMenu, openContextMenuBelow } from "../lib/contextMenuHost.svelte";
+  import {
+    buildPageActionSections,
+    pageActionLabel,
+    type PageActionHandlers,
+    type PageActionTarget,
+  } from "../lib/pageActionMenu";
 
   interface ConfirmDialog {
     message: string;
@@ -126,9 +124,8 @@
   let reloadToken = $state(0); // bump to force a re-fetch of the visible window
 
   let spacerEl: HTMLDivElement | null = $state(null);
-  let actionMenuEl: HTMLDivElement | null = $state(null);
-  let actionMenu: PageActionMenu | null = $state(null);
   let confirmDialog: ConfirmDialog | null = $state(null);
+  let confirmDialogEl: HTMLDivElement | null = $state(null);
   let confirmResolver: ((ok: boolean) => void) | null = null;
   let renameDialog: RenameDialog | null = $state(null);
   let renameInputEl: HTMLInputElement | null = $state(null);
@@ -239,23 +236,6 @@
   });
 
   $effect(() => {
-    if (!actionMenu) return;
-    const closeOutside = (event: PointerEvent) => {
-      if (!actionMenuEl?.contains(event.target as Node)) actionMenu = null;
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") actionMenu = null;
-    };
-    window.addEventListener("pointerdown", closeOutside);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("pointerdown", closeOutside);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  });
-
-
-  $effect(() => {
     if (!confirmDialog && !renameDialog) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -264,6 +244,12 @@
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
+  });
+
+  // A menu hands focus back to the row it opened from. A confirmation has to
+  // take it, or Enter would act on that row instead of the dialog.
+  $effect(() => {
+    if (confirmDialog) confirmDialogEl?.focus();
   });
 
   // Track scroll/resize of the enclosing .main-content scroller.
@@ -604,55 +590,45 @@
     onPageDeleted?.();
   }
 
-  function menuPosition(event: MouseEvent): { x: number; y: number } {
-    const rect = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect();
-    const rawX = rect ? rect.right - 224 : event.clientX;
-    const rawY = rect ? rect.bottom + 4 : event.clientY;
-    return {
-      x: Math.min(Math.max(8, rawX), Math.max(8, window.innerWidth - 240)),
-      y: Math.min(Math.max(8, rawY), Math.max(8, window.innerHeight - 180)),
-    };
-  }
-
-  function openActionMenu(event: MouseEvent, target: Omit<PageActionMenu, "x" | "y">) {
-    const { x, y } = menuPosition(event);
-    actionMenu = { ...target, x, y };
-  }
-
-  function openMenuForNode(node: PageTreeViewNode, x: number, y: number) {
-    if (treeSource !== "namespace" && !node.page_id) return;
+  function treeNodeTarget(node: PageTreeViewNode): PageActionTarget | null {
+    if (treeSource !== "namespace" && !node.page_id) return null;
     const title = titleFromTreeNode(node);
-    actionMenu = {
+    return {
       pageId: node.page_id,
       title,
       bookTitle: bookTitleFromAnyTitle(title),
       folder: treeSource === "namespace"
         && (!node.page_id || node.count > 1 || node.children.length > 0),
-      x: Math.min(Math.max(8, x), Math.max(8, window.innerWidth - 240)),
-      y: Math.min(Math.max(8, y), Math.max(8, window.innerHeight - 180)),
     };
   }
 
-  function handleTreeNodeMenu(event: MouseEvent, node: PageTreeViewNode) {
-    const { x, y } = event.type === "contextmenu"
-      ? { x: event.clientX, y: event.clientY }
-      : menuPosition(event);
-    openMenuForNode(node, x, y);
-  }
-
-  function handleListPageMenu(event: MouseEvent, page: Page) {
-    openActionMenu(event, {
+  function listPageTarget(page: Page): PageActionTarget {
+    return {
       pageId: page.id,
       title: page.title,
       bookTitle: bookTitleFromAnyTitle(page.title),
       folder: false,
+    };
+  }
+
+  function treeNodeMenu(node: PageTreeViewNode) {
+    const target = treeNodeTarget(node);
+    return target ? buildPageActionSections(target, actionHandlers) : [];
+  }
+
+  function listPageMenu(page: Page) {
+    return buildPageActionSections(listPageTarget(page), actionHandlers);
+  }
+
+  function openListPageMenu(event: MouseEvent, page: Page) {
+    openContextMenuBelow(event.currentTarget as HTMLElement, {
+      sections: listPageMenu(page),
+      label: pageActionLabel(listPageTarget(page)),
     });
   }
 
-  async function handleRenameActionTarget() {
-    const target = actionMenu;
-    if (!target || target.bookTitle) return;
-    actionMenu = null;
+  async function handleRenameActionTarget(target: PageActionTarget) {
+    if (target.bookTitle) return;
     renameError = "";
     renameBusy = false;
     renameDialog = {
@@ -662,6 +638,8 @@
       folder: target.folder,
     };
     await tick();
+    // The menu has handed focus back to the row; the dialog takes it from there.
+    renameInputEl?.focus();
     renameInputEl?.select();
   }
 
@@ -698,10 +676,7 @@
     }
   }
 
-  async function handleOpenInFileBrowser() {
-    const target = actionMenu;
-    if (!target) return;
-    actionMenu = null;
+  async function handleOpenInFileBrowser(target: PageActionTarget) {
     try {
       const page = target.pageId ? await getPage({ id: target.pageId }) : null;
       if (page && isOriginalBookPage(page)) {
@@ -719,11 +694,7 @@
     }
   }
 
-  async function handleDeleteActionTarget() {
-    const target = actionMenu;
-    if (!target) return;
-    actionMenu = null;
-
+  async function handleDeleteActionTarget(target: PageActionTarget) {
     if (target.pageId) {
       try {
         const page = await getPage({ id: target.pageId });
@@ -773,6 +744,12 @@
       await deleteFolderByTitle(target.title, null);
     }
   }
+
+  const actionHandlers: PageActionHandlers = {
+    rename: handleRenameActionTarget,
+    openInFileBrowser: handleOpenInFileBrowser,
+    remove: handleDeleteActionTarget,
+  };
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") handleCreatePage();
@@ -1026,7 +1003,7 @@
           pinSpecialFolders={treeSource === "namespace"}
           revealToken={filterQuery.trim()}
           {onNavigate}
-          onPageContextMenu={handleTreeNodeMenu}
+          pageMenu={treeNodeMenu}
           hasPageMenu={(node) => !isJournalTreeNode(node.id)
             && (treeSource === "namespace" || node.page_id !== null)}
           storageKey={`${graphScopedKey(ALL_PAGES_TREE_STORAGE_KEY, graphPath)}.${treeSource}`}
@@ -1041,15 +1018,15 @@
     <div class="pages-spacer" bind:this={spacerEl} style="height: {total * ROW_H}px;">
       {#each visible as i (i)}
         {@const page = rows.get(i)}
-        <div class="page-row" style="top: {i * ROW_H}px;">
+        <div
+          class="page-row"
+          style="top: {i * ROW_H}px;"
+          use:contextMenu={() => (page ? listPageMenu(page) : [])}
+        >
           {#if page}
             <button
               class="page-link"
               onclick={() => onNavigate(page.title)}
-              oncontextmenu={(event) => {
-                event.preventDefault();
-                handleListPageMenu(event, page);
-              }}
             >
               {page.title}
               {#if page.is_journal}
@@ -1060,47 +1037,16 @@
             <button
               type="button"
               class="btn-page-actions"
-              onclick={(event) => handleListPageMenu(event, page)}
+              onclick={(event) => openListPageMenu(event, page)}
               title="Page actions"
               aria-label={`Actions for ${page.title}`}
+              aria-haspopup="menu"
             >⋯</button>
           {:else}
             <span class="page-link placeholder">…</span>
           {/if}
         </div>
       {/each}
-    </div>
-  {/if}
-
-  {#if actionMenu}
-    <div
-      class="page-action-menu"
-      role="menu"
-      aria-label={`Actions for ${actionMenu.title}`}
-      style={`left: ${actionMenu.x}px; top: ${actionMenu.y}px;`}
-      bind:this={actionMenuEl}
-    >
-      <p class="page-action-title">{actionMenu.bookTitle ?? actionMenu.title}</p>
-      {#if !actionMenu.bookTitle}
-        <button type="button" role="menuitem" class="page-action-item" onclick={() => void handleRenameActionTarget()}>
-          Rename{actionMenu.folder ? " folder" : ""}
-        </button>
-      {/if}
-      {#if actionMenu.pageId || actionMenu.bookTitle || actionMenu.folder}
-        <button type="button" role="menuitem" class="page-action-item" onclick={handleOpenInFileBrowser}>
-          Open in file browser
-        </button>
-      {/if}
-      <div class="page-action-separator" role="separator"></div>
-      <button type="button" role="menuitem" class="page-action-item danger" onclick={() => void handleDeleteActionTarget()}>
-        {#if actionMenu.bookTitle}
-          Delete whole book folder
-        {:else if actionMenu.folder}
-          Delete folder
-        {:else}
-          Delete page
-        {/if}
-      </button>
     </div>
   {/if}
 
@@ -1112,6 +1058,7 @@
         tabindex="-1"
         aria-modal="true"
         aria-label={confirmDialog.confirmLabel}
+        bind:this={confirmDialogEl}
         onclick={(event) => event.stopPropagation()}
         onkeydown={(event) => {
           if (event.key === "Escape") answerConfirm(false);
@@ -1539,64 +1486,6 @@
     opacity: 1;
     outline: 2px solid var(--accent);
     outline-offset: 1px;
-  }
-
-  .page-action-menu {
-    position: fixed;
-    z-index: 100;
-    width: 228px;
-    padding: 6px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface-overlay);
-    box-shadow: 0 10px 28px color-mix(in srgb, var(--bg-primary) 70%, transparent);
-  }
-
-  .page-action-title {
-    margin: 0 0 5px;
-    padding: 5px 7px 7px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .page-action-item {
-    width: 100%;
-    padding: 8px 9px;
-    border: none;
-    border-radius: 5px;
-    background: transparent;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: 13px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .page-action-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .page-action-item:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-
-  .page-action-item.danger {
-    color: var(--danger);
-  }
-
-  .page-action-item.danger:hover {
-    background: var(--danger-bg);
-  }
-
-  .page-action-separator {
-    height: 1px;
-    margin: 5px 2px;
-    background: var(--border);
   }
 
   .page-dialog-backdrop {

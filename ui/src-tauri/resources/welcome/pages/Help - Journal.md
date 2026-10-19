@@ -62,6 +62,7 @@ folders.
   visible on touch screens), or right-click the date and choose **Delete page**.
   This removes that day's `.md` file after you confirm. Page deletion itself
   cannot be undone; newly unused attachments go to recoverable Asset trash.
+  The same right-click menu also offers **Import from Media...**.
 - Use **Ctrl+Shift+P** / **Cmd+Shift+P** to open the command palette, then search
   for time, journal, insert, or navigation commands.
 - Use the toolbar timestamp command to insert the current local date and time.

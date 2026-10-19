@@ -226,7 +226,7 @@ const EXPECT = {
   check("Expand all is gone", await page.locator('button:text-is("Expand all")').count(), 0);
 
   console.log("\npage and folder menus");
-  const menu = page.locator(".page-action-menu");
+  const menu = page.locator(".ctx-menu");
   const rowFor = (title) => page.locator(`[data-tree-node="namespace:${title}"]`);
   const menus = [
     { title: "tech", folder: true },
@@ -247,7 +247,7 @@ const EXPECT = {
       }
       await menu.waitFor({ state: "visible" });
       check(`${title} ${trigger} opens its own menu`,
-        await menu.locator(".page-action-title").textContent(), title);
+        await menu.locator(".ctx-menu-title").textContent(), title);
       check(`${title} ${trigger} offers the correct delete`,
         await menu.getByRole("menuitem", { name: folder ? "Delete folder" : "Delete page", exact: true }).count(), 1);
       check(`${title} ${trigger} offers the file browser`,

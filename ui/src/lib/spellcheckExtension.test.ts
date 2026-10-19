@@ -3,6 +3,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { ensureSyntaxTree } from "@codemirror/language";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { closeContextMenu, getOpenContextMenu, installContextMenu } from "./contextMenuHost.svelte";
 import {
   SETTLE_DELAY_MS,
   TYPING_DELAY_MS,
@@ -11,6 +12,9 @@ import {
   visibleMisspellings,
   type SpellSource,
 } from "./spellcheckExtension";
+
+// The clipboard section is covered by its own tests; here only the spelling part is of interest.
+vi.mock("./editActions", () => ({ buildEditSection: () => null }));
 
 function word(text: string, from: number) {
   return { word: text, from, to: from + text.length };
@@ -67,6 +71,13 @@ function fakeSource(bad: string[] = ["recieve"]) {
   const check = vi.fn(
     async (words: readonly string[]) => new Set(words.filter((text) => bad.includes(text))),
   );
+  const notify = () => [...listeners].forEach((listener) => listener());
+  const ignore = vi.fn((text: string) => {
+    ignored.add(text.toLowerCase());
+    notify();
+  });
+  const suggest = vi.fn(async (_text: string) => ["receive", "relieve"]);
+  const addWord = vi.fn(async (_text: string) => [] as string[]);
   const source: SpellSource = {
     ready: async () => {},
     isActive: () => status.active,
@@ -78,18 +89,19 @@ function fakeSource(bad: string[] = ["recieve"]) {
         listeners.delete(listener);
       };
     },
+    suggest,
+    addWord,
+    ignore,
   };
-  const notify = () => [...listeners].forEach((listener) => listener());
   return {
     source,
     check,
+    suggest,
+    addWord,
+    ignore,
     listeners,
     setActive(active: boolean) {
       status.active = active;
-      notify();
-    },
-    ignore(text: string) {
-      ignored.add(text.toLowerCase());
       notify();
     },
   };
@@ -97,12 +109,12 @@ function fakeSource(bad: string[] = ["recieve"]) {
 
 const views: EditorView[] = [];
 
-function editor(doc: string, source: SpellSource, onContextMenu = vi.fn()) {
+function editor(doc: string, source: SpellSource) {
   const view = new EditorView({
     parent: document.body,
     state: EditorState.create({
       doc,
-      extensions: [markdown(), spellcheckExtension({ source, onContextMenu })],
+      extensions: [markdown(), spellcheckExtension({ source })],
     }),
   });
   views.push(view);
@@ -121,9 +133,8 @@ function rightClick(target: Element, init: MouseEventInit = {}) {
     clientY: 50,
     ...init,
   });
-  const stop = vi.spyOn(event, "stopPropagation");
   target.dispatchEvent(event);
-  return { event, stop };
+  return event;
 }
 
 const settle = (ms = 1) => vi.advanceTimersByTimeAsync(ms);
@@ -198,7 +209,7 @@ describe("spellcheckExtension", () => {
         extensions: [
           markdown(),
           mode.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]),
-          spellcheckExtension({ source, onContextMenu: vi.fn() }),
+          spellcheckExtension({ source }),
         ],
       }),
     });
@@ -237,6 +248,29 @@ describe("spellcheckExtension", () => {
     view.dispatch({ changes: { from: 2, to: 9, insert: "receive" } });
     await settle(TYPING_DELAY_MS);
     expect(underlined(view)).toEqual([]);
+  });
+
+  it("drops the underline from a word the moment it is edited, and leaves the others", async () => {
+    const { source } = fakeSource(["recieve", "teh"]);
+    const view = editor("recieve and teh", source);
+    await settle();
+    expect(underlined(view)).toEqual(["recieve", "teh"]);
+
+    view.dispatch({ changes: { from: 0, to: 7, insert: "receive" } });
+    expect(underlined(view)).toEqual(["teh"]);
+
+    view.dispatch({ changes: { from: 13, insert: "x" } });
+    expect(underlined(view)).toEqual([]);
+  });
+
+  it("keeps an underline when text is typed right next to its word", async () => {
+    const { source } = fakeSource();
+    const view = editor("a recieve b", source);
+    await settle();
+
+    view.dispatch({ changes: { from: 2, insert: "x" } });
+    view.dispatch({ changes: { from: 10, insert: "y" } });
+    expect(underlined(view)).toEqual(["recieve"]);
   });
 
   it("keeps an underline on its word while the text before it changes", async () => {
@@ -357,48 +391,118 @@ describe("spellcheckExtension", () => {
 });
 
 describe("right-clicking an underlined word", () => {
-  async function ready(doc = "a recieve b") {
-    const onContextMenu = vi.fn();
-    const view = editor(doc, fakeSource().source, onContextMenu);
+  let uninstall: () => void;
+
+  beforeEach(() => {
+    uninstall = installContextMenu(window);
+  });
+
+  afterEach(() => {
+    uninstall();
+    closeContextMenu({ restoreFocus: false });
+  });
+
+  async function ready(doc = "a recieve b", bad = ["recieve"]) {
+    const fake = fakeSource(bad);
+    const view = editor(doc, fake.source);
     await settle();
-    return { view, onContextMenu, span: view.dom.querySelector(".cm-spell-error")! };
+    return { view, fake, span: view.dom.querySelector(".cm-spell-error")! };
   }
 
-  it("reports the word and where the click was, and keeps the browser menu away", async () => {
-    const { view, onContextMenu, span } = await ready();
-    const { event, stop } = rightClick(span);
-    expect(onContextMenu).toHaveBeenCalledOnce();
-    expect(onContextMenu).toHaveBeenCalledWith({
-      view,
-      from: 2,
-      to: 9,
-      word: "recieve",
-      clientX: 40,
-      clientY: 50,
-    });
+  const shown = () => getOpenContextMenu()?.sections.map((section) => section.id);
+
+  it("offers the spelling choices for that word and keeps the browser menu away", async () => {
+    const { fake, span } = await ready();
+    const event = rightClick(span);
+    expect(shown()).toEqual(["spelling", "spelling-actions"]);
     expect(event.defaultPrevented).toBe(true);
-    expect(stop).toHaveBeenCalled();
+
+    const [spelling] = getOpenContextMenu()!.sections;
+    const items = await spelling.resolve!();
+    expect(fake.suggest).toHaveBeenCalledWith("recieve");
+    expect(items.map((item) => item.label)).toEqual(["receive", "relieve"]);
   });
 
-  it("is left alone anywhere else", async () => {
-    const { view, onContextMenu } = await ready();
-    const { event } = rightClick(view.dom.querySelector(".cm-line")!);
-    expect(onContextMenu).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
+  it("opens the menu where the pointer is", async () => {
+    const { span } = await ready();
+    rightClick(span, { clientX: 123, clientY: 77 });
+    expect(getOpenContextMenu()?.anchor).toEqual({ x: 123, y: 77 });
   });
 
-  it("is left to the editor when something else is selected", async () => {
-    const { view, onContextMenu, span } = await ready();
+  it("offers no spelling anywhere else, and still keeps the browser menu away", async () => {
+    const { view } = await ready();
+    const event = rightClick(view.dom.querySelector(".cm-line")!);
+    expect(shown()).toBeUndefined();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("offers none when something else is selected", async () => {
+    const { view, span } = await ready();
     view.dispatch({ selection: { anchor: 0, head: 1 } });
-    const { event } = rightClick(span);
-    expect(onContextMenu).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
+    rightClick(span);
+    expect(shown()).toBeUndefined();
   });
 
-  it("works when the word itself is selected", async () => {
-    const { view, onContextMenu, span } = await ready();
+  it("offers them when the word itself is selected", async () => {
+    const { view, span } = await ready();
     view.dispatch({ selection: { anchor: 2, head: 9 } });
     rightClick(span);
-    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(shown()).toEqual(["spelling", "spelling-actions"]);
+  });
+
+  it("picks the word that was clicked when there are several", async () => {
+    const { view, fake } = await ready("recieve and teh and recieve", ["recieve", "teh"]);
+    const spans = [...view.dom.querySelectorAll(".cm-spell-error")];
+    expect(spans.map((el) => el.textContent)).toEqual(["recieve", "teh", "recieve"]);
+    rightClick(spans[1]);
+    await getOpenContextMenu()!.sections[0].resolve!();
+    expect(fake.suggest).toHaveBeenCalledWith("teh");
+  });
+
+  describe("opened with the menu key", () => {
+    // jsdom has no layout, so the position the browser reports for the caret is stood in for.
+    function menuKey(view: EditorView, caret: number, reportedAt = caret) {
+      view.dispatch({ selection: { anchor: caret } });
+      vi.spyOn(view, "posAtCoords").mockReturnValue(reportedAt);
+      return rightClick(view.contentDOM);
+    }
+
+    it("offers the spelling choices for the word at the caret", async () => {
+      const { view, fake } = await ready();
+      const event = menuKey(view, 5);
+      expect(shown()).toEqual(["spelling", "spelling-actions"]);
+      expect(event.defaultPrevented).toBe(true);
+      await getOpenContextMenu()!.sections[0].resolve!();
+      expect(fake.suggest).toHaveBeenCalledWith("recieve");
+    });
+
+    it("offers them with the caret at either end of the word", async () => {
+      const { view } = await ready();
+      for (const caret of [2, 9]) {
+        menuKey(view, caret);
+        expect(shown()).toEqual(["spelling", "spelling-actions"]);
+        closeContextMenu({ restoreFocus: false });
+      }
+    });
+
+    it("offers none when the caret is not in an underlined word", async () => {
+      const { view } = await ready();
+      menuKey(view, 0);
+      expect(shown()).toBeUndefined();
+    });
+
+    it("offers none when the position is away from the word the caret is in", async () => {
+      const { view } = await ready();
+      menuKey(view, 5, 0);
+      expect(shown()).toBeUndefined();
+    });
+
+    it("still offers none when something else is selected", async () => {
+      const { view } = await ready();
+      view.dispatch({ selection: { anchor: 0, head: 5 } });
+      vi.spyOn(view, "posAtCoords").mockReturnValue(5);
+      rightClick(view.contentDOM);
+      expect(shown()).toBeUndefined();
+    });
   });
 });

@@ -78,16 +78,15 @@
     timeAndLocationSnippet,
   } from "../lib/locationInsert";
   import { describeError, showToast } from "../lib/toast.svelte";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { writeClipboardText } from "../lib/blockClipboard";
+  import { contextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuContext, ContextMenuSection } from "../lib/contextMenuSections";
+  import { buildImageSizeSection } from "../lib/imageMenu";
   import {
     assetPathFromImageUrl,
-    formatImageScale,
-    formatScaledImageDimensions,
     imageIndexFromElement,
-    IMAGE_SIZE_SCALES,
     imageSourceUrl,
     renderedImageBaseSize,
-    scaledImageDimensions,
   } from "../lib/imageSizing";
   import { bulletToTodoContent, isTaskContent, normalizeTaskPrefix, splitBlockEnterContent } from "../lib/taskSyntax";
   import { isEmptyOrderedListItem, orderedListMarker, ORDERED_MARKER_LOOKAHEAD } from "../lib/orderedList";
@@ -95,10 +94,9 @@
   import { isFencedCodeBlock, isInsideCodeFenceAt } from "../lib/codeFence";
   import { getBulletMinHeight, getHeadingLevel, isQuoteBlockContent } from "../lib/blockLayout";
   import { sortMarkdownTableColumn, type TableSortDirection } from "../lib/markdownTableSort";
-  import { spellcheckExtension, type SpellcheckRequest } from "../lib/spellcheckExtension";
+  import { spellcheckExtension } from "../lib/spellcheckExtension";
   import DatePicker from "./DatePicker.svelte";
   import MobileEditorBar from "./MobileEditorBar.svelte";
-  import SpellcheckMenu from "./SpellcheckMenu.svelte";
 
   interface Props {
     block: Block;
@@ -205,16 +203,13 @@
     return typeof filePath === "string" ? assetBaseDirFor(filePath) : "";
   }
   let saveError = $state<string | null>(null);
-  let imageMenuMessage = $state<string | null>(null);
-  let imageMenuMessageTimer: number | undefined;
   let pendingSaveContent = $state<string | null>(null);
   let nextPasteId = 0;
   let pendingPastes = $state<{ id: number; markdown: string; error: string | null }[]>([]);
   let finishEditingPromise: Promise<boolean> | null = null;
-  type ImageSizeMenu = {
+  /** An image in the rendered block, as the context menu's actions need to know it. */
+  type MenuImage = {
     index: number;
-    x: number;
-    y: number;
     baseWidth: number;
     baseHeight: number;
     sourceUrl: string;
@@ -227,18 +222,7 @@
     to: number;
     text: string;
   };
-  type MakeLinkMenu = {
-    x: number;
-    y: number;
-    from: number;
-    to: number;
-    text: string;
-  };
   const EDITOR_MAKE_LINK_CACHE_MS = 30_000;
-  let imageSizeMenu: ImageSizeMenu | null = $state(null);
-  let makeLinkMenu: MakeLinkMenu | null = $state(null);
-  // Raw, because the request holds the live editor view.
-  let spellMenu = $state.raw<SpellcheckRequest | null>(null);
   let lastEditorPageLinkRange: (TextLinkRange & { capturedAt: number }) | null = null;
   let blockContentEl = $state<HTMLElement | null>(null);
 
@@ -313,12 +297,10 @@
     el.addEventListener("click", handleRenderedClick);
     el.addEventListener("pointerdown", protectReadingNotePointer);
     el.addEventListener("keydown", handleRenderedKeydown);
-    el.addEventListener("contextmenu", handleRenderedContextMenu);
     return () => {
       el.removeEventListener("click", handleRenderedClick);
       el.removeEventListener("pointerdown", protectReadingNotePointer);
       el.removeEventListener("keydown", handleRenderedKeydown);
-      el.removeEventListener("contextmenu", handleRenderedContextMenu);
     };
   });
   let tableSort: { tableIndex: number; columnIndex: number; direction: TableSortDirection } | null = $state(null);
@@ -333,27 +315,6 @@
       cleanup = hydrateAssetMedia(el);
     });
 
-    $effect(() => {
-      if (!imageSizeMenu) return;
-      const closeMenu = (event: MouseEvent | PointerEvent) => {
-        const target = event.target as Element | null;
-        if (target?.closest?.(".image-size-menu")) return;
-        imageSizeMenu = null;
-      };
-      const handleKeydown = (event: KeyboardEvent) => {
-        if (event.key === "Escape") {
-          imageSizeMenu = null;
-        }
-      };
-      window.addEventListener("pointerdown", closeMenu);
-      window.addEventListener("contextmenu", closeMenu);
-      window.addEventListener("keydown", handleKeydown);
-      return () => {
-        window.removeEventListener("pointerdown", closeMenu);
-        window.removeEventListener("contextmenu", closeMenu);
-        window.removeEventListener("keydown", handleKeydown);
-      };
-    });
     return () => {
       cancelled = true;
       cleanup?.();
@@ -378,28 +339,6 @@
   });
 
   $effect(() => {
-    if (!makeLinkMenu) return;
-    const closeMenu = (event: MouseEvent | PointerEvent) => {
-      const target = event.target as Element | null;
-      if (target?.closest?.(".make-link-menu")) return;
-      makeLinkMenu = null;
-    };
-    const handleKeydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        makeLinkMenu = null;
-      }
-    };
-    window.addEventListener("pointerdown", closeMenu);
-    window.addEventListener("contextmenu", closeMenu);
-    window.addEventListener("keydown", handleKeydown);
-    return () => {
-      window.removeEventListener("pointerdown", closeMenu);
-      window.removeEventListener("contextmenu", closeMenu);
-      window.removeEventListener("keydown", handleKeydown);
-    };
-  });
-
-  $effect(() => {
     const handleReplacement = (event: Event) => {
       const detail = (event as CustomEvent<{ pageId: string; blockId: string; content: string }>).detail;
       if (!detail || detail.pageId !== pageId || detail.blockId !== block.id) return;
@@ -415,19 +354,6 @@
     };
     window.addEventListener("grafium-block-content-replaced", handleReplacement);
     return () => window.removeEventListener("grafium-block-content-replaced", handleReplacement);
-  });
-
-  $effect(() => {
-    const shell = blockContentEl?.closest(".block-shell");
-    if (!shell) return;
-    if (!imageSizeMenu) {
-      shell.classList.remove("image-menu-shell");
-      return;
-    }
-    shell.classList.add("image-menu-shell");
-    return () => {
-      shell.classList.remove("image-menu-shell");
-    };
   });
 
   // Date picker state
@@ -959,8 +885,8 @@
     });
   }
 
-  function imageFilename(menu: ImageSizeMenu): string {
-    const source = menu.assetPath || menu.markdownSrc || menu.sourceUrl;
+  function imageFilename(image: MenuImage): string {
+    const source = image.assetPath || image.markdownSrc || image.sourceUrl;
     try {
       const url = new URL(source);
       const name = decodeURIComponent(url.pathname.split("/").pop() || "");
@@ -971,22 +897,19 @@
     }
   }
 
-  function markdownImageText(menu: ImageSizeMenu): string {
-    const alt = menu.altText.replace(/]/g, "\\]");
-    return `![${alt}](${menu.markdownSrc || menu.sourceUrl})`;
+  function markdownImageText(image: MenuImage): string {
+    const alt = image.altText.replace(/]/g, "\\]");
+    return `![${alt}](${image.markdownSrc || image.sourceUrl})`;
   }
 
-  function openImageSizeMenu(event: MouseEvent, img: HTMLImageElement) {
+  function describeImage(img: HTMLImageElement): MenuImage | null {
     const index = imageIndexFromElement(img);
-    if (index === null) return;
-    const pos = contextMenuPositionFromEvent(event, { width: 236, height: 560 });
+    if (index === null) return null;
     const baseSize = renderedImageBaseSize(img, renderedEl?.clientWidth);
     const sourceUrl = imageSourceUrl(img);
     const assetPath = assetPathFromImageUrl(sourceUrl) ?? assetPathFromImageUrl(img.dataset.src);
-    imageSizeMenu = {
+    return {
       index,
-      x: pos.x,
-      y: pos.y,
       baseWidth: baseSize.width,
       baseHeight: baseSize.height,
       sourceUrl,
@@ -1032,217 +955,105 @@
     return { from: fallback, to: fallback + range.text.length, text: range.text };
   }
 
-  function countOccurrences(text: string, needle: string): number {
-    if (!needle) return 0;
-    let count = 0;
-    let index = text.indexOf(needle);
-    while (index !== -1) {
-      count += 1;
-      index = text.indexOf(needle, index + needle.length);
-    }
-    return count;
-  }
-
-  function nthIndexOf(text: string, needle: string, occurrence: number): number {
-    let remaining = Math.max(0, occurrence);
-    let index = text.indexOf(needle);
-    while (index !== -1 && remaining > 0) {
-      remaining -= 1;
-      index = text.indexOf(needle, index + needle.length);
-    }
-    return index;
-  }
-
-  function renderedSelectionPrefix(range: Range): string {
-    if (!renderedEl) return "";
-    const prefixRange = document.createRange();
-    prefixRange.selectNodeContents(renderedEl);
-    prefixRange.setEnd(range.startContainer, range.startOffset);
-    const prefix = prefixRange.toString();
-    prefixRange.detach();
-    return prefix.replace(/\u00a0/g, " ");
-  }
-
-  function selectedRenderedPageLinkRange(): TextLinkRange | null {
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !renderedEl) return null;
-
-    const range = selection.getRangeAt(0);
-    if (!renderedEl.contains(range.startContainer) || !renderedEl.contains(range.endContainer)) {
-      return null;
-    }
-
-    const selected = selection.toString().replace(/\u00a0/g, " ").trim();
-    if (!selected || selected.includes("\n")) return null;
-
-    const occurrence = countOccurrences(renderedSelectionPrefix(range), selected);
-    const from = nthIndexOf(block.content, selected, occurrence);
-    if (from < 0) return null;
-
-    return { from, to: from + selected.length, text: selected };
-  }
-
-  function openMakeLinkMenuForRange(event: MouseEvent, range: TextLinkRange | null) {
-    if (!range) return false;
-    const pos = contextMenuPositionFromEvent(event, { width: 160, height: 48 });
-    imageSizeMenu = null;
-    makeLinkMenu = {
-      x: pos.x,
-      y: pos.y,
-      ...range,
-    };
-    return true;
-  }
-
-  function openEditorMakeLinkMenu(event: MouseEvent, view: EditorView) {
-    return openMakeLinkMenuForRange(event, rememberEditorPageLinkRange(view) ?? cachedEditorPageLinkRange(view));
-  }
-
-  function openRenderedMakeLinkMenu(event: MouseEvent) {
-    return openMakeLinkMenuForRange(event, selectedRenderedPageLinkRange());
-  }
-
-  async function makeSelectedTextLink() {
-    const menu = makeLinkMenu;
+  /** What a right-click inside the editor offers for the selected text. */
+  function editorMenuSections(): ContextMenuSection | null {
     const view = editorView;
-    if (!menu) return;
+    if (!view) return null;
+    const range = rememberEditorPageLinkRange(view) ?? cachedEditorPageLinkRange(view);
+    if (!range) return null;
+    return {
+      id: "selection",
+      ariaLabel: "Selected text",
+      items: [{ id: "link.make", label: "Make link", onSelect: () => makeSelectedTextLink(range) }],
+    };
+  }
 
-    const doc = view?.state.doc.toString() ?? block.content;
-    let from = Math.max(0, Math.min(menu.from, doc.length));
-    let to = Math.max(from, Math.min(menu.to, doc.length));
-    if (doc.slice(from, to) !== menu.text) {
-      const fallback = doc.indexOf(menu.text);
-      if (fallback < 0) {
-        makeLinkMenu = null;
-        return;
-      }
+  function makeSelectedTextLink(range: TextLinkRange) {
+    const view = editorView;
+    if (!view) return;
+
+    const doc = view.state.doc.toString();
+    let from = Math.max(0, Math.min(range.from, doc.length));
+    let to = Math.max(from, Math.min(range.to, doc.length));
+    if (doc.slice(from, to) !== range.text) {
+      const fallback = doc.indexOf(range.text);
+      if (fallback < 0) return;
       from = fallback;
-      to = fallback + menu.text.length;
+      to = fallback + range.text.length;
     }
     const result = wrapPageLinkText(doc, from, to);
-    if (view) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: result.doc },
-        selection:
-          result.selStart === result.selEnd
-            ? EditorSelection.cursor(result.selStart)
-            : EditorSelection.range(result.selStart, result.selEnd),
-      });
-    } else {
-      try {
-        await saveContent(result.doc);
-      } catch {
-        // saveContent already surfaces the error state.
-      }
-    }
-    makeLinkMenu = null;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: result.doc },
+      selection:
+        result.selStart === result.selEnd
+          ? EditorSelection.cursor(result.selStart)
+          : EditorSelection.range(result.selStart, result.selEnd),
+    });
     lastEditorPageLinkRange = null;
     window.getSelection()?.removeAllRanges();
-    view?.focus();
+    view.focus();
   }
 
-  async function withImageMenuAction(label: string, action: (menu: ImageSizeMenu) => Promise<void>) {
-    const menu = imageSizeMenu;
-    if (!menu) return;
+  /** Runs one of the image actions; what it returns is shown as confirmation, a failure as an error. */
+  async function runImageAction(failure: string, action: () => Promise<string | void>) {
     try {
-      await action(menu);
-      imageSizeMenu = null;
-      saveError = null;
-      showImageMenuMessage(`${label[0].toUpperCase()}${label.slice(1)} complete`);
+      const done = await action();
+      if (done) showToast(done, "success");
     } catch (e) {
-      saveError = `Failed to ${label}: ${e instanceof Error ? e.message : String(e)}`;
-      console.error(`Failed to ${label}:`, e);
+      showToast(`Failed to ${failure}: ${describeError(e)}`);
+      console.error(`Failed to ${failure}:`, e);
     }
   }
 
-  function showImageMenuMessage(message: string) {
-    imageMenuMessage = message;
-    if (imageMenuMessageTimer) clearTimeout(imageMenuMessageTimer);
-    imageMenuMessageTimer = window.setTimeout(() => {
-      imageMenuMessage = null;
-      imageMenuMessageTimer = undefined;
-    }, 1800);
+  async function copyImageAddress(image: MenuImage) {
+    await writeClipboardText(image.markdownSrc || image.sourceUrl);
+    return "Image address copied";
   }
 
-  async function writeClipboardText(text: string) {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-    } catch {
-      // Fall back below; WebKitGTK can reject async clipboard despite a click.
+  async function copyMarkdownImage(image: MenuImage) {
+    await writeClipboardText(markdownImageText(image));
+    return "Markdown image copied";
+  }
+
+  async function copyImage(image: MenuImage) {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+      await writeClipboardText(image.markdownSrc || image.sourceUrl);
+      return "Image address copied";
     }
-
-    const scratch = document.createElement("textarea");
-    scratch.value = text;
-    scratch.style.position = "fixed";
-    scratch.style.left = "-9999px";
-    scratch.style.opacity = "0";
-    document.body.appendChild(scratch);
-    scratch.select();
-    const copied = document.execCommand("copy");
-    scratch.remove();
-    if (!copied) {
-      throw new Error("clipboard text API is unavailable");
+    const source = image.assetPath ? await readAssetDataUrl(image.assetPath) : image.sourceUrl;
+    if (!source) throw new Error("image source is unavailable");
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`could not read image (${response.status})`);
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) {
+      throw new Error(`unsupported image type ${blob.type || "unknown"}`);
     }
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    return "Image copied";
   }
 
-  async function copyImageAddress() {
-    await withImageMenuAction("copy image address", async (menu) => {
-      await writeClipboardText(menu.markdownSrc || menu.sourceUrl);
-    });
+  async function openImageExternally(image: MenuImage) {
+    if (image.assetPath) {
+      await openExternal(await resolveAssetFilePath(image.assetPath));
+      return;
+    }
+    if (!image.sourceUrl) throw new Error("image source is unavailable");
+    await openExternal(image.sourceUrl);
   }
 
-  async function copyMarkdownImage() {
-    await withImageMenuAction("copy Markdown image", async (menu) => {
-      await writeClipboardText(markdownImageText(menu));
+  async function saveImageAs(image: MenuImage) {
+    const destination = await saveDialog({
+      title: "Save Image As",
+      defaultPath: imageFilename(image),
+      filters: [
+        { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"] },
+      ],
     });
-  }
-
-  async function copyImage() {
-    await withImageMenuAction("copy image", async (menu) => {
-      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
-        await writeClipboardText(menu.markdownSrc || menu.sourceUrl);
-        return;
-      }
-      const source = menu.assetPath ? await readAssetDataUrl(menu.assetPath) : menu.sourceUrl;
-      if (!source) throw new Error("image source is unavailable");
-      const response = await fetch(source);
-      if (!response.ok) throw new Error(`could not read image (${response.status})`);
-      const blob = await response.blob();
-      if (!blob.type.startsWith("image/")) {
-        throw new Error(`unsupported image type ${blob.type || "unknown"}`);
-      }
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-    });
-  }
-
-  async function openImageExternally() {
-    await withImageMenuAction("open image", async (menu) => {
-      if (menu.assetPath) {
-        await openExternal(await resolveAssetFilePath(menu.assetPath));
-        return;
-      }
-      if (!menu.sourceUrl) throw new Error("image source is unavailable");
-      await openExternal(menu.sourceUrl);
-    });
-  }
-
-  async function saveImageAs() {
-    await withImageMenuAction("save image", async (menu) => {
-      const destination = await saveDialog({
-        title: "Save Image As",
-        defaultPath: imageFilename(menu),
-        filters: [
-          { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"] },
-        ],
-      });
-      if (!destination) return;
-      const source = menu.assetPath || menu.sourceUrl;
-      if (!source) throw new Error("image source is unavailable");
-      await saveImageToPath(source, destination);
-    });
+    if (!destination) return;
+    const source = image.assetPath || image.sourceUrl;
+    if (!source) throw new Error("image source is unavailable");
+    await saveImageToPath(source, destination);
+    return "Image saved";
   }
 
   async function commitImageWidth(index: number, width: number) {
@@ -1257,33 +1068,41 @@
     await saveContent(nextContent);
   }
 
-  function imageScaleSizeLabel(scale: number): string {
-    const baseWidth = imageSizeMenu?.baseWidth ?? 240;
-    const baseHeight = imageSizeMenu?.baseHeight ?? 180;
-    return formatScaledImageDimensions(scale, baseWidth, baseHeight);
-  }
+  /** What a right-click on a rendered image offers: its actions, and its size. */
+  function renderedMenuSections({ target }: ContextMenuContext): ContextMenuSection[] | null {
+    const img = target.closest("img.fc-img");
+    if (!(img instanceof HTMLImageElement)) return null;
+    const image = describeImage(img);
+    if (!image) return null;
 
-  async function chooseImageScale(scale: number) {
-    const menu = imageSizeMenu;
-    if (!menu) return;
-    try {
-      const next = scaledImageDimensions(scale, menu.baseWidth, menu.baseHeight);
-      await commitImageWidth(menu.index, next.width);
-      imageSizeMenu = null;
-    } catch {
-      // saveContent already surfaced the error on the block.
-    }
-  }
-
-  async function resetImageScale() {
-    const menu = imageSizeMenu;
-    if (!menu) return;
-    try {
-      await clearImageWidth(menu.index);
-      imageSizeMenu = null;
-    } catch {
-      // saveContent already surfaced the error on the block.
-    }
+    return [
+      {
+        id: "image",
+        title: "Image",
+        items: [
+          { id: "image.copy", label: "Copy Image", onSelect: () => runImageAction("copy image", () => copyImage(image)) },
+          {
+            id: "image.copyAddress",
+            label: "Copy Image Address",
+            onSelect: () => runImageAction("copy image address", () => copyImageAddress(image)),
+          },
+          {
+            id: "image.copyMarkdown",
+            label: "Copy Markdown Image",
+            onSelect: () => runImageAction("copy Markdown image", () => copyMarkdownImage(image)),
+          },
+          { id: "image.open", label: "Open Image", onSelect: () => runImageAction("open image", () => openImageExternally(image)) },
+          { id: "image.save", label: "Save Image As...", onSelect: () => runImageAction("save image", () => saveImageAs(image)) },
+        ],
+      },
+      buildImageSizeSection({
+        baseWidth: image.baseWidth,
+        baseHeight: image.baseHeight,
+        // saveContent already surfaced a failure on the block.
+        setWidth: (width) => commitImageWidth(image.index, width).catch(() => {}),
+        reset: () => clearImageWidth(image.index).catch(() => {}),
+      }),
+    ];
   }
 
   function teardownEditor(view: EditorView, notifyBlur: boolean) {
@@ -1298,8 +1117,6 @@
       editorView = undefined;
     }
     isEditing = false;
-    makeLinkMenu = null;
-    spellMenu = null;
     keymap_manager.isEditing = false;
     if (notifyBlur) {
       onBlur?.(block.id);
@@ -1486,9 +1303,6 @@
 
   function startEditing() {
     if (isEditing) return;
-    imageSizeMenu = null;
-    makeLinkMenu = null;
-    spellMenu = null;
     isEditing = true;
     keymap_manager.isEditing = true;
     onFocus?.(block.id);
@@ -1562,13 +1376,7 @@
         doc: block.content,
         extensions: [
           markdown(),
-          spellcheckExtension({
-            onContextMenu: (request) => {
-              imageSizeMenu = null;
-              makeLinkMenu = null;
-              spellMenu = request;
-            },
-          }),
+          spellcheckExtension(),
           editorWriteLockExtension(pageId),
           history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
           autocompletion({
@@ -1835,12 +1643,6 @@
             },
             keyup: (event) => {
               if (event.key === "Shift") shiftHeld = false;
-            },
-            contextmenu: (event, view) => {
-              if (!openEditorMakeLinkMenu(event, view)) return false;
-              event.preventDefault();
-              event.stopPropagation();
-              return true;
             },
             paste: (event, view) => {
               const { from, to } = view.state.selection.main;
@@ -2605,16 +2407,6 @@
     return letterCount >= 3 && cleaned.length <= 140;
   }
 
-  function handleRenderedContextMenu(e: MouseEvent) {
-    const target = e.target as HTMLElement;
-    if (!(target instanceof HTMLImageElement) || !target.classList.contains("fc-img")) {
-      return;
-    }
-    e.stopPropagation();
-    e.preventDefault();
-    openImageSizeMenu(e, target);
-  }
-
   async function handleDateSelect(date: string) {
     showDatePicker = false;
     try {
@@ -2656,7 +2448,6 @@
   class:markerless-thread-end={!showBlockMarker && !threadStem}
   class:selected
   class:code-block={isFenceBlock}
-  class:image-menu-open={imageSizeMenu !== null}
   class:h1={editorStyleClass === "h1"}
   class:h2={editorStyleClass === "h2"}
   class:h3={editorStyleClass === "h3"}
@@ -2716,7 +2507,7 @@
   >
     {#if isEditing}
       <div class="editor-shell">
-        <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer}></div>
+        <div class="editor-wrapper" class:normal-block={editorStyleClass === "normal-block"} class:multiline-block={editorStyleClass === "multiline-block"} class:h1={editorStyleClass === "h1"} class:h2={editorStyleClass === "h2"} class:h3={editorStyleClass === "h3"} class:h4={editorStyleClass === "h4"} class:h5={editorStyleClass === "h5"} class:h6={editorStyleClass === "h6"} bind:this={editorContainer} use:contextMenu={editorMenuSections}></div>
         {#if saveError}
           <div class="save-error" role="alert">
             <span>{saveError}</span>
@@ -2794,6 +2585,7 @@
         class="rendered-content"
         class:outline-rendered-content={showBlockMarker && !suppressBullet}
         use:bionicReader={block.content}
+        use:contextMenu={renderedMenuSections}
         data-reading-note-footer={readingNoteLabel ? "" : undefined}
         bind:this={renderedEl}
       >
@@ -2803,9 +2595,9 @@
           {@html renderedHtml}
         {/if}
       </div>
-      {#if saveError || imageMenuMessage}
+      {#if saveError}
         <div class="save-error rendered-action-message" role="status">
-          <span>{saveError ?? imageMenuMessage}</span>
+          <span>{saveError}</span>
         </div>
       {/if}
     {/if}
@@ -2825,66 +2617,6 @@
       </div>
     {/each}
   </div>
-  {#if imageSizeMenu}
-      <div
-        class="image-size-menu app-context-menu"
-        style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
-        role="menu"
-        aria-label="Image menu"
-        tabindex="-1"
-        onpointerdown={(e) => e.stopPropagation()}
-        oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => { if (e.key === "Escape") imageSizeMenu = null; }}
-      >
-        <div class="image-size-menu-title">Image</div>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyImage()}>
-          Copy Image
-        </button>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyImageAddress()}>
-          Copy Image Address
-        </button>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => copyMarkdownImage()}>
-          Copy Markdown Image
-        </button>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => openImageExternally()}>
-          Open Image
-        </button>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => saveImageAs()}>
-          Save Image As...
-        </button>
-        <div class="image-size-menu-separator"></div>
-        <div class="image-size-menu-title">Size</div>
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => resetImageScale()}>
-          Original Size
-        </button>
-        {#each IMAGE_SIZE_SCALES as scale}
-          <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => chooseImageScale(scale)}>
-            {formatImageScale(scale)} <span>{imageScaleSizeLabel(scale)}</span>
-          </button>
-        {/each}
-      </div>
-  {/if}
-  {#if makeLinkMenu}
-      <div
-        class="make-link-menu app-context-menu"
-        style={`left: ${makeLinkMenu.x}px; top: ${makeLinkMenu.y}px;`}
-        role="menu"
-        aria-label="Text selection menu"
-        tabindex="-1"
-        onpointerdown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-        oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => { if (e.key === "Escape") makeLinkMenu = null; }}
-      >
-        <button class="make-link-menu-item" type="button" role="menuitem" onclick={() => void makeSelectedTextLink()}>
-          Make link
-        </button>
-      </div>
-  {/if}
-  {#if spellMenu}
-    <SpellcheckMenu request={spellMenu} onClose={() => (spellMenu = null)} />
-  {/if}
 </div>
 
 {#if showDatePicker}
@@ -2923,10 +2655,6 @@
     scroll-margin: 40px;
     position: relative;
     overflow: visible;
-  }
-
-  .block-item.image-menu-open {
-    z-index: 2000;
   }
 
   .block-item.editing {
@@ -3639,67 +3367,6 @@
 
   .rendered-action-message {
     margin-top: 4px;
-  }
-
-  .image-size-menu,
-  .make-link-menu {
-    position: fixed;
-    z-index: 2147483000;
-    padding: 6px;
-  }
-
-  .image-size-menu {
-    min-width: 212px;
-  }
-
-  .make-link-menu {
-    min-width: 150px;
-  }
-
-  .image-size-menu-title {
-    padding: 5px 8px 6px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .image-size-menu-separator {
-    height: 1px;
-    margin: 5px 2px;
-    background: var(--border);
-  }
-
-  .image-size-menu-item,
-  .make-link-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    width: 100%;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-primary);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 7px 8px;
-    text-align: left;
-  }
-
-  .image-size-menu-item span {
-    color: var(--text-muted);
-    font-size: 11px;
-  }
-
-  .image-size-menu-item:hover,
-  .image-size-menu-item:focus-visible,
-  .make-link-menu-item:hover,
-  .make-link-menu-item:focus-visible {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
   }
 
   .rendered-content :global(.fc-audio) {

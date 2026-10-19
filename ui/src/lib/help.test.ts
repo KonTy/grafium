@@ -27,12 +27,24 @@ import searchSource from "../components/GlobalSearchDialog.svelte?raw";
 import journalGuideHelp from "../../src-tauri/resources/welcome/pages/Help - Journal Guide.md?raw";
 import journalHelp from "../../src-tauri/resources/welcome/pages/Help - Journal.md?raw";
 import settingsSource from "../components/Settings.svelte?raw";
-import spellMenuSource from "../components/SpellcheckMenu.svelte?raw";
+import spellMenuSource from "./spellcheckMenu.ts?raw";
+import blockMenuSource from "./blockMenu.ts?raw";
+import editActionsSource from "./editActions.ts?raw";
+import contextMenuViewSource from "../components/ContextMenuView.svelte?raw";
+import journalMenuSource from "../components/JournalView.svelte?raw";
+import guideHelp from "../../src-tauri/resources/welcome/pages/Help - Grafium Guide.md?raw";
 import spellSettingsSource from "../components/SpellcheckSettings.svelte?raw";
 import { SUGGESTION_LIMIT } from "./spellcheck";
 
 const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
+
+/** Prose is hard-wrapped in the help pages; compare it as one line. */
+const flatText = (text: string) => text.replace(/\s+/g, " ");
+
+function rightClickMenuSection(): string {
+  return flatText(editorHelp.split("\n## Right-click menu")[1]?.split("\n## ")[0] ?? "");
+}
 
 describe("contextual help", () => {
   it("routes empty-number exit and previous-end Backspace guidance through editor F1", async () => {
@@ -331,6 +343,47 @@ describe("contextual help", () => {
       expect(page).toContain("[[Help - Editor]]");
       expect(page).toContain("Settings > Spell");
     }
+  });
+  it("explains the one right-click menu with the labels it really shows", () => {
+    const section = rightClickMenuSection();
+    expect(section).not.toBe("");
+    for (const label of ["Turn bullet into TODO", "Turn task into bullet", "Copy block", "Clear selection",
+      "Make link", "Rename page", "Delete page"]) {
+      expect(blockMenuSource).toContain(`"${label}"`);
+      expect(section).toContain(`**${label}**`);
+    }
+    for (const label of ["Cut", "Copy", "Paste", "Select all"]) {
+      expect(editActionsSource).toContain(`label: "${label}"`);
+      expect(section).toContain(`**${label}**`);
+    }
+    for (const label of ["Add to dictionary", "Ignore for now"]) {
+      expect(spellMenuSource).toContain(label);
+      expect(section).toContain(`**${label}**`);
+    }
+    expect(section).toContain("one right-click menu");
+    expect(section).toContain("**Menu** key or **Shift+F10**");
+    expect(helpIndex).toContain("[[Help - Editor]] - blocks, links, tags, and offline spell check");
+  });
+  it("documents the keys the right-click menu really handles", () => {
+    // The menu closes on Tab itself and hands the arrow, Home, End and Escape keys to menuKeyboard.
+    expect(contextMenuViewSource).toContain('event.key === "Tab"');
+    expect(contextMenuViewSource).toContain("handleMenuKeydown");
+    const section = rightClickMenuSection();
+    for (const phrase of ["**Up** and **Down**", "**Home** and **End**", "**Enter** chooses", "**Escape** closes",
+      "**Tab** also closes"]) {
+      expect(section).toContain(phrase);
+    }
+    const guide = flatText(guideHelp);
+    expect(guide).toContain("the right-click menu");
+    expect(guide).toContain("`Menu` key or `Shift+F10`");
+    // The menu used to listen only for Escape; the guide must not say so any more.
+    expect(guide).not.toContain("only listens for");
+  });
+  it("lists Import from Media in the journal help only because the journal menu has it", () => {
+    expect(journalMenuSource).toContain('label: "Import from Media..."');
+    expect(flatText(journalHelp)).toContain("**Import from Media...**");
+    expect(journalMenuSource).toContain('label: "Delete page"');
+    expect(flatText(journalHelp)).toContain("**Delete page**");
   });
   it("maps every supported context to a seeded help page", () => {
     const contexts: HelpContext[] = [

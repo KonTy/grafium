@@ -728,6 +728,21 @@ export function removePersonalWord(word: string): Promise<string[]> {
   return invoke("spell_remove_personal_word", { word });
 }
 
+/**
+ * `requested`: the webview was told to paste into whatever has focus.
+ * `unsupported`: this platform has no such command, so the page must paste itself.
+ */
+export type NativePasteOutcome = "requested" | "unsupported";
+
+/**
+ * Pastes the system clipboard into the focused field. The page itself may not
+ * read the clipboard without a permission prompt, but the webview can paste
+ * on its own account, as Ctrl+V does.
+ */
+export function nativePaste(): Promise<NativePasteOutcome> {
+  return invoke("native_paste", {});
+}
+
 // Asset management
 export function downloadAsset(url: string, pageId?: string): Promise<string> {
   return invoke("download_asset", { url, pageId });

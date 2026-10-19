@@ -114,6 +114,7 @@
 <div
   bind:this={host}
   class="mobile-editor-bar"
+  data-no-context-menu
   style={`bottom: ${bottomStyle};`}
   role="toolbar"
   tabindex="-1"
@@ -130,7 +131,6 @@
     onpointerup={finishTimePress}
     onpointercancel={cancelTimePress}
     onlostpointercapture={cancelTimePress}
-    oncontextmenu={(event) => event.preventDefault()}
   >Time</button>
   <button type="button" title="Unindent" aria-label="Unindent" onpointerdown={press(onOutdent)}>⇤</button>
   <button type="button" title="Indent" aria-label="Indent" onpointerdown={press(onIndent)}>⇥</button>

@@ -8,9 +8,8 @@
   import DatePicker from "./DatePicker.svelte";
   import { listJournalPages, listJournalNoteDates, createPage, getPage, deletePage } from "../lib/api";
   import type { Page } from "../lib/api";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
-  import { handleMenuKeydown } from "../lib/menuKeyboard";
-  import { autofocus } from "../lib/autofocus";
+  import { contextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuContext, ContextMenuSection } from "../lib/contextMenuSections";
   import { dispatchEditPageEnd } from "../lib/editorInsert";
   import { MAIN_PANE_SCROLL_INTENT } from "../lib/mainPaneScroll";
   import { showToast } from "../lib/toast.svelte";
@@ -342,14 +341,6 @@
     onActivePageChange?.(active);
   }
 
-  interface ContextMenu {
-    x: number;
-    y: number;
-    page: Page;
-  }
-
-  let contextMenu: ContextMenu | null = $state(null);
-
   function pagesChanged(a: Page[], b: Page[]): boolean {
     if (a.length !== b.length) return true;
     return a.some((page, index) => {
@@ -472,34 +463,25 @@
     };
   }
 
-  $effect(() => {
-    function closeMenu() {
-      contextMenu = null;
-    }
-
-    window.addEventListener("click", closeMenu);
-    window.addEventListener("contextmenu", closeMenu);
-
-    return () => {
-      window.removeEventListener("click", closeMenu);
-      window.removeEventListener("contextmenu", closeMenu);
-    };
-  });
-
-  function handleDateRightClick(e: MouseEvent, page: Page) {
-    const target = e.target as HTMLElement | null;
-    if (!target?.closest(".page-title")) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    contextMenu = { ...contextMenuPositionFromEvent(e, { width: 190, height: 100 }), page };
-  }
-
-  function handleDeletePage() {
-    if (!contextMenu) return;
-    const pageToDelete = contextMenu.page;
-    contextMenu = null;
-    void deleteJournalPage(pageToDelete);
+  /** Right-clicking a day's date offers what can be done to that day. */
+  function journalMenuSections({ target }: ContextMenuContext, page: Page): ContextMenuSection[] {
+    if (!target.closest(".page-title")) return [];
+    return [
+      {
+        id: "journal",
+        ariaLabel: "Journal entry",
+        items: [
+          { id: "journal.importMedia", label: "Import from Media...", onSelect: handleImportMediaClick },
+        ],
+      },
+      {
+        id: "page",
+        ariaLabel: "Page",
+        items: [
+          { id: "page.delete", label: "Delete page", danger: true, onSelect: () => deleteJournalPage(page) },
+        ],
+      },
+    ];
   }
 
   async function deleteJournalPage(pageToDelete: Page) {
@@ -535,7 +517,6 @@
   }
 
   function handleImportMediaClick() {
-    contextMenu = null;
     onNavigate?.("__import_media_journal__");
   }
 
@@ -796,7 +777,7 @@
           data-page-title={page.title}
           class:journal-placeholder={!mountedPages.has(page.id) || pendingPages.has(page.id)}
           aria-busy={pendingPages.has(page.id)}
-          oncontextmenu={(e) => handleDateRightClick(e, page)}
+          use:contextMenu={(context) => journalMenuSections(context, page)}
           use:trackVisibility={page.id}
           use:trackMount={page.id}
         >
@@ -836,27 +817,6 @@
         </button>
 
       <div class="journal-bottom-sentinel" bind:this={bottomSentinel} aria-hidden="true"></div>
-
-      {#if contextMenu}
-        <!-- The menu takes focus while it is open so Escape and the arrow keys
-             work; focus returns to the opener when it closes. -->
-        <div
-          class="context-menu app-context-menu"
-          role="menu"
-          tabindex="-1"
-          use:autofocus
-          style="top:{contextMenu.y}px;left:{contextMenu.x}px;"
-          onclick={(e) => e.stopPropagation()}
-          onkeydown={(e) => handleMenuKeydown(e, () => { contextMenu = null; })}
-        >
-          <button class="context-menu-item danger" role="menuitem" onclick={handleDeletePage}>
-            Delete page
-          </button>
-          <button class="context-menu-item" role="menuitem" onclick={handleImportMediaClick}>
-            Import from Media...
-          </button>
-        </div>
-      {/if}
     {/if}
   </div>
   {#if goToDatePicker}
@@ -1030,33 +990,5 @@
 
   .journal-bottom-sentinel {
     height: 1px;
-  }
-
-  .context-menu {
-    position: fixed;
-    z-index: 2147483000;
-    min-width: 150px;
-    padding: 6px;
-  }
-
-  .context-menu-item {
-    display: block;
-    width: 100%;
-    border: none;
-    background: transparent;
-    color: var(--text-primary);
-    text-align: left;
-    padding: 8px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 13px;
-  }
-
-  .context-menu-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .context-menu-item.danger {
-    color: #f38ba8;
   }
 </style>

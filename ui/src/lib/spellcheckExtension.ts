@@ -1,5 +1,5 @@
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
-import { Prec, type EditorState, type Extension } from "@codemirror/state";
+import type { EditorState, Extension } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -7,7 +7,10 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
+import { registerContextMenu } from "./contextMenuHost.svelte";
+import type { ContextMenuContext, ContextMenuSection } from "./contextMenuSections";
 import { spellcheck } from "./spellcheck";
+import { buildSpellSections, type SpellMenuSource } from "./spellcheckMenu";
 import { findSpellWords, type SpellWord, type TextRange } from "./spellcheckTokens";
 
 /** Pause after typing before checking, so a word is not judged half-typed. */
@@ -43,7 +46,7 @@ const NON_PROSE_NODES = new Set([
 type SyntaxTree = NonNullable<ReturnType<typeof ensureSyntaxTree>>;
 
 /** What the editor needs from the spell checker; `SpellcheckService` provides it. */
-export interface SpellSource {
+export interface SpellSource extends SpellMenuSource {
   ready(): Promise<void>;
   isActive(): boolean;
   check(words: readonly string[]): Promise<Set<string>>;
@@ -51,19 +54,7 @@ export interface SpellSource {
   subscribe(listener: () => void): () => void;
 }
 
-/** A right-click on an underlined word. */
-export interface SpellcheckRequest {
-  view: EditorView;
-  /** Where the word starts and ends in the document. */
-  from: number;
-  to: number;
-  word: string;
-  clientX: number;
-  clientY: number;
-}
-
 export interface SpellcheckOptions {
-  onContextMenu(request: SpellcheckRequest): void;
   /** Defaults to the app's spell checker. */
   source?: SpellSource;
 }
@@ -132,6 +123,7 @@ class SpellcheckPlugin {
   private readonly view: EditorView;
   private readonly source: SpellSource;
   private readonly unsubscribe: () => void;
+  private readonly unregisterMenu: () => void;
   private timer: ReturnType<typeof setTimeout> | undefined;
   /** Bumped by every `schedule`, so a pass started earlier knows it is out of date. */
   private generation = 0;
@@ -143,12 +135,19 @@ class SpellcheckPlugin {
     this.view = view;
     this.source = source;
     this.unsubscribe = source.subscribe(() => this.schedule(0));
+    this.unregisterMenu = registerContextMenu(view.dom, (context) => this.menuSections(context));
     this.schedule(0);
   }
 
   update(update: ViewUpdate): void {
     if (update.docChanged) {
-      this.decorations = this.decorations.map(update.changes);
+      // A word that was edited is no longer what was checked, so its underline
+      // waits for the next pass instead of lingering on the new text.
+      const edited: Array<[number, number]> = [];
+      update.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => edited.push([fromB, toB]));
+      this.decorations = this.decorations
+        .map(update.changes)
+        .update({ filter: (from, to) => !edited.some(([start, end]) => from < end && to > start) });
       this.typing = true;
       this.schedule(TYPING_DELAY_MS);
       return;
@@ -170,12 +169,42 @@ class SpellcheckPlugin {
     this.destroyed = true;
     clearTimeout(this.timer);
     this.unsubscribe();
+    this.unregisterMenu();
   }
 
   /** The underlined word that touches `pos`, if any. */
   wordAt(pos: number): { from: number; to: number } | null {
     const cursor = this.decorations.iter(pos);
     return cursor.value && cursor.from <= pos ? { from: cursor.from, to: cursor.to } : null;
+  }
+
+  /** The underlined word a menu is about: the one clicked, or the one at the caret when the menu key opened it. */
+  private menuWord({ target, x, y }: ContextMenuContext): { from: number; to: number } | null {
+    const { view } = this;
+    const marked = target.closest(`.${MISSPELLED_CLASS}`);
+    if (marked) return view.contentDOM.contains(marked) ? this.wordAt(view.posAtDOM(marked)) : null;
+
+    // The menu key reports the caret as its position, and some browsers aim the event at the editor itself.
+    if (!view.contentDOM.contains(target)) return null;
+    const found = this.wordAt(view.state.selection.main.head);
+    const at = view.posAtCoords({ x, y }, false);
+    return found && at >= found.from && at <= found.to ? found : null;
+  }
+
+  /** The spelling choices for an underlined word under the pointer or at the caret, or nothing for anything else. */
+  private menuSections(context: ContextMenuContext): ContextMenuSection[] | null {
+    const { view } = this;
+    const found = this.menuWord(context);
+    if (!found) return null;
+
+    // A selection that is more than this word is about the selection, not the word.
+    const { main } = view.state.selection;
+    if (!main.empty && (main.from < found.from || main.to > found.to)) return null;
+
+    return buildSpellSections(
+      { view, from: found.from, to: found.to, word: view.state.sliceDoc(found.from, found.to) },
+      this.source,
+    );
   }
 
   private schedule(delay: number): void {
@@ -301,47 +330,17 @@ const theme = EditorView.baseTheme({
 });
 
 /**
- * Underlines misspelled words as you write and reports right-clicks on them.
+ * Underlines misspelled words as you write, and offers corrections in the
+ * context menu when one is right-clicked.
  *
  * Needs the markdown language in the same editor, which is how code, links and
  * the like are kept out of it.
  */
-export function spellcheckExtension(options: SpellcheckOptions): Extension {
+export function spellcheckExtension(options: SpellcheckOptions = {}): Extension {
   const source = options.source ?? spellcheck;
   const plugin = ViewPlugin.define((view) => new SpellcheckPlugin(view, source), {
     decorations: (value) => value.decorations,
   });
 
-  return [
-    plugin,
-    theme,
-    Prec.high(
-      EditorView.domEventHandlers({
-        contextmenu(event, view) {
-          const target = event.target;
-          if (!(target instanceof Element)) return false;
-          const marked = target.closest(`.${MISSPELLED_CLASS}`);
-          if (!marked || !view.contentDOM.contains(marked)) return false;
-          const found = view.plugin(plugin)?.wordAt(view.posAtDOM(marked));
-          if (!found) return false;
-
-          // A selection that is more than this word belongs to the editor's own menu.
-          const { main } = view.state.selection;
-          if (!main.empty && (main.from < found.from || main.to > found.to)) return false;
-
-          event.preventDefault();
-          event.stopPropagation();
-          options.onContextMenu({
-            view,
-            from: found.from,
-            to: found.to,
-            word: view.state.sliceDoc(found.from, found.to),
-            clientX: event.clientX,
-            clientY: event.clientY,
-          });
-          return true;
-        },
-      }),
-    ),
-  ];
+  return [plugin, theme];
 }

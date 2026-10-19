@@ -1,5 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { contextMenu, openContextMenuBelow } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuSection } from "../lib/contextMenuSections";
   import {
     collectBranchIds,
     findAncestorIdsForPage,
@@ -41,7 +43,13 @@
     columns?: boolean;
     /** Use the special namespace-folder icons in the All Pages tree. */
     pinSpecialFolders?: boolean;
-    onPageContextMenu?: (event: MouseEvent, node: PageTreeViewNode) => void;
+    /**
+     * What a node's menu offers. The tree draws no menu of its own: a
+     * right-click, the context-menu key and the row's "⋯" button all open the
+     * app's one context menu with these sections.
+     */
+    pageMenu?: (node: PageTreeViewNode) => ContextMenuSection[];
+    /** Whether the node has a menu at all, which is what shows its "⋯" button. */
     hasPageMenu?: (node: PageTreeViewNode) => boolean;
   }
 
@@ -56,7 +64,7 @@
     revealToken = "",
     columns = false,
     pinSpecialFolders = false,
-    onPageContextMenu,
+    pageMenu,
     hasPageMenu,
   }: Props = $props();
 
@@ -358,15 +366,20 @@
     if (focusedId) await revealVirtualItem(focusedId, true);
   }
 
-  function emitRowAction(event: MouseEvent, node: PageTreeViewNode) {
-    if (!nodeHasMenu(node)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    onPageContextMenu?.(event, node);
+  function nodeHasMenu(node: PageTreeViewNode): boolean {
+    return Boolean(pageMenu) && (hasPageMenu?.(node) ?? true);
   }
 
-  function nodeHasMenu(node: PageTreeViewNode): boolean {
-    return Boolean(onPageContextMenu) && (hasPageMenu?.(node) ?? true);
+  function nodeMenu(node: PageTreeViewNode): ContextMenuSection[] {
+    return nodeHasMenu(node) ? (pageMenu?.(node) ?? []) : [];
+  }
+
+  function openNodeMenu(event: MouseEvent, node: PageTreeViewNode) {
+    event.stopPropagation();
+    openContextMenuBelow(event.currentTarget as HTMLElement, {
+      sections: nodeMenu(node),
+      label: `Actions for ${node.label}`,
+    });
   }
 </script>
 
@@ -381,7 +394,7 @@
     data-tree-node={row.id}
     data-special-folder={specialFolder?.icon}
     style={`--tree-depth: ${Math.min(row.level - 1, 12)}${virtualTop === null ? "" : `; --tree-row-top: ${virtualTop}px`}`}
-    oncontextmenu={(event) => emitRowAction(event, row.node)}
+    use:contextMenu={() => nodeMenu(row.node)}
   >
     <div class="tree-row-inner">
       <button
@@ -472,7 +485,7 @@
           aria-label={`Actions for ${row.node.label}`}
           aria-haspopup="menu"
           tabindex={focusedId === row.id ? 0 : -1}
-          onclick={(event) => emitRowAction(event, row.node)}
+          onclick={(event) => openNodeMenu(event, row.node)}
           onkeydown={(event) => {
             if (event.key === "Enter" || event.key === " ") event.stopPropagation();
           }}

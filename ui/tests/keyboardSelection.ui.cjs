@@ -13,7 +13,7 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
   await page.clock.setFixedTime(new Date("2026-09-13T12:00:00"));
   await page.addInitScript((options) => {
     if (window !== window.top) return;
-    localStorage.setItem("grafium.ui.zoom", "100");
+    localStorage.setItem("grafium.ui.zoom", String(options.zoom ?? 100));
     localStorage.setItem("grafium.session.lastLocation", JSON.stringify(options.journal ? { kind: "journal" }
       : { kind: "page", title: options.book ? "Books/Keyboard selection" : "Keyboard selection" }));
     for (const day of options.unifiedDays ?? []) {
@@ -57,7 +57,14 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
     const listeners = new Map();
     const state = window.__selectionState = {
       pages: [note, ...days], blocks: [...standalone, ...journal], calls: [], completed: [],
-      unhandledIpc: [],
+      unhandledIpc: [], favorites: [...(options.favorites ?? [])],
+      // Spell check is off unless a test passes `spell: { misspelled, suggestions }`.
+      spell: {
+        preferences: { enabled: !!options.spell, languages: ["en_US"] },
+        misspelled: options.spell?.misspelled ?? [],
+        suggestions: options.spell?.suggestions ?? {},
+        personal: [],
+      },
       layout: { sidebarVisible: true, wideMode: true },
       chatThreads: new Map(),
       holdUpdate: false, failUpdate: false, updateWaiters: [],
@@ -106,11 +113,39 @@ async function openEditor(browser, { beforeNavigate, ...options } = {}) {
           case "plugin:window|is_maximized": return false;
           case "get_graph_info": return { name: "Keyboard selection fixture", path: "/synthetic/keyboard-selection" };
           case "list_graphs": return [{ name: "Keyboard selection fixture", path: "/synthetic/keyboard-selection" }];
-          case "list_favorites": case "list_recent_pages": case "jobs_list": case "get_backlinks":
+          case "list_favorites":
+            return structuredClone(state.pages.filter((candidate) => state.favorites.includes(candidate.id)));
+          case "add_favorite":
+            if (!state.favorites.includes(args.pageId)) state.favorites.push(args.pageId);
+            return;
+          case "remove_favorite":
+            state.favorites = state.favorites.filter((id) => id !== args.pageId);
+            return;
+          case "list_recent_pages": case "jobs_list": case "get_backlinks":
           case "get_child_pages": case "pages_list_collections": case "sync_list_conflicts":
           case "sync_list_targets": case "list_flashcards_due": case "list_flashcard_topics":
-          case "discover_link_candidates": case "list_link_candidates":
+          case "discover_link_candidates": case "list_link_candidates": case "sync_list_pending_merges":
             return [];
+          // Without a native webview command the page pastes through the clipboard API stub.
+          case "native_paste": return "unsupported";
+          case "spell_languages": return [{
+            code: "en_US", name: "English (US)", nativeName: "English (US)", script: "latin", memoryMb: 12,
+          }];
+          case "get_spellcheck_preferences": return structuredClone(state.spell.preferences);
+          case "set_spellcheck_preferences":
+            Object.assign(state.spell.preferences, args.preferences);
+            return structuredClone(state.spell.preferences);
+          case "spell_check_words":
+            return args.words.map((word) =>
+              state.spell.misspelled.includes(word) && !state.spell.personal.includes(word));
+          case "spell_suggest": return (state.spell.suggestions[args.word] ?? []).slice(0, args.limit ?? 5);
+          case "spell_personal_words": return [...state.spell.personal];
+          case "spell_add_personal_word":
+            state.spell.personal.push(args.word);
+            return [...state.spell.personal];
+          case "spell_remove_personal_word":
+            state.spell.personal = state.spell.personal.filter((word) => word !== args.word);
+            return [...state.spell.personal];
           case "ui_log": case "record_page_open": case "reveal_startup_window":
           case "set_startup_chrome": case "startup_content_ready":
             return;

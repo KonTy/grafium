@@ -1,7 +1,5 @@
 <script lang="ts">
   import { editorHasDialogFocus } from "../lib/editorDialogFocus";
-  import { handleMenuKeydown } from "../lib/menuKeyboard";
-  import { autofocus } from "../lib/autofocus";
   import { readingSelectionCapture, publishContinuousReadingSelection } from "../lib/readingSelection";
   import type { BlockTextSelection } from "../lib/keyboardBlockSelection.svelte";
   import { onDestroy, tick, untrack } from "svelte";
@@ -48,15 +46,10 @@
     outlineListMarker,
     setMarkdownImageWidth,
   } from "../lib/markdown";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
-  import {
-    formatImageScale,
-    formatScaledImageDimensions,
-    imageIndexFromElement,
-    IMAGE_SIZE_SCALES,
-    renderedImageBaseSize,
-    scaledImageDimensions,
-  } from "../lib/imageSizing";
+  import { registerContextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuSection } from "../lib/contextMenuSections";
+  import { buildImageSizeSection } from "../lib/imageMenu";
+  import { imageIndexFromElement, renderedImageBaseSize } from "../lib/imageSizing";
   import { applyWritingEditorChanges, EDITOR_UNDO_MIN_DEPTH, markStructuralUndoBoundary, undoEditor, redoEditor } from "../lib/editorUndo";
   import {
     parsePageSourceMap,
@@ -68,8 +61,7 @@
   import { clipboardMarkdown } from "../lib/htmlToMd";
   import { followEditorShortcuts, withoutShortcutDefaults } from "../lib/editorShortcuts";
   import { getHeadingLevel } from "../lib/blockLayout";
-  import { spellcheckExtension, type SpellcheckRequest } from "../lib/spellcheckExtension";
-  import SpellcheckMenu from "./SpellcheckMenu.svelte";
+  import { spellcheckExtension } from "../lib/spellcheckExtension";
 
   interface Props {
     page: Page;
@@ -96,25 +88,15 @@
   let savedMessage = $state("");
   let assetBaseDir = $derived(assetBaseDirFor(page.file_path));
 
+  /** Where an image sits in the page source, as far as the size menu needs to know. */
   interface UnifiedImageMenuDetail {
     blockId: string | null;
     blockPreviewFrom: number;
     blockContent: string;
     imageIndex: number;
-    clientX: number;
-    clientY: number;
     baseWidth: number;
     baseHeight: number;
   }
-
-  type ImageSizeMenu = UnifiedImageMenuDetail & {
-    x: number;
-    y: number;
-  };
-
-  let imageSizeMenu: ImageSizeMenu | null = $state(null);
-  // Raw, because the request holds the live editor view.
-  let spellMenu = $state.raw<SpellcheckRequest | null>(null);
 
   function sourceBlockKey(block: SourceBlock): string {
     return block.id ?? `pos:${block.previewFrom}`;
@@ -223,30 +205,20 @@
         row.addEventListener("pointerdown", protectReadingNotePointer);
         view.focus();
       });
-      row.addEventListener("contextmenu", (event) => {
-        const target = event.target as Element | null;
-        const img = target instanceof HTMLImageElement
-          ? target
-          : target?.closest?.("img.fc-img") as HTMLImageElement | null;
-        if (!img?.classList.contains("fc-img")) return;
+      registerContextMenu(row, ({ target }): ContextMenuSection | null => {
+        const img = target.closest("img.fc-img");
+        if (!(img instanceof HTMLImageElement) || !row.contains(img)) return null;
         const imageIndex = imageIndexFromElement(img);
-        if (imageIndex === null) return;
+        if (imageIndex === null) return null;
         const baseSize = renderedImageBaseSize(img, content.clientWidth);
-        event.preventDefault();
-        event.stopPropagation();
-        row.dispatchEvent(new CustomEvent<UnifiedImageMenuDetail>("unified-image-context-menu", {
-          bubbles: true,
-          detail: {
-            blockId: this.blockId,
-            blockPreviewFrom: this.previewFrom,
-            blockContent: this.content,
-            imageIndex,
-            clientX: event.clientX,
-            clientY: event.clientY,
-            baseWidth: baseSize.width,
-            baseHeight: baseSize.height,
-          },
-        }));
+        return imageSizeSection({
+          blockId: this.blockId,
+          blockPreviewFrom: this.previewFrom,
+          blockContent: this.content,
+          imageIndex,
+          baseWidth: baseSize.width,
+          baseHeight: baseSize.height,
+        });
       });
       queueMicrotask(() => {
         if (this.bionic) applyBionicReaderToElement(content);
@@ -447,76 +419,24 @@
     return () => window.removeEventListener("grafium-writing-rewritten", handleRewrite);
   });
 
-  $effect(() => {
-    const host = editorHost;
-    if (!host) return;
-
-    const handler = (event: Event) => {
-      openImageSizeMenu(event as CustomEvent<UnifiedImageMenuDetail>);
-    };
-    host.addEventListener("unified-image-context-menu", handler);
-    return () => host.removeEventListener("unified-image-context-menu", handler);
-  });
-
-  $effect(() => {
-    if (!imageSizeMenu) return;
-
-    const closeMenu = (event: MouseEvent | PointerEvent) => {
-      const target = event.target as Element | null;
-      if (target?.closest?.(".image-size-menu")) return;
-      imageSizeMenu = null;
-    };
-    const handleKeydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        imageSizeMenu = null;
-      }
-    };
-
-    window.addEventListener("pointerdown", closeMenu);
-    window.addEventListener("contextmenu", closeMenu);
-    window.addEventListener("keydown", handleKeydown);
-    return () => {
-      window.removeEventListener("pointerdown", closeMenu);
-      window.removeEventListener("contextmenu", closeMenu);
-      window.removeEventListener("keydown", handleKeydown);
-    };
-  });
-
   function errorMessage(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
   }
 
-  function openImageSizeMenu(event: CustomEvent<UnifiedImageMenuDetail>) {
-    const detail = event.detail;
-    if (!detail) return;
-    const pos = contextMenuPositionFromEvent(detail, { width: 236, height: 360 });
-    imageSizeMenu = {
-      ...detail,
-      x: pos.x,
-      y: pos.y,
-    };
-  }
-
-  function imageScaleSizeLabel(scale: number): string {
-    const baseWidth = imageSizeMenu?.baseWidth ?? 240;
-    const baseHeight = imageSizeMenu?.baseHeight ?? 180;
-    return formatScaledImageDimensions(scale, baseWidth, baseHeight);
-  }
-
-  function findImageMenuBlock(menu: ImageSizeMenu): SourceBlock | null {
+  function findImageMenuBlock(detail: UnifiedImageMenuDetail): SourceBlock | null {
     if (!editorView) return null;
     const map = parsePageSourceMap(editorView.state.doc.toString());
     return (
-      (menu.blockId ? map.blocks.find((block) => block.id === menu.blockId) : null)
-      ?? map.blocks.find((block) => block.previewFrom === menu.blockPreviewFrom && block.content === menu.blockContent)
-      ?? map.blocks.find((block) => block.content === menu.blockContent)
+      (detail.blockId ? map.blocks.find((block) => block.id === detail.blockId) : null)
+      ?? map.blocks.find((block) => block.previewFrom === detail.blockPreviewFrom && block.content === detail.blockContent)
+      ?? map.blocks.find((block) => block.content === detail.blockContent)
       ?? null
     );
   }
 
-  function replaceImageMenuBlockContent(menu: ImageSizeMenu, content: string) {
+  function replaceImageMenuBlockContent(detail: UnifiedImageMenuDetail, content: string) {
     if (!editorView) throw new Error("editor is not ready");
-    const block = findImageMenuBlock(menu);
+    const block = findImageMenuBlock(detail);
     if (!block) throw new Error("could not find the image block in page source");
     if (content === block.content) return;
 
@@ -528,31 +448,30 @@
     editorView.focus();
   }
 
-  function chooseImageScale(scale: number) {
-    const menu = imageSizeMenu;
-    if (!menu) return;
+  function changeImageMarkdown(detail: UnifiedImageMenuDetail, failure: string, next: () => string) {
     try {
-      const nextSize = scaledImageDimensions(scale, menu.baseWidth, menu.baseHeight);
-      replaceImageMenuBlockContent(menu, setMarkdownImageWidth(menu.blockContent, menu.imageIndex, nextSize.width));
-      imageSizeMenu = null;
+      replaceImageMenuBlockContent(detail, next());
       error = null;
     } catch (e) {
-      error = `Failed to resize image: ${errorMessage(e)}`;
-      console.error("Failed to resize image:", e);
+      error = `Failed to ${failure}: ${errorMessage(e)}`;
+      console.error(`Failed to ${failure}:`, e);
     }
   }
 
-  function resetImageScale() {
-    const menu = imageSizeMenu;
-    if (!menu) return;
-    try {
-      replaceImageMenuBlockContent(menu, clearMarkdownImageWidth(menu.blockContent, menu.imageIndex));
-      imageSizeMenu = null;
-      error = null;
-    } catch (e) {
-      error = `Failed to reset image size: ${errorMessage(e)}`;
-      console.error("Failed to reset image size:", e);
-    }
+  /** The size choices for a right-click on an image in a rendered block. */
+  function imageSizeSection(detail: UnifiedImageMenuDetail): ContextMenuSection {
+    return buildImageSizeSection({
+      baseWidth: detail.baseWidth,
+      baseHeight: detail.baseHeight,
+      setWidth: (width) =>
+        changeImageMarkdown(detail, "resize image", () =>
+          setMarkdownImageWidth(detail.blockContent, detail.imageIndex, width),
+        ),
+      reset: () =>
+        changeImageMarkdown(detail, "reset image size", () =>
+          clearMarkdownImageWidth(detail.blockContent, detail.imageIndex),
+        ),
+    });
   }
 
   // History and save keys: undo and redo are built in, the save key comes
@@ -578,7 +497,6 @@
     }
     editorView?.destroy();
     editorView = undefined;
-    spellMenu = null;
   }
 
   function resetEditor(content: string) {
@@ -589,12 +507,7 @@
       doc: content,
       extensions: [
         markdown(),
-        spellcheckExtension({
-          onContextMenu: (request) => {
-            imageSizeMenu = null;
-            spellMenu = request;
-          },
-        }),
+        spellcheckExtension(),
         editorWriteLockExtension(page.id),
         history({ minDepth: EDITOR_UNDO_MIN_DEPTH }),
         EditorState.transactionFilter.of((transaction) => {
@@ -1199,35 +1112,6 @@
 
   <div class="editor-host" class:loading bind:this={editorHost}></div>
 
-  {#if imageSizeMenu}
-    <div
-      class="image-size-menu app-context-menu"
-      style={`left: ${imageSizeMenu.x}px; top: ${imageSizeMenu.y}px;`}
-      role="menu"
-      tabindex="-1"
-      use:autofocus
-      aria-label="Image size menu"
-      onpointerdown={(e) => e.stopPropagation()}
-      oncontextmenu={(e) => { e.stopPropagation(); e.preventDefault(); }}
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => handleMenuKeydown(e, () => { imageSizeMenu = null; })}
-    >
-      <div class="image-size-menu-title">Size</div>
-      <button class="image-size-menu-item" type="button" role="menuitem" onclick={resetImageScale}>
-        Original Size
-      </button>
-      {#each IMAGE_SIZE_SCALES as scale}
-        <button class="image-size-menu-item" type="button" role="menuitem" onclick={() => chooseImageScale(scale)}>
-          {formatImageScale(scale)} <span>{imageScaleSizeLabel(scale)}</span>
-        </button>
-      {/each}
-    </div>
-  {/if}
-
-  {#if spellMenu}
-    <SpellcheckMenu request={spellMenu} onClose={() => (spellMenu = null)} />
-  {/if}
-
   {#if loading}
     <div class="prototype-loading shimmer">Loading source...</div>
   {/if}
@@ -1312,50 +1196,6 @@
     color: var(--text-muted);
     font-size: 12px;
     pointer-events: none;
-  }
-
-  .image-size-menu {
-    position: fixed;
-    z-index: 2147483000;
-    min-width: 212px;
-    padding: 6px;
-  }
-
-  .image-size-menu-title {
-    padding: 5px 8px 6px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .image-size-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    width: 100%;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-primary);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 7px 8px;
-    text-align: left;
-  }
-
-  .image-size-menu-item span {
-    color: var(--text-muted);
-    font-size: 11px;
-  }
-
-  .image-size-menu-item:hover,
-  .image-size-menu-item:focus-visible {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
   }
 
   @media (max-width: 720px) {

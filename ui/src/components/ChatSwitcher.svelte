@@ -5,13 +5,13 @@
     listAssistantConversations, renameAssistantConversation,
     type AssistantThread,
   } from "../lib/assistantConversations";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { contextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuSection } from "../lib/contextMenuSections";
   import {
     deletionPrompt, deletionTakesEverything, deletionTargets,
     pruneSelection, selectRange,
   } from "../lib/chatSelection";
   import { autofocus } from "../lib/autofocus";
-  import { handleMenuKeydown } from "../lib/menuKeyboard";
   import { SvelteSet } from "svelte/reactivity";
 
   let { graphPath, currentId, onSelect, open = false, drawer = false }: {
@@ -25,24 +25,11 @@
 
   let renamingId = $state<string | null>(null);
   let renameDraft = $state("");
-  let menu = $state<{ x: number; y: number; thread: AssistantThread } | null>(null);
   const selected = new SvelteSet<string>();
   // Where a shift-click measures from. Reset whenever the selection is
   // cleared, so the next shift-click starts a fresh range instead of
   // reaching back to a row the user has since forgotten about.
   let anchorId = $state<string | null>(null);
-
-  // Any click anywhere else dismisses the menu, including the right-click that
-  // opens a different one.
-  $effect(() => {
-    function close(): void { menu = null; }
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("contextmenu", close);
-    };
-  });
 
   // Re-read on every conversation change: the list is derived state, and the
   // store signals rather than exposing a reactive collection.
@@ -140,12 +127,20 @@
     }
   }
 
-  function openMenu(event: MouseEvent, thread: AssistantThread): void {
-    event.preventDefault();
-    // The window listener that closes menus also sees this event, so let it
-    // run first and open afterwards -- otherwise the menu closes itself.
-    const at = contextMenuPositionFromEvent(event, { width: 160, height: 80 });
-    queueMicrotask(() => { menu = { ...at, thread }; });
+  /** What a right-click on a chat's row offers. */
+  function threadMenuSections(thread: AssistantThread): ContextMenuSection[] {
+    // The name field is being edited and brings its own clipboard menu.
+    if (renamingId === thread.id) return [];
+    return [
+      {
+        id: "chat",
+        ariaLabel: "Chat",
+        items: [
+          { id: "chat.rename", label: "Rename", onSelect: () => startRename(thread) },
+          { id: "chat.delete", label: "Delete", danger: true, onSelect: () => remove(thread) },
+        ],
+      },
+    ];
   }
 
   async function remove(thread: AssistantThread): Promise<void> {
@@ -206,7 +201,7 @@
       <li
         class:current={thread.id === currentId}
         class:picked={selected.has(thread.id)}
-        oncontextmenu={(event) => openMenu(event, thread)}
+        use:contextMenu={() => threadMenuSections(thread)}
       >
         {#if renamingId === thread.id}
           <input
@@ -247,21 +242,6 @@
     {/if}
   </ul>
 </div>
-
-{#if menu}
-  <div
-    class="context-menu app-context-menu"
-    role="menu"
-    tabindex="-1"
-    style="top:{menu.y}px;left:{menu.x}px;"
-    use:autofocus
-    onclick={(event) => event.stopPropagation()}
-    onkeydown={(event) => handleMenuKeydown(event, () => (menu = null))}
-  >
-    <button type="button" role="menuitem" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; startRename(t); }}>Rename</button>
-    <button type="button" role="menuitem" class="context-menu-item" onclick={() => { const t = menu!.thread; menu = null; void remove(t); }}>Delete</button>
-  </div>
-{/if}
 
 <style>
   .switcher { display: flex; flex-direction: column; min-height: 0; min-width: 0; box-sizing: border-box; width: var(--chat-history-width, 240px); flex: 0 0 auto; padding: 16px 8px; background: var(--bg-primary); }
@@ -315,9 +295,6 @@
   .actions button { background: none; border: 0; padding: 2px 4px; color: var(--text-secondary, #888); cursor: pointer; font-size: 12px; }
   .actions button:hover { color: var(--text-primary); }
   .rename { flex: 1; min-width: 0; margin: 3px 2px; padding: 3px 5px; font-size: 13px; border: 1px solid var(--accent-color, #4a90d9); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }
-  .context-menu { position: fixed; z-index: 2147483000; border-radius: 6px; padding: 4px; min-width: 150px; }
-  .context-menu-item { display: flex; align-items: center; width: 100%; padding: 7px 10px; background: none; border: none; border-radius: 4px; color: var(--text-secondary); font-size: 13px; cursor: pointer; text-align: left; }
-  .context-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
   .switcher.drawer {
     position: absolute;
     inset: 0 auto 0 0;

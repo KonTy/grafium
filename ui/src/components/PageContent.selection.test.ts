@@ -56,15 +56,29 @@ describe("PageContent block selection cut", () => {
     expect(source).toContain("from: number | null;");
     expect(source).toContain("function captureNativeSelectionMakeLinkAction()");
     expect(source).toContain("function cachedSelectionMakeLinkAction(blockId: string)");
-    expect(source).toContain("Only the");
-    expect(source).toContain("canTurnBulletsToTodos");
-    expect(source).toContain("function makeSelectionLink()");
-    expect(source).toContain("selectionMenu.makeLink");
+    expect(source).toContain("function makeSelectionLink(action: SelectionMakeLinkAction)");
+    expect(source).toContain("makeLink: makeLink ? () => makeSelectionLink(makeLink) : undefined");
     expect(source).toContain("wrapPageLinkText(block.content");
-    expect(source).toContain("if (!pageContentEl?.contains(target)) return;");
     expect(source).toMatch(
       /clickedBlock\s*\?\s*captureNativeSelectionMakeLinkAction\(\)\s*\?\?\s*cachedSelectionMakeLinkAction\(blockId!?\)\s*:\s*null/
     );
+  });
+
+  it("answers right-clicks through the shared context menu, on this page's own element only", () => {
+    expect(source).toContain("use:contextMenu={pageMenuSections}");
+    expect(source).toContain("function pageMenuSections({ target }: ContextMenuContext)");
+    expect(source).toContain("buildBlockMenuSections({");
+    // The editors and form fields keep their own menu.
+    expect(source).toContain('target.closest("input, textarea, select, .cm-editor")');
+    // No page-owned menu, no window-wide listener, no second positioning scheme.
+    expect(source).not.toMatch(/oncontextmenu|addEventListener\("contextmenu"/);
+    expect(source).not.toMatch(/selectionMenu|selection-context-menu|app-context-menu|contextMenuPositionFromEvent/);
+  });
+
+  it("acts on the blocks that were clicked, not on whatever is selected later", () => {
+    expect(source).toContain("const menuBlockIds = menuBlocks.map((block) => block.id);");
+    expect(source).toContain('convertSelectedBlocks(menuBlockIds, "task-to-bullet")');
+    expect(source).toContain('convertSelectedBlocks(menuBlockIds, "bullet-to-todo")');
   });
 
   it("coordinates pointer drag selection across active block editors", () => {

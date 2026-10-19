@@ -23,6 +23,8 @@
   import { readerShortcut } from "./lib/readerHotkeys";
   import TitleBar from "./components/TitleBar.svelte";
   import Toaster from "./components/Toaster.svelte";
+  import ContextMenuHost from "./components/ContextMenuHost.svelte";
+  import { installContextMenu } from "./lib/contextMenuHost.svelte";
   import PrivateReaderToolbar from "./components/PrivateReaderToolbar.svelte";
   import PrivateReaderBook from "./components/PrivateReaderBook.svelte";
   import PrivateReaderLibrary from "./components/PrivateReaderLibrary.svelte";
@@ -1507,6 +1509,7 @@
   });
 
   onMount(installFrontendDiagnostics);
+  onMount(() => installContextMenu());
 
   $effect(() => {
     let disposed = false;
@@ -2852,6 +2855,7 @@
   </LazyView>
 {/if}
 
+<ContextMenuHost />
 <Toaster />
 
 {#if shuttingDown}

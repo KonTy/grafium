@@ -1474,6 +1474,7 @@ pub fn run() {
             commands::graph::get_tutorial_graph_path,
             commands::help::help_get_page,
             commands::print::print_document,
+            commands::editing::native_paste,
             commands::sync::sync_list_targets,
             commands::sync::sync_add_filesystem_target,
             commands::sync::sync_add_webdav_target,

@@ -72,7 +72,9 @@
   import { readingSourceBlocks } from "../lib/readingNoteFormat";
   import { blockReadingSelection, readingSelection } from "../lib/readingSelection";
   import type { BlockContentChange, UndoAction } from "../lib/undoStack";
-  import { contextMenuPositionFromEvent } from "../lib/contextMenu";
+  import { contextMenu } from "../lib/contextMenuHost.svelte";
+  import type { ContextMenuContext, ContextMenuSection } from "../lib/contextMenuSections";
+  import { buildBlockMenuSections } from "../lib/blockMenu";
   import { jobs, isTerminal } from "../lib/jobs.svelte";
   import {
     aiCreateConceptEdges,
@@ -425,16 +427,6 @@
   };
   const SELECTION_MAKE_LINK_CACHE_MS = 30_000;
   let lastSelectionMakeLinkAction: (SelectionMakeLinkAction & { capturedAt: number }) | null = $state(null);
-  let selectionMenu: {
-    x: number;
-    y: number;
-    blockIds: string[];
-    blockCount: number;
-    canTurnTasksToBullets: boolean;
-    canTurnBulletsToTodos: boolean;
-    makeLink?: SelectionMakeLinkAction;
-    showPageActions: boolean;
-  } | null = $state(null);
   let selectionCopyMessage = $state("");
   let selectionCopyTimer: number | undefined;
   let promotedSelectionCopyText: string | null = $state(null);
@@ -544,7 +536,6 @@
   }
 
   async function deleteCurrentPage() {
-    selectionMenu = null;
     if (!canDeletePage) return;
     let childCount = 0;
     try {
@@ -594,7 +585,6 @@
   function clearBlockSelection() {
     selectedBlockIds = new Set();
     promotedSelectionCopyText = null;
-    selectionMenu = null;
     lastSelectionMakeLinkAction = null;
     releaseBlockSelectionOwner();
   }
@@ -834,7 +824,6 @@
     threadBlockId = blockId;
     emitFocusChanged(blockId);
     promotedSelectionCopyText = null;
-    selectionMenu = null;
 
     const active = document.activeElement as HTMLElement | null;
     if (active && (active.isContentEditable || active.closest(".cm-editor"))) {
@@ -2609,10 +2598,6 @@
     return blocks.filter((block) => selected.has(block.id));
   }
 
-  function contextMenuBlocks(): Block[] {
-    return selectionMenu ? blocksForSelectionIds(selectionMenu.blockIds) : selectedBlocksInDocumentOrder();
-  }
-
   function selectedBlocksWithDescendantsInDocumentOrder(): Block[] {
     return blocksWithDescendantsInDocumentOrder(selectedBlockIds);
   }
@@ -2733,21 +2718,16 @@
     return fallback < 0 ? null : { from: fallback, to: fallback + action.text.length };
   }
 
-  async function makeSelectionLink() {
-    const action = selectionMenu?.makeLink;
-    if (!action) return;
-
+  async function makeSelectionLink(action: SelectionMakeLinkAction) {
     const block = blockRenderState.blockById.get(action.blockId);
     if (!block) {
       showSelectionCopyMessage("Block changed; select the text again");
-      selectionMenu = null;
       return;
     }
 
     const range = currentMakeLinkRange(action, block.content);
     if (!range) {
       showSelectionCopyMessage("Text changed; select it again");
-      selectionMenu = null;
       return;
     }
 
@@ -2761,18 +2741,9 @@
     window.getSelection()?.removeAllRanges();
   }
 
-  function selectedBlocksContainTask(): boolean {
-    return contextMenuBlocks().some((block) => isTaskContent(block.content));
-  }
-
-  function selectedBlocksContainPlainBullet(): boolean {
-    return contextMenuBlocks().some((block) => !isTaskContent(block.content));
-  }
-
-  async function convertSelectedBlocks(kind: "task-to-bullet" | "bullet-to-todo") {
-    const selected = contextMenuBlocks();
+  async function convertSelectedBlocks(blockIds: readonly string[], kind: "task-to-bullet" | "bullet-to-todo") {
+    const selected = blocksForSelectionIds(blockIds);
     if (selected.length === 0) {
-      selectionMenu = null;
       showSelectionCopyMessage("Block changed; select it again");
       return;
     }
@@ -2792,14 +2763,10 @@
       }
     }
 
-    if (updates.length === 0) {
-      selectionMenu = null;
-      return;
-    }
+    if (updates.length === 0) return;
 
     await applyCurrentPageContentChanges(updates);
     promotedSelectionCopyText = null;
-    selectionMenu = null;
   }
 
   function showSelectionCopyMessage(message: string) {
@@ -2818,7 +2785,6 @@
     if (!markdown) return;
     try {
       await writeClipboardText(markdown);
-      selectionMenu = null;
       showSelectionCopyMessage("Copied");
     } catch (e) {
       showSelectionCopyMessage(e instanceof Error ? e.message : String(e));
@@ -2844,7 +2810,6 @@
     e.preventDefault();
     e.clipboardData.setData("text/plain", plainText);
     e.clipboardData.setData("text/markdown", markdown);
-    selectionMenu = null;
     showSelectionCopyMessage("Copied");
   }
 
@@ -2855,7 +2820,6 @@
     e.preventDefault();
     e.clipboardData.setData("text/plain", plainText);
     e.clipboardData.setData("text/markdown", markdown);
-    selectionMenu = null;
     void (async () => {
       try {
         await handleDeleteSelected({ withDescendants: true });
@@ -2866,23 +2830,20 @@
     })();
   }
 
-  function handleSelectionContextMenu(e: MouseEvent) {
-    const target = e.target as Element | null;
-    if (!pageContentEl?.contains(target)) return;
-    if (target?.closest?.("input, textarea, select, .cm-editor, .app-context-menu, .image-size-menu, .make-link-menu")) {
-      return;
-    }
+  /**
+   * What a right-click inside this page offers. It is registered on this
+   * page's own element, so the pages a journal shows together never answer
+   * for one another.
+   */
+  function pageMenuSections({ target }: ContextMenuContext): ContextMenuSection[] {
+    // Form fields and the editors bring their own menu.
+    if (target.closest("input, textarea, select, .cm-editor")) return [];
 
     const blockId = blockIdFromNode(target);
     const clickedBlock = blockId ? blockRenderState.blockById.get(blockId) : undefined;
     const makeLink = clickedBlock
       ? captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId!)
       : null;
-    const showPageActions = canRenamePage || canDeletePage;
-    // Journal/backlink views can mount multiple PageContent instances, and
-    // every one receives the same window-level contextmenu event. Only the
-    // instance that owns the clicked target may prevent the native menu.
-    if (!clickedBlock && !makeLink && !showPageActions) return;
 
     const currentSelectedBlocks = selectedBlocksInDocumentOrder();
     const selectionIncludesClickedBlock = !!blockId
@@ -2895,35 +2856,25 @@
         : [];
     const menuBlockIds = menuBlocks.map((block) => block.id);
 
-    if (menuBlocks.length === 0 && !makeLink && !showPageActions) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    if (blockId && !selectionIncludesClickedBlock && clickedBlock) {
+    // The menu acts on the clicked block, so show which one that is.
+    if (blockId && clickedBlock && !selectionIncludesClickedBlock) {
       selectedBlockIds = new Set([blockId]);
       claimBlockSelectionOwner();
       promotedSelectionCopyText = null;
     }
-    selectionMenu = {
-      ...contextMenuPositionFromEvent(e, {
-        width: 230,
-        height: (menuBlocks.length > 0 ? 92 : 12)
-          + (makeLink ? 42 : 0)
-          + (menuBlocks.some((block) => isTaskContent(block.content)) ? 42 : 0)
-          + (menuBlocks.some((block) => !isTaskContent(block.content)) ? 42 : 0)
-          + (showPageActions ? 84 : 0),
-      }),
-      blockIds: menuBlockIds,
-      blockCount: menuBlocks.length,
-      canTurnTasksToBullets: menuBlocks.some((block) => isTaskContent(block.content)),
-      canTurnBulletsToTodos: menuBlocks.some((block) => !isTaskContent(block.content)),
-      showPageActions,
-      ...(makeLink ? { makeLink } : {}),
-    };
-  }
 
-  function closeSelectionMenu() {
-    selectionMenu = null;
+    return buildBlockMenuSections({
+      blockCount: menuBlocks.length,
+      hasTasks: menuBlocks.some((block) => isTaskContent(block.content)),
+      hasBullets: menuBlocks.some((block) => !isTaskContent(block.content)),
+      makeLink: makeLink ? () => makeSelectionLink(makeLink) : undefined,
+      turnTasksIntoBullets: () => convertSelectedBlocks(menuBlockIds, "task-to-bullet"),
+      turnBulletsIntoTodos: () => convertSelectedBlocks(menuBlockIds, "bullet-to-todo"),
+      copyBlocks: copySelectedBlocks,
+      clearSelection: clearBlockSelection,
+      renamePage: canRenamePage ? startRename : undefined,
+      deletePage: canDeletePage ? deleteCurrentPage : undefined,
+    });
   }
 
   /**
@@ -3011,7 +2962,6 @@
     selectedBlockIds = next;
     claimBlockSelectionOwner();
     focusedBlockId = null;
-    selectionMenu = null;
     lastSelectionMakeLinkAction = null;
     window.getSelection()?.removeAllRanges();
 
@@ -3134,11 +3084,10 @@
   onmouseup={handleSelectionMouseUp}
   oncopy={handleCopySelection}
   oncut={handleCutSelection}
-  oncontextmenu={handleSelectionContextMenu}
-  onclick={closeSelectionMenu}
 />
 
 <div class="page-content" bind:this={pageContentEl} class:compact class:bookPage={isImportedBookPage}
+  use:contextMenu={pageMenuSections}
   tabindex="-1" data-keyboard-block-selection={keyboardSelection.active ? "true" : undefined}>
   <div class="page-heading">
     <div class="page-title-row">
@@ -3300,80 +3249,6 @@
     {#if analyzeSelectionError}
       <div class="selection-toolbar-error">{analyzeSelectionError}</div>
     {/if}
-  {/if}
-
-  {#if selectionMenu}
-    <div
-      class="selection-context-menu app-context-menu"
-      style={`left: ${selectionMenu.x}px; top: ${selectionMenu.y}px;`}
-      role="menu"
-      tabindex="-1"
-      onpointerdown={(e) => e.stopPropagation()}
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => { if (e.key === "Escape") selectionMenu = null; }}
-    >
-      {#if selectionMenu.makeLink}
-        <button
-          type="button"
-          role="menuitem"
-          onclick={() => void makeSelectionLink()}
-        >
-          Make link
-        </button>
-      {/if}
-      {#if selectionMenu.canTurnTasksToBullets}
-       <button
-         type="button"
-         role="menuitem"
-         onclick={() => void convertSelectedBlocks("task-to-bullet")}
-       >
-         {selectionMenu.blockCount > 1 ? "Turn tasks into bullets" : "Turn task into bullet"}
-       </button>
-      {/if}
-      {#if selectionMenu.canTurnBulletsToTodos}
-       <button
-         type="button"
-         role="menuitem"
-         onclick={() => void convertSelectedBlocks("bullet-to-todo")}
-       >
-         {selectionMenu.blockCount > 1 ? "Turn bullets into TODOs" : "Turn bullet into TODO"}
-       </button>
-      {/if}
-      {#if selectionMenu.blockCount > 0}
-        <button type="button" role="menuitem" onclick={copySelectedBlocks}>Copy selection</button>
-        <button
-          type="button"
-          role="menuitem"
-          onclick={clearBlockSelection}
-        >
-          Clear selection
-        </button>
-      {/if}
-      {#if selectionMenu.showPageActions}
-        {#if selectionMenu.blockCount > 0 || selectionMenu.makeLink}
-          <div class="selection-menu-separator" role="separator"></div>
-        {/if}
-        {#if canRenamePage}
-          <button
-            type="button"
-            role="menuitem"
-            onclick={() => { selectionMenu = null; startRename(); }}
-          >
-            Rename page
-          </button>
-        {/if}
-        {#if canDeletePage}
-          <button
-            type="button"
-            role="menuitem"
-            class="danger"
-            onclick={() => void deleteCurrentPage()}
-          >
-            Delete page
-          </button>
-        {/if}
-      {/if}
-    </div>
   {/if}
 
   {#if !compact && (linkCandidatesRevealed || linkCandidates.length > 0 || linkCandidatesLoading || linkCandidatesError || lastLinkCandidateAction)}
@@ -3952,40 +3827,6 @@
     color: var(--text-secondary);
   }
 
-  .selection-context-menu {
-    position: fixed;
-    z-index: 2147483000;
-    min-width: 150px;
-    padding: 4px;
-  }
-
-  .selection-context-menu button {
-    display: block;
-    width: 100%;
-    padding: 6px 8px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-primary);
-    font-size: 12px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .selection-context-menu button:hover {
-    background: var(--bg-tertiary);
-  }
-
-  .selection-context-menu button.danger {
-    color: var(--danger);
-  }
-
-  .selection-menu-separator {
-    height: 1px;
-    margin: 4px 6px;
-    background: var(--border);
-  }
-
   .selection-toolbar-error {
     font-size: 12px;
     color: var(--danger);
@@ -4248,15 +4089,6 @@
 
   .page-content.bookPage .block-shell {
     padding-bottom: 0;
-  }
-
-  /* `image-menu-shell` is applied at runtime by BlockEditor, so the compiler
-     cannot see it on any element here and would prune the rule as unused. */
-  .block-shell:global(.image-menu-shell),
-  .block-shell:has(:global(.image-menu-open)) {
-    z-index: 3000;
-    contain: none;
-    overflow: visible;
   }
 
   .virtual-spacer {

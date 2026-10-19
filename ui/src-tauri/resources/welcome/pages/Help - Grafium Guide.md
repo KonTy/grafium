@@ -58,12 +58,13 @@ Every dialog can be driven from the keyboard.
 | --- | --- |
 | Close the open dialog or menu | `Escape` |
 | Move between a dialog's controls | `Tab` / `Shift+Tab` |
-| Move through a menu you opened from a button | `↑` / `↓` |
+| Move through a menu | `↑` / `↓` |
 | Choose the highlighted item | `Enter` |
 
-Arrow keys work in menus that take the keyboard when they open: the app menu,
-the graph menu, and the `⋯` menu. A right-click menu stays where the pointer
-is and only listens for `Escape`, so your place in the text is not disturbed.
+Arrow keys work in the app menu, the graph menu, the `⋯` menu and the
+right-click menu. The right-click menu opens at the pointer, or at the caret
+when you press the `Menu` key or `Shift+F10`. `Escape` closes it and puts you
+back where you were, so your place in the text is not disturbed.
 
 Opening a dialog puts the cursor where you are most likely to start, and `Tab`
 cycles within that dialog rather than wandering into the page behind it. Click

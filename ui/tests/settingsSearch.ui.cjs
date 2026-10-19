@@ -26,6 +26,10 @@ const BASE_URL = process.env.UI_TEST_URL ?? "http://localhost:5199/";
             case "get_graph_info": return { name: "Welcome test graph", path: "/synthetic/welcome-settings" };
             case "get_app_version": return "0.0.123";
             case "get_chat_preferences": return null;
+            case "get_spellcheck_preferences": return { enabled: false, languages: ["en_US"] };
+            case "spell_languages": return [{
+              code: "en_US", name: "English (US)", nativeName: "English (US)", script: "latin", memoryMb: 12,
+            }];
             case "ai_default_concept_edge_prompt": return "Extract concepts from the selected notes.";
             case "ai_get_config": return { enabled: true, mode: "local", local: { provider: "openai_compatible" } };
             case "ai_health_check": return { enabled: true, llm_available: true, embedder_available: true, vector_count: 0 };

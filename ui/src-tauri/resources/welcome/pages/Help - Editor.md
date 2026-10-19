@@ -108,6 +108,36 @@ also opening the editor. A plain web link still opens the block for editing
 after it follows the link. Query result rows that carry a block reference are
 reachable with **Tab** and open with **Enter**.
 
+## Right-click menu
+
+Grafium has one right-click menu, and it changes with what is under the
+pointer. It opens right at the pointer, at any zoom level, and it replaces the
+browser's own menu throughout the app. Its sections always come in the same
+order:
+
+1. Spelling suggestions, **Add to dictionary** and **Ignore for now**, on an
+   underlined word.
+2. What belongs to the thing you clicked. On a rendered block that is
+   **Turn bullet into TODO** or **Turn task into bullet**, **Copy block** and
+   **Clear selection** (they act on all the selected blocks), **Make link**
+   for selected text, then **Rename page** and **Delete page**. On an image it
+   is the size choices and image actions. In the sidebar, All Pages, the page
+   tree, the journal and the chat list it is that row's actions.
+3. **Cut**, **Copy**, **Paste** and **Select all**, wherever you can type or
+   have text selected. **Cut** and **Copy** are greyed out with nothing
+   selected. A password field offers only **Paste** and **Select all**.
+
+Items that do not apply are left out, so the menu is only as long as it needs
+to be, and a right-click on something with nothing to offer shows no menu.
+
+- **Menu** key or **Shift+F10** opens it at the caret instead of the pointer.
+- **Up** and **Down** move through it, **Home** and **End** jump to the ends,
+  **Enter** chooses and **Escape** closes it and returns you to where you
+  were. **Tab** also closes it. Clicking elsewhere or scrolling the page
+  closes it too, and the click still reaches what you clicked.
+- Inside an open book or an embedded video, the system's own menu still
+  appears.
+
 ## Spell check
 
 Misspelled words get a wavy underline while you write. Checking runs on this
@@ -117,11 +147,13 @@ nothing anywhere. It checks spelling only, not grammar.
 - Underlines appear in the block you are editing, the one showing its Markdown
   source; rendered blocks are not marked. The word at the caret is left alone
   until you move away from it, so a half-typed word is never flagged.
-- **Right-click** an underlined word to see up to five corrections. Choosing
+- **Right-click** an underlined word to see up to five corrections, or put the
+  caret in it and press the **Menu** key or **Shift+F10**. Choosing
   one replaces the word and keeps its capital letters. **Add to dictionary**
   keeps the word in your personal dictionary for every graph. **Ignore for now**
   stops underlining it until Grafium restarts. **Escape** closes the menu and
-  changes nothing.
+  changes nothing. The rest of the menu is described under **Right-click menu**
+  above.
 - Code, links, web addresses, `[[page links]]`, `#tags`, page properties, HTML,
   math and other markup are never checked. Neither are acronyms in capitals,
   names with a capital inside such as `camelCase`, words with digits, or words

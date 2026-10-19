@@ -5,35 +5,27 @@ import { describe, expect, it } from "vitest";
 const read = (file: string) => readFileSync(join(process.cwd(), "src/components", file), "utf8");
 
 // Both editors create their own CodeMirror view, and neither is mounted in tests,
-// so what matters here is that each one wires the spell checker the same way.
-describe.each([
-  ["BlockEditor.svelte", 2],
-  ["UnifiedPageEditor.svelte", 1],
-])("%s spell check wiring", (file, resets) => {
+// so what matters here is that each one wires the spell checker the same way:
+// the extension registers its own menu section, and the editor draws no menu.
+describe.each(["BlockEditor.svelte", "UnifiedPageEditor.svelte"])("%s spell check wiring", (file) => {
   const source = read(file);
 
   it("installs the spell checker beside the Markdown language", () => {
-    expect(source).toContain(
-      'import { spellcheckExtension, type SpellcheckRequest } from "../lib/spellcheckExtension";',
-    );
-    expect(source).toContain('import SpellcheckMenu from "./SpellcheckMenu.svelte";');
-    expect(source).toMatch(/markdown\(\),\s+spellcheckExtension\(\{/);
+    expect(source).toContain('import { spellcheckExtension } from "../lib/spellcheckExtension";');
+    expect(source).toMatch(/markdown\(\),\s+spellcheckExtension\(\),/);
   });
 
-  it("closes the other editor menus when the spelling menu opens", () => {
-    expect(source).toMatch(
-      /onContextMenu: \(request\) => \{[^}]*imageSizeMenu = null;[^}]*spellMenu = request;/,
-    );
+  it("leaves the spelling menu to the shared context menu", () => {
+    expect(source).not.toMatch(/SpellcheckMenu|SpellcheckRequest|spellMenu|onContextMenu/);
   });
+});
 
-  it("drops the open request with the editor view it points into", () => {
-    expect(source).toContain("let spellMenu = $state.raw<SpellcheckRequest | null>(null);");
-    expect(source.match(/^\s*spellMenu = null;$/gm)).toHaveLength(resets);
-  });
+describe.each(["BlockEditor.svelte", "UnifiedPageEditor.svelte"])("%s menus", (file) => {
+  const source = read(file);
 
-  it("shows the menu for the open request and closes it again", () => {
-    expect(source).toMatch(
-      /\{#if spellMenu\}\s+<SpellcheckMenu request=\{spellMenu\} onClose=\{\(\) => \(spellMenu = null\)\} \/>\s+\{\/if\}/,
-    );
+  it("draws no menu of its own and opens none from a contextmenu event", () => {
+    expect(source).not.toMatch(/image-size-menu|make-link-menu|app-context-menu/);
+    expect(source).not.toMatch(/oncontextmenu|contextmenu:|addEventListener\("contextmenu"/);
+    expect(source).not.toContain("contextMenuPositionFromEvent");
   });
 });
