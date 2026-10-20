@@ -361,7 +361,7 @@ describe("contextual help", () => {
       expect(section).toContain(`**${label}**`);
     }
     expect(section).toContain("one right-click menu");
-    expect(section).toContain("A block you are typing in has exactly the same menu as any other block");
+    expect(section).toContain("A block you are typing in offers these same actions");
     expect(section).toContain("**Menu** key or **Shift+F10**");
     expect(helpIndex).toContain("[[Help - Editor]] - blocks, links, tags, and offline spell check");
   });
