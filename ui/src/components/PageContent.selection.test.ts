@@ -26,7 +26,8 @@ describe("PageContent block selection cut", () => {
   it("copies selected blocks as structured outline markdown", () => {
     expect(source).toContain("formatBlocksAsOutlineMarkdown");
     expect(source).toContain("function selectedBlockMarkdown()");
-    expect(source).toContain("selectedBlocksWithDescendantsInDocumentOrder()");
+    expect(source).toContain("function clipboardBlocksFor(");
+    expect(source).toContain("blocksWithDescendantsInDocumentOrder(rootIds)");
     expect(source).toContain("depth: getBlockDepth(block.id)");
   });
 
@@ -68,11 +69,36 @@ describe("PageContent block selection cut", () => {
     expect(source).toContain("use:contextMenu={pageMenuSections}");
     expect(source).toContain("function pageMenuSections({ target }: ContextMenuContext)");
     expect(source).toContain("buildBlockMenuSections({");
-    // The editors and form fields keep their own menu.
-    expect(source).toContain('target.closest("input, textarea, select, .cm-editor")');
+    // Form fields keep to the clipboard actions; an editor is not a different menu.
+    expect(source).toContain('target.closest("input, textarea, select")');
+    expect(source).not.toContain('"input, textarea, select, .cm-editor"');
+    expect(source).toContain('target.closest<HTMLElement>(".cm-editor")');
     // No page-owned menu, no window-wide listener, no second positioning scheme.
     expect(source).not.toMatch(/oncontextmenu|addEventListener\("contextmenu"/);
     expect(source).not.toMatch(/selectionMenu|selection-context-menu|app-context-menu|contextMenuPositionFromEvent/);
+  });
+
+  it("offers the block being edited the same actions, acting on the editor's own text", () => {
+    const start = source.indexOf("function editedBlockMenuSections(");
+    const end = source.indexOf("function pageMenuSections(");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const edited = source.slice(start, end);
+
+    expect(edited).toContain("buildBlockMenuSections({");
+    expect(edited).toContain("view.state.doc.toString()");
+    expect(edited).toContain("rewriteEditedBlock(view, taskToBulletContent(");
+    expect(edited).toContain("rewriteEditedBlock(view, bulletToTodoContent(");
+    expect(edited).toContain("copyEditedBlock(blockId, view)");
+    // The editor's text can be ahead of what is saved, and it overwrites the saved
+    // text when it saves, so the saved text is never the one to change or copy.
+    expect(edited).not.toMatch(/convertSelectedBlocks|block\.content|updateBlock/);
+    // Nothing is selected while a block is edited: there is nothing to clear, and
+    // the next Backspace must delete a character, not the block.
+    expect(edited).not.toMatch(/clearSelection|selectedBlockIds|claimBlockSelectionOwner/);
+
+    expect(source).toContain("clipboardBlocksFor(new Set([blockId]), liveContent)");
+    expect(source).toContain("buildPageMenuSections(pageMenuActions())");
   });
 
   it("acts on the blocks that were clicked, not on whatever is selected later", () => {

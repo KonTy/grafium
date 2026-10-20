@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildBlockMenuSections, type BlockMenuOptions } from "./blockMenu";
+import { buildBlockMenuSections, buildPageMenuSections, type BlockMenuOptions } from "./blockMenu";
 import { isStatus, type ContextMenuAction } from "./contextMenuSections";
 
 function options(overrides: Partial<BlockMenuOptions> = {}): BlockMenuOptions {
@@ -62,8 +62,25 @@ describe("the block menu", () => {
     ]);
   });
 
+  it("leaves out Clear selection when no block is selected, as while one is edited", () => {
+    expect(labels({ clearSelection: undefined })).toEqual([
+      ["Turn bullet into TODO", "Copy block"],
+      ["Rename page", "Delete page"],
+    ]);
+    expect(labels({ clearSelection: undefined, hasTasks: true, hasBullets: false, makeLink: vi.fn() })).toEqual([
+      ["Make link", "Turn task into bullet", "Copy block"],
+      ["Rename page", "Delete page"],
+    ]);
+  });
+
   it("leaves out the block actions when the pointer is not on a block", () => {
     expect(labels({ blockCount: 0, hasBullets: false })).toEqual([["Rename page", "Delete page"]]);
+  });
+
+  it("never offers Clear selection without a block, even when it could run", () => {
+    expect(labels({ blockCount: 0, hasBullets: false, clearSelection: vi.fn() })).toEqual([
+      ["Rename page", "Delete page"],
+    ]);
   });
 
   it("keeps Make link even without a block", () => {
@@ -120,7 +137,7 @@ describe("the block menu", () => {
       "blocks.taskToBullet": o.turnTasksIntoBullets,
       "blocks.bulletToTodo": o.turnBulletsIntoTodos,
       "blocks.copy": o.copyBlocks,
-      "blocks.clear": o.clearSelection,
+      "blocks.clear": o.clearSelection!,
       "page.rename": o.renamePage!,
       "page.delete": o.deletePage!,
     };
@@ -128,5 +145,34 @@ describe("the block menu", () => {
       void action(sections, id).onSelect();
       expect(expected, id).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("the page menu", () => {
+  it("offers Rename page and Delete page", () => {
+    const sections = buildPageMenuSections({ renamePage: vi.fn(), deletePage: vi.fn() });
+    expect(sections.map((section) => [section.id, section.ariaLabel])).toEqual([["page", "Page"]]);
+    expect(sections[0].items.map((item) => item.label)).toEqual(["Rename page", "Delete page"]);
+  });
+
+  it("offers what the page allows", () => {
+    expect(buildPageMenuSections({ renamePage: vi.fn() })[0].items.map((item) => item.label)).toEqual([
+      "Rename page",
+    ]);
+    expect(buildPageMenuSections({ deletePage: vi.fn() })[0].items.map((item) => item.label)).toEqual([
+      "Delete page",
+    ]);
+  });
+
+  it("has nothing to offer for a page that allows neither", () => {
+    expect(buildPageMenuSections({})).toEqual([]);
+  });
+
+  it("is the same section the block menu ends with", () => {
+    const rename = vi.fn();
+    const remove = vi.fn();
+    const alone = buildPageMenuSections({ renamePage: rename, deletePage: remove });
+    const withBlock = buildBlockMenuSections(options({ renamePage: rename, deletePage: remove }));
+    expect(withBlock.at(-1)).toEqual(alone[0]);
   });
 });

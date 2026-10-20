@@ -74,7 +74,8 @@
   import type { BlockContentChange, UndoAction } from "../lib/undoStack";
   import { contextMenu } from "../lib/contextMenuHost.svelte";
   import type { ContextMenuContext, ContextMenuSection } from "../lib/contextMenuSections";
-  import { buildBlockMenuSections } from "../lib/blockMenu";
+  import { buildBlockMenuSections, buildPageMenuSections } from "../lib/blockMenu";
+  import { rewriteEditedBlock } from "../lib/editedBlock";
   import { jobs, isTerminal } from "../lib/jobs.svelte";
   import {
     aiCreateConceptEdges,
@@ -2598,15 +2599,23 @@
     return blocks.filter((block) => selected.has(block.id));
   }
 
-  function selectedBlocksWithDescendantsInDocumentOrder(): Block[] {
-    return blocksWithDescendantsInDocumentOrder(selectedBlockIds);
+  /**
+   * The blocks under `rootIds` with their descendants, as the clipboard formats
+   * them. `liveContent` is text that is newer than what is saved, such as the
+   * block being edited.
+   */
+  function clipboardBlocksFor(
+    rootIds: ReadonlySet<string>,
+    liveContent?: ReadonlyMap<string, string>,
+  ) {
+    return blocksWithDescendantsInDocumentOrder(rootIds).map((block) => ({
+      content: liveContent?.get(block.id) ?? block.content,
+      depth: getBlockDepth(block.id),
+    }));
   }
 
   function selectedClipboardBlocks() {
-    return selectedBlocksWithDescendantsInDocumentOrder().map((block) => ({
-      content: block.content,
-      depth: getBlockDepth(block.id),
-    }));
+    return clipboardBlocksFor(selectedBlockIds);
   }
 
   function selectedClipboardPayload(): { markdown: string; plainText: string } {
@@ -2780,8 +2789,7 @@
     }, 1600);
   }
 
-  async function copySelectedBlocks() {
-    const { markdown } = selectedClipboardPayload();
+  async function copyMarkdown(markdown: string) {
     if (!markdown) return;
     try {
       await writeClipboardText(markdown);
@@ -2789,6 +2797,16 @@
     } catch (e) {
       showSelectionCopyMessage(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  async function copySelectedBlocks() {
+    await copyMarkdown(selectedClipboardPayload().markdown);
+  }
+
+  /** Copies the block being edited, as the editor shows it now, with its children. */
+  async function copyEditedBlock(blockId: string, view: EditorView) {
+    const liveContent = new Map([[blockId, view.state.doc.toString()]]);
+    await copyMarkdown(formatBlocksAsOutlineMarkdown(clipboardBlocksFor(new Set([blockId]), liveContent)));
   }
 
   async function cutSelectedBlocks() {
@@ -2830,17 +2848,60 @@
     })();
   }
 
+  /** Rename and delete, for a page that allows them. */
+  function pageMenuActions() {
+    return {
+      renamePage: canRenamePage ? startRename : undefined,
+      deletePage: canDeletePage ? deleteCurrentPage : undefined,
+    };
+  }
+
+  /**
+   * A right-click in the block being edited. It offers what the same block
+   * offers when it is only shown, and acts on the text in the editor, which may
+   * be ahead of what is saved. The block is not selected: the next Backspace
+   * would then delete the block instead of a character.
+   */
+  function editedBlockMenuSections(view: EditorView, blockId: string): ContextMenuSection[] {
+    const isTask = isTaskContent(view.state.doc.toString());
+    return buildBlockMenuSections({
+      blockCount: 1,
+      hasTasks: isTask,
+      hasBullets: !isTask,
+      turnTasksIntoBullets: () => {
+        rewriteEditedBlock(view, taskToBulletContent(view.state.doc.toString()));
+      },
+      turnBulletsIntoTodos: () => {
+        rewriteEditedBlock(view, bulletToTodoContent(view.state.doc.toString()));
+      },
+      copyBlocks: () => copyEditedBlock(blockId, view),
+      ...pageMenuActions(),
+    });
+  }
+
   /**
    * What a right-click inside this page offers. It is registered on this
    * page's own element, so the pages a journal shows together never answer
    * for one another.
    */
   function pageMenuSections({ target }: ContextMenuContext): ContextMenuSection[] {
-    // Form fields and the editors bring their own menu.
-    if (target.closest("input, textarea, select, .cm-editor")) return [];
+    // Plain form fields keep to the clipboard actions.
+    if (target.closest("input, textarea, select")) return [];
 
     const blockId = blockIdFromNode(target);
     const clickedBlock = blockId ? blockRenderState.blockById.get(blockId) : undefined;
+
+    // An editor is not a different menu: the spelling and link sections come
+    // from the editor itself, and the block and page sections are the same
+    // ones the block shows outside it.
+    const editor = target.closest<HTMLElement>(".cm-editor");
+    if (editor) {
+      const view = EditorView.findFromDOM(editor);
+      return view && clickedBlock
+        ? editedBlockMenuSections(view, clickedBlock.id)
+        : buildPageMenuSections(pageMenuActions());
+    }
+
     const makeLink = clickedBlock
       ? captureNativeSelectionMakeLinkAction() ?? cachedSelectionMakeLinkAction(blockId!)
       : null;
@@ -2872,8 +2933,7 @@
       turnBulletsIntoTodos: () => convertSelectedBlocks(menuBlockIds, "bullet-to-todo"),
       copyBlocks: copySelectedBlocks,
       clearSelection: clearBlockSelection,
-      renamePage: canRenamePage ? startRename : undefined,
-      deletePage: canDeletePage ? deleteCurrentPage : undefined,
+      ...pageMenuActions(),
     });
   }
 

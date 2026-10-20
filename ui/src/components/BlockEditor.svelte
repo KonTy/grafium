@@ -955,7 +955,7 @@
     return { from: fallback, to: fallback + range.text.length, text: range.text };
   }
 
-  /** What a right-click inside the editor offers for the selected text. */
+  /** What a right-click inside the editor adds to the block menu for the selected text. */
   function editorMenuSections(): ContextMenuSection | null {
     const view = editorView;
     if (!view) return null;
@@ -963,7 +963,7 @@
     if (!range) return null;
     return {
       id: "selection",
-      ariaLabel: "Selected text",
+      ariaLabel: "Selection",
       items: [{ id: "link.make", label: "Make link", onSelect: () => makeSelectedTextLink(range) }],
     };
   }

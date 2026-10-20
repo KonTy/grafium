@@ -271,7 +271,7 @@ scenarios.push(["a journal date offers journal and page actions", { journal: tru
   assert.deepEqual(outline(state), { "Journal entry": ["Import from Media..."], Page: ["Delete page"] });
 }]);
 
-scenarios.push(["spelling suggestions, dictionary and edit actions share one menu", SPELL_OPTIONS, async (page) => {
+scenarios.push(["spelling suggestions, block and page actions, and edit actions share one menu", SPELL_OPTIONS, async (page) => {
   await focus(page, "b0");
   const squiggle = page.locator(".cm-spell-error").first();
   await squiggle.waitFor();
@@ -284,6 +284,8 @@ scenarios.push(["spelling suggestions, dictionary and edit actions share one men
   assert.deepEqual(outline(state), {
     "Spelling suggestions": ["the", "tea", "ten"],
     Dictionary: ["Add to dictionary", "Ignore for now"],
+    Selection: ["Turn bullet into TODO", "Copy block"],
+    Page: ["Rename page", "Delete page"],
     Edit: ["Cut (disabled)", "Copy (disabled)", "Paste", "Select all"],
   });
 }]);
@@ -335,7 +337,8 @@ for (const [where, offset] of [["inside", 1], ["right after", 3]]) {
     await item(page, "the").waitFor();
     const state = await menuState(page);
     assert.equal(state.count, 1);
-    assert.deepEqual(Object.keys(outline(state)), ["Spelling suggestions", "Dictionary", "Edit"]);
+    assert.deepEqual(Object.keys(outline(state)),
+      ["Spelling suggestions", "Dictionary", "Selection", "Page", "Edit"]);
     near(state.box.left, caret.left, "opens at the caret", 3);
     assert.ok(state.box.top >= caret.top - 3 && state.box.top <= caret.bottom + 3, "opens on the caret's line");
 
@@ -346,13 +349,18 @@ for (const [where, offset] of [["inside", 1], ["right after", 3]]) {
   }]);
 }
 
-scenarios.push(["the menu key away from a misspelled word offers only the edit actions", SPELL_OPTIONS, async (page) => {
+scenarios.push(["the menu key away from a misspelled word offers the same menu, without the spelling", SPELL_OPTIONS, async (page) => {
   await focus(page, "b0");
   await page.locator(".cm-spell-error").first().waitFor();
   await page.keyboard.press("ContextMenu");
   await page.locator(MENU).first().waitFor();
   const state = await menuState(page);
-  assert.deepEqual(outline(state), { Edit: ["Cut (disabled)", "Copy (disabled)", "Paste", "Select all"] });
+  assert.equal(state.count, 1);
+  assert.deepEqual(outline(state), {
+    Selection: ["Turn bullet into TODO", "Copy block"],
+    Page: ["Rename page", "Delete page"],
+    Edit: ["Cut (disabled)", "Copy (disabled)", "Paste", "Select all"],
+  });
 }]);
 
 scenarios.push(["Copy, Paste, Cut and Select all act on the editor's selection", {
@@ -377,7 +385,8 @@ scenarios.push(["Copy, Paste, Cut and Select all act on the editor's selection",
     await menuClosed(page);
   };
 
-  await choose(6, 10, /^Copy/);
+  // "Copy block" sits in the Selection section, so Edit's own Copy is told apart by its name.
+  await choose(6, 10, /^Copy(?! block)/);
   assert.equal(await lastCopied(page), "beta");
   assert.equal(await docText(page), "alpha beta gamma", "copy leaves the text alone");
 
@@ -396,6 +405,182 @@ scenarios.push(["Copy, Paste, Cut and Select all act on the editor's selection",
     const { from, to } = window.__activeEditorView.state.selection.main;
     return [from, to, window.__activeEditorView.state.doc.length];
   }), [0, 10, 10]);
+}]);
+
+// While a block is edited its menu is the menu it has when it is only shown, with the spelling
+// suggestions and the selected text's actions added around it: one menu that changes with the
+// context, not an editor menu beside a page menu. What the menu acts on is the editor's own text,
+// which can be ahead of what is saved.
+const editSection = ["Cut (disabled)", "Copy (disabled)", "Paste", "Select all"];
+
+scenarios.push(["a block being edited offers the same block and page actions as one that is shown", {}, async (page) => {
+  await watchContextEvents(page);
+  const shown = outline(await rightClickBlock(page, "b3"));
+  await page.keyboard.press("Escape");
+  await menuClosed(page);
+
+  await focus(page, "b1");
+  const point = await pointAt(page, 3);
+  const state = await openMenu(page, point.x, point.y);
+  assert.equal(state.count, 1, "one menu element");
+  assert.equal(state.roleMenus, 1, "one menu role on the page");
+  assert.deepEqual(Object.keys(outline(state)), ["Selection", "Page", "Edit"], "the sections, in order");
+  assert.deepEqual(outline(state), {
+    Selection: ["Turn bullet into TODO", "Copy block"],
+    Page: ["Rename page", "Delete page"],
+    Edit: editSection,
+  });
+  // The shown block adds only what it needs to leave its selection.
+  assert.deepEqual(shown.Selection, [...outline(state).Selection, "Clear selection"]);
+  assert.deepEqual(shown.Page, outline(state).Page);
+  assert.deepEqual((await contextEvents(page)).map((event) => event.prevented), [true, true], "the browser's menu never shows");
+}]);
+
+scenarios.push(["Turn bullet into TODO in the editor changes the text being edited and keeps what was typed", {}, async (page) => {
+  await focus(page, "b1");
+  await page.keyboard.type(" typed");
+  assert.equal(await docText(page), "Second block typed");
+
+  const point = await pointAt(page, 7);
+  await openMenu(page, point.x, point.y);
+  const caret = await page.evaluate(() => window.__activeEditorView.state.selection.main.head);
+  await item(page, "Turn bullet into TODO").click();
+  await menuClosed(page);
+
+  assert.equal(await docText(page), "TODO Second block typed", "the text that was typed is kept");
+  assert.equal(await page.evaluate(() => window.__activeEditorView.state.selection.main.head), caret + 5,
+    "the caret stays on the same text");
+  assert.equal(await page.evaluate(() => window.__activeEditorView.hasFocus), true, "focus is back in the editor");
+
+  // Saved the way typing is: when editing ends.
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() =>
+    window.__selectionState.blocks.find((block) => block.id === "b1")?.content === "TODO Second block typed");
+}]);
+
+scenarios.push(["one undo reverses a conversion made from the editor's menu, and only that", {}, async (page) => {
+  await focus(page, "b1");
+  await page.keyboard.type(" typed");
+  const point = await pointAt(page, 7);
+  await openMenu(page, point.x, point.y);
+  await item(page, "Turn bullet into TODO").click();
+  await menuClosed(page);
+  assert.equal(await docText(page), "TODO Second block typed");
+
+  await page.keyboard.press("Control+z");
+  assert.equal(await docText(page), "Second block typed");
+}]);
+
+scenarios.push(["a task in the editor is turned back into a bullet, beside the spelling suggestions", {
+  spell: SPELL, blockContents: ["TODO teh quick fox", "second block"],
+}, async (page) => {
+  await focus(page, "b0");
+  await page.locator(".cm-spell-error").first().click({ button: "right" });
+  await item(page, "the").waitFor();
+  assert.deepEqual(outline(await menuState(page)), {
+    "Spelling suggestions": ["the", "tea", "ten"],
+    Dictionary: ["Add to dictionary", "Ignore for now"],
+    Selection: ["Turn task into bullet", "Copy block"],
+    Page: ["Rename page", "Delete page"],
+    Edit: editSection,
+  });
+
+  await item(page, "Turn task into bullet").click();
+  await menuClosed(page);
+  assert.equal(await docText(page), "teh quick fox");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() =>
+    window.__selectionState.blocks.find((block) => block.id === "b0")?.content === "teh quick fox");
+}]);
+
+scenarios.push(["Copy block in the editor copies the block as it is being edited, with its children", {}, async (page) => {
+  // What the shown block copies is the reference: the same blocks, in the same format.
+  await rightClickBlock(page, "b2");
+  await item(page, "Copy block").click();
+  await menuClosed(page);
+  const [shown] = await clipboard(page);
+  assert.match(shown, /^- Folded branch\n[\s\S]*Hidden child[\s\S]*Hidden grandchild/);
+
+  await focus(page, "b2");
+  await page.keyboard.type(" edited");
+  const point = await pointAt(page, 3);
+  await openMenu(page, point.x, point.y);
+  await item(page, "Copy block").click();
+  await menuClosed(page);
+
+  assert.equal((await clipboard(page)).at(-1), shown.replace("Folded branch", "Folded branch edited"),
+    "the text in the editor, not the saved text");
+  assert.equal(await docText(page), "Folded branch edited", "copying leaves the text alone");
+}]);
+
+scenarios.push(["the editor's menu does not select the block, so Backspace still deletes a character", {}, async (page) => {
+  await focus(page, "b1");
+  const point = await pointAt(page, 3);
+  await openMenu(page, point.x, point.y);
+  assert.equal(await page.locator(".block-item.selected").count(), 0, "no block is shown as selected");
+
+  await page.keyboard.press("Escape");
+  await menuClosed(page);
+  assert.equal(await page.evaluate(() => window.__activeEditorView.hasFocus), true, "focus returns to the editor");
+  await page.keyboard.press("End");
+  await page.keyboard.press("Backspace");
+  assert.equal(await docText(page), "Second bloc");
+  assert.equal(await page.locator(".block-item.selected").count(), 0);
+  assert.equal(await page.evaluate(() => window.__selectionState.calls.filter(window.__isDeletion).length), 0,
+    "no block is deleted");
+}]);
+
+scenarios.push(["selected text in the editor adds Make link to the same Selection section", {
+  blockContents: ["alpha beta gamma", "second block"],
+}, async (page) => {
+  await focus(page, "b0");
+  await selectRange(page, 6, 10);
+  const point = await pointAt(page, 8);
+  const state = await openMenu(page, point.x, point.y);
+  assert.deepEqual(Object.keys(outline(state)), ["Selection", "Page", "Edit"]);
+  assert.deepEqual(outline(state), {
+    Selection: ["Make link", "Turn bullet into TODO", "Copy block"],
+    Page: ["Rename page", "Delete page"],
+    Edit: ["Cut", "Copy", "Paste", "Select all"],
+  });
+
+  await item(page, "Make link").click();
+  await menuClosed(page);
+  assert.equal(await docText(page), "alpha [[beta]] gamma");
+}]);
+
+scenarios.push(["a block being edited in a journal acts on its own day, as one that is shown does", { journal: true }, async (page) => {
+  await focus(page, "day-1-b0");
+  const point = await pointAt(page, 3);
+  const state = await openMenu(page, point.x, point.y);
+  assert.equal(state.count, 1);
+  // A journal day's own actions belong to its date, not to its blocks.
+  assert.deepEqual(outline(state), { Selection: ["Turn bullet into TODO", "Copy block"], Edit: editSection });
+
+  await item(page, "Turn bullet into TODO").click();
+  await menuClosed(page);
+  assert.equal(await docText(page), "TODO Journal 1, block 0");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() =>
+    window.__selectionState.blocks.find((block) => block.id === "day-1-b0")?.content === "TODO Journal 1, block 0");
+  assert.equal(await page.evaluate(() =>
+    window.__selectionState.blocks.find((block) => block.id === "day-0-b0")?.content), "Journal 0, block 0",
+  "no other day is touched");
+
+  const shown = await rightClickBlock(page, "day-1-b1");
+  assert.deepEqual(outline(shown), { Selection: ["Turn bullet into TODO", "Copy block", "Clear selection"] });
+}]);
+
+scenarios.push(["Rename page from the editor's menu keeps what was typed", {}, async (page) => {
+  await focus(page, "b1");
+  await page.keyboard.type(" typed");
+  const point = await pointAt(page, 3);
+  await openMenu(page, point.x, point.y);
+  await item(page, "Rename page").click();
+
+  await page.waitForFunction(() => document.activeElement?.classList.contains("page-title-input"));
+  await page.waitForFunction(() =>
+    window.__selectionState.blocks.find((block) => block.id === "b1")?.content === "Second block typed");
 }]);
 
 // A modal <dialog> and an open popover are drawn in the browser's top layer, above everything

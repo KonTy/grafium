@@ -117,12 +117,14 @@ order:
 
 1. Spelling suggestions, **Add to dictionary** and **Ignore for now**, on an
    underlined word.
-2. What belongs to the thing you clicked. On a rendered block that is
-   **Turn bullet into TODO** or **Turn task into bullet**, **Copy block** and
-   **Clear selection** (they act on all the selected blocks), **Make link**
-   for selected text, then **Rename page** and **Delete page**. On an image it
-   is the size choices and image actions. In the sidebar, All Pages, the page
-   tree, the journal and the chat list it is that row's actions.
+2. What belongs to the thing you clicked. On a block that is **Make link** for
+   selected text, **Turn bullet into TODO** or **Turn task into bullet**,
+   **Copy block**, then **Rename page** and **Delete page**. A block you are
+   typing in has exactly the same menu as any other block, and its actions use
+   the text as you have typed it so far. When blocks are selected, **Clear
+   selection** is added and the block actions apply to all of them. On an
+   image it is the size choices and image actions. In the sidebar, All Pages,
+   the page tree, the journal and the chat list it is that row's actions.
 3. **Cut**, **Copy**, **Paste** and **Select all**, wherever you can type or
    have text selected. **Cut** and **Copy** are greyed out with nothing
    selected. A password field offers only **Paste** and **Select all**.
