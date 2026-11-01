@@ -15,6 +15,7 @@ separate graph.
 - [[Help - Tasks]]
 - [[Help - Library]] - private media, recent pile, favorites, resume, and bookmarks
 - [[Help - Studies]] - learning plans linking Library, graph notes, and flashcards
+- [[Help - IQ Assessments]] - reasoning scores and norm-backed approximate IQ
 - [[Help - Chat]]
 - [[Help - Settings]] - appearance, spell check languages and dictionary, library, AI, and sync
 - [[AI Setup And Privacy]] - model memory limits, CPU fallback, and crash recovery

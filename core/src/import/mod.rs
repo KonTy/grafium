@@ -2,3 +2,4 @@
 
 pub mod anki;
 pub mod books;
+pub mod iq;

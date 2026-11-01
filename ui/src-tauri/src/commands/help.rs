@@ -20,6 +20,10 @@ const HELP_PAGES: &[(&str, &str)] = &[
         include_str!("../../resources/welcome/pages/Help - Flashcards.md"),
     ),
     (
+        "iq",
+        include_str!("../../resources/welcome/pages/Help - IQ Assessments.md"),
+    ),
+    (
         "tasks",
         include_str!("../../resources/welcome/pages/Help - Tasks.md"),
     ),
@@ -76,6 +80,14 @@ pub fn help_get_page(context: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn iq_help_explains_deviation_norms_and_unverified_estimates() {
+        let page = super::help_get_page("iq".into()).unwrap();
+        assert!(page.contains("IQ = 100 + 15z"));
+        assert!(page.contains("Pack-supplied norms are unverified"));
+        assert!(page.contains("grafium-iq.json"));
+    }
+
     #[test]
     fn library_help_explains_separate_ownership_and_reference_plans() {
         let page = super::help_get_page("library".into()).unwrap();

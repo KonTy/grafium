@@ -35,6 +35,7 @@ import journalMenuSource from "../components/JournalView.svelte?raw";
 import guideHelp from "../../src-tauri/resources/welcome/pages/Help - Grafium Guide.md?raw";
 import spellSettingsSource from "../components/SpellcheckSettings.svelte?raw";
 import { SUGGESTION_LIMIT } from "./spellcheck";
+import iqHelp from "../../src-tauri/resources/welcome/pages/Help - IQ Assessments.md?raw";
 
 const api = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue("AI help") }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
@@ -47,6 +48,18 @@ function rightClickMenuSection(): string {
 }
 
 describe("contextual help", () => {
+  it("routes IQ assessments to the norm conditions and scoring limitations", async () => {
+    expect(helpPageTitle("iq")).toBe("Help - IQ Assessments");
+    expect(isHelpContext("iq")).toBe(true);
+    expect(helpIndex).toContain("[[Help - IQ Assessments]]");
+    expect(appSource).toContain('document.querySelector(\'[data-help-context="iq"]\')');
+    for (const phrase of ["IQ = 100 + 15z", "Pack-supplied norms are unverified",
+      "grafium-iq.json", "Prior practice", "spaced-repetition", "zScores"]) {
+      expect(iqHelp).toContain(phrase);
+    }
+    await loadHelpPage("iq");
+    expect(api.invoke).toHaveBeenCalledWith("help_get_page", { context: "iq" });
+  });
   it("routes empty-number exit and previous-end Backspace guidance through editor F1", async () => {
     for (const phrase of ["A number alone", "`2)`", "`2.1. `", "end of the previous visible",
       "previous empty rows", "without merging or discarding", "last empty block"]) {

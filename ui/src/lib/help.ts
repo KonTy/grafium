@@ -4,6 +4,7 @@ export type HelpContext =
   | "journal"
   | "graph"
   | "flashcards"
+  | "iq"
   | "tasks"
   | "studies"
   | "chat"
@@ -22,6 +23,7 @@ const HELP_PAGES: Record<HelpContext, string> = {
   journal: "Help - Journal Guide",
   graph: "Help - Graph",
   flashcards: "Help - Flashcards",
+  iq: "Help - IQ Assessments",
   tasks: "Help - Tasks",
   studies: "Help - Studies",
   chat: "Help - Chat",

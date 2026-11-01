@@ -3,7 +3,6 @@
     listFlashcardsDue,
     listFlashcardTopics,
     gradeFlashcard,
-    importAnkiApkg,
     type Flashcard,
     type FlashcardTopic,
   } from "../lib/api";
@@ -13,6 +12,8 @@
   import type { StudyProgress } from "../lib/studies";
   import { matchesShortcut, onShortcutsChanged, shortcutBindings } from "../lib/shortcutRegistry";
   import { formatBinding } from "../lib/shortcuts";
+  import IqAssessment from "./IqAssessment.svelte";
+  import { listIqPacks, importFlashcardPack, type IqPackSummary } from "../lib/iq";
 
   interface Props {
     onNavigate?: (title: string) => void;
@@ -28,6 +29,8 @@
   // "topics" = deck picker; "review" = an active study session.
   let view = $state<"topics" | "review">("topics");
   let topics = $state<FlashcardTopic[]>([]);
+  let iqPacks = $state<IqPackSummary[]>([]);
+  let selectedIq = $state<IqPackSummary | null>(null);
   let mixedDue = $state(0);
   // The topic being studied: null = mixed (all topics); "" = untagged; else a tag.
   let selectedTopic = $state<string | null>(null);
@@ -102,17 +105,22 @@
 
   async function loadTopics() {
     loading = true;
+    reviewError = "";
     try {
-      const [t, due] = await Promise.all([
+      const [t, due, assessments] = await Promise.all([
         listFlashcardTopics(),
         listFlashcardsDue(10000),
+        listIqPacks(),
       ]);
       topics = t;
       mixedDue = due.length;
+      iqPacks = assessments;
     } catch (e) {
       console.error("Failed to load topics", e);
       topics = [];
       mixedDue = 0;
+      iqPacks = [];
+      reviewError = `Could not load flashcard packs: ${String(e)}`;
     } finally {
       loading = false;
     }
@@ -153,8 +161,8 @@
     importMsg = null;
     const selected = await open({
       multiple: false,
-      title: "Import Anki deck",
-      filters: [{ name: "Anki deck", extensions: ["apkg"] }],
+      title: "Import flashcard pack",
+      filters: [{ name: "Flashcard or IQ-marked pack", extensions: ["apkg", "json"] }],
     });
     if (!selected || typeof selected !== "string") return;
     importing = true;
@@ -170,8 +178,15 @@
       },
     );
     try {
-      const summary = await importAnkiApkg(selected);
-      importMsg = `Imported “${summary.page_title}” — ${summary.card_count} cards (#${summary.topic})`;
+      const imported = await importFlashcardPack(selected);
+      if (imported.iq) {
+        importMsg = `Imported “${imported.iq.title}” — ${imported.iq.itemCount} assessment questions`;
+      } else if (imported.anki) {
+        const summary = imported.anki;
+        importMsg = `Imported “${summary.page_title}” — ${summary.card_count} cards (#${summary.topic})`;
+      } else {
+        throw new Error("Import returned neither a flashcard deck nor an IQ pack");
+      }
       await loadTopics();
     } catch (e) {
       console.error("Anki import failed", e);
@@ -246,14 +261,17 @@
 <svelte:window on:keydown={onKeydown} />
 
 <div class="review">
+  {#if selectedIq}
+    <IqAssessment pack={selectedIq} onExit={() => { selectedIq = null; void loadTopics(); }} />
+  {:else}
   {#if reviewError}
     <p role="alert">{reviewError}</p>
-    <button onclick={() => { void study(selectedTopic); }}>Reload review</button>
+    <button onclick={() => { if (view === "topics") void loadTopics(); else void study(selectedTopic); }}>Reload review</button>
   {/if}
   {#if importing}
     <div class="import-overlay">
       <div class="import-card">
-        <div class="import-title">Importing Anki deck</div>
+        <div class="import-title">Importing flashcard pack</div>
         <div class="import-bar" class:indeterminate={importIndeterminate}>
           <div class="import-fill" style={importIndeterminate ? "" : `width:${importPct}%`}></div>
         </div>
@@ -266,7 +284,7 @@
     <header class="review-header">
       <h1>Flashcards</h1>
       <button class="import-btn" disabled={importing} onclick={importAnki}>
-        {importing ? "Importing…" : "Import Anki deck"}
+        {importing ? "Importing…" : "Import pack"}
       </button>
     </header>
 
@@ -274,19 +292,30 @@
       <div class="import-msg">{importMsg}</div>
     {/if}
 
+    {#if !loading && iqPacks.length}
+      <h2>IQ-marked packs</h2>
+      <div class="topic-list">
+        {#each iqPacks as pack}
+          <button class="topic" onclick={() => { selectedIq = pack; }}>
+            <span class="topic-name">{pack.title}</span>
+            <span class="topic-counts">{pack.itemCount} questions · {pack.norms ? "Norm-backed estimate" : "Reasoning score"}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
     {#if loading}
       <div class="state shimmer">Loading…</div>
-    {:else if topics.length === 0}
+    {:else if topics.length === 0 && iqPacks.length === 0 && !reviewError}
       <div class="state empty">
         <p class="big">No flashcards yet</p>
         <p class="hint">
           Create a flashcard by writing <code>Question :: Answer</code> in any block.
           Add a tag like <code>#chinese</code> or <code>#physics</code> to sort it into
           a study topic. It becomes reviewable after the page is saved.
-          You can also <strong>Import Anki deck</strong> (.apkg) above to bring in existing cards.
+          You can also <strong>Import pack</strong> (.apkg or IQ JSON) above to bring in existing cards.
         </p>
       </div>
-    {:else}
+    {:else if topics.length > 0}
       <p class="picker-intro">Pick a topic to study, or review everything mixed together.</p>
       <div class="topic-list">
         <button class="topic mixed" disabled={mixedDue === 0} onclick={() => study(null)}>
@@ -353,6 +382,7 @@
         {/if}
       </div>
     {/if}
+  {/if}
   {/if}
 </div>
 

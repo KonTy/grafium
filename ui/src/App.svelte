@@ -1353,6 +1353,7 @@
     const context = isHelpContext(section) ? section : null;
     const currentContext: HelpContext =
       context ||
+      (document.querySelector('[data-help-context="iq"]') ? "iq" : null) ||
       (currentView === "library" && privateBookId ? "reader" : null) ||
       ((
         {
