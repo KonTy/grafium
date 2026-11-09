@@ -1,6 +1,95 @@
 use crate::AppState;
+use grafium_core::iq::{IqPackSummary, IqParticipant, IqResult, IqSession};
 use grafium_core::models::{Flashcard, FlashcardTopic};
 use tauri::State;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashcardPackImport {
+    anki: Option<grafium_core::import::anki::AnkiImportSummary>,
+    iq: Option<IqPackSummary>,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_flashcard_pack(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> Result<FlashcardPackImport, String> {
+    if let Some(pack) = grafium_core::import::iq::read_iq_pack(std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?
+    {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let summary = graph.db.import_iq_pack(&pack).map_err(|e| e.to_string())?;
+        Ok(FlashcardPackImport {
+            anki: None,
+            iq: Some(summary),
+        })
+    } else {
+        Ok(FlashcardPackImport {
+            anki: Some(import_anki_apkg(app, state, path)?),
+            iq: None,
+        })
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_iq_packs(state: State<AppState>) -> Result<Vec<IqPackSummary>, String> {
+    state
+        .graph
+        .lock()
+        .map_err(|e| e.to_string())?
+        .db
+        .list_iq_packs()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_iq_session(
+    state: State<AppState>,
+    pack_id: String,
+    participant: IqParticipant,
+) -> Result<IqSession, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    graph
+        .db
+        .start_iq_session(&pack_id, &participant, &graph.root_dir.to_string_lossy())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn answer_iq_item(
+    state: State<AppState>,
+    graph_path: String,
+    session_id: String,
+    index: usize,
+    answer: String,
+) -> Result<(), String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    if graph.root_dir != std::path::Path::new(&graph_path) {
+        return Err("The active graph changed; this assessment belongs to another graph.".into());
+    }
+    graph
+        .db
+        .answer_iq_item(&session_id, index, &answer)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn finish_iq_session(
+    state: State<AppState>,
+    graph_path: String,
+    session_id: String,
+) -> Result<IqResult, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    if graph.root_dir != std::path::Path::new(&graph_path) {
+        return Err("The active graph changed; this assessment belongs to another graph.".into());
+    }
+    graph
+        .db
+        .finish_iq_session(&session_id)
+        .map_err(|e| e.to_string())
+}
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_flashcards_due(
     state: State<AppState>,

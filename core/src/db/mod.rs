@@ -8,6 +8,7 @@ mod favorites;
 mod flashcards;
 mod graph_support;
 mod ink;
+mod iq;
 mod links;
 mod pages;
 mod properties;
@@ -187,6 +188,7 @@ impl Database {
         schema::create_tables(&conn)?;
         source_lifecycle::initialize(&conn)?;
         studies::initialize(&conn)?;
+        iq::initialize(&conn)?;
 
         // Migration: recreate task_events without CASCADE to preserve history across reindexes
         let has_fk: bool = conn

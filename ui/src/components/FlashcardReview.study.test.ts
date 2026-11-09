@@ -12,6 +12,7 @@ vi.mock("../lib/markdown", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("../lib/iq", () => ({ listIqPacks: vi.fn().mockResolvedValue([]), importFlashcardPack: vi.fn() }));
 import FlashcardReview from "./FlashcardReview.svelte";
 let component: ReturnType<typeof mount> | undefined;
 afterEach(async () => {

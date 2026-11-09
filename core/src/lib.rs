@@ -9,6 +9,7 @@ pub mod gpu_info;
 pub mod graph;
 pub mod import;
 pub mod ink;
+pub mod iq;
 pub mod knowledge;
 pub mod library_index;
 pub mod log_tap;
