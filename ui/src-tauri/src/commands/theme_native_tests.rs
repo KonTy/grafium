@@ -21,7 +21,7 @@ fn palette_content(id: &str, opacity: f64) -> String {
 }
 
 #[allow(deprecated)]
-async fn javascript(window: &WebviewWindow, script: &str) -> Result<String, String> {
+pub(super) async fn javascript(window: &WebviewWindow, script: &str) -> Result<String, String> {
     let script = script.to_owned();
     let (send, receive) = tokio::sync::oneshot::channel();
     window

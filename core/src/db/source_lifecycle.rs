@@ -2,6 +2,86 @@ use super::Database;
 use crate::error::{CoreError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generated_namespace_lookup_uses_literal_case_sensitive_prefixes() {
+        let db = super::Database::in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let mut kept = Vec::new();
+        let mut removed = Vec::new();
+        for title in ["Topic", "100%_[]", "A.B", "Path/Parent", "Back\\slash", "Русский"] {
+            let parent = db.get_or_create_generated_page_in_connection(&conn, title, "namespace").unwrap();
+            db.get_or_create_page_in_connection(&conn, &format!("{title}/Notes"), false).unwrap();
+            kept.push(parent.id);
+            let neighbor = db.get_or_create_generated_page_in_connection(&conn, &format!("{title}0"), "namespace").unwrap();
+            removed.push(neighbor.id);
+        }
+        let case = db.get_or_create_generated_page_in_connection(&conn, "CASE", "namespace").unwrap();
+        db.get_or_create_page_in_connection(&conn, "case/Notes", false).unwrap();
+        removed.push(case.id);
+        db.collect_generated_pages_in_connection(&conn).unwrap();
+        for id in kept {
+            assert!(db.get_page_by_id_in_connection(&conn, &id).is_ok());
+        }
+        for id in removed {
+            assert!(db.get_page_by_id_in_connection(&conn, &id).is_err());
+        }
+    }
+
+    #[test]
+    fn journal_prose_save_with_many_namespace_pages_stays_interactive() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph = crate::Graph::open(temp.path()).unwrap();
+        let journal = graph.create_page("2026-11-09", true).unwrap();
+        let anchor = graph.db.list_blocks_for_page(&journal.id).unwrap().remove(0);
+        {
+            let mut conn = graph.db.conn().unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..5_000 {
+                let parent = format!("namespace-{i}");
+                let title = format!("Topic {i:05}");
+                tx.execute(
+                    "INSERT INTO pages(id,title,created_at,updated_at) VALUES(?1,?2,0,0)",
+                    rusqlite::params![parent, title],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO generated_page_origins(page_id,kind) VALUES(?1,'namespace')",
+                    [&parent],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO pages(id,title,file_path,created_at,updated_at) VALUES(?1,?2,?3,0,0)",
+                    rusqlite::params![format!("child-{i}"), format!("{title}/Notes"), format!("pages/{i}.md")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let content = "Work through the entire agreed backlog autonomously. First enumerate every item so none disappear during the work.";
+        let started = std::time::Instant::now();
+        graph.update_block(&anchor.id, content, None).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!("Journal prose save with 10,000 namespace pages: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "Prose save blocked for {elapsed:?}"
+        );
+        assert_eq!(graph.db.get_block_by_id(&anchor.id).unwrap().content, content);
+        assert_eq!(
+            graph.db.count_pages().unwrap(), 10_001,
+            "Namespace parents must not be collected"
+        );
+        let disk = std::fs::read_to_string(graph.journals_dir.join("2026-11-09.md")).unwrap();
+        assert!(
+            disk.contains(content),
+            "The edit must reach its real Markdown source"
+        );
+    }
+}
+
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
     let tx = super::immediate_transaction(conn)?;
     tx.execute_batch(
@@ -282,6 +362,8 @@ impl Database {
 
     pub(crate) fn collect_generated_pages_in_connection(&self, conn: &Connection) -> Result<()> {
         loop {
+            // '/' immediately precedes '0': this prefix range uses the title
+            // index instead of scanning every page for every namespace parent.
             let mut statement = conn.prepare(
                 "SELECT p.id FROM pages p JOIN generated_page_origins g ON g.page_id=p.id
                  WHERE (p.file_path IS NULL OR p.file_path='') AND p.properties='{}'
@@ -291,7 +373,7 @@ impl Database {
                  AND NOT EXISTS(SELECT 1 FROM recent_pages WHERE page_id=p.id)
                  AND NOT EXISTS(SELECT 1 FROM link_candidates WHERE to_page_id=p.id)
                  AND NOT EXISTS(SELECT 1 FROM pages child WHERE child.id<>p.id
-                     AND substr(child.title,1,length(p.title)+1)=p.title||'/')",
+                     AND child.title>=p.title||'/' AND child.title<p.title||'0')",
             )?;
             let ids = statement
                 .query_map([], |r| r.get::<_, String>(0))?

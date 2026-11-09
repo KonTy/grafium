@@ -10,6 +10,13 @@ const PASTE = [
   "✅✅✅", "❌", "$5,999", "**Best for Value (But Indian)**", "**Kawasaki Eliminator**",
   "✅", "❌", "✅✅✅", "$6,799", "**Best for City (No Off-Road)**",
 ];
+const BACKLOG_PASTE = [
+  "Work through the entire agreed backlog autonomously. First enumerate every item so none disappear during the work.",
+  "For each item, track implementation, integration, testing, and deployment where applicable. A feature is done only when it works through the real application—not merely when its code compiles or mocked tests pass.",
+  "Make reasonable decisions without waiting for me. If blocked, investigate alternatives, record the concrete evidence and what you tried, then continue with other items. “Not tested” or “needs investigation” is unfinished work, not a blocker.",
+  "Deliver intermediate builds so I can test, but do not treat an intermediate delivery as completion. Before stopping, reconcile every backlog item and continue any safe, actionable work.",
+  "Finish with an explicit list of completed features and genuinely blocked items. Do not claim the entire backlog is complete while anything remains unfinished. Preserve all existing data and follow the established safety boundaries.",
+];
 
 async function openEditor(browser) {
     const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
@@ -156,6 +163,31 @@ async function expectSavedCode(fixture, content, code) {
 (async () => {
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   try {
+    for (const html of [false, true]) {
+      const fixture = await openContinuousEditor(browser, { journal: true, flatJournal: true, spell: {} });
+      const { page } = fixture;
+      await page.locator('[data-block-id="day-0-b0"] .block-content').click();
+      const editor = page.locator(".cm-content:focus");
+      await editor.fill("");
+      const elapsed = await editor.evaluate((element, { paragraphs, html }) => {
+        const data = new DataTransfer();
+        data.setData("text/plain", paragraphs.join("\n\n\n"));
+        if (html) data.setData("text/html", `<ul>${paragraphs.map((text) => `<li>${text}</li>`).join("")}</ul>`);
+        const start = performance.now();
+        element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        return performance.now() - start;
+      }, { paragraphs: BACKLOG_PASTE, html });
+      assert.ok(elapsed < 100, `journal paste handler took ${elapsed.toFixed(1)}ms`);
+      await page.waitForFunction((paragraphs) => paragraphs.every((text) =>
+        window.__selectionState.blocks.some((block) => block.page_id === "day-0" && block.content === text)),
+      BACKLOG_PASTE);
+      await page.waitForFunction(() => window.__activeEditorView?.hasFocus
+        && window.__activeEditorView.state.doc.toString().startsWith("Finish with"));
+      await page.keyboard.type(" Still editing.");
+      assert.ok(await page.evaluate(() => window.__activeEditorView.state.doc.toString().endsWith(" Still editing.")));
+      await finishCase(fixture, `${html ? "rich bulleted" : "plain"} backlog paste stays responsive in today's journal (${elapsed.toFixed(1)}ms handler)`);
+    }
+
     for (const { code, escapeFirst, ime } of [
       { code: "can we crate examples foder in workflows,", escapeFirst: false, ime: false },
       { code: "can we crate examples foder in workflows,", escapeFirst: true, ime: false },

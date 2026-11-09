@@ -41,6 +41,9 @@ Press **F1** while editing for quick editor help.
   when the clipboard also contains rich formatting. Outside code, normal paste
   still creates outline blocks from paragraphs and lists; **Ctrl/Cmd+Shift+V**
   keeps the pasted content in the current block.
+  While a multi-block paste is saving, its remaining text stays visible below
+  the editor. A save error keeps that text available to copy; do not close the
+  app until saving finishes or you have preserved the unfinished text.
 - **Tab** indents; **Shift+Tab** outdents. An outdented block moves below its
   old parent's remaining children, and the guide lines follow it immediately.
 - Deleting a block removes only that block: **Backspace** or **Delete** in an
