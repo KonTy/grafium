@@ -61,6 +61,7 @@ const RESOURCES: &[Resource] = &[
     resource!("pages/Help - Journal.md"),
     resource!("pages/Help - Graph.md"),
     resource!("pages/Help - Flashcards.md"),
+    resource!("pages/Help - IQ Assessments.md"),
     resource!("pages/Help - Tasks.md"),
     resource!("pages/Help - Studies.md"),
     resource!("pages/Help - Library.md"),
@@ -475,7 +476,7 @@ mod tests {
             .collect();
         // Guards against a page being added to RESOURCES without anyone
         // checking that its links resolve below.
-        assert_eq!(markdown.len(), 55);
+        assert_eq!(markdown.len(), 56);
         let titles: HashSet<String> = markdown
             .iter()
             .map(|resource| {
